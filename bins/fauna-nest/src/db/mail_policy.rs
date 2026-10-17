@@ -35,8 +35,10 @@
 //! deferred — a write takes effect on the bridge's next `fetch_config`).
 
 use anyhow::Result;
+use fauna_mail::dmarc_publish::{DmarcPublishPolicy, apply_overrides};
 use fauna_protocol::bridge_routing::{
-    ImapPolicy, MassMailingPolicy, OutboundPolicy, SpamPolicyThresholds, SubmissionPolicyThresholds,
+    AuthPolicy, DmarcOverrides, DmarcReportingPolicy, ImapPolicy, MassMailingPolicy,
+    OutboundPolicy, SpamPolicyThresholds, SubmissionPolicyThresholds,
 };
 use serde::{Deserialize, Serialize};
 
@@ -153,6 +155,34 @@ pub struct AuthPolicyOverrides {
     pub log_only: Option<bool>,
     pub max_auth_failures_per_minute: Option<u32>,
     pub max_conn_per_ip: Option<u32>,
+}
+
+impl AuthPolicyOverrides {
+    /// Resolve to the effective [`AuthPolicy`], overlaying each `Some`
+    /// override onto the wire-catalog `AuthPolicy::default()` — the same
+    /// `None ⇒ catalog default` semantics as the `fetch_config` projection the
+    /// Go MTA enforces from. Read nest-side by the outbound DMARC reporter,
+    /// which states in each report row what the MTA's gates did
+    /// (`dmarc-reporting.md` § Outbound aggregate-report sender).
+    pub fn effective(&self) -> AuthPolicy {
+        let d = AuthPolicy::default();
+        AuthPolicy {
+            enforce_dmarc: self.enforce_dmarc.unwrap_or(d.enforce_dmarc),
+            enforce_dmarc_quarantine: self
+                .enforce_dmarc_quarantine
+                .unwrap_or(d.enforce_dmarc_quarantine),
+            enforce_spf_hardfail: self.enforce_spf_hardfail.unwrap_or(d.enforce_spf_hardfail),
+            enforce_dkim: self.enforce_dkim.unwrap_or(d.enforce_dkim),
+            log_only: self.log_only.unwrap_or(d.log_only),
+            max_auth_failures_per_minute: self
+                .max_auth_failures_per_minute
+                .unwrap_or(d.max_auth_failures_per_minute),
+            max_conn_per_ip: self.max_conn_per_ip.unwrap_or(d.max_conn_per_ip),
+            // Forward-compat catch-all (transport.md rule 4): nest-minted from
+            // the catalog default + stored overrides, no peer `extra` to carry.
+            extra: Default::default(),
+        }
+    }
 }
 
 /// Override for the `SubmissionPolicyThresholds` sub-struct.
@@ -332,8 +362,11 @@ impl OutboundPolicyOverrides {
 #[serde(default)]
 pub struct AliasPolicyOverrides {
     pub exact_aliases_max: Option<u32>,
-    /// `Some(vec![])` clears the reservation entirely; `None` keeps the
-    /// seven-name role-address default.
+    /// The admin's ADDITIONS to the six role names
+    /// (`fauna_mail::aliases::DEFAULT_RESERVED_LOCAL_PARTS`), which stay
+    /// reserved whatever this holds: `None` and `Some(vec![])` both mean "no
+    /// additions", and a stored role name is harmless (`mail-aliases.md`
+    /// § Reserved local-parts — the six are a floor).
     pub reserved_local_parts: Option<Vec<String>>,
     pub subaddressing_enabled: Option<bool>,
     pub wildcard_prefix_enabled: Option<bool>,
@@ -345,7 +378,13 @@ pub struct AliasPolicyOverrides {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedAliasPolicy {
     pub exact_aliases_max: u32,
+    /// The effective reserved set every creation-blocking check reads: the six
+    /// role names followed by [`Self::reserved_additions`].
     pub reserved_local_parts: Vec<String>,
+    /// The admin's own additions — the stored list less the six role names and
+    /// duplicates. What `get_alias_policy` reports, so the admin's box shows
+    /// only what the admin may edit.
+    pub reserved_additions: Vec<String>,
     pub subaddressing_enabled: bool,
     pub wildcard_prefix_enabled: bool,
 }
@@ -405,20 +444,93 @@ impl AliasPolicyOverrides {
             DEFAULT_RESERVED_LOCAL_PARTS, EXACT_ALIASES_MAX_DEFAULT, SUBADDRESSING_ENABLED_DEFAULT,
             WILDCARD_PREFIX_ENABLED_DEFAULT,
         };
+        // The six are a floor the admin's list adds to, never replaces
+        // (`mail-aliases.md` § Reserved local-parts): this is the one place
+        // the union is made, so no call site unions by hand.
+        let mut reserved_additions: Vec<String> = Vec::new();
+        for name in self.reserved_local_parts.iter().flatten() {
+            let is_role = DEFAULT_RESERVED_LOCAL_PARTS
+                .iter()
+                .any(|r| r.eq_ignore_ascii_case(name));
+            if !is_role
+                && !reserved_additions
+                    .iter()
+                    .any(|a| a.eq_ignore_ascii_case(name))
+            {
+                reserved_additions.push(name.clone());
+            }
+        }
+        let reserved_local_parts = DEFAULT_RESERVED_LOCAL_PARTS
+            .iter()
+            .map(|s| (*s).to_string())
+            .chain(reserved_additions.iter().cloned())
+            .collect();
         ResolvedAliasPolicy {
             exact_aliases_max: self.exact_aliases_max.unwrap_or(EXACT_ALIASES_MAX_DEFAULT),
-            reserved_local_parts: self.reserved_local_parts.clone().unwrap_or_else(|| {
-                DEFAULT_RESERVED_LOCAL_PARTS
-                    .iter()
-                    .map(|s| (*s).to_string())
-                    .collect()
-            }),
+            reserved_local_parts,
+            reserved_additions,
             subaddressing_enabled: self
                 .subaddressing_enabled
                 .unwrap_or(SUBADDRESSING_ENABLED_DEFAULT),
             wildcard_prefix_enabled: self
                 .wildcard_prefix_enabled
                 .unwrap_or(WILDCARD_PREFIX_ENABLED_DEFAULT),
+        }
+    }
+}
+
+/// Admin overrides for the deployment-wide `mail.dmarc.*` catalog
+/// (`mail-policy-config.md` § DMARC; values owned by `dmarc-reporting.md`
+/// § Record shape and § Retention) — the single-row `mail_dmarc_policy` table,
+/// written whole by `fauna.bridges.put_dmarc_policy`. Like the alias overrides
+/// these are **not** projected to the bridge: the DNS surface's record
+/// assembler reads [`Self::publish_base`] and the two daily report prunes read
+/// [`Self::effective`]'s retentions. `record` is the deployment-wide partial in
+/// the same typed shape as a domain's `mail_domains.dmarc_overrides` column, so
+/// the assembler overlays the two in order (catalog, then the domain's own) with
+/// one function.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DmarcPolicyOverrides {
+    /// The ten published-record tags; an absent key is the shipped default.
+    pub record: DmarcOverrides,
+    pub aggregate_retention_days: Option<u32>,
+    pub forensic_retention_days: Option<u32>,
+}
+
+impl DmarcPolicyOverrides {
+    /// The deployment-wide record policy — the catalog overlaid onto the shipped
+    /// default — that each domain's own partial is then overlaid onto
+    /// (`dns_handlers::dmarc_body_for`).
+    pub fn publish_base(&self) -> DmarcPublishPolicy {
+        apply_overrides(DmarcPublishPolicy::default(), &self.record)
+    }
+
+    /// Resolve every unset knob to its catalog default — what
+    /// `get_dmarc_policy` reports and the prunes read.
+    pub fn effective(&self) -> DmarcReportingPolicy {
+        let d = DmarcReportingPolicy::default();
+        let base = self.publish_base();
+        DmarcReportingPolicy {
+            policy_mode: base.policy_mode,
+            subdomain_policy_mode: base.subdomain_policy_mode,
+            pct: base.pct,
+            adkim_mode: base.adkim,
+            aspf_mode: base.aspf,
+            rua_destination: base.rua_destination,
+            ruf_publish: base.ruf_publish,
+            ruf_destination: base.ruf_destination,
+            fo_mode: base.fo,
+            ri_seconds: base.ri_seconds,
+            aggregate_retention_days: self
+                .aggregate_retention_days
+                .unwrap_or(d.aggregate_retention_days),
+            forensic_retention_days: self
+                .forensic_retention_days
+                .unwrap_or(d.forensic_retention_days),
+            // Forward-compat catch-all (transport.md rule 4): nest-minted, no
+            // peer `extra` to carry forward.
+            extra: Default::default(),
         }
     }
 }
@@ -578,6 +690,15 @@ impl CacheDb {
         overrides: MassMailingPolicyOverrides,
     ) -> Result<()> {
         self.write_singleton_json("mail_mass_mailing_policy", &overrides)
+            .await
+    }
+
+    pub async fn get_dmarc_policy(&self) -> Result<DmarcPolicyOverrides> {
+        self.read_singleton_json("mail_dmarc_policy").await
+    }
+
+    pub async fn put_dmarc_policy(&self, overrides: DmarcPolicyOverrides) -> Result<()> {
+        self.write_singleton_json("mail_dmarc_policy", &overrides)
             .await
     }
 }
@@ -883,6 +1004,7 @@ mod tests {
             eff.reserved_local_parts.len(),
             DEFAULT_RESERVED_LOCAL_PARTS.len()
         );
+        assert!(eff.reserved_additions.is_empty());
     }
 
     #[tokio::test]
@@ -898,10 +1020,15 @@ mod tests {
         assert_eq!(db.get_alias_policy().await.unwrap(), put);
         let eff = db.get_alias_policy().await.unwrap().effective();
         assert_eq!(eff.exact_aliases_max, 5);
-        assert_eq!(
-            eff.reserved_local_parts,
-            vec!["postmaster".to_string(), "sales".to_string()]
-        );
+        // The stored list adds to the six; a stored role name is harmless and
+        // is not reported back as an addition.
+        let mut expected: Vec<String> = fauna_mail::aliases::DEFAULT_RESERVED_LOCAL_PARTS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        expected.push("sales".into());
+        assert_eq!(eff.reserved_local_parts, expected);
+        assert_eq!(eff.reserved_additions, vec!["sales".to_string()]);
         assert!(!eff.subaddressing_enabled);
         assert!(eff.wildcard_prefix_enabled);
     }
@@ -947,8 +1074,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn alias_policy_empty_reserved_clears_distinct_from_none() {
-        use fauna_mail::aliases::EXACT_ALIASES_MAX_DEFAULT;
+    async fn alias_policy_empty_reserved_clears_additions_and_keeps_the_six() {
+        use fauna_mail::aliases::{DEFAULT_RESERVED_LOCAL_PARTS, EXACT_ALIASES_MAX_DEFAULT};
         let db = CacheDb::open_in_memory().unwrap();
         db.put_alias_policy(AliasPolicyOverrides {
             reserved_local_parts: Some(Vec::new()),
@@ -957,9 +1084,70 @@ mod tests {
         .await
         .unwrap();
         let eff = db.get_alias_policy().await.unwrap().effective();
-        // Some(vec![]) clears the reservation entirely…
-        assert!(eff.reserved_local_parts.is_empty());
+        // Some(vec![]) clears the admin's additions only: the six role names
+        // stay reserved whatever the list holds (the floor)…
+        assert!(eff.reserved_additions.is_empty());
+        for role in DEFAULT_RESERVED_LOCAL_PARTS {
+            assert!(
+                eff.reserved_local_parts.iter().any(|r| r == role),
+                "{role:?} must stay reserved with the admin's list empty"
+            );
+        }
         // …while unset fields still fall back to the const default.
         assert_eq!(eff.exact_aliases_max, EXACT_ALIASES_MAX_DEFAULT);
+    }
+
+    #[tokio::test]
+    async fn dmarc_policy_empty_get_is_the_shipped_default() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let stored = db.get_dmarc_policy().await.unwrap();
+        assert_eq!(stored, DmarcPolicyOverrides::default());
+        // An empty catalog is the shipped record + retentions, so the DNS
+        // surface and the prunes read exactly what they read before the
+        // catalog existed.
+        assert_eq!(stored.effective(), DmarcReportingPolicy::default());
+        assert_eq!(stored.publish_base(), DmarcPublishPolicy::default());
+        assert_eq!(
+            stored.publish_base().to_txt_body("example.org"),
+            "v=DMARC1; p=reject; sp=reject; pct=100; adkim=s; aspf=s; \
+             rua=mailto:dmarc-report@example.org; ri=86400"
+        );
+    }
+
+    #[tokio::test]
+    async fn dmarc_policy_put_then_get_round_trips_and_feeds_the_record() {
+        use fauna_protocol::bridge_routing::{DmarcForensicOptions, DmarcMode};
+        let db = CacheDb::open_in_memory().unwrap();
+        let put = DmarcPolicyOverrides {
+            record: DmarcOverrides {
+                ruf_publish: Some(true),
+                fo_mode: Some(DmarcForensicOptions::Dkim),
+                policy_mode: Some(DmarcMode::Quarantine),
+                ..Default::default()
+            },
+            aggregate_retention_days: Some(120),
+            forensic_retention_days: None,
+        };
+        db.put_dmarc_policy(put.clone()).await.unwrap();
+        let stored = db.get_dmarc_policy().await.unwrap();
+        assert_eq!(stored, put);
+        let eff = stored.effective();
+        assert!(eff.ruf_publish);
+        assert_eq!(eff.fo_mode, DmarcForensicOptions::Dkim);
+        assert_eq!(eff.policy_mode, DmarcMode::Quarantine);
+        // Unset keys keep the shipped default.
+        assert_eq!(eff.subdomain_policy_mode, DmarcMode::Reject);
+        assert_eq!(eff.aggregate_retention_days, 120);
+        assert_eq!(
+            eff.forensic_retention_days,
+            DmarcReportingPolicy::default().forensic_retention_days
+        );
+        // The opt-in reaches the published record through the base.
+        assert_eq!(
+            stored.publish_base().to_txt_body("example.org"),
+            "v=DMARC1; p=quarantine; sp=reject; pct=100; adkim=s; aspf=s; \
+             rua=mailto:dmarc-report@example.org; \
+             ruf=mailto:dmarc-report@example.org; fo=d; ri=86400"
+        );
     }
 }

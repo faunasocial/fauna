@@ -97,6 +97,30 @@ pub async fn load_open(store: Option<&AccountStoreHandle>) -> Vec<RefusedSchedul
     }
 }
 
+/// [`load_open`] composed into what an Events surface paints — one
+/// `refused_change_view` per open row, so no app words a security notice or
+/// resolves a sender itself. Each row's sender handle is what `manager`
+/// resolves for the row's author **now** (re-derived at every read, never
+/// cached into the record) and is only a candidate: the shared view decides
+/// whether the nest that attested the author may lend it.
+pub async fn load_views(
+    store: Option<&AccountStoreHandle>,
+    manager: &ConversationsManager,
+) -> Vec<fauna_client_caldav::RefusedChangeView> {
+    load_open(store)
+        .await
+        .iter()
+        .map(|row| {
+            let handle = row
+                .author
+                .as_deref()
+                .and_then(|actor| fauna_core::identity::ActorId::from_hex(actor).ok())
+                .and_then(|person| manager.handle_for_person(&person));
+            fauna_client_caldav::refused_change_view(row, handle.as_deref())
+        })
+        .collect()
+}
+
 /// Dismiss the row `key` names — the owner's *I have seen this*, the only
 /// gesture a refused-change row carries — answering whether it was open.
 ///

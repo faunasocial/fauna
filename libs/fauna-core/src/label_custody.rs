@@ -294,8 +294,40 @@ impl LabelCustody {
         &self,
         name_hash: &[u8; 32],
     ) -> (FileDownloadKeys, Option<crate::folder_keys::ForeignHome>) {
-        if let Some(resolver) = self.resolver.as_ref() {
-            match resolver.resolve(name_hash).await {
+        let answer = match self.resolver.as_ref() {
+            Some(resolver) => Some(resolver.resolve(name_hash).await),
+            None => None,
+        };
+        self.keys_from_answer(answer)
+    }
+
+    /// [`Self::keys_for_hash`] by the set's **identity** — the address a reader
+    /// that holds the set's row has, and the only one that reaches a member row
+    /// the reader's own same-named set shadows by name
+    /// (`mls-group-key-material.md` § M2 → *Resolving custody — by the set's
+    /// identity, never by its name*). The resolver's answer maps to keys
+    /// exactly as [`Self::keys_for_hash`]'s does — one shared mapping.
+    pub async fn keys_for_ref(
+        &self,
+        folder_ref: &crate::folder_keys::FolderRef,
+    ) -> (FileDownloadKeys, Option<crate::folder_keys::ForeignHome>) {
+        let answer = match self.resolver.as_ref() {
+            Some(resolver) => Some(resolver.resolve_ref(folder_ref).await),
+            None => None,
+        };
+        self.keys_from_answer(answer)
+    }
+
+    /// The keys one resolver answer licenses — `None` when this surface has no
+    /// resolver (every set reads owner-only). The single mapping
+    /// [`Self::keys_for_hash`] and [`Self::keys_for_ref`] share, so the two
+    /// address forms cannot drift.
+    fn keys_from_answer(
+        &self,
+        answer: Option<anyhow::Result<crate::folder_keys::ResolvedCustody>>,
+    ) -> (FileDownloadKeys, Option<crate::folder_keys::ForeignHome>) {
+        if let Some(answer) = answer {
+            match answer {
                 Ok(crate::folder_keys::ResolvedCustody::ContentKeyed(resolved)) => {
                     let home =
                         resolved
@@ -1452,7 +1484,7 @@ pub fn render_retention_policy(
 mod tests {
     use super::*;
     use crate::folder_keys::{
-        ContentKeyGeneration, FolderContentKeys, ResolvedCustody, ResolvedFolderKeys,
+        ContentKeyGeneration, FolderContentKeys, FolderRef, ResolvedCustody, ResolvedFolderKeys,
     };
     use crate::secret::SecretArray32;
 
@@ -1569,6 +1601,11 @@ mod tests {
                 ResolvedCustody::owner_only()
             })
         }
+
+        /// Keyed by name: no ref answer.
+        async fn resolve_ref(&self, _folder_ref: &FolderRef) -> anyhow::Result<ResolvedCustody> {
+            anyhow::bail!("no set with that identity")
+        }
     }
 
     /// A scrubbed wire row — blank plaintext, the set's `name_hash` beside it —
@@ -1636,6 +1673,62 @@ mod tests {
                 ResolvedCustody::owner_only()
             })
         }
+
+        /// By identity: `Local(1)` is the served set, `Local(2)` the unflagged
+        /// one, any other ref names no set.
+        async fn resolve_ref(&self, folder_ref: &FolderRef) -> anyhow::Result<ResolvedCustody> {
+            match folder_ref {
+                FolderRef::Local(1) => self.resolve(&path_crypto::set_name_hash(self.served)).await,
+                FolderRef::Local(2) => {
+                    self.resolve(&path_crypto::set_name_hash(self.unflagged))
+                        .await
+                }
+                _ => anyhow::bail!("no set with that identity"),
+            }
+        }
+    }
+
+    /// `keys_for_ref` maps the resolver's three answers exactly as
+    /// `keys_for_hash` does (`mls-group-key-material.md` § M2 → *Resolving
+    /// custody — by the set's identity*): content-keyed → the set's content
+    /// keys, owner-only → the owner path with its retired candidates, `Err` →
+    /// no keys at all, never the owner path.
+    #[tokio::test]
+    async fn keys_for_ref_maps_the_three_answers_as_keys_for_hash_does() {
+        let keys = content_keys(3, [0x51; 32]);
+        let retired = content_keys(1, [0x52; 32]);
+        let custody = LabelCustody::new(
+            Some(Arc::new(ServedStubResolver {
+                served: "photos",
+                keys: Some(keys.clone()),
+                unflagged: "docs",
+                retired: Some(retired.clone()),
+            })),
+            Some(owner_key()),
+        );
+
+        let (by_ref, home_ref) = custody.keys_for_ref(&FolderRef::Local(1)).await;
+        let (by_hash, home_hash) = custody.keys_for("photos").await;
+        assert!(by_ref.is_content_keyed() && by_hash.is_content_keyed());
+        assert_eq!(by_ref.content_keys, by_hash.content_keys);
+        assert_eq!(by_ref.content_keys, Some(keys));
+        assert_eq!(by_ref.served, by_hash.served);
+        assert_eq!(by_ref.mls_group_id, by_hash.mls_group_id);
+        assert_eq!(home_ref.is_none(), home_hash.is_none());
+
+        let (by_ref, _) = custody.keys_for_ref(&FolderRef::Local(2)).await;
+        let (by_hash, _) = custody.keys_for("docs").await;
+        assert!(!by_ref.is_content_keyed() && !by_hash.is_content_keyed());
+        assert!(by_ref.backup_key.is_some() && by_hash.backup_key.is_some());
+        assert_eq!(by_ref.retired_content_keys, by_hash.retired_content_keys);
+        assert_eq!(by_ref.retired_content_keys, Some(retired));
+
+        let (unknown, home) = custody.keys_for_ref(&FolderRef::Foreign([7; 32])).await;
+        assert!(
+            unknown.backup_key.is_none() && !unknown.is_content_keyed(),
+            "an unknown ref yields no keys — never the owner path"
+        );
+        assert!(home.is_none());
     }
 
     /// A served set's row is stamped with the generation the MDA sealed it
@@ -1832,6 +1925,10 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl FolderKeyResolver for FailingResolver {
         async fn resolve(&self, _name_hash: &[u8; 32]) -> anyhow::Result<ResolvedCustody> {
+            anyhow::bail!("roster read failed")
+        }
+
+        async fn resolve_ref(&self, _folder_ref: &FolderRef) -> anyhow::Result<ResolvedCustody> {
             anyhow::bail!("roster read failed")
         }
     }

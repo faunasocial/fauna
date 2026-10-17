@@ -425,6 +425,102 @@ public class AdminNestViewModelTests
         Assert.False(string.IsNullOrEmpty(vm.Error));
     }
 
+    // ── Web-app origin (admin.md § N Nest → Web-app origin) ──
+
+    private static AdminNestViewModel NewVm(MockNestRpcClient rpc)
+    {
+        rpc.NextServiceFlags = new uniffi.fauna_ffi.FfiAdminServiceFlags(false, false);
+        rpc.NextSetupStatus = MockNestRpcClient.MakeSetupStatus();
+        return new AdminNestViewModel(rpc);
+    }
+
+    [Fact]
+    public async Task WebAppOrigin_UnmarkedAndDisabledUntilReadLands()
+    {
+        var vm = NewVm(new MockNestRpcClient());
+
+        Assert.False(vm.WebAppOriginLoaded);
+        Assert.False(vm.WebAppOriginCanSet);
+        Assert.False(vm.WebAppOriginBundledSelected);
+        Assert.False(vm.WebAppOriginCentralSelected);
+        Assert.False(vm.WebAppOriginCanSave);
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.True(vm.WebAppOriginLoaded);
+        Assert.True(vm.WebAppOriginCanSet);
+        Assert.True(vm.WebAppOriginBundledSelected);
+        Assert.False(vm.WebAppOriginCentralSelected);
+    }
+
+    [Fact]
+    public async Task WebAppOrigin_CanSetFalseDisablesRadiosAndIgnoresPicks()
+    {
+        var rpc = new MockNestRpcClient();
+        rpc.NextWebAppOriginView = rpc.NextWebAppOriginView with { canSet = false };
+        var vm = NewVm(rpc);
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        vm.SelectWebAppOrigin(uniffi.fauna_ffi.FfiWebAppOrigin.Central);
+
+        Assert.False(vm.WebAppOriginCanSet);
+        Assert.False(vm.WebAppOriginCanSave);
+        Assert.True(vm.WebAppOriginBundledSelected);
+        await vm.SaveWebAppOriginAsync();
+        Assert.Empty(rpc.WebAppOriginSetCalls);
+    }
+
+    [Fact]
+    public async Task WebAppOrigin_PickIsLocalSaveCommitsAndRepaintsFromReply()
+    {
+        var rpc = new MockNestRpcClient();
+        var vm = NewVm(rpc);
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        vm.SelectWebAppOrigin(uniffi.fauna_ffi.FfiWebAppOrigin.Central);
+
+        Assert.Empty(rpc.WebAppOriginSetCalls); // a pick dispatches nothing
+        Assert.True(vm.WebAppOriginCentralSelected);
+        Assert.True(vm.WebAppOriginCanSave);
+
+        await vm.SaveWebAppOriginAsync();
+
+        Assert.Equal(
+            new[] { uniffi.fauna_ffi.FfiWebAppOrigin.Central }, rpc.WebAppOriginSetCalls);
+        Assert.True(vm.WebAppOriginCentralSelected);
+        Assert.False(vm.WebAppOriginWorking);
+        Assert.Null(vm.Error);
+    }
+
+    [Fact]
+    public async Task WebAppOrigin_SaveFailureRoutesToPageErrorKeepsDraft()
+    {
+        var rpc = new MockNestRpcClient();
+        var vm = NewVm(rpc);
+        await vm.LoadCommand.ExecuteAsync(null);
+        vm.SelectWebAppOrigin(uniffi.fauna_ffi.FfiWebAppOrigin.Central);
+
+        rpc.NextError = "boom";
+        await vm.SaveWebAppOriginAsync();
+
+        Assert.False(string.IsNullOrEmpty(vm.Error));
+        Assert.True(vm.WebAppOriginCentralSelected);
+        Assert.False(vm.WebAppOriginWorking);
+    }
+
+    [Fact]
+    public async Task WebAppOrigin_FailedReadLeavesSectionUnloadedNotPageFailed()
+    {
+        var rpc = new MockNestRpcClient { NextWebAppOriginReadError = true };
+        var vm = NewVm(rpc);
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.False(vm.WebAppOriginLoaded);
+        Assert.False(vm.WebAppOriginCanSet);
+        Assert.Null(vm.Error);
+    }
+
     // ── Deployment-identity rotation (box-recovery.md § Deployment-seed
     // rotation) — the arm/roster/confirm/cancel ceremony, over MockNestRpcClient. ──
 

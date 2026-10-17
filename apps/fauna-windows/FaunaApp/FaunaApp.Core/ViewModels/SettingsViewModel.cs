@@ -3,6 +3,7 @@ using CommunityToolkit.Mvvm.Input;
 using FaunaApp.Core.Logs;
 using FaunaApp.Core.Models;
 using FaunaApp.Core.Services;
+using uniffi.fauna_conversations;
 using uniffi.fauna_ffi;
 
 namespace FaunaApp.Core.ViewModels;
@@ -40,6 +41,16 @@ public partial class SettingsViewModel : ViewModelBase
     [ObservableProperty] private bool _isCloseToTrayEnabled;
     [ObservableProperty] private int _keyPackageCount;
     [ObservableProperty] private bool _isMlsAvailable;
+    // The Encryption page's read-only low flag: true once a count has been read
+    // AND the shared threshold (fauna_conversations::keypackages_low, fewer
+    // than five — direct-messages.md § Key Package Management) calls it low.
+    // Never a local literal, and never true before hydration.
+    [ObservableProperty] private bool _isKeyPackageLow;
+    [ObservableProperty] private bool _isRefreshingKeyPackages;
+
+    /// The key-package pool target a manual Refresh tops up to (the same 20
+    /// the login-time replenish aims for).
+    internal const ulong KeyPackageRefreshTarget = 20;
 
     // Persisted "Close to tray" preference (apps/windows.md § App Lifecycle).
     // A local file under %LocalAppData%\Fauna, read/written here and by the
@@ -81,12 +92,22 @@ public partial class SettingsViewModel : ViewModelBase
     // export button; ExportAccountDataAsync no-ops rather than fetching bytes
     // it cannot save.
     private readonly ISnapshotFileSaver? _fileSaver;
+    // The shared session's manager — the Encryption page's Refresh rides its
+    // durable ensure_keypackages (mints on the session's MlsEngine and notifies
+    // the autosave observer; a raw RPC upload would strand the init keys).
+    // Null on every other settings sub-page: RefreshKeyPackagesAsync no-ops.
+    private readonly IConversationsManager? _keyPackageManager;
 
-    internal SettingsViewModel(INestHttpClient nest, INestRpcClient rpc, ISnapshotFileSaver? fileSaver = null)
+    internal SettingsViewModel(
+        INestHttpClient nest,
+        INestRpcClient rpc,
+        ISnapshotFileSaver? fileSaver = null,
+        IConversationsManager? keyPackageManager = null)
     {
         _nest = nest;
         _rpc = rpc;
         _fileSaver = fileSaver;
+        _keyPackageManager = keyPackageManager;
         // Seed the backing field (not the property) so the initial read doesn't
         // re-persist; a local file, available without an authed session.
         _isCloseToTrayEnabled = _appSettings.CloseToTray;
@@ -138,6 +159,7 @@ public partial class SettingsViewModel : ViewModelBase
                 {
                     KeyPackageCount = await _rpc.KeypackageCountAsync();
                     IsMlsAvailable = true;
+                    IsKeyPackageLow = FaunaConversationsMethods.KeypackagesLow((ulong)Math.Max(0, KeyPackageCount));
                 }
                 catch { IsMlsAvailable = false; }
             }
@@ -154,6 +176,26 @@ public partial class SettingsViewModel : ViewModelBase
         {
             IsLoading = false;
         }
+    }
+
+    /// Settings → Encryption "Refresh Keys": top the pool up through the shared
+    /// session's <c>ensure_keypackages</c>, then re-read the count (and the low
+    /// flag) from the nest. Manual only — the page never mints on load.
+    [RelayCommand]
+    private async Task RefreshKeyPackagesAsync()
+    {
+        if (_keyPackageManager is null) return;
+        IsRefreshingKeyPackages = true;
+        ErrorMessage = null;
+        try
+        {
+            await _keyPackageManager.EnsureKeypackages(KeyPackageRefreshTarget);
+            KeyPackageCount = await _rpc.KeypackageCountAsync();
+            IsMlsAvailable = true;
+            IsKeyPackageLow = FaunaConversationsMethods.KeypackagesLow((ulong)Math.Max(0, KeyPackageCount));
+        }
+        catch (Exception ex) { ShowError(ex); }
+        finally { IsRefreshingKeyPackages = false; }
     }
 
     [RelayCommand]

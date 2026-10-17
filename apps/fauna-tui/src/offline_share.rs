@@ -28,9 +28,9 @@
 //!    that key into a sentence through this app's own lookup, and do nothing
 //!    else.
 //!
-//! Why the transport is actor-keyed and relay-less is the shared factory
-//! type's own documentation ([`CeremonyTransportFactory`]) — this app only
-//! satisfies it.
+//! Why the transport is actor-keyed, and when it takes a relay, is the
+//! shared factory type's own documentation ([`CeremonyTransportFactory`]) —
+//! this app only satisfies it.
 //!
 //! The OTHER bind door is `crate::share_glue`: an account with ≥1 joined
 //! cross-user set binds the same one endpoint from store-ready — via
@@ -77,7 +77,7 @@ pub async fn bind_seat(
 pub(crate) async fn bind_share_plane_seat(
     session_seat: &SessionSeat,
     secret_hex: &str,
-    evidence: Option<Vec<String>>,
+    evidence: Option<fauna_sync_engine::peer_leg::PeerLegNestFacts>,
     membership: &Arc<dyn fauna_peer_share::SetMembership + Send + Sync>,
     group_roster: &Arc<dyn fauna_peer_share::admission::GroupRosterState + Send + Sync>,
 ) -> Result<(Arc<CeremonySeat>, Vec<std::net::SocketAddr>), String> {

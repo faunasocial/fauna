@@ -37,17 +37,22 @@ pub fn replay_cal_manifest_into_sqlite(
     // lockstep (`SET highestmodseq = ?1, ctag = ?1`); a restored ctag of 0
     // would tell a PROPFIND-polling MUA "nothing changed" across a revert.
     // created_at synthesized as 0 — consumers use highestmodseq / etag for
-    // ordering, not timestamps.
+    // ordering, not timestamps. The prune floor rides the restore: the
+    // tombstones replayed below are only those the retention prune kept, so
+    // the rebuilt expunge log is incomplete below it (caldav-server.md
+    // § Stale sync-token handling).
     for c in &manifest.calendars {
         tx.execute(
             "INSERT INTO bridge_caldav_calendars
-                (actor_id, calendar_id, encrypted_metadata, ctag, highestmodseq, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?4, 0)",
+                (actor_id, calendar_id, encrypted_metadata, ctag, highestmodseq, created_at,
+                 pruned_modseq)
+             VALUES (?1, ?2, ?3, ?4, ?4, 0, ?5)",
             rusqlite::params![
                 actor.as_slice(),
                 c.calendar_id.as_slice(),
                 &c.encrypted_metadata,
                 c.highestmodseq as i64,
+                c.pruned_modseq as i64,
             ],
         )
         .context("INSERT bridge_caldav_calendars")?;
@@ -95,6 +100,7 @@ mod tests {
             calendar_id: [0xAAu8; 32],
             encrypted_metadata: vec![0u8; 64],
             highestmodseq: 50,
+            pruned_modseq: 0,
         });
         m
     }
@@ -183,6 +189,7 @@ mod tests {
             calendar_id: [0xAAu8; 32],
             encrypted_metadata: vec![0u8; 64],
             highestmodseq: 50,
+            pruned_modseq: 0,
         });
         manifest.events.push(EventPlacement {
             event_id: [0xB1u8; 32],

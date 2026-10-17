@@ -335,6 +335,7 @@ fn persistable_picker(picker: &RecipientPickerState) -> RecipientPickerState {
         include_home_nest: picker.include_home_nest,
         // ---- transient probe output: never rests ----
         suggestions: Vec::new(),
+        suggestion_displays: Vec::new(),
         resolve_state: ResolveState::Idle,
         resolved: None,
     }

@@ -80,6 +80,26 @@ export async function bestEffortCopyToClipboard(text: string): Promise<void> {
   }
 }
 
+/** The only writers of `webPage` besides `ensureWebPageHydrated` and the
+ *  reset: a caller that read the nest across awaits (Settings → Web) hands
+ *  over the predicate it captured with `sameActorSince()` BEFORE its first
+ *  await, and the write lands only while that actor is still current. Without
+ *  it a read begun as A that lands after an in-heap actor change repopulates
+ *  the store `resetWebPage` just nulled, and B's feed ⋯-menu builds B's links
+ *  on A's origin (`actor-generation-contract.test.ts` pins that nothing else
+ *  writes the store). */
+export function setWebPage(page: WebPage, stillThisActor: () => boolean): void {
+  if (stillThisActor()) webPage.set(page);
+}
+
+/** [`setWebPage`]'s patch twin: a no-op while the store is unpopulated. */
+export function patchWebPage(
+  patch: (page: WebPage) => WebPage,
+  stillThisActor: () => boolean,
+): void {
+  if (stillThisActor()) webPage.update((p) => (p ? patch(p) : p));
+}
+
 let hydrating: Promise<WebPage> | null = null;
 
 /** Ensure `webPage` is populated, for a caller (the feed ⋯-menu) that
@@ -119,9 +139,12 @@ export async function ensureWebPageHydrated(): Promise<WebPage> {
       return page;
     })();
   }
+  const mine = hydrating;
   try {
-    return await hydrating;
+    return await mine;
   } finally {
-    hydrating = null;
+    // Only clear our own read: a stale awaiter resuming after a reset must not
+    // null the incoming actor's in-flight promise.
+    if (hydrating === mine) hydrating = null;
   }
 }

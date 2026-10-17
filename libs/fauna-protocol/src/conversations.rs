@@ -595,9 +595,13 @@ pub struct KeypackageFetchReply {
 
 // ── fauna.conversations.keypackage.count ───────────────────────────────
 
-/// Non-destructive count of remaining non-expired key packages for
-/// `actor_id`. Used by senders to gauge whether the FIFO consume on
-/// `keypackage.fetch` will succeed before initiating a chat.
+/// Non-destructive count of the caller's own remaining non-expired one-time
+/// key packages (the last-resort package excluded) — the top-up gauge.
+/// **Owner-only:** `actor_id` must be the caller's own id; a request naming
+/// any other actor is refused with `fauna.conversations.permission_denied`
+/// (`docs/goal/architecture/federation.md` § Key packages — privacy &
+/// exhaustion). Another actor's reachability is
+/// [`KeypackageAddressableRequest`]'s boolean, never a count.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct KeypackageCountRequest {
     pub actor_id: String,
@@ -608,6 +612,26 @@ pub struct KeypackageCountRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct KeypackageCountReply {
     pub count: u64,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+// ── fauna.conversations.keypackage.addressable ─────────────────────────
+
+/// Whether `actor_id` holds at least one usable key package, one-time **or**
+/// last-resort — the same predicate as `fauna.actor.by_handle`'s `addressable`
+/// bit, for a sender holding a bare actor id and no handle to look up. A pure
+/// read: it consumes nothing and discloses a yes/no, never a number.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct KeypackageAddressableRequest {
+    pub actor_id: String,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct KeypackageAddressableReply {
+    pub addressable: bool,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -927,6 +951,19 @@ pub struct RoomListRosterRequest {
     /// checks against the number it asked for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at_policy_version: Option<u64>,
+    /// **Serve a run, not one version**: with [`Self::at_policy_version`] named,
+    /// also serve up to this many *consecutive* retained versions starting
+    /// there, as [`RoomListRosterReply::policy_versions`] — so a member
+    /// anchoring a long chain pays one roster read per run instead of one per
+    /// version. The nest serves at most `fauna_mls::room_policy::MAX_POLICY_VERSION_SPAN` and stops at
+    /// the first version it never held; `None` (or `1`) is the single-version
+    /// read.
+    ///
+    /// Additive, and safe to be ignored: a nest older than the field answers
+    /// with the one `policy_at_version` it always did, and the member walks on
+    /// from there a version at a time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_version_span: Option<u32>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -985,6 +1022,14 @@ pub struct RoomListRosterReply {
     /// [`Self::policy_version`] and the roles above are read under.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_at_version: Option<ByteBuf>,
+    /// The run [`RoomListRosterRequest::policy_version_span`] asked for:
+    /// canonical dag-cbor `SignedRoomPolicy` blobs, unverified, in version
+    /// order and consecutive from the requested `at_policy_version` (so the
+    /// first is [`Self::policy_at_version`]). Ends early at the first version
+    /// the room never held here, or at the nest's own cap. `None` when no span
+    /// was asked for or the nest predates the field. Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_versions: Option<Vec<ByteBuf>>,
     /// The room's **birth salt** (32 bytes) — served beside
     /// [`Self::policy_at_version`], and only when the request named a version.
     /// It is the other half of the birth record the room id commits to
@@ -1042,6 +1087,9 @@ pub struct RoomListRosterRemoteRequest {
     /// home unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at_policy_version: Option<u64>,
+    /// [`RoomListRosterRequest::policy_version_span`], forwarded likewise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_version_span: Option<u32>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }

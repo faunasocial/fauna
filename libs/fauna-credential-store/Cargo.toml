@@ -12,7 +12,8 @@ license.workspace = true
 live-keychain = ["allow-live-keyring"]
 # Escape hatch keeping the FAUNA_E2E_CREDENTIAL_DIR /
 # FAUNA_E2E_FORCE_HEADLESS_STORE store redirects (`cred_file_dir`,
-# `force_headless_store`) in a --release e2e build — a debug build reaches them
+# `force_headless_store`) and the FAUNA_E2E_FORCE_LOCKED_KEYRING probe seam
+# (`forced_keyring_reach`) in a --release e2e build — a debug build reaches them
 # via each fn's own `debug_assertions` arm. Never default-on; consumers forward
 # it from their own e2e feature (linux/tui/sync-agent `e2e-agent`), never on a
 # dep line (e2e-conventions.md convention 15 rule (b)). Without the forward a
@@ -74,3 +75,9 @@ windows = { workspace = true, features = [
 core-foundation = "0.10"
 security-framework = "3"
 security-framework-sys = "2"
+
+# The detached-store test seeds a fauna-client-accounts in-memory snapshot,
+# which that crate gates behind `test-helpers` (a workspace crate, no new
+# third-party code).
+[dev-dependencies]
+fauna-client-accounts = { workspace = true, features = ["test-helpers"] }

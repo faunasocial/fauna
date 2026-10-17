@@ -1736,6 +1736,42 @@ impl CacheDb {
         .context("get_room_policy_version")
     }
 
+    /// The signed policies a room held from `from` upward — consecutive
+    /// versions, in order, at most `limit` of them, each exactly as its author
+    /// signed it. The run ends at the first version the room never held here
+    /// (a gap truncates it rather than being skipped: a member judging the
+    /// chain link by link could not use a version past a hole anyway).
+    pub async fn get_room_policy_versions(
+        &self,
+        room_id: &[u8; 32],
+        from: u64,
+        limit: u32,
+    ) -> Result<Vec<Vec<u8>>> {
+        let room_id = *room_id;
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT version, policy_blob FROM room_policy_versions \
+                 WHERE room_id = ?1 AND version >= ?2 \
+                 ORDER BY version LIMIT ?3",
+            )
+            .context("get_room_policy_versions")?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![room_id.as_slice(), from as i64, i64::from(limit)],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .context("get_room_policy_versions")?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("get_room_policy_versions")?;
+        Ok(rows
+            .into_iter()
+            .enumerate()
+            .take_while(|(offset, (version, _))| *version == from as i64 + *offset as i64)
+            .map(|(_, (_, blob))| blob)
+            .collect())
+    }
+
     /// A room's stored signed policy — the owner-signed record the floor
     /// applies on every write (`conversation-rooms.md` § Roles and
     /// authorization → *Community rooms — enforced at the floor*). `None`

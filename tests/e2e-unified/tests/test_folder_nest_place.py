@@ -30,6 +30,7 @@ import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from helpers.set_names import find_set
+from helpers.waiting import await_devices_refresh_after, devices_refresh_baseline
 
 pytestmark = [
     pytest.mark.tier2,
@@ -221,7 +222,77 @@ def test_nest_place_policy_is_reachable_editable_and_clearable(
         )
 
 
-def _wait_row(client, name: str, predicate, timeout: float = 15.0) -> dict:
+@pytest.mark.feature("folders")
+def test_a_refresh_keeps_staged_nest_place_edits(logged_in_app, nest_instance, test_user):
+    """A store change between the typing and the save must not put the nest's
+    values back into the boxes (`backup-restore.md` § 8b, "A refresh never
+    overwrites a staged edit"; the rule is `nest_place::nest_place_reseed`).
+
+    An app that re-seeds the six boxes on every refresh shows the old values
+    after any unrelated write, and its save then sends the OLD policy with no
+    error — tui's live red of 2026-10-06, and windows' `RenderFolders` rebuild
+    until its carry landed. The store change here is a plain tick: a
+    conflict-policy pick on the same row, which writes `fauna.folders.update`
+    and refreshes the page, but moves none of the policy the boxes were seeded
+    from.
+    """
+    app = logged_in_app
+    b = app.backups
+    name = f"nest-staged-{secrets.token_hex(4)}"
+
+    b.navigate_folders()
+    b.create_folder_via_wizard(name)
+
+    gt = _user_client(nest_instance, test_user)
+    with gt:
+        idx = b.find_and_expand_folder_until(name, "folder-nest-snapshots-select")
+
+        # 1. Stage — type, do not save.
+        b.set_nest_quiet("300")
+        b.set_version_retention(count="4", days="")
+
+        # 2. A store tick under the staged edit, anchored causally: a refresh
+        #    that BEGAN after the pick has committed (convention 14), and the UI
+        #    thread has drained whatever that refresh enqueued.
+        current = _row(gt, name).get("conflict_policy") or "auto"
+        other = "latest_wins_always" if current == "auto" else "auto"
+        baseline = devices_refresh_baseline(app.driver)
+        b.set_conflict_policy(other, row=idx)
+        _wait_row(
+            gt, name, lambda r: (r.get("conflict_policy") or "auto") == other,
+            what="the conflict-policy pick",
+        )
+        await_devices_refresh_after(
+            app.driver, baseline, budget_s=30.0, what="the conflict-policy pick"
+        )
+        app.driver.barrier()
+
+        # 3. The boxes still hold what was typed.
+        assert b.nest_quiet_value() == "300", (
+            "a refresh put the nest's value back over the staged quiet period: "
+            f"the box reads {b.nest_quiet_value()!r} after the conflict-policy "
+            "write, so the save would send the OLD policy (backup-restore.md § 8b)"
+        )
+        assert b.version_retention_count_value() == "4", (
+            "a refresh put the nest's value back over the staged version count: "
+            f"the box reads {b.version_retention_count_value()!r}"
+        )
+
+        # 4. And the save sends them.
+        b.save_nest_place()
+        row = _wait_row(
+            gt, name, lambda r: (r.get("nest_place") or {}).get("quiet_secs") == 300
+        )
+        vr = row.get("version_retention") or {}
+        assert vr.get("max_versions_per_path") == 4, (
+            f"the staged version count did not land with the save: {vr!r}"
+        )
+
+
+def _wait_row(
+    client, name: str, predicate, timeout: float = 15.0, *,
+    what: str = "the expected nest-place state",
+) -> dict:
     """Poll the nest row until `predicate` holds, then return it.
 
     A deadline poll on latency-independent STATE, never a settle-sleep
@@ -238,7 +309,8 @@ def _wait_row(client, name: str, predicate, timeout: float = 15.0) -> dict:
             return last
         time.sleep(0.3)
     raise AssertionError(
-        f"folder {name!r} never reached the expected nest-place state; "
+        f"folder {name!r} never reached {what}; "
         f"last row: nest_place={last.get('nest_place')!r} "
-        f"retention_policy={last.get('retention_policy')!r}"
+        f"retention_policy={last.get('retention_policy')!r} "
+        f"conflict_policy={last.get('conflict_policy')!r}"
     )

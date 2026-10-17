@@ -4,7 +4,7 @@ the **real Docker image**, where the s6 supervisor restarts the nest for real.
 
 Why this exists
 ---------------
-The live CalDAV roundtrip (``test_caldav_live_nest.py`` vs example.com) hit a bug NO
+The live CalDAV roundtrip (``test_caldav_live_nest.py`` vs the live nest) hit a bug NO
 local e2e caught: after ``factory_reset → re-claim (same identity) → enable-mail``
 the linux Events page showed ``CalendarsLoaded: 0`` and ``create_event`` failed
 ("Event did not appear", ``actions/events.py:68``). The tier_3 cycle test
@@ -48,7 +48,7 @@ Root cause (nest-side, fixed): the TLS channel binding
 so the post-reset boot minted a *new random* deployment identity; the
 channel-binding ``nest_actor_id`` changed; a self-signed/TOFU client's
 process-global identity **pin** (from phase 1) then mismatched → ``IdentityError``
-in graduation → no reconnect, **no TLS error**. (A WebPKI client like example.com, and
+in graduation → no reconnect, **no TLS error**. (A WebPKI client like the live nest, and
 the Python ``CERT_NONE`` client, are unaffected — they never pin the binding.) The
 fix makes the deployment key durable across a reset (``nest_deployment.key``,
 preserved like ``nest_identity.key``; ``bins/fauna-nest/src/deployment_key.rs``

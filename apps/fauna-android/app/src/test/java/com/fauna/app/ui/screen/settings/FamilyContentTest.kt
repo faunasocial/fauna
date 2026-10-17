@@ -111,6 +111,7 @@ class FamilyContentTest {
         supervisedActorId: ByteArray = ByteArray(32) { 1 },
         peerActorId: ByteArray = ByteArray(32) { 2 },
         messageId: ByteArray = ByteArray(16) { 3 },
+        createdAt: Long = 0,
     ) = FfiFamilyApprovalEntry(
         supervisedActorId = supervisedActorId,
         supervisedHandle = "ward",
@@ -127,7 +128,7 @@ class FamilyContentTest {
         bridgeId = "",
         operation = "",
         target = "",
-        createdAt = 0,
+        createdAt = createdAt,
     )
 
     private fun status(
@@ -585,6 +586,26 @@ class FamilyContentTest {
     }
 
     @Test
+    fun halfSetScreenTimeWindowRefusesSaveAndSurfacesTheReason() {
+        // Each bound parses on its own; only the shared cross-field
+        // `validateScreenTime` knows a window comes in pairs, so a half-set
+        // window must be refused locally, never sent to `policy.update`.
+        val w = ward("Ward1")
+        var saved: FfiReachPolicy? = null
+        var error: String? = null
+        render(
+            status = status(supervisedBy = null, policy = null, wards = listOf(w), incomingTransfers = emptyList(), usageTodayMinutes = null),
+            selectedWardActorId = w.actorId,
+            onSavePolicy = { _, p -> saved = p },
+            onSaveError = { error = it },
+        )
+        composeTestRule.onNodeWithTag("family-policy-screen-window-start-input").performTextInput("08:00")
+        composeTestRule.onNodeWithTag("family-policy-save-button").performScrollTo().performClick()
+        assertNull(saved)
+        assertEquals(true, error?.isNotEmpty())
+    }
+
+    @Test
     fun wardRowRendersUsageTodayWhenBudgetSet() {
         val w = ward("Ward1", policy = policy(screenTime = FfiScreenTimePolicy(null, null, 120u)), usageTodayMinutes = 30u)
         render(status = status(wards = listOf(w)), selectedWardActorId = w.actorId)
@@ -644,6 +665,26 @@ class FamilyContentTest {
         )
         composeTestRule.onNode(
             hasTestTag("family-approval-item") and hasAnyDescendant(hasText("attacker@example.com")),
+        ).assertExists()
+    }
+
+    // A held mail also reads when it arrived ("sender · HH:MM", the shared
+    // conversation bucket over `created_at` seconds); without a stamp the row
+    // shows the sender alone (the test above).
+    @Test
+    fun mailHoldApprovalRowShowsSenderAndArrivalTime() {
+        val entry = approval(
+            kind = "mail_hold",
+            peerAddress = "attacker@example.com",
+            createdAt = System.currentTimeMillis() / 1000,
+        )
+        render(
+            status = status(supervisedBy = null, policy = null, wards = listOf(ward("Ward1")), incomingTransfers = emptyList(), usageTodayMinutes = null),
+            approvals = listOf(entry),
+        )
+        composeTestRule.onNode(
+            hasTestTag("family-approval-item") and
+                hasAnyDescendant(hasText("attacker@example.com · ", substring = true)),
         ).assertExists()
     }
 

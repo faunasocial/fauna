@@ -56,6 +56,8 @@ pub mod port;
 pub mod retirement;
 pub mod snapshots;
 
+#[cfg(all(feature = "rpc-glue", feature = "account-port", target_arch = "wasm32"))]
+pub use consent_grant::consent_grant_seams_over_port;
 pub use consent_grant::{
     ConsentFolder, ConsentFolderSeam, ConsentGrantSeams, CustodyConsentFolders,
     consent_folder_from, consent_folder_names, names_twin,
@@ -73,13 +75,16 @@ pub use custody::{DirectoryGenesisVerifier, GenesisVerifier};
 pub use delegation_clock::set_clock_offset_secs as set_delegation_clock_offset_secs;
 pub use depth::{DepthLevelOption, depth_level_options};
 pub use error::AtprotoSettingsError;
-pub use machine::{AtprotoSettingsMachine, consent_card_row, scope_words};
+pub use machine::{
+    AtprotoSettingsMachine, consent_card_row, grant_set, identity_op_words, oracle_class_words,
+    scope_words,
+};
 #[cfg(feature = "rpc-glue")]
 pub use nest_api::build_atproto_settings_machine;
 pub use nest_api::{
     AtprotoSettingsApiError, AtprotoSettingsNestApi, CredentialListing, IntegrationStatus,
-    LinkSummary, NestConsentRow, NestConsentSet, NestCredentialRow, NestIdentitySummary,
-    RevokeOutcome,
+    LinkSummary, NestConsentInstall, NestConsentRow, NestConsentSet, NestCredentialRow,
+    NestIdentitySummary, NestInstallSetting, RevokeOutcome,
 };
 #[cfg(any(test, feature = "test-helpers"))]
 pub use nest_api::{FakeAtprotoSettingsNestApi, FakeCall};

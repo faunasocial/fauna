@@ -56,7 +56,7 @@ public final class SyncStatesStore {
     }
 
     /// Which root one set's `fsid-<ref>.db` is read from — the **two-root fold**
-    /// (`on-demand-files.md` § Apple File Provider binding, *state unification*):
+    /// (`on-demand-files-apple.md` § Apple File Provider binding, *state unification*):
     /// a set whose local presence is a registered File Provider domain is hosted
     /// by the sandboxed extension, so its DB is in the container; every other set
     /// this device hosts is in the host's own root. Registered domains are the

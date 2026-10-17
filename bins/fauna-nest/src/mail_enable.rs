@@ -233,22 +233,38 @@ pub async fn set_atproto_enabled(data_dir: &Path, enabled: bool) -> std::io::Res
 }
 
 /// Best-effort: signal the supervisor sidekick socket to bring one role service
-/// up or down. Connect failures (socket absent in the e2e harness / on a dev
-/// box, or Stage 0 packaging not yet deployed) are logged at debug and
-/// swallowed — the flag file is the durable signal; the run-script picks the
-/// service up off the flag at the next boot even if this notify no-ops. Per
+/// up or down. A sent command is logged at info: the supervisor reports nothing
+/// itself by design, so this line is the admin log's record of it
+/// (`observability.md` § Coverage). An absent socket (the e2e harness, a dev
+/// box) is logged at debug and swallowed — the flag file is the durable signal;
+/// the run-script picks the service up off the flag at the next boot even if
+/// this notify no-ops; any other failure is a warning. Per
 /// `mail-bridge-lifecycle.md` § Why the supervisor sidekick socket.
 async fn notify_service(service: &str, up: bool) {
     let action = if up { "up" } else { "down" };
-    if let Err(e) = send_supervisor_command(SUPERVISOR_SOCKET, action, service).await {
-        tracing::debug!(
+    match send_supervisor_command(SUPERVISOR_SOCKET, action, service).await {
+        Ok(()) => tracing::info!(
+            target: "mail_enable",
+            action,
+            service,
+            "supervisor command sent"
+        ),
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => tracing::warn!(
+            target: "mail_enable",
+            socket = SUPERVISOR_SOCKET,
+            action,
+            service,
+            error = %e,
+            "supervisor command failed (the flag file still takes effect at the next boot)"
+        ),
+        Err(e) => tracing::debug!(
             target: "mail_enable",
             socket = SUPERVISOR_SOCKET,
             action,
             service,
             error = %e,
             "supervisor notify skipped (socket unavailable — flag file is the durable signal)"
-        );
+        ),
     }
 }
 
@@ -961,7 +977,7 @@ pub async fn ensure_primary_mail_domain(state: &crate::routes::AppState) {
 /// `validate_recipient` (exact-only — `mail-aliases.md:423` "a login must resolve
 /// an exact canonical identity, never an alias") rejects it `no such recipient`,
 /// breaking IMAP / CalDAV / submission login for the box admin on its own
-/// address (the symptom on a re-claimed factory-reset example.com).
+/// address (the symptom on a re-claimed factory-reset live nest).
 ///
 /// Fired from the same two triggers as [`ensure_primary_mail_domain`] — the
 /// `set_mail_enabled(true)` enable transition and nest boot — and ordered *after*
@@ -1466,7 +1482,7 @@ mod tests {
         // domain)"). So this unit pins the middle-to-last rung of the chain in
         // isolation; it is not a picture of the image, where BOTH seeds are unset
         // and the domain arrives at claim. (It said "entrypoint.sh writes
-        // example.com" until 2026-09-02; the entrypoint has never written one.)
+        // a domain" until 2026-09-02; the entrypoint has never written one.)
         let db = crate::db::CacheDb::open_in_memory().unwrap();
         let mut state = crate::routes::AppState::for_test(std::sync::Arc::new(db));
         let cfg = std::sync::Arc::get_mut(&mut state.config).unwrap();

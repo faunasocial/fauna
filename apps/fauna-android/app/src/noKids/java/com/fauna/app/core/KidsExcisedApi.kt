@@ -180,8 +180,13 @@ abstract class KidsExcisedApi {
     internal fun startAutoRenewCadence() {
         api.autoRenewJob = api.connectionScope.launch {
             val machine = buildDnsManagementMachineWithCredentials() ?: return@launch
+            // The debug build's agent can end the wait early (`auto_renew_wake`,
+            // convention 14) so a witness drives this production loop instead of
+            // waiting out its clock; the shipping twin's waiter is a bare `delay`.
+            // Minted per loop, so a cancelled session's loop is never the one woken.
+            val wait = com.fauna.app.testing.TestAgent.autoRenewWaiter()
             while (true) {
-                delay(uniffi.fauna_client_dns.autoRenewPollSecs().toLong() * 1000L)
+                wait(uniffi.fauna_client_dns.autoRenewPollSecs().toLong() * 1000L)
                 runAutoRenewCadenceTick(machine)
             }
         }
@@ -334,18 +339,74 @@ abstract class KidsExcisedApi {
         return com.fauna.ffi.buildMailSettingsMachine(client, secretBytes, api.nodeUrl)
     }
 
+    /**
+     * The post-claim serving enablement (`onboarding.md` § 3b *Mechanism*) — the
+     * ONE shared-Rust call [com.fauna.app.ui.viewmodel.MailEnableGlueVM] makes
+     * with the four intents latched off the onboarding machine at `LoggedIn`,
+     * replacing the per-step firing of the mail provision, the three DAV toggles
+     * and their companion mints. Same `secret` + `nodeUrl` idiom as
+     * [buildMailSettingsMachine]; the shared step resolves `am_i_admin` itself and
+     * each step logs its own failure, so this throws only on a missing connection
+     * or an undecodable secret (priority #2; mirrors apple's
+     * `APIClient.applyPostClaimServingEnablement`).
+     */
+    suspend fun applyPostClaimServingEnablement(
+        email: Boolean,
+        caldav: Boolean,
+        carddav: Boolean,
+        webdav: Boolean,
+    ) {
+        api.ensureAuthenticated()
+        val client = api.nestClient ?: throw ApiException("No nest connection for post-claim serving enablement")
+        val secretBytes = api.secret?.let { HexUtil.hexToBytes(it) }
+            ?: throw ApiException("No secret for post-claim serving enablement")
+        com.fauna.ffi.applyPostClaimServingEnablement(
+            client, secretBytes, api.nodeUrl, email, caldav, carddav, webdav,
+        )
+    }
+
+    /**
+     * Seal the DNS-provider credential the wizard captured into the account's
+     * `fauna.state.dns` — the UniFFI face of the shared
+     * `fauna_client_dns::dispatch_seal_captured_dns_credential`
+     * (`onboarding-provisioning.md` § 4. DNS configuration). Resolves once the
+     * dispatch settles; a seal failure is logged in Rust (the credential stays
+     * re-enterable from the admin DNS page), so this throws only on a missing
+     * connection or a malformed identity secret. Here, not in [ApiClient],
+     * because the face is `fauna-ffi`'s `mail-admin` plane, which the kids
+     * flavor excises.
+     */
+    suspend fun sealCapturedDnsCredential(
+        credential: com.fauna.ffi.onboarding.CapturedDnsCredential,
+    ) = com.fauna.ffi.sealCapturedDnsCredential(api.backupNest(), api.backupSecret(), credential)
+
     /** The `connected-apps` page's `ConnectedAppsMachine`
      *  (docs/goal/ui/connected-apps.md): the Requests tray, the roster, Connect
-     *  an app and Blocked apps. Every call is a plain authenticated nest request,
-     *  so it needs no actor secret; [mail] is the Mail & Calendar machine whose
-     *  app passwords are rows of the roster (`null` builds a roster without
-     *  them). Returns null until connected to a nest; each call builds a fresh
-     *  machine bound to the current connection (mirrors [buildDevicesMachine]). */
+     *  an app and Blocked apps. Every call is a plain authenticated nest request;
+     *  the actor secret is used only to wire the consent-time grant seams
+     *  (`wireConnectedAppsConsentGrant`, `third-party-kinds.md` § The record
+     *  doors), so approving a `fauna:records:rw:` request mints its grant. With
+     *  no secret the machine is still returned and such an approve is refused;
+     *  a wiring failure is logged, never thrown. [mail] is the Mail & Calendar
+     *  machine whose app passwords are rows of the roster (`null` builds a
+     *  roster without them). Returns null until connected to a nest; each call
+     *  builds a fresh machine bound to the current connection (mirrors
+     *  [buildDevicesMachine]). */
     fun buildConnectedAppsMachine(
         observer: uniffi.fauna_client_connected_apps.ConnectedAppsObserver,
         mail: uniffi.fauna_client_mail_settings.MailSettingsMachine?,
     ): uniffi.fauna_client_connected_apps.ConnectedAppsMachine? =
-        api.nestClient?.let { com.fauna.ffi.buildConnectedAppsMachine(it, observer, mail) }
+        api.nestClient?.let { client ->
+            com.fauna.ffi.buildConnectedAppsMachine(client, observer, mail).also { machine ->
+                api.secret?.let { hex ->
+                    runCatching {
+                        com.fauna.ffi.wireConnectedAppsConsentGrant(machine, client, HexUtil.hexToBytes(hex))
+                    }.onFailure {
+                        ShellLog.w("ConnectedApps", "wireConnectedAppsConsentGrant failed: ${it.message}")
+                    }
+                }
+            }
+        }
 
     /** The `atproto` page's `AtprotoSettingsMachine` (docs/goal/ui/atproto.md):
      *  the integration-depth selector + F1 app-credential/session/kill-switch
@@ -370,19 +431,35 @@ abstract class KidsExcisedApi {
     }
 
     /**
-     * Opportunistically refresh the published mail content-sealing epoch
-     * schedule — the native twin of linux `FaunaClient::refresh_mail_epoch_schedule`,
-     * fired at the same universal post-auth hook as [selfHealDeploymentSeedCustody] and
-     * mirroring its best-effort, fire-and-forget posture
-     * (`docs/goal/architecture/encryption-at-rest.md` § Capability tiering →
-     * *Content-sealing epochs*). Delegates to the shared, idempotent
-     * `MailSettingsMachine.refreshEpochSchedule`, which no-ops when mail isn't
-     * enabled (no MSEK). A `null` machine (not yet connected, or no
-     * secret) is a silent no-op — the next connect retries.
+     * Start the mail connect-time refresh on [client]: the shared
+     * `refresh_epoch_schedule_on_every_connect` loop runs the idempotent
+     * `MailSettingsMachine.refreshEpochSchedule` once now and again after every
+     * reconnect of the client, for the client's life (`mail-credentials.md`
+     * § Hard revoke → *Published before the nest moves*, rule (4); tui and linux
+     * spawn the same loop). Called ONCE per client from `ApiClient.ensureNestConnected`,
+     * the per-client chokepoint, so a composition edge can never start it twice.
+     * The export returns at once; the loop is best-effort and log-only.
      */
-    suspend fun refreshMailEpochSchedule() {
-        buildMailSettingsMachine()?.refreshEpochSchedule()
+    internal fun startMailEpochRefresh(client: FfiNestClient) {
+        api.connectionScope.launch {
+            try {
+                com.fauna.ffi.startMailEpochRefreshOnEveryConnect(client)
+            } catch (e: Exception) {
+                ShellLog.w("EpochScheduleGlue", "startMailEpochRefresh failed: ${e.message}")
+            }
+        }
     }
+
+    /**
+     * Publish the account's subscriber encapsulation-key registry entry
+     * (`post-quantum.md` § surface B) over the shared
+     * `SubscriptionsClient::publish_encaps_key` — the native twin of linux
+     * `FaunaClient::publish_subscriber_encaps_key`, fired at the same universal
+     * post-auth hook as [selfHealDeploymentSeedCustody]. Idempotent (every device
+     * derives the same key); the caller treats a throw as best-effort.
+     */
+    suspend fun publishSubscriberEncapsKey() =
+        com.fauna.ffi.subscriptionsPublishEncapsKey(api.nestRpc(), api.ownerSecretBytes())
 
     /** Per-account aliases (`fauna.bridges.{list,create,update,revoke,delete}_account_alias`
      *  + generate_disposable — backend largely built → genuinely green). */
@@ -498,6 +575,28 @@ abstract class KidsExcisedApi {
     fun buildForwardersMachine(): uniffi.fauna_client_mail_settings.ForwarderMachine? =
         api.nestClient?.let { com.fauna.ffi.buildForwardersMachine(it) }
 
+    // ── Per-account Forwarding (mail-forwarding.md § Per-account "forward all",
+    // § Per-account forward rate-limit) — the
+    // mail-settings page's two inputs. Plain fauna.bridges.{get,set}_forward_*
+    // RPCs over the shared MailAccountClient, same shape as the spam-threshold pair.
+
+    /** The caller's "forward all incoming mail to" address, or `null` when off. */
+    suspend fun forwardAllToGet(): String? =
+        com.fauna.ffi.forwardAllToGet(api.nestRpc())
+
+    /** Set (or clear, with `null`) the forward-all address; returns the
+     *  persisted value the nest confirmed on the re-read, never the local edit. */
+    suspend fun forwardAllToSet(address: String?): String? =
+        com.fauna.ffi.forwardAllToSet(api.nestRpc(), address)
+
+    /** The caller's hourly forwarding limit and the admin ceiling it may not pass. */
+    suspend fun forwardPerHourGet(): com.fauna.ffi.ForwardPerHour =
+        com.fauna.ffi.forwardPerHourGet(api.nestRpc())
+
+    /** Set the hourly limit; returns the persisted `{value, ceiling}`. */
+    suspend fun forwardPerHourSet(value: UInt): com.fauna.ffi.ForwardPerHour =
+        com.fauna.ffi.forwardPerHourSet(api.nestRpc(), value)
+
     /** `admin-bridges-pending` approval feed (`fauna.bridges.{list_pending,
      *  approve_pending,reject_pending}_bridges` + set_mail_enabled — backend real). */
     fun buildBridgeApprovalMachine(): uniffi.fauna_client_mail_settings.BridgeApprovalMachine? =
@@ -527,6 +626,20 @@ abstract class KidsExcisedApi {
     fun buildLocalDomainsMachine(): uniffi.fauna_client_mail_settings.LocalDomainMachine? =
         api.nestClient?.let { com.fauna.ffi.buildLocalDomainsMachine(it) }
 
+    /** The nest's ACTIVE local domains, re-read live — the `nest_retire` admin
+     *  entry's attribution candidates (`nest-retirement.md` § DNS cleanup →
+     *  *Several domains* (1); soft-deleted ones no longer publish, so they are
+     *  not candidates). Best-effort: no connection or a failed read is empty. */
+    suspend fun retireLocalDomains(): List<String> {
+        val machine = buildLocalDomainsMachine() ?: return emptyList()
+        return try {
+            machine.dispatch(uniffi.fauna_client_mail_settings.LocalDomainAction.Refresh)
+            machine.snapshot().active.map { it.domain }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
     /** The `fauna.web.*` authoring client (web-content-hosting.md § Admin apex
      *  hosting / § Published-post management) — the per-user subdomain opt-in toggle (`web-settings` page, User-scoped)
      *  and the nest-wide admin apex-actor designation (`admin-web` page, Admin-class)
@@ -538,7 +651,7 @@ abstract class KidsExcisedApi {
 
     /**
      * Run the feeders that have no page of their own, at the same universal
-     * post-auth hook as [selfHealDeploymentSeedCustody] / [refreshMailEpochSchedule]
+     * post-auth hook as [selfHealDeploymentSeedCustody]
      * (`critical-alerts.md` § Mechanism → *Who runs the detector*). tui's
      * `critical_alerts::spawn_session_start_sweep` (`session::establish`) is
      * the reference; [com.fauna.ffi.runCriticalAlertSweep] is the one FFI
@@ -560,6 +673,40 @@ abstract class KidsExcisedApi {
      */
     suspend fun runCriticalAlertSweepLoop() =
         com.fauna.ffi.runCriticalAlertSweepLoop(api.backupNest(), api.backupSecret())
+
+    /**
+     * The post-auth hook's one entry point (`critical-alerts.md` § Mechanism →
+     * *Who runs the detector*), called from both post-auth sites — the nav
+     * host's effect and the e2e `session` patch, which never recomposes it:
+     * a first or identity-changing sign-in starts [runCriticalAlertSweepLoop];
+     * a same-identity re-establish runs ONE [runCriticalAlertSweep]
+     * ([CriticalAlertsHost.startSweep]). Fire-and-forget on the host's own
+     * process-wide scope, so it returns at once; a failure is logged, never
+     * thrown — sign-in must not wait on a nest that cannot answer.
+     */
+    fun startCriticalAlertSweep() {
+        val identity = api.sweepIdentityKey() ?: run {
+            ShellLog.w("CriticalAlertSweepGlue", "sweep not started: the API client holds no secret")
+            return
+        }
+        api.criticalAlertsHost.startSweep(
+            identity,
+            loop = {
+                try {
+                    runCriticalAlertSweepLoop()
+                } catch (e: Exception) {
+                    ShellLog.w("CriticalAlertSweepGlue", "runCriticalAlertSweepLoop failed: ${e.message}")
+                }
+            },
+            onePass = {
+                try {
+                    runCriticalAlertSweep()
+                } catch (e: Exception) {
+                    ShellLog.w("CriticalAlertSweepGlue", "runCriticalAlertSweep failed: ${e.message}")
+                }
+            },
+        )
+    }
 
     /** §1 create — encrypted-mode mint path: record the fresh period key, then create. */
     suspend fun subscriptionCreateTier(
@@ -710,15 +857,24 @@ abstract class KidsExcisedApi {
 
     // -- Sealed tier-1 spam training (mail-spam.md § Encrypted-mode interaction) --
     //
-    // The three calls the moderation queue and the conversation "Mark as spam"
+    // The calls the moderation queue and the conversation "Mark as spam"
     // gesture make into the mail-settings machine, narrowed to kept types so
     // those two shared VMs stay in `src/main`: the kids twin answers "no sealed
     // model" and the callers fall through to their non-mail path.
 
-    /** Whether the nest advertises `spam-model-sealed-at-rest` and mail is enabled
-     *  for this actor; `false` with no mail-settings machine (not connected). */
-    internal suspend fun sealedSpamWriteAvailable(): Boolean =
-        buildMailSettingsMachine()?.sealedSpamWriteAvailable() ?: false
+    /** The moderation-queue training correction for a **server** row — the one
+     *  shared flow (`MailSettingsMachine::train_moderation_correction`): the sealed
+     *  model write when possible, then `fauna.moderation.train` always (the read
+     *  gate + report capture). With no mail-settings machine (not connected) only
+     *  the nest half is left, so it still runs. */
+    internal suspend fun trainModerationCorrection(contentId: String, isSpam: Boolean) {
+        val machine = buildMailSettingsMachine()
+        if (machine != null) {
+            machine.trainModerationCorrection(contentId, isSpam)
+        } else {
+            api.submitModerationTrain(contentId, if (isSpam) "spam" else "ham")
+        }
+    }
 
     /** Train the sealed spam model client-side over [text]; `true` iff the write
      *  landed sealed (`false` on the ServerPath race or with no machine). */

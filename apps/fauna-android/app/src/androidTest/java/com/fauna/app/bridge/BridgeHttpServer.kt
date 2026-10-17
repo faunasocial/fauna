@@ -6,6 +6,25 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentLinkedQueue
 
+/** The region content plane's test-capable seams the launch environment may
+ *  carry (`drivers/http_bridge.py` `_REGION_ENV_KEYS`): the registry seed and the
+ *  declared-region override. */
+private val REGION_E2E_ENV_KEYS = listOf("FAUNA_E2E_REGION_REGISTRY", "FAUNA_E2E_REGION_DECLARED")
+
+/** The admin DNS page's e2e seams the launch environment may carry
+ *  (`conftest.py`'s android block), all read by `fauna-client-dns` via
+ *  std::env: the fake-provider decorator gate, the compressed re-check clock,
+ *  and the ACME directory seed (e2e-automation-surface-gating.md § The ACME
+ *  directory seed) — all three of its keys, every one meaningful on the
+ *  device (the name server is a reversed loopback port). */
+private val DNS_E2E_ENV_KEYS = listOf(
+    "FAUNA_DNS_PROVIDER_FAKE",
+    "FAUNA_DNS_RECHECK_SECS",
+    "FAUNA_E2E_ACME_DIRECTORY_URL",
+    "FAUNA_E2E_ACME_CA_PEM",
+    "FAUNA_E2E_ACME_NAMESERVER",
+)
+
 class BridgeHttpServer(
     port: Int,
     private val elementOps: ElementOps,
@@ -125,6 +144,14 @@ class BridgeHttpServer(
                 }
                 json(Response.Status.OK, JSONObject().put("files", files).toString())
             }
+            // The system clipboard's plain text (`drivers/android.py::get_clipboard_text`),
+            // read through the target context's ClipboardManager — the same
+            // service the app's copy buttons write to. `text` is null when the
+            // clipboard holds no text (the windows / linux / apple contract).
+            "/clipboard/text" -> {
+                val text: Any = launcher.clipboardText() ?: JSONObject.NULL
+                json(Response.Status.OK, JSONObject().put("text", text).toString())
+            }
             "/app-log-file" -> {
                 val name = session.parms["name"] ?: return badReq("name required")
                 val from = (session.parms["from"]?.toLongOrNull() ?: 0L).coerceAtLeast(0L)
@@ -182,6 +209,13 @@ class BridgeHttpServer(
                         env.optString("FAUNA_E2E_REAL_CONVERSATIONS", "").isNotEmpty(),
                         env.optString("FAUNA_E2E_TRUST_NEST_IDENTITY", ""),
                         env.optString("FAUNA_E2E_CLOCK_OFFSET_SECS", ""),
+                        // The region content plane's registry seed + declared-
+                        // region override (`declare_region_for_relaunch`).
+                        REGION_E2E_ENV_KEYS.associateWith { env.optString(it, "") }
+                            .filterValues { it.isNotEmpty() },
+                        // The admin DNS page's fake provider + re-check clock.
+                        DNS_E2E_ENV_KEYS.associateWith { env.optString(it, "") }
+                            .filterValues { it.isNotEmpty() },
                     )
                     json(Response.Status.CREATED, """{"session_id":"1"}""")
                 }
@@ -307,6 +341,23 @@ class AppLauncher(private val instrumentation: android.app.Instrumentation) {
     private fun reauthResultFile(): java.io.File =
         java.io.File(credentialFile().parentFile, "reauth-result")
 
+    /**
+     * The clipboard's first item coerced to text, `null` when it is empty or
+     * holds no text. Read on the main looper: ClipboardManager reads are
+     * focus-gated on API 29+ and the foreground app's main thread is the
+     * caller the framework expects.
+     */
+    fun clipboardText(): String? {
+        var out: String? = null
+        instrumentation.runOnMainSync {
+            val ctx = instrumentation.targetContext
+            val cm = ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            val item = cm.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)
+            out = item?.coerceToText(ctx)?.toString()?.takeIf { it.isNotEmpty() }
+        }
+        return out
+    }
+
     /** The credential file's flat map, `{}` when absent or unreadable. */
     fun readCredentials(): JSONObject {
         val file = credentialFile()
@@ -397,6 +448,8 @@ class AppLauncher(private val instrumentation: android.app.Instrumentation) {
         realConversations: Boolean = false,
         trustNestIdentity: String = "",
         clockOffsetSecs: String = "",
+        regionEnv: Map<String, String> = emptyMap(),
+        dnsEnv: Map<String, String> = emptyMap(),
     ) {
         val pkg = instrumentation.targetContext.packageName
         Runtime.getRuntime().exec(arrayOf("am", "force-stop", pkg)).waitFor()
@@ -439,6 +492,16 @@ class AppLauncher(private val instrumentation: android.app.Instrumentation) {
             // MainActivity's Os.setenv door, beside the trust seed above.
             intent.putExtra("FAUNA_E2E_CLOCK_OFFSET_SECS", clockOffsetSecs)
         }
+        // The region content plane's two seams (`FAUNA_E2E_REGION_REGISTRY`,
+        // `FAUNA_E2E_REGION_DECLARED`), read via std::env::var inside
+        // `FfiRegionPlane.open` — forwarded verbatim for MainActivity's
+        // Os.setenv door, beside the clock offset above.
+        for ((key, value) in regionEnv) intent.putExtra(key, value)
+        // The admin DNS page's two seams (`FAUNA_DNS_PROVIDER_FAKE`,
+        // `FAUNA_DNS_RECHECK_SECS`), read via std::env inside
+        // `fauna-client-dns` when the page builds its machine and ticks its
+        // clocks — forwarded verbatim for MainActivity's Os.setenv door.
+        for ((key, value) in dnsEnv) intent.putExtra(key, value)
         // Forward whenever a seed file exists on disk -- not only on the
         // launch that wrote it -- so a later relaunch with no fresh seed
         // still finds the previously-seeded registry instead of silently

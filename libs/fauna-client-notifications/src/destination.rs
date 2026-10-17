@@ -112,7 +112,9 @@ pub fn notification_destination(item: &NotifItem) -> Option<NotificationDestinat
 /// The `source == "fauna"` half of [`notification_destination`].
 fn native_destination(item: &NotifItem) -> Option<NotificationDestination> {
     match &item.notif_type {
-        NotifType::Like => item
+        // A tip opens the tipped post, exactly as a like does: `content_id`
+        // is the post the credited receipt named (`monetization.md` § Tips).
+        NotifType::Like | NotifType::Tip => item
             .content_id
             .clone()
             .map(|post_id| NotificationDestination::Post { post_id }),
@@ -179,6 +181,21 @@ mod tests {
                 post_id: "aa".repeat(32)
             })
         );
+    }
+
+    /// A credited tip opens the tipped post, like a like; a tip row without
+    /// its post id is inert rather than a dead button.
+    #[test]
+    fn a_tip_opens_the_tipped_post() {
+        let mut item = row("fauna", "tip");
+        item.content_id = Some("cc".repeat(32));
+        assert_eq!(
+            notification_destination(&item),
+            Some(NotificationDestination::Post {
+                post_id: "cc".repeat(32)
+            })
+        );
+        assert_eq!(notification_destination(&row("fauna", "tip")), None);
     }
 
     /// The trap this router exists to avoid: a bridged like reuses the native
@@ -311,13 +328,13 @@ mod tests {
         );
     }
 
-    /// A security notice's `content_id` is the inbox row id used as a dedup
-    /// token — routing on it would open nothing. The notice's whole detail is
-    /// already in the row it is read from.
+    /// A security notice's `content_id` is a random per-event nonce used as a
+    /// dedup token — routing on it would open nothing. The notice's whole
+    /// detail is already in the row it is read from.
     #[test]
     fn a_security_notice_is_informational() {
         let mut item = row("fauna", "security.notice");
-        item.content_id = Some("2a00000000000000".into());
+        item.content_id = Some("2a".repeat(16));
         assert_eq!(notification_destination(&item), None);
     }
 

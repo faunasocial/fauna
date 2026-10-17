@@ -8,7 +8,7 @@ import Foundation
     /// read-only set answers with — shared FaunaKit (not appex-local) so the
     /// rule is pinned headlessly and macOS and iOS serve it alike.
     ///
-    /// A set the account holds as a reader (`on-demand-files.md` § Shared sets
+    /// A set the account holds as a reader (`on-demand-files-shared-sets.md` § Shared sets
     /// on a capability host, decision 3) advertises no write, create, delete or
     /// rename capability on any of its items: the host says which it is
     /// (`FfiFileProviderHost.isReadOnly`), and refuses a write that arrives

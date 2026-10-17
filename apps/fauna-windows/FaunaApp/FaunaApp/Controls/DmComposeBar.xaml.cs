@@ -4,7 +4,8 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using FaunaApp.Core.Helpers;
 using FaunaApp.Core.Services;
-using S = FaunaApp.Core.Services.Strings;
+using FaunaApp.Helpers;
+using S =FaunaApp.Core.Services.Strings;
 using FaunaApp.UiIds;
 
 namespace FaunaApp.Controls;
@@ -196,6 +197,26 @@ public sealed partial class DmComposeBar : UserControl
             : Visibility.Collapsed;
     }
 
+    private bool _foundsRoomGate;
+
+    /// <summary>
+    /// Whether the send this bar is about to issue FOUNDS a community room — the
+    /// new-thread composer's home-nest choice is on and the prospective class is
+    /// community. That send is the <c>room.create</c> ceremony, never a queued
+    /// channel append, so it needs a nest and the gate must say so
+    /// (<c>fauna.conversations.room.create</c>, OnlineOnly). The declaration
+    /// follows the paint BOTH ways: the toggle going off hands the send back to
+    /// the page's own enablement (<c>OfflineGate.Retract</c>). Always false for
+    /// the reply bar.
+    /// </summary>
+    internal void SetFoundsRoom(bool foundsRoom)
+    {
+        if (foundsRoom == _foundsRoomGate) return;
+        _foundsRoomGate = foundsRoom;
+        if (foundsRoom) SendButton.FaunaGate("fauna.conversations.room.create");
+        else SendButton.FaunaUngate();
+    }
+
     /// <summary>
     /// Rebuild the editable reply "To" line chip row from the shared
     /// <c>compose.reply_recipients</c> (display strings, pre-resolved by the
@@ -305,6 +326,31 @@ public sealed partial class DmComposeBar : UserControl
                 Child = inner,
             };
             AttachmentChips.Children.Add(chip);
+        }
+    }
+
+    /// <summary>
+    /// Paint the shared <c>ComposeState.list_send</c>: each of the three texts shows
+    /// only while its <c>LocalizedText</c> is <c>Some</c>, resolved through
+    /// <see cref="S.Resolve"/>. <c>null</c> (not a list send) collapses all three.
+    /// Mirrors tui's <c>list_send_elements</c> (mail-mass-mailing.md § Composing a
+    /// list message).
+    /// </summary>
+    internal void SetListSend(uniffi.fauna_conversations.ListSendView? view)
+    {
+        Paint(ListSendWarning, view?.sendWarning);
+        Paint(ListQuotaWarning, view?.quotaWarning);
+        Paint(ListSendProgress, view?.progress);
+
+        static void Paint(TextBlock block, uniffi.fauna_core.LocalizedText? text)
+        {
+            if (text is null)
+            {
+                block.Visibility = Visibility.Collapsed;
+                return;
+            }
+            block.Text = S.Resolve(text);
+            block.Visibility = Visibility.Visible;
         }
     }
 

@@ -94,6 +94,45 @@ public class MailSpamViewModelTests
     }
 
     [Fact]
+    public async Task Resync_RereadsTheHistoryAnotherDeviceChanged()
+    {
+        // An undo or reset on another device (mail-spam.md § Implementation status,
+        // item 5): the push re-hydrates the machine and re-projects the new rows.
+        var fake = new FakeMailSpamMachine
+        {
+            NextSnapshot = FakeMailSpamMachine.Snap(SeededRows()),
+        };
+        var vm = new MailSpamViewModel(fake, new MockNestRpcClient());
+        await vm.LoadCommand.ExecuteAsync(null);
+        Assert.Equal(2, vm.Events.Count);
+
+        fake.NextSnapshot = FakeMailSpamMachine.Snap(Array.Empty<SpamTrainingView>());
+        await vm.ResyncAsync();
+
+        Assert.Equal(2, fake.HydrateCalls);
+        Assert.Empty(vm.Events);
+        Assert.Null(vm.Error);
+    }
+
+    [Fact]
+    public async Task Resync_Failure_KeepsTheHistoryAndRaisesNoError()
+    {
+        // A quiet re-read must not surface an error over the page the user is on.
+        var fake = new FakeMailSpamMachine
+        {
+            NextSnapshot = FakeMailSpamMachine.Snap(SeededRows()),
+        };
+        var vm = new MailSpamViewModel(fake, new MockNestRpcClient());
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        fake.NextError = "offline";
+        await vm.ResyncAsync();
+
+        Assert.Equal(2, vm.Events.Count);
+        Assert.Null(vm.Error);
+    }
+
+    [Fact]
     public async Task ResetModel_DispatchesResetModel()
     {
         var fake = new FakeMailSpamMachine { NextSnapshot = FakeMailSpamMachine.Snap(SeededRows()) };

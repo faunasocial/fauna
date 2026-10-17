@@ -113,6 +113,52 @@ public partial class BridgesViewModel : ViewModelBase
         {
             Logs.E2eTrace.Write(
                 $"[bridge-link] rpc FAILED ({bridgeId}): {ex.GetType().Name}: {ex.Message}");
+            ShowSourceRefusalOrError(
+                ex, bridgeId, FfiFeedSourceOperation.Link, target: string.Empty);
+        }
+    }
+
+    // ── The ward's feed-source ask (family-safety.md § Feed-source approvals → App
+    //    affordance; tui's bridges.rs `guardian_refused` / `source_ask_rows`) ──
+
+    /// <summary>Show a failed link / follow. The nest's TYPED guardian refusal
+    /// (<c>FfiException.GuardianApprovalRequired</c> — never message text, rule (a))
+    /// is recorded as the <c>(bridge_id, operation, target)</c> triple that was refused,
+    /// which is what makes <c>bridge-source-request-button</c> appear on that bridge's
+    /// card; it still STAYS on <c>error-message</c> (rule (b)) with the feed-source
+    /// sentence, since the operation genuinely did not happen. Every other failure takes
+    /// the ordinary path. Keyed on the ask data, never on the add-follow form's buffers
+    /// (rule (d)).</summary>
+    private void ShowSourceRefusalOrError(
+        Exception ex, string bridgeId, FfiFeedSourceOperation operation, string target)
+    {
+        if (ex is FfiException.GuardianApprovalRequired)
+        {
+            WardAsksCache.NoteFeedRefusal(new FeedTriple(
+                bridgeId, FaunaFfiMethods.FeedSourceOperationWire(operation), target));
+            SetError(Strings.Get("bridges/source_blocked"));
+        }
+        else
+        {
+            ShowError(ex);
+        }
+    }
+
+    /// <summary><c>bridge-source-request-button</c> — ask the guardian to approve the
+    /// refused <paramref name="triple"/> (<c>fauna.family.feed_source.request</c>).
+    /// <paramref name="label"/> is display-only, never authorizing (the bridge's name,
+    /// the one label still available once the add-follow buffers are cleared). A
+    /// failure surfaces on the page's error bar; success needs no local flag — the
+    /// shared status re-read lands the durable row the card renders.</summary>
+    internal async Task AskSourceAsync(FeedTriple triple, string label)
+    {
+        try
+        {
+            await _rpc.FamilyFeedSourceRequestAsync(
+                triple.BridgeId, triple.Operation, triple.Target, label);
+        }
+        catch (Exception ex)
+        {
             ShowError(ex);
         }
     }
@@ -186,7 +232,10 @@ public partial class BridgesViewModel : ViewModelBase
             await _rpc.BridgesAddFollowAsync(SelectedBridgeId, id, petname);
             await LoadFollowsAsync(SelectedBridgeId);
         }
-        catch (Exception ex) { ShowError(ex); }
+        catch (Exception ex)
+        {
+            ShowSourceRefusalOrError(ex, SelectedBridgeId, FfiFeedSourceOperation.Follow, id);
+        }
     }
 
     [RelayCommand]

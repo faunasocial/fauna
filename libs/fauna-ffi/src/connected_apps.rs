@@ -6,6 +6,8 @@
 
 use std::sync::Arc;
 
+use fauna_atproto_settings_machine::ConsentCardRow;
+pub use fauna_client_connected_apps::compose::{ComposedText, RosterRowText};
 pub use fauna_client_connected_apps::{
     BlockedAppRow, ConnectedAppRow, ConnectedAppsMachine, ConnectedAppsObserver,
     ConnectedAppsSnapshot, MailAppPassword,
@@ -46,19 +48,48 @@ pub fn build_connected_apps_machine(
 #[uniffi::export]
 pub fn wire_connected_apps_consent_grant(
     machine: Arc<ConnectedAppsMachine>,
+    nest: Arc<FfiNestClient>,
     secret: Vec<u8>,
 ) -> Result<(), crate::FfiError> {
     let keypair = crate::keypair_from_bytes(&secret)?;
     #[cfg(feature = "account-runtime")]
     {
-        machine.set_consent_grant_seams(crate::atproto_settings::consent_grant_seams(&keypair));
+        machine.set_consent_grant_seams(crate::atproto_settings::consent_grant_seams(
+            &keypair,
+            nest.nest_arc(),
+        ));
         Ok(())
     }
     #[cfg(not(feature = "account-runtime"))]
     {
-        let _ = (machine, keypair);
+        let _ = (machine, nest, keypair);
         Err(crate::FfiError::General {
             msg: "no account runtime in this build".into(),
         })
     }
+}
+
+/// A roster row's text, composed once in shared Rust
+/// (`fauna_client_connected_apps::compose`; `docs/goal/ui/connected-apps.md`
+/// § Where logic lives): the lines top to bottom, then the facts the app joins
+/// with the separator as its last line. Each [`ComposedText`] is an i18n key
+/// plus arguments — resolve `nested` first, then `text` — through the app's own
+/// string table. Instants are formatted in the device's local timezone here.
+#[uniffi::export]
+pub fn connected_apps_roster_row_text(row: ConnectedAppRow) -> RosterRowText {
+    fauna_client_connected_apps::compose::roster_row_text(&row)
+}
+
+/// A request card's lines, composed once in shared Rust
+/// (`compose::request_card_lines`): the heading, who is asking, the scopes, the
+/// permission sets, then what the approve ends besides granting.
+#[uniffi::export]
+pub fn connected_apps_request_card_lines(consent: ConsentCardRow) -> Vec<ComposedText> {
+    fauna_client_connected_apps::compose::request_card_lines(&consent)
+}
+
+/// What a roster row's facts line puts between its facts.
+#[uniffi::export]
+pub fn connected_apps_facts_separator() -> String {
+    fauna_client_connected_apps::compose::FACTS_SEPARATOR.to_string()
 }

@@ -286,7 +286,7 @@ def test_kill_client_mid_mail_enable_box_recovers(killable_app, crash_nest):
 
     if app.mail_settings.credential_count() < 1:
         app.mail_settings.enable_mail(display_name="Default")
-    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=15.0), (
+    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=app.mail_settings.ENABLE_SETTLE_S), (
         f"relaunched client could not drive the box to 'mail enabled with a "
         f"credential' after a mid-enable crash (beacon: {beacon!r}; services "
         f"at kill: {services!r}). error={app.error_text()!r}"
@@ -1363,11 +1363,11 @@ def test_kill_client_mid_mail_disable_box_recovers(killable_app, crash_nest):
     app.mail_settings.navigate()
     app.driver.wait_for("mail-settings-enabled-toggle", timeout=15.0)
     app.mail_settings.enable_mail(display_name="Default")
-    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=15.0), (
+    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=app.mail_settings.ENABLE_SETTLE_S), (
         f"precondition: mail enable failed. error={app.error_text()!r}"
     )
     app.mail_settings.add_credential("Second")
-    assert app.mail_settings.wait_for_credential_count_at_least(2, timeout=15.0), (
+    assert app.mail_settings.wait_for_credential_count_at_least(2, timeout=app.mail_settings.ENABLE_SETTLE_S), (
         f"precondition: second credential add failed. error={app.error_text()!r}"
     )
 
@@ -1436,11 +1436,10 @@ def _imap_enabled_flag_path(nest) -> str:
 def _deployment_mail_enabled(nest) -> bool:
     """Admin side-channel read of the deployment-wide mail toggle
     (`fauna.bridges.get_mail_config` → FetchConfigReply.mail_enabled — an
-    observation, not a mutation). NOTE this collapses the UNSET toggle to True
-    (`get_mail_enabled().unwrap_or(true)`, bridge_routing_handlers.rs), so it
-    can't tell 'never touched' from 'explicitly on' — the on-disk flag below is
-    the authoritative 'explicitly enabled' signal. Only meaningful once the
-    toggle has been explicitly written (Some(false) → False here)."""
+    observation, not a mutation). An UNSET toggle reads OFF (the default-off
+    flip, `CacheDb::effective_mail_enabled`, mail-policy-config.md), so this
+    cannot tell 'never touched' from 'explicitly off'; the on-disk flag below
+    is the authoritative 'explicitly enabled' signal."""
     with _admin_ws(nest) as adm:
         return bool(adm.call("fauna.bridges.get_mail_config", {})["mail_enabled"])
 
@@ -1570,8 +1569,8 @@ def test_kill_nest_mid_admin_mail_disable_reconciles(killable_app, crash_nest):
 
 # ---------------------------------------------------------------------------
 # Journey 12 — kill the client BETWEEN THE TWO LEGS of a devices-page removal
-# (`account-data-taxonomy.md` § The generation machinery → *Fleet-scope
-#  reclamation*, clause (4), *The completion rule*; `common.md` § Client-state
+# (`fleet-scope-reclamation.md`
+#  § *Fleet-scope reclamation*, clause (4), *The completion rule*; `common.md` § Client-state
 #  recoverability.)
 #
 # A removal is two legs on two systems — `fauna.sync.devices.delete` at the

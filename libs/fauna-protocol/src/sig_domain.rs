@@ -290,6 +290,18 @@ pub const CUSTODY_HANDSHAKE_V1: &[u8] = b"fauna.custody.handshake.v1\0";
 /// had one — overlapping field layouts under the same key family.
 pub const CUSTODY_HANDSHAKE_V2: &[u8] = b"fauna.custody.handshake.v2\0";
 
+/// Custodied-fleet handshake (`fauna.auth.custodied_fleet_handshake`), over
+/// `owner_actor_id ‖ device_key ‖ timestamp_be ‖ nest_id ‖ nonce` — signed by
+/// an OWNER-FLEET **device** key at a custodian nest
+/// ([`crate::auth::custodied_fleet_handshake_signed_message`]). **APPLIED.**
+/// The [`CUSTODY_HANDSHAKE_V2`] layout under its own tag: the two mint
+/// different authority (a custodian's pull from the owner's nest vs. an owner
+/// device's restore read from a custodian nest) over the same field order, so
+/// a custody PoP must never replay as a fleet PoP or back. Owner:
+/// `account-replica-posture.md` § Replica posture → *The custody grant +
+/// ceremony*, the custodian-NEST serve door bullet, ruling 2.
+pub const CUSTODIED_FLEET_HANDSHAKE_V1: &[u8] = b"fauna.custodied-fleet.handshake.v1\0";
+
 /// **RETIRED 2026-09-23 — never reuse.** The unbound form: it named no nest,
 /// so one signature was a bearer mint at every nest where the signer was
 /// known (`login.md` § Binding the nest). Replaced **in place** by the
@@ -490,6 +502,7 @@ mod tests {
         DEVICE_P2P_PARTICIPATION_V1,
         CUSTODY_HANDSHAKE_V1,
         CUSTODY_HANDSHAKE_V2,
+        CUSTODIED_FLEET_HANDSHAKE_V1,
         CLAIM_ADMIN_V1,
         ACCOUNT_LOCKOUT_V1,
         NEST_ROTATION_V1,
@@ -517,6 +530,7 @@ mod tests {
         DEVICE_GRANT_REVOKE_V1,
         DEVICE_P2P_PARTICIPATION_V1,
         CUSTODY_HANDSHAKE_V2,
+        CUSTODIED_FLEET_HANDSHAKE_V1,
         CLAIM_ADMIN_V1,
         ACCOUNT_LOCKOUT_V1,
         NEST_ROTATION_V1,

@@ -250,7 +250,7 @@ class WebPublishStoreTest {
         whenever(web.getSubdomainEnabled()).thenReturn(true)
         whenever(web.domainGet()).thenReturn(emptyList<WebDomainRow>())
 
-        store.ensureOrigin()
+        val read = store.ensureOrigin() ?: error("the first ensureOrigin must launch a read")
 
         // The account switch lands while the read above is still blocked.
         val registerCall = mockingDetails(accountStores).invocations
@@ -262,18 +262,50 @@ class WebPublishStoreTest {
         // Now let the outgoing actor's read finish.
         releaseRead.countDown()
 
-        // Bounded poll for the wrong-actor write this test guards against —
-        // it must never arrive, so a poll that times out withOUT seeing it is
-        // the passing case (the `ensureOrigin hydrates...` test above polls
-        // FOR the write; this one polls against it).
-        val deadline = System.currentTimeMillis() + 2_000
-        while (store.origin.value == null && System.currentTimeMillis() < deadline) {
-            Thread.sleep(20)
-        }
+        // Join the read: the landing has run (or been refused) by the time
+        // this returns, so the assertion below is causal rather than a wait
+        // for a write that must never arrive (`e2e-latency-independent-
+        // assertions.md` convention 14 — a slow mutated landing cannot slip
+        // past a fixed deadline).
+        read.join()
         assertNull(
             "a read spawned for the outgoing actor must not paint the incoming actor's origin",
             store.origin.value,
         )
+    }
+
+    /** **A settings-VM landing computed as the outgoing actor must be refused
+     *  once the closer has run** (`account-scoping.md` § The scoping taxonomy →
+     *  the in-memory corollary): `WebSettingsVM`
+     *  survives an account switch and lands `hydrate` / `setEnabled` results
+     *  after awaits, so without the generation check actor A's origin would
+     *  paint B's store and [WebPublishStore.ensureOrigin] would short-circuit
+     *  on it.
+     *
+     *  Red-verify by dropping the `generation != token` check in
+     *  [WebPublishStore.landWebPage]: `origin` reads `https://alice.example.com/`. */
+    @Test
+    fun `a stale settings landing after an account switch is refused`() {
+        val (store, _, _) = makeStore()
+        val accountStores = mock(AccountStores::class.java)
+        val storeWithCloser = WebPublishStore(mock(ApiClient::class.java), mock(SecureStorage::class.java), accountStores)
+
+        val token = storeWithCloser.captureGeneration()
+        val registerCall = mockingDetails(accountStores).invocations
+            .single { it.method.name == "registerCloser" }
+        @Suppress("UNCHECKED_CAST")
+        val closer = registerCall.arguments[1] as () -> Unit
+        closer.invoke()
+
+        val landed = storeWithCloser.landWebPage(token, emptyList(), true, "alice", "example.com")
+
+        assertEquals("the stale landing must report it was refused", false, landed)
+        assertNull("the outgoing actor's origin must not reach the store", storeWithCloser.origin.value)
+        assertNull(storeWithCloser.disabledReason.value)
+
+        // A landing from the current generation still works.
+        assertTrue(store.landWebPage(store.captureGeneration(), emptyList(), true, "alice", "example.com"))
+        assertEquals("https://alice.example.com/", store.origin.value)
     }
 
     @Test

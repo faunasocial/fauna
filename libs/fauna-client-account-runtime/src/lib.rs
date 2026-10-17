@@ -51,7 +51,13 @@
 //! agent's contract, so the two stay separate on purpose.
 
 pub mod deployment_seeds;
+pub mod holder_yield;
 pub mod p2p_participation;
+pub mod removed_account;
+pub use removed_account::{
+    EnrollmentRetirement, REMOVED_ACCOUNT_RETIRE_BUDGET, RemovedAccountInputs,
+    retire_removed_account,
+};
 // The conversations seams over the account store moved to their wasm-capable
 // home on 2026-09-29 (`fauna-account-seams` — web registers the same seams
 // once it hosts the runtime; `account-client-lifecycle.md` § The client-side
@@ -73,11 +79,13 @@ use std::sync::Arc;
 
 pub use fauna_account_plane::account_driver::SeedHolder;
 pub use fauna_account_plane::attested_predecessors::AttestedPredecessors;
+pub use fauna_account_plane::departed_fleet::record_departed_fleet;
 pub use fauna_account_plane::owed_delivery::PredecessorSeeds;
 use fauna_anon_client::AnonymousNestClient;
 use fauna_client::NestClient;
 use fauna_client_core::succession_delivery::{OwedNestReach, SignIn, deliver_owed_nests};
 use fauna_core::identity::ActorKeypair;
+use fauna_credential_store::CredentialStore;
 pub use fauna_sync_engine::account_runtime::CloudBackupExclusion;
 use fauna_sync_engine::account_runtime::{
     AccountRuntimeParams, AccountStoreHandle, AccountStoreRuntime, DEFAULT_BACKSTOP_INTERVAL,
@@ -204,17 +212,20 @@ pub struct ResolveContext {
 /// and `enrollment_target_device_id` (this device's own id, a DB/state-dir
 /// read). Both are I/O that a sign-in must not wait on.
 ///
-/// Infallible by design, the desktop posture included: a **desktop** host (no
-/// container) resolves [`CloudBackupExclusion::platform_desktop`], which on a
-/// target with no established posture is a shell arm that refuses at
-/// assembly — a phone shell forgetting its container is the wiring bug it
-/// makes loud, at the one place every consumer already handles a failed
-/// exclusion.
+/// Fails only where the desktop root does: a **desktop** host (no container)
+/// resolves [`StoreRoot::platform`], which refuses a process with no absolute
+/// home (the shared no-home refusal) — the caller handles it exactly as a
+/// failed assembly, every store-backed surface answering not-running. The
+/// desktop backup posture stays infallible here:
+/// [`CloudBackupExclusion::platform_desktop`] on a target with no established
+/// posture is a shell arm that refuses at assembly — a phone shell forgetting
+/// its container is the wiring bug it makes loud, at the one place every
+/// consumer already handles a failed exclusion.
 pub fn build_params(
     inputs: AppRuntimeInputs,
     rpc: Arc<NestClient>,
     nest_url: &str,
-) -> AccountRuntimeParams<Arc<NestClient>> {
+) -> anyhow::Result<AccountRuntimeParams<Arc<NestClient>>> {
     let AppRuntimeInputs {
         actor_id_hex,
         principal,
@@ -246,12 +257,12 @@ pub fn build_params(
     let (store_root, store_backup_exclusion) = match store_container {
         Some(SandboxedStoreContainer { dir, exclusion }) => (StoreRoot::at(dir), exclusion),
         None => (
-            StoreRoot::platform(),
+            StoreRoot::platform()?,
             CloudBackupExclusion::platform_desktop(),
         ),
     };
 
-    AccountRuntimeParams {
+    Ok(AccountRuntimeParams {
         store_root,
         store_backup_exclusion,
         actor_id_hex,
@@ -285,7 +296,7 @@ pub fn build_params(
         enrollment_target_device_id: String::new(),
         linked_nests: Some(linked_nests),
         owed_nests: Some(owed_nests),
-    }
+    })
 }
 
 /// The road's native reach (`fauna_client_core::succession_delivery`): an
@@ -316,17 +327,27 @@ impl OwedNestReach for NativeOwedReach {
         let Some(keypair) = self.seeds.keypair_for(actor_id) else {
             return SignIn::NoSeed;
         };
-        let client = NestClient::new(url.to_string(), keypair);
-        match client.connect().await {
-            Ok(()) => SignIn::Connected(client),
-            // A refused mint flattens to "couldn't obtain a token"; the
-            // typed refusal is the auth client's last one, which tells "the
-            // nest holds no account for it" from "no nest answered".
-            Err(e) => match client.auth().last_auth_refusal() {
-                Some(refusal) => SignIn::from_error(&fauna_client::NestClientError::Rpc(refusal)),
-                None => SignIn::from_error(&e),
-            },
-        }
+        sign_in_with_seed(url, keypair).await
+    }
+}
+
+/// Sign in to `url` as the identity whose seed is `keypair`, over a fresh
+/// [`NestClient`] of its own — no app session, no registry. The road's
+/// sign-in as a retired identity the device holds the seed of, and a
+/// remove-account's sign-in as the account it just removed
+/// ([`retire_removed_account`]): both reach a nest as an identity no live
+/// session of this app is signed in as.
+pub async fn sign_in_with_seed(url: &str, keypair: ActorKeypair) -> SignIn<Arc<NestClient>> {
+    let client = NestClient::new(url.to_string(), keypair);
+    match client.connect().await {
+        Ok(()) => SignIn::Connected(client),
+        // A refused mint flattens to "couldn't obtain a token"; the typed
+        // refusal is the auth client's last one, which tells "the nest holds
+        // no account for it" from "no nest answered".
+        Err(e) => match client.auth().last_auth_refusal() {
+            Some(refusal) => SignIn::from_error(&fauna_client::NestClientError::Rpc(refusal)),
+            None => SignIn::from_error(&e),
+        },
     }
 }
 
@@ -428,8 +449,45 @@ pub fn with_session_wakes(
 /// [`AccountStoreRuntime::start`], by running without a runtime rather than
 /// failing the sign-in.
 pub async fn resolve_and_start(
+    params: AccountRuntimeParams<Arc<NestClient>>,
+    ctx: ResolveContext,
+) -> anyhow::Result<AccountStoreHandle> {
+    let handle = assemble(params, ctx, production_credential_store()).await?;
+    // The yield's nudge: on a desktop whose agent mounts beside this runtime,
+    // the role this runtime hands over is taken by the agent now, not at its
+    // backstop tick (`holder_yield`). Ends with the runtime.
+    holder_yield::spawn_holder_yield_nudge(
+        handle.subscribe_engine_role(),
+        p2p_participation::EngineHolderNudgeSlot::seat(),
+    );
+    // And beside the agent, a key this runtime's seed pass recovers from
+    // escrow asks the agent for the pass that re-presents the rows it opens
+    // (`holder_yield::spawn_holder_pass_owed_nudge`). Ends with the runtime.
+    holder_yield::spawn_holder_pass_owed_nudge(
+        handle.subscribe_holder_pass_owed(),
+        p2p_participation::EngineHolderNudgeSlot::seat(),
+    );
+    // The awaited walk's reach: a non-holder's `walk_fleet` (the mail
+    // refresh's walk leg) is walked by the holder this slot reaches — the
+    // agent, once its provisioner is published (`account-runtime.md`
+    // § Multi-instance concurrency → *A non-holder's awaited fleet walk
+    // reaches the holder*). A process with no agent reaches none and keeps
+    // the role refusal.
+    handle.seat_holder_walk(Arc::new(p2p_participation::EngineHolderNudgeSlot::seat()));
+    Ok(handle)
+}
+
+/// Phase 2's assembly, shared by the live seat ([`resolve_and_start`], which
+/// adds the agent nudges a serving runtime owes) and a remove-account's nest
+/// half ([`retire_removed_account`], which stops the runtime at once and owes
+/// the agent nothing). Every slot it reads or writes is `params.credentials`'
+/// — the store principal's writer key included — and `latch_credentials` is
+/// that same namespace again, for the principal client's `not_registered`
+/// hook to void the latch in (a [`CredentialStore`] is not `Clone`).
+async fn assemble(
     mut params: AccountRuntimeParams<Arc<NestClient>>,
     ctx: ResolveContext,
+    latch_credentials: CredentialStore,
 ) -> anyhow::Result<AccountStoreHandle> {
     let actor_id_hex = params.actor_id_hex.clone();
 
@@ -446,8 +504,13 @@ pub async fn resolve_and_start(
     // waits for its grant to be registered, then reports its own outcome
     // (`spawn_connect_retry`); the fallback arm rides the app session, which
     // is connected already.
-    let device_client = match resolve_process_rpc(&params.store_root, &actor_id_hex, &ctx.nest_url)
-    {
+    let device_client = match resolve_process_rpc(
+        &params.store_root,
+        &actor_id_hex,
+        &ctx.nest_url,
+        &params.credentials,
+        latch_credentials,
+    ) {
         Ok(device_client) => {
             tracing::debug!(
                 "store principal: the account runtime's data path rides the PRINCIPAL's own \
@@ -577,30 +640,22 @@ pub async fn device_set_state_json(
 /// The account store's read marker for one fauna-native channel —
 /// `{"found": true, "through": N}` or `{"found": false}` — the e2e's
 /// durability barrier for a read (`conversation-read-state.md` § The
-/// read-marker record): a test that must know a read reached the store before
-/// it quits the app asks this, never a clock. Built on
-/// [`AccountStoreHandle::read_markers`], the same read the conversations glue
-/// delivers from. An on-demand reader, gated and dispatched exactly like
-/// [`device_set_state_json`] (async store I/O, so never on the per-tick state
-/// path; real account content, so convention 15's rule (a)).
+/// read-marker record). The reader itself is
+/// [`fauna_account_plane::account_driver::e2e_readers::read_marker_state`], in
+/// the wasm-capable plane crate so web's dispatcher answers the same command
+/// over the same code (priority #2); this is its JSON value at the old path
+/// every native dispatcher calls. An on-demand reader, gated and dispatched
+/// exactly like [`device_set_state_json`] (async store I/O, so never on the
+/// per-tick state path; real account content, so convention 15's rule (a)).
 #[cfg(any(debug_assertions, feature = "e2e-agent"))]
 pub async fn read_marker_state_json(
     handle: Option<&AccountStoreHandle>,
     channel_id_hex: &str,
 ) -> serde_json::Value {
-    let Some(handle) = handle else {
-        return serde_json::json!({ "found": false });
-    };
-    let Ok(markers) = handle.read_markers().await else {
-        return serde_json::json!({ "found": false });
-    };
-    match markers
-        .iter()
-        .find(|(channel, _)| channel.eq_ignore_ascii_case(channel_id_hex))
-    {
-        Some((_, through)) => serde_json::json!({ "found": true, "through": through }),
-        None => serde_json::json!({ "found": false }),
-    }
+    let view =
+        fauna_account_plane::account_driver::e2e_readers::read_marker_state(handle, channel_id_hex)
+            .await;
+    serde_json::to_value(view).unwrap_or_else(|_| serde_json::json!({ "found": false }))
 }
 
 // The stop's budget, its reason and the one stop per handle live beside the
@@ -609,75 +664,14 @@ pub async fn read_marker_state_json(
 // every native host has always named them.
 use fauna_account_plane::account_driver::stop_one;
 pub use fauna_account_plane::account_driver::{ACCOUNT_RUNTIME_STOP_BUDGET, StopReason};
-
-/// The **assembly side** of the in-flight seam: publishes the started runtime
-/// the instant [`resolve_and_start`] settles, so a teardown can reach a store
-/// that is open but not yet installed.
-///
-/// Dropping one without calling either method reads as [`Self::failed`] — the
-/// assembly task died without answering, and there is nothing to stop.
-pub struct AssemblySettle(tokio::sync::oneshot::Sender<Option<AccountStoreHandle>>);
-
-impl AssemblySettle {
-    /// The assembly started a runtime. Publishes a clone for the teardown;
-    /// a cheap no-op when no teardown is waiting.
-    pub fn started(self, handle: &AccountStoreHandle) {
-        let _ = self.0.send(Some(handle.clone()));
-    }
-
-    /// The assembly failed. Resolves the wait **at once**, so a failed
-    /// assembly never spends the teardown budget.
-    pub fn failed(self) {
-        let _ = self.0.send(None);
-    }
-}
-
-/// Hand-written rather than derived: [`InstallClaim`] is `Debug` and carries
-/// one of these, and neither the channel nor an `AccountStoreHandle` owes a
-/// `Debug` for that to hold.
-impl std::fmt::Debug for AssemblySettle {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("AssemblySettle")
-    }
-}
-
-/// The **teardown side**: an assembly that may still be in flight.
-///
-/// # Why a handle slot is not enough, and this is not belt-and-braces
-///
-/// `AccountStoreRuntime::start` opens `account-store.db` **on its own OS
-/// thread before returning**, and the started handle then has to reach the
-/// app — through [`AccountRuntimeHost::finish`], or across a UI queue. Between
-/// those two moments a live connection holds the database while the host's own
-/// handle slot honestly reads `None`, and a teardown that only *checks* that
-/// slot stops nothing and erases anyway. Measured `--app tui` on Windows,
-/// 2026-09-04: sign-out landed 475 ms after the assembly minted this machine's
-/// writer key, and the erase failed with `os error 32` on a root nothing had
-/// torn down (`apps/account-scoping.md` § Erasure follows scope, the ⚠ *A
-/// store that is still ASSEMBLING has no handle to release* note).
-///
-/// POSIX `unlink` removes an open file, which is why this hid on linux for as
-/// long as it existed — so closing it is a **convergence** obligation on every
-/// host, not a windows patch.
-pub struct PendingAssembly(tokio::sync::oneshot::Receiver<Option<AccountStoreHandle>>);
-
-impl PendingAssembly {
-    /// Wait for the assembly to settle. `None` means there is nothing to stop
-    /// — the assembly failed, or its task died without answering.
-    pub async fn settled(self) -> Option<AccountStoreHandle> {
-        self.0.await.ok().flatten()
-    }
-}
-
-/// Mint the in-flight seam. The host — or the app itself, for a deliberately
-/// host-less one like tui (`account-data-plane.md` § The account store → *The
-/// client-side lifecycle*, the ⚠ *tui is a deliberate NON-consumer* note) —
-/// keeps the [`PendingAssembly`]; the assembly task carries the
-/// [`AssemblySettle`].
-pub fn assembly_channel() -> (AssemblySettle, PendingAssembly) {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    (AssemblySettle(tx), PendingAssembly(rx))
-}
+// The install/teardown lifecycle lives beside the driver
+// (`fauna_account_plane::account_driver`'s `host` module) since the browser
+// tab hosts the runtime through the same claim and generation guard;
+// re-exported here at the paths every native host has always named.
+pub use fauna_account_plane::account_driver::{
+    AccountRuntimeHost, AssemblySettle, InstallClaim, InstallOutcome, PendingAssembly,
+    RuntimeTeardown, assembly_channel,
+};
 
 /// What [`stop_account_runtime`] achieved. Worth logging and worth asserting;
 /// never worth branching on at a call site — the erase follows regardless.
@@ -864,398 +858,46 @@ impl<C> StopQueue<C> {
     }
 }
 
-/// The **install/teardown lifecycle** every seed-holding host repeats around
-/// [`resolve_and_start`] — the slot the started handle lives in, the
-/// generation guard that makes spawning the assembly safe, and the in-flight
-/// seam a teardown waits on.
-///
-/// # Why this is shared and not four copies of twenty lines
-///
-/// Assembly does real I/O, so every host spawns it — and a sign-out or account
-/// switch can therefore land *while it runs*. What must happen then is not
-/// obvious and is silent when wrong: the freshly-started runtime has to be shut
-/// down rather than installed, because installing it means **the signed-out
-/// account is still being served** (the shape `apps/sync-agent.md` § Control
-/// plane split forbids). linux and the `fauna-ffi` seat each wrote that guard
-/// by hand and the second was a near-verbatim copy of the first, comments
-/// included — which is exactly the drift this crate's module docs predict for
-/// the eleven params, applied to the lifecycle instead. windows, macOS and iOS
-/// are about to become the third, fourth and fifth.
-///
-/// # The payload, and why it is captured at CLAIM rather than at install
-///
-/// A host often needs one thing *beside* the handle, needed at teardown, and it
-/// differs per host: linux stores the tokio [`Handle`] its shutdown must be
-/// driven on, because its teardown is called from the GTK main thread and must
-/// never build a runtime there. Hosts with nothing to carry use the default
-/// `()`.
-///
-/// It is handed to [`Self::begin`], not to [`Self::finish`], and that moved
-/// (2026-09-06) for a reason the earlier shape could not express: **the
-/// teardown that most needs the payload is the one that finds an EMPTY slot.**
-/// A sign-out landing mid-assembly has to wait for a store that is open but not
-/// yet installed — and on linux that wait must be driven on the runtime handle,
-/// which under install-time capture does not exist yet. Claim time is when the
-/// host first knows both.
-///
-/// # What it deliberately does NOT do
-///
-/// [`Self::take`] returns what to stop rather than stopping it, because *how*
-/// to await that shutdown is the host's own constraint — linux spawns it and
-/// runs the synchronous erase that follows as a GTK main-loop continuation of
-/// its completion (that thread cannot await, and must not be held for the
-/// stop's budget), the FFI seat awaits it (its caller is already async and a
-/// sign-out should not race the drain). Deciding that here would force one of
-/// them into the wrong shape. [`stop_account_runtime`] is the shared *body* of
-/// that stop; the choice of how to drive it stays at the call site.
-///
-/// [`Handle`]: https://docs.rs/tokio/latest/tokio/runtime/struct.Handle.html
-pub struct AccountRuntimeHost<T = ()> {
-    state: std::sync::Mutex<HostState<AccountStoreHandle, T>>,
-}
-
-/// The host's whole mutable state, behind **one** lock.
-///
-/// # Why one lock, and not a mutex per field
-///
-/// An install is three decisions — is my claim still current, remove the
-/// in-flight registration, write the slot — and a teardown is two: advance the
-/// generation, take whatever is there. Under a lock per field, a teardown could
-/// land *between* an install's second and third decision and see both halves
-/// empty: the registration just removed, the slot not yet written. It then
-/// reported **nothing to stop**, the erase ran, and the install completed
-/// immediately afterwards — leaving the signed-out account's runtime installed
-/// and pumping against a store being erased (the `os error 32` shape on
-/// windows, deleted-inode writes on linux). No `.await` sat in that gap, which
-/// is what made it look safe; the teardown runs on a different thread (the GTK
-/// main thread on linux, the FFI caller's thread in the `fauna-ffi` seat), so
-/// it never needed one.
-///
-/// So both sequences are single transitions over this struct, and the
-/// in-between state is unrepresentable rather than merely unlikely: while a
-/// claim is current, this state always holds either the registration or the
-/// slot for a teardown to find.
-///
-/// Generic over the handle type so the transitions can be tested without a
-/// started [`AccountStoreHandle`], whose fields are private to its own crate
-/// and which no test can construct.
-struct HostState<H, T> {
-    /// The installed runtime and this host's teardown payload.
-    slot: Option<(H, T)>,
-    /// The assembly claimed but not yet settled, and the payload its teardown
-    /// will need. Present between [`AccountRuntimeHost::begin`] and whichever
-    /// comes first: [`AccountRuntimeHost::finish`] or a teardown's
-    /// [`AccountRuntimeHost::take`].
-    pending: Option<(PendingAssembly, T)>,
-    /// The newest install claim's number. `begin` and `take` both advance it;
-    /// [`AccountRuntimeHost::finish`] installs only under the newest.
-    generation: u64,
-    /// The newest generation a **sign-out** teardown invalidated. Every claim
-    /// at or below it belongs to a sign-in whose credential slot that sign-out
-    /// erased, so an assembly of theirs that settles late is stopped the
-    /// sign-out way ([`Self::settle_install`]). `0` — below every claim — until
-    /// the first sign-out.
-    signed_out_through: u64,
-}
-
-/// The two halves one teardown found — the settled runtime with its payload,
-/// and the assembly still in flight with its own. [`AccountRuntimeHost::take`]
-/// assembles the public [`RuntimeTeardown`] around them.
-type TornDown<H, T> = (Option<(H, T)>, Option<(PendingAssembly, T)>);
-
-/// What [`HostState::settle_install`] decided, for the caller to carry out
-/// **after** releasing the lock — shutting a runtime down is async, and nothing
-/// may `.await` under a `std::sync::Mutex`.
-enum InstallStep<H, T> {
-    /// The handle is installed. Shut down whatever it replaced, if anything.
-    Installed(Option<(H, T)>),
-    /// A teardown or a newer install landed first. Shut this handle down —
-    /// **the way whatever superseded it would have**: a sign-out's erase took
-    /// this runtime's credential slot, so its enrollment is retired on the way
-    /// out; anything else left the slot in place and the machine stays
-    /// enrolled ([`StopReason`]).
-    Superseded(H, StopReason),
-}
-
-impl<H, T> HostState<H, T> {
-    const fn empty() -> Self {
-        Self {
-            slot: None,
-            pending: None,
-            generation: 0,
-            signed_out_through: 0,
-        }
-    }
-
-    /// How a runtime assembled under `claim_generation` must be stopped now
-    /// that it will not be installed.
-    ///
-    /// ⚠ **The superseded arm is a stop like any other, and a stop has a
-    /// reason.** The prologue enrolls the machine *before* the assembly
-    /// settles, so a sign-out landing mid-assembly supersedes a runtime that
-    /// already holds a registered enrollment. Stopped plainly, that enrollment
-    /// outlives the key the erase is about to destroy — a live grant nobody
-    /// holds, per such sign-out (`sync-agent-credentials.md` § Implementation
-    /// status today). The waiting teardown cannot be relied on
-    /// for the retirement: this arm's own shutdown is queued the instant the
-    /// handle is published, ahead of anything the teardown sends after waking.
-    fn superseded_stop_reason(&self, claim_generation: u64) -> StopReason {
-        if claim_generation <= self.signed_out_through {
-            StopReason::SignOut
-        } else {
-            StopReason::AccountSwitch
-        }
-    }
-
-    /// Claim the next install: advance the generation and register the
-    /// assembly as in flight, replacing any earlier registration (whose
-    /// generation has just moved on, so nothing will be installed under it).
-    fn begin(&mut self, pending: PendingAssembly, payload: T) -> u64 {
-        self.generation += 1;
-        self.pending = Some((pending, payload));
-        self.generation
-    }
-
-    /// The **whole install decision**, as one transition: the claim check, the
-    /// registration's removal and the slot write — see the type docs for why
-    /// they may not be three.
-    fn settle_install(&mut self, claim_generation: u64, handle: H) -> InstallStep<H, T> {
-        let reason = self.superseded_stop_reason(claim_generation);
-        if self.generation != claim_generation {
-            return InstallStep::Superseded(handle, reason);
-        }
-        // Unreachable while the claim is current: only `begin` and `take` clear
-        // the registration, and both advance the generation in this same
-        // transition. Kept as the fail-closed arm — refusing to install beats
-        // inventing a payload, because an un-torn-down runtime is the one
-        // outcome this type exists to prevent.
-        let Some((_, payload)) = self.pending.take() else {
-            return InstallStep::Superseded(handle, reason);
-        };
-        InstallStep::Installed(self.slot.replace((handle, payload)))
-    }
-
-    /// Everything a teardown must stop, and the generation advanced so an
-    /// assembly still in flight discards itself — one transition, for the same
-    /// reason [`Self::settle_install`] is one. A sign-out additionally marks
-    /// every claim so far as signed out, **before** the generation moves on, so
-    /// the sign-in that follows is not caught by it.
-    fn tear_down(&mut self, reason: StopReason) -> TornDown<H, T> {
-        if reason == StopReason::SignOut {
-            self.signed_out_through = self.generation;
-        }
-        self.generation += 1;
-        (self.slot.take(), self.pending.take())
-    }
-}
-
-/// A claim on one install attempt, taken by [`AccountRuntimeHost::begin`]
-/// **before** the assembly is spawned and presented back to
-/// [`AccountRuntimeHost::finish`] after it returns.
-///
-/// Not `Copy` or constructible outside this crate on purpose: a host cannot
-/// finish an install it never began, nor reuse one claim for two assemblies.
-///
-/// It carries the [`AssemblySettle`] half of the in-flight seam, so an
-/// assembly task that **drops** its claim — the failed-assembly path, where
-/// `finish` is never called — resolves a waiting teardown at once instead of
-/// spending its whole budget.
-#[derive(Debug)]
-pub struct InstallClaim(u64, Option<AssemblySettle>);
-
-/// What [`AccountRuntimeHost::finish`] did — worth logging, never worth
-/// branching on: both arms leave the host in a correct state.
-#[derive(Debug, PartialEq, Eq)]
-pub enum InstallOutcome {
-    /// The handle is now this host's live runtime. Any previous one was shut
-    /// down first.
-    Installed,
-    /// A teardown or a newer install landed while this assembly ran, so the
-    /// fresh runtime was shut down instead of installed.
-    Superseded,
-}
-
-impl<T> AccountRuntimeHost<T> {
-    /// An empty host. `const` so it can be a `static` — every consumer wants
-    /// exactly one per process, since the W5.1 engine election is per store
-    /// and a second host in one process would contend with the first.
-    pub const fn new() -> Self {
-        Self {
-            state: std::sync::Mutex::new(HostState::empty()),
-        }
-    }
-
-    /// The host's state, through a poisoned lock as well as a healthy one.
-    ///
-    /// Nothing under this lock can panic — the transitions are moves between
-    /// `Option`s — so a poisoned lock means a panic *elsewhere* left the state
-    /// intact, and the previous shape's "on poison, skip the operation" would
-    /// turn that into the very outcome this type prevents: a teardown that
-    /// takes nothing while a runtime stays installed.
-    fn state(&self) -> std::sync::MutexGuard<'_, HostState<AccountStoreHandle, T>> {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    /// Claim the next install and register the assembly as in flight. Call
-    /// this **on the login path, before spawning the assembly** — claiming
-    /// after the spawn would leave a window in which a teardown bumps nothing
-    /// and the assembly installs anyway.
-    ///
-    /// `payload` is what this host's teardown will need beside the handle; it
-    /// is captured here rather than at [`Self::finish`] because a teardown
-    /// landing mid-assembly needs it precisely when nothing is installed yet
-    /// (see the type docs).
-    pub fn begin(&self, payload: T) -> InstallClaim {
-        let (settle, pending) = assembly_channel();
-        // A previous claim's registration is replaced, not merged: its
-        // generation has just moved on, so `finish` will discard whatever it
-        // produces and nothing is left for a teardown to wait on. Dropping its
-        // receiver also resolves that assembly's own settle send as "nobody
-        // waiting", which is true.
-        let generation = self.state().begin(pending, payload);
-        InstallClaim(generation, Some(settle))
-    }
-
-    /// Install `handle` under `claim`, or shut it down if the claim is stale.
-    ///
-    /// Shutting down the superseded runtime — and the previous one it replaces
-    /// — happens here rather than at the call site precisely because forgetting
-    /// either is invisible: the account keeps pumping and nothing reports it.
-    pub async fn finish(
-        &self,
-        mut claim: InstallClaim,
-        handle: AccountStoreHandle,
-    ) -> InstallOutcome {
-        // Publish to a waiting teardown FIRST, before either arm below. The
-        // superseded arm's own `shutdown()` is what usually stops this runtime,
-        // and `shutdown` is idempotent — so a teardown that also reaches it
-        // stops it once and both report success. What the publish actually buys
-        // is the *wait*: without it the teardown returns while this store is
-        // still open, which on windows is the `os error 32` erase failure.
-        if let Some(settle) = claim.1.take() {
-            settle.started(&handle);
-        }
-        // ONE transition, not three: the claim check, the registration's
-        // removal and the slot write happen under a single lock, so a teardown
-        // cannot land between them and come away with "nothing to stop" while
-        // this install completes behind it (`HostState`'s docs). The shutdowns
-        // below run after the guard is dropped — nothing may `.await` under a
-        // `std::sync::Mutex`.
-        let step = self.state().settle_install(claim.0, handle);
-        match step {
-            InstallStep::Superseded(handle, reason) => {
-                // The reason is the superseding teardown's, not a default: see
-                // `HostState::superseded_stop_reason`.
-                stop_one(&handle, reason).await;
-                InstallOutcome::Superseded
-            }
-            InstallStep::Installed(previous) => {
-                if let Some((previous, _)) = previous {
-                    previous.shutdown().await;
-                }
-                InstallOutcome::Installed
-            }
-        }
-    }
-
-    /// The live handle, if an assembly has landed. `None` before it completes,
-    /// after a teardown, or whenever it failed.
-    pub fn handle(&self) -> Option<AccountStoreHandle> {
-        self.state().slot.as_ref().map(|(h, _)| h.clone())
-    }
-
-    /// Take **everything this host has to stop** for a teardown, and advance
-    /// the generation so an assembly still in flight discards itself instead of
-    /// installing under the next account.
-    ///
-    /// **The caller must stop what it gets back** — feed it to
-    /// [`stop_account_runtime`] and decide whether to await or spawn that; see
-    /// the type docs for why the decision is not made here. The generation
-    /// moves even when the slot is empty, which is the case that matters: a
-    /// sign-out landing *during* the very first assembly has nothing to take
-    /// and everything to prevent — and, since 2026-09-06, an in-flight
-    /// assembly to WAIT for rather than merely to invalidate.
-    ///
-    /// `reason` is the same one the caller is about to hand
-    /// [`stop_account_runtime`]. It is recorded here because the in-flight
-    /// assembly's own [`Self::finish`] also stops that runtime, usually first,
-    /// and must stop it the same way — a sign-out's retirement is otherwise
-    /// lost to a plain shutdown queued ahead of it.
-    pub fn take(&self, reason: StopReason) -> RuntimeTeardown<T> {
-        // One transition, for [`Self::finish`]'s reason: an install that is
-        // half-applied is not a state this can observe.
-        let (settled, pending) = self.state().tear_down(reason);
-        // The payload comes from whichever half exists. Both cannot: `finish`
-        // clears the registration as it installs, and `begin` replaces it — so
-        // a host is either assembling or settled, never both for one account.
-        let (settled, settled_payload) = match settled {
-            Some((handle, payload)) => (Some(handle), Some(payload)),
-            None => (None, None),
-        };
-        let (pending, pending_payload) = match pending {
-            Some((pending, payload)) => (Some(pending), Some(payload)),
-            None => (None, None),
-        };
-        RuntimeTeardown {
-            settled,
-            pending,
-            payload: settled_payload.or(pending_payload),
-        }
-    }
-}
-
-/// What one teardown found: the settled runtime, the assembly still in flight,
-/// and the payload whichever of them registered.
-///
-/// A struct rather than a tuple because the interesting case is the one where
-/// `settled` is `None` and `pending` is not — the mid-assembly sign-out — and a
-/// tuple's second element is exactly the thing a call site forgets.
-pub struct RuntimeTeardown<T> {
-    /// The installed runtime, if the assembly had landed.
-    pub settled: Option<AccountStoreHandle>,
-    /// The assembly claimed but not yet settled — a store that may already be
-    /// **open** on its own OS thread while `settled` reads `None`. Hand both to
-    /// [`stop_account_runtime`].
-    pub pending: Option<PendingAssembly>,
-    /// This host's teardown payload — the tokio [`Handle`] on linux, `()`
-    /// where there is nothing to carry. `None` only when there was nothing to
-    /// stop at all.
-    ///
-    /// [`Handle`]: https://docs.rs/tokio/latest/tokio/runtime/struct.Handle.html
-    pub payload: Option<T>,
-}
-
-impl<T> RuntimeTeardown<T> {
-    /// Is there anything at all to stop? `false` is the common teardown — a
-    /// sign-out with no account runtime ever assembled.
-    pub fn is_empty(&self) -> bool {
-        self.settled.is_none() && self.pending.is_none()
-    }
-}
-
-impl<T> Default for AccountRuntimeHost<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Mint the store principal's own nest client. Its connect retry is the
 /// caller's to spawn, once the runtime that gates it exists.
 ///
 /// Split out so the degrade path above reads as one `match` — and so the
 /// hex-decode and the slot read, which fail for entirely different reasons,
 /// surface as one "not resolvable" verdict at the single call site that cares.
+///
+/// The writer key is read from `credentials` — the runtime's own
+/// `params.credentials`, never a namespace of its own choosing: over a
+/// remove-account's snapshot, a read of the production slot would find it
+/// already deleted and mint a fresh key into the registry's namespace, the
+/// ⚠ *async writer* case `account-scoping.md` § Erasure follows scope refuses.
+/// The client's per-mint read, load-only, goes through `latch_credentials` —
+/// that same namespace again, so it never names a slot of its own choosing
+/// either.
 fn resolve_process_rpc(
     store_root: &StoreRoot,
     actor_id_hex: &str,
     nest_url: &str,
+    credentials: &CredentialStore,
+    latch_credentials: CredentialStore,
 ) -> anyhow::Result<Arc<NestClient>> {
     let actor_bytes =
         fauna_core::hex32::decode(actor_id_hex).map_err(|e| anyhow::anyhow!("actor id: {e}"))?;
-    let writer_key =
-        resolve_writer_key_serialized(store_root, actor_id_hex, &production_credential_store())?;
+    // Resolved here for the mint a first sign-in owes and the early "not
+    // resolvable" verdict — but never captured: the assembly may rotate this
+    // writer before its first pass (a key loaded over a store with no stamped
+    // writer, a lost slot, a burnt journal, a succession), and the enrollment
+    // pass then registers the SUCCESSOR's grant. So the client reads the slot
+    // at every mint (`PrincipalKeySource`), load-only, and signs with whatever
+    // writer the machine has now.
+    resolve_writer_key_serialized(store_root, actor_id_hex, credentials)?;
+    let slot = Arc::new(latch_credentials);
+    let writer_key = {
+        let slot = Arc::clone(&slot);
+        let actor_id_hex = actor_id_hex.to_string();
+        fauna_client::ws_device_handshake_bearer::PrincipalKeySource::reading(move || {
+            fauna_sync_engine::principal_bundle::load_writer_key(&slot, &actor_id_hex)
+        })
+    };
     Ok(
         fauna_client::ws_device_handshake_bearer::device_principal_nest_client(
             nest_url,
@@ -1263,7 +905,12 @@ fn resolve_process_rpc(
             writer_key,
             // A second nest or a rebuilt box answers `not_registered`: the
             // latch is void, and the runtime's next pass re-registers.
-            Some(fauna_sync_engine::principal_bundle::not_registered_voids_latch(actor_id_hex)),
+            Some(
+                fauna_sync_engine::principal_bundle::not_registered_voids_latch_in(
+                    slot,
+                    actor_id_hex,
+                ),
+            ),
         ),
     )
 }
@@ -1303,7 +950,7 @@ mod tests {
     /// to a possibly-wedged agent) in front of its own sign-in.
     #[test]
     fn the_io_bound_fields_are_left_for_phase_two() {
-        let params = build_params(inputs(), rpc(), "https://nest.example");
+        let params = build_params(inputs(), rpc(), "https://nest.example").unwrap();
         assert!(
             params.process_rpc.is_none(),
             "the store principal's bearer costs a credential-slot read; phase 2 owns it"
@@ -1322,10 +969,10 @@ mod tests {
     /// integration test can do.
     #[test]
     fn the_store_root_is_the_shared_per_user_root() {
-        let params = build_params(inputs(), rpc(), "https://nest.example");
+        let params = build_params(inputs(), rpc(), "https://nest.example").unwrap();
         assert_eq!(
             params.store_root.base(),
-            StoreRoot::platform().base(),
+            StoreRoot::platform().unwrap().base(),
             "the unified per-user root every app and the agent open (W6)"
         );
         assert_ne!(
@@ -1353,7 +1000,7 @@ mod tests {
                 declaration: "test manifest".into(),
             },
         });
-        let params = build_params(i, rpc(), "https://nest.example");
+        let params = build_params(i, rpc(), "https://nest.example").unwrap();
         assert_eq!(
             params.store_root.base(),
             Path::new("/containers/group.social.fauna.shared"),
@@ -1380,7 +1027,7 @@ mod tests {
     /// nothing.
     #[test]
     fn a_desktop_host_carries_the_desktop_posture() {
-        let params = build_params(inputs(), rpc(), "https://nest.example");
+        let params = build_params(inputs(), rpc(), "https://nest.example").unwrap();
         assert!(
             matches!(
                 &params.store_backup_exclusion,
@@ -1396,7 +1043,7 @@ mod tests {
     /// can never reach it.
     #[test]
     fn an_app_assembles_a_seed_holding_host() {
-        let params = build_params(inputs(), rpc(), "https://nest.example");
+        let params = build_params(inputs(), rpc(), "https://nest.example").unwrap();
         assert!(matches!(params.principal, RuntimePrincipal::SeedHolding(_)));
     }
 
@@ -1408,7 +1055,7 @@ mod tests {
     /// empty" here would be a data-loss bug rather than a stale walk.
     #[test]
     fn the_membership_source_passes_through_and_absence_stays_absence() {
-        let params = build_params(inputs(), rpc(), "https://nest.example");
+        let params = build_params(inputs(), rpc(), "https://nest.example").unwrap();
         assert!(
             params.memberships.is_none(),
             "an app with no conversations session cannot tell — it must not answer empty"
@@ -1416,7 +1063,7 @@ mod tests {
 
         let mut i = inputs();
         i.memberships = Some(Arc::new(|| Some(vec![[9u8; 32]])));
-        let params = build_params(i, rpc(), "https://nest.example");
+        let params = build_params(i, rpc(), "https://nest.example").unwrap();
         let source = params.memberships.expect("wired");
         assert_eq!(source(), Some(vec![[9u8; 32]]));
     }
@@ -1425,293 +1072,8 @@ mod tests {
     /// runtime and taking the `fauna-iroh` dependency are separate tranches.
     #[test]
     fn the_peer_leg_is_structurally_off_without_a_factory() {
-        let params = build_params(inputs(), rpc(), "https://nest.example");
+        let params = build_params(inputs(), rpc(), "https://nest.example").unwrap();
         assert!(params.peer_transport.is_none());
-    }
-
-    // ── the install/teardown transitions ────────────────────────────────
-    //
-    // These drive `HostState` rather than the host, because the install half
-    // needs a handle and a started `AccountStoreHandle` cannot be constructed
-    // in a test (its fields are private to `fauna-sync-engine`). The state is
-    // generic over the handle exactly so this half is reachable; the host is a
-    // lock around it and one `.await` per shutdown.
-
-    /// A stand-in for the started runtime. The transitions never call anything
-    /// on it — they only move it between the registration, the slot and the
-    /// teardown, which is the whole of what the lock protects.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    struct FakeHandle(u8);
-
-    fn claimed(state: &mut HostState<FakeHandle, ()>) -> (u64, AssemblySettle) {
-        let (settle, pending) = assembly_channel();
-        (state.begin(pending, ()), settle)
-    }
-
-    /// ⚠ **The state a teardown must never observe: nothing to stop while an
-    /// install is still going to happen.**
-    ///
-    /// The defect this pins: with a lock per field, an
-    /// install was three
-    /// decisions — check the claim, remove the registration, write the slot —
-    /// and a teardown landing between the last two found the registration gone
-    /// and the slot empty. It reported `NothingToStop`, the erase ran, and the
-    /// install completed behind it: the signed-out account's runtime installed
-    /// and pumping against a store being erased. No `.await` sat in that gap,
-    /// which is what made it read as safe; the teardown runs on another thread.
-    ///
-    /// The fix makes the install ONE transition, so the gap state is
-    /// unrepresentable rather than unlikely. This walks the protocol and
-    /// asserts that after every step, while the claim is current, the state
-    /// still holds something for a teardown to take.
-    #[test]
-    fn a_current_claim_always_leaves_a_teardown_something_to_take() {
-        let mut state = HostState::<FakeHandle, ()>::empty();
-        let has_something_to_stop =
-            |st: &HostState<FakeHandle, ()>| st.slot.is_some() || st.pending.is_some();
-
-        let (claim, _settle) = claimed(&mut state);
-        assert!(
-            has_something_to_stop(&state),
-            "the registration is what a mid-assembly teardown waits on"
-        );
-
-        let step = state.settle_install(claim, FakeHandle(1));
-        assert!(
-            matches!(step, InstallStep::Installed(None)),
-            "the first install replaces nothing"
-        );
-        assert!(
-            has_something_to_stop(&state),
-            "the install moved the account from the registration to the slot in ONE \
-             transition — a teardown sees one or the other, never neither"
-        );
-        assert!(
-            state.pending.is_none() && state.slot.is_some(),
-            "and it is the slot's turn now: {:?}",
-            state.slot.map(|(h, ())| h)
-        );
-    }
-
-    /// The two orders a teardown and an install can genuinely land in — and
-    /// neither leaves a runtime installed behind a teardown that took nothing.
-    #[test]
-    fn a_teardown_either_takes_the_runtime_or_stops_it_being_installed() {
-        // Teardown first: the claim is stale, so the assembly's handle is
-        // handed back to be shut down and nothing is installed.
-        let mut state = HostState::<FakeHandle, ()>::empty();
-        let (claim, _settle) = claimed(&mut state);
-        let (settled, pending) = state.tear_down(StopReason::AccountSwitch);
-        assert!(settled.is_none(), "nothing had been installed yet");
-        assert!(pending.is_some(), "but the assembly was in flight");
-        assert!(
-            matches!(
-                state.settle_install(claim, FakeHandle(1)),
-                InstallStep::Superseded(FakeHandle(1), _)
-            ),
-            "the signed-out account's runtime must be shut down, not installed"
-        );
-        assert!(state.slot.is_none(), "and it must not be in the slot");
-
-        // Install first: the teardown takes the installed runtime, so the stop
-        // has something to wait on and nothing stays behind.
-        let mut state = HostState::<FakeHandle, ()>::empty();
-        let (claim, _settle) = claimed(&mut state);
-        let _ = state.settle_install(claim, FakeHandle(2));
-        let (settled, pending) = state.tear_down(StopReason::AccountSwitch);
-        assert_eq!(
-            settled.map(|(h, ())| h),
-            Some(FakeHandle(2)),
-            "the teardown takes the runtime the install landed"
-        );
-        assert!(pending.is_none(), "the registration went when it installed");
-        assert!(state.slot.is_none());
-    }
-
-    /// A live claim survives to its install, and a second `begin` invalidates
-    /// the first — the account-switch case, where the older assembly must
-    /// discard its runtime rather than install it under the newer login.
-    ///
-    /// Asserted through the install step itself rather than a predicate beside
-    /// it: the check is now part of the one transition, and a mirror of it in
-    /// the host could drift from the one the install actually gates on.
-    #[test]
-    fn a_newer_install_invalidates_the_older_claim() {
-        let mut state = HostState::<FakeHandle, ()>::empty();
-        let (first, _first_settle) = claimed(&mut state);
-        let (second, _second_settle) = claimed(&mut state);
-
-        assert!(
-            matches!(
-                state.settle_install(first, FakeHandle(1)),
-                InstallStep::Superseded(..)
-            ),
-            "the older assembly must shut its runtime down, not install it under the \
-             newer login"
-        );
-        assert!(
-            matches!(
-                state.settle_install(second, FakeHandle(2)),
-                InstallStep::Installed(_)
-            ),
-            "the newest claim is the one that installs"
-        );
-    }
-
-    /// ⚠ **A runtime superseded by a SIGN-OUT is stopped the sign-out way** —
-    /// its enrollment retired — and one superseded by anything else is not.
-    ///
-    /// The defect this pins, measured `--app linux` 2026-09-20: the prologue
-    /// registers the machine's enrollment *before* the assembly settles, so a
-    /// sign-out landing mid-assembly supersedes a runtime that already holds a
-    /// registered grant. The superseded arm shut it down plainly, and that
-    /// shutdown is queued the instant the handle is published — ahead of the
-    /// waiting teardown's retirement, which then read `account runtime is shut
-    /// down`. One stranded `sync_devices` row per such sign-out, to the tier's
-    /// device cap.
-    #[test]
-    fn a_sign_out_superseding_an_assembly_has_its_runtime_retire_on_the_way_out() {
-        // The sign-out lands mid-assembly: the late install must retire.
-        let mut state = HostState::<FakeHandle, ()>::empty();
-        let (claim, _settle) = claimed(&mut state);
-        let _ = state.tear_down(StopReason::SignOut);
-        assert!(
-            matches!(
-                state.settle_install(claim, FakeHandle(1)),
-                InstallStep::Superseded(FakeHandle(1), StopReason::SignOut)
-            ),
-            "the erase that follows a sign-out destroys this runtime's key, so the \
-             enrollment it registered must be retired before it stops"
-        );
-
-        // ...and STILL must when the next sign-in has claimed before the old
-        // assembly settles: the slot it enrolled under is just as erased.
-        let mut state = HostState::<FakeHandle, ()>::empty();
-        let (old, _old_settle) = claimed(&mut state);
-        let _ = state.tear_down(StopReason::SignOut);
-        let (new, _new_settle) = claimed(&mut state);
-        assert!(matches!(
-            state.settle_install(old, FakeHandle(1)),
-            InstallStep::Superseded(_, StopReason::SignOut)
-        ));
-        assert!(
-            matches!(
-                state.settle_install(new, FakeHandle(2)),
-                InstallStep::Installed(None)
-            ),
-            "the sign-in after the sign-out is not caught by it"
-        );
-        // Nor is that sign-in's own assembly, when a switch supersedes it: its
-        // slot postdates the erase and survives the switch.
-        let mut state = HostState::<FakeHandle, ()>::empty();
-        let _ = claimed(&mut state);
-        let _ = state.tear_down(StopReason::SignOut);
-        let (after, _after_settle) = claimed(&mut state);
-        let _ = state.tear_down(StopReason::AccountSwitch);
-        assert!(
-            matches!(
-                state.settle_install(after, FakeHandle(3)),
-                InstallStep::Superseded(_, StopReason::AccountSwitch)
-            ),
-            "a sign-out marks the claims BEFORE it, never the sign-in after it"
-        );
-
-        // A switch keeps the slot: retiring here would turn the next sign-in as
-        // this account into a removed-from-account state.
-        let mut state = HostState::<FakeHandle, ()>::empty();
-        let (claim, _settle) = claimed(&mut state);
-        let _ = state.tear_down(StopReason::AccountSwitch);
-        assert!(matches!(
-            state.settle_install(claim, FakeHandle(1)),
-            InstallStep::Superseded(_, StopReason::AccountSwitch)
-        ));
-
-        // So does a newer login replacing an older assembly with no teardown.
-        let mut state = HostState::<FakeHandle, ()>::empty();
-        let (first, _first_settle) = claimed(&mut state);
-        let (_second, _second_settle) = claimed(&mut state);
-        assert!(matches!(
-            state.settle_install(first, FakeHandle(1)),
-            InstallStep::Superseded(_, StopReason::AccountSwitch)
-        ));
-    }
-
-    /// ⚠ **A teardown advances the generation even with an EMPTY slot**, and
-    /// that is the case the guard exists for.
-    ///
-    /// A sign-out landing *during the very first assembly* has no handle to
-    /// take — so an implementation that only bumped when it took something
-    /// would leave this claim current, and the assembly would install the
-    /// signed-out account's runtime seconds later, with the app showing a
-    /// logged-out UI over a live pump. There is no louder failure downstream:
-    /// the runtime is healthy, it is just serving an account nobody is signed
-    /// in to.
-    #[test]
-    fn a_teardown_invalidates_an_in_flight_claim_even_with_nothing_installed() {
-        let host: AccountRuntimeHost = AccountRuntimeHost::new();
-        let _claim = host.begin(());
-        assert!(
-            host.take(StopReason::AccountSwitch).settled.is_none(),
-            "nothing installed yet"
-        );
-
-        let mut state = HostState::<FakeHandle, ()>::empty();
-        let (claim, _settle) = claimed(&mut state);
-        let _ = state.tear_down(StopReason::AccountSwitch);
-        assert_ne!(
-            state.generation, claim,
-            "the teardown must advance the generation itself — asserted here rather \
-             than only through the install below, which would refuse this claim \
-             anyway on the fail-closed arm (its registration is gone) and so would \
-             pass even if the generation had never moved"
-        );
-        assert!(
-            matches!(
-                state.settle_install(claim, FakeHandle(1)),
-                InstallStep::Superseded(..)
-            ),
-            "a sign-out during the first assembly must still supersede it"
-        );
-    }
-
-    /// ⚠ **The same teardown must also come away with something to WAIT on**,
-    /// which invalidation alone does not give it.
-    ///
-    /// Invalidating the claim stops the signed-out account from being *served*;
-    /// it does nothing about the store the assembly already has **open on its
-    /// own OS thread**, and the erase that follows a sign-out is synchronous.
-    /// That gap is the measured `os error 32` (`PendingAssembly`'s docs), so
-    /// this pins the half the generation guard structurally cannot cover.
-    #[test]
-    fn a_teardown_during_the_first_assembly_comes_away_with_the_in_flight_half() {
-        let host: AccountRuntimeHost<u8> = AccountRuntimeHost::new();
-        let _claim = host.begin(7);
-        let teardown = host.take(StopReason::AccountSwitch);
-        assert!(teardown.settled.is_none(), "nothing installed yet");
-        assert!(
-            teardown.pending.is_some(),
-            "a sign-out mid-assembly must be able to wait for the store the \
-             assembly already opened — an empty slot is not 'nothing to stop'"
-        );
-        assert!(!teardown.is_empty());
-        assert_eq!(
-            teardown.payload,
-            Some(7),
-            "the payload a teardown needs most is the one whose slot is empty: \
-             on linux it is the runtime handle the wait is driven on"
-        );
-    }
-
-    /// A second teardown finds the seam emptied — the wait is handed over once,
-    /// not re-served to whoever asks next.
-    #[test]
-    fn the_in_flight_half_is_handed_over_exactly_once() {
-        let host: AccountRuntimeHost = AccountRuntimeHost::new();
-        let _claim = host.begin(());
-        assert!(host.take(StopReason::AccountSwitch).pending.is_some());
-        let second = host.take(StopReason::AccountSwitch);
-        assert!(second.pending.is_none());
-        assert!(second.is_empty());
     }
 
     /// A failed assembly — the task drops its claim without ever calling
@@ -1765,7 +1127,9 @@ mod tests {
              is the whole defect: the erase then runs against an open file"
         );
 
-        claim.1.expect("the claim carries the settle").failed();
+        // The assembly failed: its task drops the claim, whose settle half
+        // then reads as `failed`.
+        drop(claim);
         assert_eq!(
             stop.await.expect("the stop task"),
             StopOutcome::NothingToStop
@@ -1818,24 +1182,12 @@ mod tests {
         );
     }
 
-    /// An untouched host serves no handle, and a teardown on one is a no-op
-    /// rather than a panic — every host's teardown runs on paths where no
-    /// runtime was ever assembled (a failed assembly, a sign-out before login
-    /// completed).
-    #[test]
-    fn an_empty_host_serves_nothing_and_tears_down_cleanly() {
-        let host: AccountRuntimeHost = AccountRuntimeHost::new();
-        assert!(host.handle().is_none());
-        assert!(host.take(StopReason::AccountSwitch).is_empty());
-        assert!(host.handle().is_none());
-    }
-
     /// The reconnect wake is the pump's push-reset signal; without it a pump
     /// falls back to the backstop cadence alone, which is a latency
     /// regression no test downstream would name.
     #[test]
     fn the_session_wakes_attach_together() {
-        let params = build_params(inputs(), rpc(), "https://nest.example");
+        let params = build_params(inputs(), rpc(), "https://nest.example").unwrap();
         assert!(
             params.reconnects.is_none() && params.pushes.is_none(),
             "unset until the app attaches them"

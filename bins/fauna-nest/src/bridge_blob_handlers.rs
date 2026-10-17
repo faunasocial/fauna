@@ -1111,7 +1111,7 @@ fn revoke_service_user_handler() -> RpcHandler {
             // which would otherwise keep streaming per-user mailbox metadata to
             // the revoked socket (a Push is not an RPC — the capability gate
             // never runs for one). The 4401 also triggers the bridge's reconnect
-            // → whoami-denied → graceful-shutdown → re-key cycle immediately
+            // → upgrade-refused → revoked-status → graceful-shutdown → re-key cycle immediately
             // (`mail-bridge-lifecycle.md` § Service-user re-keying) instead of
             // waiting for the next natural WS drop. Per transport.md § Revocation
             // teardown. This in-memory cut being un-durable is fine: the revoked
@@ -2151,6 +2151,7 @@ fn webdav_list_files_handler() -> RpcHandler {
 /// and the point where a save is refused with `507` never disagree. Its own
 /// limiter bucket: file managers ask for quota on every folder refresh, and
 /// that polling must not starve the file operations' `_webdav_files` budget.
+/// Answers only for an actor serving at least one set, else `set_not_served`.
 fn webdav_quota_handler() -> RpcHandler {
     Box::new(|state, bridge_actor, payload| {
         Box::pin(async move {
@@ -2164,6 +2165,18 @@ fn webdav_quota_handler() -> RpcHandler {
                 .check(&bridge_actor, &target_actor, "_webdav_quota")
             {
                 return Err(rate_limited());
+            }
+            // Phase F bounds the MDA to folders the user flagged for WebDAV: an
+            // actor serving no set has no meter to read.
+            if !state
+                .db
+                .get_folders_for_actor_full(&target_actor)
+                .await
+                .map_err(internal)?
+                .iter()
+                .any(crate::db::FolderRow::is_webdav_served)
+            {
+                return Err(set_not_served());
             }
             let (used, limit) = state
                 .db
@@ -2733,6 +2746,22 @@ fn fetch_tls_cert_blob_handler() -> RpcHandler {
                 );
                 return Err(rate_limited());
             }
+            // Test-only: a bridge booted into the cert-less state
+            // (`tls_cert_withhold_test_hook`). Production compiles no check here.
+            #[cfg(feature = "test-hooks")]
+            if crate::tls_cert_withhold_test_hook::is_withheld(
+                &state
+                    .tls_cert_fetch_withheld
+                    .lock()
+                    .expect("tls_cert_fetch_withheld mutex poisoned"),
+                &req.bridge_role,
+                &req.bridge_id,
+            ) {
+                return encode_reply(&FetchTlsCertBlobReply {
+                    blob: None,
+                    extra: Default::default(),
+                });
+            }
             // Authoritative seal-on-read: seal the cert currently on disk
             // (whatever ACME / self-signed last wrote) freshly to this bridge,
             // keyed by the domain it fetches with and its attested x25519. This
@@ -2877,6 +2906,7 @@ fn report_log_events_handler() -> RpcHandler {
                 CallerClass::User
                 | CallerClass::Admin
                 | CallerClass::Custodian
+                | CallerClass::CustodiedFleet
                 | CallerClass::ThirdParty => {
                     return Err(permission_denied("log plane is a bridge-only surface"));
                 }
@@ -5870,7 +5900,7 @@ mod tests {
             .await
             .unwrap();
         let before = state.db.list_dkim_selectors(None).await.unwrap();
-        assert_eq!(before.len(), 1, "adding the domain minted its key");
+        assert_eq!(before.len(), 2, "adding the domain minted its key pair");
 
         let revoke = |state: Arc<AppState>, actor_id: Vec<u8>| async move {
             let payload = Bytes::from(
@@ -6191,19 +6221,30 @@ mod tests {
             .await
             .expect("admin list ok");
         let reply: ListDkimSelectorsReply = decode(&reply_bytes).unwrap();
-        assert_eq!(reply.selectors.len(), 1);
-        assert_eq!(reply.selectors[0].selector, "2026a");
         assert_eq!(
-            reply.selectors[0].public_dns_value,
-            stored[0].public_dns_value
+            reply
+                .selectors
+                .iter()
+                .map(|s| s.selector.as_str())
+                .collect::<Vec<_>>(),
+            ["2026a-rsa", "2026a-ed25519"],
+            "one label lists as its two algorithm selectors"
         );
+        for (listed, stored) in reply.selectors.iter().zip(&stored) {
+            assert_eq!(listed.public_dns_value, stored.public_dns_value);
+        }
         assert!(
             reply.selectors[0]
+                .public_dns_value
+                .starts_with("v=DKIM1; k=rsa; p=")
+        );
+        assert!(
+            reply.selectors[1]
                 .public_dns_value
                 .starts_with("v=DKIM1; k=ed25519; p=")
         );
 
-        // Revoke removes it.
+        // Revoke by label removes both of its keys.
         let revoke_req = RevokeDkimBlobRequest {
             domain: "example.com".into(),
             selector: "2026a".into(),
@@ -7045,6 +7086,7 @@ mod tests {
                 b"sealed-model",
                 None,
                 Some((&cp_public, b"sealed-copy")),
+                None,
             )
             .await
             .unwrap();
@@ -8982,6 +9024,7 @@ mod tests {
                 b"\xEE\xEE not a plaintext SpamModel",
                 None,
                 Some((holder_pubkey, &copy_model.to_bytes())),
+                None,
             )
             .await
             .unwrap();
@@ -9651,6 +9694,7 @@ mod tests {
                 b"\xEE\xEE not a plaintext SpamModel",
                 None,
                 Some((&cp_public, &copy_model.to_bytes())),
+                None,
             )
             .await
             .unwrap();

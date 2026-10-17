@@ -65,6 +65,33 @@ pub trait NestContentApi: Send + Sync {
     /// loses percent-encoding.)
     async fn get_with_query(&self, path: &str, params: &[(&str, &str)]) -> Result<Bytes, ApiError>;
 
+    /// `GET {base}{path}` (with `params` when non-empty) whose 2xx body is read
+    /// at most `max_bytes` — a reply past it is an [`ApiError::Transport`], not
+    /// a buffered allocation. For the readers of a body whose size the wire
+    /// bounds (a chunk, a manifest, a blob) from a responder that may be a
+    /// nest someone else runs; the plain verbs stay uncapped because they carry
+    /// documents of every size. The default checks the length after the fact
+    /// (right for a double with no wire); [`ReqwestNestContentApi`] overrides it
+    /// to stop reading at the cap.
+    async fn get_capped(
+        &self,
+        path: &str,
+        params: &[(&str, &str)],
+        max_bytes: u64,
+    ) -> Result<Bytes, ApiError> {
+        let body = if params.is_empty() {
+            self.get(path).await?
+        } else {
+            self.get_with_query(path, params).await?
+        };
+        if body.len() as u64 > max_bytes {
+            return Err(ApiError::Transport(
+                crate::capped::CappedReadError::TooLarge.to_string(),
+            ));
+        }
+        Ok(body)
+    }
+
     /// `POST {base}{path}` with a JSON body and the session bearer.
     async fn post_json(&self, path: &str, body: &serde_json::Value) -> Result<Bytes, ApiError>;
 
@@ -253,6 +280,25 @@ impl<B: BearerSource> NestContentApi for ReqwestNestContentApi<B> {
             .send(self.http.get(self.url(path)).query(params))
             .await?;
         Self::into_body(resp).await
+    }
+
+    async fn get_capped(
+        &self,
+        path: &str,
+        params: &[(&str, &str)],
+        max_bytes: u64,
+    ) -> Result<Bytes, ApiError> {
+        let resp = self
+            .send(self.http.get(self.url(path)).query(params))
+            .await?;
+        if !resp.status().is_success() {
+            return Self::into_body(resp).await;
+        }
+        let max = usize::try_from(max_bytes).unwrap_or(usize::MAX);
+        crate::capped::read_capped(resp, max)
+            .await
+            .map(Bytes::from)
+            .map_err(|e| ApiError::Transport(e.to_string()))
     }
 
     async fn post_json(&self, path: &str, body: &serde_json::Value) -> Result<Bytes, ApiError> {

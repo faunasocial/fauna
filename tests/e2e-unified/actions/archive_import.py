@@ -61,6 +61,10 @@ class ArchiveImportActions:
     def select_source(self, label: str) -> None:
         self.driver.select("archive-import-source-picker", label)
 
+    def source_help(self) -> str:
+        """How to request the export — and where: the platform's own page."""
+        return self._text_or_empty("archive-import-source-help")
+
     def next(self) -> None:
         self.driver.wait_for("wizard-next-button", timeout=10.0)
         self.driver.click("wizard-next-button")
@@ -106,6 +110,12 @@ class ArchiveImportActions:
     def select_audience_mode(self, label: str) -> None:
         self.driver.select("archive-import-scope-audience-mode", label)
 
+    def set_date_from(self, value: str) -> None:
+        self.driver.clear_and_type("archive-import-scope-date-from", value)
+
+    def set_date_to(self, value: str) -> None:
+        self.driver.clear_and_type("archive-import-scope-date-to", value)
+
     # ── step 4 — confirm / commit ────────────────────────────────────────
 
     def confirm_summary(self) -> str:
@@ -123,6 +133,16 @@ class ArchiveImportActions:
     def error_log(self) -> str:
         return self._text_or_empty("archive-import-error-log")
 
+    def progress_fraction(self) -> float:
+        """The overall bar's ``fraction`` attribute, 0.0–1.0."""
+        return float(self.driver.get_attr("archive-import-progress-bar", "fraction"))
+
+    def category_progress(self) -> list[tuple[str, str]]:
+        """``(name, progress)`` per category row on the Progress step."""
+        names = self.driver.get_texts("archive-import-category-progress-list-item-name")
+        progress = self.driver.get_texts("archive-import-category-progress-list-item-progress")
+        return list(zip(names, progress))
+
     def pause(self) -> None:
         self.driver.click("archive-import-pause-button")
 
@@ -139,6 +159,15 @@ class ArchiveImportActions:
         the restart-resume journey's causal anchor (convention 14). A test-agent
         command, never user-facing."""
         reply = self.driver.call_command("archive_import_pause_after", {"records": records})
+        assert not (isinstance(reply, dict) and reply.get("error")), reply
+
+    def arm_hold_after(self, records: int) -> None:
+        """Arm the machine's one-shot HOLD after ``records`` settled records:
+        the run stays Running there until the user's own Pause or Cancel
+        arrives — the pause/cancel journey's causal anchor (convention 14), so
+        the click never races the end of a small import. A test-agent command,
+        never user-facing."""
+        reply = self.driver.call_command("archive_import_hold_after", {"records": records})
         assert not (isinstance(reply, dict) and reply.get("error")), reply
 
     # ── step 6 — done ────────────────────────────────────────────────────

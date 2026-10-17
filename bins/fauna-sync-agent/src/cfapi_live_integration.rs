@@ -35,7 +35,7 @@
 //! would go green while the shipped path stayed broken, which is precisely the failure this
 //! track exists to end.
 //!
-//! ## Two cfapi facts these tests are built on (see `file-sync.md` § On-Demand Files)
+//! ## Two cfapi facts these tests are built on (see `on-demand-files.md` § On-Demand Files)
 //!
 //! 1. **cfapi does not fire callbacks for I/O originating in the provider's own process.** An
 //!    in-process `read_dir` of the root returns empty with no callback — indistinguishable from
@@ -77,7 +77,9 @@ use fauna_ipc::sync::{
 use fauna_sync_engine::FileHydrator;
 use fauna_sync_engine::always_resident::{EngineCommand, LocalWriteHost};
 use fauna_sync_engine::db::{SyncDb, SyncState};
-use fauna_sync_engine::engine::{PlaceholderFold, StaleHydratedRow};
+use fauna_sync_engine::engine::{
+    FoldedDelete, FoldedDeleteOutcome, PlaceholderFold, StaleHydratedRow,
+};
 use fauna_sync_engine::engine_host::CancellationToken;
 use fauna_sync_engine::enumerate::{PlaceholderLister, PlaceholderRow};
 
@@ -254,6 +256,14 @@ impl HydrationHost for DbBackedHost {
         HydrationHost::repoint_placeholder(&self.engine, row).await
     }
 
+    async fn apply_folded_delete(
+        &self,
+        delete: &FoldedDelete,
+        remove: &dyn for<'p> Fn(&'p std::path::Path) -> Result<()>,
+    ) -> Result<FoldedDeleteOutcome> {
+        HydrationHost::apply_folded_delete(&self.engine, delete, remove).await
+    }
+
     async fn repull(&self) -> Result<PlaceholderFold> {
         self.engine.fold_changes_for_test(&self.fold_on_repull)
     }
@@ -264,6 +274,10 @@ impl HydrationHost for DbBackedHost {
     // nothing to converge here and would only add wiremock traffic the assertions
     // below do not expect. A deliberate no-op, owned here, never a trait default.
     async fn converge_corpus_at_start(&self, _folder: &str) {}
+
+    async fn adopt_deposits(&self, _folder: &str) -> Vec<String> {
+        Vec::new()
+    }
 
     async fn refresh_and_converge_corpus(&self, _folder: &str) {}
 
@@ -288,8 +302,39 @@ impl HydrationHost for DbBackedHost {
 
     /// The real engine's gate over the real `SyncDb` — so the live pin-reaction
     /// tests exercise the shipped clean-predicate, not a fake's.
-    async fn is_dehydration_safe(&self, rel: &str) -> bool {
-        self.engine.is_dehydration_safe(rel)
+    async fn is_recorded_content(&self, rel: &str) -> bool {
+        self.engine.is_recorded_content(rel)
+    }
+
+    async fn keeps_own_record(&self, rel: &str) -> bool {
+        self.engine.keeps_own_record(rel)
+    }
+
+    async fn kept_own_records(&self) -> Result<Vec<String>> {
+        self.engine.kept_own_records()
+    }
+
+    /// The real engine's one-row read.
+    async fn placeholder_row(&self, rel: &str) -> Result<Option<PlaceholderRow>> {
+        HydrationHost::placeholder_row(&self.engine, rel).await
+    }
+
+    /// The real engine's replace — its fetch goes to the harness's nest (a
+    /// [`fauna_sync_engine::test_support::MockNest`] where a test serves the head).
+    async fn replace_superseded_own_record(&self, row: &StaleHydratedRow) -> Result<bool> {
+        HydrationHost::replace_superseded_own_record(&self.engine, row).await
+    }
+
+    // `download_head_to_path` keeps the trait default: the head's bytes are this
+    // harness's canned ones, served by path like every other fetch here.
+
+    /// The real engine's row move over the swapped-in bytes.
+    async fn record_replaced_head(
+        &self,
+        row: &StaleHydratedRow,
+        content: ContentHash,
+    ) -> Result<()> {
+        HydrationHost::record_replaced_head(&self.engine, row, content).await
     }
 }
 
@@ -348,7 +393,7 @@ fn seeded_manifest_hash(rel: &str) -> ContentHash {
 /// the tests that must prove an upload really left the machine.
 async fn harness_against_nest(rows: &[(&str, i64)], nest_base_url: &str) -> Harness {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let paths = SyncPaths::new(Some(tmp.path().to_path_buf()));
+    let paths = SyncPaths::at(tmp.path().to_path_buf());
     let root = tmp.path().join("root");
     std::fs::create_dir_all(&root).expect("create sync root");
 
@@ -430,8 +475,20 @@ impl Harness {
     /// (so the write half is the shipped one), plus whatever bytes the "nest" should answer a
     /// fetch with.
     fn host(&self, blobs: HashMap<String, Vec<u8>>) -> DbBackedHost {
+        self.host_with_residency(blobs, None)
+    }
+
+    /// [`Self::host`] over an engine built with `metadata_only` as the folder's
+    /// residency — the reading the posture refresh persists (`Some(true)` a
+    /// metadata-only folder, `Some(false)` a full one; `None` clears it, as an
+    /// unstamped binding does).
+    fn host_with_residency(
+        &self,
+        blobs: HashMap<String, Vec<u8>>,
+        metadata_only: Option<bool>,
+    ) -> DbBackedHost {
         DbBackedHost {
-            engine: self.engine(),
+            engine: self.engine_with_residency(metadata_only),
             root: self.root.clone(),
             blobs: Arc::new(std::sync::Mutex::new(blobs)),
             reconnect: watch::channel(0),
@@ -481,6 +538,15 @@ impl Harness {
             .map(|e| e.size_bytes)
     }
 
+    /// Re-read the manifest a row resolves — its hydration anchor — straight from the DB file.
+    fn db_manifest(&self, rel: &str) -> Option<ContentHash> {
+        SyncDb::open(&self.db_path)
+            .expect("reopen db")
+            .get_entry(rel)
+            .expect("get entry")
+            .and_then(|e| e.manifest_hash)
+    }
+
     /// Re-read a row's seen mark (`delete-propagation.md` § *An offline placeholder
     /// delete propagates*, decision (a)) straight from the DB file.
     fn db_seen(&self, rel: &str) -> bool {
@@ -509,42 +575,23 @@ impl Harness {
     /// lookalike. There is no role to pass: both roots build the same engine (both watch,
     /// both upload, both honour `.faunaignore`).
     fn engine(&self) -> fauna_sync_engine::engine::SyncEngine {
-        // A provisioned capability, because `CapabilityBearer` yields NO bearer without one
-        // and every nest-bound request would then fail inside the engine before it ever hit
-        // the wire. The guard tests don't care (nothing is supposed to reach the nest); the
-        // upload tests would silently "pass" for the wrong reason without it.
-        let capability = crate::bearer::CapabilitySlot::new(Some(SyncCapability::new(
-            vec![9u8; 32],
-            vec![7u8; 32],
-            self.nest_base_url.clone(),
-            "cfapi-live-test".into(),
-            BearerToken::new("test.bearer".into(), 4_000_000_000),
-        )));
-        fauna_sync_engine::engine_lifecycle::assemble_engine(
-            agent_engine_params(
-                agent_control_plane(capability, self.nest_base_url.clone(), [9u8; 32]),
-                // `db_path` is `FOLDER_REF`'s state DB under the data-root.
-                self.db_path
-                    .parent()
-                    .expect("the state DB sits under the data-root")
-                    .to_path_buf(),
-                self.root.clone(),
-                FOLDER_REF,
-                [7u8; 32],
-                [3u8; 32],
-                &crate::bridge::AgentPredecessors::default(), // no succession in this fixture
-                None,                                         // progress_tx
-                fauna_sync_engine::access_gate::AccessGate::new(),
-                None, // change_signer
-                std::sync::Arc::new(fauna_client_folders::MemoryFolderKeyStore::default()),
-            ),
-            fauna_sync_engine::engine_lifecycle::ResolvedBinding {
-                folder: FOLDER.to_string(),
-                ..Default::default()
-            },
+        self.engine_with_residency(None)
+    }
+
+    /// [`Self::engine`], built with `metadata_only` as the folder's residency reading.
+    fn engine_with_residency(
+        &self,
+        metadata_only: Option<bool>,
+    ) -> fauna_sync_engine::engine::SyncEngine {
+        production_engine(
+            &self.nest_base_url,
+            // `db_path` is `FOLDER_REF`'s state DB under the data-root.
+            self.db_path
+                .parent()
+                .expect("the state DB sits under the data-root"),
+            &self.root,
+            metadata_only,
         )
-        .expect("build the production SyncEngine")
-        .engine
     }
 
     /// The row's recorded **local content identity** — what both upload paths compare against
@@ -572,8 +619,53 @@ impl Harness {
     }
 }
 
+/// A **real production** [`SyncEngine`](fauna_sync_engine::engine::SyncEngine) for
+/// `FOLDER_REF` over `watch`, its state under `data_root`, its byte plane at
+/// `nest_base_url` — the harness's own engine, or another seat of the same folder
+/// (same keys, so each opens what the other sealed).
+fn production_engine(
+    nest_base_url: &str,
+    data_root: &std::path::Path,
+    watch: &std::path::Path,
+    metadata_only: Option<bool>,
+) -> fauna_sync_engine::engine::SyncEngine {
+    // A provisioned capability, because `CapabilityBearer` yields NO bearer without one
+    // and every nest-bound request would then fail inside the engine before it ever hit
+    // the wire. The guard tests don't care (nothing is supposed to reach the nest); the
+    // upload tests would silently "pass" for the wrong reason without it.
+    let capability = crate::bearer::CapabilitySlot::new(Some(SyncCapability::new(
+        vec![9u8; 32],
+        vec![7u8; 32],
+        nest_base_url.to_string(),
+        "cfapi-live-test".into(),
+        BearerToken::new("test.bearer".into(), 4_000_000_000),
+    )));
+    fauna_sync_engine::engine_lifecycle::assemble_engine(
+        agent_engine_params(
+            agent_control_plane(capability, nest_base_url.to_string(), [9u8; 32], [7u8; 32]),
+            data_root.to_path_buf(),
+            watch.to_path_buf(),
+            FOLDER_REF,
+            [7u8; 32],
+            [3u8; 32],
+            &crate::bridge::AgentPredecessors::default(), // no succession in this fixture
+            None,                                         // progress_tx
+            fauna_sync_engine::access_gate::AccessGate::new(),
+            None, // change_signer
+            std::sync::Arc::new(fauna_client_folders::MemoryFolderKeyStore::default()),
+        ),
+        fauna_sync_engine::engine_lifecycle::ResolvedBinding {
+            folder: FOLDER.to_string(),
+            metadata_only_residency: metadata_only,
+            ..Default::default()
+        },
+    )
+    .expect("build the production SyncEngine")
+    .engine
+}
+
 /// Enumerate the folder **from another process** — cfapi suppresses callbacks for the
-/// provider's own I/O, so an in-process `read_dir` would prove nothing (`file-sync.md`
+/// provider's own I/O, so an in-process `read_dir` would prove nothing (`on-demand-files.md`
 /// § On-Demand Files, the 2026-07-13 correction).
 ///
 /// `pub(crate)`: also the restore path's `restore_byteplane_tier3`'s copy of this
@@ -632,7 +724,7 @@ fn write_from_another_process(scratch: &std::path::Path, dst: &std::path::Path, 
 ///    this crate already deps `fauna-sync-engine` (Cargo.toml `[dependencies]`), so reaching
 ///    the builder would need only a **dev**-dependency re-declaration naming `test-helpers`
 ///    (rule (b) forbids naming it on the normal dep line).
-/// 2. `docs/goal/behavior/on-demand-files.md` § Headless-first testing rules that this
+/// 2. `docs/goal/behavior/on-demand-files-apple.md` § Headless-first testing rules that this
 ///    wiremock-nest playbook "should eventually lift onto the same real-nest shape" as
 ///    `bins/fauna-nest/tests/conformance_*_client.rs`. Investing it in a *wiremock* builder
 ///    now would move it away from where its owning goal doc says it is going.
@@ -1467,9 +1559,7 @@ async fn an_edit_plus_unpin_uploads_the_edit_but_does_not_free_it_until_recorded
         // ...but because the change RECORD never landed, the recorded head does
         // not match this content, so the gate MUST refuse to free the bytes.
         assert!(
-            !h.host(HashMap::new())
-                .is_dehydration_safe("notes.txt")
-                .await,
+            !h.engine().is_dehydration_safe("notes.txt"),
             "a chunks-uploaded-but-not-RECORDED edit is unrecoverable from the nest \
              (the head is still the pre-edit manifest), so is_dehydration_safe must \
              refuse — freeing it would destroy the edit"
@@ -1575,7 +1665,7 @@ async fn a_save_during_an_upload_survives_the_in_sync_flip_and_a_free_up_space()
     let abs = h.root.join("notes.txt");
     let placeholder = abs.to_string_lossy().to_string();
     assert!(
-        host.is_dehydration_safe("notes.txt").await,
+        host.engine.is_dehydration_safe("notes.txt"),
         "precondition: the hydrated bytes are the recorded content"
     );
 
@@ -1637,16 +1727,21 @@ struct SaveBeforeAssert {
 }
 
 impl crate::bridge::PlaceholderInvalidator for SaveBeforeAssert {
-    fn dehydrate(&self, abs_path: &std::path::Path) -> Result<()> {
+    fn dehydrate(&self, abs_path: &std::path::Path) -> crate::bridge::PlatformCall<'_> {
         CfapiInvalidator.dehydrate(abs_path)
     }
-    fn supersede(&self, abs_path: &std::path::Path, size: u64, mtime: i64) -> Result<()> {
+    fn supersede(
+        &self,
+        abs_path: &std::path::Path,
+        size: u64,
+        mtime: i64,
+    ) -> crate::bridge::PlatformCall<'_> {
         CfapiInvalidator.supersede(abs_path, size, mtime)
     }
     fn pin_action(&self, abs_path: &std::path::Path) -> Option<crate::pin_reaction::PinAction> {
         CfapiInvalidator.pin_action(abs_path)
     }
-    fn set_in_sync(&self, abs_path: &std::path::Path, usn: i64) -> Result<()> {
+    fn set_in_sync(&self, abs_path: &std::path::Path, usn: i64) -> crate::bridge::PlatformCall<'_> {
         use std::io::Write;
         std::fs::OpenOptions::new()
             .write(true)
@@ -1666,6 +1761,12 @@ impl crate::bridge::PlaceholderInvalidator for SaveBeforeAssert {
     }
     fn anchor(&self, abs_path: &std::path::Path, rel: &str) -> Result<()> {
         CfapiInvalidator.anchor(abs_path, rel)
+    }
+    fn is_pinned(&self, abs_path: &std::path::Path) -> bool {
+        CfapiInvalidator.is_pinned(abs_path)
+    }
+    fn pin(&self, abs_path: &std::path::Path) -> crate::bridge::PlatformCall<'_> {
+        CfapiInvalidator.pin(abs_path)
     }
     fn convert_dir_in_sync(&self, abs_path: &std::path::Path, rel: &str) -> Result<()> {
         CfapiInvalidator.convert_dir_in_sync(abs_path, rel)
@@ -1707,7 +1808,7 @@ async fn a_save_between_the_proof_and_the_in_sync_assertion_is_refused() {
     // The recorded content, re-saved: the not-in-sync bit is set, and the proof holds.
     write_from_another_process(&h._tmp.path().join("scratch.bin"), &abs, RECORDED);
     assert!(
-        host.is_dehydration_safe("notes.txt").await,
+        host.engine.is_dehydration_safe("notes.txt"),
         "precondition: the disk holds exactly the recorded content"
     );
 
@@ -1734,6 +1835,456 @@ async fn a_save_between_the_proof_and_the_in_sync_assertion_is_refused() {
         NEWER,
         "the newer save's bytes must survive verbatim"
     );
+}
+
+/// Put `body` at `rel` (written by another process, as the user's own file is) and record
+/// it as this device's own write: the `Synced` row a landed change record leaves, its
+/// proof earned by its own record (`ProofOrigin::OwnRecord`). **Before the root is
+/// connected**, or with a loop serving it: the other process's write first looks at the
+/// never-listed root, and a listing nobody serves waits out cfapi's 60 s timeout.
+fn record_own_write(h: &Harness, rel: &str, body: &[u8]) {
+    write_from_another_process(
+        &h._tmp.path().join("own-write.bin"),
+        &h.root.join(rel),
+        body,
+    );
+    let content = ContentHash::of_raw(body);
+    let db = SyncDb::open(&h.db_path).expect("open per-folder db");
+    db.upsert_entry(
+        rel,
+        Some(content),
+        None,
+        Some(seeded_manifest_hash(rel)),
+        SyncState::Synced,
+        0,
+        1_700_000_000,
+        body.len() as i64,
+        1,
+        None,
+    )
+    .expect("seed the recorded row");
+    db.stamp_recorded_content_from_local(rel, fauna_sync_engine::db::ProofOrigin::OwnRecord)
+        .expect("stamp the own record's proof");
+}
+
+/// The OS's in-sync bit for `abs` (`CF_PLACEHOLDER_STATE_IN_SYNC`).
+fn is_in_sync(abs: &std::path::Path) -> bool {
+    fauna_cfapi::placeholder_state(abs).expect("placeholder state") & CF_PLACEHOLDER_STATE_IN_SYNC
+        != 0
+}
+
+/// Is `abs` pinned — Explorer's *always keep on this device*?
+fn is_pinned(abs: &std::path::Path) -> bool {
+    fauna_cfapi::pin_state(abs).expect("pin state") == fauna_cfapi::PinState::Pinned
+}
+
+/// **An own record made in a metadata-only folder is kept, out of the OS's reach, and shown
+/// synced** (`file-sync.md` § Relay serving → *A holder keeps what it wrote*). The nest took
+/// no bytes, so this device may hold the only copy. Its recorded upload's flip pins it and
+/// then vouches it in sync — the honest display is *kept on this device* and synced, not
+/// sync-pending arrows that never clear — and nothing frees it: the shell's *Free up space*
+/// refuses with its reason, and the OS refuses to dehydrate a pinned file.
+#[tokio::test]
+async fn an_own_record_in_a_metadata_only_folder_is_kept_pinned_and_never_freed() {
+    const MINE: &[u8] = b"written here, in a folder whose nest keeps no bytes";
+
+    let h = harness(&[]).await;
+    record_own_write(&h, "mine.txt", MINE);
+    let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+    let _conn = crate::cfapi_host::register_and_connect(&h.root, cmd_tx).expect("connect");
+    let abs = h.root.join("mine.txt");
+    let host = h.host_with_residency(HashMap::new(), Some(true));
+
+    // Its change record landed: the loop's post-record call.
+    flip_recorded_in_sync(&host, &CfapiInvalidator, &h.root, &["mine.txt".to_string()]).await;
+
+    assert!(
+        is_pinned(&abs),
+        "the only copy is kept out of the OS's own eviction"
+    );
+    assert!(
+        is_in_sync(&abs),
+        "its record landed: shown in sync, not with sync-pending arrows for ever"
+    );
+    let res = handle_request(
+        &Request {
+            id: 9,
+            method: RequestMethod::FreeSpace {
+                path: abs.to_string_lossy().to_string(),
+            },
+        },
+        &h.state,
+    )
+    .await
+    .result;
+    let ResponseResult::Err(reason) = res else {
+        panic!("the shell's Free up space must refuse the only copy, got {res:?}");
+    };
+    assert!(
+        reason.contains("only copy"),
+        "the refusal says why: {reason}"
+    );
+    assert!(
+        fauna_cfapi::dehydrate_placeholder(&abs).is_err(),
+        "the OS refuses to dehydrate a pinned file"
+    );
+    assert!(!bytes_are_freed(&abs.to_string_lossy()));
+    assert_eq!(std::fs::read(&abs).expect("read back"), MINE);
+}
+
+/// **A flip to metadata-only reaches a body recorded while the folder was full** — the gate
+/// reads the residency when a body is freed, but the OS's own eviction asks no gate, and this
+/// body was vouched in sync, unpinned, while the nest held its bytes. The posture refresh that
+/// installs the new reading pins it, and Explorer's *Free up space* (an unpin from another
+/// process) is refused and the pin put back: the bytes stay, the row stays `Synced`, the file
+/// stays in sync. Red when only the shell verb is held: the pin reaction's bare dehydrate frees
+/// it.
+#[tokio::test]
+async fn a_body_recorded_while_full_is_kept_after_a_flip_to_metadata_only() {
+    const MINE: &[u8] = b"recorded while the folder was full";
+
+    let h = harness(&[]).await;
+    record_own_write(&h, "mine.txt", MINE);
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let _conn = crate::cfapi_host::register_and_connect(&h.root, cmd_tx).expect("connect");
+    let abs = h.root.join("mine.txt");
+
+    // Recorded while full: vouched in sync and unpinned — a full folder's body is freeable.
+    let full = h.host_with_residency(HashMap::new(), Some(false));
+    flip_recorded_in_sync(&full, &CfapiInvalidator, &h.root, &["mine.txt".to_string()]).await;
+    assert!(
+        is_in_sync(&abs) && !is_pinned(&abs),
+        "precondition: an evictable body"
+    );
+
+    // The folder is flipped to metadata-only: the posture refresh persists the reading
+    // (`SyncDb::set_residency_reading(true)`), which the loop's engine is built over.
+    let host = h.host_with_residency(HashMap::new(), Some(true));
+    let cancel = CancellationToken::new();
+    let loop_fut = run_hydration_loop(
+        host,
+        CfapiInvalidator,
+        cmd_rx,
+        None,
+        h.root.clone(),
+        FOLDER.to_string(),
+        cancel.clone(),
+        None,
+        None,
+    );
+    let driver = async {
+        eventually(
+            || is_pinned(&abs),
+            Duration::from_secs(10),
+            "the refresh's pass to pin the body the gate now keeps",
+        )
+        .await;
+
+        let p = abs.to_string_lossy().to_string();
+        tokio::task::spawn_blocking(move || run_helper(&p, "unpin", Duration::from_secs(15)))
+            .await
+            .expect("unpin task")
+            .expect("CfSetPinState(UNPINNED) from another process");
+        eventually(
+            || is_pinned(&abs),
+            Duration::from_secs(15),
+            "the pin reaction to refuse the unpin and put the pin back",
+        )
+        .await;
+        // Ample time for a dehydrate to (not) land.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        assert!(
+            !bytes_are_freed(&abs.to_string_lossy()),
+            "the only copy was freed after the flip"
+        );
+        assert_eq!(std::fs::read(&abs).expect("read back"), MINE);
+        assert_eq!(h.db_state("mine.txt"), Some(SyncState::Synced));
+        assert!(is_in_sync(&abs), "still shown synced");
+        cancel.cancel();
+    };
+    tokio::join!(loop_fut, driver);
+}
+
+/// Seat B of the same folder writes `body` at `rel` past this seat: its upload's chunks and
+/// manifest land in `store` (the mock nest's byte plane standing in for a holder that
+/// answers), and its manifest hash is the head the fold will report. Seat B's change record
+/// goes to a control plane nothing answers, so the upload is let go once the manifest landed.
+async fn upload_as_another_seat(
+    nest: &str,
+    store: &fauna_sync_engine::test_support::BlobStore,
+    rel: &str,
+    body: &[u8],
+) -> ContentHash {
+    let tmp = tempfile::tempdir().expect("seat B's tempdir");
+    let watch = tmp.path().join("root");
+    std::fs::create_dir_all(&watch).expect("seat B's root");
+    // Built full, so its chunks do land: the store plays the holder that answers.
+    let seat_b = production_engine(nest, &tmp.path().join("data"), &watch, Some(false));
+    std::fs::write(watch.join(rel), body).expect("seat B's write");
+    tokio::select! {
+        _ = seat_b.upload_file(rel) => {}
+        _ = eventually(
+            || store.last_manifest_hash.lock().unwrap().is_some(),
+            Duration::from_secs(30),
+            "seat B's manifest to reach the byte plane",
+        ) => {}
+    }
+    store.expect_last_manifest_hash()
+}
+
+/// What the fold reports for `rel` once the head is `manifest`.
+fn head_moved_to(rel: &str, manifest: ContentHash, size: usize) -> StaleHydratedRow {
+    StaleHydratedRow {
+        relative_path: rel.to_string(),
+        manifest_hash: manifest,
+        size_bytes: size as i64,
+        content_key_version: None,
+        remote_mtime: 1_700_000_100,
+        version_num: 2,
+        signed_as: None,
+    }
+}
+
+/// **A superseded own-record body is replaced, never freed** (`file-sync.md` § Relay
+/// serving), through the cfapi binding: another seat wrote past this seat's own record in a
+/// metadata-only folder, so the stale copy is the only copy of the old version and the new one
+/// rests on its writer. The gate refuses the free, the engine fetches the head over the body,
+/// and the ordinary file its atomic write leaves is re-anchored and vouched in sync — a
+/// fetched body now, which takes no pin and may be freed like any other.
+#[tokio::test]
+async fn a_superseded_own_record_in_a_metadata_only_folder_is_replaced_by_the_fetched_head() {
+    use crate::bridge::PlaceholderInvalidator as _;
+    const MINE: &[u8] = b"v1 - this seat's own record";
+    let theirs: Vec<u8> = (0..40_000u32).map(|i| (i % 241) as u8).collect();
+
+    let server = MockServer::start().await;
+    let store = fauna_sync_engine::test_support::MockNest::new()
+        .with_blob_plane()
+        .mount(&server)
+        .await;
+    let h = harness_against_nest(&[], &server.uri()).await;
+    let head = upload_as_another_seat(&server.uri(), &store, "mine.txt", &theirs).await;
+
+    record_own_write(&h, "mine.txt", MINE);
+    let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+    let _conn = crate::cfapi_host::register_and_connect(&h.root, cmd_tx).expect("connect");
+    let abs = h.root.join("mine.txt");
+    let host = h.host_with_residency(HashMap::new(), Some(true));
+    flip_recorded_in_sync(&host, &CfapiInvalidator, &h.root, &["mine.txt".to_string()]).await;
+    assert!(is_pinned(&abs), "precondition: the own record is kept");
+
+    let n = crate::bridge::apply_stale_hydrated(
+        &host,
+        &CfapiInvalidator,
+        &h.root,
+        &[head_moved_to("mine.txt", head, theirs.len())],
+        None,
+    )
+    .await;
+
+    assert_eq!(n, 1, "the seat follows the head");
+    assert_eq!(
+        std::fs::read(&abs).expect("read back"),
+        theirs,
+        "the new head's body is on the disk, in place of the old one"
+    );
+    let row = SyncDb::open(&h.db_path)
+        .expect("reopen db")
+        .get_entry("mine.txt")
+        .expect("get entry")
+        .expect("the row");
+    assert_eq!(row.state, SyncState::Synced, "the file stays hydrated");
+    assert_eq!(row.manifest_hash, Some(head), "the row is at the head");
+    assert!(
+        CfapiInvalidator.is_cloud_file(&abs),
+        "the written file is a placeholder again"
+    );
+    assert!(is_in_sync(&abs), "and vouched in sync");
+    assert!(
+        !is_pinned(&abs),
+        "a fetched body takes no pin — the next remote edit supersedes it"
+    );
+    assert!(
+        h.engine_with_residency(Some(true))
+            .is_dehydration_safe("mine.txt"),
+        "another holder has it: freeable like any fetched body"
+    );
+}
+
+/// The wait half of the rule: no holder answering for the new head leaves the old version
+/// whole — its body, its row, its pin — for the next pull to retry.
+#[tokio::test]
+async fn a_superseded_own_record_whose_head_no_holder_serves_is_kept_whole() {
+    const MINE: &[u8] = b"v1 - this seat's own record";
+
+    let server = MockServer::start().await;
+    let _store = fauna_sync_engine::test_support::MockNest::new()
+        .with_blob_plane()
+        .mount(&server)
+        .await;
+    let h = harness_against_nest(&[], &server.uri()).await;
+    record_own_write(&h, "mine.txt", MINE);
+    let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+    let _conn = crate::cfapi_host::register_and_connect(&h.root, cmd_tx).expect("connect");
+    let abs = h.root.join("mine.txt");
+    let host = h.host_with_residency(HashMap::new(), Some(true));
+    flip_recorded_in_sync(&host, &CfapiInvalidator, &h.root, &["mine.txt".to_string()]).await;
+
+    // A head nobody serves: its writer is away.
+    let unreachable = ContentHash::from_digest_raw([0x99; 32]);
+    let n = crate::bridge::apply_stale_hydrated(
+        &host,
+        &CfapiInvalidator,
+        &h.root,
+        &[head_moved_to("mine.txt", unreachable, 10)],
+        None,
+    )
+    .await;
+
+    assert_eq!(n, 0, "nothing followed");
+    assert_eq!(std::fs::read(&abs).expect("read back"), MINE);
+    assert_eq!(h.db_state("mine.txt"), Some(SyncState::Synced));
+    assert_eq!(
+        SyncDb::open(&h.db_path)
+            .expect("reopen db")
+            .get_entry("mine.txt")
+            .expect("get entry")
+            .and_then(|e| e.manifest_hash),
+        Some(seeded_manifest_hash("mine.txt")),
+        "the row has not moved"
+    );
+    assert!(
+        is_pinned(&abs) && is_in_sync(&abs),
+        "still kept, still shown synced"
+    );
+}
+
+/// **The measurement probe for keeping a body the OS may not evict** — what cfapi offers a
+/// provider whose seat must keep its own record of a metadata-only folder (`file-sync.md`
+/// § Relay serving → *A holder keeps what it wrote*). Reports, never asserts: its subject is
+/// OS behavior.
+///
+/// ```text
+/// cmd /c "scripts\cargo-win.cmd test -p fauna-sync-agent --lib diag_holder_keep_mechanics -- --ignored --nocapture"
+/// ```
+///
+/// **Measured 2026-10-08 on real Windows (Windows 11 ARM64), against a live connected root:**
+///
+/// | probe | result |
+/// |---|---|
+/// | pin a hydrated in-sync file | in-sync bit kept (`0x9`), **USN moved** — an in-sync assertion at the pre-pin USN is refused |
+/// | `CfDehydratePlaceholder` on a pinned file, in sync or not | refused `0x80070188` ("cannot be performed on pinned cloud files") |
+/// | `CfUpdatePlaceholder(DEHYDRATE)` (`supersede_placeholder`) on a pinned file | refused `0x80070188` |
+/// | a sibling temp file renamed over a pinned in-sync placeholder | succeeds; the result is an ORDINARY file (`0x0`), its pin gone |
+/// | anchor, then the in-sync assertion | `0x1` → `0x9` |
+/// | pin a not-in-sync placeholder, read the USN, assert in-sync | succeeds (`0x9`, still pinned) |
+/// | unpin | in-sync bit kept; the provider's own dehydrate then frees the file |
+///
+/// So a pin is the OS's own hold on a body — it refuses the provider's dehydrate too — and it
+/// must land BEFORE the USN an in-sync assertion is conditioned on is read.
+#[tokio::test]
+#[ignore = "measurement probe; run with --ignored --nocapture"]
+async fn diag_holder_keep_mechanics() {
+    use crate::bridge::PlaceholderInvalidator as _;
+    const BYTES: &[u8] = b"an own record no other device holds";
+    const FETCHED: &[u8] = b"the newer head, fetched from a holder";
+
+    let h = harness(&[("notes.txt", BYTES.len() as i64)]).await;
+    let _conn = hydrate_recorded_notes(&h, BYTES).await;
+    let abs = h.root.join("notes.txt");
+    let report = |label: &str| {
+        eprintln!(
+            "[diag] {label}: state={:?} pin={:?} usn={:?} freed={} cloud_file={}",
+            fauna_cfapi::placeholder_state(&abs).map(|s| format!("0x{s:x}")),
+            fauna_cfapi::pin_state(&abs),
+            fauna_cfapi::file_usn(&abs),
+            bytes_are_freed(&abs.to_string_lossy()),
+            CfapiInvalidator.is_cloud_file(&abs),
+        )
+    };
+
+    report("hydrated by the fetch arm");
+    let before = fauna_cfapi::file_usn(&abs).expect("usn");
+    eprintln!("[diag] pin -> {:?}", fauna_cfapi::set_pin_state(&abs, true));
+    report("pinned");
+    eprintln!(
+        "[diag] in-sync assertion at the pre-pin USN {before} -> {:?}",
+        fauna_cfapi::set_in_sync(&abs, before)
+    );
+    eprintln!(
+        "[diag] dehydrate a pinned in-sync file -> {:?}",
+        fauna_cfapi::dehydrate_placeholder(&abs)
+    );
+    report("after that dehydrate");
+    eprintln!(
+        "[diag] supersede a pinned in-sync file -> {:?}",
+        fauna_cfapi::supersede_placeholder(&abs, BYTES.len() as u64, 1_700_000_000)
+    );
+    report("after that supersede");
+
+    // The engine's write: a sibling temp file renamed over the placeholder.
+    let tmp = h.root.join(".notes.txt.diag-tmp");
+    std::fs::write(&tmp, FETCHED).expect("write the temp body");
+    eprintln!(
+        "[diag] rename over a pinned in-sync placeholder -> {:?}",
+        std::fs::rename(&tmp, &abs)
+    );
+    report("after the replace");
+    eprintln!(
+        "[diag] the body on disk now: {:?}",
+        std::fs::read(&abs).map(|b| String::from_utf8_lossy(&b).into_owned())
+    );
+    eprintln!(
+        "[diag] anchor -> {:?}",
+        fauna_cfapi::convert_to_placeholder_anchored(&abs, "notes.txt")
+    );
+    report("re-anchored");
+    let usn = fauna_cfapi::file_usn(&abs).expect("usn");
+    eprintln!(
+        "[diag] in-sync assertion -> {:?}",
+        fauna_cfapi::set_in_sync(&abs, usn)
+    );
+    report("asserted");
+
+    // A pin on a NOT-in-sync placeholder, and the order pin → USN → assert. `copy /y`
+    // replaces the file (an ordinary one again), so it is re-anchored as the flip does.
+    write_from_another_process(&h._tmp.path().join("scratch.bin"), &abs, FETCHED);
+    report("re-saved by another process");
+    eprintln!(
+        "[diag] anchor -> {:?}",
+        fauna_cfapi::convert_to_placeholder_anchored(&abs, "notes.txt")
+    );
+    report("re-anchored, not in sync");
+    eprintln!("[diag] pin -> {:?}", fauna_cfapi::set_pin_state(&abs, true));
+    report("pinned while not in sync");
+    eprintln!(
+        "[diag] dehydrate a pinned not-in-sync file -> {:?}",
+        fauna_cfapi::dehydrate_placeholder(&abs)
+    );
+    let usn = fauna_cfapi::file_usn(&abs).expect("usn");
+    eprintln!(
+        "[diag] in-sync assertion after the pin -> {:?}",
+        fauna_cfapi::set_in_sync(&abs, usn)
+    );
+    report("pinned and asserted");
+
+    // The control: unpinned and in sync, the provider's dehydrate frees it.
+    eprintln!(
+        "[diag] unpin -> {:?}",
+        fauna_cfapi::set_pin_state(&abs, false)
+    );
+    report("unpinned");
+    let usn = fauna_cfapi::file_usn(&abs).expect("usn");
+    eprintln!(
+        "[diag] in-sync assertion after the unpin -> {:?}",
+        fauna_cfapi::set_in_sync(&abs, usn)
+    );
+    eprintln!(
+        "[diag] dehydrate an unpinned in-sync file -> {:?}",
+        fauna_cfapi::dehydrate_placeholder(&abs)
+    );
+    report("after the control dehydrate");
 }
 
 /// **Pin flips made while the service was down are healed at the next start** —
@@ -2501,6 +3052,7 @@ async fn a_remote_edit_reaches_the_file_whole(held: HeldAs, old: &[u8], new: &[u
             .lock()
             .unwrap()
             .insert(REL.to_string(), new.to_vec());
+        let nudged = std::time::Instant::now();
         wake_tx.send(()).await.expect("nudge the loop");
         eventually(
             || {
@@ -2519,6 +3071,15 @@ async fn a_remote_edit_reaches_the_file_whole(held: HeldAs, old: &[u8], new: &[u
         )
         .await;
         measure("after the edit");
+        // Timed on the wall clock, not by `eventually`: a loop blocked on this thread blocks
+        // `eventually` with it, which then finds its condition met and never sees the time.
+        assert!(
+            nudged.elapsed() < Duration::from_secs(10),
+            "the fold describes the new version within seconds of the nudge, not {:?} — an \
+             update the serve thread makes waits on any outstanding fetch of the file, which \
+             only that thread answers, for cfapi's 60 s",
+            nudged.elapsed()
+        );
         assert_eq!(
             std::fs::metadata(&abs)
                 .and_then(|m| m.modified())
@@ -2570,6 +3131,1287 @@ async fn a_remote_edit_that_grows_a_cloud_only_file_reaches_it_whole() {
     a_remote_edit_reaches_the_file_whole(HeldAs::CloudOnly, b"short\n", &[b'g'; 248]).await;
 }
 
+/// Between the OS and the serve loop: passes every request on, except a fetch of `rel` while
+/// [`hold`](Self::hold) is set, which it keeps — a fetch the platform has outstanding that the
+/// loop has not been handed yet. What it passes and keeps is printed, timed from its start.
+struct FetchHold {
+    rel: &'static str,
+    holding: std::cell::Cell<bool>,
+    held: std::cell::RefCell<Vec<crate::bridge::HydrationCommand>>,
+    to_loop: mpsc::UnboundedSender<crate::bridge::HydrationCommand>,
+    start: std::time::Instant,
+}
+
+impl FetchHold {
+    fn new(
+        rel: &'static str,
+        to_loop: mpsc::UnboundedSender<crate::bridge::HydrationCommand>,
+    ) -> Self {
+        Self {
+            rel,
+            holding: std::cell::Cell::new(false),
+            held: std::cell::RefCell::new(Vec::new()),
+            to_loop,
+            start: std::time::Instant::now(),
+        }
+    }
+
+    /// Keep every fetch of `rel` from now on.
+    fn hold(&self) {
+        self.holding.set(true);
+    }
+
+    /// Hand the kept fetches to the loop, and keep no more.
+    fn release(&self) {
+        self.holding.set(false);
+        for cmd in self.held.borrow_mut().drain(..) {
+            let _ = self.to_loop.send(cmd);
+        }
+    }
+
+    fn is_holding_a_fetch(&self) -> bool {
+        !self.held.borrow().is_empty()
+    }
+
+    /// Relay `from_os` until it closes, then wait for ever.
+    async fn relay(
+        &self,
+        label: &str,
+        mut from_os: mpsc::UnboundedReceiver<crate::bridge::HydrationCommand>,
+    ) {
+        use crate::bridge::HydrationCommand;
+        while let Some(cmd) = from_os.recv().await {
+            let what = match &cmd {
+                HydrationCommand::Fetch {
+                    rel,
+                    offset,
+                    length,
+                    ..
+                } => format!("Fetch {rel} [{offset}, +{length})"),
+                HydrationCommand::Populate { parent_rel, .. } => {
+                    format!("Populate {parent_rel:?}")
+                }
+                HydrationCommand::Dehydrate { rel } => format!("Dehydrate {rel}"),
+                _ => "another request".to_string(),
+            };
+            let keep = self.holding.get()
+                && matches!(&cmd, HydrationCommand::Fetch { rel, .. } if rel == self.rel);
+            eprintln!(
+                "[relay] {label}: {:>6} ms  OS -> {what}{}",
+                self.start.elapsed().as_millis(),
+                if keep { "  (HELD)" } else { "" }
+            );
+            if keep {
+                self.held.borrow_mut().push(cmd);
+            } else {
+                let _ = self.to_loop.send(cmd);
+            }
+        }
+        std::future::pending::<()>().await
+    }
+}
+
+/// **A fold that re-describes a file the platform is fetching goes on serving the root**
+/// (`on-demand-files.md` § *A placeholder is present-but-unreadable*: 60 s spent on the single
+/// thread that serves hydration is a liveness failure of the whole root; § *A placeholder
+/// describes the version its row resolves*). A program opens the cloud-only `edit.txt` and its
+/// fetch is outstanding — kept between the OS and the loop, so the loop has not been handed it.
+/// Then another device's edit moves the file's row, and the fold re-describes the placeholder,
+/// an update that waits on that fetch. Until 2026-10-10 the fold made it on the serve thread,
+/// which then answered nothing until cfapi's 60 s request timeout ran out: another program
+/// opening `other.txt` meanwhile waited the minute out. Now the update is out while the loop
+/// answers the root, so `other.txt` opens at once; and once the fetch is let through, the
+/// placeholder describes the new version and an open reads it whole.
+#[tokio::test]
+async fn a_redescribe_of_a_file_being_fetched_never_holds_up_the_root() {
+    const REL: &str = "edit.txt";
+    const OTHER: &str = "other.txt";
+    const OLD: &[u8] = b"short\n";
+    const NEW: &[u8] = &[b'g'; 248];
+    const OTHER_BODY: &[u8] = b"another file\n";
+    const EDITED_AT_S: i64 = 1_700_000_100;
+
+    let h = harness(&[(REL, OLD.len() as i64), (OTHER, OTHER_BODY.len() as i64)]).await;
+    let mut host = h.host(HashMap::from([
+        (REL.to_string(), OLD.to_vec()),
+        (OTHER.to_string(), OTHER_BODY.to_vec()),
+    ]));
+    host.fold_on_repull = vec![remote_modify(10, REL, NEW.len() as i64, EDITED_AT_S * 1000)];
+    let nest_serves = Arc::clone(&host.blobs);
+    let (os_tx, os_rx) = mpsc::unbounded_channel();
+    let (loop_tx, loop_rx) = mpsc::unbounded_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(4);
+    let cancel = CancellationToken::new();
+    let _conn = crate::cfapi_host::register_and_connect(&h.root, os_tx).expect("connect");
+    let loop_fut = run_hydration_loop(
+        host,
+        CfapiInvalidator,
+        loop_rx,
+        None,
+        h.root.clone(),
+        FOLDER.to_string(),
+        cancel.clone(),
+        Some(wake_rx),
+        None,
+    );
+    let gate = FetchHold::new(REL, loop_tx);
+
+    let abs = h.root.join(REL);
+    let placeholder = abs.to_string_lossy().to_string();
+    let driver = async {
+        let root_str = h.root_str();
+        tokio::task::spawn_blocking(move || dir_from_another_process(&root_str))
+            .await
+            .expect("browse");
+        gate.hold();
+        let (p, dst) = (placeholder.clone(), h._tmp.path().join("first.bin"));
+        let first_open = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("cmd")
+                .args(["/c", "copy", "/b", &p, &dst.to_string_lossy()])
+                .output()
+                .map(|o| o.status.success())
+        });
+        eventually(
+            || gate.is_holding_a_fetch(),
+            Duration::from_secs(10),
+            "the program's fetch of the file to be outstanding",
+        )
+        .await;
+
+        // Another device's edit lands on the nest, and the nest nudges this folder.
+        nest_serves
+            .lock()
+            .unwrap()
+            .insert(REL.to_string(), NEW.to_vec());
+        let nudged = std::time::Instant::now();
+        wake_tx.send(()).await.expect("nudge the loop");
+        eventually(
+            || h.db_size(REL) == Some(NEW.len() as i64),
+            Duration::from_secs(10),
+            "the re-pull to point the row at the new head",
+        )
+        .await;
+        // The fold's re-describe is out now, waiting on the kept fetch.
+        let (p, dst) = (
+            h.root.join(OTHER).to_string_lossy().to_string(),
+            h._tmp.path().join("other.bin"),
+        );
+        let other = tokio::task::spawn_blocking(move || read_from_another_process(&p, &dst))
+            .await
+            .expect("open the other file");
+        // Timed on the wall clock: a loop blocked on this thread blocks `eventually` too.
+        let other_opened_after = nudged.elapsed();
+        eprintln!("[measure] the other file opened {other_opened_after:?} after the nudge");
+        assert_eq!(other, OTHER_BODY, "the other file is served whole");
+        assert!(
+            other_opened_after < Duration::from_secs(5),
+            "another file opens at once while the fold's update waits on a fetch, not after \
+             {other_opened_after:?}: the update is made off the thread that answers the root"
+        );
+
+        gate.release();
+        let first = first_open.await.expect("the first open");
+        eprintln!("[measure] the first open, once its fetch was let through: {first:?}");
+        eventually(
+            || std::fs::metadata(&abs).is_ok_and(|m| m.len() == NEW.len() as u64),
+            Duration::from_secs(15),
+            "the placeholder to describe the new version",
+        )
+        .await;
+        assert_eq!(
+            mtime_secs(&abs),
+            EDITED_AT_S as u64,
+            "the placeholder carries the new version's modification time"
+        );
+        let (p, dst) = (placeholder.clone(), h._tmp.path().join("after.bin"));
+        let read = tokio::task::spawn_blocking(move || read_from_another_process(&p, &dst))
+            .await
+            .expect("open after the edit");
+        assert_eq!(
+            read, NEW,
+            "the open after the edit reads the new version whole"
+        );
+        cancel.cancel();
+    };
+
+    tokio::select! {
+        _ = loop_fut => panic!("the hydration loop returned before the test finished asserting"),
+        _ = gate.relay("re-describe", os_rx) => unreachable!("the relay never returns"),
+        _ = driver => {}
+    }
+}
+
+/// **A file the user keeps on this device takes another device's edit whole, and stays kept**
+/// (`on-demand-files.md` § *Sync direction*: another device's edit reaches an on-demand folder's
+/// disk as it reaches an always-resident one's, whatever the file's pin). cfapi frees no pinned
+/// file — the superseding update and a bare dehydrate are both refused `0x80070188` — so the
+/// free-and-re-point road every other stale copy takes never moved one: a pinned file kept the
+/// old version for ever, its pull skipping it as "likely an unsynced local edit". It is REPLACED
+/// instead: the new head lands beside it and is swapped in already pinned, so the device holds a
+/// whole version, and the pin, at every instant.
+#[tokio::test]
+async fn a_remote_edit_reaches_a_pinned_file_whole_and_it_stays_pinned() {
+    const REL: &str = "kept.txt";
+    const OLD: &[u8] = b"short\n";
+    const NEW: &[u8] = &[b'g'; 248];
+    const EDITED_AT_S: i64 = 1_700_000_100;
+
+    let h = harness(&[(REL, OLD.len() as i64)]).await;
+    let mut host = h.host(HashMap::from([(REL.to_string(), OLD.to_vec())]));
+    host.fold_on_repull = vec![remote_modify(10, REL, NEW.len() as i64, EDITED_AT_S * 1000)];
+    let nest_serves = Arc::clone(&host.blobs);
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(4);
+    let cancel = CancellationToken::new();
+    let _conn = crate::cfapi_host::register_and_connect(&h.root, cmd_tx).expect("connect");
+    let loop_fut = run_hydration_loop(
+        host,
+        CfapiInvalidator,
+        cmd_rx,
+        None,
+        h.root.clone(),
+        FOLDER.to_string(),
+        cancel.clone(),
+        Some(wake_rx),
+        None,
+    );
+
+    let abs = h.root.join(REL);
+    let placeholder = abs.to_string_lossy().to_string();
+    let driver = async {
+        hold(&h, REL, HeldAs::Hydrated, OLD).await;
+        // Explorer's "Always keep on this device" is exactly this pin-state write.
+        fauna_cfapi::set_pin_state(&abs, true).expect("pin the hydrated file");
+        assert!(
+            is_pinned(&abs),
+            "precondition: the file is kept on this device"
+        );
+
+        // Another device's edit lands on the nest, and the nest nudges this folder.
+        nest_serves
+            .lock()
+            .unwrap()
+            .insert(REL.to_string(), NEW.to_vec());
+        wake_tx.send(()).await.expect("nudge the loop");
+        eventually(
+            || {
+                h.db_state(REL) == Some(SyncState::Synced)
+                    && h.db_size(REL) == Some(NEW.len() as i64)
+            },
+            Duration::from_secs(10),
+            "the re-pull to move the row to the new head over the bytes on the disk — a pinned \
+             file the pull skips keeps the old version for ever",
+        )
+        .await;
+        assert!(
+            !bytes_are_freed(&placeholder),
+            "a pinned file is never left without its bytes"
+        );
+        assert!(is_pinned(&abs), "the file is still kept on this device");
+        assert_eq!(
+            std::fs::read(&abs).expect("read the kept file"),
+            NEW,
+            "the kept file holds the new version, every byte"
+        );
+        assert_eq!(
+            std::fs::metadata(&abs)
+                .and_then(|m| m.modified())
+                .expect("stat the kept file"),
+            std::time::UNIX_EPOCH + Duration::from_secs(EDITED_AT_S as u64),
+            "the kept file carries the new version's modification time"
+        );
+        eventually(
+            || is_in_sync(&abs),
+            Duration::from_secs(5),
+            "the replaced file to be vouched in sync — not left with sync-pending arrows",
+        )
+        .await;
+        assert!(
+            !h.root.join(".fauna-replacing-kept.txt").exists(),
+            "no replacement litter is left beside it"
+        );
+
+        let (p, dst) = (placeholder.clone(), h._tmp.path().join("after.bin"));
+        let read = tokio::task::spawn_blocking(move || read_from_another_process(&p, &dst))
+            .await
+            .expect("open after the edit");
+        assert_eq!(read, NEW, "another program reads the new version whole");
+        cancel.cancel();
+    };
+
+    drive_until_asserted(loop_fut, driver).await;
+}
+
+/// **A pinned file carrying a local edit is never overwritten by another device's edit** — the
+/// dirty-file refusal holds on the replacing road exactly as on the freeing one
+/// (`file-versions.md` § Restore, ordering 3). The newer head IS fetchable, so the refusal can only
+/// come from the guard; the edit survives whole, the row stays for the conflict path, the pin
+/// stays, and nothing is left beside the file.
+#[tokio::test]
+async fn a_remote_edit_never_overwrites_a_pinned_file_with_an_unsynced_local_edit() {
+    const RECORDED: &[u8] = b"the version both devices hold";
+    // At least as long as RECORDED: the in-place write must replace every byte.
+    const LOCAL: &[u8] = b"edited here and not uploaded yet -- the only copy of it anywhere";
+    const HEAD: &[u8] = b"another device's edit";
+
+    let h = harness(&[("notes.txt", RECORDED.len() as i64)]).await;
+    let _conn = hydrate_recorded_notes(&h, RECORDED).await;
+    let abs = h.root.join("notes.txt");
+    fauna_cfapi::set_pin_state(&abs, true).expect("pin the hydrated file");
+    {
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&abs)
+            .and_then(|mut f| f.write_all(LOCAL))
+            .expect("the in-place local edit");
+    }
+    assert!(
+        is_pinned(&abs) && !is_in_sync(&abs),
+        "precondition: pinned, and the local edit cleared the in-sync bit"
+    );
+
+    let host = h.host(HashMap::from([("notes.txt".to_string(), HEAD.to_vec())]));
+    let superseded_by = StaleHydratedRow {
+        relative_path: "notes.txt".to_string(),
+        manifest_hash: ContentHash::of_raw(b"the other device's head"),
+        size_bytes: HEAD.len() as i64,
+        content_key_version: None,
+        remote_mtime: 1_700_000_100,
+        version_num: 1,
+        signed_as: None,
+    };
+    let invalidated = crate::bridge::apply_stale_hydrated(
+        &host,
+        &CfapiInvalidator,
+        &h.root,
+        &[superseded_by],
+        None,
+    )
+    .await;
+    assert_eq!(invalidated, 0, "the replacement must be refused");
+    assert_eq!(
+        std::fs::read(&abs).expect("read the local edit back"),
+        LOCAL,
+        "the unsynced local edit must survive whole"
+    );
+    assert_eq!(
+        h.db_state("notes.txt"),
+        Some(SyncState::Synced),
+        "the row is left for the conflict path"
+    );
+    assert_eq!(
+        h.db_size("notes.txt"),
+        Some(RECORDED.len() as i64),
+        "the row has not moved to the other device's head"
+    );
+    assert!(is_pinned(&abs), "the file is still kept on this device");
+    assert!(
+        !h.root.join(".fauna-replacing-notes.txt").exists(),
+        "no replacement litter is left beside it"
+    );
+}
+
+/// Hold `abs` open the way another program can: reading, every writer shut out. A
+/// placeholder's superseding update needs a writer's handle (`fauna_cfapi::supersede_placeholder`),
+/// so it is refused while this is open. Opening reads no data, so a cloud-only placeholder
+/// stays cloud-only.
+fn hold_open_shutting_out_writers(abs: &std::path::Path) -> std::fs::File {
+    use std::os::windows::fs::OpenOptionsExt;
+    /// `FILE_SHARE_READ` alone: other readers in, every writer out.
+    const FILE_SHARE_READ: u32 = 0x1;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(abs)
+        .expect("hold the file open, shutting writers out")
+}
+
+/// [`read_from_another_process`], retried every 250 ms while the open is refused, for up to
+/// `within` — the user retrying an open. Returns how many opens were refused before one
+/// succeeded, and what that one read.
+fn read_retrying_from_another_process(
+    src: &str,
+    scratch: &std::path::Path,
+    within: Duration,
+) -> (usize, Vec<u8>) {
+    let deadline = std::time::Instant::now() + within;
+    let mut refused = 0usize;
+    loop {
+        // A fresh destination per try: `copy` asks before overwriting one.
+        let dst = scratch.join(format!("try-{refused}.bin"));
+        let out = std::process::Command::new("cmd")
+            .args(["/c", "copy", "/b", src, &dst.to_string_lossy()])
+            .output()
+            .expect("spawn copy");
+        if out.status.success() {
+            return (
+                refused,
+                std::fs::read(&dst).expect("read the hydrated copy"),
+            );
+        }
+        refused += 1;
+        assert!(
+            std::time::Instant::now() < deadline,
+            "every open was refused for {within:?} ({refused} tries): {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// The file's last-write time, in Unix seconds.
+fn mtime_secs(abs: &std::path::Path) -> u64 {
+    std::fs::metadata(abs)
+        .and_then(|m| m.modified())
+        .expect("stat the file")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a last-write time after 1970")
+        .as_secs()
+}
+
+/// **A remote edit reaches a cloud-only file whose re-describe a held handle refused — once
+/// the handle closes** (`on-demand-files.md` § On-Demand Files, *A placeholder describes the
+/// version its row resolves*). Another device's edit moves the row, and the fold's
+/// re-describe is refused: another program holds the placeholder open, shutting writers out.
+/// The next fold sees an unchanged head and re-points nothing, so until 2026-10-09 the
+/// placeholder kept the old size for ever and every open of it was refused — the size check,
+/// never a truncated file. The refused re-describe is retried: once the program lets the file
+/// go, the placeholder describes the new version, and the next open reads it whole.
+#[tokio::test]
+async fn a_remote_edit_reaches_a_cloud_only_file_whose_redescribe_a_held_handle_refused() {
+    const REL: &str = "held.txt";
+    const OLD: &[u8] = b"short\n";
+    const NEW: &[u8] = &[b'g'; 248];
+    const EDITED_AT_S: i64 = 1_700_000_100;
+
+    let h = harness(&[(REL, OLD.len() as i64)]).await;
+    let mut host = h.host(HashMap::from([(REL.to_string(), OLD.to_vec())]));
+    host.fold_on_repull = vec![remote_modify(10, REL, NEW.len() as i64, EDITED_AT_S * 1000)];
+    let nest_serves = Arc::clone(&host.blobs);
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(4);
+    let cancel = CancellationToken::new();
+    let _conn = crate::cfapi_host::register_and_connect(&h.root, cmd_tx).expect("connect");
+    let loop_fut = run_hydration_loop(
+        host,
+        CfapiInvalidator,
+        cmd_rx,
+        None,
+        h.root.clone(),
+        FOLDER.to_string(),
+        cancel.clone(),
+        Some(wake_rx),
+        None,
+    );
+
+    let abs = h.root.join(REL);
+    let placeholder = abs.to_string_lossy().to_string();
+    let driver = async {
+        hold(&h, REL, HeldAs::CloudOnly, OLD).await;
+        let held = hold_open_shutting_out_writers(&abs);
+
+        // Another device's edit lands on the nest, and the nest nudges this folder.
+        nest_serves
+            .lock()
+            .unwrap()
+            .insert(REL.to_string(), NEW.to_vec());
+        wake_tx.send(()).await.expect("nudge the loop");
+        eventually(
+            || {
+                h.db_state(REL) == Some(SyncState::Placeholder)
+                    && h.db_size(REL) == Some(NEW.len() as i64)
+            },
+            Duration::from_secs(10),
+            "the re-pull to point the row at the new head",
+        )
+        .await;
+        assert_eq!(
+            std::fs::metadata(&abs)
+                .expect("stat the held placeholder")
+                .len(),
+            OLD.len() as u64,
+            "precondition: the re-describe is refused while the file is held"
+        );
+        assert!(
+            bytes_are_freed(&placeholder),
+            "precondition: holding the placeholder open hydrated nothing"
+        );
+
+        drop(held);
+        eventually(
+            || std::fs::metadata(&abs).is_ok_and(|m| m.len() == NEW.len() as u64),
+            Duration::from_secs(15),
+            "the placeholder to describe the new version once the file is let go — the fold \
+             never re-points an unchanged head, so nothing else ever re-describes it",
+        )
+        .await;
+        assert_eq!(
+            mtime_secs(&abs),
+            EDITED_AT_S as u64,
+            "the placeholder carries the new version's modification time"
+        );
+
+        let (p, dst) = (placeholder.clone(), h._tmp.path().join("after.bin"));
+        let read = tokio::task::spawn_blocking(move || read_from_another_process(&p, &dst))
+            .await
+            .expect("open after the handle closed");
+        assert_eq!(read, NEW, "the open reads the new version whole");
+        cancel.cancel();
+    };
+
+    drive_until_asserted(loop_fut, driver).await;
+}
+
+/// The restore of `rel` from `current` to `restored`, with its free refused: `rel` is opened
+/// here (hydrated, `Synced`), the restored version is what the nest now serves, and the
+/// restore's own local apply (`pipe_server::apply_restore_locally`) runs while another program
+/// holds the file open, shutting writers out. The row moves first, as ordering 2 says, and the
+/// free that follows is refused — leaving the correct row over a stale cache.
+async fn restore_whose_free_a_held_handle_refused(
+    h: &Harness,
+    nest_serves: &std::sync::Mutex<HashMap<String, Vec<u8>>>,
+    rel: &str,
+    current: &[u8],
+    restored: &[u8],
+) {
+    hold(h, rel, HeldAs::Hydrated, current).await;
+    let abs = h.root.join(rel);
+    nest_serves
+        .lock()
+        .unwrap()
+        .insert(rel.to_string(), restored.to_vec());
+
+    let held = hold_open_shutting_out_writers(&abs);
+    crate::pipe_server::apply_restore_locally(
+        &h.state,
+        &abs.to_string_lossy(),
+        FOLDER_REF,
+        rel,
+        &crate::versions::RestoredVersion {
+            manifest_hash: [0x6c; 32],
+            size_bytes: restored.len() as i64,
+            content_key_version: None,
+            recorded_seq: 11,
+        },
+        None,
+        crate::config::LocationMode::OnDemand,
+    )
+    .await;
+    drop(held);
+
+    assert_eq!(
+        (h.db_state(rel), h.db_size(rel)),
+        (Some(SyncState::Placeholder), Some(restored.len() as i64)),
+        "precondition: the restore re-pointed the row"
+    );
+    assert!(
+        !bytes_are_freed(&abs.to_string_lossy()),
+        "precondition: the restore's free was refused — the stale cache is still on the disk"
+    );
+    assert_eq!(
+        std::fs::metadata(&abs).expect("stat the stale cache").len(),
+        current.len() as u64,
+        "precondition: the stale cache is the version the restore replaced"
+    );
+}
+
+/// **A restore whose free a held file refused opens as the restored version after a bare
+/// eviction** (`file-versions.md` § Restore, ordering 2: a failed free leaves a correct row and
+/// a stale cache, which a later eviction completes). The OS evicts what it likes, and its
+/// `CfDehydratePlaceholder` keeps the placeholder's size — so the freed placeholder still
+/// described the version the restore replaced, and every open of it was refused until another
+/// edit moved the row again. The refused open now re-describes the placeholder from the row,
+/// and the user's retry reads the restored version whole.
+///
+/// The eviction is staged in-process, with the call Storage Sense makes: an out-of-process
+/// `CfDehydratePlaceholder` hangs (`diag_cross_process_dehydrate`), and cfapi tells a provider
+/// nothing of its own I/O — so this is the eviction no notification reaches, and only the open
+/// is left to heal it.
+#[tokio::test]
+async fn a_restore_whose_free_was_refused_opens_whole_after_a_bare_eviction() {
+    const REL: &str = "restored.txt";
+    const CURRENT: &[u8] = b"the current version, which the user is about to restore away\n";
+    const RESTORED: &[u8] = b"the old one\n";
+
+    let h = harness(&[(REL, CURRENT.len() as i64)]).await;
+    let host = h.host(HashMap::from([(REL.to_string(), CURRENT.to_vec())]));
+    let nest_serves = Arc::clone(&host.blobs);
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let _conn = crate::cfapi_host::register_and_connect(&h.root, cmd_tx).expect("connect");
+    let loop_fut = run_hydration_loop(
+        host,
+        CfapiInvalidator,
+        cmd_rx,
+        None,
+        h.root.clone(),
+        FOLDER.to_string(),
+        cancel.clone(),
+        None,
+        None,
+    );
+
+    let abs = h.root.join(REL);
+    let placeholder = abs.to_string_lossy().to_string();
+    let driver = async {
+        let staging = std::time::Instant::now();
+        restore_whose_free_a_held_handle_refused(&h, &nest_serves, REL, CURRENT, RESTORED).await;
+        eprintln!(
+            "[measure] staged the refused restore in {:?}",
+            staging.elapsed()
+        );
+
+        fauna_cfapi::dehydrate_placeholder(&abs).expect("the OS's own eviction");
+        assert!(
+            bytes_are_freed(&placeholder),
+            "precondition: the stale cache is evicted"
+        );
+        assert_eq!(
+            std::fs::metadata(&abs)
+                .expect("stat the evicted file")
+                .len(),
+            CURRENT.len() as u64,
+            "precondition: a bare eviction keeps the size of the version it freed"
+        );
+
+        let (p, scratch) = (placeholder.clone(), h._tmp.path().to_path_buf());
+        let opening = std::time::Instant::now();
+        let (refused, read) = tokio::task::spawn_blocking(move || {
+            read_retrying_from_another_process(&p, &scratch, Duration::from_secs(15))
+        })
+        .await
+        .expect("open the restored file");
+        eprintln!(
+            "[measure] opens refused before the placeholder healed: {refused}, in {:?}",
+            opening.elapsed()
+        );
+        assert_eq!(
+            read, RESTORED,
+            "the user's retried open reads the restored version whole"
+        );
+        assert!(
+            opening.elapsed() < Duration::from_secs(30),
+            "the opens are answered at once, refused or served — an update made on the serve              thread while a fetch of the file is outstanding holds the loop for cfapi's 60 s"
+        );
+        cancel.cancel();
+    };
+
+    drive_until_asserted(loop_fut, driver).await;
+}
+
+/// **…and Explorer's *Free up space* completes it, while nothing on the way records the
+/// version it replaced** (`file-versions.md` § Restore, ordering 2: a failed free leaves a
+/// correct row and a stale cache, which whatever frees it later completes). The stale cache
+/// is the version the restore replaced, bytes the nest already holds, so neither the next
+/// converge nor the unpin's own watcher event may take it for a local edit. Until 2026-10-10
+/// both did. The restore left the row with no local identity. The converge marked it
+/// `LocallyModified` and uploaded the replaced version, which was then recorded over the
+/// restore on every device. The unpin's free then found no `Placeholder` row to describe and
+/// kept the replaced version's size, so every open was refused. Now the restore keeps the
+/// identity of the bytes still on the disk, the uploader declines a `Placeholder` row over
+/// exactly those bytes, and reconcile leaves the row's restored size for the free to read.
+/// The freed placeholder then describes the restored version, and the very first open reads
+/// it whole.
+///
+/// The free is the one Explorer's *Free up space* reaches: a cross-process
+/// `CfSetPinState(UNPINNED)`, seen by the live watcher arm, whose batch reaches the uploader
+/// before the pin reaction (`bridge::free_local_bytes`). The folder is full — the posture
+/// refresh's reading — where the holder-keeps gate frees a body the nest holds.
+#[tokio::test]
+async fn a_restore_whose_free_was_refused_is_completed_by_the_providers_own_free() {
+    const REL: &str = "restored.txt";
+    const CURRENT: &[u8] = b"the current version, which the user is about to restore away\n";
+    const RESTORED: &[u8] = b"the old one\n";
+
+    let nest = MockServer::start().await;
+    let chunk_posts = mount_nest_byte_plane(&nest).await;
+    let h = harness_against_nest(&[(REL, CURRENT.len() as i64)], &nest.uri()).await;
+    let host = h.host_with_residency(
+        HashMap::from([(REL.to_string(), CURRENT.to_vec())]),
+        Some(false),
+    );
+    let nest_serves = Arc::clone(&host.blobs);
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let _conn = crate::cfapi_host::register_and_connect(&h.root, cmd_tx).expect("connect");
+    let loop_fut = run_hydration_loop(
+        host,
+        CfapiInvalidator,
+        cmd_rx,
+        None,
+        h.root.clone(),
+        FOLDER.to_string(),
+        cancel.clone(),
+        None,
+        None,
+    );
+
+    let abs = h.root.join(REL);
+    let placeholder = abs.to_string_lossy().to_string();
+    let driver = async {
+        restore_whose_free_a_held_handle_refused(&h, &nest_serves, REL, CURRENT, RESTORED).await;
+
+        // The rescan tick's converge, run here: the loop's own tick is an hour away. Its
+        // engine carries the folder's reading too, since building one with none clears it.
+        let converging = h.host_with_residency(HashMap::new(), Some(false));
+        let recorded = LocalWriteHost::converge(&converging, FOLDER).await;
+        assert!(recorded.is_empty(), "the converge records nothing");
+        assert_eq!(
+            chunk_posts.load(Ordering::SeqCst),
+            0,
+            "the converge takes the stale cache for no edit: the replaced version never leaves \
+             this machine"
+        );
+        assert_eq!(
+            (h.db_state(REL), h.db_size(REL)),
+            (Some(SyncState::Placeholder), Some(RESTORED.len() as i64)),
+            "the row still names the restored version, at its size: the free reads that size \
+             to describe the placeholder"
+        );
+
+        let p = placeholder.clone();
+        tokio::task::spawn_blocking(move || run_helper(&p, "unpin", Duration::from_secs(15)))
+            .await
+            .expect("unpin task")
+            .expect("CfSetPinState(UNPINNED) from another process");
+        eventually(
+            || {
+                bytes_are_freed(&placeholder)
+                    && std::fs::metadata(&abs).is_ok_and(|m| m.len() == RESTORED.len() as u64)
+            },
+            Duration::from_secs(30),
+            "the unpinned stale cache to be freed, its placeholder describing the restored \
+             version — a bare dehydrate keeps the replaced version's size, and every open of it \
+             is refused",
+        )
+        .await;
+        assert_eq!(
+            chunk_posts.load(Ordering::SeqCst),
+            0,
+            "the unpin's watcher event takes the stale cache for no edit either"
+        );
+
+        let (p, dst) = (placeholder.clone(), h._tmp.path().join("after.bin"));
+        let read = tokio::task::spawn_blocking(move || read_from_another_process(&p, &dst))
+            .await
+            .expect("open the restored file");
+        assert_eq!(
+            read, RESTORED,
+            "the first open reads the restored version whole"
+        );
+        cancel.cancel();
+    };
+
+    drive_until_asserted(loop_fut, driver).await;
+}
+
+/// **A real edit of that stale cache still uploads** (`on-demand-files.md` § *Sync direction*:
+/// a change to a tracked file must be uploaded; `file-versions.md` § Restore, ordering 2: the
+/// edit uploads as a conflict with the restore). The cache is inert only while it is the
+/// version the restore replaced. Another program's write makes it new content, and the
+/// uploader takes it.
+#[tokio::test]
+async fn an_edit_of_a_refused_restores_stale_cache_still_uploads() {
+    const REL: &str = "restored.txt";
+    const CURRENT: &[u8] = b"the current version, which the user is about to restore away\n";
+    const RESTORED: &[u8] = b"the old one\n";
+    const EDITED: &[u8] = b"the user typed this over the stale copy\n";
+
+    let nest = MockServer::start().await;
+    let chunk_posts = mount_nest_byte_plane(&nest).await;
+    let h = harness_against_nest(&[(REL, CURRENT.len() as i64)], &nest.uri()).await;
+    let host = h.host(HashMap::from([(REL.to_string(), CURRENT.to_vec())]));
+    let nest_serves = Arc::clone(&host.blobs);
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let _conn = crate::cfapi_host::register_and_connect(&h.root, cmd_tx).expect("connect");
+    let loop_fut = run_hydration_loop(
+        host,
+        CfapiInvalidator,
+        cmd_rx,
+        None,
+        h.root.clone(),
+        FOLDER.to_string(),
+        cancel.clone(),
+        None,
+        None,
+    );
+
+    let abs = h.root.join(REL);
+    let scratch = h._tmp.path().join("scratch.bin");
+    let driver = async {
+        restore_whose_free_a_held_handle_refused(&h, &nest_serves, REL, CURRENT, RESTORED).await;
+
+        write_from_another_process(&scratch, &abs, EDITED);
+        eventually(
+            || h.db_uploaded(REL, ContentHash::of_raw(EDITED)),
+            Duration::from_secs(30),
+            "the edit of the stale cache to upload — the watcher saw the write and the uploader \
+             took it as the edit it is",
+        )
+        .await;
+        assert!(
+            chunk_posts.load(Ordering::SeqCst) > 0,
+            "the edit's bytes reach the nest's byte plane"
+        );
+        cancel.cancel();
+    };
+
+    drive_until_asserted(loop_fut, driver).await;
+}
+
+/// The manifest every pinned-restore test below restores to.
+const RESTORED_MANIFEST: [u8; 32] = [0x6c; 32];
+
+/// The restore of `rel` to `restored`, recorded on the nest as `recorded_as`: the nest now
+/// serves the restored version, and the restore's own local apply
+/// (`pipe_server::apply_restore_locally`) runs — the second half of the IPC verb, after the
+/// record.
+async fn restore_locally(
+    h: &Harness,
+    nest_serves: &std::sync::Mutex<HashMap<String, Vec<u8>>>,
+    rel: &str,
+    restored: &[u8],
+    recorded_as: [u8; 32],
+) {
+    nest_serves
+        .lock()
+        .unwrap()
+        .insert(rel.to_string(), restored.to_vec());
+    crate::pipe_server::apply_restore_locally(
+        &h.state,
+        &h.root.join(rel).to_string_lossy(),
+        FOLDER_REF,
+        rel,
+        &crate::versions::RestoredVersion {
+            manifest_hash: RESTORED_MANIFEST,
+            size_bytes: restored.len() as i64,
+            content_key_version: None,
+            recorded_seq: 11,
+        },
+        Some(recorded_as),
+        crate::config::LocationMode::OnDemand,
+    )
+    .await;
+}
+
+/// **Restoring an older version of a file kept on this device puts that version on the disk,
+/// whole and still kept** (`file-versions.md` § Restore, ordering 2's pinned branch;
+/// `on-demand-files.md` § On-Demand Files, *A placeholder describes the version its row
+/// resolves*: a pinned file is replaced, never freed). cfapi frees no pinned file — the
+/// restore's superseding update is refused `0x80070188` — so until 2026-10-10 the restore
+/// re-pointed the row and left the pinned copy at the version it replaced, hydrated and in
+/// sync, under a row naming the restored one, which the next converge then took for a local
+/// edit. The restored version now reaches the copy as another device's edit does, on the
+/// root's own loop: fetched beside it, swapped in pin and all, the row moved last — so the
+/// replaced version is never read back as an edit, and nothing is uploaded.
+#[tokio::test]
+async fn restoring_a_pinned_file_puts_the_restored_version_on_the_disk_and_keeps_it_pinned() {
+    const REL: &str = "kept.txt";
+    const CURRENT: &[u8] = b"the current version, which the user is about to restore away\n";
+    const RESTORED: &[u8] = b"the old one\n";
+    const RECORDED_AS: [u8; 32] = [0x5a; 32];
+
+    let h = harness(&[(REL, CURRENT.len() as i64)]).await;
+    let host = h.host(HashMap::from([(REL.to_string(), CURRENT.to_vec())]));
+    let nest_serves = Arc::clone(&host.blobs);
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    // The root's command channel, where the pipe server routes a verb to its loop.
+    let (engine_cmd_tx, engine_cmd_rx) = mpsc::channel(2);
+    h.state
+        .engine_cmd_senders
+        .lock()
+        .await
+        .insert(FOLDER_REF.to_wire(), 0, engine_cmd_tx);
+    let cancel = CancellationToken::new();
+    let _conn = crate::cfapi_host::register_and_connect(&h.root, cmd_tx).expect("connect");
+    let loop_fut = run_hydration_loop(
+        host,
+        CfapiInvalidator,
+        cmd_rx,
+        None,
+        h.root.clone(),
+        FOLDER.to_string(),
+        cancel.clone(),
+        None,
+        Some(engine_cmd_rx),
+    );
+
+    let abs = h.root.join(REL);
+    let placeholder = abs.to_string_lossy().to_string();
+    let driver = async {
+        hold(&h, REL, HeldAs::Hydrated, CURRENT).await;
+        // Explorer's "Always keep on this device" is exactly this pin-state write.
+        fauna_cfapi::set_pin_state(&abs, true).expect("pin the hydrated file");
+        assert!(
+            is_pinned(&abs) && is_in_sync(&abs),
+            "precondition: the file is kept on this device, in sync"
+        );
+
+        restore_locally(&h, &nest_serves, REL, RESTORED, RECORDED_AS).await;
+
+        assert_eq!(
+            std::fs::read(&abs).expect("read the kept file"),
+            RESTORED,
+            "the kept file holds the restored version, every byte — not the version the \
+             restore replaced"
+        );
+        assert!(is_pinned(&abs), "the file is still kept on this device");
+        assert!(
+            !bytes_are_freed(&placeholder),
+            "a pinned file is never left without its bytes"
+        );
+        assert_eq!(
+            (h.db_state(REL), h.db_size(REL), h.db_manifest(REL)),
+            (
+                Some(SyncState::Synced),
+                Some(RESTORED.len() as i64),
+                Some(ContentHash::from_digest_raw(RESTORED_MANIFEST))
+            ),
+            "the row stands at the restored version, Synced over the bytes on the disk"
+        );
+        assert_eq!(
+            h.db_local_hash(REL),
+            Some(fauna_core::chunker_stream::content_hash_streaming(&abs).expect("hash the file")),
+            "the row's local identity is the bytes on the disk, so no pass reads them as an edit"
+        );
+        assert_eq!(
+            SyncDb::open(&h.db_path)
+                .expect("reopen db")
+                .head_signers_of_manifest(&ContentHash::from_digest_raw(RESTORED_MANIFEST))
+                .expect("read the head's signer"),
+            vec![Some(RECORDED_AS)],
+            "the restored head is signed as the identity the restore recorded as — a head with \
+             no signer opens under no owner root"
+        );
+        assert!(
+            !h.root.join(".fauna-replacing-kept.txt").exists(),
+            "no replacement litter is left beside it"
+        );
+        eventually(
+            || is_in_sync(&abs),
+            Duration::from_secs(5),
+            "the replaced file to be vouched in sync — not left with sync-pending arrows",
+        )
+        .await;
+
+        // The replaced version is never recorded over the restore: past the watcher's
+        // debounce, and through the next rescan's converge, the row is untouched — an upload
+        // against this harness's unreachable nest would leave it in flight.
+        tokio::time::sleep(fauna_sync_engine::always_resident::DEBOUNCE_DELAY * 2).await;
+        let converged = LocalWriteHost::converge(&h.host(HashMap::new()), FOLDER).await;
+        assert!(
+            converged.is_empty(),
+            "the converge records nothing: {converged:?}"
+        );
+        assert_eq!(
+            (h.db_state(REL), h.db_manifest(REL)),
+            (
+                Some(SyncState::Synced),
+                Some(ContentHash::from_digest_raw(RESTORED_MANIFEST))
+            ),
+            "nothing took the kept file for a local edit of the restored one"
+        );
+
+        let (p, dst) = (placeholder.clone(), h._tmp.path().join("after.bin"));
+        let read = tokio::task::spawn_blocking(move || read_from_another_process(&p, &dst))
+            .await
+            .expect("open after the restore");
+        assert_eq!(
+            read, RESTORED,
+            "another program reads the restored version whole"
+        );
+        cancel.cancel();
+    };
+
+    drive_until_asserted(loop_fut, driver).await;
+}
+
+/// **…but a pinned file carrying a local edit is never overwritten by the restore** — the
+/// dirty-file refusal holds on the restore's road as on a remote edit's (`file-versions.md`
+/// § Restore, ordering 2's pinned branch). The restored version IS fetchable, so the refusal can
+/// only come from the guard: the edit survives whole, the pin stays, the row is not moved to the
+/// restored version ahead of bytes it does not describe, and nothing is left beside the file.
+/// The edit then uploads on its own, a conflict with the restore.
+#[tokio::test]
+async fn restoring_a_pinned_file_never_overwrites_an_unsynced_local_edit() {
+    const REL: &str = "kept.txt";
+    const CURRENT: &[u8] = b"the version both devices hold";
+    // At least as long as CURRENT: the in-place write must replace every byte.
+    const LOCAL: &[u8] = b"edited here and not uploaded yet -- the only copy of it anywhere";
+    const RESTORED: &[u8] = b"the old one\n";
+
+    let h = harness(&[(REL, CURRENT.len() as i64)]).await;
+    let host = h.host(HashMap::from([(REL.to_string(), CURRENT.to_vec())]));
+    let nest_serves = Arc::clone(&host.blobs);
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let (engine_cmd_tx, engine_cmd_rx) = mpsc::channel(2);
+    h.state
+        .engine_cmd_senders
+        .lock()
+        .await
+        .insert(FOLDER_REF.to_wire(), 0, engine_cmd_tx);
+    let cancel = CancellationToken::new();
+    let _conn = crate::cfapi_host::register_and_connect(&h.root, cmd_tx).expect("connect");
+    let loop_fut = run_hydration_loop(
+        host,
+        CfapiInvalidator,
+        cmd_rx,
+        None,
+        h.root.clone(),
+        FOLDER.to_string(),
+        cancel.clone(),
+        None,
+        Some(engine_cmd_rx),
+    );
+
+    let abs = h.root.join(REL);
+    let driver = async {
+        hold(&h, REL, HeldAs::Hydrated, CURRENT).await;
+        fauna_cfapi::set_pin_state(&abs, true).expect("pin the hydrated file");
+        {
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&abs)
+                .and_then(|mut f| f.write_all(LOCAL))
+                .expect("the in-place local edit");
+        }
+        assert!(
+            is_pinned(&abs) && !is_in_sync(&abs),
+            "precondition: pinned, and the local edit cleared the in-sync bit"
+        );
+
+        restore_locally(&h, &nest_serves, REL, RESTORED, [0x5a; 32]).await;
+
+        assert_eq!(
+            std::fs::read(&abs).expect("read the local edit back"),
+            LOCAL,
+            "the unsynced local edit must survive whole"
+        );
+        assert!(is_pinned(&abs), "the file is still kept on this device");
+        assert_ne!(
+            h.db_manifest(REL),
+            Some(ContentHash::from_digest_raw(RESTORED_MANIFEST)),
+            "the row is not moved to the restored version over bytes it does not describe — the \
+             edit is the conflict path's"
+        );
+        assert!(
+            !h.root.join(".fauna-replacing-kept.txt").exists(),
+            "no replacement litter is left beside it"
+        );
+        cancel.cancel();
+    };
+
+    drive_until_asserted(loop_fut, driver).await;
+}
+
+/// A nest `SyncChange` deleting `rel` — another device's delete, as `changes.list`
+/// carries it (`manifest_hash = None`).
+fn remote_delete(seq: i64, rel: &str) -> fauna_protocol::sync::SyncChange {
+    fauna_protocol::sync::SyncChange {
+        change_type: "delete".to_string(),
+        manifest_hash: None,
+        ..remote_create(seq, rel, 0)
+    }
+}
+
+/// Browse the root from another process and, for a [`HeldAs::Hydrated`] file, open it
+/// there too and wait for the open's flip to `Synced` — how this device comes to hold
+/// `rel` before another device's change lands.
+async fn hold(h: &Harness, rel: &str, held: HeldAs, served: &[u8]) {
+    let (root_str, p, dst) = (
+        h.root_str(),
+        h.root.join(rel).to_string_lossy().to_string(),
+        h._tmp.path().join("held.bin"),
+    );
+    let read = tokio::task::spawn_blocking(move || {
+        dir_from_another_process(&root_str);
+        match held {
+            HeldAs::Hydrated => Some(read_from_another_process(&p, &dst)),
+            HeldAs::CloudOnly => None,
+        }
+    })
+    .await
+    .expect("browse");
+    match read {
+        Some(read) => {
+            assert_eq!(read, served, "precondition: the open serves the file");
+            eventually(
+                || h.db_state(rel) == Some(SyncState::Synced),
+                Duration::from_secs(10),
+                "the open's flip to Synced",
+            )
+            .await;
+        }
+        None => {
+            eventually(
+                || h.db_seen(rel),
+                Duration::from_secs(10),
+                "the listing to put the placeholder on the disk (seen)",
+            )
+            .await;
+            assert!(
+                bytes_are_freed(&h.root.join(rel).to_string_lossy()),
+                "precondition: listed but never opened is a cloud-only placeholder"
+            );
+        }
+    }
+}
+
+/// **Another device's delete reaches this disk, however this device holds the file**
+/// (`on-demand-files.md` § *Sync direction*: an on-demand root downloads remote changes like
+/// a full root, deletes included; `delete-propagation.md` § *How a delete travels*).
+///
+/// The delete lands on the nest, which nudges the folder; the loop's re-pull folds it. The
+/// file must then leave the disk — a listed placeholder and an opened copy alike — and its
+/// row must go with it. The fold used to drop only a `Placeholder` row and leave the
+/// placeholder on the disk (cfapi never lists that directory again), and to skip a hydrated
+/// row outright: the 2026-10-08 native seat pair's red at `recreate-delete`, where the
+/// scenario's own read had hydrated the file.
+async fn a_remote_delete_reaches_the_disk(held: HeldAs) {
+    const REL: &str = "gone.txt";
+    const BYTES: &[u8] = b"deleted on another device";
+
+    let h = harness(&[(REL, BYTES.len() as i64)]).await;
+    let mut host = h.host(HashMap::from([(REL.to_string(), BYTES.to_vec())]));
+    host.fold_on_repull = vec![remote_delete(10, REL)];
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(4);
+    let cancel = CancellationToken::new();
+    let _conn = crate::cfapi_host::register_and_connect(&h.root, cmd_tx).expect("connect");
+    let loop_fut = run_hydration_loop(
+        host,
+        CfapiInvalidator,
+        cmd_rx,
+        None,
+        h.root.clone(),
+        FOLDER.to_string(),
+        cancel.clone(),
+        Some(wake_rx),
+        None,
+    );
+
+    let abs = h.root.join(REL);
+    let driver = async {
+        hold(&h, REL, held, BYTES).await;
+        assert!(abs.exists(), "precondition: the file is on this disk");
+
+        // Another device deletes the file, and the nest nudges this folder.
+        wake_tx.send(()).await.expect("nudge the loop");
+        eventually(
+            || std::fs::symlink_metadata(&abs).is_err(),
+            Duration::from_secs(10),
+            "the remote delete to remove the file from this disk — present = the fold \
+             touched the row at most, and nothing removed what the disk holds",
+        )
+        .await;
+        eventually(
+            || h.db_state(REL).is_none(),
+            Duration::from_secs(5),
+            "the row to go once the file has",
+        )
+        .await;
+        let root_str = h.root_str();
+        let listed = tokio::task::spawn_blocking(move || dir_from_another_process(&root_str))
+            .await
+            .expect("re-browse");
+        assert!(
+            !listed.contains(&REL.to_string()),
+            "Explorer must no longer list the deleted file. Got {listed:?}"
+        );
+        cancel.cancel();
+    };
+
+    drive_until_asserted(loop_fut, driver).await;
+}
+
+/// A file this device listed but never opened: its cloud-only placeholder goes.
+#[tokio::test]
+async fn a_remote_delete_removes_a_cloud_only_placeholder() {
+    a_remote_delete_reaches_the_disk(HeldAs::CloudOnly).await;
+}
+
+/// A file this device opened and holds in sync: the hydrated copy goes.
+#[tokio::test]
+async fn a_remote_delete_removes_a_hydrated_in_sync_copy() {
+    a_remote_delete_reaches_the_disk(HeldAs::Hydrated).await;
+}
+
+/// **A remote delete never destroys an unsynced local edit** (`delete-propagation.md`
+/// § *How a delete travels*: a tombstone applies only to a settled row whose disk still
+/// hashes to it; otherwise the bytes are kept and the delete-vs-edit conflict recorded,
+/// `conflicts.md`). The file was opened here and then written in place; another device's
+/// delete lands before the edit uploads. The edit must survive whole, its row must stay, and
+/// the declined delete must leave a conflict for the user — here the local record, the rung
+/// the report falls back to with no nest to send it to.
+#[tokio::test]
+async fn a_remote_delete_never_destroys_an_unsynced_local_edit() {
+    const REL: &str = "notes.txt";
+    const RECORDED: &[u8] = b"the version both devices hold";
+    // At least as long as RECORDED: the in-place write must replace every byte.
+    const LOCAL: &[u8] = b"edited here and not uploaded yet -- the only copy of it anywhere";
+
+    let h = harness(&[(REL, RECORDED.len() as i64)]).await;
+    let mut host = h.host(HashMap::from([(REL.to_string(), RECORDED.to_vec())]));
+    host.fold_on_repull = vec![remote_delete(10, REL)];
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(4);
+    let cancel = CancellationToken::new();
+    let _conn = crate::cfapi_host::register_and_connect(&h.root, cmd_tx).expect("connect");
+    let loop_fut = run_hydration_loop(
+        host,
+        CfapiInvalidator,
+        cmd_rx,
+        None,
+        h.root.clone(),
+        FOLDER.to_string(),
+        cancel.clone(),
+        Some(wake_rx),
+        None,
+    );
+
+    let abs = h.root.join(REL);
+    let driver = async {
+        hold(&h, REL, HeldAs::Hydrated, RECORDED).await;
+        {
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&abs)
+                .and_then(|mut f| f.write_all(LOCAL))
+                .expect("the in-place local edit");
+        }
+
+        // Another device's delete lands before the edit's upload (the 2 s debounce).
+        wake_tx.send(()).await.expect("nudge the loop");
+        eventually(
+            || {
+                SyncDb::open(&h.db_path)
+                    .expect("reopen db")
+                    .has_unresolved_conflict_for_path(REL)
+                    .expect("read conflicts")
+            },
+            Duration::from_secs(30),
+            "the declined delete to record a delete-vs-edit conflict",
+        )
+        .await;
+        assert_eq!(
+            std::fs::read(&abs).expect("read the local edit back"),
+            LOCAL,
+            "the unsynced local edit must survive whole"
+        );
+        assert!(
+            h.db_state(REL).is_some(),
+            "the row stays: the survivor is still this device's to sync"
+        );
+        cancel.cancel();
+    };
+
+    drive_until_asserted(loop_fut, driver).await;
+}
+
 /// **A remote edit never frees an unsynced local edit.** The invalidation of a superseded
 /// copy is gated by the platform's dirty-file refusal and by nothing else
 /// ([`crate::bridge::PlaceholderInvalidator::dehydrate`]'s contract): a file written since
@@ -2609,6 +4451,7 @@ async fn a_remote_edit_never_frees_an_unsynced_local_edit() {
         content_key_version: None,
         remote_mtime: 1_700_000_100,
         version_num: 1,
+        signed_as: None,
     };
     let invalidated = crate::bridge::apply_stale_hydrated(
         &host,
@@ -2671,7 +4514,9 @@ async fn supersede_placeholder_redescribes_a_hydrated_file() {
 
 /// **A pinned file ("Always keep on this device") another device edited: what the platform
 /// answers.** Measurement only — the update dehydrates, and cfapi may refuse that on a pinned
-/// file; whether it does decides whether a pinned file ever receives a remote edit.
+/// file; whether it does decides whether a pinned file ever receives a remote edit. Measured
+/// 2026-10-08: both the update and a bare dehydrate are refused `0x80070188`, so a pinned copy
+/// takes the replacing road instead ([`diag_update_a_pinned_file`] measures its candidates).
 #[tokio::test]
 #[ignore = "measurement probe; run with --ignored --nocapture"]
 async fn diag_supersede_a_pinned_file() {
@@ -2694,6 +4539,537 @@ async fn diag_supersede_a_pinned_file() {
     );
     let bare = fauna_cfapi::dehydrate_placeholder(&abs);
     eprintln!("[measure] bare dehydrate of it -> {bare:?}");
+}
+
+/// **How a pinned file can take another device's edit at all: each candidate, measured.**
+/// Every candidate runs on its own fresh root holding `notes.txt` hydrated (in sync) and then
+/// pinned; the dirty-file guard is measured on a pinned file written in place. Reports, never
+/// asserts: its subject is OS behavior.
+///
+/// ```text
+/// cmd /c "scripts\cargo-win.cmd test -p fauna-sync-agent --lib diag_update_a_pinned_file -- --ignored --nocapture --test-threads=1"
+/// ```
+///
+/// **Measured 2026-10-09 on real Windows (Windows 11 ARM64), against a live connected root:**
+///
+/// | candidate | result |
+/// |---|---|
+/// | A: `CfUpdatePlaceholder` to the new size and mtime, `VERIFY_IN_SYNC`, no `DEHYDRATE` | succeeds; still pinned, hydrated, in sync (`0x9`) — holding the OLD bytes zero-padded to the new size |
+/// | A, then `provider_push_data` of the new bytes | succeeds; the new version whole, pinned, in sync — but between the two calls the file held neither version, marked in sync |
+/// | B: the update with a dehydrate range, no `DEHYDRATE` flag | refused `0x80070188` |
+/// | C: unpin, `supersede_placeholder`, re-pin | each succeeds; between the calls the file is cloud-only and unpinned (`0x00501620`), and still needs a hydration after |
+/// | D: a sibling anchored and pinned, renamed over the pinned file (with or without a write-excluding handle held on it) | succeeds; the result is the sibling's bytes whole, a placeholder, pinned, NOT in sync (`0x1`) |
+/// | E: the update (A) on a pinned file written in place | refused `0x80070179` (not in sync) |
+/// | F: the last-write time on D's road | survives the anchor, the pin, a plain rename and the in-sync assertion; a rename over a file HELD OPEN (F2) restamps it with the current time, so it is stamped after the swap |
+///
+/// So only D swaps atomically, and `fauna_cfapi::replace_placeholder` is D, guarded (the
+/// handle shuts out writers between its in-sync check and the rename), stamped after.
+#[tokio::test]
+#[ignore = "measurement probe; run with --ignored --nocapture"]
+async fn diag_update_a_pinned_file() {
+    use windows::Win32::Storage::CloudFilters::{
+        CF_FILE_RANGE, CF_UPDATE_FLAG_MARK_IN_SYNC, CF_UPDATE_FLAG_PASSTHROUGH_FS_METADATA,
+        CF_UPDATE_FLAG_VERIFY_IN_SYNC,
+    };
+    const OLD: &[u8] = b"the version both devices hold";
+    const NEW: &[u8] = b"another device's edit, which is longer than the old version was";
+    const LOCAL: &[u8] = b"edited here and not uploaded yet -- the only copy of it anywhere";
+    const MTIME: i64 = 1_700_000_100;
+
+    fn report(label: &str, abs: &std::path::Path) {
+        use std::os::windows::fs::MetadataExt;
+        let meta = std::fs::metadata(abs);
+        eprintln!(
+            "[probe] {label}: attrs={:?} len={:?} state={:?} pin={:?} usn={:?} freed={:?}",
+            meta.as_ref()
+                .map(|m| format!("0x{:08x}", m.file_attributes())),
+            meta.as_ref().map(|m| m.len()),
+            fauna_cfapi::placeholder_state(abs).map(|s| format!("0x{s:x}")),
+            fauna_cfapi::pin_state(abs),
+            fauna_cfapi::file_usn(abs),
+            meta.as_ref()
+                .map(fauna_sync_engine::placeholder::is_cloud_placeholder),
+        );
+    }
+    /// An in-process read, bounded: a range nobody serves would stall the reader 60 s.
+    fn content(abs: &std::path::Path) -> String {
+        let p = abs.to_path_buf();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(std::fs::read(&p));
+        });
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(Ok(b)) if b == NEW => "NEW (whole)".to_string(),
+            Ok(Ok(b)) if b == OLD => "OLD (whole)".to_string(),
+            Ok(Ok(b)) => format!("OTHER {:?}", String::from_utf8_lossy(&b)),
+            Ok(Err(e)) => format!("read error {e}"),
+            Err(_) => "STALLED (a range nobody serves)".to_string(),
+        }
+    }
+    async fn pinned_root(old: &[u8]) -> (Harness, crate::cfapi_host::CfApiConnection) {
+        let h = harness(&[("notes.txt", old.len() as i64)]).await;
+        let conn = hydrate_recorded_notes(&h, old).await;
+        fauna_cfapi::set_pin_state(&h.root.join("notes.txt"), true).expect("pin");
+        (h, conn)
+    }
+    let in_place = CF_UPDATE_FLAG_VERIFY_IN_SYNC | CF_UPDATE_FLAG_PASSTHROUGH_FS_METADATA;
+
+    // ── A: update the metadata in place (no DEHYDRATE), then push the new bytes. ──
+    {
+        let (h, conn) = pinned_root(OLD).await;
+        let abs = h.root.join("notes.txt");
+        report("A pinned", &abs);
+        let upd =
+            fauna_cfapi::update_placeholder_raw(&abs, NEW.len() as u64, MTIME, in_place, None);
+        eprintln!("[probe] A update in place -> {upd:?}");
+        report("A after the update", &abs);
+        eprintln!("[probe] A content after the update: {}", content(&abs));
+        let push = fauna_cfapi::provider_push_data(&conn.key(), &abs, NEW);
+        eprintln!("[probe] A push -> {push:?}");
+        report("A after the push", &abs);
+        eprintln!("[probe] A content after the push: {}", content(&abs));
+    }
+    // ── A2: the same update with MARK_IN_SYNC. ──
+    {
+        let (h, conn) = pinned_root(OLD).await;
+        let abs = h.root.join("notes.txt");
+        let upd = fauna_cfapi::update_placeholder_raw(
+            &abs,
+            NEW.len() as u64,
+            MTIME,
+            in_place | CF_UPDATE_FLAG_MARK_IN_SYNC,
+            None,
+        );
+        eprintln!("[probe] A2 update in place + mark in sync -> {upd:?}");
+        report("A2 after the update", &abs);
+        let push = fauna_cfapi::provider_push_data(&conn.key(), &abs, NEW);
+        eprintln!("[probe] A2 push -> {push:?}");
+        report("A2 after the push", &abs);
+        eprintln!("[probe] A2 content after the push: {}", content(&abs));
+    }
+    // ── B: the update invalidating the old range, without the DEHYDRATE flag. ──
+    {
+        let (h, conn) = pinned_root(OLD).await;
+        let abs = h.root.join("notes.txt");
+        let range = [CF_FILE_RANGE {
+            StartingOffset: 0,
+            Length: OLD.len() as i64,
+        }];
+        let upd = fauna_cfapi::update_placeholder_raw(
+            &abs,
+            NEW.len() as u64,
+            MTIME,
+            in_place,
+            Some(&range),
+        );
+        eprintln!("[probe] B update + dehydrate range -> {upd:?}");
+        report("B after the update", &abs);
+        let push = fauna_cfapi::provider_push_data(&conn.key(), &abs, NEW);
+        eprintln!("[probe] B push -> {push:?}");
+        report("B after the push", &abs);
+        eprintln!("[probe] B content after the push: {}", content(&abs));
+    }
+    // ── C: unpin, supersede, re-pin. ──
+    {
+        let (h, conn) = pinned_root(OLD).await;
+        let abs = h.root.join("notes.txt");
+        eprintln!(
+            "[probe] C unpin -> {:?}",
+            fauna_cfapi::set_pin_state(&abs, false)
+        );
+        report("C unpinned", &abs);
+        eprintln!(
+            "[probe] C supersede -> {:?}",
+            fauna_cfapi::supersede_placeholder(&abs, NEW.len() as u64, MTIME)
+        );
+        report("C superseded", &abs);
+        eprintln!(
+            "[probe] C re-pin -> {:?}",
+            fauna_cfapi::set_pin_state(&abs, true)
+        );
+        report("C re-pinned", &abs);
+        let push = fauna_cfapi::provider_push_data(&conn.key(), &abs, NEW);
+        eprintln!("[probe] C push -> {push:?}");
+        report("C after the push", &abs);
+        eprintln!("[probe] C content after the push: {}", content(&abs));
+    }
+    // ── D: a pinned, anchored temp placeholder holding the new bytes, renamed over. ──
+    for guarded in [false, true] {
+        let (h, _conn) = pinned_root(OLD).await;
+        let abs = h.root.join("notes.txt");
+        let tmp = h.root.join(".notes.txt.probe");
+        std::fs::write(&tmp, NEW).expect("write the temp");
+        eprintln!(
+            "[probe] D anchor the temp -> {:?}",
+            fauna_cfapi::convert_to_placeholder_anchored(&tmp, "notes.txt")
+        );
+        eprintln!(
+            "[probe] D pin the temp -> {:?}",
+            fauna_cfapi::set_pin_state(&tmp, true)
+        );
+        report("D the temp", &tmp);
+        // The guard: the target held open excluding every writer (share READ|DELETE).
+        let guard = guarded.then(|| {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0x1 | 0x4)
+                .open(&abs)
+        });
+        if let Some(g) = &guard {
+            eprintln!(
+                "[probe] D guard open -> {:?}; state through it = {:?}",
+                g.as_ref().map(|_| ()),
+                fauna_cfapi::placeholder_state(&abs).map(|s| format!("0x{s:x}"))
+            );
+        }
+        let renamed = std::fs::rename(&tmp, &abs);
+        eprintln!("[probe] D rename over (guarded={guarded}) -> {renamed:?}");
+        drop(guard);
+        report("D after the rename", &abs);
+        eprintln!("[probe] D content: {}", content(&abs));
+    }
+    // ── E: the dirty-file guard — a pinned file written in place. ──
+    {
+        let (h, conn) = pinned_root(OLD).await;
+        let abs = h.root.join("notes.txt");
+        {
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&abs)
+                .and_then(|mut f| f.write_all(LOCAL))
+                .expect("the in-place local edit");
+        }
+        report("E pinned + edited", &abs);
+        let upd =
+            fauna_cfapi::update_placeholder_raw(&abs, NEW.len() as u64, MTIME, in_place, None);
+        eprintln!("[probe] E update in place of a dirty pinned file -> {upd:?}");
+        let push = fauna_cfapi::provider_push_data(&conn.key(), &abs, NEW);
+        eprintln!("[probe] E push into a dirty pinned file -> {push:?}");
+        report("E after", &abs);
+        eprintln!("[probe] E content: {}", content(&abs));
+        eprintln!(
+            "[probe] E unpin -> {:?}; supersede -> {:?}",
+            fauna_cfapi::set_pin_state(&abs, false),
+            fauna_cfapi::supersede_placeholder(&abs, NEW.len() as u64, MTIME)
+        );
+        report("E after unpin + supersede", &abs);
+    }
+    // ── F: what moves the last-write time on the replace road, call by call. ──
+    {
+        fn mtime(p: &std::path::Path) -> String {
+            std::fs::metadata(p)
+                .and_then(|m| m.modified())
+                .map(|t| {
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_secs())
+                        .to_string()
+                })
+                .unwrap_or_else(|e| format!("error {e}"))
+        }
+        fn stamp(p: &std::path::Path) -> std::io::Result<()> {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(p)
+                .and_then(|f| {
+                    f.set_times(
+                        std::fs::FileTimes::new().set_modified(
+                            std::time::UNIX_EPOCH + Duration::from_secs(MTIME as u64),
+                        ),
+                    )
+                })
+        }
+        let (h, _conn) = pinned_root(OLD).await;
+        let abs = h.root.join("notes.txt");
+        let tmp = h.root.join(".fauna-replacing-notes.txt");
+        std::fs::write(&tmp, NEW).expect("write the sibling");
+        eprintln!("[probe] F written: {}", mtime(&tmp));
+        eprintln!("[probe] F stamp -> {:?}: {}", stamp(&tmp), mtime(&tmp));
+        let anchored = fauna_cfapi::convert_to_placeholder_anchored(&tmp, "notes.txt");
+        eprintln!("[probe] F anchor -> {anchored:?}: {}", mtime(&tmp));
+        let pinned = fauna_cfapi::set_pin_state(&tmp, true);
+        eprintln!("[probe] F pin -> {pinned:?}: {}", mtime(&tmp));
+        eprintln!(
+            "[probe] F stamp again -> {:?}: {}",
+            stamp(&tmp),
+            mtime(&tmp)
+        );
+        eprintln!(
+            "[probe] F rename -> {:?}: {}",
+            std::fs::rename(&tmp, &abs),
+            mtime(&abs)
+        );
+        let usn = fauna_cfapi::file_usn(&abs).expect("usn");
+        eprintln!(
+            "[probe] F set_in_sync -> {:?}: {}",
+            fauna_cfapi::set_in_sync(&abs, usn),
+            mtime(&abs)
+        );
+        report("F after", &abs);
+
+        // F2: the same, with the target held open (share READ|DELETE) across the rename.
+        let (h, _conn) = pinned_root(OLD).await;
+        let abs = h.root.join("notes.txt");
+        let tmp = h.root.join(".fauna-replacing-notes.txt");
+        std::fs::write(&tmp, NEW).expect("write the sibling");
+        eprintln!("[probe] F2 stamp -> {:?}: {}", stamp(&tmp), mtime(&tmp));
+        let anchored = fauna_cfapi::convert_to_placeholder_anchored(&tmp, "notes.txt");
+        let pinned = fauna_cfapi::set_pin_state(&tmp, true);
+        eprintln!(
+            "[probe] F2 anchor -> {anchored:?}, pin -> {pinned:?}: {}",
+            mtime(&tmp)
+        );
+        let guard = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0x1 | 0x4)
+                .open(&abs)
+        };
+        eprintln!(
+            "[probe] F2 guarded rename -> {:?}: {}",
+            std::fs::rename(&tmp, &abs),
+            mtime(&abs)
+        );
+        drop(guard);
+        eprintln!("[probe] F2 guard dropped: {}", mtime(&abs));
+        eprintln!(
+            "[probe] F2 stamp after -> {:?}: {}",
+            stamp(&abs),
+            mtime(&abs)
+        );
+        let usn = fauna_cfapi::file_usn(&abs).expect("usn");
+        eprintln!(
+            "[probe] F2 set_in_sync -> {:?}: {}",
+            fauna_cfapi::set_in_sync(&abs, usn),
+            mtime(&abs)
+        );
+        report("F2 after", &abs);
+
+        let (h, _conn) = pinned_root(OLD).await;
+        let abs = h.root.join("notes.txt");
+        let tmp = h.root.join(".fauna-replacing-notes.txt");
+        std::fs::write(&tmp, NEW).expect("write the sibling");
+        eprintln!(
+            "[probe] F replace_placeholder -> {:?}: {}",
+            fauna_cfapi::replace_placeholder(&abs, &tmp, "notes.txt", MTIME),
+            mtime(&abs)
+        );
+        let usn = fauna_cfapi::file_usn(&abs).expect("usn");
+        eprintln!(
+            "[probe] F then set_in_sync -> {:?}: {}",
+            fauna_cfapi::set_in_sync(&abs, usn),
+            mtime(&abs)
+        );
+    }
+}
+
+/// **Which platform calls wait on an outstanding fetch — and so may never run on the serve loop,
+/// the one thread that answers it.** Each candidate runs on its own fresh root, served by the
+/// real loop through a relay that holds back the fetches of `f.txt` ([`FetchHold`]): another
+/// process opens the cloud-only `f.txt`, the relay holds its fetch, and the candidate runs on its
+/// own thread. A candidate still running when the hold ends, which returns only once the fetch
+/// is let through, waited on the fetch. Reports, never asserts: its subject is OS behavior.
+///
+/// ```text
+/// cmd /c "scripts\cargo-win.cmd test -p fauna-sync-agent --lib diag_calls_that_wait_on_an_outstanding_fetch -- --ignored --nocapture --test-threads=1"
+/// ```
+///
+/// **Measured 2026-10-10 on real Windows (Windows 11 ARM64), against a live connected root, the
+/// fetch held 5 s:**
+///
+/// | candidate on the file being fetched | result |
+/// |---|---|
+/// | `supersede_placeholder` (`CfUpdatePlaceholder` + `DEHYDRATE`) | **waits**; returns 30 ms after the fetch is let through |
+/// | the same update without `DEHYDRATE` | **waits** |
+/// | `dehydrate_placeholder` (`CfDehydratePlaceholder`) | **waits** |
+/// | `set_in_sync` (`CfSetInSyncState`) | **waits** |
+/// | `set_pin_state`, pinned or unpinned (`CfSetPinState`) | **waits** |
+/// | `replace_placeholder` (the guarded rename) | **waits** |
+/// | `remove_file` | returns at once: refused, the reading program holds the file |
+///
+/// | candidate on another file, while it is fetched | result |
+/// |---|---|
+/// | `supersede_placeholder` of a sibling | returns at once |
+/// | `create_placeholder` in its directory | returns at once |
+/// | `convert_to_placeholder_anchored` of an ordinary sibling | returns at once |
+///
+/// So every call that changes a cloud file waits on that file's outstanding fetch, and nothing
+/// else waits on it. A listing leaves no fetch outstanding: none arrived in the 2 s after `dir`.
+#[tokio::test]
+#[ignore = "measurement probe; run with --ignored --nocapture"]
+async fn diag_calls_that_wait_on_an_outstanding_fetch() {
+    use std::path::Path;
+    use windows::Win32::Storage::CloudFilters::{
+        CF_UPDATE_FLAG_MARK_IN_SYNC, CF_UPDATE_FLAG_PASSTHROUGH_FS_METADATA,
+        CF_UPDATE_FLAG_VERIFY_IN_SYNC,
+    };
+    const BODY: &[u8] = &[b'f'; 248];
+    const MTIME: i64 = 1_700_000_100;
+    /// How long the candidate gets with the fetch held before it is let through.
+    const HOLD: Duration = Duration::from_secs(5);
+
+    type Call = fn(&Path, &Path) -> Result<()>;
+    let candidates: Vec<(&str, Call)> = vec![
+        ("supersede (update + DEHYDRATE)", |_, f| {
+            fauna_cfapi::supersede_placeholder(f, BODY.len() as u64, MTIME)
+        }),
+        ("update, no DEHYDRATE", |_, f| {
+            fauna_cfapi::update_placeholder_raw(
+                f,
+                BODY.len() as u64,
+                MTIME,
+                CF_UPDATE_FLAG_VERIFY_IN_SYNC
+                    | CF_UPDATE_FLAG_MARK_IN_SYNC
+                    | CF_UPDATE_FLAG_PASSTHROUGH_FS_METADATA,
+                None,
+            )
+        }),
+        ("bare dehydrate", |_, f| {
+            fauna_cfapi::dehydrate_placeholder(f)
+        }),
+        ("set_in_sync", |_, f| {
+            fauna_cfapi::set_in_sync(f, fauna_cfapi::file_usn(f)?)
+        }),
+        ("pin", |_, f| fauna_cfapi::set_pin_state(f, true)),
+        ("unpin", |_, f| fauna_cfapi::set_pin_state(f, false)),
+        ("replace (anchor, guarded rename)", |root, f| {
+            let r = root.join(".fauna-replacing-f.txt");
+            std::fs::write(&r, BODY)?;
+            fauna_cfapi::replace_placeholder(f, &r, "f.txt", MTIME)
+        }),
+        ("remove", |_, f| Ok(std::fs::remove_file(f)?)),
+        ("supersede a SIBLING", |root, _| {
+            fauna_cfapi::supersede_placeholder(&root.join("g.txt"), BODY.len() as u64, MTIME)
+        }),
+        ("create a placeholder beside it", |root, _| {
+            fauna_cfapi::create_placeholder(
+                root,
+                &fauna_cfapi::PlaceholderInfo {
+                    rel_path: "new.txt".into(),
+                    size: 5,
+                    mtime: MTIME,
+                    is_dir: false,
+                },
+            )
+        }),
+        ("anchor an ordinary sibling", |root, _| {
+            let o = root.join("o.txt");
+            std::fs::write(&o, b"ordinary")?;
+            fauna_cfapi::convert_to_placeholder_anchored(&o, "o.txt")
+        }),
+    ];
+
+    for (name, call) in candidates {
+        let h = harness(&[("f.txt", BODY.len() as i64), ("g.txt", BODY.len() as i64)]).await;
+        let host = h.host(HashMap::from([
+            ("f.txt".to_string(), BODY.to_vec()),
+            ("g.txt".to_string(), BODY.to_vec()),
+        ]));
+        let (os_tx, os_rx) = mpsc::unbounded_channel();
+        let (loop_tx, loop_rx) = mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        let _conn = crate::cfapi_host::register_and_connect(&h.root, os_tx).expect("connect");
+        let loop_fut = run_hydration_loop(
+            host,
+            CfapiInvalidator,
+            loop_rx,
+            None,
+            h.root.clone(),
+            FOLDER.to_string(),
+            cancel.clone(),
+            None,
+            None,
+        );
+        let gate = FetchHold::new("f.txt", loop_tx);
+
+        let root = h.root.clone();
+        let abs = h.root.join("f.txt");
+        let driver = async {
+            let root_str = h.root_str();
+            tokio::task::spawn_blocking(move || dir_from_another_process(&root_str))
+                .await
+                .expect("browse");
+            // Anything the platform asks for after a listing, with no open.
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            gate.hold();
+            let (p, dst) = (
+                abs.to_string_lossy().to_string(),
+                h._tmp.path().join("copy.bin"),
+            );
+            let reader = tokio::task::spawn_blocking(move || {
+                std::process::Command::new("cmd")
+                    .args(["/c", "copy", "/b", &p, &dst.to_string_lossy()])
+                    .output()
+                    .map(|o| o.status.success())
+            });
+            eventually(
+                || gate.is_holding_a_fetch(),
+                Duration::from_secs(10),
+                "the other process's fetch of f.txt to be outstanding",
+            )
+            .await;
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (r, f) = (root.clone(), abs.clone());
+            let called = std::time::Instant::now();
+            std::thread::spawn(move || {
+                let _ = tx.send(call(&r, &f));
+            });
+            let mut outcome = None;
+            while called.elapsed() < HOLD {
+                if let Ok(res) = rx.try_recv() {
+                    outcome = Some(res);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            match outcome {
+                Some(res) => eprintln!(
+                    "[measure] {name}: returned in {:?} WITH THE FETCH HELD -> {res:?}",
+                    called.elapsed()
+                ),
+                None => {
+                    let released = std::time::Instant::now();
+                    gate.release();
+                    let res = loop {
+                        if let Ok(res) = rx.try_recv() {
+                            break Some(res);
+                        }
+                        if released.elapsed() > Duration::from_secs(70) {
+                            break None;
+                        }
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    };
+                    match res {
+                        Some(res) => eprintln!(
+                            "[measure] {name}: WAITED — still running after {HOLD:?} held, \
+                             returned {:?} after the fetch was let through -> {res:?}",
+                            released.elapsed()
+                        ),
+                        None => eprintln!(
+                            "[measure] {name}: HUNG — no return 70 s after the fetch was let \
+                             through"
+                        ),
+                    }
+                }
+            }
+            gate.release();
+            let read = reader.await.expect("reader task");
+            eprintln!(
+                "[measure] {name}: the other process's open -> {read:?} (at {} ms)",
+                gate.start.elapsed().as_millis()
+            );
+            cancel.cancel();
+        };
+
+        tokio::select! {
+            _ = loop_fut => panic!("the hydration loop returned before the probe finished"),
+            _ = gate.relay(name, os_rx) => unreachable!("the relay never returns"),
+            _ = driver => {}
+        }
+    }
 }
 
 /// `CF_PLACEHOLDER_STATE_IN_SYNC` — the bit `CF_INSYNC_POLICY_TRACK_ALL` clears on a local
@@ -2824,7 +5200,7 @@ async fn hold_a_live_root_for_explorer() {
     drop(conn);
 }
 
-/// **The core contract: a directory listing populates lazily** (`file-sync.md` § On-Demand
+/// **The core contract: a directory listing populates lazily** (`on-demand-files.md` § On-Demand
 /// Files) — driven through the *service's own* cfapi host, end to end.
 ///
 /// Another process browses a real sync root; Windows fires FETCH_PLACEHOLDERS into
@@ -3123,7 +5499,7 @@ async fn a_dehydrated_file_is_never_recorded_as_a_delete() {
     tokio::join!(loop_fut, driver);
 }
 
-/// **The other half of the contract: opening a placeholder hydrates it** (`file-sync.md`
+/// **The other half of the contract: opening a placeholder hydrates it** (`on-demand-files.md`
 /// § On-Demand Files) — again through the service's own host.
 ///
 /// Another process reads the placeholder; Windows fires FETCH_DATA; the real callback routes a
@@ -3369,7 +5745,7 @@ async fn an_in_process_dehydrate_fires_no_callback() {
 //
 
 // ═══════════════════════════════════════════════════════════════════════════════════════
-// TWO-WAY: an on-demand root uploads local edits (TRACK T, `file-sync.md` § Sync direction)
+// TWO-WAY: an on-demand root uploads local edits (TRACK T, `on-demand-files.md` § Sync direction)
 // ═══════════════════════════════════════════════════════════════════════════════════════
 
 /// **THE CONTRACT THIS WHOLE TRACK EXISTS FOR: a local edit to a tracked file is uploaded.**
@@ -3538,7 +5914,7 @@ async fn a_local_edit_by_another_process_is_detected_and_uploaded() {
 /// watch→`upload_file` loop, and every folder's record lands on the one `sync_changes` head.
 /// So what a backup seat needs from
 /// this host is exactly what this test asserts: **a file appearing in the folder is adopted and
-/// uploaded.** ("New files are adopted" is itself ratified — `file-sync.md` § Sync direction.)
+/// uploaded.** ("New files are adopted" is itself ratified — `on-demand-files.md` § Sync direction.)
 ///
 /// The co-assertion is the sharp one. This runs a live watcher on a live cfapi root, where our
 /// **own** `CfExecute(TRANSFER_PLACEHOLDERS)` materializes cloud-only files that the OS reports
@@ -3639,7 +6015,7 @@ async fn a_backup_mode_set_on_an_on_demand_folder_uploads() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════
-// 0-BYTE PLACEHOLDERS (2026-07-15, `file-sync.md` § On-Demand Files → present-but-unreadable)
+// 0-BYTE PLACEHOLDERS (2026-07-15, `on-demand-files.md` § On-Demand Files → present-but-unreadable)
 //
 // Measured against a real cfapi root (the exploratory `measure_*` test these two replace):
 //   M1 — a 0-byte entry DOES materialize as a placeholder another process can list.
@@ -3746,7 +6122,7 @@ async fn opening_a_zero_byte_placeholder_never_flips_its_row_yet_it_badges_synce
 }
 
 /// **The fix, end-to-end against a real cfapi root: a 0-byte file badges `Synced` and lifts its
-/// folder** (`file-sync.md` § On-Demand Files; the NEXT success criterion).
+/// folder** (`on-demand-files.md` § On-Demand Files; the NEXT success criterion).
 ///
 /// The rows are seeded exactly as the fold leaves them — every 0-byte file a `Placeholder`
 /// (never Synced-while-absent). This asserts the size-aware overlay reads them right: the 0-byte

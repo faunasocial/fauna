@@ -186,6 +186,41 @@ fn list_handler() -> RpcHandler {
             // learns exactly what an unrelated stranger learns. Answering a
             // distinguishable "you hold a grant, but not that one" would make
             // this door an oracle for the shape of someone else's grants.
+            // The custodian-NEST serve door's bulk half: an owner-fleet device
+            // lists the segments this nest HOLDS for its owner, answered from
+            // the custodied store (`crate::custody_fleet`) — the same
+            // `not_owner` on refusal, so this door is no oracle either.
+            if req_actor_bytes != auth_actor
+                && crate::bridge_method_allowlist::caller_class_for_actor(&state.db, &auth_actor)
+                    .await
+                    .ok()
+                    .flatten()
+                    == Some(crate::bridge_method_allowlist::CallerClass::CustodiedFleet)
+            {
+                use crate::custody_fleet::FleetSegmentError;
+                let reply = crate::custody_fleet::serve_segments_list(
+                    &state,
+                    &auth_actor,
+                    &req_actor_bytes,
+                    &req.kind,
+                )
+                .await
+                .map_err(|e| match e {
+                    FleetSegmentError::Refused => {
+                        RpcError::new("fauna.segments.not_owner", "error.segments.not_owner")
+                    }
+                    FleetSegmentError::Internal(e) => {
+                        RpcError::new("fauna.segments.internal", "error.segments.internal")
+                            .with_details_text(format!("{e:#}"))
+                    }
+                })?;
+                let bytes = encode_canonical(&reply).map_err(|e| {
+                    RpcError::new("fauna.segments.internal", "error.segments.internal")
+                        .with_details_text(format!("encode reply: {e}"))
+                })?;
+                return Ok(Bytes::from(bytes.to_vec()));
+            }
+
             if req_actor_bytes != auth_actor
                 && crate::custody_admission::admit_segment_plane_for_custody(
                     &state,

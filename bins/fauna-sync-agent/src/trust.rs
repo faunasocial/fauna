@@ -37,18 +37,11 @@ use crate::config::SyncPaths;
 /// instead: a test launch must never read or write the box's real
 /// install-scoped state (testing.md § conventions point 10 — the same branch
 /// `NestTrust.installPinStore()` takes for `FaunaE2E.isActive`).
-pub fn trust_dir(data_dir: Option<&Path>) -> PathBuf {
-    trust_dir_for_paths(&SyncPaths::new(data_dir.map(PathBuf::from)))
-}
-
-/// Scoped to the *install*, so it must not move when the agent adopts a
-/// per-actor scope (which moves `base_dir`, never `flat_base_dir`).
-fn trust_dir_for_paths(paths: &SyncPaths) -> PathBuf {
-    if paths.is_production() {
-        fauna_client::cert_binding::install_scoped_trust_home()
-    } else {
-        paths.flat_base_dir().join("trust")
-    }
+///
+/// `Err` (the shared no-home refusal) when the production layout has no
+/// absolute home — the same refusal [`SyncPaths::new`] carries.
+pub fn trust_dir(data_dir: Option<&Path>) -> anyhow::Result<PathBuf> {
+    Ok(SyncPaths::new(data_dir.map(PathBuf::from))?.trust_dir())
 }
 
 /// Install the read-only pin store. Call **once**, at agent startup, before the
@@ -61,14 +54,16 @@ fn trust_dir_for_paths(paths: &SyncPaths) -> PathBuf {
 /// somewhere to write). The store is uncached, so a pin the app mints after
 /// this agent launched is picked up on the very next connect retry — no
 /// relaunch, and nothing to re-install here.
-pub fn install_consumer_pin_store(data_dir: Option<&Path>) {
-    let dir = trust_dir(data_dir);
+///
+/// `dir` is [`SyncPaths::trust_dir`] (see [`trust_dir`]), resolved once at
+/// startup with the rest of the agent's paths.
+pub fn install_consumer_pin_store(dir: &Path) {
     tracing::info!(
         trust_dir = %dir.display(),
         "installing read-only nest-identity pin store (the app is the sole minter)"
     );
     fauna_client::trust::install_pin_store(Arc::new(
-        fauna_client::cert_binding::ReadOnlyDiskPinStore::open_in_dir(&dir),
+        fauna_client::cert_binding::ReadOnlyDiskPinStore::open_in_dir(dir),
     ));
 }
 
@@ -79,7 +74,7 @@ mod tests {
     #[test]
     fn an_explicit_data_dir_keeps_the_store_inside_that_root() {
         assert_eq!(
-            trust_dir(Some(Path::new("/tmp/run-42"))),
+            trust_dir(Some(Path::new("/tmp/run-42"))).unwrap(),
             PathBuf::from("/tmp/run-42/trust")
         );
     }
@@ -95,8 +90,8 @@ mod tests {
     /// agent's own dir starts empty and drifts from the app's (rule 1).
     #[test]
     fn the_production_store_is_never_inside_the_agents_own_root() {
-        let paths = SyncPaths::new(None);
-        let trust = trust_dir_for_paths(&paths);
+        let paths = SyncPaths::new(None).expect("this box has an absolute home");
+        let trust = paths.trust_dir();
         let base = paths.flat_base_dir();
         assert!(
             !trust.starts_with(&base),
@@ -111,8 +106,8 @@ mod tests {
     /// move it.
     #[test]
     fn a_per_actor_scope_does_not_move_the_trust_dir() {
-        let paths = SyncPaths::new(Some(PathBuf::from("/tmp/run-7")));
-        let before = trust_dir_for_paths(&paths);
+        let paths = SyncPaths::at(PathBuf::from("/tmp/run-7"));
+        let before = paths.trust_dir();
 
         paths.set_actor_scope(Some("a1b2c3".into()));
         assert_ne!(
@@ -121,7 +116,7 @@ mod tests {
             "scope moved the base"
         );
 
-        let after = trust_dir_for_paths(&paths);
+        let after = paths.trust_dir();
         assert_eq!(before, after);
     }
 }

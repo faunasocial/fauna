@@ -174,6 +174,59 @@ async fn a_worker_that_never_answers_a_ping_is_reaped_and_its_socket_released() 
     );
 }
 
+/// A worker that stops *draining* is reaped even while the proxy is parked in a
+/// send. The proxy is one select loop, so a `socket.send` stuck on a full TCP
+/// buffer used to stop the heartbeat's dead arm from being polled at all: two
+/// oversized frames in flight and a worker that never reads left the link
+/// registered, and both callers waiting, past any liveness window.
+///
+/// The worker's socket is never polled after the handshake, so nothing it
+/// receives is ever consumed; the proxy's first oversized `Store` fills the
+/// loopback buffers and wedges its send, the second sits behind it.
+#[tokio::test]
+async fn a_worker_that_stops_draining_mid_send_is_reaped_not_deadlocked() {
+    use fauna_nest::nest_link::protocol::PayloadKind;
+
+    let (h, key) = start().await;
+    let _ws = connect_worker(&h, &key).await;
+
+    poll_until("the worker to register", async || {
+        h.state.bridge.worker.is_connected().await
+    })
+    .await;
+
+    let handle = h.state.bridge.worker.get_handle().await.expect("handle");
+    let big = "a".repeat(48 << 20);
+    let calls: Vec<_> = (0..2)
+        .map(|i| {
+            let handle = Arc::clone(&handle);
+            let big = big.clone();
+            tokio::spawn(async move {
+                handle
+                    .store(PayloadKind::Blob, &format!("big-{i}"), &big, None)
+                    .await
+            })
+        })
+        .collect();
+
+    poll_until(
+        "the proxy to reap a worker that drained nothing while a send was in flight",
+        async || !h.state.bridge.worker.is_connected().await,
+    )
+    .await;
+
+    for call in calls {
+        let outcome = tokio::time::timeout(Duration::from_secs(10), call)
+            .await
+            .expect("a caller was left waiting on a reaped link")
+            .expect("caller task panicked");
+        assert!(
+            !matches!(outcome, Ok(true)),
+            "a store to a worker that never read cannot have been acked"
+        );
+    }
+}
+
 /// A worker that answers Pings but sends nothing of its own is left alone. The
 /// barrier is causal: server Pings counted on the wire, spanning more than a
 /// full liveness window.

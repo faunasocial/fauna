@@ -76,6 +76,12 @@ Rejected alternatives, and why (decision record):
 Port 80 serves exactly two things: `/.well-known/acme-challenge/*` and a
 redirect to HTTPS — the same shape the nest's HTTP-01 listener has.
 
+**`fauna.build` is the organisation's own zone, not a vhost of this box**
+(placed 2026-10-10; a registered domain since 2026-10-12, the apex zone
+carrying nothing for it): the organisation's three nests live in it in their
+own cloud project, and the door serves nothing under that name — owner
+[`org-nests.md`](org-nests.md) § One zone, one project.
+
 **Tenancy is closed.** The future `nest-broker` and `push` relay are **never
 co-tenants** of this box — a compromise of the public web box must not touch
 managed-mode brokering or push. New public names get their own placement
@@ -222,7 +228,12 @@ CORS proxy run as **two static Rust binaries under hardened systemd units**:
   the receiver is started with `--munge-links --no-specials --no-devices`, and
   the door serves only **regular files whose canonical path lies inside the
   canonical docroot** — on the main static path and on the burrow-404 and SPA
-  fallbacks alike. Neither layer alone covers both arms, and the release path
+  fallbacks alike. Neither layer alone covers both arms. The door's check
+  binds a **name**, not an open object: it canonicalizes, then both readers
+  re-open by name, so the sink is a boundary over content **at rest** and a
+  component swapped for a link between check and open would be followed. What
+  makes concurrent writes safe is the receiver's `--munge-links` (an incoming
+  link lands dangling), so relaxing the wrapper is never free. The release path
   and its `releases` parent must each resolve to themselves, so nothing is
   created through a planted parent.
 - **Deploys are push-triggered, path-filtered workflows** for both the site
@@ -259,7 +270,8 @@ Built 2026-08-21 (the deciding session), NOT yet deployed:
   hardened headers, burrow 404 + SPA fallback, loopback proxy pass, per-IP
   token bucket, TLS floor + hot-swap, renewal task; each behavior unit-tested.
 - **The docroots are contained at the door** (2026-09-20): `src/vhost.rs`
-  resolves every static request itself and opens only what it resolved — the
+  resolves every static request itself and opens only the path it resolved
+  (by name, so the check binds a name, not an object — § The box) — the
   docroot is canonicalized per request (`current` flips underneath a running
   door), each path segment is percent-decoded and refused if it is `.`, `..`
   or a decoded separator, and what remains must canonicalize to a regular file

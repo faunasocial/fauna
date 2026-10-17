@@ -402,6 +402,10 @@ pub async fn direct_auth_core(
     if let Ok(Some(locked_until)) = state.db.get_locked_until(&actor_bytes).await {
         let now_secs = now_ms / 1000;
         if (locked_until as u64) > now_secs {
+            // Test-only: the outside witness that a locked app stops retrying
+            // (`account_lock_test_hook`). Compiled out of every production build.
+            #[cfg(feature = "test-hooks")]
+            state.account_lock_refusals.note(&actor_bytes);
             return Err(AuthError::AccountLocked { locked_until });
         }
     }
@@ -591,6 +595,10 @@ pub async fn verify_core(
         if (locked_until as u64) > now_secs
             && !matches!(state.db.is_admin(&actor_bytes).await, Ok(true))
         {
+            // Test-only: the outside witness that a locked app stops retrying
+            // (`account_lock_test_hook`). Compiled out of every production build.
+            #[cfg(feature = "test-hooks")]
+            state.account_lock_refusals.note(&actor_bytes);
             return Err(AuthError::AccountLocked { locked_until });
         }
     }
@@ -792,6 +800,10 @@ pub async fn device_auth_core(
     if let Ok(Some(locked_until)) = state.db.get_locked_until(&actor_bytes).await {
         let now_secs = now_ms / 1000;
         if (locked_until as u64) > now_secs {
+            // Test-only: the outside witness that a locked app stops retrying
+            // (`account_lock_test_hook`). Compiled out of every production build.
+            #[cfg(feature = "test-hooks")]
+            state.account_lock_refusals.note(&actor_bytes);
             return Err(AuthError::AccountLocked { locked_until });
         }
     }
@@ -992,6 +1004,129 @@ pub async fn custody_auth_core(
         .insert_with_metadata(actor_id, TOKEN_TTL_SECS, None, Some(custodian_bytes))
         .await;
 
+    Ok(TokenMint {
+        token,
+        token_id,
+        expires_at: now_secs + TOKEN_TTL_SECS,
+        expires_in: TOKEN_TTL_SECS,
+    })
+}
+
+/// The custodied-fleet handshake's verification body — the mint half of the
+/// custodian-NEST serve door (`account-replica-posture.md` § Replica posture
+/// → *The custody grant + ceremony*, the custodian-NEST serve door bullet,
+/// ruling 2).
+///
+/// [`custody_auth_core`] step for step, fleet-shaped: PoP by the owner
+/// DEVICE's principal key + the device's inline root-signed
+/// `DeviceAuthorization` + a live hosting row on THIS nest for that owner. The
+/// minted bearer's actor is the device key — never the owner — so the
+/// allowlist confines the session to `CallerClass::CustodiedFleet`'s two
+/// reads, and AUTHORIZATION is re-derived from rows on every request
+/// (`crate::custody_fleet`); this ceremony authenticates and records the
+/// device's register row, nothing more.
+///
+/// Refusal opacity mirrors the custody door: a cert that does not verify
+/// under the claimed owner (a stranger, the host's own device), a device the
+/// owner's grants name as removed, and an owner with no live hosting row here
+/// all answer the same `NotRegistered("no held custody")`.
+#[allow(clippy::too_many_arguments)]
+pub async fn custodied_fleet_auth_core(
+    state: &Arc<AppState>,
+    owner_actor_id_hex: &str,
+    device_key_hex: &str,
+    timestamp_ms: u64,
+    signature_hex: &str,
+    client_nonce: &[u8],
+    authorization: &fauna_core::encoding::EmbedAsBytes,
+    nest_id_hex: &str,
+) -> Result<TokenMint, AuthError> {
+    let refused = || AuthError::NotRegistered("no held custody".into());
+
+    // 1. Parse identities; the blob must be addressed to THIS nest.
+    let owner_bytes =
+        parse_actor_id(owner_actor_id_hex).ok_or(AuthError::InvalidRequest("owner_actor_id"))?;
+    let device_bytes =
+        parse_actor_id(device_key_hex).ok_or(AuthError::InvalidRequest("device_key"))?;
+    let own_nest = require_own_nest(state, nest_id_hex)?;
+
+    // 2. Timestamp freshness — the direct-auth window.
+    let now_ms = fauna_core::data::Timestamp::now_millis();
+    if timestamp_ms.abs_diff(now_ms) > MAX_TIMESTAMP_DRIFT_MS {
+        return Err(AuthError::TimestampDrift);
+    }
+
+    // 3. The device's cert — self-contained, verified against nothing but the
+    //    claimed owner and the device key (envelope under the owner, names this
+    //    key, same account, unexpired: the admission seam's four rules). Before
+    //    any DB read so an invalid cert conscripts nothing.
+    fauna_core::encoding::verify_device_admission_witness(
+        authorization,
+        &device_bytes,
+        &fauna_core::identity::ActorId(owner_bytes),
+        fauna_core::data::Timestamp(now_ms.saturating_mul(1000)),
+    )
+    .map_err(|_| refused())?;
+
+    // 4. A live hosting row for that owner on this nest that serves this
+    //    device — window open, not refused by the owner's nest, the device not
+    //    on the owner's exclusion set (the class predicate's own read).
+    if !crate::custody_fleet::owner_hosting_serves(&state.db, owner_bytes, &device_bytes)
+        .await
+        .map_err(|e| AuthError::Internal(e.to_string()))?
+    {
+        return Err(refused());
+    }
+
+    // 5. The PoP — the domain-tagged signature by the device key.
+    let sig_bytes = match hex::decode(signature_hex) {
+        Ok(b) if b.len() == 64 => b,
+        _ => return Err(AuthError::InvalidRequest("signature")),
+    };
+    let signature =
+        Signature::from_slice(&sig_bytes).map_err(|_| AuthError::InvalidRequest("signature"))?;
+    let msg = fauna_protocol::auth::custodied_fleet_handshake_signed_message(
+        &owner_bytes,
+        &device_bytes,
+        timestamp_ms,
+        &own_nest,
+        client_nonce,
+    );
+    if !fauna_core::identity::verify_detached(&device_bytes, &msg, &sig_bytes) {
+        return Err(AuthError::SignatureFailed);
+    }
+
+    // 5b. Replay guard — single-use signatures, the shared map.
+    if !state
+        .auth
+        .replay_guard
+        .check_and_record(&signature.to_bytes(), now_ms, MAX_TIMESTAMP_DRIFT_MS)
+        .await
+    {
+        return Err(AuthError::SignatureFailed);
+    }
+
+    // 6. The register row (ruling 3): the verified cert verbatim, rewritten at
+    //    every handshake — what the class re-derives from on each dispatch.
+    let cert_bytes = fauna_core::encoding::canonical_encode(authorization)
+        .map_err(|e| AuthError::Internal(e.to_string()))?;
+    state
+        .db
+        .put_custody_hosting_fleet(&device_bytes, &owner_bytes, &cert_bytes)
+        .await
+        .map_err(|e| AuthError::Internal(e.to_string()))?;
+
+    // 7. Mint — an ordinary session token whose ACTOR IS THE DEVICE KEY, tagged
+    //    with that key so session listings label it (and `ws::bound_device_key_for`
+    //    reads a tag equal to the actor as no device binding).
+    let actor_id = fauna_core::identity::ActorId(device_bytes);
+    let crate::token_store::MintedToken { token, token_id } = state
+        .auth
+        .token_store
+        .insert_with_metadata(actor_id, TOKEN_TTL_SECS, None, Some(device_bytes))
+        .await;
+
+    let now_secs = now_ms / 1000;
     Ok(TokenMint {
         token,
         token_id,

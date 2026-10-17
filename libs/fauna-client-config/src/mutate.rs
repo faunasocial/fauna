@@ -109,7 +109,7 @@ pub fn remove_backup_destination(state: &mut BackupState, destination_id: &str) 
 /// re-attach of an existing row refreshes it (a renamed folder's next attach
 /// records the new name) and returns `true` when that changed the row; a label
 /// field the listing did not carry erases nothing, exactly as the custodian
-/// store keeps its name (`segment-backup-protocol.md` § *Where a restored
+/// store keeps its name (`client-device-custodian.md` § *Where a restored
 /// folder's name comes from*).
 pub fn attach_backup_destination_folder(
     state: &mut BackupState,
@@ -122,14 +122,7 @@ pub fn attach_backup_destination_folder(
         .iter_mut()
         .find(|d| d.destination_id == destination_id && d.folder_name == folder_set)
     {
-        let before = (row.folder_display_name.clone(), row.folder_label.clone());
-        if label.display_name.is_some() {
-            row.folder_display_name = label.display_name.clone();
-        }
-        if label.label.is_some() {
-            row.folder_label = label.label.clone();
-        }
-        return (row.folder_display_name.clone(), row.folder_label.clone()) != before;
+        return label.refresh(row);
     }
     let Some(template) = destinations
         .iter()
@@ -160,7 +153,44 @@ pub struct FolderCoverageLabel {
     pub label: Option<fauna_core::data::CoveredFolderLabel>,
 }
 
+/// Refresh the label of every EXISTING coverage row a listing names — the
+/// read-time heal behind `list_folder_destinations`. `labels` holds
+/// `(destination_id, folder_set, label)` per listed covered folder. Unlike
+/// [`attach_backup_destination_folder`] it never creates a row (a read is not an
+/// attach), and an absent label field erases nothing. Returns `true` when any
+/// row changed, so the caller writes the list only on a difference.
+pub fn refresh_backup_destination_folder_labels(
+    state: &mut BackupState,
+    labels: &[(&str, &str, FolderCoverageLabel)],
+) -> bool {
+    let mut changed = false;
+    for (destination_id, folder_set, label) in labels {
+        if let Some(row) = state
+            .backup
+            .destinations
+            .iter_mut()
+            .find(|d| d.destination_id == *destination_id && d.folder_name == *folder_set)
+        {
+            changed |= label.refresh(row);
+        }
+    }
+    changed
+}
+
 impl FolderCoverageLabel {
+    /// Fold this label into a coverage row: a present field replaces the
+    /// recorded one, an absent field erases nothing. `true` when the row moved.
+    fn refresh(&self, row: &mut BackupDestination) -> bool {
+        let before = (row.folder_display_name.clone(), row.folder_label.clone());
+        if self.display_name.is_some() {
+            row.folder_display_name = self.display_name.clone();
+        }
+        if self.label.is_some() {
+            row.folder_label = self.label.clone();
+        }
+        (row.folder_display_name.clone(), row.folder_label.clone()) != before
+    }
+
     /// The label off one `fauna.backup.destination.list` coverage entry. A
     /// blank name, a hash that is not 32 bytes or an empty seal is no label,
     /// and so is one over its row cap (`fauna_core::backup_state`'s

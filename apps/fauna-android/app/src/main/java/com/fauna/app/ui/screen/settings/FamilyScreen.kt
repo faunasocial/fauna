@@ -10,6 +10,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -20,11 +21,14 @@ import com.fauna.app.core.HexUtil
 import com.fauna.app.core.UndenyDecide
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.util.ValueFormat
 import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.localizedNested
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.viewmodel.FamilyVM
+import com.fauna.app.ui.viewmodel.FeatureAuthoringState
+import com.fauna.app.ui.viewmodel.FeatureEditorActions
 import com.fauna.ffi.FfiContentPolicy
 import com.fauna.ffi.FfiFamilyApprovalEntry
 import com.fauna.ffi.FfiFamilyContentNotice
@@ -35,7 +39,6 @@ import com.fauna.ffi.FfiFamilyWardInfo
 import com.fauna.ffi.FfiReachPolicy
 import com.fauna.ffi.FfiScreenTimePolicy
 import com.fauna.ffi.ageBandLine
-import com.fauna.ffi.approvalDisplayText
 import com.fauna.ffi.contentFloorLabel
 import com.fauna.ffi.contentFloorOptions
 import com.fauna.ffi.contentNoticeLine
@@ -49,6 +52,7 @@ import com.fauna.ffi.unknownPeerDmLabel
 import com.fauna.ffi.unknownPeerDmOptions
 import com.fauna.ffi.unknownSenderLabel
 import com.fauna.ffi.unknownSenderOptions
+import com.fauna.ffi.validateScreenTime
 import com.fauna.ffi.usageTodayLine
 import social.fauna.generated.Ids
 
@@ -79,6 +83,7 @@ fun FamilyScreen(
     val approvals by vm.approvals.collectAsState()
     val selectedWardActorId by vm.selectedWardActorId.collectAsState()
     val errorMessage by vm.errorMessage.collectAsState()
+    val featureAuthoring by vm.featureLimits.state.collectAsState()
     val appMessages = LocalAppMessages.current
 
     LaunchedEffect(errorMessage) { errorMessage?.let { appMessages.showError(it) } }
@@ -92,6 +97,8 @@ fun FamilyScreen(
         onSelectWard = vm::selectWard,
         onSavePolicy = vm::savePolicy,
         onSaveError = { vm.errorMessage.value = it },
+        featureAuthoring = featureAuthoring,
+        featureEditor = vm.featureLimits.actions(),
         onMarkDevice = vm::markDevice,
         onAllowBlockedPeer = vm::allowBlockedPeer,
         onDecideApproval = vm::decideApproval,
@@ -123,6 +130,8 @@ fun FamilyContent(
     onCancelTransfer: (ByteArray) -> Unit,
     onAcceptIncomingTransfer: (ByteArray) -> Unit,
     onDeclineIncomingTransfer: (ByteArray) -> Unit,
+    featureAuthoring: FeatureAuthoringState = FeatureAuthoringState(),
+    featureEditor: FeatureEditorActions = FeatureEditorActions.None,
 ) {
     Scaffold(
         topBar = {
@@ -212,6 +221,8 @@ fun FamilyContent(
                         onSelectWard = onSelectWard,
                         onSavePolicy = onSavePolicy,
                         onSaveError = onSaveError,
+                        featureAuthoring = featureAuthoring,
+                        featureEditor = featureEditor,
                         onMarkDevice = onMarkDevice,
                         onAllowBlockedPeer = onAllowBlockedPeer,
                         onDecideApproval = onDecideApproval,
@@ -275,6 +286,8 @@ private fun GuardianSection(
     onSelectWard: (ByteArray) -> Unit,
     onSavePolicy: (ByteArray, FfiReachPolicy) -> Unit,
     onSaveError: (String) -> Unit,
+    featureAuthoring: FeatureAuthoringState,
+    featureEditor: FeatureEditorActions,
     onMarkDevice: (ByteArray, String, Boolean) -> Unit,
     onAllowBlockedPeer: (UndenyDecide) -> Unit,
     onDecideApproval: (FfiFamilyApprovalEntry, Boolean) -> Unit,
@@ -300,6 +313,9 @@ private fun GuardianSection(
         val selectedWard = wards.find { selectedWardActorId?.contentEquals(it.actorId) == true }
         if (selectedWard != null) {
             PolicyEditor(ward = selectedWard, onSavePolicy = onSavePolicy, onSaveError = onSaveError)
+            // Directly after the policy save button, before the device marks
+            // (family-safety.md § App surface → *Feature limits*).
+            FeatureLimitsGuardianSection(authoring = featureAuthoring, editor = featureEditor)
             DeviceMarkSection(ward = selectedWard, onMarkDevice = onMarkDevice)
             BlockedPeersSection(ward = selectedWard, onAllow = onAllowBlockedPeer)
             ContactAddRow(supervisedActorId = selectedWard.actorId, onAddContact = onAddContact)
@@ -609,22 +625,26 @@ private fun PolicyEditor(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        // A policy the nest enforces is written online
+        // (`account-offline-mutation.md` § The offline-mutation contract).
+        val saveGate = faunaGate("fauna.family.policy.update")
         Button(
             onClick = {
                 // Fallible ONLY because of screen time: the three text inputs
                 // are the one place a guardian can type something the policy
-                // cannot hold. Both the per-field parse ([parseTimeOfDay] /
-                // [parseDailyMinutes]) and the cross-field rules bounds-come-
-                // in-pairs / start==end ambiguous) run through the SAME shared
-                // code the nest runs at `policy.update`, so a save that would
-                // be refused never leaves the client and the guardian sees why
-                // locally — mirrors linux's `editor_policy`.
+                // cannot hold. The per-field parse ([parseTimeOfDay] /
+                // [parseDailyMinutes]) and then the cross-field rules
+                // ([validateScreenTime]: bounds come in pairs, start==end is
+                // ambiguous) run through the SAME shared code the nest runs at
+                // `policy.update`, so a save that would be refused never leaves
+                // the client and the guardian sees why locally — mirrors
+                // linux's `editor_policy`.
                 val screenTime = try {
                     FfiScreenTimePolicy(
                         windowStart = parseTimeOfDay(screenWindowStart),
                         windowEnd = parseTimeOfDay(screenWindowEnd),
                         dailyMinutes = parseDailyMinutes(screenDailyMinutes),
-                    )
+                    ).also { validateScreenTime(it) }
                 } catch (e: Exception) {
                     onSaveError(e.message ?: "invalid screen-time input")
                     return@Button
@@ -665,8 +685,10 @@ private fun PolicyEditor(
                     ),
                 )
             },
+            enabled = saveGate.enabled,
             modifier = Modifier.testTag(Ids.FAMILY_POLICY_SAVE_BUTTON),
         ) { Text(stringResource(R.string.family_policy_save_button)) }
+        DisabledControlReasonText(saveGate.reason)
     }
 }
 
@@ -1042,7 +1064,7 @@ private fun ApprovalRow(entry: FfiFamilyApprovalEntry, onDecide: (FfiFamilyAppro
     Card(modifier = Modifier.fillMaxWidth().testTag(Ids.FAMILY_APPROVAL_ITEM)) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
-                approvalDisplayText(entry) ?: stringResource(R.string.family_approval_no_sender),
+                ValueFormat.approvalRowText(LocalContext.current, entry),
                 style = MaterialTheme.typography.bodyMedium,
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1062,5 +1084,6 @@ private fun ApprovalRow(entry: FfiFamilyApprovalEntry, onDecide: (FfiFamilyAppro
 // The approval row's display rule (family-safety.md § Don't surface content) now lives in
 // shared Rust as `com.fauna.ffi.approvalDisplayText` — it returns `peer_address` for a
 // non-empty `mail_hold`, `summary` for every other kind, and `null` for a held null-path
-// `mail_hold` (whose `peer_address` is deliberately empty), which `ApprovalRow` above
-// resolves to the localized no-sender label.
+// `mail_hold` (whose `peer_address` is deliberately empty), which
+// `ValueFormat.approvalRowText` resolves to the localized no-sender label and, for a
+// held mail, joins with its arrival time (`com.fauna.ffi.approvalTimestampDisplay`).

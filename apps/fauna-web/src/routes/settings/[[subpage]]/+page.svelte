@@ -35,6 +35,9 @@
     type LogEntry,
   } from '$lib/wasm';
   import { qrDisplayFromUri, type QrDisplay } from '$lib/qr-display';
+  import { featureAuthoredRows, featureEditorOpen } from '$lib/rpc';
+  import type { AuthoredRow, PolicyEditorHandle } from '$lib/wasm';
+  import FeaturePolicyEditor from '$lib/components/FeaturePolicyEditor.svelte';
   import {
     authHeaders,
     nodeUrl,
@@ -85,21 +88,27 @@
     type MemberReviewRowText,
     type CrossGroupEviction,
   } from '$lib/conversations';
-  import { ephemeralReviewPassActive, deferEphemeralReviewPass, successionSweepCopy, successionSweepRetry } from '$lib/rpc';
+  import { ephemeralReviewPassActive, deferEphemeralReviewPass, successionSweepCopy, successionSweepRetry, dischargeOwedSuccessionSweep } from '$lib/rpc';
   // The owed-kit slot's three faces. From `$lib/wasm`, not `$lib/rpc`, because
   // they are pure sessionStorage reads that need no connected client — see
   // their doc comments for why the sibling succession reads beside them do.
-  import { claimOwedSuccessionKit, rearmOwedSuccessionKit, dischargeOwedSuccessionSweep } from '$lib/wasm';
+  import { claimOwedSuccessionKit, rearmOwedSuccessionKit, successionSweepOwed } from '$lib/wasm';
   import { dischargeOwedKit } from '$lib/succession-kit';
   import { RecoveryErrorGuard } from '$lib/recovery-error-guard';
+  import { recoveryDeadGenerations, recoveryLetGo, recoveryLetGoConfirmWord } from '$lib/wasm';
+  import { keypackagesLow, statusTextRaw } from '$lib/wasm';
+  import { letGoAnswer, letGoArmed, letGoRenders, type DeadGenerations } from '$lib/recovery-let-go';
   import { ownSupersessionHold } from '$lib/own-supersession-hold';
   import { performHeldBackSupersession } from '$lib/post-auth-escalation';
   import type { SweepCopy } from '$lib/rpc';
   import {
     keypackageCount as wsKeypackageCount,
+    statusNode,
+    type NodeLeg,
     moderationActions,
     moderationAbuseReportMine,
     moderationAbuseReportWithdraw,
+    moderationAppeal,
     mutedKeywordsList,
     mutedKeywordsAdd,
     mutedKeywordsRemove,
@@ -113,8 +122,11 @@
   } from '$lib/conversations';
   import {
     accountDisplayLabel,
+    appealFormView,
+    appealVerdict,
     confidencePercent,
     moderationQueue,
+    moderationRowIsAppealable,
     obligationActionLabel,
     quotaPercent,
     shortId,
@@ -152,6 +164,7 @@
   import NostrSettingsSection from '$lib/components/NostrSettingsSection.svelte';
   import AtprotoSettingsSection from '$lib/components/AtprotoSettingsSection.svelte';
   import DevicesSection from '$lib/components/DevicesSection.svelte';
+  import SessionsSection from '$lib/components/SessionsSection.svelte';
   import FoldersSection from '$lib/components/FoldersSection.svelte';
   import PersonalizationSection from '$lib/components/PersonalizationSection.svelte';
   import LabelerCatalogSection from '$lib/components/LabelerCatalogSection.svelte';
@@ -187,6 +200,7 @@
     : current === 'encryption' ? t.settings.encryption_page.title
     : current === 'logs' ? t.logs.title
     : current === 'connected-apps' ? t.connected_apps.title
+    : current === 'sessions' ? t.sessions.title
     : t.common.settings
   );
 
@@ -209,6 +223,14 @@
   // `fauna.features.status` reply arrives (`settings.md` § Layout & flow item
   // 2b: "renders only once the transparency read resolves").
   let features: FeatureRow[] | null = $state(null);
+  // The self tier's AUTHORED limits (`fauna.features.self_limits.get`) as the
+  // shared `AuthoredRow`s — what `feature-limits-own-summary` words, never the
+  // effective meet above. `null` until the read resolves, so no row says "No
+  // limit set" with no basis. The edit button opens the shared
+  // `feature-policy-editor` at the self tier under its row.
+  let ownLimits: AuthoredRow[] | null = $state(null);
+  let ownEditor: PolicyEditorHandle | null = $state(null);
+  let ownEditorFor: string | null = $state(null);
   let newHandle = $state('');
   let changeHandleError = $state('');
   let changingHandle = $state(false);
@@ -447,6 +469,13 @@
    *  is), so the comparison is against the literal on every app and in every
    *  language. */
   let stolenConfirm = $state('');
+  /** The let-go of a dead generation (settings.md § Recovery kit, the fifth
+   *  act): the account runtime's dead read — the trio's one render gate,
+   *  through the shared line (`letGoRenders`) — and its type-to-confirm field.
+   *  The word is shared Rust's constant, read from the wasm door. */
+  let deadGenerations = $state<DeadGenerations | null>(null);
+  let letGoConfirm = $state('');
+  let letGoWord = $state<string | null>(null);
   // The shown-once minted kit. `null` = nothing to show; dropped on the next
   // ceremony's result or on leaving the page — there is no "show it again"
   // path and there can never be one (identity-succession.md § The
@@ -531,6 +560,43 @@
       recoveryError = recoveryErrorGuard.write(recoveryError, e instanceof Error ? e.message : String(e));
     }
   }
+
+  /** The let-go's render read, on the same nav edge as the status (tui's
+   *  Account hydrate). Never an error: no runtime in this tab, or a failed
+   *  read, is the empty answer — a let-go that cannot be shown is not offered. */
+  async function loadDeadGenerations() {
+    deadGenerations = await recoveryDeadGenerations();
+    letGoWord = recoveryLetGoConfirmWord();
+  }
+
+  /** `recovery-kit-let-go-button` — the user's confirmed act, and the only
+   *  caller there is. The word is re-checked HERE and not only in the render
+   *  (the stolen gate's reason: a test agent driving the id reaches this, and a
+   *  destructive act refuses in words rather than run). The re-read REPLACES
+   *  the list, so the trio leaves the screen once nothing is dead; what the act
+   *  did is said on `error-message`, a kept generation named (tui's fold). */
+  async function doLetGo() {
+    if (!letGoArmed(letGoConfirm, letGoWord, false)) {
+      recoveryError = recoveryErrorGuard.write(recoveryError, t.settings.recovery_kit.let_go_confirm_placeholder);
+      return;
+    }
+    const ids = deadGenerations?.generation_ids ?? [];
+    recoveryError = recoveryErrorGuard.write(recoveryError, '');
+    recoveryBusy = true;
+    try {
+      const outcome = await recoveryLetGo(ids);
+      deadGenerations = outcome.dead;
+      recoveryError = recoveryErrorGuard.write(recoveryError, letGoAnswer(outcome, t.settings.recovery_kit));
+    } catch (e) {
+      recoveryError = recoveryErrorGuard.write(
+        recoveryError,
+        t.settings.recovery_kit.let_go_failed({ message: e instanceof Error ? e.message : String(e) }),
+      );
+    } finally {
+      letGoConfirm = '';
+      recoveryBusy = false;
+    }
+  }
   $effect(() => {
     if (current !== 'account') return;
     // ⚠ ENTERING the section clears any kit on screen — the shown-once custody
@@ -555,6 +621,7 @@
     recoveryMinted = null;
     recoveryQr = null;
     void loadRecoveryStatus();
+    void loadDeadGenerations();
     // The section's inherited-filters line counts these, and a Keep answered
     // on the filter list since the last read must already be gone from it.
     void refreshFilterMarks();
@@ -686,13 +753,22 @@
     // relaunch-adoption clause): an unbidden press of the sweep retry, ahead of
     // the kit. It parks the report its answer chooses — re-read here so the
     // sweep's lines and the retry button render — and says its answer as a
-    // press would. `null` on every session that adopted nothing.
+    // press would (a sweep that ran says it through those lines). Peeked first,
+    // so only the launch that owes one waits for the conversations plane: the
+    // sweep reads the retired leaf the plane's restore parked, and joins the
+    // live engine (`null` when this tab cannot run one — the press then answers
+    // in words).
     try {
-      const sweepAnswer = await dischargeOwedSuccessionSweep(id.actorId);
-      if (sweepAnswer) {
-        console.info('[succession] discharged the owed group sweep for', id.actorId);
-        sweepCopy = await successionSweepCopy(id.secretHex);
-        recoveryError = recoveryErrorGuard.write(recoveryError, resolveLocalized(sweepAnswer));
+      if (await successionSweepOwed(id.actorId)) {
+        const conversations = await getConversationsManager().catch(() => null);
+        const discharged = await dischargeOwedSuccessionSweep(id.secretHex, conversations);
+        if (discharged) {
+          console.info('[succession] discharged the owed group sweep for', id.actorId);
+          sweepCopy = await successionSweepCopy(id.secretHex);
+          if (discharged.message) {
+            recoveryError = recoveryErrorGuard.write(recoveryError, resolveLocalized(discharged.message));
+          }
+        }
       }
     } catch (e) {
       console.warn('[succession] could not discharge the owed sweep:', e);
@@ -822,17 +898,24 @@
    *  ⚠ **The answer is the product here, not a side effect.** The button renders
    *  on unfinished work and deliberately NOT on whether this device can retry
    *  (`settings.md` § Recovery kit → *Finishing an unfinished group sweep*), so
-   *  a press that cannot sweep must still say something — and on web no press
-   *  ever sweeps: the retired identity's MLS state rests in the nest replica
-   *  behind bearers the succession revoked. The sentence is the shared
-   *  projection's, never composed here, and it lands on `error-message` like
-   *  every other answer this section gives. */
+   *  a press that cannot sweep must still say something: a browser with no
+   *  predecessor seed, or no retired leaf parked in its replica plane, answers
+   *  in the shared projection's sentence, never composed here, on
+   *  `error-message` like every other answer this section gives. A press that
+   *  sweeps answers `null` and says it through the sweep's own lines, re-read
+   *  from the report it parked. */
   async function doRetrySuccessionSweep() {
     const id = $identity;
     if (!id) return;
     recoveryError = recoveryErrorGuard.write(recoveryError, '');
     try {
-      recoveryError = recoveryErrorGuard.write(recoveryError, resolveLocalized(await successionSweepRetry(id.secretHex)));
+      // The live engine — built if this tab has not yet — is the one the
+      // successor's half of the sweep joins; `null` (another tab serves this
+      // account) answers in words.
+      const conversations = await getConversationsManager().catch(() => null);
+      const answer = await successionSweepRetry(id.secretHex, conversations);
+      sweepCopy = await successionSweepCopy(id.secretHex);
+      if (answer) recoveryError = recoveryErrorGuard.write(recoveryError, resolveLocalized(answer));
     } catch (e) {
       recoveryError = recoveryErrorGuard.write(recoveryError, e instanceof Error ? e.message : String(e));
     }
@@ -983,6 +1066,25 @@
 
   // MLS key package state
   let keyPackageCount = $state<number | null>(null);
+
+  // The Status page's shared snapshot (`ui/status.md` § State & data shape): the
+  // node leg is read once per visit; the MLS leg is the key-package read above
+  // plus the live manager's channel count. Every element text is
+  // `statusTextRaw`'s (shared Rust) — nothing is derived here, and a `null`
+  // text means the element is not rendered. Web has no local sync agent, so the
+  // sync leg is a declared absence.
+  let statusNodeLeg = $state<NodeLeg | null>(null);
+  let statusManagerReady = $state(false);
+  const statusText = $derived.by(() => {
+    void $conversationsSnapshot; // the channel count moves with the threads
+    const manager = statusManagerReady ? conversationsManagerIfReady() : null;
+    return statusTextRaw(
+      statusNodeLeg,
+      manager ? keyPackageCount : null,
+      manager ? manager.secureChannelCount() : 0,
+      import.meta.env.VITE_GIT_SHA ?? null,
+    );
+  });
   let keyPackageError = $state('');
   let publishingKeys = $state(false);
 
@@ -1034,7 +1136,9 @@
 
   // Push notification state — the install's stored opt-in bit (written only
   // from the store, never from the click, so the toggle is evidence of it).
-  let pushSubscribed = $state(pushOptedIn());
+  // Seeded false and read in `onMount` after `ensureWasm()`: `pushOptedIn()` is
+  // a synchronous core-wasm read, and this script runs before the chunk is up.
+  let pushSubscribed = $state(false);
   let pushLoading = $state(false);
   let pushError = $state('');
 
@@ -1054,6 +1158,52 @@
   const moderationRows = $derived.by<QueueRow[]>(() =>
     moderationQueue(serverModerationActions, localDetections),
   );
+
+  // The appeal form (moderation.md § Legal takedown — the transparency triple's
+  // second leg). Every decision is the shared `fauna_client_moderation::appeal`
+  // fold (`moderationRowIsAppealable`, `appealFormView`, `appealVerdict`); this
+  // page paints and wires. At most one draft is open, and it captures its row's
+  // `content_id` at OPEN time — the queue refetches, so a dispatch keyed on the
+  // row index could appeal the wrong decision. The outcome line is
+  // `appeal-status`, never the page-level `error`: a refused appeal is form
+  // feedback, and routing it there would blank the queue being read. No offline
+  // gate: the kind is `OfflineQueued`, which the gate never desensitizes.
+  let appealDraft = $state<{ contentId: string; reason: string } | null>(null);
+  let appealStatus = $state('');
+  let appealBusy = $state(false);
+  const appealView = $derived(
+    appealDraft ? appealFormView(appealDraft.contentId, appealDraft.reason) : null,
+  );
+
+  function openAppeal(contentId: string): void {
+    appealDraft = { contentId, reason: '' };
+    appealStatus = '';
+  }
+
+  function cancelAppeal(): void {
+    appealDraft = null;
+    appealStatus = '';
+  }
+
+  async function submitAppeal(): Promise<void> {
+    const draft = appealDraft;
+    const id = $identity;
+    if (!draft || !id?.secretHex || appealBusy) return;
+    if (!appealFormView(draft.contentId, draft.reason).can_submit) return;
+    appealBusy = true;
+    try {
+      await moderationAppeal(id.secretHex, draft.contentId, draft.reason.trim());
+      // Recorded for review: the decision is with an admin now, so the form
+      // closes. The queue row stays — appeals are additive history.
+      appealDraft = null;
+      appealStatus = resolveLocalized(appealVerdict(null));
+    } catch (e) {
+      // A refusal keeps the form open so the reason can be fixed and resent.
+      appealStatus = resolveLocalized(appealVerdict(rejectionText(e, String(e))));
+    } finally {
+      appealBusy = false;
+    }
+  }
 
   // The reporter's own ledger (`moderation-reports-section`; moderation.md
   // § User-initiated reporting → What the reporter is told), read beside the
@@ -1252,21 +1402,36 @@
    *  patching the cached list in place. Resolves each row's handle BEFORE
    *  building its text — `memberReviewHandleForPerson` reads live
    *  membership, so it must run before any Remove for the same person. */
+  /** The roster with each row's text — the read `loadMemberReview` and the
+   *  store-change re-read share. */
+  async function readMemberReviewRows(): Promise<MemberReviewRowVM[]> {
+    const reviews = await memberReviewList();
+    return Promise.all(
+      reviews.map(async (review) => {
+        const handle = await memberReviewHandleForPerson(review.person);
+        const text = await memberReviewRowText(review.person, review.reasons, handle);
+        return { review, text };
+      }),
+    );
+  }
+
+  /** Bumped by every Keep/Remove, so a store-change re-read a verdict
+   *  overtook paints nothing (the verdict's own re-read follows it). */
+  let memberReviewGestures = 0;
+  /** The text of the failure the roster read put up, so the store-change
+   *  re-read retires only its OWN message — a Remove's partial-eviction
+   *  message stays. */
+  let memberReviewReadError = '';
+
   async function loadMemberReview() {
     const id = $identity;
     if (!id) return;
     try {
-      const reviews = await memberReviewList();
-      memberReviewRows = await Promise.all(
-        reviews.map(async (review) => {
-          const handle = await memberReviewHandleForPerson(review.person);
-          const text = await memberReviewRowText(review.person, review.reasons, handle);
-          return { review, text };
-        }),
-      );
+      memberReviewRows = await readMemberReviewRows();
       memberReviewLoaded = true;
     } catch (e) {
-      memberReviewError = e instanceof Error ? e.message : String(e);
+      memberReviewReadError = e instanceof Error ? e.message : String(e);
+      memberReviewError = memberReviewReadError;
     }
     // No round trip (a synchronous local read on the wasm side) — never
     // allowed to leave `ephemeralReviewActive` stuck true from a stale sign-in
@@ -1309,6 +1474,7 @@
   async function keepMemberReview(personHex: string) {
     const id = $identity;
     if (!id) return;
+    memberReviewGestures += 1;
     try {
       await memberReviewKeep(personHex);
       memberReviewError = '';
@@ -1370,6 +1536,7 @@
     if (!id) return;
     const row = memberReviewRows.find((r) => r.review.person === personHex);
     const who = row ? resolveLocalized(row.text.who) : t.settings.recovery_kit.review_unknown_person;
+    memberReviewGestures += 1;
     try {
       const eviction = await memberReviewRemove(personHex);
       memberReviewError = memberReviewRemoveMessage(eviction, who);
@@ -1379,11 +1546,38 @@
     }
   }
 
+  // The open page's re-read on a store-change notice (`$lib/store-change`):
+  // the review items rest in the account store, so another device's verdict
+  // walking in drops its row here. The roster only — the ephemeral pass's
+  // witness and the sweep lines describe this tab's own ceremony, not the
+  // store. Level-shaped: a failed or overtaken re-read replaces nothing and
+  // writes no error, an unchanged roster paints nothing, and a good read
+  // retires only the error the roster read put up.
+  async function rereadMemberReview() {
+    if (!$identity) return;
+    const before = memberReviewGestures;
+    let fresh: MemberReviewRowVM[];
+    try {
+      fresh = await readMemberReviewRows();
+    } catch {
+      return;
+    }
+    if (before !== memberReviewGestures) return;
+    if (memberReviewReadError && memberReviewError === memberReviewReadError) memberReviewError = '';
+    memberReviewReadError = '';
+    if (!memberReviewLoaded || JSON.stringify(fresh) !== JSON.stringify(memberReviewRows)) {
+      memberReviewRows = fresh;
+      memberReviewLoaded = true;
+    }
+  }
+
   $effect(() => {
     // 'account' hosts the Recovery kit section (the ephemeral pass);
     // 'member-review' is the permanent page — both render the SAME roster
     // (`succession-aftermath.md` § Propagation: one family, two surfaces).
-    if (current === 'member-review' || current === 'account') void loadMemberReview();
+    if (current !== 'member-review' && current !== 'account') return;
+    void loadMemberReview();
+    return onStoreChange(() => void rereadMemberReview());
   });
 
   // Spam preferences state
@@ -1395,6 +1589,7 @@
 
   onMount(async () => {
     await ensureWasm();
+    pushSubscribed = pushOptedIn();
     inboxModes = inboxModeValues().map((value) => {
       const known = inboxModeLabels[value];
       if (!known) throw new Error(`inbox mode "${value}" has no web label`);
@@ -1415,6 +1610,42 @@
     }
   });
 
+  async function loadOwnLimits() {
+    const id = $identity;
+    if (!id) return;
+    try {
+      ownLimits = await featureAuthoredRows(id.secretHex, 'self');
+    } catch { /* an older nest has no self-limit read: the rows paint no own control */ }
+  }
+
+  // A self-limit write changes what binds, so the transparency rows above are
+  // re-read with the authored summary (no re-navigation needed).
+  async function reloadAfterOwnWrite() {
+    const id = $identity;
+    if (!id) return;
+    try {
+      features = await fetchFeatures(id.secretHex);
+    } catch { /* keep the rows already painted */ }
+    await loadOwnLimits();
+  }
+
+  async function openOwnEditor(feature: string) {
+    const id = $identity;
+    if (!id) return;
+    error = '';
+    try {
+      ownEditor = await featureEditorOpen(id.secretHex, 'self', feature);
+      ownEditorFor = feature;
+    } catch (e) {
+      error = t.features.editor_load_failed({ error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  function closeOwnEditor() {
+    ownEditor = null;
+    ownEditorFor = null;
+  }
+
   async function loadAll() {
     const id = $identity;
     if (!id) return;
@@ -1424,15 +1655,24 @@
     try {
       features = await fetchFeatures(id.secretHex);
     } catch { /* feature limits not available */ }
+    await loadOwnLimits();
     try {
       inboxMode = await getInboxMode(id.secretHex);
     } catch { /* inbox mode not available */ }
     try {
+      statusNodeLeg = await statusNode(id.secretHex);
+    } catch { /* node info not available: the Node section stays absent */ }
+    try {
+      // A read only: the count is never an auto-mint trigger
+      // (`direct-messages.md` § Key Package Management) — the pool is topped
+      // up at sign-in and by this page's own Refresh.
       keyPackageCount = await wsKeypackageCount(id.secretHex, id.actorId);
-      if (keyPackageCount < 5) {
-        await publishMlsKeys(id.secretHex, id.actorId);
-      }
     } catch { /* MLS key packages not available */ }
+    try {
+      // The channel count reads the live manager (built at sign-in anyway).
+      await getConversationsManager();
+      statusManagerReady = true;
+    } catch { /* no manager: the Encryption section stays absent */ }
     try {
       emailFilters = await listEmailFilters(id.secretHex);
     } catch { /* filters not available */ }
@@ -1879,6 +2119,34 @@
                 <span class="muted" data-testid={IDS.FEATURE_LIMITS_QUOTA_TIER}>{resolveLocalized(cell.tier_label)}</span>
               </div>
             {/each}
+            <!-- The user's OWN limit for this member, in words, and the control
+                 that opens the shared editor at the self tier right under the
+                 row (settings.md § Layout & flow item 2b). Present only once the
+                 authored read has resolved and the nest carries the member. -->
+            {#each (ownLimits ?? []).filter((o) => o.feature === row.feature) as own (own.feature)}
+              <div class="field">
+                <span class="field-label">{t.features.own_label}</span>
+                <span data-testid={IDS.FEATURE_LIMITS_OWN_SUMMARY}>{resolveLocalized(own.summary)}</span>
+                <button
+                  type="button"
+                  class="btn"
+                  data-testid={IDS.FEATURE_LIMITS_OWN_EDIT_BUTTON}
+                  onclick={() => openOwnEditor(row.feature)}
+                >
+                  {t.features.own_edit}
+                </button>
+              </div>
+              {#if ownEditor && ownEditorFor === row.feature && $identity?.secretHex}
+                <FeaturePolicyEditor
+                  secretHex={$identity.secretHex}
+                  editor={ownEditor}
+                  tier="self"
+                  onwritten={reloadAfterOwnWrite}
+                  oncancel={closeOwnEditor}
+                  onerror={(message) => (error = message)}
+                />
+              {/if}
+            {/each}
           </div>
         {/each}
       {/if}
@@ -1897,6 +2165,34 @@
     </section>
   {/if}
 
+  {#if statusText.node_domain !== null && statusText.node_version !== null}
+    <section class="section">
+      <h2>{t.status.node.title}</h2>
+      <div class="field">
+        <span class="field-label">{t.common.domain}</span>
+        <span data-testid={IDS.STATUS_NODE_DOMAIN}>{statusText.node_domain}</span>
+      </div>
+      <div class="field">
+        <span class="field-label">{t.admin.dashboard.version}</span>
+        <span data-testid={IDS.STATUS_NODE_VERSION}>{statusText.node_version}</span>
+      </div>
+    </section>
+  {/if}
+
+  {#if statusText.mls_key_packages !== null && statusText.mls_channels !== null}
+    <section class="section">
+      <h2>{t.settings.encryption_page.title}</h2>
+      <div class="field">
+        <span class="field-label">{t.status.encryption.key_packages}</span>
+        <span data-testid={IDS.STATUS_MLS_KEY_PACKAGES}>{statusText.mls_key_packages}</span>
+      </div>
+      <div class="field">
+        <span class="field-label">{t.status.encryption.dm_channels}</span>
+        <span data-testid={IDS.STATUS_MLS_CHANNELS}>{statusText.mls_channels}</span>
+      </div>
+    </section>
+  {/if}
+
   <section class="section build-info">
     <h2>{t.status.build.title}</h2>
     <div class="field">
@@ -1904,19 +2200,18 @@
       <code class="mono">{$identity?.actorId}</code>
       <button class="btn-copy" data-testid={IDS.STATUS_ACTOR_ID_COPY_BTN} data-copied={copiedActorId ?? undefined} onclick={copyActorId}>{actorIdCopied ? t.common.copied : t.common.copy}</button>
     </div>
-    <div class="field">
-      <span class="field-label">{t.status.build.commit}</span>
-      {#if import.meta.env.VITE_GIT_SHA !== 'dev'}
+    {#if statusText.build_sha !== null}
+      <div class="field">
+        <span class="field-label">{t.status.build.commit}</span>
         <!-- Plain text, not a link: builds are stamped with a development-repo
-             commit that is not resolvable from the public mirror's history. -->
-        <code class="mono" data-testid={IDS.STATUS_BUILD_SHA}>{import.meta.env.VITE_GIT_SHA.slice(0, 12)}</code>
-      {:else}
-        <code class="mono" data-testid={IDS.STATUS_BUILD_SHA}>dev</code>
-      {/if}
-    </div>
-    <p class="muted small">
-      {t.status.build.verify_hint}
-    </p>
+             commit that is not resolvable from the public mirror's history. An
+             unstamped build renders no row (`status.md` § Build). -->
+        <code class="mono" data-testid={IDS.STATUS_BUILD_SHA}>{statusText.build_sha}</code>
+      </div>
+      <p class="muted small">
+        {t.status.build.verify_hint}
+      </p>
+    {/if}
   </section>
 
 {:else if current === 'account'}
@@ -2097,14 +2392,13 @@
            cannot vouch for — with no combined "you are safe" verdict; which
            arm says what, and the silence on an account with no groups, are
            the shared projection's (`SweepView::copy`), never this page's.
-           The degraded arms DO name the retry button here as of 2026-08-27
-           (`SweepRetryAffordance::Rendered`, declared wasm-side): it is on
+           The degraded arms name the retry button here: it is on
            screen directly below them. -->
       {#if sweepCopy?.outcome}
-        <p class="muted">{resolveLocalized(sweepCopy.outcome)}</p>
+        <p class="muted" data-testid={IDS.RECOVERY_KIT_SWEEP_STATUS}>{resolveLocalized(sweepCopy.outcome)}</p>
       {/if}
       {#if sweepCopy?.unattested}
-        <p class="muted">{resolveLocalized(sweepCopy.unattested)}</p>
+        <p class="muted" data-testid={IDS.RECOVERY_KIT_SWEEP_UNVOUCHED_STATUS}>{resolveLocalized(sweepCopy.unattested)}</p>
       {/if}
       <!-- The retry, on the arms that owe work. Gated on `owesWork` — the
            SHARED render gate — and deliberately NOT on whether this browser
@@ -2258,6 +2552,31 @@
           disabled={recoveryBusy}
         >
           {t.settings.recovery_kit.veto}
+        </button>
+      {/if}
+      <!-- The let-go of a dead generation (settings.md § Recovery kit, the
+           fifth act): the line, its type-to-confirm field and its button,
+           ONLY while the shared projection has a line — which is why ui.yaml
+           has them in `optional_elements`. The button arms on the confirm word
+           alone (tui's `let_go_elements`). -->
+      {#if deadGenerations && letGoRenders(deadGenerations)}
+        <p class="muted" data-testid={IDS.RECOVERY_KIT_UNREADABLE_STATUS}>
+          {resolveLocalized(deadGenerations.unreadable_status)}
+        </p>
+        <input
+          data-testid={IDS.RECOVERY_KIT_LET_GO_CONFIRM_FIELD}
+          type="text"
+          class="input"
+          placeholder={t.settings.recovery_kit.let_go_confirm_placeholder}
+          bind:value={letGoConfirm}
+        />
+        <button
+          data-testid={IDS.RECOVERY_KIT_LET_GO_BUTTON}
+          class="btn danger"
+          onclick={doLetGo}
+          disabled={!letGoArmed(letGoConfirm, letGoWord, recoveryBusy)}
+        >
+          {t.settings.recovery_kit.let_go}
         </button>
       {/if}
       {#if recoveryStatus?.allows_escrow_reseal}
@@ -2487,7 +2806,7 @@
           bind:value={spamThreshold}
         />
         <span class="pref-value">{spamThreshold.toFixed(2)}</span>
-        <span class="pref-hint muted">
+        <span class="pref-hint muted" data-testid={IDS.SPAM_THRESHOLD_BAND}>
           {t.status.spam[spamThresholdBand(spamThreshold)]}
         </span>
       </div>
@@ -2526,14 +2845,16 @@
       {:else}
         <p class="muted">{t.moderation.flagged_count({ count: String(moderationRows.length) })}</p>
         {#each moderationRows as item, i (item.content_id + '-' + i)}
+          {@const pct = `${confidencePercent(item.confidence_per_mille)}%`}
+          {@const actionText = item.action !== null ? resolveLocalized(obligationActionLabel(item.action)) : undefined}
           <div class="flagged-item">
             <span class="flagged-id mono">{shortId(item.content_id)}</span>
-            <ContentLabelBadge label={item.category} />
-            <span class="muted small">{confidencePercent(item.confidence_per_mille)}% {t.moderation.confidence}</span>
+            <ContentLabelBadge label={item.category} confidence={pct} action={actionText} />
+            <span class="muted small">{pct} {t.moderation.confidence}</span>
             <!-- A local detection carries no `action` (the client classifies, it never
                  enforces) → blank action column, never a fabricated label. -->
-            {#if item.action !== null}
-              <span class="muted small action-label">{resolveLocalized(obligationActionLabel(item.action))}</span>
+            {#if actionText !== undefined}
+              <span class="muted small action-label">{actionText}</span>
             {/if}
             <button
               data-testid={IDS.TRAIN_CORRECTION_BUTTON}
@@ -2555,8 +2876,48 @@
                 }
               }}
             >{t.moderation.correct}</button>
+            <!-- The appeal handle: nest-issued (server) rows only — a local detection
+                 records nobody's decision, so its lever is the correction button above. -->
+            {#if moderationRowIsAppealable(item)}
+              <button
+                data-testid={IDS.APPEAL_BUTTON}
+                class="btn small"
+                onclick={() => openAppeal(item.content_id)}
+              >{t.moderation.appeal}</button>
+            {/if}
           </div>
+          <!-- The open form paints under the row it was opened against. -->
+          {#if appealDraft && appealView && appealDraft.contentId === item.content_id}
+            <div class="appeal-form">
+              <p class="muted small">{resolveLocalized(appealView.summary)}</p>
+              <label>
+                {t.moderation.appeal_reason_label}
+                <input
+                  type="text"
+                  data-testid={IDS.APPEAL_REASON_INPUT}
+                  bind:value={appealDraft.reason}
+                />
+              </label>
+              {#if appealView.blocked_reason}
+                <p class="muted small">{resolveLocalized(appealView.blocked_reason)}</p>
+              {/if}
+              <button
+                class="btn small"
+                data-testid={IDS.APPEAL_SUBMIT_BUTTON}
+                disabled={!appealView.can_submit || appealBusy}
+                onclick={submitAppeal}
+              >{resolveLocalized(appealView.submit_label)}</button>
+              <button
+                class="btn ghost small"
+                data-testid={IDS.APPEAL_CANCEL_BUTTON}
+                onclick={cancelAppeal}
+              >{t.moderation.appeal_cancel}</button>
+            </div>
+          {/if}
         {/each}
+        {#if appealStatus}
+          <p data-testid={IDS.APPEAL_STATUS}>{appealStatus}</p>
+        {/if}
       {/if}
     </div>
     <div data-testid={IDS.MODERATION_REPORTS_SECTION}>
@@ -2721,7 +3082,7 @@
         <span class="field-label">{t.status.encryption.key_packages}</span>
         <span>{t.status.encryption.available({ count: String(keyPackageCount) })}</span>
       </div>
-      {#if keyPackageCount < 5}
+      {#if keypackagesLow(keyPackageCount)}
         <p class="muted small">{t.status.encryption.low_keys}</p>
       {/if}
     {:else}
@@ -2741,6 +3102,12 @@
        Settings shell (the folder wizard/list/conflicts moved to Settings → File
        sets, below). Dumb renderer of the shared DevicesMachine — devices.md. ── -->
   <DevicesSection bind:error />
+
+{:else if current === 'sessions'}
+  <!-- ── Settings → Sessions (`ui/sessions.md`): where the account is signed in
+       right now — the list, sign out everywhere else, the 24-hour lock. Dumb
+       renderer of the shared sessions fold over the wasm twin. ── -->
+  <SessionsSection bind:error />
 
 {:else if current === 'folders'}
   <!-- ── Settings → Folders (sync-file-set-ui-unification, 2026-06-28): the ONE
@@ -2923,6 +3290,10 @@
     border: 1px solid var(--border); border-radius: 6px; margin-bottom: 0.375rem;
   }
   .flagged-id { flex: 1; font-size: 0.8rem; }
+  .appeal-form {
+    display: flex; flex-direction: column; gap: 0.375rem; padding: 0.5rem;
+    border: 1px solid var(--border); border-radius: 6px; margin-bottom: 0.375rem;
+  }
   .filter-item {
     display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem;
     border: 1px solid var(--border); border-radius: 6px; margin-bottom: 0.375rem;

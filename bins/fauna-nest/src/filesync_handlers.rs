@@ -301,6 +301,14 @@ fn parse_name_hash(name_hash: &Option<ByteBuf>) -> Result<Option<[u8; 32]>, RpcE
     crate::routes::parse_name_hash(name_hash, |msg| invalid_request(msg))
 }
 
+/// The request's set address — its row when carried, else its name with the
+/// hash validated (`crate::routes::parse_set_address`).
+fn set_address<'r>(
+    req: &'r impl fauna_protocol::folders::SetAddressed,
+) -> Result<crate::folder_authz::FolderAddress<'r>, RpcError> {
+    crate::routes::parse_set_address(req, |msg| invalid_request(msg))
+}
+
 fn not_soft_deleted() -> RpcError {
     let mut e = RpcError::new(
         "fauna.filesync.snapshot.not_soft_deleted",
@@ -1084,7 +1092,7 @@ fn list_handler() -> RpcHandler {
             // selector a client has, so reading it only inside the
             // `folder.is_some()` arm would silently answer with the bearer's
             // message-kind rows instead of the set they addressed.
-            let rows = if req.folder.is_some() || name_hash.is_some() {
+            let rows = if req.folder.is_some() || name_hash.is_some() || req.folder_id.is_some() {
                 // B15 folder fold-in: file_set-name scoped, behavior-
                 // preserving vs the `GET /api/v1/snapshots?folder=` twin
                 // (returns all rows for the set, incl. soft-deleted).
@@ -1093,11 +1101,9 @@ fn list_handler() -> RpcHandler {
                 // — never the name-only `get_folder` (cross-user list). A
                 // not-found / not-yours both fold to `not_found` (ST-RES-1).
                 // Hash-first when present, so the empty name is never read.
-                let name = req.folder.as_deref().unwrap_or("");
                 let fs = crate::folder_authz::resolve_readable_folder(
                     &state.db,
-                    name,
-                    name_hash.as_ref(),
+                    set_address(&req)?,
                     &bearer,
                 )
                 .await
@@ -1195,13 +1201,11 @@ fn create_folder_handler() -> RpcHandler {
             // Owner-scoped lookup (N1): resolve the caller's own folder by
             // (name, actor), never the name-only `get_folder` which returns
             // whichever actor's row sorts first for a colliding name.
-            let name_hash = parse_name_hash(&req.name_hash)?;
-            let fs = match name_hash {
-                Some(h) => state.db.get_folder_for_actor_by_name_hash(&h, &actor).await,
-                None => state.db.get_folder_for_actor(&req.folder, &actor).await,
-            }
-            .map_err(internal)?
-            .ok_or_else(|| not_found("folder not found"))?;
+            let fs =
+                crate::folder_authz::resolve_owned_folder(&state.db, set_address(&req)?, &actor)
+                    .await
+                    .map_err(internal)?
+                    .ok_or_else(|| not_found("folder not found"))?;
 
             // A reserved (`__`) backup-type set is a cross-location backup
             // DESTINATION (custodian-held latest-per-path custody) — snapshot
@@ -1552,13 +1556,11 @@ fn prune_handler() -> RpcHandler {
             let req: SnapshotPruneRequest = decode(&payload).map_err(malformed)?;
 
             // Owner-scoped lookup (N1) — see create_folder.
-            let name_hash = parse_name_hash(&req.name_hash)?;
-            let fs = match name_hash {
-                Some(h) => state.db.get_folder_for_actor_by_name_hash(&h, &actor).await,
-                None => state.db.get_folder_for_actor(&req.folder, &actor).await,
-            }
-            .map_err(internal)?
-            .ok_or_else(|| not_found("folder not found"))?;
+            let fs =
+                crate::folder_authz::resolve_owned_folder(&state.db, set_address(&req)?, &actor)
+                    .await
+                    .map_err(internal)?
+                    .ok_or_else(|| not_found("folder not found"))?;
             // § 7: the candidate population is the ACTIVE snapshots only — the
             // predicate shared with the automatic path (`backup::prune`). The
             // unfiltered list also carries `soft_deleted` rows (30-day undelete
@@ -1690,13 +1692,11 @@ fn prune_set_policy_handler() -> RpcHandler {
             // Owner-scoped lookup (N1) — the same gate `prune` uses. A prune
             // is a write; a roster member reading a group-bound set may not
             // launch one.
-            let name_hash = parse_name_hash(&req.name_hash)?;
-            let fs = match name_hash {
-                Some(h) => state.db.get_folder_for_actor_by_name_hash(&h, &actor).await,
-                None => state.db.get_folder_for_actor(&req.folder, &actor).await,
-            }
-            .map_err(internal)?
-            .ok_or_else(|| not_found("folder not found"))?;
+            let fs =
+                crate::folder_authz::resolve_owned_folder(&state.db, set_address(&req)?, &actor)
+                    .await
+                    .map_err(internal)?
+                    .ok_or_else(|| not_found("folder not found"))?;
 
             use crate::backup::retention::{
                 FolderRetention, evaluate_folder_retention_at, parse_folder_retention,
@@ -1835,13 +1835,11 @@ fn check_handler() -> RpcHandler {
             let req: SnapshotCheckRequest = decode(&payload).map_err(malformed)?;
 
             // Owner-scoped lookup (N1) — see create_folder.
-            let name_hash = parse_name_hash(&req.name_hash)?;
-            let fs = match name_hash {
-                Some(h) => state.db.get_folder_for_actor_by_name_hash(&h, &actor).await,
-                None => state.db.get_folder_for_actor(&req.folder, &actor).await,
-            }
-            .map_err(internal)?
-            .ok_or_else(|| not_found("folder not found"))?;
+            let fs =
+                crate::folder_authz::resolve_owned_folder(&state.db, set_address(&req)?, &actor)
+                    .await
+                    .map_err(internal)?
+                    .ok_or_else(|| not_found("folder not found"))?;
 
             let backup_svc = state
                 .backup_service
@@ -2108,11 +2106,11 @@ async fn restore_mail(
 /// rebuild: the floor carries the ingest-time columns, the `(seg_id, cid)`
 /// pair addresses the envelope (for `encrypted_index_hint`), and the bucket
 /// feeds the rebuilt `segment_records` mirror row.
-struct DiskContentRecord<F> {
-    seg_id: u32,
-    bucket: String,
-    cid: fauna_cbor::Cid,
-    floor: F,
+pub(crate) struct DiskContentRecord<F> {
+    pub(crate) seg_id: u32,
+    pub(crate) bucket: String,
+    pub(crate) cid: fauna_cbor::Cid,
+    pub(crate) floor: F,
 }
 
 /// Open every pinned live segment under `root`, decode each record's floor
@@ -2167,7 +2165,7 @@ fn verify_pinned_record_identity(
     Ok(())
 }
 
-fn walk_pinned_segments<F>(
+pub(crate) fn walk_pinned_segments<F>(
     root: &std::path::Path,
     kind: &str,
     live_segments: &[u32],
@@ -4249,6 +4247,7 @@ mod tests {
                 calendar_id: [0xCAu8; 32],
                 encrypted_metadata: vec![0u8; 64],
                 highestmodseq: 42,
+                pruned_modseq: 0,
             });
         let placement_blob = fauna_core::encoding::canonical_encode(&placement)
             .expect("serialize CalPlacementManifest");

@@ -1227,6 +1227,35 @@ async fn hydrate_reads_serving_flag_from_nest() {
     assert!(machine.snapshot().serving_enabled, "default-on round-trips");
 }
 
+/// A hydrate the first-listing gate refuses records the reason on the
+/// snapshot's error, so the page says why instead of reading "mail is
+/// disabled" with the enable gesture offered
+/// (`account-client-lifecycle.md` § The client-side lifecycle → *The first
+/// listing*, clause (4)).
+#[tokio::test]
+async fn hydrate_refused_for_want_of_a_listing_records_the_reason() {
+    let (machine, _nest, mail) = build_machine();
+    mail.refuse_reads_with(fauna_client_config::LEDGER_NOT_READY);
+    let _ = machine.hydrate().await;
+    assert_eq!(
+        machine.snapshot().error.as_deref(),
+        Some(fauna_i18n::strings::common::NEEDS_NEST),
+        "the refused hydrate says what it waits for"
+    );
+}
+
+/// The sibling refusal crosses as the other-device reason.
+#[tokio::test]
+async fn hydrate_awaiting_a_sibling_records_the_other_device_reason() {
+    let (machine, _nest, mail) = build_machine();
+    mail.refuse_reads_with(fauna_client_config::LEDGER_AWAITING_SIBLING);
+    let _ = machine.hydrate().await;
+    assert_eq!(
+        machine.snapshot().error.as_deref(),
+        Some(fauna_i18n::strings::common::NEEDS_OTHER_DEVICE),
+    );
+}
+
 fn build_machine_for(node_url: &str) -> (MailSettingsMachine, FakeNestClient) {
     let nest = FakeNestClient::new();
     let cfg = FakeSuccessionLedgerStore::empty(fauna_core::identity::ActorId(ACTOR));

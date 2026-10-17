@@ -71,6 +71,7 @@ import pytest
 
 from actions import ActionLayer
 from common import build_registry_seed, create_actor_and_register
+from helpers.app_launch import app_launch_config
 from conftest import _seeded_environment, get_available_apps
 from drivers import create_driver
 from drivers.inprocess_agent import InProcessAgentDriver
@@ -193,15 +194,8 @@ def _launch_seat(request, nest_instance, app: str, seed: dict):
         "url": nest_instance["url"],
         "seed_credentials": seed,
         "environment": _seeded_environment(request, nest_instance),
+        **app_launch_config(app, request),
     }
-    if app == "ios":
-        # No bare `ios_app_path` fixture: `ios_setup` carries the simctl `udid`
-        # `drivers/ios.py`'s `launch()` needs beside the app path.
-        ios_setup = request.getfixturevalue("ios_setup")
-        launch_config["app_path"] = ios_setup["app_path"]
-        launch_config["udid"] = ios_setup["udid"]
-    else:
-        launch_config["app_path"] = request.getfixturevalue(f"{app}_app_path")
     driver.launch(launch_config)
     return driver
 

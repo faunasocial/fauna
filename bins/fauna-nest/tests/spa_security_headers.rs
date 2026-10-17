@@ -92,6 +92,34 @@ async fn spa_deep_link_fallback_carries_security_headers() {
     );
 }
 
+/// `web-content-hosting.md` § The nest-served `/app/` and the central origin
+/// (*What the bundled app answers for a path it does not have*): a miss under the
+/// content-hashed asset tree `/app/_app/` is 404, never the app's page — a stale
+/// hashed URL must not hand the browser HTML to run as a script — while an
+/// existing asset is 200 and every other miss (the deep link above) stays the page.
+#[tokio::test]
+async fn spa_asset_miss_is_not_found_with_headers_and_existing_asset_is_served() {
+    let (router, tmp) = spa_router();
+    let dir = tmp.path().join("_app").join("immutable");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("app.js"), "export {};").unwrap();
+
+    let miss = get(&router, "/app/_app/immutable/does-not-exist.js").await;
+    assert_eq!(miss.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        miss.headers()
+            .get("x-frame-options")
+            .map(|v| v.to_str().unwrap()),
+        Some("DENY"),
+        "the mount's headers ride the 404 too"
+    );
+
+    let hit = get(&router, "/app/_app/immutable/app.js").await;
+    assert_eq!(hit.status(), StatusCode::OK);
+    let ct = hit.headers().get("content-type").unwrap().to_str().unwrap();
+    assert!(ct.contains("javascript"), "got content-type {ct:?}");
+}
+
 /// Scope guard: the security headers are attached to the `/app` service, NOT
 /// applied globally. A path outside `/app` (here a 404 on the SPA-only router)
 /// must carry neither `X-Frame-Options` nor the SPA `frame-ancestors` CSP — the

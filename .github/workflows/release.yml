@@ -45,8 +45,18 @@ jobs:
         with:
           rustflags: ""
           cache: false
+      # Built `--locked` on an exact STABLE toolchain, never the pinned nightly:
+      # cargo-vet's own lockfile pins dependency versions the nightly in
+      # rust-toolchain.toml refuses to compile (the first dispatch, 2026-10-10,
+      # died here on `rustix` 0.37's reserved `rustc_` attributes), and an
+      # unlocked install resolves whatever is newest that day (wasm-pack's broke
+      # on a withdrawn `zip`, 2026-10-16). The internal supply-chain workflow
+      # builds the same tool `--locked` on stable. What it verifies — the tree's
+      # own Cargo.lock — stays `--locked` below, on the pinned toolchain.
       - name: Install cargo-vet
-        run: cargo install cargo-vet --locked
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal
+          cargo +1.99.0 install --locked cargo-vet@0.10.2
       - name: Verify supply chain
         run: cargo vet --locked
 
@@ -220,7 +230,7 @@ jobs:
 
       - name: Install WiX
         run: |
-          dotnet tool install --global wix
+          dotnet tool install --global wix --version 6.0.2
           wix extension add WixToolset.Util.wixext/6.0.2
           wix extension add WixToolset.UI.wixext/6.0.2
           wix extension add WixToolset.Firewall.wixext/6.0.2
@@ -384,70 +394,64 @@ jobs:
             Fauna-Setup-${{ matrix.arch }}.msi
             fauna-tui-${{ matrix.arch }}-windows.zip
 
-      # Real msiexec install/uninstall smoke test of the REMOVE_USER_DATA data-removal
-      # path (the one installer behaviour that source/MSI-table verification cannot prove
-      # — only a real install exercises the util:RemoveFolderEx custom action + the DataDir
-      # RegistrySearch at uninstall time). Runs ONLY on the x64 leg: windows-latest is an
-      # x64 runner and cannot install an ARM64-targeted MSI ("not supported by this
-      # processor type"). The removal logic lives in arch-independent WiX authoring
-      # (UI.wxs RemoveFolderEx + the HKLM DataDir RegistrySearch built from the same .wxs
-      # for both packages), so the x64 run validates the behaviour for both; an ARM64
-      # runtime install-smoke would need a windows-11-arm runner. The feature-tree
-      # constraints (Sync non-deselectable, Bridge requires Nest) are UI-interactive and
-      # already verified at the MSI-table level — not re-checked here. Safe to run in CI:
-      # this is an ephemeral runner, so the perMachine service install/uninstall
+      # Real msiexec install/uninstall smoke of the x64 MSI. The asserts live in
+      # apps/fauna-windows/installer/ci-smoke.ps1, which the arm64 leg's smoke
+      # (the smoke-windows-arm64 job below) runs too: install with every
+      # feature, one Add/Remove Programs entry, every installed native binary
+      # built for the arch, the FaunaNest + FaunaBridge services Running, the
+      # shell-extension CLSIDs activating, a plain uninstall preserving
+      # %ProgramData%\Fauna\ and REMOVE_USER_DATA=1 deleting it. Runs ONLY on
+      # the x64 leg: windows-latest is an x64 runner and cannot install an
+      # ARM64-targeted MSI ("not supported by this processor type"). Safe in
+      # CI: this is an ephemeral runner, so the perMachine service install
       # disrupts nothing.
-      - name: Smoke-test install/uninstall (REMOVE_USER_DATA data removal)
+      - name: Smoke-test install/uninstall (x64)
         if: matrix.arch == 'x64'
         shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $msi  = "Fauna-Setup-x64.msi"
-          $data = Join-Path $env:ProgramData 'Fauna'
+        run: ./apps/fauna-windows/installer/ci-smoke.ps1 -Msi Fauna-Setup-x64.msi -Arch x64
 
-          function Invoke-Msi {
-            param([string]$Op, [string]$Log, [string]$What, [string[]]$Props = @())
-            # Properties go LAST on the msiexec command line, after the switches.
-            $argv = @($Op, $msi, '/qn', '/norestart', '/l*v', $Log) + $Props
-            Write-Host "==> msiexec $($argv -join ' ')"
-            $p = Start-Process -FilePath 'msiexec.exe' -ArgumentList $argv -Wait -PassThru
-            # 0 = success; 3010 = success, reboot required (services).
-            if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
-              Write-Host "----- $Log (tail) -----"
-              if (Test-Path $Log) { Get-Content $Log -Tail 100 }
-              throw "$What FAILED: msiexec exit $($p.ExitCode)"
-            }
-            Write-Host "$What OK (exit $($p.ExitCode))"
-          }
-
-          # Case 1 — a plain uninstall PRESERVES %ProgramData%\Fauna\.
-          Invoke-Msi -Op '/i' -Log 'install-1.log'   -What 'install (case 1)'
-          New-Item -ItemType Directory -Force -Path $data | Out-Null
-          Set-Content -LiteralPath (Join-Path $data 'user-data.sentinel') -Value 'preserve me'
-          Invoke-Msi -Op '/x' -Log 'uninstall-1.log' -What 'uninstall (case 1, no flag)'
-          if (-not (Test-Path $data)) {
-            throw "REGRESSION: a plain uninstall deleted $data; it must be preserved without REMOVE_USER_DATA=1"
-          }
-          Write-Host "Case 1 PASS: plain uninstall preserved $data"
-
-          # Case 2 — REMOVE_USER_DATA=1 DELETES %ProgramData%\Fauna\.
-          Invoke-Msi -Op '/i' -Log 'install-2.log'   -What 'install (case 2)'
-          New-Item -ItemType Directory -Force -Path $data | Out-Null
-          Set-Content -LiteralPath (Join-Path $data 'user-data.sentinel') -Value 'delete me'
-          Invoke-Msi -Op '/x' -Log 'uninstall-2.log' -What 'uninstall (case 2, REMOVE_USER_DATA=1)' -Props @('REMOVE_USER_DATA=1')
-          if (Test-Path $data) {
-            Write-Host "Still present under $data :"
-            Get-ChildItem -Recurse -Force $data | ForEach-Object { Write-Host "  $($_.FullName)" }
-            throw "REGRESSION: REMOVE_USER_DATA=1 left $data behind; it must be deleted"
-          }
-          Write-Host "Case 2 PASS: REMOVE_USER_DATA=1 deleted $data"
-          Write-Host "Installer install/uninstall smoke test PASSED."
-
+      # Logs on failure ONLY: the `release` job downloads every artifact of the
+      # run and signs and publishes each file, so a log uploaded on success
+      # would ship as a release asset. A failed smoke fails the run, and then
+      # nothing is released.
       - name: Upload installer smoke logs
-        if: ${{ always() && matrix.arch == 'x64' }}
+        if: ${{ failure() && matrix.arch == 'x64' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
-          name: windows-installer-smoke-logs
+          name: windows-installer-smoke-logs-x64
+          path: '*.log'
+          if-no-files-found: ignore
+
+  # The same install/uninstall smoke for the ARM64 MSI, on GitHub's hosted
+  # Windows ARM64 runner: what only a real arm64 install proves is that the
+  # arm64 binaries load, the FaunaNest and FaunaBridge services start and the
+  # arm64 shell DLL registers and activates (docs/goal/architecture/installers/
+  # windows.md § Testing). It runs here, on a disposable runner, and never on a
+  # dev machine: a CI-built MSI installing machine services on a machine that
+  # builds releases is exactly the prebuilt-binary install that is ruled out.
+  # No credentials; it gates the `release` job like the x64 smoke does.
+  smoke-windows-arm64:
+    needs: build-windows
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          sparse-checkout: apps/fauna-windows/installer
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: windows-arm64
+
+      - name: Smoke-test install/uninstall (arm64)
+        shell: pwsh
+        run: ./apps/fauna-windows/installer/ci-smoke.ps1 -Msi Fauna-Setup-arm64.msi -Arch arm64
+
+      - name: Upload installer smoke logs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: windows-installer-smoke-logs-arm64
           path: '*.log'
           if-no-files-found: ignore
 
@@ -464,7 +468,7 @@ jobs:
   # maintainer approves the run into the `release` Environment.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-rust, build-windows]
+    needs: [build-rust, build-windows, smoke-windows-arm64]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: release
@@ -496,8 +500,20 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.6.2
         with:
           files: all-artifacts/*
+          # A tag is pushed at UAT entry, so the Release starts as a pre-release:
+          # the direct-download channel's pre-release track. `fauna-publish
+          # release` flips it after the promote to :latest.
+          prerelease: true
           generate_release_notes: true
           body: |
+            Fauna is free and open-source software for your feed, messages,
+            mail, photos, files and calendar, served from a small server you
+            control. This release carries the server binaries (`fauna-nest`
+            and its companions), the Linux desktop app, the terminal app for
+            Linux and Windows, and the Windows installer (`Fauna-Setup-x64.msi`,
+            `Fauna-Setup-arm64.msi`), each built by this workflow from the
+            tagged source.
+
             ## Verify Downloads
 
             Every file was signed by this repository's `Release` workflow with

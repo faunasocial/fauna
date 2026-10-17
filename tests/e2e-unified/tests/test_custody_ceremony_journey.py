@@ -32,14 +32,18 @@ import time
 import pytest
 
 from helpers import enrollment
+from helpers.app_surface import skip_unbuilt
+from helpers.fleet import SiblingSeats, poked_pass
 from helpers.budgets import MLS_HANDSHAKE_S, RECEIVE_CYCLE_S
 from helpers.waiting import (
     account_pump_cycles,
+    account_pump_role,
     await_device_removal_ready,
-    await_pump_cycle_after,
     await_receive_cycle_after,
     conv_receive_cycles,
+    custody_ceremony_ingest,
     poke_account_pump,
+    poke_custody_owner_resend,
     poke_receive_cycle,
     wait_until,
 )
@@ -152,6 +156,55 @@ def _open_carrier(alice, bob_app, bob, port) -> None:
     _receive_once(bob_app)
 
 
+def _require_owner_resend(app) -> None:
+    """Skip as unbuilt (convention 7) where the app has neither the owner's
+    send-again poke nor the host's ceremony-ingest tally — both seats run the
+    same app, so one read decides. Checked before any setup: the devices
+    outcome 15 journeys below have nothing to witness without them."""
+    if custody_ceremony_ingest(app.driver) is None:
+        skip_unbuilt(
+            app.driver,
+            surface="custody_owner_resend_now / custody_ceremony_ingest",
+            detail=(
+                "the owner's send-again poke (shared body: "
+                "fauna_client_custody::spawn_owner_resend) and the host's "
+                "ceremony-ingest tally (fauna_client_conversations::"
+                "custody_ceremony_ingest_counts) are not wired on this app"
+            ),
+            tracked="",
+        )
+
+
+def _owner_resends(owner, host, *, counted: str, what: str) -> tuple[dict, dict]:
+    """The owner sends its ceremonies again (``custody_owner_resend_now``) and
+    the host's sink counts the arrival: poll the host's receive cycles until
+    its ``custody_ceremony_ingest[counted]`` passes the pre-poke baseline.
+
+    The barrier is what makes a "stays gone" assertion after it mean anything
+    — without it the assertion passes on a re-send that never crossed the
+    wire. Returns ``(before, after)``; a timeout names both reads (convention
+    6)."""
+    before = custody_ceremony_ingest(host.driver)
+    assert before is not None, (
+        "the host stopped publishing custody_ceremony_ingest mid-test "
+        "(fauna_e2e_agent::CUSTODY_CEREMONY_INGEST_KEY)"
+    )
+    poke_custody_owner_resend(owner.driver)
+    now = before
+    deadline = time.time() + _UI_LEG_S
+    while time.time() < deadline:
+        _receive_once(host)
+        now = custody_ceremony_ingest(host.driver) or now
+        if now[counted] > before[counted]:
+            return before, now
+        time.sleep(0.5)
+    raise AssertionError(
+        f"never observed: {what} — the host's ceremony-ingest tally went from "
+        f"{before} to {now} (want '{counted}' to grow)"
+        f"\n--- owner's custody log ---\n{_custody_log_tail(owner)}"
+    )
+
+
 def _poll_ui(app, predicate, *, what: str, receive: bool = False, budget_s: float = _UI_LEG_S):
     """Deadline-poll a UI predicate, re-hydrating the Devices page each try
     (the facet folds on the nav edge) and optionally poking a receive cycle
@@ -241,17 +294,18 @@ def test_custody_ceremony_two_accounts(
 
     # ── The A7 receipt: bob's account pump meters the custody and mints
     # (never-attested ⇒ due), and the poke's chained drive posts it over the
-    # same channel. The pump barrier is the cycle counters, never a cadence.
-    pump = account_pump_cycles(bob_app.driver)
-    assert pump is not None, (
+    # same channel. The pump barrier is the cycle counters, never a cadence —
+    # but only while bob's APP holds the engine role: once his sync agent
+    # mounts, the agent holds it by rule and mints in its own pass, the app's
+    # counters freeze, and `poked_pass` nudges the agent's pass instead, with
+    # alice's receipt poll below the barrier either way (`account-runtime.md` § Multi-instance concurrency → *The
+    # agent holds the role when present*).
+    assert account_pump_cycles(bob_app.driver) is not None, (
         "bob's app publishes no account_pump_cycles — the pump barrier is "
         "unimplemented on this app (fauna_e2e_agent::ACCOUNT_PUMP_CYCLES_KEY)"
     )
-    poke_account_pump(bob_app.driver)
     try:
-        await_pump_cycle_after(
-            bob_app.driver, pump[0], budget_s=_PUMP_PASS_S, what="the receipt mint pass"
-        )
+        poked_pass(bob_app.driver, what="the receipt mint pass", budget_s=_PUMP_PASS_S)
     except AssertionError as e:
         raise AssertionError(f"{e}\n--- bob's pump log ---\n{_custody_log_tail(bob_app)}") from e
 
@@ -410,6 +464,34 @@ def test_custody_ceremony_two_accounts(
         what="bob's held row showing the hold ended",
     )
 
+    # ── Stop is the pause, remove is the reclaim (`account-replica-posture.md`
+    # § The custody grant + ceremony, the reclaim bullet). Stopped, the copy is
+    # still bob's to hold: its row stays, still metering what it keeps, and
+    # says the stored bytes remain until removed.
+    assert bob_app.custody.held_stop_label(0) == S.devices.custody_stopped_bytes_remain, (
+        "a stopped hold must say its stored bytes remain until removed: "
+        f"{bob_app.driver.diagnose('custody-held-stop-button')}"
+    )
+    assert bob_app.custody.held_bytes(0).startswith("Holding "), (
+        "pausing keeps what is held — the row still meters it: "
+        f"{bob_app.custody.held_bytes(0)!r}"
+    )
+    # Remove frees it: still available on the stopped row, and the copy leaves
+    # what bob holds for others — no card, no error.
+    held_before_remove = bob_app.custody.held_count()
+    assert bob_app.driver.is_enabled("custody-held-remove-button"), (
+        "remove stays available after stop — a host who paused must still get the space back"
+    )
+    bob_app.custody.remove_holding(0)
+    _poll_ui(
+        bob_app,
+        lambda: bob_app.custody.held_count() == held_before_remove - 1,
+        what="bob's removed hold leaving what he holds for others",
+    )
+    assert not bob_app.driver.is_visible("error-message"), (
+        f"the remove must not surface an error: {bob_app.driver.get_text('error-message')!r}"
+    )
+
     # ── Revoke (owner side): the custody leaves alice's Now rows — History's
     # business thereafter (the honest bound stays stated beside the control).
     alice.backups.navigate_devices()
@@ -483,6 +565,356 @@ def test_a_declined_custody_offer_goes_away(
     )
 
 
+@pytest.mark.real_conversations
+@pytest.mark.feature("devices")
+def test_a_removed_custody_stays_gone_when_its_owner_sends_again(
+    real_faunamls_app, second_real_faunamls_app, nest_instance
+):
+    """``devices`` outcome 15, the held half: the host's pause and allowance
+    survive the owner sending its deliver again, and once the host removes the
+    copy a further re-send never brings it back
+    (``account-replica-posture.md`` § The custody grant + ceremony, "A deliver
+    never re-opens consent" — the host's knobs live on its ceremony record, and
+    a deliver on a removed ceremony is refused).
+
+    No app gesture makes an owner send again — the drive posts each step once,
+    behind monotone marks — so alice's re-send is the ``custody_owner_resend_now``
+    poke: the production signing site re-signs the deliver over the recorded
+    window, nothing is crafted. Bob's ``custody_ceremony_ingest`` tally is the
+    barrier proving each re-send arrived before the "unchanged" reads.
+
+    Deliberately its own journey rather than legs of
+    ``test_custody_ceremony_two_accounts``: the ledger records a whole test, so
+    a leg an app has not built would hide that journey's outcomes 10–14 on it.
+    """
+    alice = real_faunamls_app
+    bob_app, bob = second_real_faunamls_app
+    alice.custody.require_supported()
+    _require_owner_resend(alice)
+
+    # ── A delivered custody bob holds (the ceremony journey's opening, with
+    # no receipt leg — nothing here reads it).
+    _open_carrier(alice, bob_app, bob, nest_instance["port"])
+    alice.backups.navigate_devices()
+    alice.custody.mint_offer(bob["actor_id_hex"])
+    _poll_ui(
+        bob_app,
+        lambda: bob_app.custody.offer_count() >= 1,
+        what="the consent card on bob's Devices page",
+        receive=True,
+    )
+    bob_app.custody.accept_offer(0)
+    _poll_ui(
+        alice,
+        lambda: alice.custody.holder_count() >= 1
+        and alice.driver.is_enabled("custody-holder-revoke-button"),
+        what="alice's custodian row bound + minted (revoke enabled)",
+        receive=True,
+    )
+    _poll_ui(
+        bob_app,
+        lambda: bob_app.custody.held_count() >= 1,
+        what="bob's held-for-others row after the deliver",
+        receive=True,
+    )
+
+    # ── Bob changes his allowance and pauses (the host's two knobs).
+    bob_app.custody.set_held_budget("3072 MB")
+    changed_cap = S.size.gb(value="3")
+    _poll_ui(
+        bob_app,
+        lambda: bob_app.custody.held_budget(0) == changed_cap,
+        what=f"bob's budget input re-seeding the changed cap {changed_cap}",
+    )
+    bob_app.custody.stop_holding(0)
+    _poll_ui(
+        bob_app,
+        lambda: bob_app.custody.held_count() >= 1
+        and not bob_app.driver.is_enabled("custody-held-stop-button"),
+        what="bob's held row showing the hold ended",
+    )
+
+    # ── Alice sends again. Re-signed over the recorded window, the deliver
+    # normally arrives byte-identical (a duplicate); a changed owner fleet view
+    # would make it a superseding refresh that rewrites bob's runtime row — so
+    # the knobs are read after a poked pass, and must hold either way.
+    before, after = _owner_resends(
+        alice, bob_app, counted="seen", what="alice's re-sent deliver reaching bob's sink"
+    )
+    assert after["refused"] == before["refused"], (
+        f"a paused (not removed) custody takes its owner's deliver: {before} -> {after}"
+    )
+    poked_pass(bob_app.driver, what="bob's pass after the re-sent deliver", budget_s=_PUMP_PASS_S)
+    bob_app.backups.navigate_devices()
+    assert bob_app.custody.held_count() >= 1, bob_app.driver.diagnose("custody-held-card")
+    assert not bob_app.driver.is_enabled("custody-held-stop-button"), (
+        "the owner's re-send must not undo bob's pause: "
+        f"{bob_app.driver.diagnose('custody-held-stop-button')}"
+    )
+    assert bob_app.custody.held_stop_label(0) == S.devices.custody_stopped_bytes_remain
+    assert bob_app.custody.held_budget(0) == changed_cap, (
+        f"the owner's re-send must not reset bob's {changed_cap} allowance: "
+        f"{bob_app.driver.diagnose('custody-held-budget-input')}"
+    )
+
+    # ── Bob removes the copy; alice sends again; his sink refuses the deliver
+    # for a custody he removed, and no held card comes back.
+    held_before_remove = bob_app.custody.held_count()
+    bob_app.custody.remove_holding(0)
+    _poll_ui(
+        bob_app,
+        lambda: bob_app.custody.held_count() == held_before_remove - 1,
+        what="bob's removed hold leaving what he holds for others",
+    )
+    _owner_resends(
+        alice, bob_app, counted="refused", what="bob refusing alice's deliver for the removed copy"
+    )
+    bob_app.backups.navigate_devices()
+    assert bob_app.custody.held_count() == held_before_remove - 1, (
+        "a removed copy must not come back when its owner sends again: "
+        f"{bob_app.driver.diagnose('custody-held-card')}"
+    )
+    assert not bob_app.driver.is_visible("error-message"), (
+        f"the refused re-send must not surface an error: {bob_app.driver.get_text('error-message')!r}"
+    )
+
+    # Leave the shared account (alice) with no live custodian row for later
+    # custody journeys in the session (the ceremony journey's revoke leg
+    # counts them).
+    alice.backups.navigate_devices()
+    alice.custody.revoke_holder(0)
+    _poll_ui(
+        alice,
+        lambda: alice.custody.holder_count() == 0,
+        what="alice's custodian row leaving the Now list after revoke",
+    )
+
+
+@pytest.mark.real_conversations
+@pytest.mark.feature("devices")
+def test_a_declined_custody_offer_stays_gone_when_its_owner_sends_again(
+    real_faunamls_app, second_real_faunamls_app, nest_instance, test_user
+):
+    """``devices`` outcome 15, the declined half: an offer you declined does
+    not come back when its owner sends it again — your sink takes the
+    identical offer as a duplicate of the one on record, and the card stays
+    gone (``account-replica-posture.md`` § The custody grant + ceremony).
+
+    Roles as in ``test_a_declined_custody_offer_goes_away`` and for its reason:
+    the fresh second account (bob) offers and the shared account (alice)
+    declines, so no pending custodian row is left on the shared account. Bob's
+    re-send is the ``custody_owner_resend_now`` poke (the recorded envelope,
+    verbatim); alice's ``custody_ceremony_ingest`` tally is the barrier."""
+    alice = real_faunamls_app
+    bob_app, bob = second_real_faunamls_app
+    alice.custody.require_supported()
+    _require_owner_resend(alice)
+
+    _open_carrier(alice, bob_app, bob, nest_instance["port"])
+    bob_app.backups.navigate_devices()
+    bob_app.custody.mint_offer(test_user["actor_id_hex"][:12] + "…")
+    _poll_ui(
+        alice,
+        lambda: alice.custody.offer_count() >= 1,
+        what="the consent card on alice's Devices page",
+        receive=True,
+    )
+    offers_before = alice.custody.offer_count()
+    held_before = alice.custody.held_count()
+    alice.custody.decline_offer(0)
+    _poll_ui(
+        alice,
+        lambda: alice.custody.offer_count() == offers_before - 1,
+        what="the declined offer leaving alice's Devices page",
+    )
+
+    _owner_resends(
+        bob_app, alice, counted="duplicate", what="alice's sink deduping bob's re-sent offer"
+    )
+    alice.backups.navigate_devices()
+    assert alice.custody.offer_count() == offers_before - 1, (
+        "a declined offer must not come back when its owner sends it again: "
+        f"{alice.driver.diagnose('custody-offer-card')}"
+    )
+    assert alice.custody.held_count() == held_before, alice.driver.diagnose("custody-held-card")
+    assert not alice.driver.is_visible("error-message"), (
+        f"the re-sent offer must not surface an error: {alice.driver.get_text('error-message')!r}"
+    )
+
+
+@pytest.fixture
+def sibling_seats(request, nest_instance):
+    """Extra tui seats on the session nest (`helpers.fleet.SiblingSeats`) —
+    here BOTH ceremony parties, so the observing seat may be any app."""
+    seats = SiblingSeats(request, nest_instance)
+    try:
+        yield seats
+    finally:
+        seats.teardown()
+
+
+def _poll_observer(observer, owner_tui, predicate, *, what: str, budget_s: float = 240.0) -> None:
+    """Deadline-poll a predicate on the OBSERVING seat's Devices page while
+    the two seats of the owner's account converge: each try pokes the tui
+    seat's pump (it PUBLISHES its ceremony/ledger rows) and the observer's
+    (it MERGES them), then re-enters the page so the nav-edge hydrate refolds.
+    A non-holder app's poke reaches its co-located agent instead
+    (`helpers.fleet.poked_pass`) — the effect poll is the barrier either way
+    (convention 14)."""
+    def converged() -> bool:
+        poked_pass(owner_tui.driver, what="the owner tui seat's plane publish", budget_s=_PUMP_PASS_S)
+        poked_pass(observer.driver, what="the observing seat's plane merge", budget_s=_PUMP_PASS_S)
+        observer.backups.navigate_devices()
+        return predicate()
+
+    wait_until(
+        converged,
+        budget_s,
+        interval=1.0,
+        diagnose=lambda: (
+            f"never observed: {what} — {observer.custody.holder_count()} holder card(s) "
+            f"on the observing seat; error-message: "
+            f"{observer.driver.get_text('error-message') if observer.driver.is_visible('error-message') else ''!r}. "
+            f"{observer.driver.diagnose('custody-holder-card')} Observer pump role "
+            f"{account_pump_role(observer.driver)}, cycles "
+            f"{account_pump_cycles(observer.driver)}."
+            f"\n--- observing seat's custody log ---\n{_custody_log_tail(observer)}"
+            f"\n--- owner tui seat's custody log ---\n{_custody_log_tail(owner_tui)}"
+        ),
+    )
+
+
+@pytest.mark.feature("devices")
+def test_a_custody_minted_on_another_device_renders_and_revokes_here(
+    app, request, nest_instance, test_user, sibling_seats
+):
+    """Piece 2 on a seat that took no part in the ceremony: the owner mints a
+    custody on their tui device, and their OTHER device — the app under test —
+    paints the holder row (receipt status + revoke) from its own replica of the
+    account's ceremony records, then revokes it, and the owner's tui device
+    sees the revoke land (``devices.md`` § Custody facet, piece 2;
+    ``account-client-lifecycle.md`` § The client-side lifecycle → *The account
+    port*, decision (i) — the custody-ceremony seam's e2e leg).
+
+    On web this is the whole account-port read path end to end:
+    ``custodyFacetLoad`` → ``sharedAccountPort`` → ``accountPortCall``'s
+    custody arm → the tab runtime's ``CustodyCeremonyStore``, whose rows the
+    fleet walk brought in from the tui device. Web cannot drive the mint or the
+    accept (``require_supported``'s declared absence), which is why the
+    ceremony runs between two tui seats and this app only observes.
+
+    **Three seats.** The app under test is signed in as a DEDICATED owner (a
+    fresh actor, so no earlier test's custody shares its rows); the owner's
+    second device and bob's host device are tui sibling seats
+    (`SiblingSeats`, real engine toggled on at runtime) — never
+    ``second_real_faunamls_app``, which skips when the primary app is web.
+    ``test_user`` is still requested: its fixture lifts the device cap on the
+    tier every test user shares, and the owner enrols two seats.
+    """
+    from conftest import _make_user
+
+    observer = app
+    observer.custody.require_holder_rows_supported()
+    port = nest_instance["port"]
+
+    owner = _make_user(nest_instance)
+    enrollment.sign_in(observer, request, nest_instance, owner)
+    owner_tui = sibling_seats.launch(user=owner)
+    bob = _make_user(nest_instance)
+    # bob accepts the owner, or the nest refuses the carrier's Welcome
+    # (direct-messages.md § Reach policy — the `allow_knock` default).
+    conv_api.accept_contact(port, bob, owner["actor_id_hex"])
+    bob_app = sibling_seats.launch(user=bob)
+    owner_tui.conversations.enable_real_faunamls()
+    bob_app.conversations.enable_real_faunamls()
+
+    # ── The ceremony, tui ↔ tui, through both UIs (the journey above, minus
+    # the receipt/budget legs it already owns).
+    _open_carrier(owner_tui, bob_app, bob, port)
+    owner_tui.backups.navigate_devices()
+    owner_tui.custody.mint_offer(bob["actor_id_hex"])
+    _poll_ui(
+        bob_app,
+        lambda: bob_app.custody.offer_count() >= 1,
+        what="the consent card on bob's Devices page",
+        receive=True,
+    )
+    bob_app.custody.accept_offer(0)
+    _poll_ui(
+        owner_tui,
+        lambda: owner_tui.custody.holder_count() >= 1
+        and owner_tui.driver.is_enabled("custody-holder-revoke-button"),
+        what="the owner tui seat's custodian row bound + minted (revoke enabled)",
+        receive=True,
+    )
+
+    # ── The observing device paints the same custody, minted (revoke enabled
+    # — the render gates it on a bound custodian key), from rows it never
+    # wrote: they reached it only through the account's own sync.
+    _poll_observer(
+        observer,
+        owner_tui,
+        lambda: observer.custody.holder_count() >= 1
+        and observer.driver.is_enabled("custody-holder-revoke-button"),
+        what="the tui-minted custody's holder row, minted, on the observing seat",
+    )
+    assert observer.custody.holder_count() == 1, (
+        "the dedicated owner has exactly one custody: "
+        f"{observer.driver.diagnose('custody-holder-card')}"
+    )
+    # Three-state honesty reads off the same shared fold on every seat: no
+    # receipt yet, or one already verified — never blank, never stale this soon.
+    status = observer.custody.holder_receipt_status(0)
+    assert status == S.devices.custody_receipt_none or status.startswith("Last confirmed"), (
+        f"the holder row's receipt status must be one of the fresh states, got {status!r}"
+    )
+
+    # ── Revoke from the observing seat (convention 8): its row leaves the Now
+    # list, with no error on the page.
+    observer.custody.revoke_holder(0)
+    _poll_observer(
+        observer,
+        owner_tui,
+        lambda: observer.custody.holder_count() == 0,
+        what="the revoked custody leaving the observing seat's Now list",
+    )
+    assert not observer.driver.is_visible("error-message"), (
+        f"the revoke must not surface an error: {observer.driver.get_text('error-message')!r}"
+    )
+
+    # ── …and the revoke is the ACCOUNT's, not this seat's: it reached the
+    # owner's grant log, so the tui device that minted the custody drops the
+    # row too once it merges the observer's rows.
+    def tui_dropped() -> bool:
+        poked_pass(observer.driver, what="the observing seat's plane publish", budget_s=_PUMP_PASS_S)
+        poked_pass(owner_tui.driver, what="the owner tui seat's plane merge", budget_s=_PUMP_PASS_S)
+        owner_tui.backups.navigate_devices()
+        return owner_tui.custody.holder_count() == 0
+
+    wait_until(
+        tui_dropped,
+        240.0,
+        interval=1.0,
+        diagnose=lambda: (
+            "the observing seat's revoke never reached the owner tui seat — "
+            f"{owner_tui.custody.holder_count()} holder card(s) there. "
+            f"{owner_tui.driver.diagnose('custody-holder-card')}"
+            f"\n--- owner tui seat's custody log ---\n{_custody_log_tail(owner_tui)}"
+        ),
+    )
+
+
+# Marked for the six apps that can run the ceremony (`CustodyActions.require_supported`:
+# web lacks the mint and the accept), never gated on web by that declared absence —
+# the pages it witnesses declare no web absence, and web's admin-page outcomes are
+# witnessed by `test_admin_custody_hosting.py` (feature-catalog.md § Cell semantics,
+# the marked-witness rule).
+@pytest.mark.linux
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
+@pytest.mark.tui
 @pytest.mark.real_conversations
 @pytest.mark.feature("backup-destinations-and-restore")
 @pytest.mark.feature("nests-and-trust")

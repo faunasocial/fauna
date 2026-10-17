@@ -71,6 +71,15 @@ class MailExportActions:
         """Pick the export format from the picker (mbox / Maildir++ / EML zip)."""
         self.driver.select("mail-export-format-picker", label)
 
+    def selected_format(self) -> str:
+        """The format the picker shows as chosen."""
+        return self.driver.get_text("mail-export-format-picker")
+
+    def format_options(self) -> list[str] | None:
+        """Every format the picker paints, or ``None`` on a driver that does not
+        serve the ``options`` attr (`drivers/base.py::option_texts`)."""
+        return self.driver.option_texts("mail-export-format-picker")
+
     def next(self) -> None:
         """Step 1→2 or step 2→3 — the shared wizard Next (same id both steps)."""
         self.driver.wait_for("wizard-next-button", timeout=10.0)
@@ -127,6 +136,11 @@ class MailExportActions:
     def toggle_strip_headers(self) -> None:
         self.driver.click("mail-export-scope-strip-headers-toggle")
 
+    def strip_headers_on(self) -> bool:
+        """Whether the transit-header strip is on — the toggle's ``state``
+        attribute, the contract every app serves (as for the mailbox rows)."""
+        return self.driver.get_attr("mail-export-scope-strip-headers-toggle", "state") == "on"
+
     # ── step 3 — confirm / commit ─────────────────────────────────────────
 
     def confirm_summary(self) -> str:
@@ -150,11 +164,33 @@ class MailExportActions:
 
     def cancel(self) -> None:
         """Two-click inline confirm → MailExportAction::Cancel."""
-        self.driver.click("mail-export-cancel-button")  # arm
-        self.driver.click("mail-export-cancel-button")  # confirm
+        self.arm_cancel()
+        self.confirm_cancel()
+
+    def arm_cancel(self) -> None:
+        """The first Cancel click: asks for confirmation, cancels nothing."""
+        self.driver.click("mail-export-cancel-button")
+
+    def confirm_cancel(self) -> None:
+        """The second Cancel click — the confirmation that cancels."""
+        self.driver.click("mail-export-cancel-button")
+
+    def cancel_button_text(self) -> str:
+        return self.driver.get_text("mail-export-cancel-button")
 
     def mailbox_progress_count(self) -> int:
         return self.driver.count("mail-export-mailbox-progress-list-item-name")
+
+    def mailbox_progress(self) -> list[tuple[str, str]]:
+        """``[(mailbox, its progress text), …]`` in painted order — the
+        per-mailbox rows of the Progress step."""
+        names = self.driver.get_texts("mail-export-mailbox-progress-list-item-name")
+        progress = self.driver.get_texts("mail-export-mailbox-progress-list-item-progress")
+        return list(zip(names, progress))
+
+    def error_log(self) -> str:
+        """The Progress step's error log, as painted."""
+        return self.driver.get_text("mail-export-error-log")
 
     # ── step 5 — done ─────────────────────────────────────────────────────
 

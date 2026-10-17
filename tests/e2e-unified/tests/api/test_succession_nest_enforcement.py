@@ -474,9 +474,11 @@ def test_the_recovery_disconnects_the_apps_you_had_authorized(succession_nest):
         apps_after = heir_ws.call("fauna.nostr.bunker.list", {})["apps"]
         signers_after = heir_ws.call("fauna.nostr.zap_signers.list", {})["signers"]
 
-    assert apps_after == [], (
+    assert [a["status"] for a in apps_after] == ["burned"], (
         f"every bunker connection must be disconnected by the recovery — a "
-        f"thief-minted one signs as the npub silently, forever: {apps_after!r}"
+        f"thief-minted one signs as the npub silently, forever — and stay "
+        f"listed as burned so the successor sees which apps held authority: "
+        f"{apps_after!r}"
     )
     assert signers_after == [], (
         f"every zap-signer designation must die with them: this nest BELIEVES "

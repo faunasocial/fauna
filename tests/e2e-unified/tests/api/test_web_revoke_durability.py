@@ -22,14 +22,15 @@ honestly:
   that lands the commit and then withholds the render), and stays pinned in
   ``bins/fauna-nest/tests/conformance_web.rs``.
 * The **paced restore retry** (``start_restore_retry``, the between-boots half of
-  *A blanked site is owed its restore*) likewise cannot be triggered honestly
-  from outside: the only outside door to a dark site,
-  ``/api/v1/test/web/blank-site``, deliberately does **not** wake it, and nothing
-  else out here can make a render fail. So ``test_a_blanked_site_comes_back_at_the
-  _next_boot`` witnesses the **boot-drain half only**; the retry stays
-  Rust-pinned. The outcome it witnesses is not narrowed by that — a blanked site
-  does come back by itself, with nothing for the author to do — only the *which
-  payer* half is.
+  *A blanked site is owed its restore*) is not woken here:
+  ``/api/v1/test/web/blank-site`` deliberately does **not** wake it, so
+  ``test_a_blanked_site_comes_back_at_the_next_boot`` witnesses the **boot-drain
+  half only**. The retry's own outside witness is
+  ``test_web_restore_retry_log.py``, through the render-fault door; the retry
+  *restoring* a site stays Rust-pinned, since its next pass after a failure is a
+  quarter-hour out. The outcome witnessed here is not narrowed by that — a
+  blanked site does come back by itself, with nothing for the author to do —
+  only the *which payer* half is.
 
 Process safety: the restart goes through ``common.nest.restart_nest``, which
 SIGTERMs the fixture's OWN ``proc`` handle and nothing else — never
@@ -216,9 +217,8 @@ def test_a_blanked_site_comes_back_at_the_next_boot(durable_nest):
     left to pay the debt.
 
     The **boot-drain half** is what this witnesses, per the file docstring: the
-    hook deliberately does not wake the paced restore retry, and nothing outside
-    the process can make a render fail, so the retry stays pinned in Rust
-    (`web_content::service::start_restore_retry`).
+    hook deliberately does not wake the paced restore retry, so the retry's
+    restore stays pinned in Rust (`web_content::service::start_restore_retry`).
     """
     from conftest import _bridge_admin_post
 

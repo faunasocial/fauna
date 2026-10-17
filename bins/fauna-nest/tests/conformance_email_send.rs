@@ -217,6 +217,31 @@ async fn send_with_matching_domain_rejects_unverified_handle() {
 }
 
 #[tokio::test]
+async fn send_with_a_subdomain_from_is_refused_even_for_the_handle() {
+    // A subdomain of a local domain is signed for (DKIM keys `d=` under the
+    // closest local parent) but holds no mailbox, so nobody owns an address
+    // there — the sender's own handle included (`mail-multidomain.md` § From:
+    // header ownership). Until the app door shared the bridges' predicate it
+    // compared exact domains only and let this one through.
+    let (router, state) = router_with_domain("fauna.test").await;
+    let alice = [8u8; 32];
+    state
+        .db
+        .create_user_with_handle(&alice, "free", "alice", None)
+        .await
+        .unwrap();
+    let req = SendEmailRequest {
+        extra: Default::default(),
+        recipients: vec!["bob@example.com".into()],
+        raw_rfc5322: message_with_from("alice@mail.fauna.test"),
+    };
+    let err = dispatch(&router, state, alice, "fauna.email.send", encode_req(&req))
+        .await
+        .expect_err("a subdomain From is nobody's");
+    assert_eq!(err.code, "fauna.email.permission_denied");
+}
+
+#[tokio::test]
 async fn send_with_off_domain_from_skips_handle_check() {
     // From: domain does not match the deployment domain → no handle
     // verification (the deployment isn't claiming authority over the

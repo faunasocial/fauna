@@ -1,0 +1,33 @@
+{
+  "_comment": [
+    "Every RRset a nest's DNS record matrix publishes for its primary domain, by owner name RELATIVE to that domain ('@' = the domain itself; '*' stands for exactly one label: a DKIM selector, an ATProto handle) and record type.",
+    "'literal': true marks a name compared verbatim, its '*' the DNS wildcard label itself (the '*.<domain>' A/AAAA every subdomain site and plugin name resolves through), never 'any one label'.",
+    "'value_prefix' marks an RRset at a name the box shares with other records (the domain's own TXT also holds site-verification values and the like): only values with that prefix are the box's.",
+    "Read by tests/e2e-unified/helpers/staging_box.py (which RRsets a kept box at a zone apex owns). Pinned to the real matrix by the nest test dns_handlers::tests::box_dns_names_fixture_is_the_matrix, which fails when the matrix grows a name or type this file does not list.",
+    "Never NS, SOA or CAA: the box publishes none of them."
+  ],
+  "rrsets": [
+    {"name": "@", "type": "A"},
+    {"name": "@", "type": "AAAA"},
+    {"name": "@", "type": "MX"},
+    {"name": "@", "type": "TXT", "value_prefix": "v=spf1"},
+    {"name": "mail", "type": "A"},
+    {"name": "mail", "type": "AAAA"},
+    {"name": "relay", "type": "A"},
+    {"name": "relay", "type": "AAAA"},
+    {"name": "pds", "type": "A"},
+    {"name": "pds", "type": "AAAA"},
+    {"name": "*", "type": "A", "literal": true},
+    {"name": "*", "type": "AAAA", "literal": true},
+    {"name": "*._domainkey", "type": "TXT"},
+    {"name": "_dmarc", "type": "TXT"},
+    {"name": "_mta-sts", "type": "TXT"},
+    {"name": "_smtp._tls", "type": "TXT"},
+    {"name": "_caldavs._tcp", "type": "SRV"},
+    {"name": "_carddavs._tcp", "type": "SRV"},
+    {"name": "_25._tcp.mail", "type": "TLSA"},
+    {"name": "_fauna", "type": "TXT"},
+    {"name": "_atproto.*", "type": "TXT"},
+    {"name": "_acme-challenge", "type": "TXT"}
+  ]
+}

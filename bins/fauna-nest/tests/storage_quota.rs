@@ -208,6 +208,7 @@ async fn run_quota_flow(tier: &str) {
                 .id,
             &a_hash,
             &[0xA2; 32],
+            Some(&[0xA1; 32]),
         )
         .await
         .unwrap();

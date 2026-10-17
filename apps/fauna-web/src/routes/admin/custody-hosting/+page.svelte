@@ -131,52 +131,52 @@
   {/if}
 
   <div class="rows">
-    {#each rows as row, i (rowKey(row))}
-      <div class="row" data-testid={`${IDS.ADMIN_CUSTODY_HOSTING_ROW}-${i}`}>
+    {#each rows as row (rowKey(row))}
+      <div class="row" data-testid={IDS.ADMIN_CUSTODY_HOSTING_ROW}>
         <div class="field">
           <span class="label">{t.admin.custody_hosting.host}</span>
-          <span class="value mono" data-testid={`${IDS.ADMIN_CUSTODY_HOSTING_HOST}-${i}`}
+          <span class="value mono" data-testid={IDS.ADMIN_CUSTODY_HOSTING_HOST}
             >{row.host_actor_id}</span
           >
         </div>
         <div class="field">
           <span class="label">{t.admin.custody_hosting.owner}</span>
-          <span class="value mono" data-testid={`${IDS.ADMIN_CUSTODY_HOSTING_OWNER}-${i}`}
+          <span class="value mono" data-testid={IDS.ADMIN_CUSTODY_HOSTING_OWNER}
             >{row.owner_actor_id}</span
           >
         </div>
         <div class="field">
           <span class="label">{t.admin.custody_hosting.url}</span>
-          <span class="value mono" data-testid={`${IDS.ADMIN_CUSTODY_HOSTING_URL}-${i}`}
+          <span class="value mono" data-testid={IDS.ADMIN_CUSTODY_HOSTING_URL}
             >{row.owner_nest_url}</span
           >
         </div>
         <div class="field">
           <span class="label">{t.admin.custody_hosting.budget}</span>
-          <span class="value" data-testid={`${IDS.ADMIN_CUSTODY_HOSTING_BUDGET}-${i}`}
+          <span class="value" data-testid={IDS.ADMIN_CUSTODY_HOSTING_BUDGET}
             >{budgetText(row.retained_bytes_cap)}</span
           >
         </div>
         <div class="field">
           <span class="label">{t.admin.custody_hosting.held}</span>
-          <span class="value" data-testid={`${IDS.ADMIN_CUSTODY_HOSTING_HELD}-${i}`}
+          <span class="value" data-testid={IDS.ADMIN_CUSTODY_HOSTING_HELD}
             >{resolveLocalized(byteSizeRaw(row.held_bytes))}</span
           >
         </div>
         <div class="field">
-          <span class="value" data-testid={`${IDS.ADMIN_CUSTODY_HOSTING_STOPPED}-${i}`}>
+          <span class="value" data-testid={IDS.ADMIN_CUSTODY_HOSTING_STOPPED}>
             {row.stopped ? t.admin.custody_hosting.stopped : t.admin.custody_hosting.active}
           </span>
         </div>
         <div class="field">
-          <span class="value" data-testid={`${IDS.ADMIN_CUSTODY_HOSTING_RECEIPT}-${i}`}>
+          <span class="value" data-testid={IDS.ADMIN_CUSTODY_HOSTING_RECEIPT}>
             {RECEIPT_TEXT[row.receipt_state]}
           </span>
         </div>
         <div class="actions">
           <button
             class="btn small danger"
-            data-testid={`${IDS.ADMIN_CUSTODY_HOSTING_REMOVE_BUTTON}-${i}`}
+            data-testid={IDS.ADMIN_CUSTODY_HOSTING_REMOVE_BUTTON}
             disabled={busy || confirmKey === rowKey(row)}
             onclick={() => openConfirm(row)}
           >

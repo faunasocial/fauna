@@ -194,6 +194,399 @@ pub unsafe extern "C" fn fauna_post_build_gated(
     0
 }
 
+/// Build a community room's **birth record** for its founder — a fresh
+/// binding birth salt (`fauna_mls::room_policy::binding_birth_salt` around 24
+/// random bytes), the signed initial `RoomPolicy`
+/// (`fauna_mls::room_policy::RoomPolicy::initial`) and a fresh group-reception
+/// public key: everything `fauna.conversations.room.create` carries (the room
+/// fixtures of the e2e harness, which founds a room over the wire with no app
+/// engine).
+///
+/// The reception key's secret half is dropped: a harness founder seals under
+/// the generation key its own mint returns
+/// ([`fauna_room_build_generation_mint`]) and never opens a wrap.
+///
+/// `secret`/`secret_len` — the founder's 32-byte Ed25519 secret. `name` — a
+/// NUL-terminated UTF-8 room name. `out_salt` receives the 32-byte salt;
+/// `out_policy` the canonical-CBOR `SignedRoomPolicy`; `out_reception_pubkey`
+/// the reception public key. Caller frees both buffers via
+/// `fauna_ffi_free_buffer`.
+///
+/// # Safety
+///
+/// `secret` must point to `secret_len` readable bytes; `name` must be a valid
+/// NUL-terminated C string; `out_salt` must point to 32 writable bytes;
+/// `out_policy` and `out_reception_pubkey` must be valid, aligned, writable
+/// `FfiBuffer` pointers. All pointers must remain valid for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fauna_room_build_birth(
+    secret: *const u8,
+    secret_len: u32,
+    name: *const c_char,
+    out_salt: *mut u8,
+    out_policy: *mut FfiBuffer,
+    out_reception_pubkey: *mut FfiBuffer,
+) -> i32 {
+    // SAFETY: per the `# Safety` section above, the caller guarantees
+    // `secret`/`secret_len` and `name` meet `slice_to_vec`/`cstr_to_string`'s
+    // preconditions.
+    let (salt, policy, reception_pubkey) = cabi_try!(unsafe {
+        let kp = crate::keypair_from_bytes(&slice_to_vec(secret, secret_len))?;
+        let mut entropy = [0u8; 24];
+        getrandom::fill(&mut entropy).map_err(|e| crate::FfiError::General {
+            msg: format!("salt entropy: {e}"),
+        })?;
+        let salt = fauna_mls::room_policy::binding_birth_salt(&entropy);
+        let name_s = cstr_to_string(name)?;
+        let signed = fauna_mls::room_policy::RoomPolicy::initial(kp.actor_id(), Some(name_s))
+            .sign(&kp)
+            .map_err(|e| crate::FfiError::General { msg: e.to_string() })?;
+        let policy = fauna_protocol::encode_canonical(&signed)
+            .map_err(|e| crate::FfiError::General { msg: e.to_string() })?
+            .to_vec();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or_default();
+        let reception = fauna_core::group_generation::GroupReceptionKeyRecord::mint(now_ms);
+        let pubkey = reception
+            .reception_pubkey()
+            .map_err(|e| crate::FfiError::General { msg: e.to_string() })?;
+        Ok::<_, crate::FfiError>((salt, policy, pubkey))
+    });
+    // SAFETY: per the `# Safety` section above, `out_salt` points to 32
+    // writable bytes and both buffers are valid, aligned, writable `FfiBuffer`
+    // pointers for the duration of this call.
+    unsafe {
+        std::ptr::copy_nonoverlapping(salt.as_ptr(), out_salt, 32);
+        *out_policy = FfiBuffer::from_vec(policy);
+        *out_reception_pubkey = FfiBuffer::from_vec(reception_pubkey);
+    }
+    0
+}
+
+/// Build one community-room **generation mint** over the wrap targets the
+/// caller read back from `fauna.conversations.room.list_roster` — the owner's
+/// rotation (`conversation-rooms.md` § The three classes → *Community*), over
+/// the same `build_group_mint` the room engine's
+/// `MlsEngine::build_room_generation_mint` calls.
+///
+/// The targets come as `count` parallel rows: `entry_ids` and `actors` are
+/// `count * 32` bytes each, `reception_lens` is `count` lengths, and
+/// `reception_pubkeys` is the keys concatenated in that order. Leaving a
+/// member out of the targets is how an owner rotates it — or the home nest —
+/// out. `parents` is `parents_count * 32` bytes: empty for a room's first
+/// mint, else the tip it replaces.
+///
+/// `out_mint` receives the canonical-CBOR mint record for
+/// `fauna.conversations.room.publish_generation`; `out_gen_key` the 32-byte
+/// generation key; `out_generation_id` its 32-byte id. Caller frees `out_mint`
+/// via `fauna_ffi_free_buffer`.
+///
+/// # Safety
+///
+/// `secret` must point to `secret_len` readable bytes; `entry_ids` and
+/// `actors` to `count * 32`; `reception_lens` to `count` `u32`s;
+/// `reception_pubkeys` to the sum of those lengths; `parents` to
+/// `parents_count * 32` (null when zero); `out_mint` must be a valid, aligned,
+/// writable `FfiBuffer` pointer and `out_gen_key` / `out_generation_id` must
+/// point to 32 writable bytes each. All pointers must remain valid for the
+/// call.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn fauna_room_build_generation_mint(
+    secret: *const u8,
+    secret_len: u32,
+    count: u32,
+    entry_ids: *const u8,
+    actors: *const u8,
+    reception_lens: *const u32,
+    reception_pubkeys: *const u8,
+    parents: *const u8,
+    parents_count: u32,
+    minted_at_ms: i64,
+    out_mint: *mut FfiBuffer,
+    out_gen_key: *mut u8,
+    out_generation_id: *mut u8,
+) -> i32 {
+    fn bad(msg: &str) -> crate::FfiError {
+        crate::FfiError::General { msg: msg.into() }
+    }
+    // SAFETY: per the `# Safety` section above, every input pointer is valid
+    // for the byte counts its length arguments state.
+    let built = cabi_try!(unsafe {
+        let kp = crate::keypair_from_bytes(&slice_to_vec(secret, secret_len))?;
+        let n = count as usize;
+        let entry_ids = slice_to_vec(entry_ids, count * 32);
+        let actors = slice_to_vec(actors, count * 32);
+        let lens: &[u32] = if n == 0 || reception_lens.is_null() {
+            &[]
+        } else {
+            slice::from_raw_parts(reception_lens, n)
+        };
+        if entry_ids.len() != n * 32 || actors.len() != n * 32 || lens.len() != n {
+            return Err(bad(
+                "roster rows must be count * 32 bytes with count lengths",
+            ));
+        }
+        let total: u32 = lens.iter().sum();
+        let keys = slice_to_vec(reception_pubkeys, total);
+        let mut targets = Vec::with_capacity(n);
+        let mut at = 0usize;
+        for i in 0..n {
+            let len = lens[i] as usize;
+            let mut entry = [0u8; 32];
+            entry.copy_from_slice(&entry_ids[i * 32..(i + 1) * 32]);
+            let mut actor = [0u8; 32];
+            actor.copy_from_slice(&actors[i * 32..(i + 1) * 32]);
+            targets.push(fauna_core::group_scope::RosterMember {
+                entry_id: entry,
+                member_actor: fauna_core::identity::ActorId(actor),
+                reception_pubkey: keys[at..at + len].to_vec(),
+                enrolled_at_ms: 0,
+            });
+            at += len;
+        }
+        let parent_bytes = slice_to_vec(parents, parents_count * 32);
+        let parents: Vec<[u8; 32]> = parent_bytes.as_chunks::<32>().0.to_vec();
+        let built = fauna_mls::wrapped_blob::group_generation_wraps::build_group_mint(
+            &targets,
+            parents,
+            Vec::new(),
+            kp.signing_key(),
+            Vec::new(),
+            minted_at_ms,
+        )
+        .map_err(|e| bad(&e.to_string()))?;
+        let record = fauna_protocol::encode_canonical(&built.record)
+            .map_err(|e| bad(&e.to_string()))?
+            .to_vec();
+        Ok::<_, crate::FfiError>((record, *built.gen_key.as_bytes(), built.generation_id))
+    });
+    // SAFETY: per the `# Safety` section above, `out_mint` is a valid writable
+    // `FfiBuffer` pointer and the two key outputs point to 32 writable bytes.
+    unsafe {
+        *out_mint = FfiBuffer::from_vec(built.0);
+        std::ptr::copy_nonoverlapping(built.1.as_ptr(), out_gen_key, 32);
+        std::ptr::copy_nonoverlapping(built.2.as_ptr(), out_generation_id, 32);
+    }
+    0
+}
+
+/// Build a signed **room-restricted** feed `Post` addressed to a community
+/// room, plus its sealed full-body blob — the room twin of
+/// [`fauna_post_build_gated`], wrapping the shared
+/// `fauna_client_core::post::build_room_post_at` under
+/// `room_post_base_key(gen_key)` with a fresh `seal_id`.
+///
+/// `room` — the room's 32-byte channel id; `generation` / `gen_key` — the
+/// generation id and key the room's mint returned
+/// ([`fauna_room_build_generation_mint`]). `out_post` receives the
+/// `fauna.posts.create` wire bytes, `out_blob` the sealed body to upload
+/// first. Caller frees both via `fauna_ffi_free_buffer`.
+///
+/// # Safety
+///
+/// `secret` must point to `secret_len` readable bytes and `room`,
+/// `generation`, `gen_key` to 32 each; `preview` and `full_body` must be valid
+/// NUL-terminated C strings; `out_post` and `out_blob` must be valid, aligned,
+/// writable `FfiBuffer` pointers. All pointers must remain valid for the call.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn fauna_post_build_room(
+    secret: *const u8,
+    secret_len: u32,
+    preview: *const c_char,
+    full_body: *const c_char,
+    room: *const u8,
+    generation: *const u8,
+    gen_key: *const u8,
+    out_post: *mut FfiBuffer,
+    out_blob: *mut FfiBuffer,
+) -> i32 {
+    fn arr32(v: Vec<u8>, what: &str) -> Result<[u8; 32], crate::FfiError> {
+        v.try_into().map_err(|_| crate::FfiError::General {
+            msg: format!("{what} must be 32 bytes"),
+        })
+    }
+    // SAFETY: per the `# Safety` section above, the caller guarantees every
+    // input meets `slice_to_vec`/`cstr_to_string`'s preconditions.
+    let build = cabi_try!(unsafe {
+        let kp = crate::keypair_from_bytes(&slice_to_vec(secret, secret_len))?;
+        let preview_s = cstr_to_string(preview)?;
+        let full_s = cstr_to_string(full_body)?;
+        let room = arr32(slice_to_vec(room, 32), "room")?;
+        let generation = arr32(slice_to_vec(generation, 32), "generation")?;
+        let key = fauna_core::crypto::GenerationKey::from_bytes(arr32(
+            slice_to_vec(gen_key, 32),
+            "gen_key",
+        )?);
+        let seal_id = fauna_client_core::post::mint_seal_id()
+            .map_err(|e| crate::FfiError::General { msg: e.0 })?;
+        fauna_client_core::post::build_room_post_at(
+            &kp,
+            &preview_s,
+            fauna_core::data::PostBody::Text {
+                content: full_s,
+                facets: vec![],
+            },
+            room,
+            fauna_core::room_post::RoomPostSeal::Community { generation },
+            &fauna_core::group_content::room_post_base_key(&key),
+            seal_id,
+            &fauna_client_core::post::PostAuthoring::now(),
+        )
+        .map_err(|e| crate::FfiError::General { msg: e.0 })
+    });
+    // SAFETY: per the `# Safety` section above, `out_post` and `out_blob` are
+    // valid, aligned, writable `FfiBuffer` pointers for the duration of this
+    // call.
+    unsafe {
+        *out_post = FfiBuffer::from_vec(build.post_bytes);
+        *out_blob = FfiBuffer::from_vec(build.encrypted_blob);
+    }
+    0
+}
+
+/// Sign a community room's **labeler set** — the canonical-CBOR
+/// `SignedRoomLabelers` that `fauna.conversations.room.set_labelers` carries
+/// (`fauna_mls::room_policy::RoomLabelers`, sorted and de-duplicated there).
+///
+/// `labelers` is `count * 32` bytes of labeler ids. `out` receives the signed
+/// set; the caller frees it via `fauna_ffi_free_buffer`.
+///
+/// # Safety
+///
+/// `secret` must point to `secret_len` readable bytes, `room` to 32, and
+/// `labelers` to `count * 32` (null when zero); `out` must be a valid,
+/// aligned, writable `FfiBuffer` pointer. All pointers must remain valid for
+/// the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fauna_room_sign_labelers(
+    secret: *const u8,
+    secret_len: u32,
+    room: *const u8,
+    version: u64,
+    labelers: *const u8,
+    count: u32,
+    out: *mut FfiBuffer,
+) -> i32 {
+    // SAFETY: per the `# Safety` section above, every input pointer is valid
+    // for the byte counts its length arguments state.
+    let signed = cabi_try!(unsafe {
+        let kp = crate::keypair_from_bytes(&slice_to_vec(secret, secret_len))?;
+        let room: [u8; 32] =
+            slice_to_vec(room, 32)
+                .try_into()
+                .map_err(|_| crate::FfiError::General {
+                    msg: "room must be 32 bytes".into(),
+                })?;
+        let ids = slice_to_vec(labelers, count * 32);
+        let set = fauna_mls::room_policy::RoomLabelers::new(
+            room,
+            version,
+            ids.as_chunks::<32>()
+                .0
+                .iter()
+                .map(|c| fauna_core::identity::ActorId(*c)),
+        )
+        .sign(&kp)
+        .map_err(|e| crate::FfiError::General { msg: e.to_string() })?;
+        fauna_protocol::encode_canonical(&set)
+            .map(|b| b.to_vec())
+            .map_err(|e| crate::FfiError::General { msg: e.to_string() })
+    });
+    // SAFETY: per the `# Safety` section above, `out` is a valid, aligned,
+    // writable `FfiBuffer` pointer for the duration of this call.
+    unsafe {
+        *out = FfiBuffer::from_vec(signed);
+    }
+    0
+}
+
+/// Sign an invitation of `invitee` into a community room as a **member** — the
+/// canonical-CBOR `SignedRoomInvite` that `fauna.conversations.room.invite`
+/// carries (`fauna_mls::room_policy::RoomInvite`, signed by the inviter's
+/// key), read under the room's policy `policy_version`.
+///
+/// `out` receives the signed invitation; the caller frees it via
+/// `fauna_ffi_free_buffer`.
+///
+/// # Safety
+///
+/// `secret` must point to `secret_len` readable bytes, `room` and `invitee` to
+/// 32 each; `out` must be a valid, aligned, writable `FfiBuffer` pointer. All
+/// pointers must remain valid for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fauna_room_sign_member_invite(
+    secret: *const u8,
+    secret_len: u32,
+    room: *const u8,
+    invitee: *const u8,
+    policy_version: u64,
+    out: *mut FfiBuffer,
+) -> i32 {
+    // SAFETY: per the `# Safety` section above, every input pointer is valid
+    // for the byte counts its length arguments state.
+    let signed = cabi_try!(unsafe {
+        let kp = crate::keypair_from_bytes(&slice_to_vec(secret, secret_len))?;
+        let invitee: [u8; 32] =
+            slice_to_vec(invitee, 32)
+                .try_into()
+                .map_err(|_| crate::FfiError::General {
+                    msg: "invitee must be 32 bytes".into(),
+                })?;
+        let invite = fauna_mls::room_policy::RoomInvite {
+            room_id: slice_to_vec(room, 32),
+            invitee: fauna_core::identity::ActorId(invitee),
+            role: fauna_mls::room_policy::RoomRole::Member,
+            policy_version,
+        }
+        .sign(&kp)
+        .map_err(|e| crate::FfiError::General { msg: e.to_string() })?;
+        fauna_protocol::encode_canonical(&invite)
+            .map(|b| b.to_vec())
+            .map_err(|e| crate::FfiError::General { msg: e.to_string() })
+    });
+    // SAFETY: per the `# Safety` section above, `out` is a valid, aligned,
+    // writable `FfiBuffer` pointer for the duration of this call.
+    unsafe {
+        *out = FfiBuffer::from_vec(signed);
+    }
+    0
+}
+
+/// A fresh group-reception public key — the wrap target an invitee names in
+/// `fauna.conversations.room.accept_invite`
+/// (`fauna_core::group_generation::GroupReceptionKeyRecord`). The secret half
+/// is dropped, as [`fauna_room_build_birth`] drops the founder's: a harness
+/// member never opens a wrap.
+///
+/// `out` receives the public key; the caller frees it via
+/// `fauna_ffi_free_buffer`.
+///
+/// # Safety
+///
+/// `out` must be a valid, aligned, writable `FfiBuffer` pointer for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fauna_room_mint_reception_pubkey(out: *mut FfiBuffer) -> i32 {
+    let pubkey = cabi_try!({
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or_default();
+        fauna_core::group_generation::GroupReceptionKeyRecord::mint(now_ms)
+            .reception_pubkey()
+            .map_err(|e| crate::FfiError::General { msg: e.to_string() })
+    });
+    // SAFETY: per the `# Safety` section above, `out` is a valid, aligned,
+    // writable `FfiBuffer` pointer for the duration of this call.
+    unsafe {
+        *out = FfiBuffer::from_vec(pubkey);
+    }
+    0
+}
+
 /// Build a canonical-CBOR capability `GrantBlob` carrying one
 /// `content.read{post:tier}` scope wrapping the tier's period key — the
 /// owner-side mint input for `fauna.capabilities.mint` (web paywall; wraps
@@ -791,12 +1184,16 @@ pub unsafe extern "C" fn fauna_capability_build_ext_kinds_grant(
     0
 }
 
-/// Build the canonical-CBOR **consent-time folder deposit grant to a
-/// third-party principal** — one keyless `deposit` tuple over `folder_id`,
-/// held by `holder_x25519` (`file-sync.md` § Third-party deposit ingress).
-/// The Python e2e twin of the approving app's mint: it runs the production
-/// `fauna_client_capabilities::mint_folder_deposit_grant`, owned by the actor
-/// `identity_seed` derives.
+/// Build the canonical-CBOR **`fauna:personalization:rw` grant twin** to a
+/// third-party principal (`authorization-server.md` § Scope grammar → *The
+/// fifth arm*): two `content.read` tuples, the delegable pairs of
+/// `fauna.state.personalization` and `fauna.personalization.model`, wrapped to
+/// `holder_x25519`. The Python e2e twin of the owner's mint inside
+/// `fauna_client_capabilities::ext_consent::prepare_ext_consent_grant`, minus
+/// the ledger `Mint` (pinned in Rust): it runs the production
+/// `fauna_client_capabilities::mint_personalization_grant` over the delegable
+/// branch derived from the owner's identity seed exactly as
+/// `ConsentGrantSeams::from_keypair` derives it.
 ///
 /// # Safety
 ///
@@ -804,15 +1201,15 @@ pub unsafe extern "C" fn fauna_capability_build_ext_kinds_grant(
 /// to the stated byte counts; `out` must be a valid, aligned, writable
 /// `FfiBuffer` pointer. All pointers must remain valid for the call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fauna_capability_build_folder_deposit_grant(
+pub unsafe extern "C" fn fauna_capability_build_personalization_grant(
     identity_seed: *const u8,
     grant_id: *const u8,
     holder_x25519: *const u8,
     epoch_start: u64,
     epoch_end: u64,
-    folder_id: i64,
     out: *mut FfiBuffer,
 ) -> i32 {
+    use fauna_core::crypto::{BackupKey, DelegableSchedule};
     use fauna_mls::wrapped_blob::GrantWindow;
     // SAFETY: per the `# Safety` section above, the caller guarantees every
     // pointer meets `read_32`/`slice_to_vec`'s preconditions.
@@ -826,15 +1223,486 @@ pub unsafe extern "C" fn fauna_capability_build_folder_deposit_grant(
                 })?;
         let holder = read_32(holder_x25519, "holder_x25519")?;
         let keypair = fauna_core::identity::ActorKeypair::from_secret(seed);
+        let delegable = DelegableSchedule::derive(&BackupKey::derive(keypair.secret_bytes()));
+        let blob = fauna_client_capabilities::mint_personalization_grant(
+            &delegable,
+            &keypair.actor_id().0,
+            &grant_a,
+            &holder,
+            GrantWindow(epoch_start, epoch_end),
+        )
+        .map_err(|e| crate::FfiError::General {
+            msg: format!("mint personalization grant: {e}"),
+        })?;
+        blob.to_canonical_bytes()
+            .map_err(|e| crate::FfiError::General {
+                msg: format!("encode grant blob: {e}"),
+            })
+    });
+    // SAFETY: per the `# Safety` section above, `out` is a valid, aligned,
+    // writable pointer to an `FfiBuffer` for the duration of this call.
+    unsafe {
+        *out = FfiBuffer::from_vec(bytes);
+    }
+    0
+}
+
+/// Seal one row of a **delegable** account-plane kind under the scope `state`
+/// **as the owner**: the kind's pair from the delegable branch of the owner's
+/// identity seed (`DelegableSchedule::for_kind`, the pair a grant twin wraps),
+/// signed by `writer_secret` — what one of the owner's replicas puts on the
+/// delegable feed. The e2e harness's owner leg for a principal that opens
+/// `state` rows with a granted pair (`fauna:personalization:rw`); it carries
+/// no merge metadata, the open being the observable.
+///
+/// `out` receives canonical CBOR `{"item_key": bytes(32), "envelope": bytes}`.
+///
+/// # Safety
+///
+/// `identity_seed` and `writer_secret` must point to 32 bytes each; `kind` and
+/// `key` must be valid NUL-terminated C strings; `value` must point to
+/// `value_len` readable bytes (or be null with len 0); `out` must be a valid,
+/// aligned, writable `FfiBuffer` pointer. All pointers must remain valid for
+/// the call.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)] // a flat C ABI
+pub unsafe extern "C" fn fauna_account_state_seal_delegable_row(
+    identity_seed: *const u8,
+    writer_secret: *const u8,
+    kind: *const c_char,
+    key: *const c_char,
+    value: *const u8,
+    value_len: u32,
+    writer_seq: u64,
+    out: *mut FfiBuffer,
+) -> i32 {
+    use fauna_core::account_entry_crypto::{EntryCoordinates, EntryPlaintext, seal_entry};
+    use fauna_core::crypto::{BackupKey, DelegableSchedule};
+    use fauna_protocol::ByteBuf;
+    // SAFETY: per the `# Safety` section above, the caller guarantees every
+    // pointer meets `read_32`/`slice_to_vec`/`cstr_to_string`'s preconditions.
+    let bytes = cabi_try!(unsafe {
+        let general = |msg: String| crate::FfiError::General { msg };
+        let seed = read_32(identity_seed, "identity_seed")?;
+        let writer =
+            ed25519_dalek::SigningKey::from_bytes(&read_32(writer_secret, "writer_secret")?);
+        let kind_s = cstr_to_string(kind)?;
+        let keypair = fauna_core::identity::ActorKeypair::from_secret(seed);
+        let keys = DelegableSchedule::derive(&BackupKey::derive(keypair.secret_bytes()))
+            .for_kind(&kind_s)
+            .into_keys();
+        let sealed = seal_entry(
+            &keys,
+            &EntryCoordinates {
+                writer_id: writer.verifying_key().to_bytes(),
+                writer_seq,
+                scope: fauna_protocol::account_state::ACCOUNT_STATE_SCOPE,
+            },
+            &EntryPlaintext {
+                kind: kind_s,
+                key: cstr_to_string(key)?,
+                merge_meta: None,
+                value: ByteBuf::from(slice_to_vec(value, value_len)),
+                tombstone: false,
+            },
+            &writer,
+        )
+        .map_err(|e| general(format!("seal: {e:#}")))?;
+        let reply: std::collections::BTreeMap<&str, ByteBuf> = [
+            ("item_key", ByteBuf::from(sealed.item_key.to_vec())),
+            ("envelope", ByteBuf::from(sealed.envelope)),
+        ]
+        .into_iter()
+        .collect();
+        fauna_core::encoding::canonical_encode(&reply)
+            .map_err(|e| general(format!("encode sealed row: {e}")))
+    });
+    // SAFETY: per the `# Safety` section above, `out` is a valid, aligned,
+    // writable pointer to an `FfiBuffer` for the duration of this call.
+    unsafe {
+        *out = FfiBuffer::from_vec(bytes);
+    }
+    0
+}
+
+/// Open one `state` row **as a `fauna:personalization:rw` principal**: the
+/// twin's two pairs out of `grant_blob` with the holder's X25519 secret (the
+/// production `fauna_client_capabilities::open_personalization_keys`), each
+/// tried on the row — the delegable scope is kind-blinded, so a principal
+/// opens the one kind it holds a key to and no other. The e2e harness's
+/// principal leg over a listed `state` row.
+///
+/// `out` receives canonical CBOR `{"kind": bytes, "key": bytes, "value":
+/// bytes}` (the first two UTF-8); a row no granted pair opens is an error.
+///
+/// # Safety
+///
+/// `grant_blob` must point to `grant_blob_len` readable bytes,
+/// `holder_secret`, `writer_id` and `item_key` to 32 bytes each, `envelope` to
+/// `envelope_len` bytes; `out` must be a valid, aligned, writable `FfiBuffer`
+/// pointer. All pointers must remain valid for the call.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)] // a flat C ABI
+pub unsafe extern "C" fn fauna_personalization_open_state_row(
+    grant_blob: *const u8,
+    grant_blob_len: u32,
+    holder_secret: *const u8,
+    writer_id: *const u8,
+    writer_seq: u64,
+    item_key: *const u8,
+    envelope: *const u8,
+    envelope_len: u32,
+    out: *mut FfiBuffer,
+) -> i32 {
+    use fauna_core::account_entry_crypto::{EntryCoordinates, open_entry};
+    // SAFETY: per the `# Safety` section above, the caller guarantees every
+    // pointer meets `read_32`/`slice_to_vec`'s preconditions.
+    let bytes = cabi_try!(unsafe {
+        let general = |msg: String| crate::FfiError::General { msg };
+        let blob = fauna_mls::wrapped_blob::GrantBlob::from_canonical_bytes(&slice_to_vec(
+            grant_blob,
+            grant_blob_len,
+        ))
+        .map_err(|e| general(format!("decode grant blob: {e}")))?;
+        let holder = read_32(holder_secret, "holder_secret")?;
+        let coords = EntryCoordinates {
+            writer_id: read_32(writer_id, "writer_id")?,
+            writer_seq,
+            scope: fauna_protocol::account_state::ACCOUNT_STATE_SCOPE,
+        };
+        let item_key = read_32(item_key, "item_key")?;
+        let envelope = slice_to_vec(envelope, envelope_len);
+        let opened = fauna_client_capabilities::open_personalization_keys(&blob, &holder)
+            .map_err(|e| general(format!("open the grant: {e}")))?
+            .iter()
+            .find_map(|keys| open_entry(keys, &coords, &item_key, &envelope).ok())
+            .ok_or_else(|| general("no granted pair opens the row".into()))?;
+        use fauna_protocol::ByteBuf;
+        let reply: std::collections::BTreeMap<&str, ByteBuf> = [
+            ("kind", ByteBuf::from(opened.kind.into_bytes())),
+            ("key", ByteBuf::from(opened.key.into_bytes())),
+            ("value", opened.value),
+        ]
+        .into_iter()
+        .collect();
+        fauna_core::encoding::canonical_encode(&reply)
+            .map_err(|e| general(format!("encode opened row: {e}")))
+    });
+    // SAFETY: per the `# Safety` section above, `out` is a valid, aligned,
+    // writable pointer to an `FfiBuffer` for the duration of this call.
+    unsafe {
+        *out = FfiBuffer::from_vec(bytes);
+    }
+    0
+}
+
+/// Open a sealed **trained-topic model** blob as its owner: the seal keys
+/// derived from the owner's seed exactly as `FeedManager` derives them
+/// (`model_seal_keys(BackupKey::derive(seed))`), then the production
+/// `fauna_client_personalization::unseal_topic_model`. The e2e harness's
+/// owner-side read of a blob it fetched off the nest — the proof that the
+/// opaque bytes the nest rests are the user's own marks
+/// (`topic-factors.md` § At rest — seal + home).
+///
+/// `out` receives canonical CBOR `{"markers": {post_id_hex: "more-like-this"
+/// | "less-like-this" | <a label this build does not name>}, "example_count":
+/// u32, "engagement_count": u32}` (explicit, then engagement-taught
+/// documents); a blob the seed does not open is an error.
+///
+/// # Safety
+///
+/// `secret` must point to 32 readable bytes and `blob` to `blob_len`; `out`
+/// must be a valid, aligned, writable `FfiBuffer` pointer. All pointers must
+/// remain valid for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fauna_personalization_open_topic_model(
+    secret: *const u8,
+    blob: *const u8,
+    blob_len: u32,
+    out: *mut FfiBuffer,
+) -> i32 {
+    use fauna_feed::TrainVerb;
+    // SAFETY: per the `# Safety` section above, the caller guarantees every
+    // pointer meets `read_32`/`slice_to_vec`'s preconditions.
+    let bytes = cabi_try!(unsafe {
+        let general = |msg: String| crate::FfiError::General { msg };
+        let keys = owner_model_seal_keys(secret)?;
+        let model =
+            fauna_client_personalization::unseal_topic_model(&slice_to_vec(blob, blob_len), &keys)
+                .map_err(|e| general(format!("open the topic model: {e}")))?;
+        let markers: std::collections::BTreeMap<String, String> = model
+            .example_markers()
+            .map(|(id, label)| {
+                let label = if label == TrainVerb::MoreLikeThis.into() {
+                    "more-like-this".to_string()
+                } else if label == TrainVerb::LessLikeThis.into() {
+                    "less-like-this".to_string()
+                } else {
+                    format!("{label:?}")
+                };
+                (id.to_string(), label)
+            })
+            .collect();
+        fauna_core::encoding::canonical_encode(&serde_json::json!({
+            "markers": markers,
+            "example_count": model.example_count(),
+            "engagement_count": model.engagement_example_count(),
+        }))
+        .map_err(|e| general(format!("encode opened model: {e}")))
+    });
+    // SAFETY: per the `# Safety` section above, `out` is a valid, aligned,
+    // writable pointer to an `FfiBuffer` for the duration of this call.
+    unsafe {
+        *out = FfiBuffer::from_vec(bytes);
+    }
+    0
+}
+
+/// Open a sealed **engagement-cue rollup** blob (`cues:v1`) as its owner,
+/// through the production `fauna_feed::unseal_cue_rollup` under the same seal
+/// keys as [`fauna_personalization_open_topic_model`]
+/// (`engagement-cues.md` § At rest — the sealed cue rollup).
+///
+/// `out` receives canonical CBOR `{content_id: verdict}`, each verdict its wire
+/// string (`"watch-complete"`, `"skip"`, or the string a newer build wrote).
+///
+/// # Safety
+///
+/// As [`fauna_personalization_open_topic_model`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fauna_personalization_open_cue_rollup(
+    secret: *const u8,
+    blob: *const u8,
+    blob_len: u32,
+    out: *mut FfiBuffer,
+) -> i32 {
+    use fauna_feed::CueVerdict;
+    // SAFETY: per the `# Safety` section above, the caller guarantees every
+    // pointer meets `read_32`/`slice_to_vec`'s preconditions.
+    let bytes = cabi_try!(unsafe {
+        let general = |msg: String| crate::FfiError::General { msg };
+        let keys = owner_model_seal_keys(secret)?;
+        let rollup = fauna_feed::unseal_cue_rollup(&slice_to_vec(blob, blob_len), &keys)
+            .map_err(|e| general(format!("open the cue rollup: {e}")))?;
+        let items: std::collections::BTreeMap<String, String> = rollup
+            .iter()
+            .map(|(id, cues)| {
+                let verdict = match &cues.verdict {
+                    CueVerdict::Other(s) => s.clone(),
+                    known => known.wire_str().unwrap_or_default().to_string(),
+                };
+                (id.clone(), verdict)
+            })
+            .collect();
+        fauna_core::encoding::canonical_encode(&items)
+            .map_err(|e| general(format!("encode opened rollup: {e}")))
+    });
+    // SAFETY: per the `# Safety` section above, `out` is a valid, aligned,
+    // writable pointer to an `FfiBuffer` for the duration of this call.
+    unsafe {
+        *out = FfiBuffer::from_vec(bytes);
+    }
+    0
+}
+
+/// The owner's personalization seal keys from their 32-byte seed — the
+/// derivation `FeedManager` seals its models and cue rollup under.
+///
+/// # Safety
+///
+/// `secret` must point to 32 readable bytes.
+unsafe fn owner_model_seal_keys(
+    secret: *const u8,
+) -> Result<fauna_core::crypto::DelegableKindKeys, crate::FfiError> {
+    // SAFETY: per this function's contract.
+    let seed = unsafe { read_32(secret, "secret")? };
+    Ok(fauna_client_personalization::model_seal_keys(
+        &fauna_core::crypto::BackupKey::derive(&seed),
+    ))
+}
+
+/// Build the canonical-CBOR **consent-time folder deposit grant to a
+/// third-party principal** (`folder-deposit.md`) —
+/// the Python e2e twin of the deposit arm of the owner's mint inside
+/// `fauna_client_capabilities::ext_consent::prepare_ext_consent_grant`, minus
+/// the ledger `Mint` a harness holding no account store cannot make (pinned in
+/// Rust). It runs the production steps over the consent row's own `scopes`
+/// (newline-separated, as `list_pending_consents` returned them): qualify the
+/// bare folder-plane scopes by the card's `folder` choice
+/// (`ext_consent::approved_scopes`; `folder` 0 = no choice), collect the
+/// deposit folders (`ext_consent::folder_deposit_ids`), and mint one keyless
+/// `deposit` tuple per folder held by `holder_x25519`, owned by the actor
+/// `identity_seed` derives. A row naming no deposit scope is refused.
+///
+/// # Safety
+///
+/// `identity_seed` (32), `grant_id` (16) and `holder_x25519` (32) must point
+/// to the stated byte counts; `scopes` must be a valid NUL-terminated C
+/// string; `out` must be a valid, aligned, writable `FfiBuffer` pointer. All
+/// pointers must remain valid for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fauna_capability_build_consent_deposit_grant(
+    identity_seed: *const u8,
+    grant_id: *const u8,
+    holder_x25519: *const u8,
+    epoch_start: u64,
+    epoch_end: u64,
+    scopes: *const c_char,
+    folder: i64,
+    out: *mut FfiBuffer,
+) -> i32 {
+    use fauna_client_capabilities::ext_consent::{approved_scopes, folder_deposit_ids};
+    use fauna_mls::wrapped_blob::GrantWindow;
+    // SAFETY: per the `# Safety` section above, the caller guarantees every
+    // pointer meets `read_32`/`slice_to_vec`/`cstr_to_string`'s preconditions.
+    let bytes = cabi_try!(unsafe {
+        let seed = read_32(identity_seed, "identity_seed")?;
+        let grant_a: [u8; 16] =
+            slice_to_vec(grant_id, 16)
+                .try_into()
+                .map_err(|_| crate::FfiError::General {
+                    msg: "grant_id must be 16 bytes".into(),
+                })?;
+        let holder = read_32(holder_x25519, "holder_x25519")?;
+        let scopes: Vec<String> = cstr_to_string(scopes)?
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect();
+        let scopes = approved_scopes(&scopes, (folder != 0).then_some(folder)).map_err(|e| {
+            crate::FfiError::General {
+                msg: format!("consent scopes: {e}"),
+            }
+        })?;
+        let folders = folder_deposit_ids(&scopes);
+        if folders.is_empty() {
+            return Err(crate::FfiError::General {
+                msg: "the consent names no folder deposit".into(),
+            });
+        }
+        let keypair = fauna_core::identity::ActorKeypair::from_secret(seed);
         let blob = fauna_client_capabilities::mint_folder_deposit_grant(
             &keypair.actor_id().0,
             &grant_a,
             &holder,
             GrantWindow(epoch_start, epoch_end),
-            &[folder_id],
+            &folders,
         )
         .map_err(|e| crate::FfiError::General {
             msg: format!("mint folder deposit grant: {e}"),
+        })?;
+        blob.to_canonical_bytes()
+            .map_err(|e| crate::FfiError::General {
+                msg: format!("encode grant blob: {e}"),
+            })
+    });
+    // SAFETY: per the `# Safety` section above, `out` is a valid, aligned,
+    // writable pointer to an `FfiBuffer` for the duration of this call.
+    unsafe {
+        *out = FfiBuffer::from_vec(bytes);
+    }
+    0
+}
+
+/// Open a **principal's folder read twin** (`webdav-server.md` § Key model →
+/// *A principal's read*) with the holder's X25519 secret into the value of
+/// the `Fauna-Folder-Keys` request header its WebDAV bearer requests carry —
+/// the production `fauna_client_capabilities::open_folder_read_keys`, then
+/// `FolderContentKeys::to_header_value`. The e2e harness's principal leg over
+/// a grant it fetched with `fauna.capabilities.fetch`; a blob that is no
+/// folder twin, or that the key does not open, is an error.
+///
+/// `out` receives the header value's UTF-8 bytes.
+///
+/// # Safety
+///
+/// `grant_blob` must point to `grant_blob_len` readable bytes and
+/// `holder_secret` to 32; `out` must be a valid, aligned, writable
+/// `FfiBuffer` pointer. All pointers must remain valid for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fauna_folder_read_keys_header(
+    grant_blob: *const u8,
+    grant_blob_len: u32,
+    holder_secret: *const u8,
+    out: *mut FfiBuffer,
+) -> i32 {
+    // SAFETY: per the `# Safety` section above, the caller guarantees every
+    // pointer meets `read_32`/`slice_to_vec`'s preconditions.
+    let bytes = cabi_try!(unsafe {
+        let general = |msg: String| crate::FfiError::General { msg };
+        let blob = fauna_mls::wrapped_blob::GrantBlob::from_canonical_bytes(&slice_to_vec(
+            grant_blob,
+            grant_blob_len,
+        ))
+        .map_err(|e| general(format!("decode grant blob: {e}")))?;
+        let holder = read_32(holder_secret, "holder_secret")?;
+        fauna_client_capabilities::open_folder_read_keys(&blob, &holder)
+            .map_err(|e| general(format!("open the folder twin: {e}")))?
+            .to_header_value()
+            .map(String::into_bytes)
+            .map_err(|e| general(format!("encode the keys header: {e:#}")))
+    });
+    // SAFETY: per the `# Safety` section above, `out` is a valid, aligned,
+    // writable pointer to an `FfiBuffer` for the duration of this call.
+    unsafe {
+        *out = FfiBuffer::from_vec(bytes);
+    }
+    0
+}
+
+/// Build the canonical-CBOR **keyless `identity.op` grant to a third-party
+/// principal** — one tuple naming the operation class `class_name`, held by
+/// `holder_x25519` (`key-material-hierarchy.md` § Audience: deployment
+/// infrastructure → *The oracle*). The Python e2e twin of the owner's mint:
+/// `fauna_client_capabilities::identity_op_scope` over the shared grant
+/// builder, owned by the actor `identity_seed` derives. A sovereign or
+/// unknown class name is refused, as the mint refuses it.
+///
+/// # Safety
+///
+/// `identity_seed` (32), `grant_id` (16) and `holder_x25519` (32) must point
+/// to the stated byte counts; `class_name` must be a valid NUL-terminated C
+/// string; `out` must be a valid, aligned, writable `FfiBuffer` pointer. All
+/// pointers must remain valid for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fauna_capability_build_identity_op_grant(
+    identity_seed: *const u8,
+    grant_id: *const u8,
+    holder_x25519: *const u8,
+    epoch_start: u64,
+    epoch_end: u64,
+    class_name: *const c_char,
+    out: *mut FfiBuffer,
+) -> i32 {
+    use fauna_mls::wrapped_blob::GrantWindow;
+    // SAFETY: per the `# Safety` section above, the caller guarantees every
+    // pointer meets `read_32`/`slice_to_vec`/`cstr_to_string`'s preconditions.
+    let bytes = cabi_try!(unsafe {
+        let seed = read_32(identity_seed, "identity_seed")?;
+        let grant_a: [u8; 16] =
+            slice_to_vec(grant_id, 16)
+                .try_into()
+                .map_err(|_| crate::FfiError::General {
+                    msg: "grant_id must be 16 bytes".into(),
+                })?;
+        let holder = read_32(holder_x25519, "holder_x25519")?;
+        let name = cstr_to_string(class_name)?;
+        let class = fauna_core::identity_op::IdentityOpClass::parse(&name).map_err(|e| {
+            crate::FfiError::General {
+                msg: format!("identity.op class {name:?}: {e}"),
+            }
+        })?;
+        let keypair = fauna_core::identity::ActorKeypair::from_secret(seed);
+        let blob = fauna_mls::wrapped_blob::build_grant_blob(
+            &keypair.actor_id().0,
+            &grant_a,
+            &holder,
+            None,
+            GrantWindow(epoch_start, epoch_end),
+            &[(fauna_client_capabilities::identity_op_scope(class), None)],
+        )
+        .map_err(|e| crate::FfiError::General {
+            msg: format!("build identity.op grant: {e}"),
         })?;
         blob.to_canonical_bytes()
             .map_err(|e| crate::FfiError::General {
@@ -2030,6 +2898,193 @@ pub unsafe extern "C" fn fauna_subscriptions_build_birth_upload(
         fauna_core::encoding::canonical_encode(&upload).map_err(|e| crate::FfiError::General {
             msg: format!("encode birth upload: {e}"),
         })
+    });
+    // SAFETY: per the `# Safety` section above, `out` is a valid, aligned,
+    // writable pointer to an `FfiBuffer` for the duration of this call.
+    unsafe {
+        *out = FfiBuffer::from_vec(bytes);
+    }
+    0
+}
+
+/// Build the `EncryptedKeyBlobUpload` an author's approve carries — a
+/// `KeyBlob` for `tier` under `period_key` covering exactly the
+/// `subscriber_count` 32-byte actor ids packed back to back at `subscribers`,
+/// at `rotated_at` (microseconds; must exceed every blob the tier already
+/// published). The roster-bearing sibling of
+/// [`fauna_subscriptions_build_birth_upload`], riding the same
+/// `mint_self_delegated_upload`, so an e2e witness that keeps its tier's period
+/// key can complete a grant through the real `requests.approve` door exactly as
+/// an app's drain pump does — the nest itself only ever enqueues a grant
+/// (`monetization.md` § Pillar 1 → the headless-author corollary).
+///
+/// A roster entry is hybrid (X-Wing) exactly when its subscriber published an
+/// ML-KEM encapsulation key, as an app's drain pump wraps: `mlkem_eks` holds
+/// `1184 * subscriber_count` bytes, one slot per entry in roster order, and
+/// `mlkem_ek_present` one byte per entry (non-zero = the slot is that
+/// subscriber's key; zero = classical, the slot ignored). Both null =
+/// every entry classical. `out` receives the canonical dag-cbor upload;
+/// caller frees via `fauna_ffi_free_buffer`.
+///
+/// # Safety
+///
+/// `secret` must point to `secret_len` readable bytes, `period_key` to 32 and
+/// `subscribers` to `32 * subscriber_count`; when non-null, `mlkem_eks` to
+/// `1184 * subscriber_count` and `mlkem_ek_present` to `subscriber_count`;
+/// `tier` must be a valid NUL-terminated C string; `out` must be a valid,
+/// aligned, writable pointer to an `FfiBuffer`. All pointers must remain valid
+/// for the duration of the call.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn fauna_subscriptions_build_roster_upload(
+    secret: *const u8,
+    secret_len: u32,
+    tier: *const c_char,
+    period_key: *const u8,
+    rotated_at: u64,
+    subscribers: *const u8,
+    subscriber_count: u32,
+    mlkem_eks: *const u8,
+    mlkem_ek_present: *const u8,
+    out: *mut FfiBuffer,
+) -> i32 {
+    // SAFETY: per the `# Safety` section above, the caller guarantees every
+    // pointer/length pair meets `slice_to_vec`/`cstr_to_string`'s preconditions.
+    let bytes = cabi_try!(unsafe {
+        let secret_vec = slice_to_vec(secret, secret_len);
+        let kp = crate::keypair_from_bytes(&secret_vec)?;
+        let tier_s = cstr_to_string(tier)?;
+        let pk: [u8; 32] =
+            slice_to_vec(period_key, 32)
+                .try_into()
+                .map_err(|_| crate::FfiError::General {
+                    msg: "period_key must be 32 bytes".into(),
+                })?;
+        let packed = slice_to_vec(subscribers, subscriber_count.saturating_mul(32));
+        const EK_LEN: u32 = 1184;
+        let (eks, present) = if mlkem_eks.is_null() || mlkem_ek_present.is_null() {
+            (Vec::new(), vec![0u8; subscriber_count as usize])
+        } else {
+            (
+                slice_to_vec(mlkem_eks, subscriber_count.saturating_mul(EK_LEN)),
+                slice_to_vec(mlkem_ek_present, subscriber_count),
+            )
+        };
+        let roster: Vec<(fauna_core::identity::ActorId, Option<Vec<u8>>)> = packed
+            .as_chunks::<32>()
+            .0
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let mut id = [0u8; 32];
+                id.copy_from_slice(c);
+                let ek = (present[i] != 0).then(|| {
+                    let at = i * EK_LEN as usize;
+                    eks[at..at + EK_LEN as usize].to_vec()
+                });
+                (fauna_core::identity::ActorId(id), ek)
+            })
+            .collect();
+        let upload = fauna_client_subscriptions::orchestration::mint_self_delegated_upload(
+            &kp, &tier_s, rotated_at, &roster, &pk,
+        )
+        .map_err(|e| crate::FfiError::General { msg: e.to_string() })?;
+        fauna_core::encoding::canonical_encode(&upload).map_err(|e| crate::FfiError::General {
+            msg: format!("encode roster upload: {e}"),
+        })
+    });
+    // SAFETY: per the `# Safety` section above, `out` is a valid, aligned,
+    // writable pointer to an `FfiBuffer` for the duration of this call.
+    unsafe {
+        *out = FfiBuffer::from_vec(bytes);
+    }
+    0
+}
+
+/// Build the `fauna.subscriptions.encaps_key.publish` request an account's
+/// app sends at session start — its identity-seed-derived ML-KEM-768
+/// encapsulation key (`post-quantum.md` § surface B) — through the one shared
+/// builder `fauna_client_subscriptions::encaps_key_publish_request`, so an
+/// e2e witness publishes exactly what an app does. `out` receives the
+/// canonical dag-cbor request; caller frees via `fauna_ffi_free_buffer`.
+///
+/// # Safety
+///
+/// `secret` must point to `secret_len` readable bytes; `out` must be a valid,
+/// aligned, writable pointer to an `FfiBuffer`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fauna_subscriptions_build_encaps_key_publish(
+    secret: *const u8,
+    secret_len: u32,
+    out: *mut FfiBuffer,
+) -> i32 {
+    // SAFETY: per the `# Safety` section above, `secret`/`secret_len` meet
+    // `slice_to_vec`'s preconditions.
+    let bytes = cabi_try!(unsafe {
+        let kp = crate::keypair_from_bytes(&slice_to_vec(secret, secret_len))?;
+        let req = fauna_client_subscriptions::encaps_key_publish_request(&kp);
+        fauna_core::encoding::canonical_encode(&req).map_err(|e| crate::FfiError::General {
+            msg: format!("encode encaps key publish: {e}"),
+        })
+    });
+    // SAFETY: per the `# Safety` section above, `out` is a valid, aligned,
+    // writable pointer to an `FfiBuffer` for the duration of this call.
+    unsafe {
+        *out = FfiBuffer::from_vec(bytes);
+    }
+    0
+}
+
+/// Build the `fauna.tls.publish_cert` request an admin's app sends after a
+/// DNS-01 order finishes: the issued cert sealed to the nest it is for and
+/// signed by the admin, through the one shared producer
+/// `fauna_client_dns::seal_issued_cert_for_nest` the admin-dns machine's
+/// delivery calls — so a witness of the relayed install publishes exactly what
+/// an app does. `out` receives the canonical dag-cbor request; caller frees via
+/// `fauna_ffi_free_buffer`.
+///
+/// `cert_chain_pem` / `privkey_pem` / `domain` — NUL-terminated UTF-8.
+/// `target_nest_id` — the installing nest's 32-byte Ed25519 node id.
+/// `actor_secret` — the signer's 32-byte Ed25519 seed.
+///
+/// # Safety
+///
+/// The three strings must be valid NUL-terminated C strings; `target_nest_id`
+/// and `actor_secret` must point to 32 readable bytes; `out` must be a valid,
+/// aligned, writable pointer to an `FfiBuffer`. All pointers must remain valid
+/// for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fauna_tls_build_publish_cert(
+    cert_chain_pem: *const c_char,
+    privkey_pem: *const c_char,
+    domain: *const c_char,
+    target_nest_id: *const u8,
+    actor_secret: *const u8,
+    out: *mut FfiBuffer,
+) -> i32 {
+    // SAFETY: per the `# Safety` section above, the caller guarantees every
+    // pointer meets `cstr_to_string`/`read_32`'s preconditions.
+    let bytes = cabi_try!(unsafe {
+        let general = |msg: String| crate::FfiError::General { msg };
+        let issued = fauna_client_dns::Dns01Issued {
+            cert_chain_pem: cstr_to_string(cert_chain_pem)?,
+            privkey_pem: cstr_to_string(privkey_pem)?,
+            account_credentials: Vec::new(),
+        };
+        let domain = cstr_to_string(domain)?;
+        let nest_id = read_32(target_nest_id, "target_nest_id")?;
+        let actor_sk =
+            ed25519_dalek::SigningKey::from_bytes(&read_32(actor_secret, "actor_secret")?);
+        let (ciphertext, actor_sig) =
+            fauna_client_dns::seal_issued_cert_for_nest(&issued, &domain, &nest_id, &actor_sk)
+                .map_err(|e| general(e.to_string()))?;
+        let req = fauna_protocol::tls::PublishCertRequest {
+            ciphertext: fauna_protocol::ByteBuf::from(ciphertext),
+            actor_sig: fauna_protocol::ByteBuf::from(actor_sig),
+            extra: Default::default(),
+        };
+        fauna_core::encoding::canonical_encode(&req)
+            .map_err(|e| general(format!("encode publish_cert request: {e}")))
     });
     // SAFETY: per the `# Safety` section above, `out` is a valid, aligned,
     // writable pointer to an `FfiBuffer` for the duration of this call.

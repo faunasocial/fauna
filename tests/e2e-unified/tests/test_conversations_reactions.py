@@ -34,6 +34,13 @@ import time
 
 import pytest
 
+from helpers.budgets import MLS_HANDSHAKE_S, RECEIVE_CYCLE_S
+from helpers.waiting import (
+    await_receive_cycle_after,
+    conv_receive_cycles,
+    poke_receive_cycle,
+    wait_until,
+)
 from tests.api import conv_api
 
 pytestmark = [pytest.mark.tier_3]
@@ -107,6 +114,7 @@ def test_reaction_option_elements_present_in_flyout(logged_in_app):
     )
 
 
+@pytest.mark.web
 @pytest.mark.real_conversations
 @pytest.mark.feature("reactions-and-message-delete")
 def test_react_cross_member_peer_sees_pill(
@@ -119,7 +127,9 @@ def test_react_cross_member_peer_sees_pill(
     (Track E for native UniFFI apps).
 
     Written client-agnostic so it runs on any machine where the two-engine pair is
-    available (linux + web on the same host).
+    available (linux + web on the same host). Marked ``web`` only: bob is the web
+    GUI, and ``real_faunamls_linux_sender`` skips every other parametrization
+    (the skip stays as the runtime backstop, convention 7's marker rider).
     """
     bob_app = real_faunamls_app
     alice_app, alice = real_faunamls_linux_sender
@@ -171,6 +181,101 @@ def test_react_cross_member_peer_sees_pill(
 
     assert bob_app.driver.count("dm-reaction-pill") >= 1, (
         "bob's bubble should show a dm-reaction-pill after alice's cross-engine reaction"
+    )
+
+
+@pytest.mark.linux
+@pytest.mark.tui
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.real_conversations
+@pytest.mark.feature("reactions-and-message-delete")
+def test_native_peer_reaction_shows_pill_on_senders_copy(
+    real_faunamls_app, second_real_faunamls_app, nest_instance
+):
+    """The native leg of outcome 1's peer half: bob reacts through his own ⋯
+    menu, and ALICE's copy of her message shows the ``dm-reaction-pill``.
+
+    ``test_react_cross_member_peer_sees_pill`` witnesses the same promise with a
+    web GUI on the receiving end; this is its same-app native twin, two real
+    engines of one client on one nest (the ``second_real_faunamls_app`` shape
+    ``test_fauna_mls_two_client_inbox_drain`` proves the drain over). The set it
+    runs on is that fixture's — linux, tui, windows, macos, ios; android has no
+    second seat and skips there, so it carries no marker.
+
+    The pill alice sees is the shared manager's fold of the channel's reaction
+    log (``MessageSnapshot.reactions``), which every app renders whole — so a
+    red here that names the pill, with bob's reaction sent, is a product bug in
+    the fold or the render, not a test to soften.
+    """
+    alice = real_faunamls_app
+    bob_app, bob = second_real_faunamls_app
+    body = "react to me natively"
+
+    # bob is addressable only once his login-time key packages are on the nest
+    # (alice's resolve asks `keypackage.addressable`); before that her send is
+    # refused as "did not resolve to a chip" — a race with his login, not a bug.
+    wait_until(
+        lambda: conv_api.keypackage_count(
+            nest_instance["port"], bob, bob["actor_id_hex"]
+        ) >= 1,
+        MLS_HANDSHAKE_S,
+        diagnose=lambda: "bob's engine never published a key package — his "
+        "login-time replenish never ran",
+    )
+
+    # alice sends; bob's push arm is suppressed and his ticker muted, so his
+    # copy arrives on an explicit receive poke (the fixture's documented lever).
+    alice.conversations.real_resolve_send_new(bob["actor_id_hex"], body)
+
+    def _bobs_thread():
+        return next(
+            (
+                t
+                for t in bob_app.conversations.list_threads()
+                if t.rail == "FaunaMls" and body in (t.snippet or "")
+            ),
+            None,
+        )
+
+    cycles = conv_receive_cycles(bob_app.driver)
+    poke_receive_cycle(bob_app.driver)
+    await_receive_cycle_after(
+        bob_app.driver,
+        cycles[0] if cycles else None,
+        budget_s=RECEIVE_CYCLE_S,
+        what="alice's message reaching bob",
+    )
+    wait_until(
+        lambda: _bobs_thread() is not None,
+        RECEIVE_CYCLE_S,
+        diagnose=lambda: "bob never received alice's message; his threads: "
+        + str([(t.rail, t.snippet) for t in bob_app.conversations.list_threads()]),
+    )
+
+    # alice opens her copy BEFORE bob reacts, so the pill's arrival is observed
+    # on a rendered bubble that had none.
+    alice.conversations.open_thread_by_rail("FaunaMls", snippet=body)
+    assert alice.driver.count("dm-message-text") >= 1, "alice's bubble never rendered"
+    assert alice.driver.count("dm-reaction-pill") == 0, (
+        "alice's fresh 1:1 already shows a reaction pill before bob reacted"
+    )
+
+    # bob reacts through his own ⋯ menu — the user gesture, not a bridge write.
+    bob_app.conversations.open_thread_by_rail("FaunaMls", snippet=body)
+    bob_app.conversations.react_to_message(message_index=0, reaction_index=0)
+
+    # alice's copy shows bob's reaction. Her receive loop is the ordinary one;
+    # the poke only removes waiting for its tick (convention 14).
+    poke_receive_cycle(alice.driver)
+    wait_until(
+        lambda: alice.driver.count("dm-reaction-pill") >= 1,
+        RECEIVE_CYCLE_S,
+        diagnose=lambda: (
+            "alice's copy never showed bob's reaction pill; bob's own copy shows "
+            f"{bob_app.driver.count('dm-reaction-pill')} pill(s)"
+        ),
     )
 
 

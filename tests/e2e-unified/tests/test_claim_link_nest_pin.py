@@ -56,7 +56,21 @@ from helpers.app_surface import skip_unbuilt
 from helpers.crash_recovery import setup_status
 from i18n.strings import S
 
-pytestmark = [pytest.mark.tier_3, pytest.mark.tier1]
+# web is deliberately NOT marked: this native channel-binding pin can never run
+# there (its e2e origin is never TLS), so the module is MARKED for the six apps
+# it can drive rather than gated on web by a skip — a `skip_unbuilt` on a column
+# that is witnessed by its own twin records a permanent red no run can clear
+# (`feature-catalog.md` § Cell semantics, the marked-not-gated rule).
+pytestmark = [
+    pytest.mark.tier_3,
+    pytest.mark.tier1,
+    pytest.mark.linux,
+    pytest.mark.macos,
+    pytest.mark.ios,
+    pytest.mark.tui,
+    pytest.mark.windows,
+    pytest.mark.android,
+]
 
 #: A well-formed 64-hex root that is NOT this box's. Never dialed — it only ever
 #: rides inside the claim URI — so it need not belong to any real nest; what it
@@ -78,7 +92,8 @@ def _require_admin_claim_drive(app) -> None:
 
     web is the one worth spelling out: it could not use this module even with
     the drive built, because its e2e origin is never TLS, so there is no
-    channel binding for a held root to be checked against. Its outcome-9
+    channel binding for a held root to be checked against. It is therefore
+    not marked into this module (see `pytestmark`), and its outcome-9
     column is witnessed instead by `test_web_claim_pin_wasm_witness.py`,
     through the wasm store's own guard.
     """

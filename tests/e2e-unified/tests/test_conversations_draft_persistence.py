@@ -60,6 +60,7 @@ pytestmark = [
     pytest.mark.windows,
     pytest.mark.linux,
     pytest.mark.tui,
+    pytest.mark.android,
     pytest.mark.real_conversations,
     # The debounce itself must land this draft — see the marker's entry in
     # pytest.ini. Keeps a `drafts_autosave_window_ms` run from silently

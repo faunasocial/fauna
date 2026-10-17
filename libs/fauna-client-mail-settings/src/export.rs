@@ -74,6 +74,43 @@ use crate::error::{DispatchError, NestError};
 /// (the definition's own doc comment records why).
 pub use fauna_mail::export::ExportFormat;
 
+/// The confirm step's three figures (`mail-export.md` § Wizard steps step 3),
+/// over the SELECTED mailboxes: the message total, the bytes their records rest
+/// in on the nest, and that figure through the one shared rate
+/// ([`crate::timing::export_time_estimate_secs`]). Under a date range all three
+/// are upper bounds. `sealed_bytes == 0` with `messages > 0` is a nest that
+/// reports no sizes — the app says the estimate is unavailable rather than
+/// rendering a zero.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ExportConfirmEstimate {
+    pub messages: u64,
+    pub sealed_bytes: u64,
+    pub secs: u64,
+}
+
+/// [`ExportConfirmEstimate`] of `mailboxes` (the snapshot's `mailboxes`). One
+/// computation for all seven apps (priority #2): every app hands its snapshot's
+/// options here instead of summing them itself.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn export_confirm_estimate(mailboxes: Vec<MailboxOption>) -> ExportConfirmEstimate {
+    confirm_estimate_of(&mailboxes)
+}
+
+fn confirm_estimate_of(mailboxes: &[MailboxOption]) -> ExportConfirmEstimate {
+    let (messages, sealed_bytes) = mailboxes
+        .iter()
+        .filter(|m| m.selected)
+        .fold((0u64, 0u64), |(n, b), m| {
+            (n + u64::from(m.message_count), b + m.sealed_bytes)
+        });
+    ExportConfirmEstimate {
+        messages,
+        sealed_bytes,
+        secs: crate::timing::export_time_estimate_secs(sealed_bytes),
+    }
+}
+
 /// Canonical label for an [`ExportFormat`], returned as [`LocalizedText`] so each
 /// app resolves it through its own i18n runtime (mirrors
 /// [`member_status_label`](crate::member_status_label)). Lifts the identical
@@ -126,6 +163,21 @@ pub enum ExportSessionState {
 pub struct MailboxOption {
     pub name: String,
     pub selected: bool,
+    /// The mailbox's live message count (`list_own_mailboxes`' `exists`) —
+    /// what the confirm step's "total messages" sums over the selection
+    /// (`mail-export.md` § Wizard steps step 3). An upper bound under a date
+    /// range: the count is the whole mailbox's.
+    #[cfg_attr(feature = "uniffi", uniffi(default = 0))]
+    #[serde(default)]
+    pub message_count: u32,
+    /// The bytes the mailbox's records rest in (`list_own_mailboxes`'
+    /// `sealed_bytes`) — what the confirm step's estimated bytes and time sum
+    /// over the selection (`mail-export.md` § Wizard steps step 3). `0` from a
+    /// nest that does not report it. An upper bound under a date range, like
+    /// [`Self::message_count`].
+    #[cfg_attr(feature = "uniffi", uniffi(default = 0))]
+    #[serde(default)]
+    pub sealed_bytes: u64,
 }
 
 /// One per-mailbox progress row (`mail-export-mailbox-progress-list-item`).
@@ -197,6 +249,16 @@ pub struct ExportSessionView {
     #[cfg_attr(feature = "uniffi", uniffi(default = None))]
     #[serde(default)]
     pub scope: Option<ExportScope>,
+    /// The row's `started_at` and `last_progress_at`, epoch seconds — what
+    /// [`crate::timing::transfer_timing`] reads for the progress step's
+    /// elapsed time and estimate and the Done step's "time elapsed"
+    /// (`mail-export.md` § Wizard steps steps 4–5).
+    #[cfg_attr(feature = "uniffi", uniffi(default = 0))]
+    #[serde(default)]
+    pub started_at: i64,
+    #[cfg_attr(feature = "uniffi", uniffi(default = 0))]
+    #[serde(default)]
+    pub last_progress_at: i64,
 }
 
 /// The scope the wizard's step 2 builds, passed to `start_export_session` (the
@@ -314,6 +376,14 @@ pub struct MailExportSnapshot {
     /// who reads the screen a minute later, gets the same answer. It is a
     /// *local* path, so it crosses no wire and is not the sensitive session id.
     pub saved_archive_path: String,
+    /// The session's `started_at` / `last_progress_at` (epoch seconds; `0`
+    /// before a session exists) — read through [`Self::timing`].
+    #[cfg_attr(feature = "uniffi", uniffi(default = 0))]
+    #[serde(default)]
+    pub started_at: i64,
+    #[cfg_attr(feature = "uniffi", uniffi(default = 0))]
+    #[serde(default)]
+    pub last_progress_at: i64,
     pub status: ExportStatus,
     /// Last action's error, surfaced via `error-message`. On an app built
     /// without key custody (one whose glue does not yet spawn [`
@@ -341,9 +411,50 @@ impl MailExportSnapshot {
             blob_bytes: None,
             download_url: String::new(),
             saved_archive_path: String::new(),
+            started_at: 0,
+            last_progress_at: 0,
             status: ExportStatus::Idle,
             error: None,
         }
+    }
+
+    /// The confirm step's "total messages" (`mail-export.md` § Wizard steps
+    /// step 3): the selected mailboxes' counts, summed. Under a date range it
+    /// is an upper bound — the run's own `total_count` is the exact figure.
+    pub fn selected_message_count(&self) -> u64 {
+        confirm_estimate_of(&self.mailboxes).messages
+    }
+
+    /// The confirm step's "estimated bytes" (`mail-export.md` § Wizard steps
+    /// step 3): the bytes the selected mailboxes' records rest in, summed. An
+    /// estimate of the archive's size, not its size — the archive holds the
+    /// opened messages in the chosen format — and an upper bound under a date
+    /// range, like [`Self::selected_message_count`].
+    pub fn selected_byte_estimate(&self) -> u64 {
+        confirm_estimate_of(&self.mailboxes).sealed_bytes
+    }
+
+    /// The confirm step's "estimated wall-clock time", in seconds:
+    /// [`Self::selected_byte_estimate`] through the one shared rate
+    /// ([`crate::timing::export_time_estimate_secs`]).
+    pub fn selected_time_estimate_secs(&self) -> u64 {
+        confirm_estimate_of(&self.mailboxes).secs
+    }
+
+    /// The progress step's elapsed time and estimate, and the Done step's
+    /// time elapsed (`mail-export.md` § Wizard steps steps 4–5), at the
+    /// client's `now_secs`.
+    pub fn timing(&self, now_secs: i64) -> crate::timing::TransferTiming {
+        crate::timing::transfer_timing(
+            self.started_at,
+            self.last_progress_at,
+            self.session_state == Some(ExportSessionState::Running),
+            u64::from(self.exported_count)
+                + u64::from(self.skipped_count)
+                + u64::from(self.errored_count),
+            u64::from(self.total_count),
+            now_secs,
+        )
     }
 
     /// The scope the current selections describe (the seam's `start` argument).
@@ -379,6 +490,8 @@ impl MailExportSnapshot {
         }
         self.blob_bytes = s.blob_bytes;
         self.download_url = s.download_url;
+        self.started_at = s.started_at;
+        self.last_progress_at = s.last_progress_at;
         self.step = match s.state {
             ExportSessionState::Completed => ExportStep::Done,
             // running / paused / errored all render the Progress screen; the
@@ -394,6 +507,32 @@ impl MailExportSnapshot {
         *self = MailExportSnapshot::empty();
         self.mailboxes = mailboxes;
     }
+}
+
+/// Which listed session the wizard shows (`mail-export.md` § A failed export is
+/// a record the wizard shows until the user moves on): the newest live one
+/// (`running` / `paused`); with none, the newest of the `completed` and
+/// `errored` ones; a `cancelled` one never. The listing arrives newest first
+/// (`list_export_sessions` orders by `started_at` descending), so "newest" is
+/// the first match.
+fn session_to_show(sessions: Vec<ExportSessionView>) -> Option<ExportSessionView> {
+    let live = |s: &ExportSessionView| {
+        matches!(
+            s.state,
+            ExportSessionState::Running | ExportSessionState::Paused
+        )
+    };
+    let record = |s: &ExportSessionView| {
+        matches!(
+            s.state,
+            ExportSessionState::Completed | ExportSessionState::Errored
+        )
+    };
+    let at = sessions
+        .iter()
+        .position(live)
+        .or_else(|| sessions.iter().position(record))?;
+    sessions.into_iter().nth(at)
 }
 
 /// Default mailbox selection per `mail-export.md` § UX shape step 2: `Trash` /
@@ -460,6 +599,9 @@ pub struct ExportMailboxCount {
     /// The mailbox's IMAP `UIDVALIDITY`, recorded per message in the EML-zip
     /// manifest.
     pub uid_validity: u32,
+    /// The bytes the mailbox's records rest in on the nest — the confirm
+    /// step's byte and time estimates' only source. `0` from an older nest.
+    pub sealed_bytes: u64,
 }
 
 /// One message on the down-leg, as the seam hands it up.
@@ -553,6 +695,18 @@ impl std::fmt::Display for ExportSeamError {
     }
 }
 
+impl ExportSeamError {
+    /// [`DispatchError::refused_control`] for the export seam: a refusal of a
+    /// control the user pressed is the nest's own sentence; `Superseded` keeps
+    /// its own message.
+    fn refused_control(e: Self) -> DispatchError {
+        match e {
+            Self::Nest(e) => DispatchError::refused_control(e),
+            other => other.into(),
+        }
+    }
+}
+
 impl From<ExportSeamError> for DispatchError {
     fn from(e: ExportSeamError) -> Self {
         match e {
@@ -565,6 +719,14 @@ impl From<ExportSeamError> for DispatchError {
 /// Shown when this app's run finds another device has restarted the export.
 const SUPERSEDED_MESSAGE: &str =
     "this export was restarted from another app session and continues there";
+
+/// Pause, Resume or Cancel sent on a failed export — none is offered there.
+const FAILED_EXPORT_CONTROL_MESSAGE: &str = "this export failed — it can no longer be paused, resumed or cancelled; dismiss it and \
+     start a new export";
+
+/// Pause, Resume or Cancel sent on an export that was cancelled.
+const CANCELLED_EXPORT_CONTROL_MESSAGE: &str =
+    "this export was cancelled — it can no longer be paused, resumed or cancelled";
 
 /// Shown when Resume is pressed on an export this app is not driving and
 /// cannot faithfully re-run (its scope is unreadable here) — cancel and rerun.
@@ -955,8 +1117,13 @@ pub struct MailExportMachine {
     /// silent loss" rule — cost the user the whole export. `Pause` therefore
     /// only asks, and the loop pauses the session itself at the page boundary.
     driving: std::sync::atomic::AtomicBool,
+    /// True while a [`MailExportAction::Download`] holds the save: a second
+    /// download of the same export (a double-click, or a button an app did not
+    /// disable) is refused rather than racing the first to the same file
+    /// (`mail-export.md` § Download flow).
+    downloading: std::sync::atomic::AtomicBool,
     /// The last `list_own_mailboxes` reply, kept whole. The rendered
-    /// [`MailboxOption`] list carries only name + selection, but `Start` needs
+    /// [`MailboxOption`] list carries name, selection and count, but `Start` needs
     /// each mailbox's message count (the `total_count` estimate), its
     /// UID-validity (the EML manifest), and above all the **listing order**,
     /// which is § Container shape's total order and the order the run must
@@ -1030,6 +1197,13 @@ struct ExportRun {
     /// it to the nest. The listing's per-mailbox counts are whole-mailbox, so
     /// under a range the estimate only becomes true as mailboxes finish.
     revised_total: Option<u64>,
+    /// Messages exported since the last uploaded chunk carried a count to the
+    /// nest — the next upload's `exported_delta`. In the run, not a loop
+    /// local, for `exported_here`'s reason: at the real chunk size a small
+    /// export uploads nothing before it closes, so a warm pause that dropped
+    /// this would leave the nest's count, and the Done card read from it,
+    /// short by everything exported before the pause.
+    unreported: u64,
 }
 
 impl MailExportMachine {
@@ -1083,6 +1257,7 @@ impl MailExportMachine {
             session: Mutex::new(None),
             stop: Mutex::new(StopRequest::None),
             driving: std::sync::atomic::AtomicBool::new(false),
+            downloading: std::sync::atomic::AtomicBool::new(false),
             catalogue: Mutex::new(Vec::new()),
             run: Mutex::new(None),
             chunk_bytes: fauna_mail::export::EXPORT_CHUNK_BYTES,
@@ -1138,38 +1313,50 @@ impl MailExportMachine {
         self.set_status(ExportStatus::Loading);
         let mailboxes = self.nest.list_own_mailboxes().await?;
         let sessions = self.nest.list_export_sessions().await?;
-        // Resume the newest non-terminal session, if any (running / paused /
-        // completed-not-yet-discarded).
-        let active = sessions.into_iter().find(|s| {
-            !matches!(
-                s.state,
-                ExportSessionState::Cancelled | ExportSessionState::Errored
-            )
-        });
+        let shown = session_to_show(sessions);
         {
             let mut snap = self.inner.lock().expect("snapshot mutex");
-            // Preserve any in-progress selection across a refresh; only (re)seed
-            // the mailbox options when we don't have them yet.
-            if snap.mailboxes.is_empty() {
-                snap.mailboxes = mailboxes
-                    .iter()
-                    .map(|m| MailboxOption {
-                        selected: default_selected(&m.name),
-                        name: m.name.clone(),
-                    })
-                    .collect();
-            }
+            // Re-read the options from the listing on every refresh, so the
+            // confirm step's counts and estimates are the mailboxes' current
+            // ones, not the first visit's (mail that arrived since counts) —
+            // but keep any in-progress selection: a mailbox already offered
+            // keeps its checkbox, only a new one takes the default.
+            let previous: std::collections::HashMap<String, bool> = snap
+                .mailboxes
+                .iter()
+                .map(|m| (m.name.clone(), m.selected))
+                .collect();
+            snap.mailboxes = mailboxes
+                .iter()
+                .map(|m| MailboxOption {
+                    selected: previous
+                        .get(&m.name)
+                        .copied()
+                        .unwrap_or_else(|| default_selected(&m.name)),
+                    name: m.name.clone(),
+                    message_count: m.exists,
+                    sealed_bytes: m.sealed_bytes,
+                })
+                .collect();
             snap.status = ExportStatus::Idle;
         }
         // The counts and UID-validities ride beside the options: the scope
         // step's estimate needs the counts and the EML manifest needs the
         // validities, and neither is a rendered field.
         *self.catalogue.lock().expect("catalogue mutex") = mailboxes;
-        if let Some(active) = active {
-            self.store_session(active);
+        let holds_run = self.run.lock().expect("run mutex").is_some()
+            || self.driving.load(std::sync::atomic::Ordering::SeqCst);
+        if holds_run {
+            // A machine holding a run of the session ignores the nudge (§ A
+            // failed export is a record the wizard shows until the user moves
+            // on): its own loop is the session view's writer, the export events
+            // are its own, and whatever another device did to the session
+            // reaches it as `Superseded` or a refused upload on its next call.
+        } else if let Some(shown) = shown {
+            self.store_session(shown);
         } else if self.session.lock().expect("session mutex").is_some() {
-            // The session this machine holds is no longer live on the nest —
-            // discarded, cancelled or failed from another of the user's
+            // The session this machine holds is no longer listed as anything
+            // to show — discarded or cancelled from another of the user's
             // devices, or reclaimed by § Expiry. Keeping it would paint a Done
             // screen whose download names a blob that no longer exists (or a
             // Progress screen nothing drives). Only a HELD session is dropped:
@@ -1217,7 +1404,8 @@ impl MailExportMachine {
         let session = self
             .nest
             .start_export_session(format, scope, minted.wrapped, total_count)
-            .await?;
+            .await
+            .map_err(DispatchError::refused_control)?;
         self.open_run(
             &session,
             strip_headers,
@@ -1282,6 +1470,7 @@ impl MailExportMachine {
             last_processed: String::new(),
             range,
             revised_total: None,
+            unreported: 0,
         });
         Ok(())
     }
@@ -1297,7 +1486,31 @@ impl MailExportMachine {
             .map(|r| r.generation)
     }
 
+    /// Pause, Resume and Cancel move a `running` / `paused` session only. On a
+    /// failed or cancelled one they are not offered (§ A failed export is a
+    /// record the wizard shows until the user moves on), and should an app
+    /// still send one it is refused here with a sentence, before the nest is
+    /// asked — the nest would refuse it too, naming nothing the user can act on.
+    fn refuse_on_terminal_session(&self) -> Result<(), DispatchError> {
+        let state = self
+            .session
+            .lock()
+            .expect("session mutex")
+            .as_ref()
+            .map(|s| s.state);
+        match state {
+            Some(ExportSessionState::Errored) => Err(DispatchError::InvalidState(
+                FAILED_EXPORT_CONTROL_MESSAGE.into(),
+            )),
+            Some(ExportSessionState::Cancelled) => Err(DispatchError::InvalidState(
+                CANCELLED_EXPORT_CONTROL_MESSAGE.into(),
+            )),
+            _ => Ok(()),
+        }
+    }
+
     async fn pause(&self) -> Result<(), DispatchError> {
+        self.refuse_on_terminal_session()?;
         self.set_status(ExportStatus::Working);
         let id = self.current_session_id()?;
         *self.stop.lock().expect("stop mutex") = StopRequest::Pause;
@@ -1326,7 +1539,7 @@ impl MailExportMachine {
         match self.nest.pause_export_session(id.clone(), parked).await {
             Ok(session) => self.store_session(session),
             Err(ExportSeamError::Superseded) => return self.superseded(&id).await,
-            Err(e) => return Err(e.into()),
+            Err(ExportSeamError::Nest(e)) => return Err(DispatchError::refused_control(e)),
         }
         self.set_status(ExportStatus::Idle);
         Ok(())
@@ -1338,6 +1551,7 @@ impl MailExportMachine {
     /// app glue calls [`Self::run_export`] right after, as it does after
     /// `Start`.
     async fn resume(&self) -> Result<(), DispatchError> {
+        self.refuse_on_terminal_session()?;
         self.set_status(ExportStatus::Working);
         let id = self.current_session_id()?;
         *self.stop.lock().expect("stop mutex") = StopRequest::None;
@@ -1357,7 +1571,7 @@ impl MailExportMachine {
                 {
                     Ok(session) => self.store_session(session),
                     Err(ExportSeamError::Superseded) => return self.superseded(&id).await,
-                    Err(e) => return Err(e.into()),
+                    Err(ExportSeamError::Nest(e)) => return Err(DispatchError::refused_control(e)),
                 }
             }
             None => self.restart_here(id).await?,
@@ -1410,7 +1624,8 @@ impl MailExportMachine {
         let session = self
             .nest
             .restart_export_session(session_id, minted.wrapped, total_count)
-            .await?;
+            .await
+            .map_err(ExportSeamError::refused_control)?;
         self.open_run(
             &session,
             scope.strip_headers,
@@ -1459,11 +1674,15 @@ impl MailExportMachine {
     }
 
     async fn cancel(&self) -> Result<(), DispatchError> {
+        self.refuse_on_terminal_session()?;
         self.set_status(ExportStatus::Working);
         let id = self.current_session_id()?;
         *self.stop.lock().expect("stop mutex") = StopRequest::Cancel;
         // The user's own control: unconditional, whoever is driving (§ Resume).
-        self.nest.cancel_export_session(id, None).await?;
+        self.nest
+            .cancel_export_session(id, None)
+            .await
+            .map_err(ExportSeamError::refused_control)?;
         // Cancel returns the wizard to the start so the user can re-run it.
         self.clear_session();
         Ok(())
@@ -1472,7 +1691,10 @@ impl MailExportMachine {
     async fn discard(&self) -> Result<(), DispatchError> {
         self.set_status(ExportStatus::Working);
         let id = self.current_session_id()?;
-        self.nest.discard_export_blob(id).await?;
+        self.nest
+            .discard_export_blob(id)
+            .await
+            .map_err(DispatchError::refused_control)?;
         self.clear_session();
         Ok(())
     }
@@ -1501,6 +1723,17 @@ impl MailExportMachine {
     /// mailbox. § Architectural rules' no-partial-blob-download rule is exactly
     /// this call site.
     async fn download(&self) -> Result<(), DispatchError> {
+        // One save at a time: the guard is taken before anything else and
+        // released on every exit, a dropped future included.
+        if self
+            .downloading
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(DispatchError::InvalidState(
+                "this export is already being saved".into(),
+            ));
+        }
+        let _downloading = DrivingGuard(&self.downloading);
         self.set_status(ExportStatus::Working);
         let session = self
             .session
@@ -1666,6 +1899,12 @@ impl MailExportMachine {
             snap.session_state = Some(ExportSessionState::Errored);
             snap.status = ExportStatus::Idle;
         }
+        // The held view follows the row, so the controls a failed export does
+        // not offer are refused here too (`refuse_on_terminal_session`).
+        if let Some(held) = self.session.lock().expect("session mutex").as_mut() {
+            held.state = ExportSessionState::Errored;
+            held.error_reason = reason.clone();
+        }
         *self.run.lock().expect("run mutex") = None;
         Err(DispatchError::InvalidState(reason))
     }
@@ -1734,7 +1973,8 @@ impl MailExportMachine {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let _driving = DrivingGuard(&self.driving);
 
-        let mut pending_exported: u64 = 0;
+        // A warm resume picks up the count its pause parked (`unreported`).
+        let mut pending_exported: u64 = run.unreported;
 
         'mailboxes: while let Some(mailbox) = run.remaining.first().cloned() {
             loop {
@@ -1888,6 +2128,7 @@ impl MailExportMachine {
             // this same machine picks up the live zstd stream whatever the RPC
             // below answers.
             let session_id = run.session_id.clone();
+            run.unreported = pending_exported;
             *self.run.lock().expect("run mutex") = Some(run);
             match self
                 .nest
@@ -2067,9 +2308,10 @@ impl MailExportMachine {
     }
 }
 
-/// Clears [`MailExportMachine`]'s `driving` flag on every exit from the loop —
-/// return, `?`, or a dropped future — so a later `Pause` never waits on a loop
-/// that is no longer there.
+/// Clears one of [`MailExportMachine`]'s in-flight flags (`driving`,
+/// `downloading`) on every exit from its holder — return, `?`, or a dropped
+/// future — so a later `Pause` never waits on a loop that is no longer there
+/// and a later `Download` is never refused for a save that already ended.
 struct DrivingGuard<'a>(&'a std::sync::atomic::AtomicBool);
 
 impl Drop for DrivingGuard<'_> {
@@ -2260,6 +2502,15 @@ mod tests {
     #[derive(Default)]
     struct FakeState {
         session: Option<ExportSessionView>,
+        /// When set, `list_export_sessions` answers this listing (newest
+        /// first, the real handler's order) instead of `session` — the
+        /// several-rows shapes of § A failed export is a record the wizard
+        /// shows until the user moves on.
+        listing: Option<Vec<ExportSessionView>>,
+        /// Every pause / resume / restart / cancel call the seam received.
+        controls: usize,
+        /// The session ids `discard_export_blob` was called with.
+        discarded: Vec<String>,
         wrapped_key: Option<Vec<u8>>,
         started_total: Option<u64>,
         blob: Vec<u8>,
@@ -2272,6 +2523,8 @@ mod tests {
         finalized: bool,
         /// The session's current stream generation (§ Resume).
         generation: u64,
+        /// When set, `cancel_export_session` refuses with this sentence.
+        refuse_cancel: Option<String>,
     }
 
     /// In-memory nest modelling the **built** backend: the caller-scoped
@@ -2307,6 +2560,7 @@ mod tests {
                     name: (*name).to_string(),
                     exists: recs.len() as u32,
                     uid_validity: 7,
+                    sealed_bytes: recs.iter().map(|r| r.sealed.len() as u64).sum(),
                 })
                 .collect();
             // The real handler's order: ascending by the name's raw bytes.
@@ -2394,7 +2648,116 @@ mod tests {
             wrapped_session_key: Vec::new(),
             stream_generation: 0,
             scope: None,
+            started_at: 1_000,
+            last_progress_at: 1_000,
         }
+    }
+
+    /// The Done step's "time elapsed" and the progress step's estimate read
+    /// the session row's own clock (`mail-export.md` § Wizard steps 4–5).
+    #[test]
+    fn the_snapshot_times_the_run_from_the_session_row() {
+        let mut snap = MailExportSnapshot::empty();
+        snap.apply_session(ExportSessionView {
+            exported_count: 10,
+            last_progress_at: 1_040,
+            ..view(ExportSessionState::Running, 40)
+        });
+        // Running: elapsed to now, the rest at the same rate.
+        let t = snap.timing(1_060);
+        assert_eq!(t.elapsed_secs, Some(60));
+        assert_eq!(t.remaining_secs, Some(180));
+        snap.apply_session(ExportSessionView {
+            exported_count: 40,
+            last_progress_at: 1_150,
+            ..view(ExportSessionState::Completed, 40)
+        });
+        let t = snap.timing(9_999);
+        assert_eq!(t.elapsed_secs, Some(150), "frozen at completion");
+        assert_eq!(t.remaining_secs, None);
+    }
+
+    /// The confirm step's estimated bytes and time (`mail-export.md` § Wizard
+    /// steps step 3) sum only the SELECTED mailboxes, and the time is the
+    /// bytes through the one shared rate.
+    #[test]
+    fn the_confirm_estimates_sum_only_the_selected_mailboxes() {
+        let mut snap = MailExportSnapshot::empty();
+        let option = |name: &str, selected, sealed_bytes| MailboxOption {
+            name: name.into(),
+            selected,
+            message_count: 1,
+            sealed_bytes,
+        };
+        snap.mailboxes = vec![
+            option("INBOX", true, 3 << 20),
+            option("Sent", true, 1 << 20),
+            option("Trash", false, 900 << 20),
+        ];
+        assert_eq!(snap.selected_byte_estimate(), 4 << 20);
+        assert_eq!(
+            snap.selected_time_estimate_secs(),
+            crate::timing::export_time_estimate_secs(4 << 20)
+        );
+        assert_eq!(snap.selected_time_estimate_secs(), 4);
+        assert_eq!(
+            export_confirm_estimate(snap.mailboxes.clone()),
+            ExportConfirmEstimate {
+                messages: 2,
+                sealed_bytes: 4 << 20,
+                secs: 4,
+            }
+        );
+    }
+
+    /// The listing's byte totals reach the scope step's options on refresh —
+    /// the hop between the nest's reply and the confirm step's estimate.
+    #[tokio::test]
+    async fn refresh_carries_each_mailboxs_bytes_onto_its_option() {
+        let machine = machine_over(Arc::new(FakeNest::new(&[(
+            "INBOX",
+            vec![stored(1, 1_700_000_000, "a")],
+        )])));
+        machine.hydrate().await.unwrap();
+        let snap = machine.snapshot();
+        let inbox = snap.mailboxes.iter().find(|m| m.name == "INBOX").unwrap();
+        assert!(inbox.sealed_bytes > 0);
+        assert_eq!(snap.selected_byte_estimate(), inbox.sealed_bytes);
+    }
+
+    /// A refresh re-reads every option's count and bytes from the listing (so
+    /// the confirm step never shows the first visit's figures) yet keeps the
+    /// user's in-progress selection.
+    #[tokio::test]
+    async fn a_refresh_rereads_the_figures_but_keeps_the_selection() {
+        let machine = machine_over(Arc::new(FakeNest::new(&[
+            ("INBOX", vec![stored(1, 1_700_000_000, "a")]),
+            ("Sent", vec![stored(1, 1_700_000_000, "b")]),
+        ])));
+        machine.hydrate().await.unwrap();
+        machine
+            .dispatch(MailExportAction::ToggleMailbox {
+                mailbox: "INBOX".into(),
+            })
+            .await
+            .unwrap();
+        // Stale figures on the snapshot, as a first visit before mail arrived
+        // would have left them.
+        for m in &mut machine.inner.lock().unwrap().mailboxes {
+            m.message_count = 0;
+            m.sealed_bytes = 0;
+        }
+        machine.hydrate().await.unwrap();
+        let snap = machine.snapshot();
+        let inbox = snap.mailboxes.iter().find(|m| m.name == "INBOX").unwrap();
+        assert!(!inbox.selected, "the user's deselection survives a refresh");
+        assert_eq!(inbox.message_count, 1);
+        assert!(
+            inbox.sealed_bytes > 0,
+            "the figures are the listing's again"
+        );
+        let sent = snap.mailboxes.iter().find(|m| m.name == "Sent").unwrap();
+        assert_eq!(snap.selected_byte_estimate(), sent.sealed_bytes);
     }
 
     #[async_trait]
@@ -2403,14 +2766,11 @@ mod tests {
             Ok(self.listing.clone())
         }
         async fn list_export_sessions(&self) -> Result<Vec<ExportSessionView>, NestError> {
-            Ok(self
-                .state
-                .lock()
-                .unwrap()
-                .session
-                .clone()
-                .into_iter()
-                .collect())
+            let st = self.state.lock().unwrap();
+            if let Some(listing) = &st.listing {
+                return Ok(listing.clone());
+            }
+            Ok(st.session.clone().into_iter().collect())
         }
         async fn start_export_session(
             &self,
@@ -2538,6 +2898,7 @@ mod tests {
             _session_id: String,
             as_driver_of: Option<u64>,
         ) -> Result<ExportSessionView, ExportSeamError> {
+            self.state.lock().unwrap().controls += 1;
             self.transition(ExportSessionState::Paused, as_driver_of)
         }
         async fn resume_export_session(
@@ -2545,6 +2906,7 @@ mod tests {
             _session_id: String,
             as_driver_of: Option<u64>,
         ) -> Result<ExportSessionView, ExportSeamError> {
+            self.state.lock().unwrap().controls += 1;
             self.transition(ExportSessionState::Running, as_driver_of)
         }
         async fn restart_export_session(
@@ -2553,6 +2915,7 @@ mod tests {
             wrapped_session_key: Vec<u8>,
             total_count: u64,
         ) -> Result<ExportSessionView, ExportSeamError> {
+            self.state.lock().unwrap().controls += 1;
             self.restart(wrapped_session_key, total_count)
         }
         async fn cancel_export_session(
@@ -2561,8 +2924,12 @@ mod tests {
             as_driver_of: Option<u64>,
         ) -> Result<(), ExportSeamError> {
             let mut st = self.state.lock().unwrap();
+            st.controls += 1;
             if as_driver_of.is_some_and(|g| g != st.generation) {
                 return Err(ExportSeamError::Superseded);
+            }
+            if let Some(sentence) = st.refuse_cancel.clone() {
+                return Err(NestError::Rejected(sentence).into());
             }
             st.session = None;
             st.blob.clear();
@@ -2613,8 +2980,9 @@ mod tests {
             }
             Ok(())
         }
-        async fn discard_export_blob(&self, _session_id: String) -> Result<(), NestError> {
+        async fn discard_export_blob(&self, session_id: String) -> Result<(), NestError> {
             let mut st = self.state.lock().unwrap();
+            st.discarded.push(session_id);
             st.session = None;
             st.blob.clear();
             Ok(())
@@ -2729,6 +3097,9 @@ mod tests {
     #[async_trait]
     impl SealedBlobStream for FakeBlobStream {
         async fn next_slice(&mut self) -> Result<Option<Vec<u8>>, DispatchError> {
+            // A real GET suspends between slices; so does the fake, which is
+            // what lets a test interleave a second download with the first.
+            tokio::task::yield_now().await;
             if self.at >= self.body.len() {
                 return Ok(None);
             }
@@ -2862,6 +3233,38 @@ mod tests {
     /// The key deliberately comes from the **row**, not from the run's memory:
     /// § Download flow's client need not be the one that exported, and the fake
     /// custody unwraps the stored bytes exactly as a second device would.
+    /// A second `Download` while one is mid-save is refused, never
+    /// run alongside it — the first still saves the whole, verified archive,
+    /// and the guard is released so a later download works.
+    #[tokio::test]
+    async fn a_second_download_while_one_is_saving_is_refused() {
+        let corpus = corpus();
+        let nest = Arc::new(FakeNest::new(&corpus));
+        let (m, seen) = machine_and_delivery(nest.clone());
+        walk_to_confirm(&m).await;
+        m.dispatch(MailExportAction::Start).await.unwrap();
+        m.run_export().await.expect("the run completes");
+
+        let (a, b) = tokio::join!(
+            m.dispatch(MailExportAction::Download),
+            m.dispatch(MailExportAction::Download)
+        );
+        assert!(a.is_ok(), "the first download saves: {a:?}");
+        assert!(
+            matches!(b, Err(DispatchError::InvalidState(ref s)) if s.contains("already being saved")),
+            "the second is refused: {b:?}"
+        );
+        {
+            let st = seen.lock().unwrap();
+            assert_eq!(st.abandoned, 0, "no second sink was opened");
+            let (_, bytes) = st.saved.clone().expect("the archive was saved");
+            assert_eq!(bytes, open_downloaded(&nest, ExportFormat::Mbox));
+        }
+        m.dispatch(MailExportAction::Download)
+            .await
+            .expect("the guard was released");
+    }
+
     #[tokio::test]
     async fn download_saves_the_archive_the_run_built() {
         let corpus = corpus();
@@ -3228,23 +3631,32 @@ mod tests {
             snap.error_log
         );
         assert_eq!(snap.skipped_count, 0, "nothing is ever counted as skipped");
-        let st = nest.state.lock().unwrap();
-        assert!(
-            !st.cancelled,
-            "the failure is recorded as one, not disguised as the user's cancel"
-        );
-        assert!(
-            st.failed.as_deref().is_some_and(|r| r.contains("uid 2")),
-            "the nest row carries the reason: {:?}",
-            st.failed
-        );
-        assert!(st.blob.is_empty(), "the partial blob is disposed of");
-        assert_eq!(
-            st.session.as_ref().map(|s| s.state),
-            Some(ExportSessionState::Errored),
-            "a second client's listing reads `errored`, not `cancelled`"
-        );
-        assert!(!st.finalized, "no archive is produced");
+        let controls = {
+            let st = nest.state.lock().unwrap();
+            assert!(
+                !st.cancelled,
+                "the failure is recorded as one, not disguised as the user's cancel"
+            );
+            assert!(
+                st.failed.as_deref().is_some_and(|r| r.contains("uid 2")),
+                "the nest row carries the reason: {:?}",
+                st.failed
+            );
+            assert!(st.blob.is_empty(), "the partial blob is disposed of");
+            assert_eq!(
+                st.session.as_ref().map(|s| s.state),
+                Some(ExportSessionState::Errored),
+                "a second client's listing reads `errored`, not `cancelled`"
+            );
+            assert!(!st.finalized, "no archive is produced");
+            st.controls
+        };
+        // The app whose run failed refuses the controls a failed export does
+        // not offer, exactly as a relaunched one does.
+        for action in [MailExportAction::Pause, MailExportAction::Cancel] {
+            assert!(m.dispatch(action).await.is_err());
+        }
+        assert_eq!(nest.state.lock().unwrap().controls, controls);
     }
 
     /// A Pause arriving mid-run stops at a page boundary and keeps the live
@@ -3271,6 +3683,52 @@ mod tests {
         assert_eq!(
             open_downloaded(&nest, ExportFormat::Mbox),
             expected_blob(ExportFormat::Mbox, &corpus),
+        );
+    }
+
+    /// What a run exported before a warm Pause still counts once it finishes,
+    /// even when no chunk was uploaded before the pause to carry that count to
+    /// the nest. At the real chunk size a small mailbox fills no chunk until
+    /// the archive closes, so this is the ordinary case, not an edge: the Done
+    /// card's "X exported" is the nest's count, and it read short by every
+    /// message exported before the pause.
+    #[tokio::test]
+    async fn a_warm_pause_before_any_upload_keeps_the_count_of_what_it_exported() {
+        let corpus = corpus();
+        let total: usize = corpus.iter().map(|(_, msgs)| msgs.len()).sum();
+        let mut fake = FakeNest::new(&corpus);
+        fake.pause_after_fetches = Some(1);
+        let nest = Arc::new(fake);
+        let (delivery, _seen) = FakeDelivery::new(Arc::clone(&nest));
+        // The production chunk size, unlike `machine_over`'s 64 bytes.
+        let m = Arc::new(MailExportMachine::new(
+            nest.clone(),
+            Arc::new(FakeCustody { msek: MSEK }),
+            delivery,
+            HANDLE,
+        ));
+        let _ = nest.machine.set(Arc::downgrade(&m));
+        walk_to_confirm(&m).await;
+        m.dispatch(MailExportAction::Start).await.unwrap();
+
+        m.run_export().await.expect("a pause is not an error");
+        assert_eq!(m.snapshot().session_state, Some(ExportSessionState::Paused));
+        m.dispatch(MailExportAction::Resume).await.unwrap();
+        m.run_export().await.expect("the resumed run completes");
+
+        assert_eq!(m.snapshot().step, ExportStep::Done);
+        let on_nest = nest
+            .state
+            .lock()
+            .unwrap()
+            .session
+            .as_ref()
+            .map(|s| s.exported_count);
+        assert_eq!(on_nest, Some(total as u32), "the nest's exported count");
+        assert_eq!(
+            m.snapshot().exported_count,
+            total as u32,
+            "the Done card's count"
         );
     }
 
@@ -3843,6 +4301,21 @@ mod tests {
         );
     }
 
+    /// A refusal the nest answers to a control the user pressed is shown as
+    /// the nest's own sentence, bare — the import wizard's rule, shared.
+    #[tokio::test]
+    async fn a_refused_cancel_shows_the_nests_own_sentence() {
+        const REFUSED: &str = "This export can no longer be cancelled.";
+        let nest = Arc::new(FakeNest::names(&["INBOX"]));
+        let m = machine_over(Arc::clone(&nest));
+        walk_to_confirm(&m).await;
+        m.dispatch(MailExportAction::Start).await.unwrap();
+        nest.state.lock().unwrap().refuse_cancel = Some(REFUSED.into());
+        let err = m.dispatch(MailExportAction::Cancel).await.unwrap_err();
+        assert_eq!(err.to_string(), REFUSED);
+        assert_eq!(m.snapshot().error.as_deref(), Some(REFUSED));
+    }
+
     #[tokio::test]
     async fn cancel_resets_to_format_and_keeps_mailboxes() {
         let m = machine(&["INBOX", "Work"]);
@@ -3889,6 +4362,171 @@ mod tests {
         snap.apply_session(errored);
         assert_eq!(snap.error_log, vec!["INBOX: uid 2 could not be opened"]);
         drop(m);
+    }
+
+    // ── § A failed export is a record the wizard shows until the user moves on
+
+    /// A listed session with its own id, state and start time.
+    fn listed(id: &str, state: ExportSessionState, started_at: i64) -> ExportSessionView {
+        let mut v = view(state, 10);
+        v.session_id = id.into();
+        v.started_at = started_at;
+        v.last_progress_at = started_at;
+        if state == ExportSessionState::Errored {
+            v.error_reason = format!("{id} failed");
+        }
+        v
+    }
+
+    /// Hydrate a fresh machine against `listing` (newest first) and answer the
+    /// adopted session's id and the step it painted.
+    async fn adopted(listing: Vec<ExportSessionView>) -> (Option<String>, ExportStep) {
+        let nest = Arc::new(FakeNest::names(&["INBOX"]));
+        nest.state.lock().unwrap().listing = Some(listing);
+        let m = machine_over(nest);
+        m.hydrate().await.unwrap();
+        let id = m
+            .session
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|s| s.session_id.clone());
+        (id, m.snapshot().step)
+    }
+
+    /// The adoption rule: the newest live session; with none, the newest of the
+    /// completed and errored ones; a cancelled one never.
+    #[tokio::test]
+    async fn refresh_adopts_the_newest_live_session_else_the_newest_record_never_a_cancel() {
+        use ExportSessionState::*;
+        assert_eq!(
+            adopted(vec![listed("err", Errored, 20), listed("run", Running, 10)]).await,
+            (Some("run".into()), ExportStep::Progress),
+            "a live export outranks a newer failure"
+        );
+        assert_eq!(
+            adopted(vec![
+                listed("err", Errored, 20),
+                listed("done", Completed, 10)
+            ])
+            .await,
+            (Some("err".into()), ExportStep::Progress),
+            "the newer of a failure and a finished export is the one shown"
+        );
+        assert_eq!(
+            adopted(vec![
+                listed("done", Completed, 20),
+                listed("err", Errored, 10)
+            ])
+            .await,
+            (Some("done".into()), ExportStep::Done)
+        );
+        assert_eq!(
+            adopted(vec![
+                listed("gone", Cancelled, 20),
+                listed("done", Completed, 10)
+            ])
+            .await,
+            (Some("done".into()), ExportStep::Done),
+            "a cancelled row is skipped as if it were not listed"
+        );
+        assert_eq!(
+            adopted(vec![listed("gone", Cancelled, 20)]).await,
+            (None, ExportStep::Format)
+        );
+    }
+
+    /// A relaunched (or second) app opens on the failure: Progress, the reason
+    /// as the error log's one line, the session held for Dismiss.
+    #[tokio::test]
+    async fn a_fresh_machine_hydrated_against_a_failed_export_lands_on_its_progress_step() {
+        let nest = Arc::new(FakeNest::names(&["INBOX"]));
+        {
+            let mut failed = view(ExportSessionState::Errored, 3);
+            failed.exported_count = 2;
+            failed.error_reason = "INBOX: uid 2 could not be opened".into();
+            nest.state.lock().unwrap().session = Some(failed);
+        }
+        let m = machine_over(nest);
+        m.hydrate().await.unwrap();
+        let snap = m.snapshot();
+        assert_eq!(snap.step, ExportStep::Progress);
+        assert_eq!(snap.session_state, Some(ExportSessionState::Errored));
+        assert_eq!(snap.error_log, vec!["INBOX: uid 2 could not be opened"]);
+        assert_eq!(snap.exported_count, 2, "the counters stay where it failed");
+    }
+
+    /// Pause, Resume and Cancel are not offered on a failed (or cancelled)
+    /// export, and the machine refuses each with a sentence should an app send
+    /// one — without a call to the nest.
+    #[tokio::test]
+    async fn the_three_controls_are_refused_on_a_terminal_session_without_a_seam_call() {
+        for state in [ExportSessionState::Errored, ExportSessionState::Cancelled] {
+            let nest = Arc::new(FakeNest::names(&["INBOX"]));
+            let m = machine_over(nest.clone());
+            m.store_session(view(state, 3));
+            for action in [
+                MailExportAction::Pause,
+                MailExportAction::Resume,
+                MailExportAction::Cancel,
+            ] {
+                let err = m.dispatch(action.clone()).await.unwrap_err();
+                assert!(
+                    matches!(&err, DispatchError::InvalidState(msg) if !msg.is_empty()),
+                    "{state:?} {action:?}: {err:?}"
+                );
+                assert_eq!(
+                    m.snapshot().step,
+                    ExportStep::Progress,
+                    "{state:?} {action:?}"
+                );
+            }
+            assert_eq!(nest.state.lock().unwrap().controls, 0, "{state:?}");
+        }
+    }
+
+    /// Dismiss is the Done step's discard: it deletes the row and returns the
+    /// wizard to Format.
+    #[tokio::test]
+    async fn dismissing_a_failed_export_discards_it_and_returns_to_format() {
+        let nest = Arc::new(FakeNest::names(&["INBOX"]));
+        {
+            let mut failed = view(ExportSessionState::Errored, 3);
+            failed.error_reason = "boom".into();
+            nest.state.lock().unwrap().session = Some(failed);
+        }
+        let m = machine_over(nest.clone());
+        m.hydrate().await.unwrap();
+        m.dispatch(MailExportAction::Discard).await.unwrap();
+        let snap = m.snapshot();
+        assert_eq!(snap.step, ExportStep::Format);
+        assert_eq!(snap.session_state, None);
+        assert!(snap.error_log.is_empty());
+        assert_eq!(nest.state.lock().unwrap().discarded, vec![SESSION_ID]);
+        m.hydrate().await.unwrap();
+        assert_eq!(
+            m.snapshot().step,
+            ExportStep::Format,
+            "no record comes back"
+        );
+    }
+
+    /// A machine holding a run of the session ignores the nudge: its loop is
+    /// the writer, and whatever another device did reaches it on its next call.
+    #[tokio::test]
+    async fn a_refresh_leaves_the_session_of_a_held_run_alone() {
+        let nest = Arc::new(FakeNest::new(&corpus()));
+        let m = machine_over(nest.clone());
+        walk_to_confirm(&m).await;
+        m.dispatch(MailExportAction::Start).await.unwrap();
+        assert!(m.run.lock().unwrap().is_some());
+        nest.state.lock().unwrap().listing =
+            Some(vec![listed("other", ExportSessionState::Errored, 9_999)]);
+        m.dispatch(MailExportAction::Refresh).await.unwrap();
+        let snap = m.snapshot();
+        assert_eq!(snap.session_state, Some(ExportSessionState::Running));
+        assert_eq!(m.current_session_id().unwrap(), SESSION_ID);
+        assert!(m.run.lock().unwrap().is_some(), "the run is kept");
     }
 
     // ── export format label ─────────────────────────────────────────────

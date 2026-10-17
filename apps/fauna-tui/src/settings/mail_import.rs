@@ -67,14 +67,21 @@
 //! # The two Done-step buttons have no machine action
 //!
 //! `mail-import-view-imported-button` / `mail-import-review-skipped-button`
-//! are not backed by any `MailImportAction` — the shared machine never wired
-//! a "view inbox" / "skip log" RPC or action. Both use the generic
-//! `Gesture::Nav(Page::Conversations)` (mail lives on the Conversations page)
-//! — a real navigation, not a stub, but "Review skipped" cannot deep-link to a
-//! skip-log page that exists nowhere in the app yet (the error log lives
-//! inline on the Progress screen instead). A known, proportionate scope limit
-//! — mirrors the row's own "Not in scope" list for Outlook OAuth / the web
-//! transport / restart-survivable resume.
+//! are not backed by any `MailImportAction`. View imported uses the generic
+//! `Gesture::Nav(Page::Conversations)` (mail lives on the Conversations
+//! page). Review skipped toggles the snapshot's skip log onto the Done screen
+//! (`MailImportState::show_skipped`, `mailbox-migration.md` § Wizard steps
+//! step 6) — the log is already on the snapshot, kept past the run's end, so
+//! revealing it is a view toggle, the archive import's own shape.
+//!
+//! # A session adopted after a restart asks for its credential on Progress
+//!
+//! When the machine adopted a live session cold
+//! (`MailImportSnapshot::resume_needs_credentials`, `mailbox-migration.md`
+//! § Resume protocol step 2), the Progress step paints the Source step's own
+//! credential field for the session's provider beside Resume
+//! (`resume_credential_elements`), and Resume commits it first through the
+//! shared `resume_actions`.
 //!
 //! # The Outlook OAuth button is disabled
 //!
@@ -126,6 +133,9 @@ pub(crate) struct MailImportState {
     /// Set once Cancel has been armed by a first click — the
     /// `MailExportState::cancel_armed` shape.
     pub(super) cancel_armed: bool,
+    /// Whether Review skipped has revealed the skip log on the Done screen
+    /// — the `ArchiveImportState::show_skipped` shape.
+    pub(super) show_skipped: bool,
 }
 
 impl Default for MailImportState {
@@ -140,6 +150,7 @@ impl Default for MailImportState {
             date_from_input: String::new(),
             max_size_input: DEFAULT_MAX_SIZE_MB.to_string(),
             cancel_armed: false,
+            show_skipped: false,
         }
     }
 }
@@ -161,6 +172,7 @@ impl MailImportState {
     /// longer holds.
     pub(super) fn reset_form(&mut self) {
         self.cancel_armed = false;
+        self.show_skipped = false;
         self.host_input.clear();
         self.port_input.clear();
         self.username_input.clear();
@@ -190,6 +202,25 @@ impl MailImportState {
     /// in `self` — same division of labor as [`Self::connect_actions`].
     pub(super) fn scope_next_actions(&self) -> Vec<MailImportAction> {
         fauna_client_mail_settings::scope_next_actions(&self.date_from_input, &self.max_size_input)
+    }
+
+    /// Step 5's Resume: on a session adopted after a restart, commit the
+    /// credential the Progress step painted first. The wire-action shape is
+    /// `fauna_client_mail_settings::resume_actions`; this side's own job is
+    /// locating the strings in `self`, as for [`Self::connect_actions`].
+    pub(super) fn resume_actions(&self) -> Vec<MailImportAction> {
+        let (needs, kind) = self
+            .snapshot
+            .as_ref()
+            .map_or((false, ImportSourceKind::Gmail), |s| {
+                (s.resume_needs_credentials, s.source_kind)
+            });
+        fauna_client_mail_settings::resume_actions(
+            needs,
+            kind,
+            &self.port_input,
+            SecretString::from(self.password_input.clone()),
+        )
     }
 }
 
@@ -257,7 +288,7 @@ pub(super) fn mail_import_elements(state: &SettingsState) -> Vec<Element> {
         ImportStep::Scope => els.extend(scope_step_elements(e, snapshot)),
         ImportStep::Confirm => els.extend(confirm_step_elements(snapshot)),
         ImportStep::Progress => els.extend(progress_step_elements(e, snapshot)),
-        ImportStep::Done => els.extend(done_step_elements(snapshot)),
+        ImportStep::Done => els.extend(done_step_elements(e, snapshot)),
     }
 
     els.push(
@@ -292,6 +323,11 @@ fn source_step_elements(
 
     match kind {
         ImportSourceKind::Gmail | ImportSourceKind::ICloud => {
+            let help = if kind == ImportSourceKind::Gmail {
+                t::SOURCE_APP_PASSWORD_HELP_GMAIL
+            } else {
+                t::SOURCE_APP_PASSWORD_HELP_ICLOUD
+            };
             els.push(
                 Element::input(
                     ids::MAIL_IMPORT_SOURCE_USERNAME,
@@ -300,19 +336,19 @@ fn source_step_elements(
                 )
                 .labelled(t::SOURCE_USERNAME_PLACEHOLDER),
             );
+            // The explanation rides the field as its `help` attribute too, so
+            // the promise "an app password is needed, made here" is
+            // observable on the field it is about (§ Wizard steps step 1).
             els.push(
                 Element::input(
                     ids::MAIL_IMPORT_SOURCE_APP_PASSWORD,
                     crate::unlock::mask(e.password_input.as_str()),
                     Field::Settings(SettingsField::MailImportPassword),
                 )
-                .labelled(t::SOURCE_APP_PASSWORD_LABEL),
+                .labelled(t::SOURCE_APP_PASSWORD_LABEL)
+                .attr("help", help),
             );
-            els.push(Element::chrome(if kind == ImportSourceKind::Gmail {
-                t::SOURCE_APP_PASSWORD_HELP_GMAIL
-            } else {
-                t::SOURCE_APP_PASSWORD_HELP_ICLOUD
-            }));
+            els.push(Element::chrome(help));
         }
         ImportSourceKind::Outlook => {
             els.push(Element::gesture_button(
@@ -446,30 +482,27 @@ fn scope_step_elements(e: &MailImportState, snapshot: Option<&MailImportSnapshot
 
 /// Step 4 — confirmation + the durable commit.
 ///
-/// The summary states what IS known from the scope selection: the source, the
-/// selected-mailbox count, and their summed `message_count` estimate
-/// (`mailbox-migration.md` § Wizard steps step 4: "total messages … the
-/// client enumerates the source" — no estimated-bytes/wall-clock field exists
-/// on the snapshot, so neither is claimed here).
+/// The summary states the source and the selected mailboxes' estimate —
+/// messages and, when every one of them was sized, roughly how much data
+/// (`mailbox-migration.md` § Wizard steps step 4), from
+/// `MailImportSnapshot::selected_totals`.
 fn confirm_step_elements(snapshot: Option<&MailImportSnapshot>) -> Vec<Element> {
-    let (source, selected, messages) = snapshot
-        .map(|s| {
-            let selected = s.mailboxes.iter().filter(|m| m.selected).count();
-            let messages: u64 = s
-                .mailboxes
-                .iter()
-                .filter(|m| m.selected)
-                .map(|m| u64::from(m.message_count))
-                .sum();
-            (source_kind_label(s.source_kind), selected, messages)
-        })
-        .unwrap_or((source_kind_label(ImportSourceKind::Gmail), 0, 0));
+    let source = source_kind_label(snapshot.map_or(ImportSourceKind::Gmail, |s| s.source_kind));
+    let totals = snapshot.map(MailImportSnapshot::selected_totals);
+    let mailboxes = totals.map_or(0, |t| t.mailboxes).to_string();
+    let messages = totals.map_or(0, |t| t.messages).to_string();
+    let summary = match totals.and_then(|t| t.bytes) {
+        Some(bytes) => t::confirm_summary_sized_fmt(
+            &source,
+            &mailboxes,
+            &messages,
+            &crate::wizard::localized(&fauna_core::format::byte_size(bytes)),
+        ),
+        None => t::confirm_summary_fmt(&source, &mailboxes, &messages),
+    };
     vec![
         Element::chrome(t::CONFIRM_TITLE),
-        Element::label(
-            ids::MAIL_IMPORT_CONFIRM_SUMMARY,
-            t::confirm_summary_fmt(&source, &selected.to_string(), &messages.to_string()),
-        ),
+        Element::label(ids::MAIL_IMPORT_CONFIRM_SUMMARY, summary),
         Element::gesture_button(
             ids::WIZARD_BACK_BUTTON,
             t::BACK,
@@ -508,11 +541,14 @@ fn progress_step_elements(
         Element::chrome(t::PROGRESS_TITLE),
         Element::label(
             ids::MAIL_IMPORT_PROGRESS_SUMMARY,
-            t::progress_summary_fmt(
-                &imported.to_string(),
-                &total.to_string(),
-                &skipped.to_string(),
-                &errored.to_string(),
+            with_timing(
+                t::progress_summary_fmt(
+                    &imported.to_string(),
+                    &total.to_string(),
+                    &skipped.to_string(),
+                    &errored.to_string(),
+                ),
+                snapshot.map(|s| s.timing(fauna_core::data::Timestamp::now_secs())),
             ),
         ),
         Element::label(
@@ -520,6 +556,11 @@ fn progress_step_elements(
             format!("{:.0}%", fraction * 100.0),
         )
         .attr("fraction", format!("{fraction:.4}")),
+    ];
+    if let Some(s) = snapshot.filter(|s| s.resume_needs_credentials) {
+        els.extend(resume_credential_elements(e, s));
+    }
+    els.extend([
         Element::gesture_button(
             ids::MAIL_IMPORT_PAUSE_BUTTON,
             t::PAUSE_BUTTON,
@@ -550,60 +591,141 @@ fn progress_step_elements(
         ),
         Element::chrome(t::ERROR_LOG_TITLE),
         Element::label(ids::MAIL_IMPORT_MAILBOX_PROGRESS_LIST, t::PROGRESS_TITLE),
-    ];
-    // The machine tracks only GLOBAL imported/skipped/errored counts, not a
-    // per-mailbox breakdown (`import.rs::MailImportSnapshot` has no
-    // `mailbox_progress` field the way export's does) — so each row shows its
-    // planned message count, not a live per-mailbox fraction. A known,
-    // accurate-to-what-exists simplification, not a gap this page introduces.
-    for mailbox in snapshot.map(|s| s.mailboxes.as_slice()).unwrap_or(&[]) {
-        if !mailbox.selected {
-            continue;
-        }
-        els.extend(mailbox_progress_row_elements(mailbox));
+    ]);
+    // The machine keeps one row per mailbox the run takes, laid at Start.
+    for row in snapshot
+        .map(|s| s.mailbox_progress.as_slice())
+        .unwrap_or(&[])
+    {
+        els.extend(mailbox_progress_row_elements(row));
     }
     els
+}
+
+/// The Progress step of a session this app adopted after a restart
+/// (`MailImportSnapshot::resume_needs_credentials`, `mailbox-migration.md`
+/// § Resume protocol step 2): the sentence saying why, and the Source step's
+/// own credential field for the session's provider — the app password, or
+/// Generic's password with its port and connection security, which the
+/// session row does not record. The Outlook source asks for the Microsoft
+/// sign-in, whose button stays inert on tui (module docs).
+fn resume_credential_elements(e: &MailImportState, s: &MailImportSnapshot) -> Vec<Element> {
+    match s.source_kind {
+        ImportSourceKind::Gmail | ImportSourceKind::ICloud => vec![
+            Element::chrome(t::RESUME_NEEDS_PASSWORD),
+            Element::input(
+                ids::MAIL_IMPORT_SOURCE_APP_PASSWORD,
+                crate::unlock::mask(e.password_input.as_str()),
+                Field::Settings(SettingsField::MailImportPassword),
+            )
+            .labelled(t::SOURCE_APP_PASSWORD_LABEL),
+        ],
+        ImportSourceKind::Generic => vec![
+            Element::chrome(t::RESUME_NEEDS_PASSWORD),
+            Element::input(
+                ids::MAIL_IMPORT_SOURCE_PORT,
+                e.port_input.clone(),
+                Field::Settings(SettingsField::MailImportPort),
+            )
+            .labelled(t::SOURCE_PORT_PLACEHOLDER),
+            Element::select(
+                ids::MAIL_IMPORT_SOURCE_TLS_MODE,
+                tls_mode_label(s.tls_mode),
+                SelectTarget::MailImportTlsMode,
+                tls_mode_options(),
+            ),
+            Element::input(
+                ids::MAIL_IMPORT_SOURCE_PASSWORD,
+                crate::unlock::mask(e.password_input.as_str()),
+                Field::Settings(SettingsField::MailImportPassword),
+            )
+            .labelled(t::SOURCE_PASSWORD_PLACEHOLDER),
+        ],
+        ImportSourceKind::Outlook => vec![
+            Element::chrome(t::RESUME_NEEDS_MICROSOFT),
+            Element::gesture_button(
+                ids::MAIL_IMPORT_SOURCE_OAUTH_BUTTON,
+                t::SOURCE_OAUTH_BUTTON,
+                false,
+                Gesture::Settings(Action::MailImportOAuthStart),
+            ),
+        ],
+    }
 }
 
 /// One `mail-import-mailbox-progress-list-item` row. FLAT — the
 /// `mail_export.rs::mailbox_progress_row_elements` shape: no `.within(..)`
 /// scope, matching how `actions/mail_export.py` reads its own twin.
 fn mailbox_progress_row_elements(
-    mailbox: &fauna_client_mail_settings::SourceMailboxOption,
+    row: &fauna_client_mail_settings::ImportMailboxProgress,
 ) -> Vec<Element> {
     vec![
         Element::label(
             ids::MAIL_IMPORT_MAILBOX_PROGRESS_LIST_ITEM,
-            mailbox.name.clone(),
+            row.name.clone(),
         ),
         Element::label(
             ids::MAIL_IMPORT_MAILBOX_PROGRESS_LIST_ITEM_NAME,
-            mailbox.name.clone(),
+            row.name.clone(),
         ),
         Element::label(
             ids::MAIL_IMPORT_MAILBOX_PROGRESS_LIST_ITEM_PROGRESS,
-            t::progress_row_fmt(&mailbox.message_count.to_string()),
+            fauna_client_mail_settings::import_mailbox_progress_text(row.clone())
+                .resolve(fauna_i18n::strings::lookup),
         ),
     ]
 }
 
-/// Step 6 — done. The summary card and the two deep-links (module docs: both
-/// use `Gesture::Nav(Page::Conversations)`, a known scope limit for
-/// "Review skipped").
-fn done_step_elements(snapshot: Option<&MailImportSnapshot>) -> Vec<Element> {
+/// The progress summary with the run's elapsed time and, while it is
+/// running, the time left (`mailbox-migration.md` § Wizard steps step 5; the
+/// shared `transfer_timing` decides both) — `mail_export.rs`'s twin.
+fn with_timing(
+    summary: String,
+    timing: Option<fauna_client_mail_settings::TransferTiming>,
+) -> String {
+    match timing.map(|t| (t.elapsed_secs, t.remaining_secs)) {
+        Some((Some(elapsed), Some(remaining))) => {
+            t::progress_remaining_fmt(&summary, &duration_text(elapsed), &duration_text(remaining))
+        }
+        Some((Some(elapsed), None)) => t::progress_elapsed_fmt(&summary, &duration_text(elapsed)),
+        _ => summary,
+    }
+}
+
+/// A duration in the shared coarse format (`value-formatting.md` § Duration).
+fn duration_text(secs: u64) -> String {
+    fauna_core::format::duration_secs(secs).resolve(fauna_i18n::strings::lookup)
+}
+
+/// Step 6 — done. The summary card, View imported (Conversations), and Review
+/// skipped, which reveals the run's skip log below the card (module docs).
+fn done_step_elements(e: &MailImportState, snapshot: Option<&MailImportSnapshot>) -> Vec<Element> {
     let (imported, skipped, errored) = snapshot
         .map(|s| (s.imported_count, s.skipped_count, s.errored_count))
         .unwrap_or((0, 0, 0));
-    vec![
-        Element::chrome(t::DONE_TITLE),
-        Element::label(
-            ids::MAIL_IMPORT_DONE_SUMMARY,
-            t::done_summary_fmt(
-                &imported.to_string(),
-                &skipped.to_string(),
-                &errored.to_string(),
-            ),
+    // § Wizard steps step 6: the counts and the time elapsed.
+    let elapsed = snapshot
+        .and_then(|s| {
+            s.timing(fauna_core::data::Timestamp::now_secs())
+                .elapsed_secs
+        })
+        .map(duration_text);
+    let summary = match elapsed {
+        Some(elapsed) => t::done_summary_timed_fmt(
+            &imported.to_string(),
+            &skipped.to_string(),
+            &errored.to_string(),
+            &elapsed,
         ),
+        None => t::done_summary_fmt(
+            &imported.to_string(),
+            &skipped.to_string(),
+            &errored.to_string(),
+        ),
+    };
+    let mut els = vec![
+        Element::chrome(t::DONE_TITLE),
+        Element::label(ids::MAIL_IMPORT_DONE_SUMMARY, summary),
         Element::gesture_button(
             ids::MAIL_IMPORT_VIEW_IMPORTED_BUTTON,
             t::VIEW_IMPORTED_BUTTON,
@@ -614,17 +736,25 @@ fn done_step_elements(snapshot: Option<&MailImportSnapshot>) -> Vec<Element> {
             ids::MAIL_IMPORT_REVIEW_SKIPPED_BUTTON,
             t::REVIEW_SKIPPED_BUTTON,
             true,
-            Gesture::Nav(Page::Conversations),
+            Gesture::Settings(Action::MailImportToggleSkipped),
         ),
-    ]
+    ];
+    if e.show_skipped {
+        els.push(Element::chrome(t::ERROR_LOG_TITLE));
+        els.push(Element::label(
+            ids::MAIL_IMPORT_ERROR_LOG,
+            snapshot.map(|s| s.error_log.join("\n")).unwrap_or_default(),
+        ));
+    }
+    els
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::settings::SubPage;
-    use fauna_client_mail_settings::SourceMailboxOption;
     use fauna_client_mail_settings::testing::a_mail_import_snapshot as a_snapshot;
+    use fauna_client_mail_settings::{ImportMailboxProgress, SourceMailboxOption};
 
     fn state_with(snapshot: MailImportSnapshot) -> SettingsState {
         let mut state = SettingsState {
@@ -668,11 +798,15 @@ mod tests {
             name: "INBOX".into(),
             selected: true,
             message_count: 1,
+            byte_total: None,
         }];
         painted.extend(ids(&mail_import_elements(&state_with(scope_snap))));
         for step in [ImportStep::Confirm, ImportStep::Progress, ImportStep::Done] {
             painted.extend(ids(&mail_import_elements(&state_with(a_snapshot(step)))));
         }
+        let mut reviewing = state_with(a_snapshot(ImportStep::Done));
+        reviewing.mail_import.show_skipped = true;
+        painted.extend(ids(&mail_import_elements(&reviewing)));
         for id in [
             "page-heading",
             // "error-message" is registered globally by ui::register_frame
@@ -739,6 +873,46 @@ mod tests {
                 .any(|id| id == "mail-import-view-imported-button")
         );
         assert!(!done.iter().any(|id| id == "mail-import-pause-button"));
+    }
+
+    /// A session adopted after a restart asks for the provider's own
+    /// credential on the Progress step (§ Resume protocol step 2) — and only
+    /// then: the app that started the import paints none.
+    #[test]
+    fn an_adopted_session_asks_for_its_credential_on_the_progress_step() {
+        let progress_ids = |kind: ImportSourceKind, needs: bool| {
+            let mut snap = a_snapshot(ImportStep::Progress);
+            snap.source_kind = kind;
+            snap.resume_needs_credentials = needs;
+            ids(&mail_import_elements(&state_with(snap)))
+        };
+        let has = |ids: &[String], id: &str| ids.iter().any(|i| i == id);
+
+        let started_here = progress_ids(ImportSourceKind::Generic, false);
+        assert!(!has(&started_here, "mail-import-source-password"));
+        assert!(!has(&started_here, "mail-import-source-app-password"));
+
+        let gmail = progress_ids(ImportSourceKind::Gmail, true);
+        assert!(has(&gmail, "mail-import-source-app-password"));
+        assert!(!has(&gmail, "mail-import-source-password"));
+        assert!(has(&gmail, "mail-import-resume-button"));
+
+        let generic = progress_ids(ImportSourceKind::Generic, true);
+        for id in [
+            "mail-import-source-port",
+            "mail-import-source-tls-mode",
+            "mail-import-source-password",
+        ] {
+            assert!(has(&generic, id), "missing {id}: {generic:?}");
+        }
+        assert!(
+            !has(&generic, "mail-import-source-host"),
+            "the host is the session's, not the person's to change on a resume"
+        );
+
+        let outlook = progress_ids(ImportSourceKind::Outlook, true);
+        assert!(has(&outlook, "mail-import-source-oauth-button"));
+        assert!(!has(&outlook, "mail-import-source-password"));
     }
 
     /// Pre-hydrate the wizard still opens on a usable Source step with the
@@ -995,22 +1169,67 @@ mod tests {
                 name: "INBOX".into(),
                 selected: true,
                 message_count: 100,
+                byte_total: None,
             },
             SourceMailboxOption {
                 name: "Sent".into(),
                 selected: true,
                 message_count: 20,
+                byte_total: None,
             },
             SourceMailboxOption {
                 name: "Trash".into(),
                 selected: false,
                 message_count: 5,
+                byte_total: None,
             },
         ];
         let els = mail_import_elements(&state_with(snap));
         assert_eq!(
             text_of(&els, "mail-import-confirm-summary", 0),
             t::confirm_summary_fmt(&source_kind_label(ImportSourceKind::Outlook), "2", "120"),
+        );
+    }
+
+    /// § Wizard steps step 4: once every selected mailbox is sized, the
+    /// summary also says roughly how much data is coming, through the shared
+    /// byte formatter; one unsized mailbox drops the size, never the count.
+    #[test]
+    fn the_confirm_summary_names_the_size_once_every_selected_mailbox_has_one() {
+        let mut snap = a_snapshot(ImportStep::Confirm);
+        snap.mailboxes = vec![
+            SourceMailboxOption {
+                name: "INBOX".into(),
+                selected: true,
+                message_count: 100,
+                byte_total: Some(3 * 1024 * 1024),
+            },
+            SourceMailboxOption {
+                name: "Sent".into(),
+                selected: true,
+                message_count: 20,
+                byte_total: Some(1024 * 1024),
+            },
+        ];
+        let size = crate::wizard::localized(&fauna_core::format::byte_size(4 * 1024 * 1024));
+        let els = mail_import_elements(&state_with(snap.clone()));
+        let summary = text_of(&els, "mail-import-confirm-summary", 0);
+        assert_eq!(
+            summary,
+            t::confirm_summary_sized_fmt(
+                &source_kind_label(ImportSourceKind::Gmail),
+                "2",
+                "120",
+                &size
+            ),
+        );
+        assert!(summary.contains("120 messages · about"), "{summary}");
+
+        snap.mailboxes[1].byte_total = None;
+        let els = mail_import_elements(&state_with(snap));
+        assert_eq!(
+            text_of(&els, "mail-import-confirm-summary", 0),
+            t::confirm_summary_fmt(&source_kind_label(ImportSourceKind::Gmail), "2", "120"),
         );
     }
 
@@ -1041,20 +1260,26 @@ mod tests {
         );
     }
 
-    /// One row per SELECTED mailbox with every leaf present, painted FLAT.
+    /// One row per mailbox the run takes (the machine's `mailbox_progress`),
+    /// every leaf present, painted FLAT, its progress through the shared
+    /// formatter.
     #[test]
-    fn mailbox_progress_rows_paint_flat_for_selected_mailboxes_only() {
+    fn mailbox_progress_rows_paint_flat_with_each_mailboxs_own_counts() {
         let mut snap = a_snapshot(ImportStep::Progress);
-        snap.mailboxes = vec![
-            SourceMailboxOption {
+        snap.mailbox_progress = vec![
+            ImportMailboxProgress {
                 name: "INBOX".into(),
-                selected: true,
-                message_count: 42,
+                imported: 40,
+                skipped: 1,
+                errored: 1,
+                total: 42,
             },
-            SourceMailboxOption {
-                name: "Trash".into(),
-                selected: false,
-                message_count: 7,
+            ImportMailboxProgress {
+                name: "Archive".into(),
+                imported: 0,
+                skipped: 0,
+                errored: 0,
+                total: 7,
             },
         ];
         let els = mail_import_elements(&state_with(snap));
@@ -1065,13 +1290,21 @@ mod tests {
         ] {
             assert_eq!(
                 els.iter().filter(|e| e.id == id).count(),
-                1,
-                "one {id} — only the selected mailbox"
+                2,
+                "one {id} per mailbox the run takes"
             );
         }
         assert_eq!(
-            text_of(&els, "mail-import-mailbox-progress-list-item-name", 0),
-            "INBOX"
+            text_of(&els, "mail-import-mailbox-progress-list-item-name", 1),
+            "Archive"
+        );
+        assert_eq!(
+            text_of(&els, "mail-import-mailbox-progress-list-item-progress", 0),
+            t::progress_row_counts_fmt("40", "42", "1", "1")
+        );
+        assert_eq!(
+            text_of(&els, "mail-import-mailbox-progress-list-item-progress", 1),
+            t::progress_row_counts_fmt("0", "7", "0", "0")
         );
         assert!(
             els.iter().all(|e| e.path.is_empty()),
@@ -1098,21 +1331,59 @@ mod tests {
         assert_eq!(armed, fauna_i18n::strings::common::CONFIRM_Q);
     }
 
-    /// The done step's two buttons both navigate to Conversations — the
-    /// module docs' documented scope limit, proven rather than assumed.
+    /// View imported navigates to Conversations; Review skipped toggles the
+    /// skip log onto the Done screen instead (§ Wizard steps step 6).
     #[test]
-    fn the_done_step_buttons_navigate_to_conversations() {
+    fn the_done_step_buttons_go_to_conversations_and_the_skip_log() {
         let els = mail_import_elements(&state_with(a_snapshot(ImportStep::Done)));
-        for id in [
-            "mail-import-view-imported-button",
-            "mail-import-review-skipped-button",
-        ] {
-            let button = els.iter().find(|e| e.id == id).expect("button painted");
-            assert!(matches!(
-                button.role,
-                crate::element::Role::Button(Gesture::Nav(Page::Conversations))
-            ));
-        }
+        let role = |id: &str| {
+            els.iter()
+                .find(|e| e.id == id)
+                .expect("button painted")
+                .role
+                .clone()
+        };
+        assert!(matches!(
+            role("mail-import-view-imported-button"),
+            crate::element::Role::Button(Gesture::Nav(Page::Conversations))
+        ));
+        assert!(matches!(
+            role("mail-import-review-skipped-button"),
+            crate::element::Role::Button(Gesture::Settings(Action::MailImportToggleSkipped))
+        ));
+    }
+
+    /// The skip log stays off a Done card until Review skipped reveals it,
+    /// then lists every line the run recorded — a clean import's card stays
+    /// uncluttered.
+    #[test]
+    fn review_skipped_reveals_the_runs_skip_log_on_the_done_screen() {
+        let mut snap = a_snapshot(ImportStep::Done);
+        snap.error_log = vec![
+            "INBOX uid 2: too large (4096 bytes, over the 1024-byte limit)".into(),
+            "Gone: mailbox not found".into(),
+        ];
+        let mut state = state_with(snap);
+        let hidden = mail_import_elements(&state);
+        assert!(!ids(&hidden).contains(&"mail-import-error-log".to_string()));
+
+        state.mail_import.show_skipped = true;
+        let shown = mail_import_elements(&state);
+        assert_eq!(
+            text_of(&shown, "mail-import-error-log", 0),
+            "INBOX uid 2: too large (4096 bytes, over the 1024-byte limit)\nGone: mailbox not found"
+        );
+    }
+
+    /// A fresh visit hides the log again, like the armed cancel.
+    #[test]
+    fn a_fresh_visit_hides_the_skip_log_again() {
+        let mut s = MailImportState {
+            show_skipped: true,
+            ..MailImportState::default()
+        };
+        s.reset_form();
+        assert!(!s.show_skipped);
     }
 
     /// The done summary renders through the generated i18n template.
@@ -1130,6 +1401,37 @@ mod tests {
         assert_eq!(
             text_of(&els, "mail-import-done-summary", 0),
             t::done_summary_fmt("10", "1", "2"),
+        );
+    }
+
+    /// § Wizard steps steps 5–6: a stopped run's progress line carries its
+    /// elapsed time and no estimate, and the Done card adds how long the
+    /// import took — both off the session row's clock.
+    #[test]
+    fn the_progress_and_done_summaries_carry_the_runs_time() {
+        let mut snap = a_snapshot(ImportStep::Progress);
+        snap.session_state = Some(fauna_client_mail_settings::ImportSessionState::Paused);
+        snap.imported_count = 4;
+        snap.total_count = 9;
+        snap.started_at = 1_000;
+        snap.last_progress_at = 1_000 + 5 * 60;
+        let els = mail_import_elements(&state_with(snap));
+        assert_eq!(
+            text_of(&els, "mail-import-progress-summary", 0),
+            t::progress_elapsed_fmt(&t::progress_summary_fmt("4", "9", "0", "0"), "5m"),
+        );
+
+        let mut snap = a_snapshot(ImportStep::Done);
+        snap.session_state = Some(fauna_client_mail_settings::ImportSessionState::Completed);
+        snap.imported_count = 10;
+        snap.skipped_count = 1;
+        snap.errored_count = 2;
+        snap.started_at = 1_000;
+        snap.last_progress_at = 1_000 + 2 * 3_600;
+        let els = mail_import_elements(&state_with(snap));
+        assert_eq!(
+            text_of(&els, "mail-import-done-summary", 0),
+            "10 imported · 1 skipped · 2 errored · took 2h 0m"
         );
     }
 }

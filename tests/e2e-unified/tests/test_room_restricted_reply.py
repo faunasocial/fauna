@@ -59,6 +59,10 @@ pytestmark = [
     pytest.mark.tier_3,
     pytest.mark.real_conversations,
     pytest.mark.tui,
+    pytest.mark.linux,
+    pytest.mark.web,
+    pytest.mark.android,
+    pytest.mark.windows,
 ]
 
 ROOM_POST_TIER = "room"

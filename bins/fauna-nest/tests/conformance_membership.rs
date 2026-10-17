@@ -505,6 +505,7 @@ async fn apply_membership_payment(
         tier: tier.into(),
         valid_until_secs: valid_until.map(|s| s as u64),
         external_ref: "mem_pay_1".into(),
+        return_ref: None,
     };
     match payment_core::apply_payment(state, &e)
         .await

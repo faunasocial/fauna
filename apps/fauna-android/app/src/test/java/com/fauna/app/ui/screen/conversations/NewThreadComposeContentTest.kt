@@ -37,12 +37,14 @@ class NewThreadComposeContentTest {
         rawInput: String = "",
         chips: List<TypedAddress> = emptyList(),
         suggestions: List<TypedAddress> = emptyList(),
+        suggestionDisplays: List<String> = emptyList(),
         resolveState: ResolveState = ResolveState.IDLE,
         resolved: TypedAddress? = null,
     ) = RecipientPickerState(
         rawInput = rawInput,
         chips = chips,
         suggestions = suggestions,
+        suggestionDisplays = suggestionDisplays,
         resolveState = resolveState,
         resolved = resolved,
     )
@@ -77,12 +79,15 @@ class NewThreadComposeContentTest {
         onDiscard: () -> Unit = {},
         onRecipientInputChange: (String) -> Unit = {},
         onAcceptRecipient: () -> Unit = {},
+        onAcceptSuggestion: (Int) -> Unit = {},
+        onRemoveRecipientChip: (Int) -> Unit = {},
         onBodyChange: (String) -> Unit = {},
         onSubjectChange: (String) -> Unit = {},
         onTopicToggle: () -> Unit = {},
         onSend: () -> Unit = {},
         onAttach: () -> Unit = {},
         onReplyCancel: () -> Unit = {},
+        onHomeNestToggle: (Boolean) -> Unit = {},
     ) {
         composeTestRule.setContent {
             NewThreadComposeContent(
@@ -91,14 +96,31 @@ class NewThreadComposeContentTest {
                 onDiscard = onDiscard,
                 onRecipientInputChange = onRecipientInputChange,
                 onAcceptRecipient = onAcceptRecipient,
+                onAcceptSuggestion = onAcceptSuggestion,
+                onRemoveRecipientChip = onRemoveRecipientChip,
                 onBodyChange = onBodyChange,
                 onSubjectChange = onSubjectChange,
                 onTopicToggle = onTopicToggle,
                 onSend = onSend,
                 onAttach = onAttach,
                 onReplyCancel = onReplyCancel,
+                onHomeNestToggle = onHomeNestToggle,
             )
         }
+    }
+
+    @Test
+    fun homeNestTogglePaintsBeforeAnyChipAndReportsTheValueAsked() {
+        val asked = mutableListOf<Boolean>()
+        render(compose(), onHomeNestToggle = { asked += it })
+        composeTestRule.onNodeWithTag("recipient-picker-home-nest-toggle").assertExists()
+        assertEquals(
+            "false",
+            composeTestRule.onNodeWithTag("recipient-picker-home-nest-toggle").fetchSemanticsNode()
+                .config[androidx.compose.ui.semantics.SemanticsProperties.StateDescription],
+        )
+        composeTestRule.onNodeWithTag("recipient-picker-home-nest-toggle").performClick()
+        assertEquals(listOf(true), asked)
     }
 
     @Test
@@ -140,6 +162,43 @@ class NewThreadComposeContentTest {
             2,
             composeTestRule.onAllNodesWithTag("recipient-picker-suggestion").fetchSemanticsNodes().size,
         )
+    }
+
+    @Test
+    fun suggestionClickAcceptsThatRowNotTheTypedText() {
+        val accepted = mutableListOf<Int>()
+        var typedAccepts = 0
+        render(
+            compose(
+                recipientPicker = picker(
+                    suggestions = listOf(email("alice@x.test"), email("bob@x.test")),
+                    suggestionDisplays = listOf("Alice", "bob@x.test"),
+                ),
+            ),
+            onAcceptRecipient = { typedAccepts++ },
+            onAcceptSuggestion = { accepted += it },
+        )
+        // The row reads the manager-derived label first, the address beside it
+        // (the harness's default `displayAddress` is `toString`, so only the
+        // label half is pinned here).
+        composeTestRule.onAllNodesWithTag("recipient-picker-suggestion")[0]
+            .assertTextContains("Alice \u00b7 ", substring = true)
+        composeTestRule.onAllNodesWithTag("recipient-picker-suggestion")[1].performClick()
+        assertEquals(listOf(1), accepted)
+        assertEquals(0, typedAccepts)
+    }
+
+    @Test
+    fun chipClickRemovesThatChip() {
+        val removed = mutableListOf<Int>()
+        render(
+            compose(recipientPicker = picker(chips = listOf(email("a@x.test"), email("b@x.test")))),
+            onRemoveRecipientChip = { removed += it },
+        )
+        composeTestRule.onAllNodesWithTag("recipient-picker-chip")[0].assertTextContains("a@x.test", substring = true)
+        composeTestRule.onAllNodesWithTag("recipient-picker-chip")[0].assertTextContains(" ×", substring = true)
+        composeTestRule.onAllNodesWithTag("recipient-picker-chip")[1].performClick()
+        assertEquals(listOf(1), removed)
     }
 
     @Test

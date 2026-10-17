@@ -40,7 +40,8 @@ public sealed partial class StatusPage : Page
             _viewModel = new StatusViewModel(
                 clients.Nest,
                 clients.Rpc!,
-                new AgentStatusProbe(() => App.CurrentSyncAgent?.Channel));
+                new AgentStatusProbe(() => App.CurrentSyncAgent?.Channel),
+                () => FaunaApp.Conversations.ConversationsManagerHost.Instance.SecureChannelCount());
             _viewModel.PropertyChanged += ViewModel_PropertyChanged;
             NestUrlLabel.Text = S.Get("settings/nest_url");
             NestUrlText.Text = clients.Account.NestUrl ?? "--";
@@ -69,8 +70,6 @@ public sealed partial class StatusPage : Page
         await _viewModel.LoadCommand.ExecuteAsync(null);
 
         UpdateDisplay();
-
-        // MLS status will be queried via nest HTTP API when available
 
         LoadProgress.IsActive = false;
         LoadProgress.Visibility = Visibility.Collapsed;
@@ -148,16 +147,7 @@ public sealed partial class StatusPage : Page
             SyncStatusText.Text = S.Get("common/disconnected");
         }
 
-        // `status-sync-pending`: the shared `status/sync/pending_summary` template
-        // over the file count and the localized byte size (status.md § State &
-        // data shape — "the shared status.sync.pending_summary string over the
-        // file count and fauna_core::format::byte_size"; windows resw is flat, so
-        // the two placeholders are substituted here, same shape as
-        // AdminMailPage's spam_baseline_published).
-        FilesPendingText.Text = S.Get("status/sync/pending_summary")
-            .Replace("{files}", _viewModel.FilesPending.ToString())
-            .Replace("{bytes}", ValueFormat.ByteSize(_viewModel.BytesPending));
-        LastSyncText.Text = StatusViewModel.LastSyncText(_viewModel.LastSync, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        UpdateLegSections();
 
         // Quota (folded in from the old SettingsPage so it lives on the Settings
         // shell's default Status sub-page — settings.md § Navigation model). The
@@ -168,6 +158,33 @@ public sealed partial class StatusPage : Page
 
         UpdateFeatureLimits();
         PaintRegion();
+    }
+
+    /// <summary>
+    /// Paints the Node, Sync, Encryption and Build element texts (<c>ui/status.md</c> §
+    /// Layout &amp; flow sections 5–8) from the shared snapshot's text projection — one
+    /// <c>StatusText</c> call over the legs the VM has loaded; this method derives none
+    /// of them. A <c>null</c> text is an element (or, when both its rows are null, a
+    /// whole section) that is not rendered — no header, no placeholder, no zero.
+    /// </summary>
+    private void UpdateLegSections()
+    {
+        if (_viewModel is null) return;
+        var text = _viewModel.StatusTexts(
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), new StatusStringLookup());
+
+        PaintLeg(NodeSection, (NodeDomainText, text.@nodeDomain), (NodeVersionText, text.@nodeVersion));
+        PaintLeg(SyncLegGrid, (FilesPendingText, text.@syncPending), (LastSyncText, text.@syncLast));
+        PaintLeg(MlsSection, (KeyPackageCountText, text.@mlsKeyPackages), (DmChannelCountText, text.@mlsChannels));
+        PaintLeg(BuildSection, (BuildShaText, text.@buildSha));
+    }
+
+    private static void PaintLeg(FrameworkElement section, params (TextBlock Block, string? Value)[] rows)
+    {
+        foreach (var (block, value) in rows)
+            if (value is not null) block.Text = value;
+        // A leg lands whole: every row of a section is present or none is.
+        section.Visibility = rows.All(r => r.Value is not null) ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /// <summary>

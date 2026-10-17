@@ -18,12 +18,19 @@ import com.fauna.ffi.FfiNestClient
  * caller in this flavor can reach a surface that would need them.
  */
 abstract class KidsExcisedApi {
+    /** Excised — no sweep (the registry's only feeder is compiled out). */
+    fun startCriticalAlertSweep() = Unit
+
     /** Excised — this flavor holds no feed / search / atproto singleton to tear down. */
     internal fun detachKidsExcised(): () -> Unit = {}
 
     /** Excised — the TLS auto-renew cadence rides the DNS machine (a bridge); a
      *  kids account is never the admin who would renew a certificate. */
     internal fun startAutoRenewCadence() = Unit
+
+    /** Excised — the mail machine is compiled out of this flavor, so no connect-time refresh. */
+    @Suppress("UNUSED_PARAMETER")
+    internal fun startMailEpochRefresh(client: FfiNestClient) = Unit
 
     /** Excised — the subscriptions author plane (monetization) is compiled out. */
     @Suppress("UNUSED_PARAMETER")
@@ -35,6 +42,18 @@ abstract class KidsExcisedApi {
         client: FfiNestClient,
         secretBytes: ByteArray,
     ): uniffi.fauna_client_pair.LinkedNestsMachine? = null
+
+    /** Excised — local domains ride the `mail-admin` plane; a kids account is
+     *  never the admin whose `nest_retire` entry would read them. */
+    suspend fun retireLocalDomains(): List<String> = emptyList()
+
+    /** Excised — the DNS credential store rides the `mail-admin` plane. Only the
+     *  admin's provisioning wizard captures a credential, and a kids account is
+     *  never that admin, so the post-auth glue never has one to seal here. */
+    @Suppress("UNUSED_PARAMETER")
+    suspend fun sealCapturedDnsCredential(
+        credential: com.fauna.ffi.onboarding.CapturedDnsCredential,
+    ) = Unit
 
     // The subscriptions author calls (monetization). Their surfaces — the
     // profile Tiers tab, the Offers tab and the Follow button — carry
@@ -68,7 +87,10 @@ abstract class KidsExcisedApi {
     // Sealed tier-1 spam training rides the mail-settings machine, a bridge:
     // there is no sealed model here, so the callers take their non-mail path.
 
-    internal suspend fun sealedSpamWriteAvailable(): Boolean = false
+    /** No sealed model here, so only the nest half of the correction flow runs. */
+    internal suspend fun trainModerationCorrection(contentId: String, isSpam: Boolean) {
+        (this as ApiClient).submitModerationTrain(contentId, if (isSpam) "spam" else "ham")
+    }
 
     @Suppress("UNUSED_PARAMETER")
     internal suspend fun trainSpamModelClient(text: String, isSpam: Boolean): Boolean = false

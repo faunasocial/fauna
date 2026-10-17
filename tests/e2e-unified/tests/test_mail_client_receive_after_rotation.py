@@ -25,8 +25,8 @@ receive cursor and on screen, so nothing re-opens it. A fresh process
 re-drains the mailbox from UID 0 under the keys the account holds *now*, which
 is the only moment the standing set is actually exercised
 (``test_mail_client_receive_after_reenable.py`` makes the same restart for the
-same reason, and is this test's opposite: there the keys are torn down, so the
-old record is skipped).
+same reason, and is this test's opposite: there the old record is damaged at
+rest, so the restarted app skips it).
 
 **What makes the witness non-vacuous.** If the rotation did nothing, A and B
 would both open under the one unchanged key and the test would pass for the

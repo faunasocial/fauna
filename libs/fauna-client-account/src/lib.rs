@@ -29,7 +29,7 @@ pub use fauna_protocol::account;
 
 pub mod sessions;
 pub mod sessions_view;
-pub use sessions::{SessionsClient, SessionsError};
+pub use sessions::{SessionsAct, SessionsClient, SessionsError, SessionsPass};
 
 /// Typed `fauna.account.*` / `fauna.quota.get` / `fauna.profile.handle.change`
 /// call surface, generic over the WS-RPC transport (`R: RpcRequester`): native

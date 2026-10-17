@@ -69,15 +69,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use fauna_client_recovery::ceremony::{
-    LandedSuccession, StolenOutcome, SweepStatus, finish_unconfirmed_succession,
-    sweep_after_succession,
+    LandedSuccession, StolenOutcome, SweepStatus, succeed_stolen_identity,
 };
 use fauna_client_recovery::linked_fanout::LinkedNestOutcome;
 use fauna_client_recovery::linked_fanout::native::NativeLinkedNestDial;
 use fauna_client_recovery::{
-    RecoveryClient, RecoveryKitStatus, SuccessionAttempt, create_kit, kit_status, parse_kit,
+    RecoveryClient, RecoveryKitStatus, create_kit, kit_status, parse_kit,
     predecessor_seeds_from_rows, request_seed_alone_replacement_everywhere,
-    reseal_escrow_with_held_kit, succeed_with_held_kit, veto_everywhere,
+    reseal_escrow_with_held_kit, veto_everywhere,
 };
 use fauna_core::identity::ActorKeypair;
 
@@ -164,22 +163,11 @@ pub struct FfiSweepCopy {
 /// Select the sweep's lines off the view an app carried across the switch
 /// (`settings.md` § Recovery kit → *The sweep's own lines*).
 ///
-/// `renders_retry` declares whether this app paints
-/// `recovery-kit-sweep-retry-button` beside the lines on every arm
-/// [`FfiSweepView::owes_work`] answers true for. The two degraded arms name
-/// that button by label, and a degraded line must never name a control that is
-/// not on screen — so an app that has not built the button passes `false` and
-/// gets the member-side remedy alone. ⚠ `false` is a parity gap, never a
-/// product choice: no FFI app has the button today (`retry_group_sweep` has no
-/// FFI face yet), and the flag flips per app as each builds it.
+/// The two degraded arms name `recovery-kit-sweep-retry-button` by label; every
+/// app renders it on every arm [`FfiSweepView::owes_work`] answers true for.
 #[uniffi::export]
-pub fn sweep_copy(view: FfiSweepView, renders_retry: bool) -> FfiSweepCopy {
-    use fauna_client_recovery::ceremony::{SweepRetryAffordance, SweepView};
-    let retry = if renders_retry {
-        SweepRetryAffordance::Rendered
-    } else {
-        SweepRetryAffordance::Absent
-    };
+pub fn sweep_copy(view: FfiSweepView) -> FfiSweepCopy {
+    use fauna_client_recovery::ceremony::SweepView;
     let copy = SweepView {
         kind: view.kind,
         detail: view.detail,
@@ -187,7 +175,7 @@ pub fn sweep_copy(view: FfiSweepView, renders_retry: bool) -> FfiSweepCopy {
         groups_old_leaf_removed: view.groups_old_leaf_removed,
         unattested_members: view.unattested_members,
     }
-    .copy(retry);
+    .copy();
     FfiSweepCopy {
         outcome: copy.outcome,
         unattested: copy.unattested,
@@ -592,43 +580,18 @@ fn stolen_outcome_view(outcome: &StolenOutcome, persisted: bool) -> FfiStolenOut
     }
 }
 
-/// Steps 1–2 of [`succession_succeed_with_held_kit`]: persist the successor
-/// seed into the account store and report whether it READS BACK — the verdict
-/// that decides whether an app tells the user the seed is saved or puts it on
-/// screen (`identity-succession.md` § Implementation status today). Lifted out
-/// of the driver so a native test can pin the read-back over a store whose
-/// writes vanish; takes the attempt's exposed parts, not the attempt, which this
-/// crate cannot construct.
-fn persist_successor_seed(
+/// Whether a landed ceremony's successor seed READS BACK from the account
+/// store — the verdict that decides whether an app tells the user the seed is
+/// saved or puts it on screen (`identity-succession.md` § Implementation status
+/// today). Never read off `add_account`'s return: `SecretStore::set` is
+/// infallible by signature, so a clean return proves the call was made and
+/// nothing more. The persist itself is the shared ceremony's, run
+/// before anything that can fail or block.
+fn successor_reads_back(
     registry: &fauna_client_accounts::AccountRegistry,
     successor_secret_hex: &str,
     successor_actor_hex: &str,
-    nest_url: &str,
 ) -> bool {
-    // ── Step 1: persist. A device id of its OWN, minted here — never the
-    // predecessor's, and never left empty. `succession-aftermath.md` § Propagation → *Own device fleet*:
-    // "device registrations and sync-agent renewal grants are **re-created**
-    // under the new identity, not migrated", so carrying the old one across
-    // would be the wrong answer even though the hardware did not change.
-    //
-    // ⚠ Left empty it is not merely untidy: an app that builds its session from
-    // the account's stored material — apple reads `(secret, nest_url, device_id)`
-    // and refuses to construct a client without all three — routes a perfectly
-    // good successor into the onboarding wizard on the very next launch, i.e.
-    // the ceremony appears to have signed the user out of the account it just
-    // gave them back. Minted inside the boundary so every FFI app inherits it.
-    let successor_device_id = hex::encode(fauna_client_core::chunking::generate_device_id());
-    if let Err(e) = registry.add_account(
-        successor_secret_hex,
-        Some(nest_url),
-        Some(&successor_device_id),
-    ) {
-        // Logged, never fatal: the account HAS moved by now, and returning an
-        // error here would drop the only copy of the seed that owns it.
-        tracing::error!(error = %e, "succession: persisting the successor seed failed");
-    }
-
-    // ── Step 2: verify by READ-BACK, never off `add_account`'s return.
     let persisted = registry
         .secrets(successor_actor_hex)
         .is_some_and(|stored| stored.secret_hex.as_str() == successor_secret_hex);
@@ -638,9 +601,95 @@ fn persist_successor_seed(
     persisted
 }
 
+/// The one body behind both exports: the shared
+/// [`fauna_client_recovery::ceremony::succeed_stolen_identity`] (anonymous
+/// connection, persist-first, sweep or reconcile), then the read-back, then the
+/// shared park + link before any app switches accounts.
+async fn run_stolen_ceremony(
+    nest_url: String,
+    old_secret: Vec<u8>,
+    kit_input: String,
+    old_engine: Option<Arc<fauna_mls::engine::MlsEngine>>,
+    accounts: Arc<FfiAccountRegistry>,
+    store_path: Arc<dyn FfiSuccessorStorePath>,
+    store_container_dir: Option<String>,
+) -> Result<FfiStolenOutcome, FfiError> {
+    #[cfg(not(feature = "recovery-aftermath"))]
+    let _ = store_container_dir;
+    let identity = ActorKeypair::from_secret(secret32(&old_secret)?);
+    let old_actor_id = identity.actor_id();
+
+    // The resolver, invoked by the ceremony AFTER the successor's connect —
+    // never here.
+    let db_path_for = move |successor_actor_hex: &str| -> PathBuf {
+        PathBuf::from(store_path.mls_db_path(successor_actor_hex.to_string()))
+    };
+
+    // A device id of the successor's OWN, minted here — never the
+    // predecessor's, and never left empty. `succession-aftermath.md`
+    // § Propagation → *Own device fleet*: device registrations are
+    // **re-created** under the new identity, not migrated. ⚠ Left empty it is
+    // not merely untidy: an app that builds its session from the account's
+    // stored material — apple reads `(secret, nest_url, device_id)` and
+    // refuses to construct a client without all three — routes a perfectly
+    // good successor into the onboarding wizard on the very next launch.
+    // Minted inside the boundary so every FFI app inherits it.
+    let successor_device_id = hex::encode(fauna_client_core::chunking::generate_device_id());
+
+    let registry = accounts.registry();
+    let outcome = succeed_stolen_identity(
+        &nest_url,
+        &identity,
+        &kit_input,
+        old_engine.as_deref(),
+        Some(&successor_device_id),
+        registry,
+        db_path_for,
+    )
+    .await;
+    let StolenOutcome::Landed(landed) = &outcome else {
+        // `persisted` rides only the landed arm; the undecided arms carry
+        // their own read-back inside the shared outcome.
+        return Ok(stolen_outcome_view(&outcome, false));
+    };
+    let persisted = successor_reads_back(
+        registry,
+        &landed.successor_secret_hex,
+        &landed.new_actor_id.to_hex(),
+    );
+
+    // The departed fleet, then the park + the LINK, after the arm resolved
+    // and before any app switch — never fatal
+    // (`fauna_client_account_runtime::record_departed_fleet`,
+    // `ceremony::record_landed_succession`). Off the live runtime while it is
+    // still the predecessor's; a locked app has none, and the predecessor's
+    // store is read at rest under `store_container_dir`'s root.
+    #[cfg(feature = "recovery-aftermath")]
+    fauna_client_account_runtime::record_departed_fleet(
+        crate::account_runtime::handle().as_ref(),
+        registry,
+        crate::account_state::store_root_for(store_container_dir.map(PathBuf::from))
+            .map(fauna_sync_engine::root::StoreRoot::at)
+            .map_err(|e| anyhow::anyhow!("{e}")),
+        &identity,
+    )
+    .await;
+    #[cfg(feature = "recovery-aftermath")]
+    fauna_client_recovery::ceremony::record_landed_succession(registry, &old_actor_id, landed);
+    #[cfg(not(feature = "recovery-aftermath"))]
+    if let Err(e) =
+        registry.record_succession(&old_actor_id.to_hex(), &landed.new_actor_id.to_hex())
+    {
+        tracing::error!(error = %e, "succession: recording the predecessor link failed");
+    }
+
+    Ok(stolen_outcome_view(&outcome, persisted))
+}
+
 /// Run the whole "my identity was stolen" ceremony with the kit the user holds
-/// — `identity-stolen-button`'s one call
-/// (`docs/goal/ui/settings.md` § Recovery kit).
+/// — `identity-stolen-button`'s one call from the signed-in Settings section
+/// (`docs/goal/ui/settings.md` § Recovery kit). The locked launch surface,
+/// which has no session, calls [`succession_succeed_stolen_locked`] instead.
 ///
 /// The account is re-pointed to a freshly minted successor, the successor's seed
 /// is persisted and verified here, the old identity's MLS groups are swept, and
@@ -667,13 +716,14 @@ fn persist_successor_seed(
 ///
 /// ## Parameters
 ///
-/// `nest_url` is the account's nest URL; the ceremony opens its **own**
-/// connections from it (anonymous for the succession, then as the successor for
-/// the sweep) rather than riding `nest`'s authenticated one — which is the whole
-/// reason this works for an owner a thief has locked out. `old_secret` is the
-/// current identity's 32-byte Ed25519 secret. `kit_input` is whatever the user
-/// pasted into `recovery-entry-phrase-field`: the shared `parse_kit` grammar
-/// takes both the `fauna://recovery` URI form and a bare 64-hex secret, and a
+/// `nest` is read for one thing only: the old identity's live MLS engine, off
+/// its own stashed conversations session (module doc) — the ceremony itself
+/// opens its **own** connections from `nest_url` (anonymous for the
+/// succession, then as the successor for the sweep), which is the whole reason
+/// this works for an owner a thief has locked out. `old_secret` is the current
+/// identity's 32-byte Ed25519 secret. `kit_input` is whatever the user pasted
+/// into `recovery-entry-phrase-field`: the shared `parse_kit` grammar takes
+/// both the `fauna://recovery` URI form and a bare 64-hex secret, and a
 /// malformed one costs no round trip.
 ///
 /// An `Err` here means the ceremony could not even start (unparseable secret
@@ -690,100 +740,49 @@ pub async fn succession_succeed_with_held_kit(
     accounts: Arc<FfiAccountRegistry>,
     store_path: Arc<dyn FfiSuccessorStorePath>,
 ) -> Result<FfiStolenOutcome, FfiError> {
-    let identity = ActorKeypair::from_secret(secret32(&old_secret)?);
-    let old_actor_id = identity.actor_id();
-
-    // The old identity's live engine, read off this client's own session rather
-    // than passed in (module doc). `None` is an ordinary answer.
     let old_engine = nest.conversations_engine();
-
-    // The resolver, wrapped once so both arms pass the same `FnOnce`. It is
-    // invoked by the ceremony AFTER the successor's connect — never here.
-    let db_path_for = move |successor_actor_hex: &str| -> PathBuf {
-        PathBuf::from(store_path.mls_db_path(successor_actor_hex.to_string()))
-    };
-
-    let client = RecoveryClient::new(nest.nest_arc());
-    // No status re-read first: the kit is the whole authorization, and a chain
-    // read here would only add a round trip a locked-out owner can fail on.
-    // A refusal before the submit is the not-landed arm, not a fault: nothing
-    // moved and the seed it minted authorizes nothing.
-    let attempt =
-        match succeed_with_held_kit(&client, old_actor_id, &kit_input, Some(&identity)).await {
-            Ok(attempt) => attempt,
-            Err(e) => return Ok(stolen_outcome_view(&StolenOutcome::not_landed(e), false)),
-        };
-
-    // ── Steps 1–2: persist the seed, off the attempt, BEFORE matching arms, and
-    // verify it by read-back (`persist_successor_seed`). Reachable without
-    // matching on purpose — "persist before anything that can fail or block"
-    // does not depend on which arm this is.
-    let registry = accounts.registry();
-    let successor_secret_hex = attempt.successor_secret_hex().to_string();
-    let successor_actor_hex = attempt.successor_actor_id().to_hex();
-    let persisted = persist_successor_seed(
-        registry,
-        &successor_secret_hex,
-        &successor_actor_hex,
-        &nest_url,
-    );
-
-    // ── Step 3: the arms. The confirmed one lands; only the unconfirmed one has
-    // to ask the nest whether the account moved at all.
-    let outcome = match attempt {
-        SuccessionAttempt::Confirmed(handoff) => {
-            let sweep =
-                sweep_after_succession(&nest_url, old_engine.as_deref(), &handoff, db_path_for)
-                    .await;
-            StolenOutcome::Landed(LandedSuccession::new(
-                handoff.successor_secret_hex().to_string(),
-                handoff.new_actor_id,
-                sweep,
-                handoff.succeeded_at,
-            ))
-        }
-        SuccessionAttempt::Unconfirmed(unconfirmed) => {
-            finish_unconfirmed_succession(
-                &nest_url,
-                old_engine.as_deref(),
-                unconfirmed.old_actor_id,
-                unconfirmed.successor_secret_hex(),
-                &unconfirmed.error,
-                registry,
-                db_path_for,
-            )
-            .await
-        }
-    };
-    let StolenOutcome::Landed(landed) = &outcome else {
-        return Ok(stolen_outcome_view(&outcome, persisted));
-    };
-
-    // ── Step 4: the LINK, after the arm resolved — never beside `add_account`.
-    // Never fatal: every aftermath consumer degrades quietly without it, but a
-    // succession that landed must not be reported as a failure over a bookkeeping
-    // write (`FfiAccountRegistry::record_succession`).
-    //
-    // Parked FIRST, in the same registry: what only this ceremony knows (the
-    // sweep's roster, the nest's commit stamp) is the member-item and
-    // filter-mark raises' input, drained by the successor's post-store-ready
-    // pass — the single durable decision point of those raises, so no app
-    // carries it across its account switch
-    // (`fauna_client_recovery::aftermath::PendingCeremony`).
-    #[cfg(feature = "recovery-aftermath")]
-    fauna_client_recovery::aftermath::PendingCeremony::new(
-        &old_actor_id,
-        &landed.sweep.review_roster(),
-        landed.succeeded_at,
+    // The platform store root: the live runtime answers on a signed-in
+    // surface, so the at-rest fallback is never this export's main path.
+    run_stolen_ceremony(
+        nest_url, old_secret, kit_input, old_engine, accounts, store_path, None,
     )
-    .park(registry, &landed.new_actor_id.to_hex());
-    if let Err(e) =
-        registry.record_succession(&old_actor_id.to_hex(), &landed.new_actor_id.to_hex())
-    {
-        tracing::error!(error = %e, "succession: recording the predecessor link failed");
-    }
+    .await
+}
 
-    Ok(stolen_outcome_view(&outcome, persisted))
+/// The same ceremony from the **locked launch surface** — `identity-stolen-button`
+/// on the step `identity_stolen_entry` (`docs/goal/ui/sessions.md` § Layout &
+/// flow → *The locked surface*; `devices.md` § The locked state). A locked app
+/// has no session, so this takes no [`FfiNestClient`]: there is no live MLS
+/// engine to hand over, the group sweep reports that it did not run, and the
+/// successor finishes it from Settings ([`succession_retry_group_sweep`]).
+/// Everything else — the anonymous connection, the persist-first order, the
+/// read-back, the link, what the caller owes — is
+/// [`succession_succeed_with_held_kit`]'s, through the one shared body.
+///
+/// `store_container_dir` locates the account store as the account runtime
+/// does (`None` = the platform location; a sandboxed shell passes its
+/// container): with no runtime up, the predecessor's departed fleet is read
+/// from its store there (`succession-aftermath.md` § Re-key scope →
+/// *Predecessor devices are departed devices*).
+#[fauna_uniffi_async::export(default(store_container_dir = None))]
+pub async fn succession_succeed_stolen_locked(
+    nest_url: String,
+    old_secret: Vec<u8>,
+    kit_input: String,
+    accounts: Arc<FfiAccountRegistry>,
+    store_path: Arc<dyn FfiSuccessorStorePath>,
+    store_container_dir: Option<String>,
+) -> Result<FfiStolenOutcome, FfiError> {
+    run_stolen_ceremony(
+        nest_url,
+        old_secret,
+        kit_input,
+        None,
+        accounts,
+        store_path,
+        store_container_dir,
+    )
+    .await
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1252,34 +1251,18 @@ mod tests {
     /// The lines an app paints are the SHARED selection, reached through the
     /// view it carried across the switch — pinned at this boundary so an app
     /// cannot be handed the pieces to select them a second way. The
-    /// `groups == 0` silence and the retry-affordance split are the shared
-    /// crate's own tests; this checks only that the boundary delegates.
+    /// `groups == 0` silence is the shared crate's own test; this checks only that the boundary delegates.
     #[test]
     fn sweep_copy_is_the_shared_selection_over_the_carried_view() {
-        use fauna_client_recovery::ceremony::SweepRetryAffordance;
         let none = FfiSweepView::from(&SweepStatus::NoEngine);
-        let without = sweep_copy(none.clone(), false);
-        let with = sweep_copy(none, true);
         assert_eq!(
-            without.outcome,
-            SweepStatus::NoEngine
-                .render_copy(SweepRetryAffordance::Absent)
-                .outcome
-        );
-        assert_eq!(
-            with.outcome,
-            SweepStatus::NoEngine
-                .render_copy(SweepRetryAffordance::Rendered)
-                .outcome
-        );
-        assert_ne!(
-            with.outcome, without.outcome,
-            "the degraded arm names the button only where the app says it renders it"
+            sweep_copy(none).outcome,
+            SweepStatus::NoEngine.render_copy().outcome
         );
 
         let empty = FfiSweepView::from(&SweepStatus::Ran(Box::default()));
         assert!(!empty.owes_work, "nothing to move, nothing to finish");
-        let copy = sweep_copy(empty, false);
+        let copy = sweep_copy(empty);
         assert_eq!(
             (copy.outcome, copy.unattested),
             (None, None),
@@ -1581,7 +1564,12 @@ mod tests {
         let actor = ActorKeypair::from_secret_hex(&secret)
             .unwrap()
             .actor_id_hex();
-        persist_successor_seed(accounts.registry(), &secret, &actor, "https://nest.example")
+        // The shared ceremony's persist, then this face's read-back.
+        let _ =
+            accounts
+                .registry()
+                .add_account(&secret, Some("https://nest.example"), Some("dev-1"));
+        successor_reads_back(accounts.registry(), &secret, &actor)
     }
 
     /// The succession ceremony's read-back verdict (`identity-succession.md`

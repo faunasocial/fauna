@@ -313,9 +313,9 @@ class MailAliasesActions:
     def delete(self, index: int) -> None:
         """Destructively delete the alias at `index` via the overflow-menu's
         Delete. Two-click inline confirm (no modal), the first tap relabelling
-        to `common.confirm_q` ("Confirm?"), on every app but android, whose
-        overflow menu is a real dropdown whose Delete item deletes on one tap
-        (apps/common.md § Two-click confirm records the gap). The inter-click gap is pacing for that re-render, not a
+        to `common.confirm_q` ("Confirm?") on every app — the overflow-menu
+        node is the inline Delete button itself, never a dropdown
+        (apps/common.md § Two-click confirm). The inter-click gap is pacing for that re-render, not a
         correctness wait — the caller deadline-polls `wait_for_pattern_gone`
         against ground truth after this returns."""
         self.arm_delete(index)

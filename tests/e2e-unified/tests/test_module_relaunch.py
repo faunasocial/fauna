@@ -1,6 +1,6 @@
 """Module-boundary cold relaunch is a 7-app fixture contract, not apple's workaround.
 
-`testing.md` § point 10 (a launch is isolated from the box it runs on). The
+`e2e-launch-isolation.md` convention 10 (a launch is isolated from the box it runs on). The
 `app` fixture cold-relaunches the session-scoped app process at every test-
 MODULE boundary, so each module starts against a fresh app instance — the same
 baseline it would see run in isolation. The decision is driver-type-free:
@@ -15,10 +15,10 @@ Two properties are load-bearing:
     a driver the table "never heard of" cannot silently skip the contract —
     convention 7's `app_capabilities.py` lesson.
 
-  * **An absence is declared and pinned, never silent.** Android's bridge
-    keeps no relaunchable session today, so its driver answers False; the pin
-    below fails the moment it gains a real `recover()`, at which point the
-    absence note (drivers/android.py) and the capture go with it.
+  * **An absence is declared and pinned, never silent.** All seven drivers
+    relaunch today (android joined last: it cycles the app in place through
+    the instrumentation bridge); a driver that loses or lacks a real
+    `recover()` fails the pin below and must declare its absence there.
 """
 
 import pytest
@@ -116,8 +116,8 @@ def test_an_incapable_driver_is_never_asked_to_recover():
 def test_every_driver_declares_its_relaunch_capability():
     """Equality-pinned per driver, instantiating each class and asking the
     real method — a hand-maintained expectation, deliberately: when a driver's
-    status changes (android gaining a real recover()), this fails and forces
-    the absence declaration and its NEXT capture to move in the same change.
+    status changes, this fails and forces the absence declaration to move in
+    the same change.
     """
     from drivers.android import AndroidBridgeDriver
     from drivers.ios import IosInProcessDriver
@@ -134,11 +134,7 @@ def test_every_driver_declares_its_relaunch_capability():
         WindowsBridgeDriver: True,
         MacosInProcessDriver: True,
         IosInProcessDriver: True,
-        # Android's recover() is the base bridge health-probe: it relaunches
-        # nothing, so the module-boundary contract is a declared absence there
-        # (drivers/android.py — build recover() when
-        # host e2e exists, then flip this pin).
-        AndroidBridgeDriver: False,
+        AndroidBridgeDriver: True,
     }
     actual = {
         cls: cls().supports_cold_relaunch() for cls in expected

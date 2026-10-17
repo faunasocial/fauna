@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import SwiftUI
 
 /// One bridge's card content (identity + settings + unlink, or the metadata-
@@ -420,3 +423,4 @@ private struct BridgeNumberSettingRow: View {
         Task { await vm.updateSetting(bridge: bridge, key: setting.key, value: parsed) }
     }
 }
+#endif // !FAUNA_KIDS

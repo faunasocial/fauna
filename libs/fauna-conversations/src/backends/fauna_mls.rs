@@ -18,10 +18,10 @@
 use crate::address::{Rail, TypedAddress};
 use crate::backend::{
     BackendError, ChannelCursor, CommitGate, ConvRpcError, ConversationsRpc, CustodyCeremonySink,
-    DomainEvidence, FolderCustodySink, GroupReceptionKeys, HistoryPersist, InboundBucket, MailFeed,
-    ProviderPersist, RailBackend, RailInboundMessage, ResolveResult, RoomCeremonyRpc,
-    RoomGenerationReader, RoomPolicyEdit, RoomPolicyRebuild, RoomPrincipalKind, RoomRosterEntry,
-    RoomRosterRead, RoomRosterReader, RoomRosterReport, RoomRosterReportOutcome,
+    DomainEvidence, FolderCustodySink, FolderEnvelopeOwner, GroupReceptionKeys, HistoryPersist,
+    InboundBucket, MailFeed, ProviderPersist, RailBackend, RailInboundMessage, ResolveResult,
+    RoomCeremonyRpc, RoomGenerationReader, RoomPolicyEdit, RoomPolicyRebuild, RoomPrincipalKind,
+    RoomRosterEntry, RoomRosterRead, RoomRosterReader, RoomRosterReport, RoomRosterReportOutcome,
     RoomRosterReporter, RoomSeams, SchedulingSink, SelfAddress, SendOutcome, ShareEndpointsSink,
     SiblingGroupAdopter, SuccessionWitness, WelcomeChannelKind, classify_foreign_non_answer,
 };
@@ -304,6 +304,81 @@ enum NestRead {
     Revoke,
 }
 
+/// The most **distinct** succession statements one park slot holds — one slot
+/// per `(thread, participant)` on the conversations rail, one per channel on the
+/// folder rail (`identity-succession.md` § The succession statement (wire) →
+/// *The slot's replacement policy*). A hard-coded bound, not a choice: it caps
+/// what a member posting junk for one identity can make this device hold, and
+/// the admission bound (roster row / recorded owner) caps the slots.
+pub const PARKED_PER_SLOT: usize = 4;
+
+/// One parked succession statement and what the last witness pass said of it.
+#[derive(Debug, Clone)]
+struct Parked {
+    statement: fauna_core::recovery::SignedIdentitySuccession,
+    /// The witness VERIFIED it — parked for this group's remove-old commit, not
+    /// for an anchor. **Retention priority only, never trust**: it lets the
+    /// entry into a full slot ([`ParkedSlot::admit`]), and every re-drive
+    /// re-verifies the entry whatever it says.
+    verified: bool,
+}
+
+/// What [`ParkedSlot::admit`] did with a statement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Admitted {
+    /// A new entry (into a free place, or — verified only — in place of the
+    /// oldest unverified entry of a full slot).
+    Added,
+    /// The same bytes were already parked; a verified copy marks the held one.
+    AlreadyHeld,
+    /// The slot is full and the statement is unverified: refused, and the
+    /// caller counts it (`SuccessionStatementCounts::park_full`).
+    Refused,
+}
+
+/// One park slot: a bounded set of distinct statements that **displaces
+/// nothing** a later post could beat — first-come kept, a full slot refuses —
+/// save the one honest-direction exception, a verified statement, which only
+/// the recovery key can mint (`identity-succession.md` § The succession
+/// statement (wire) → *The slot's replacement policy*). Nothing anchor-free
+/// tells an honest parked statement from a junk-signed one, so no eviction rule
+/// could prefer the honest entry; retention is the policy.
+#[derive(Debug, Default)]
+struct ParkedSlot(Vec<Parked>);
+
+impl ParkedSlot {
+    fn admit(
+        &mut self,
+        statement: fauna_core::recovery::SignedIdentitySuccession,
+        verified: bool,
+    ) -> Admitted {
+        if let Some(held) = self.0.iter_mut().find(|p| p.statement == statement) {
+            held.verified |= verified;
+            return Admitted::AlreadyHeld;
+        }
+        let entry = Parked {
+            statement,
+            verified,
+        };
+        if self.0.len() < PARKED_PER_SLOT {
+            self.0.push(entry);
+            return Admitted::Added;
+        }
+        if verified && let Some(oldest) = self.0.iter().position(|p| !p.verified) {
+            self.0.remove(oldest);
+            self.0.push(entry);
+            return Admitted::Added;
+        }
+        Admitted::Refused
+    }
+
+    /// The statements alone, oldest first — what the folder rail rests (the
+    /// `verified` flag is RAM-only: a relaunch re-verifies everything anyway).
+    fn statements(&self) -> Vec<&fauna_core::recovery::SignedIdentitySuccession> {
+        self.0.iter().map(|p| &p.statement).collect()
+    }
+}
+
 /// A channel's message-log home, as this device knows it — the total encoding
 /// behind [`FaunaMlsBackend::channel_home`]. Its three states (this enum's two
 /// variants plus **absent from the map**) are what let the unauthenticated
@@ -429,6 +504,16 @@ pub struct FaunaMlsBackend {
     /// unreachable for the member it matters most for: one that ingested at
     /// join, then failed a rotation-commit ingest, and could never fetch again.
     ingested_folders: Mutex<HashSet<ChannelId>>,
+    /// The owner-side envelope re-seal seam ([`FolderEnvelopeOwner`]),
+    /// injected by the launch pass that builds the owner's `FoldersAuthor`;
+    /// unset, no walk re-seals anything and an envelope sealed behind the
+    /// group's epoch waits for the owner's next launch to converge it.
+    folder_envelope_owner: OnceLock<Arc<dyn FolderEnvelopeOwner>>,
+    /// `ChannelId → epoch` the owner seam last answered settled at — RAM-only,
+    /// empty each launch (the launch pass converges every owned envelope
+    /// itself). [`Self::maybe_converge_owned_envelope`] asks the seam only for
+    /// a channel whose current epoch differs from the one recorded here.
+    envelope_settled_at: Mutex<HashMap<ChannelId, u64>>,
     /// `ChannelId → `[`ChannelHome`]` — the channel's message-log routing.
     /// `Foreign(url)` names the nest whose log the drain relays `channel.fetch`
     /// to (`docs/goal/behavior/direct-messages.md` § Technical Flow — Cross-Nest,
@@ -756,19 +841,20 @@ pub struct FaunaMlsBackend {
     /// witness's own report cannot give, because a statement the poll never
     /// reached never reaches the witness either.
     succession_statements: SuccessionStatementTally,
-    /// Witness-refused statements retained for the harvest re-drive
-    /// (`identity-succession.md` § The succession statement → *the
-    /// peer-profile harvest*). Keyed by the statement's `old_actor_id`, latest
-    /// per thread; **admitted only for a current snapshot participant of the
-    /// bound thread** (only a roster row can ever be re-pointed, and the bound
+    /// Statements retained for a re-drive — witness-refused ones for the
+    /// harvest's (`identity-succession.md` § The succession statement → *the
+    /// peer-profile harvest*), verified ones for this group's remove-old
+    /// commit. Keyed by the statement's `old_actor_id`, then thread, each slot
+    /// a bounded set that displaces nothing ([`ParkedSlot`]; *The slot's
+    /// replacement policy*, same §); **admitted only for a current snapshot
+    /// participant of the bound thread** (only a roster row can ever be re-pointed, and the bound
     /// caps what an in-group forger of arbitrary `old_actor_id`s
     /// can make this hold at roster size). Session-lifetime by design: an
     /// at-rest variant was considered and rejected in the ratification — it
     /// would hand a forged statement durable per-session re-drive work plus an
     /// expiry policy, to close a seconds-wide race whose harm is rendering
     /// continuity only.
-    parked_successions:
-        Mutex<HashMap<ActorId, HashMap<ThreadId, fauna_core::recovery::SignedIdentitySuccession>>>,
+    parked_successions: Mutex<HashMap<ActorId, HashMap<ThreadId, ParkedSlot>>>,
     /// The **folder rail's** park store — witness-refused statements a FOLDER
     /// channel carried ([`route_folder_succession`]), keyed by `old_actor_id`
     /// then channel (a folder channel has no thread; `federation.md` § Cross-nest
@@ -777,7 +863,8 @@ pub struct FaunaMlsBackend {
     /// `old_actor_id` IS the channel's recorded folder owner** — the one marker
     /// a re-drive could ever re-point, the folder twin of the participant-row
     /// bound above, so an in-group forger of arbitrary `old_actor_id`s holds
-    /// this at one slot per channel.
+    /// this at one slot per channel — a [`ParkedSlot`] under the same
+    /// replacement policy as the store above.
     ///
     /// **Mirrored at rest, unlike the store above** — the engine's at-rest
     /// folder park (`MlsEngine::park_folder_succession`), drained into this map
@@ -795,9 +882,9 @@ pub struct FaunaMlsBackend {
     /// guards is a forked seat, not that race, and neither cost carries over:
     /// the harvest speaking for the owner forgets the rested copy whatever it
     /// decides — that settle is the expiry — so a forgery costs at most one
-    /// hold window per launch, and one slot per channel.
-    parked_folder_successions:
-        Mutex<HashMap<ActorId, HashMap<ChannelId, fauna_core::recovery::SignedIdentitySuccession>>>,
+    /// hold window per launch, and one slot per channel. The whole set rests,
+    /// statements only ([`ParkedSlot::statements`]).
+    parked_folder_successions: Mutex<HashMap<ActorId, HashMap<ChannelId, ParkedSlot>>>,
     /// Channels whose at-rest folder park this session has already drained
     /// into [`Self::parked_folder_successions`] — the once-per-channel memo
     /// (like [`Self::floor_backfill`]) that makes the drain the launch's first
@@ -908,6 +995,12 @@ pub struct SuccessionStatementCounts {
     /// climbing after the sweep should have spoken is the sweep never reaching
     /// that owner.
     pub held_commits: u64,
+    /// Statements **refused by a full park slot** — the bounded set's own
+    /// degrade (`identity-succession.md` § The succession statement (wire) →
+    /// *The slot's replacement policy*). A slot fills only with distinct
+    /// statements nobody could verify, so a non-zero count reads as a member
+    /// pre-filling the slot for an identity — the policy's accepted residual.
+    pub park_full: u64,
 }
 
 #[derive(Debug, Default)]
@@ -920,6 +1013,7 @@ struct SuccessionStatementTally {
     awaiting_remove_old: std::sync::atomic::AtomicU64,
     not_in_this_group: std::sync::atomic::AtomicU64,
     held_commits: std::sync::atomic::AtomicU64,
+    park_full: std::sync::atomic::AtomicU64,
 }
 
 impl SuccessionStatementTally {
@@ -934,6 +1028,7 @@ impl SuccessionStatementTally {
             awaiting_remove_old: self.awaiting_remove_old.load(Relaxed),
             not_in_this_group: self.not_in_this_group.load(Relaxed),
             held_commits: self.held_commits.load(Relaxed),
+            park_full: self.park_full.load(Relaxed),
         }
     }
 }
@@ -1170,6 +1265,8 @@ impl FaunaMlsBackend {
             folder_channels: Mutex::new(HashSet::new()),
             folder_custody: OnceLock::new(),
             ingested_folders: Mutex::new(HashSet::new()),
+            folder_envelope_owner: OnceLock::new(),
+            envelope_settled_at: Mutex::new(HashMap::new()),
             channel_home: Mutex::new(HashMap::new()),
             commit_gate: OnceLock::new(),
             channel_cursor: OnceLock::new(),
@@ -1283,39 +1380,65 @@ impl FaunaMlsBackend {
         self.succession_statements.snapshot()
     }
 
-    /// Park a witness-refused statement for the harvest re-drive. Latest per
-    /// `(old_actor, thread)` wins — statements are idempotent and only the
-    /// terminal pair matters, so one slot per row is enough.
+    /// Park a statement for a re-drive — refused by the witness for now
+    /// (`verified == false`, the harvest's wait), or verified and held for this
+    /// group's remove-old commit (`verified == true`). Admitted into the
+    /// `(old_actor, thread)` slot under the set rule ([`ParkedSlot::admit`]):
+    /// a new entry counts in `parked`, a full slot's refusal in `park_full`,
+    /// a copy already held in neither.
     fn park_succession(
         &self,
         thread_id: ThreadId,
         statement: fauna_core::recovery::SignedIdentitySuccession,
+        verified: bool,
     ) {
+        let admitted = self.admit_parked(thread_id, statement, verified);
+        self.count_park(admitted);
+    }
+
+    /// Bump the tally for one [`ParkedSlot::admit`] outcome at a first park.
+    fn count_park(&self, admitted: Admitted) {
+        use std::sync::atomic::Ordering::Relaxed;
+        match admitted {
+            Admitted::Added => self.succession_statements.parked.fetch_add(1, Relaxed),
+            Admitted::Refused => self.succession_statements.park_full.fetch_add(1, Relaxed),
+            Admitted::AlreadyHeld => 0,
+        };
+    }
+
+    fn admit_parked(
+        &self,
+        thread_id: ThreadId,
+        statement: fauna_core::recovery::SignedIdentitySuccession,
+        verified: bool,
+    ) -> Admitted {
         let old = statement.statement.old_actor_id;
         self.parked_successions
             .lock()
             .unwrap()
             .entry(old)
             .or_default()
-            .insert(thread_id, statement);
-        self.succession_statements
-            .parked
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            .entry(thread_id)
+            .or_default()
+            .admit(statement, verified)
     }
 
-    /// Take every parked statement for `old_actor` out of the store. The
-    /// re-drive re-inserts what the witness still refuses — fill-empty only,
-    /// so a statement parked while the re-drive ran is never displaced by the
-    /// older one it is re-considering.
-    fn take_parked_for(
-        &self,
-        old_actor: &ActorId,
-    ) -> Vec<(ThreadId, fauna_core::recovery::SignedIdentitySuccession)> {
+    /// Take every parked statement for `old_actor` out of the store, every
+    /// entry of every slot. The re-drive re-parks what it still cannot settle
+    /// through [`Self::repark_succession`] — the same set rule, so whatever was
+    /// parked while the re-drive ran is never displaced by the entries it is
+    /// re-considering.
+    fn take_parked_for(&self, old_actor: &ActorId) -> Vec<(ThreadId, Parked)> {
         self.parked_successions
             .lock()
             .unwrap()
             .remove(old_actor)
-            .map(|per_thread| per_thread.into_iter().collect())
+            .map(|per_thread| {
+                per_thread
+                    .into_iter()
+                    .flat_map(|(thread, slot)| slot.0.into_iter().map(move |p| (thread.clone(), p)))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -1327,96 +1450,95 @@ impl FaunaMlsBackend {
     ///
     /// Empties a predecessor's map when its last row goes, so the store does
     /// not accumulate empty shells for peers whose statements all settled.
-    fn take_parked_in_thread(
-        &self,
-        thread_id: &ThreadId,
-    ) -> Vec<fauna_core::recovery::SignedIdentitySuccession> {
+    fn take_parked_in_thread(&self, thread_id: &ThreadId) -> Vec<Parked> {
         let mut taken = Vec::new();
         self.parked_successions
             .lock()
             .unwrap()
             .retain(|_old, per_thread| {
-                if let Some(statement) = per_thread.remove(thread_id) {
-                    taken.push(statement);
+                if let Some(slot) = per_thread.remove(thread_id) {
+                    taken.extend(slot.0);
                 }
                 !per_thread.is_empty()
             });
         taken
     }
 
-    /// Re-insert a still-refused statement — but only into an empty slot (see
-    /// [`Self::take_parked_for`]).
-    fn repark_succession_if_empty(
-        &self,
-        thread_id: ThreadId,
-        statement: fauna_core::recovery::SignedIdentitySuccession,
-    ) {
-        let old = statement.statement.old_actor_id;
-        self.parked_successions
-            .lock()
-            .unwrap()
-            .entry(old)
-            .or_default()
-            .entry(thread_id)
-            .or_insert(statement);
+    /// Re-park a statement a re-drive could not settle, with what this pass
+    /// learned of it (`verified`) — admitted under the set rule like a first
+    /// park, so it never displaces what was parked while the re-drive ran. A
+    /// full slot's refusal counts in `park_full`; the re-park itself is not a
+    /// new park.
+    fn repark_succession(&self, thread_id: ThreadId, parked: Parked) {
+        if self.admit_parked(thread_id, parked.statement, parked.verified) == Admitted::Refused {
+            self.succession_statements
+                .park_full
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
-    /// The folder rail's [`Self::park_succession`]: latest per
-    /// `(old_actor, channel)` wins. Counted in the shared tally's `parked`.
-    /// Mirrored to the engine's at-rest folder park (one slot per channel —
-    /// the admission bound makes the owner the only `old_actor` one channel
+    /// The folder rail's [`Self::park_succession`]: admitted into the
+    /// `(old_actor, channel)` slot under the same set rule, counted in the
+    /// shared tally's `parked`/`park_full`. Its only caller parks refused
+    /// statements, so it admits unverified. On a new entry the **whole set**
+    /// is mirrored to the engine's at-rest folder park (one value per channel
+    /// — the admission bound makes the owner the only `old_actor` one channel
     /// can park), so the hold survives the session.
     fn park_folder_succession(
         &self,
         channel_id: ChannelId,
         statement: fauna_core::recovery::SignedIdentitySuccession,
     ) {
-        match fauna_core::encoding::canonical_encode(&statement) {
-            Ok(bytes) => self.engine.park_folder_succession(&channel_id, &bytes),
-            Err(e) => tracing::warn!(
-                channel = %channel_id,
-                "folder succession statement not rested (encode failed): {e}"
-            ),
-        }
         let old = statement.statement.old_actor_id;
-        self.parked_folder_successions
-            .lock()
-            .unwrap()
-            .entry(old)
-            .or_default()
-            .insert(channel_id, statement);
-        self.succession_statements
-            .parked
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (admitted, rest) = {
+            let mut parked = self.parked_folder_successions.lock().unwrap();
+            let slot = parked
+                .entry(old)
+                .or_default()
+                .entry(channel_id)
+                .or_default();
+            let admitted = slot.admit(statement, false);
+            let rest = (admitted == Admitted::Added)
+                .then(|| fauna_core::encoding::canonical_encode(&slot.statements()));
+            (admitted, rest)
+        };
+        match rest {
+            Some(Ok(bytes)) => self.engine.park_folder_succession(&channel_id, &bytes),
+            Some(Err(e)) => tracing::warn!(
+                channel = %channel_id,
+                "folder succession statements not rested (encode failed): {e}"
+            ),
+            None => {}
+        }
+        self.count_park(admitted);
     }
 
     /// The harvest re-drive's cut of the folder park store
     /// ([`Self::take_parked_for`]'s twin).
-    fn take_parked_folder_for(
-        &self,
-        old_actor: &ActorId,
-    ) -> Vec<(ChannelId, fauna_core::recovery::SignedIdentitySuccession)> {
+    fn take_parked_folder_for(&self, old_actor: &ActorId) -> Vec<(ChannelId, Parked)> {
         self.parked_folder_successions
             .lock()
             .unwrap()
             .remove(old_actor)
-            .map(|per_channel| per_channel.into_iter().collect())
+            .map(|per_channel| {
+                per_channel
+                    .into_iter()
+                    .flat_map(|(channel, slot)| slot.0.into_iter().map(move |p| (channel, p)))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
     /// The commit re-drive's cut of the folder park store
     /// ([`Self::take_parked_in_thread`]'s twin, keyed by channel).
-    fn take_parked_folder_in_channel(
-        &self,
-        channel_id: &ChannelId,
-    ) -> Vec<fauna_core::recovery::SignedIdentitySuccession> {
+    fn take_parked_folder_in_channel(&self, channel_id: &ChannelId) -> Vec<Parked> {
         let mut taken = Vec::new();
         self.parked_folder_successions
             .lock()
             .unwrap()
             .retain(|_old, per_channel| {
-                if let Some(statement) = per_channel.remove(channel_id) {
-                    taken.push(statement);
+                if let Some(slot) = per_channel.remove(channel_id) {
+                    taken.extend(slot.0);
                 }
                 !per_channel.is_empty()
             });
@@ -1424,9 +1546,11 @@ impl FaunaMlsBackend {
     }
 
     /// Drain `channel_id`'s at-rest folder park into the RAM store — once per
-    /// channel per session, ahead of the launch's first walk over it, and only
-    /// into an empty slot (a statement this session parked itself is newer).
-    /// An undecodable rested copy is forgotten: it can hold nothing.
+    /// channel per session, ahead of the launch's first walk over it — each
+    /// rested statement admitted unverified under the set rule (a relaunch
+    /// re-verifies everything). A rested value that does not decode as the set
+    /// is forgotten: it can hold nothing (the 0.1.x window — an older
+    /// single-statement value is a hold lost once).
     fn load_rested_folder_park(&self, channel_id: &ChannelId) {
         if !self.folder_park_loaded.lock().unwrap().insert(*channel_id) {
             return;
@@ -1434,11 +1558,19 @@ impl FaunaMlsBackend {
         let Some(bytes) = self.engine.parked_folder_succession(channel_id) else {
             return;
         };
-        match fauna_core::encoding::canonical_decode::<fauna_core::recovery::SignedIdentitySuccession>(
-            &bytes,
-        ) {
-            Ok(statement) => self.repark_folder_succession_if_empty(*channel_id, statement),
-            Err(_) => {
+        match decode_rested_park(&bytes) {
+            Some(statements) => {
+                for statement in statements {
+                    self.repark_folder_succession(
+                        *channel_id,
+                        Parked {
+                            statement,
+                            verified: false,
+                        },
+                    );
+                }
+            }
+            None => {
                 self.engine.forget_parked_folder_succession(channel_id);
             }
         }
@@ -1446,7 +1578,7 @@ impl FaunaMlsBackend {
 
     /// Forget every at-rest folder park naming `old_actor` — the harvest has
     /// spoken for that identity, so no later launch may hold on it again. An
-    /// undecodable rested copy goes too.
+    /// undecodable rested value goes too.
     fn forget_rested_folder_parks_naming(&self, old_actor: &ActorId) {
         for (channel_id, bytes) in self.engine.parked_folder_successions() {
             if rested_statement_names(&bytes, old_actor) {
@@ -1456,8 +1588,10 @@ impl FaunaMlsBackend {
     }
 
     /// Forget `channel_id`'s at-rest folder park if it names `old_actor` — the
-    /// channel's walk dropped that statement, and a later owner's rested one
-    /// (the slot is latest-wins) is not this drop's to forget.
+    /// channel's walk dropped or settled a statement about that owner, and a
+    /// later owner's rested set is not this drop's to forget. The whole rested
+    /// set goes: every entry names the one owner the channel admits, and a
+    /// settled entry moved the marker the rest were waiting to move.
     fn forget_rested_folder_park_naming(&self, channel_id: &ChannelId, old_actor: &ActorId) {
         if self
             .engine
@@ -1468,20 +1602,24 @@ impl FaunaMlsBackend {
         }
     }
 
-    /// [`Self::repark_succession_if_empty`] for the folder park store.
-    fn repark_folder_succession_if_empty(
-        &self,
-        channel_id: ChannelId,
-        statement: fauna_core::recovery::SignedIdentitySuccession,
-    ) {
-        let old = statement.statement.old_actor_id;
-        self.parked_folder_successions
+    /// [`Self::repark_succession`] for the folder park store — RAM only: the
+    /// rested set is the one the first park wrote, and a settle forgets it.
+    fn repark_folder_succession(&self, channel_id: ChannelId, parked: Parked) {
+        let old = parked.statement.statement.old_actor_id;
+        let admitted = self
+            .parked_folder_successions
             .lock()
             .unwrap()
             .entry(old)
             .or_default()
             .entry(channel_id)
-            .or_insert(statement);
+            .or_default()
+            .admit(parked.statement, parked.verified);
+        if admitted == Admitted::Refused {
+            self.succession_statements
+                .park_full
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     /// Grant the Rule-2 cursor rewind for `channel` at most once per session:
@@ -1542,6 +1680,14 @@ impl FaunaMlsBackend {
     /// a shared set but cannot decrypt its bytes (the pre-Phase-0 behaviour).
     pub fn set_folder_custody_sink(&self, sink: Arc<dyn FolderCustodySink>) {
         let _ = self.folder_custody.set(sink);
+    }
+
+    /// Register the owner-side envelope re-seal seam ([`FolderEnvelopeOwner`])
+    /// — the owner twin of [`Self::set_folder_custody_sink`], injected once by
+    /// the launch pass that builds the owner's `FoldersAuthor`; idempotent
+    /// (the `OnceLock` keeps the first).
+    pub fn set_folder_envelope_owner(&self, owner: Arc<dyn FolderEnvelopeOwner>) {
+        let _ = self.folder_envelope_owner.set(owner);
     }
 
     /// Register the in-group succession-statement verifier
@@ -3483,9 +3629,11 @@ impl FaunaMlsBackend {
     }
 
     /// Walk the room's anchored chain ([`Self::room_policy_chains`]) until it
-    /// reaches version `through`: fetch each missing link from the home nest
-    /// ([`RoomRosterReader::read_policy_version`]), anchor version 1 to the
-    /// room id under the served birth salt, and extend by the one judge. The
+    /// reaches version `through`: fetch the missing links from the home nest a
+    /// run at a time ([`RoomRosterReader::read_policy_versions`] — a nest that
+    /// predates ranges serves a run of one, so the walk is then a version per
+    /// read), anchor version 1 to the room id under the served birth salt, and
+    /// extend by the one judge, every link of every run judged alike. The
     /// proven prefix is kept whatever the outcome. `Err` is why the chain does
     /// not reach `through` this pass — [`FloorDeleteVerdict::NotYet`] for a
     /// link not reachable yet (or the pass's fetch cap), `Refused` for one
@@ -3510,17 +3658,18 @@ impl FaunaMlsBackend {
             .get(channel_id)
             .cloned();
         let mut verdict = None;
+        // Reads made (the cap counts reads, not links), and the rest of the run
+        // the last read served — consumed in order before the next read.
         let mut fetched = 0u64;
+        let mut run = std::collections::VecDeque::<Vec<u8>>::new();
         while chain.as_ref().is_none_or(|c| c.head_version() < named) {
-            if fetched == MAX_POLICY_VERSION_FETCHES {
-                verdict = Some(FloorDeleteVerdict::NotYet);
-                break;
-            }
-            fetched += 1;
             let want = chain.as_ref().map_or(1, |c| c.head_version() + 1);
             if let Some(held) = chain.as_mut()
                 && let Some(link) = seats.pending.take_if(|p| p.policy.version == want)
             {
+                // The parked link stands in for the run's first: the run no
+                // longer starts at the head.
+                run.clear();
                 match self
                     .extend_resolving(channel_id, held, link, seats, first_asks, waiting)
                     .await
@@ -3532,24 +3681,46 @@ impl FaunaMlsBackend {
                     }
                 }
             }
-            let (policy, birth_salt) = match reader
-                .read_policy_version(
-                    channel_id.to_string(),
-                    self.channel_home_url(channel_id),
-                    want,
-                )
-                .await
-            {
-                crate::backend::RoomPolicyVersionRead::Served { policy, birth_salt } => {
-                    (policy, birth_salt)
-                }
-                crate::backend::RoomPolicyVersionRead::NotHeld => {
-                    verdict = Some(FloorDeleteVerdict::Refused);
-                    break;
-                }
-                crate::backend::RoomPolicyVersionRead::Unavailable => {
+            let (policy, birth_salt) = if let Some(next) = run.pop_front() {
+                (next, None)
+            } else {
+                if fetched == MAX_POLICY_VERSION_FETCHES {
                     verdict = Some(FloorDeleteVerdict::NotYet);
                     break;
+                }
+                fetched += 1;
+                let span = (named - want + 1)
+                    .min(u64::from(fauna_mls::room_policy::MAX_POLICY_VERSION_SPAN))
+                    as u32;
+                match reader
+                    .read_policy_versions(
+                        channel_id.to_string(),
+                        self.channel_home_url(channel_id),
+                        want,
+                        span,
+                    )
+                    .await
+                {
+                    crate::backend::RoomPolicyVersionsRead::Served {
+                        policies,
+                        birth_salt,
+                    } => {
+                        let mut policies = policies.into_iter();
+                        let Some(first) = policies.next() else {
+                            verdict = Some(FloorDeleteVerdict::Refused);
+                            break;
+                        };
+                        run.extend(policies);
+                        (first, birth_salt)
+                    }
+                    crate::backend::RoomPolicyVersionsRead::NotHeld => {
+                        verdict = Some(FloorDeleteVerdict::Refused);
+                        break;
+                    }
+                    crate::backend::RoomPolicyVersionsRead::Unavailable => {
+                        verdict = Some(FloorDeleteVerdict::NotYet);
+                        break;
+                    }
                 }
             };
             let Ok(link) = fauna_core::encoding::canonical_decode::<SignedRoomPolicy>(&policy)
@@ -4478,7 +4649,7 @@ impl FaunaMlsBackend {
 
     /// Stage + distribute + merge a room-policy commit installing what
     /// `rebuild` derives from the channel's current policy — the
-    /// gated/gate-less twin of [`Self::evict_leaf_locked`] for a
+    /// gated/gate-less twin of [`Self::evict_member_locked`] for a
     /// GroupContextExtensions commit, with the same Rule-1 discipline (merge
     /// only once the nest accepted). **The caller must already hold
     /// [`Self::channel_lock`]**, and must have judged the edit against the
@@ -4904,6 +5075,35 @@ impl FaunaMlsBackend {
             channel_id,
             merged,
         );
+    }
+
+    /// The owner's half of the envelope ordering
+    /// (`mls-group-key-material.md` § Admitting a member, *Envelope
+    /// ordering*): after a clean walk of a folder channel whose epoch moved
+    /// since the owner seam last settled it — a member's takeover the walk
+    /// applied, or this device's own commit merged through the gate — ask the
+    /// seam to re-seal the set's envelope at the current epoch. The envelope
+    /// opens only at the epoch it was sealed at, so without this a takeover
+    /// leaves every member unable to open it until the owner's next launch.
+    /// Asked once per epoch per channel; a `false` answer leaves the next walk
+    /// to ask again. No-op when no seam is registered.
+    async fn maybe_converge_owned_envelope(&self, channel_id: &ChannelId) {
+        let Some(owner) = self.folder_envelope_owner.get() else {
+            return;
+        };
+        // An unreadable epoch decides nothing; the next walk asks again.
+        let Ok(epoch) = self.engine.current_epoch(channel_id) else {
+            return;
+        };
+        if self.envelope_settled_at.lock().unwrap().get(channel_id) == Some(&epoch) {
+            return;
+        }
+        if owner.converge_envelope(&channel_id.0).await {
+            self.envelope_settled_at
+                .lock()
+                .unwrap()
+                .insert(*channel_id, epoch);
+        }
     }
 
     /// The injected [`ChannelCursor`], or `None` when unset — then the background
@@ -5785,22 +5985,35 @@ impl FaunaMlsBackend {
         Ok(())
     }
 
-    /// Confirm a resolved actor is a reachable Fauna peer and wrap it in a
-    /// `Resolved(Fauna)`. Both `resolve_address` forms (actor-id and handle)
-    /// end here: a non-destructive `keypackage.count > 0` probe means there's a
-    /// key package to add them to a group with. `count == 0` is
-    /// reachable-but-exhausted, indistinguishable from non-existent over this
-    /// probe and equally un-addable, so it keeps the manager's chain falling
-    /// through (`NotFound`); a transport fault is `Error` — the home nest is a
-    /// known Fauna domain by definition, the same rule `resolve_foreign` applies
-    /// to a known foreign one (`federation.md` § Peer-auth model →
-    /// *Discovery-failure semantics*), and `Error` is terminal for the chain.
-    async fn resolve_reachable(&self, actor_id: ActorId, handle: String) -> ResolveResult {
-        match self.rpc.keypackage_count(hex::encode(actor_id.0)).await {
-            Ok(count) if count > 0 => {
-                ResolveResult::Resolved(TypedAddress::Fauna { handle, actor_id })
-            }
-            Ok(_) => ResolveResult::NotFound,
+    /// Wrap a same-nest actor in a `Resolved(Fauna)` when it is reachable.
+    /// Reachability is a boolean on every arm, never another actor's count
+    /// (`federation.md` § Key packages — privacy & exhaustion): ≥1 usable key
+    /// package, one-time **or** last-resort, means there is one to add them to a
+    /// group with. Not addressable is indistinguishable from non-existent and
+    /// equally un-addable, so it keeps the manager's chain falling through
+    /// (`NotFound`).
+    fn reachable(addressable: bool, actor_id: ActorId, handle: String) -> ResolveResult {
+        if addressable {
+            ResolveResult::Resolved(TypedAddress::Fauna { handle, actor_id })
+        } else {
+            ResolveResult::NotFound
+        }
+    }
+
+    /// The actor-id form's probe: the authed same-nest
+    /// `fauna.conversations.keypackage.addressable` boolean (there is no handle
+    /// to look up, so no `by_handle` reply carries the bit). A transport fault
+    /// is `Error` — the home nest is a known Fauna domain by definition, the
+    /// same rule `resolve_foreign` applies to a known foreign one
+    /// (`federation.md` § Peer-auth model → *Discovery-failure semantics*), and
+    /// `Error` is terminal for the chain.
+    async fn resolve_actor_id(&self, actor_id: ActorId, handle: String) -> ResolveResult {
+        match self
+            .rpc
+            .keypackage_addressable(hex::encode(actor_id.0))
+            .await
+        {
+            Ok(addressable) => Self::reachable(addressable, actor_id, handle),
             Err(e) => ResolveResult::Error(e.to_string()),
         }
     }
@@ -5878,8 +6091,8 @@ impl FaunaMlsBackend {
 
     /// Resolve a typed `localpart@domain` whose `domain` is **foreign** (not this
     /// nest's) directly against that peer nest: anonymous `by_handle` over TLS,
-    /// with reachability taken from the reply's `addressable` boolean — a foreign
-    /// client cannot run a same-nest `keypackage.count` probe
+    /// with reachability taken from the reply's `addressable` boolean, exactly as
+    /// the same-nest handle arm reads it
     /// (`docs/goal/architecture/federation.md` § Key packages).
     ///
     /// **Discovery-failure semantics** (`federation.md` § Peer-auth model,
@@ -6389,20 +6602,26 @@ impl FaunaMlsBackend {
         }
     }
 
-    /// Stage + distribute + merge a `remove_member` commit evicting `leaf` — an
+    /// Stage + distribute + merge a `remove_member` commit evicting `actor` — an
     /// MLS Commit that re-keys the group so the removed member can't follow
     /// forward. No Welcome: the removed member simply falls off the epoch.
     /// **The caller must already hold [`Self::channel_lock`]** (see
     /// [`Self::admit_member_locked`] for the full gated/gate-less rationale,
-    /// which is identical here). Returns the commit's log position.
-    async fn evict_leaf_locked(
+    /// which is identical here). Returns the commit's log position, or `None`
+    /// when `actor` holds no leaf any more (nothing sent). The leaf is resolved
+    /// from the actor at stage time — on the gated path on every rebase attempt —
+    /// so the commit can only ever evict the member it names.
+    async fn evict_member_locked(
         &self,
         channel_id: &ChannelId,
-        leaf: u32,
-    ) -> Result<i64, BackendError> {
+        actor: &ActorId,
+    ) -> Result<Option<i64>, BackendError> {
         if let Some(gate) = self.commit_gate() {
-            return gate.gated_remove_member(*channel_id, leaf).await;
+            return gate.gated_remove_member(*channel_id, *actor).await;
         }
+        let Some(leaf) = self.engine.find_leaf_by_identity(channel_id, actor) else {
+            return Ok(None);
+        };
         let commit_bytes = self
             .engine
             .remove_member_staged(channel_id, leaf)
@@ -6420,7 +6639,7 @@ impl FaunaMlsBackend {
                     .merge_pending_commit(channel_id)
                     .map_err(|e| BackendError::Internal(format!("merge remove commit: {e}")))?;
                 self.persist_engine_state();
-                Ok(seq)
+                Ok(Some(seq))
             }
             Err(e) => {
                 if let Err(clear_err) = self.engine.clear_pending_commit(channel_id) {
@@ -6673,7 +6892,7 @@ impl RailBackend for FaunaMlsBackend {
         // WebFinger / DID resolution is a later slice.)
         if let Some(actor_id) = parse_actor_id_hex(raw) {
             return self
-                .resolve_reachable(actor_id, raw.trim().to_string())
+                .resolve_actor_id(actor_id, raw.trim().to_string())
                 .await;
         }
 
@@ -6748,7 +6967,8 @@ impl RailBackend for FaunaMlsBackend {
                 // Canonical `localpart@domain` display, regardless of which form
                 // was typed (so a bare-handle chip still shows the full address).
                 let canonical = format!("{localpart}@{}", resolved.echoed_domain);
-                self.resolve_reachable(actor_id, canonical).await
+                // The reply already carries reachability — no second call.
+                Self::reachable(resolved.addressable, actor_id, canonical)
             }
             // Bare handle with no local actor → fall through to other rails.
             None => ResolveResult::NotFound,
@@ -6970,7 +7190,11 @@ impl RailBackend for FaunaMlsBackend {
         // row at Welcome delivery, precisely the step a crash-window add never
         // reached (`mls-group-key-material.md` § M2 *Admitting a member*).
         let mut healed_phantom = false;
-        if let Some(leaf) = self.engine.find_leaf_by_identity(&channel_id, &actor_id) {
+        if self
+            .engine
+            .find_leaf_by_identity(&channel_id, &actor_id)
+            .is_some()
+        {
             match self.roster_holds(&channel_id, &actor_hex).await? {
                 // On the roster ⇒ a healthy member, and this is a duplicate
                 // gesture (a stale overlay, a second device, a retry whose
@@ -6986,7 +7210,7 @@ impl RailBackend for FaunaMlsBackend {
                 // fresh below. A Welcome is mintable only inside the Add commit
                 // itself, so re-admission is the *only* way to produce one.
                 Some(false) => {
-                    self.evict_leaf_locked(&channel_id, leaf).await?;
+                    self.evict_member_locked(&channel_id, &actor_id).await?;
                     healed_phantom = true;
                 }
                 // Roster unreadable — a transport failure, or a
@@ -7149,19 +7373,23 @@ impl RailBackend for FaunaMlsBackend {
         // (`conversation-rooms.md` § Roles and authorization).
         self.ensure_may_remove(&channel_id, &actor_id)?;
 
-        let leaf = self
+        if self
             .engine
             .find_leaf_by_identity(&channel_id, &actor_id)
-            .ok_or_else(|| {
-                BackendError::Internal(format!(
-                    "{} is not a member of this group",
-                    hex::encode(actor_id.0)
-                ))
-            })?;
+            .is_none()
+        {
+            return Err(BackendError::Internal(format!(
+                "{} is not a member of this group",
+                hex::encode(actor_id.0)
+            )));
+        }
 
         // The gated driver's inner catch-up poll does not re-take this lock.
-        let commit_seq = self.evict_leaf_locked(&channel_id, leaf).await?;
-        self.report_roster(&channel_id, Some(commit_seq)).await;
+        // `None`: a catch-up folded a commit that already removed them — nothing
+        // was sent, so there is no fresh seq to report a roster at.
+        if let Some(commit_seq) = self.evict_member_locked(&channel_id, &actor_id).await? {
+            self.report_roster(&channel_id, Some(commit_seq)).await;
+        }
         Ok(())
     }
 
@@ -7885,12 +8113,13 @@ async fn redrive_parked_in_thread(
     let Some(witness) = backend.succession_witness() else {
         // The witness went away under us; put them back untouched rather than
         // let a roster move consume statements nothing can verify.
-        for statement in parked {
-            backend.repark_succession_if_empty(thread_id.clone(), statement);
+        for entry in parked {
+            backend.repark_succession(thread_id.clone(), entry);
         }
         return;
     };
-    for statement in parked {
+    for entry in parked {
+        let statement = &entry.statement;
         // A local pre-filter ahead of the witness, off the statement's own
         // CLAIMED pair: this commit moved one group's roster, and most parked
         // statements are waiting on something else entirely. Reading unverified
@@ -7905,19 +8134,28 @@ async fn redrive_parked_in_thread(
             &statement.statement.new_actor_id,
         ) != RosterPair::Complete
         {
-            backend.repark_succession_if_empty(thread_id.clone(), statement);
+            backend.repark_succession(thread_id.clone(), entry);
             continue;
         }
-        let verdict = match witness.verify(statement.clone()).await {
-            Some(verified) => {
-                settle_verified_succession(backend, manager, thread_id, channel_id, &verified)
-            }
+        // The flag follows the latest verdict: a refusal of a once-verified
+        // entry means its anchor was demoted, and it keeps no priority.
+        let (verdict, verified) = match witness.verify(statement.clone()).await {
+            Some(verified) => (
+                settle_verified_succession(backend, manager, thread_id, channel_id, &verified),
+                true,
+            ),
             // Refused now (the anchor was demoted, or never landed): that is
             // the harvest re-drive's wait, not ours. Keep holding it.
-            None => RosterPair::AwaitingRemoveOld,
+            None => (RosterPair::AwaitingRemoveOld, false),
         };
         if verdict != RosterPair::Complete {
-            backend.repark_succession_if_empty(thread_id.clone(), statement);
+            backend.repark_succession(
+                thread_id.clone(),
+                Parked {
+                    statement: entry.statement,
+                    verified,
+                },
+            );
         }
     }
 }
@@ -7976,7 +8214,7 @@ async fn redrive_after_harvest(
     // the re-read would settle on the head the seed just demoted.
     witness.harvest_settled(old_actor).await;
     let mut repointed = 0u32;
-    for (thread_id, statement) in backend.take_parked_for(old_actor) {
+    for (thread_id, entry) in backend.take_parked_for(old_actor) {
         // The anchor arriving is only half the question: the statement still
         // has to have happened in THIS group ([`roster_pair`]). A row parked
         // here was refused by the witness, never gated, so the gate runs for
@@ -7984,22 +8222,27 @@ async fn redrive_after_harvest(
         let Some(channel_id) = backend.channel_for(&thread_id) else {
             // The thread unbound under us (a restore in flight): the gate
             // cannot be read, so nothing is decided and nothing is dropped.
-            backend.repark_succession_if_empty(thread_id, statement);
+            backend.repark_succession(thread_id, entry);
             continue;
         };
-        let verdict = match witness.verify(statement.clone()).await {
-            Some(verified) => {
-                settle_verified_succession(backend, manager, &thread_id, &channel_id, &verified)
-            }
-            None => RosterPair::AwaitingRemoveOld,
+        let (verdict, verified) = match witness.verify(entry.statement.clone()).await {
+            Some(verified) => (
+                settle_verified_succession(backend, manager, &thread_id, &channel_id, &verified),
+                true,
+            ),
+            None => (RosterPair::AwaitingRemoveOld, false),
         };
         match verdict {
             RosterPair::Complete => repointed += 1,
             // Still waiting — on the anchor, or on this group's remove-old
             // commit. Either way the commit re-drive picks it up.
-            RosterPair::AwaitingRemoveOld => {
-                backend.repark_succession_if_empty(thread_id, statement)
-            }
+            RosterPair::AwaitingRemoveOld => backend.repark_succession(
+                thread_id,
+                Parked {
+                    statement: entry.statement,
+                    verified,
+                },
+            ),
             RosterPair::NotHere => {}
         }
     }
@@ -8011,14 +8254,20 @@ async fn redrive_after_harvest(
     for (channel_id, _) in backend.engine.parked_folder_successions() {
         backend.load_rested_folder_park(&channel_id);
     }
-    for (channel_id, statement) in backend.take_parked_folder_for(old_actor) {
-        match witness.verify(statement.clone()).await {
+    for (channel_id, entry) in backend.take_parked_folder_for(old_actor) {
+        match witness.verify(entry.statement.clone()).await {
             Some(verified) => {
                 if settle_folder_owner_succession(backend, &channel_id, &verified) {
                     repointed += 1;
                 }
             }
-            None => backend.repark_folder_succession_if_empty(channel_id, statement),
+            None => backend.repark_folder_succession(
+                channel_id,
+                Parked {
+                    statement: entry.statement,
+                    verified: false,
+                },
+            ),
         }
     }
     // Spoken for, whatever was decided: no later launch holds on this owner
@@ -8151,11 +8400,19 @@ fn settle_folder_owner_succession(
     }
 }
 
-/// Whether a rested folder-park value names `old_actor` — an undecodable one
-/// counts as naming everyone, since it can hold nothing and should go.
+/// A rested folder-park value as the set it rests
+/// ([`FaunaMlsBackend::park_folder_succession`]); `None` when it does not
+/// decode as one.
+fn decode_rested_park(bytes: &[u8]) -> Option<Vec<fauna_core::recovery::SignedIdentitySuccession>> {
+    fauna_core::encoding::canonical_decode(bytes).ok()
+}
+
+/// Whether a rested folder-park value names `old_actor` — any entry of the set
+/// does. An undecodable one counts as naming everyone, since it can hold
+/// nothing and should go.
 fn rested_statement_names(bytes: &[u8], old_actor: &ActorId) -> bool {
-    fauna_core::encoding::canonical_decode::<fauna_core::recovery::SignedIdentitySuccession>(bytes)
-        .map_or(true, |s| s.statement.old_actor_id == *old_actor)
+    decode_rested_park(bytes)
+        .is_none_or(|set| set.iter().any(|s| s.statement.old_actor_id == *old_actor))
 }
 
 /// The folder rail's [`redrive_parked_in_thread`], run at **both** ends of a
@@ -8184,21 +8441,21 @@ async fn redrive_parked_folder_in_channel(
     let Some(witness) = backend.succession_witness() else {
         // The witness went away under us: keep the statements, but nothing can
         // verify them, so nothing may wait on them either.
-        for statement in parked {
-            backend.repark_folder_succession_if_empty(*channel_id, statement);
+        for entry in parked {
+            backend.repark_folder_succession(*channel_id, entry);
         }
         return false;
     };
     let mut hold = false;
-    for statement in parked {
-        let old = statement.statement.old_actor_id;
+    for entry in parked {
+        let old = entry.statement.statement.old_actor_id;
         if recorded_owner != Some(old) {
             // Dropped here, so dropped at rest too: the next launch must not
             // hold on a statement with nothing left to re-point.
             backend.forget_rested_folder_park_naming(channel_id, &old);
             continue;
         }
-        match witness.verify(statement.clone()).await {
+        match witness.verify(entry.statement.clone()).await {
             Some(verified) => {
                 settle_folder_owner_succession(backend, channel_id, &verified);
                 backend.forget_rested_folder_park_naming(channel_id, &old);
@@ -8208,7 +8465,13 @@ async fn redrive_parked_folder_in_channel(
             // statement waits with it.
             None => {
                 hold |= backend.folder_walk_waits_on(&old);
-                backend.repark_folder_succession_if_empty(*channel_id, statement);
+                backend.repark_folder_succession(
+                    *channel_id,
+                    Parked {
+                        statement: entry.statement,
+                        verified: false,
+                    },
+                );
             }
         }
     }
@@ -8643,7 +8906,7 @@ pub async fn poll_inbound_conv(
                                     backend, manager, &thread_id, channel_id, &verified,
                                 ) == RosterPair::AwaitingRemoveOld
                                 {
-                                    backend.park_succession(thread_id.clone(), statement);
+                                    backend.park_succession(thread_id.clone(), statement, true);
                                 }
                             }
                             // Refused for now — and this delivery is the only
@@ -8665,7 +8928,7 @@ pub async fn poll_inbound_conv(
                                         ))
                                     });
                                 if names_a_row {
-                                    backend.park_succession(thread_id.clone(), statement);
+                                    backend.park_succession(thread_id.clone(), statement, false);
                                 }
                             }
                         }
@@ -9857,6 +10120,18 @@ pub async fn join_folder_welcome(
                 // The Welcome carries no floor; the first federated content-key
                 // read stamps it (`custody::refresh_foreign_set_from_reply`).
                 content_key_floor: None,
+                // The folder's residency as the home nest stamped it on this
+                // Welcome — the seed the member's seat arms from before any
+                // federated read (`file-sync.md` § Relay serving, step (1)).
+                // An absent or unknown stamp states nothing — never *full*.
+                // `custody::record_foreign_set` stamps it at the accept's time.
+                residency: fauna_core::data::ForeignResidency::parse_stamp(
+                    welcome_ctx.residency.as_deref(),
+                )
+                .map(|metadata_only| fauna_core::data::ForeignResidency {
+                    metadata_only,
+                    stamped_at: 0,
+                }),
                 // The cross-nest owner label, recorded only as the verified
                 // pair this member's own nest forwarded (`federation.md`
                 // § … *The cross-nest owner label*, join rule) — a bare handle
@@ -10351,6 +10626,10 @@ pub async fn poll_inbound_folder(
             });
         }
     }
+    // The owner's re-seal, on a CLEAN walk only for the same reason as the
+    // ingest below: sealing at an epoch with a commit still un-incorporated
+    // would seal at one every member has already left.
+    backend.maybe_converge_owned_envelope(channel_id).await;
     // Member custody ingest (Phase 0 — the read leg), on a CLEAN walk only. A
     // stalled walk returned earlier and deliberately skips this: ingesting at an
     // un-incorporated epoch would just fail the open (design D4), and the next
@@ -11247,5 +11526,72 @@ mod custody_ingest_retry_tests {
     #[test]
     fn a_reowed_fetch_attempts_on_a_quiet_poll_over_current_custody() {
         assert!(should_attempt_custody_ingest(false, true, true));
+    }
+}
+
+#[cfg(test)]
+mod park_slot_tests {
+    use super::*;
+
+    /// A distinct junk-signed statement about `old` — nothing anchor-free
+    /// tells it from an honest one.
+    fn parked_statement(old: ActorId) -> fauna_core::recovery::SignedIdentitySuccession {
+        let recovery = fauna_core::recovery::RecoveryKey::generate();
+        let new = fauna_core::identity::ActorKeypair::generate();
+        fauna_core::recovery::IdentitySuccession {
+            old_actor_id: old,
+            new_actor_id: new.actor_id(),
+            recovery_pubkey: recovery.public(),
+            seq: 2,
+            created_at: fauna_core::data::Timestamp::now(),
+        }
+        .sign(&recovery, new.signing_key(), None)
+        .expect("signs")
+    }
+
+    /// The slot's replacement policy (`identity-succession.md` § The
+    /// succession statement (wire) → *The slot's replacement policy*), all
+    /// four arms: equal bytes are held once (a verified copy marks the held
+    /// entry), distinct ones fill the set, a full slot refuses an unverified
+    /// statement and displaces nothing, and a verified one takes the place of
+    /// the oldest unverified entry.
+    #[test]
+    fn a_park_slot_displaces_nothing_but_admits_a_verified_statement() {
+        let old = fauna_core::identity::ActorKeypair::generate().actor_id();
+        let mut slot = ParkedSlot::default();
+        let first = parked_statement(old);
+        assert_eq!(slot.admit(first.clone(), false), Admitted::Added);
+        assert_eq!(slot.admit(first.clone(), false), Admitted::AlreadyHeld);
+        assert_eq!(slot.0.len(), 1, "equal bytes park once");
+        for _ in 1..PARKED_PER_SLOT {
+            assert_eq!(slot.admit(parked_statement(old), false), Admitted::Added);
+        }
+        let held: Vec<_> = slot.statements().into_iter().cloned().collect();
+
+        assert_eq!(
+            slot.admit(parked_statement(old), false),
+            Admitted::Refused,
+            "a full slot refuses a later unverified statement"
+        );
+        assert_eq!(
+            slot.statements().into_iter().cloned().collect::<Vec<_>>(),
+            held,
+            "and displaced nothing"
+        );
+
+        let verified = parked_statement(old);
+        assert_eq!(slot.admit(verified.clone(), true), Admitted::Added);
+        assert_eq!(slot.0.len(), PARKED_PER_SLOT);
+        assert!(
+            !slot.statements().contains(&&first),
+            "the oldest unverified entry made room"
+        );
+        assert!(slot.0.iter().any(|p| p.statement == verified && p.verified));
+
+        assert_eq!(slot.admit(held[1].clone(), true), Admitted::AlreadyHeld);
+        assert!(
+            slot.0.iter().any(|p| p.statement == held[1] && p.verified),
+            "a verified copy of a held statement marks it"
+        );
     }
 }

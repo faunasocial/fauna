@@ -92,6 +92,11 @@ tracing = { workspace = true }
 # one cross-app contract. Not cfg-gated: it is a pure value builder, and what
 # convention 15 compiles out of a release artifact is the automation *server*.
 serde_json = { workspace = true }
+# A remove-account's nest half (`retire_removed_account`): the removed
+# account's in-memory snapshot the registry hands over, and the credential
+# store's detached stand-in the assembly reads it through.
+fauna-client-accounts = { workspace = true }
+fauna-credential-store = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
@@ -104,5 +109,5 @@ fauna-conversations = { path = "../fauna-conversations", default-features = fals
 # (`fauna-account-store`, the T10 slot in `fauna-credential-store`).
 fauna-transport = { workspace = true, features = ["test-helpers"] }
 fauna-account-store = { workspace = true }
-fauna-credential-store = { workspace = true }
 serde = { workspace = true }
+fauna-client-accounts = { workspace = true, features = ["test-helpers"] }

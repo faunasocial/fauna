@@ -54,8 +54,11 @@ use std::sync::Mutex;
 use crate::i18n::strings::common;
 use crate::i18n::strings::settings::recovery_kit as rk;
 use fauna_client_recovery::RecoveryKitStatus;
-use fauna_client_recovery::ceremony::{STOLEN_CONFIRM_WORD, SweepRetryAffordance, SweepStatus};
+use fauna_client_recovery::ceremony::{STOLEN_CONFIRM_WORD, SweepStatus};
 use fauna_core::qr_matrix::QrMatrix;
+use fauna_sync_engine::generation_let_go::{
+    DeadGeneration, LET_GO_CONFIRM_WORD, unreadable_status,
+};
 
 /// The landed succession's group sweep, parked so it outlives the account
 /// switch the ceremony ends with.
@@ -402,6 +405,66 @@ struct Widgets {
     drafts_reseal_status_label: gtk::Label,
     mail_burn_status_label: gtk::Label,
     inherited_filters_status_label: gtk::Label,
+    let_go: LetGoWidgets,
+}
+
+/// The let-go of a dead generation, beside the four actions (`settings.md`
+/// § Recovery kit, the fifth act; `fleet-scope-reclamation.md`
+/// § *Fleet-scope reclamation*, clause (3)(j)): the line, its
+/// type-to-confirm field and its button — all three ONLY while the account
+/// runtime's dead read answers non-empty, which is why ui.yaml has them in
+/// `optional_elements`. tui's `let_go_elements`, as GTK widgets.
+struct LetGoWidgets {
+    status_label: gtk::Label,
+    confirm_row: adw::EntryRow,
+    button: gtk::Button,
+}
+
+impl LetGoWidgets {
+    /// The trio, hidden until a dead read lands.
+    fn new() -> Self {
+        let status_label = gtk::Label::builder().wrap(true).visible(false).build();
+        status_label.set_halign(gtk::Align::Start);
+        status_label.add_css_class("dim-label");
+        status_label.set_margin_top(8);
+        crate::testid::set_test_id(&status_label, ids::RECOVERY_KIT_UNREADABLE_STATUS);
+
+        let confirm_row = adw::EntryRow::builder()
+            .title(rk::LET_GO_CONFIRM_PLACEHOLDER)
+            .visible(false)
+            .build();
+        crate::testid::set_test_id(&confirm_row, ids::RECOVERY_KIT_LET_GO_CONFIRM_FIELD);
+
+        let button = gtk::Button::builder()
+            .label(rk::LET_GO)
+            .halign(gtk::Align::Start)
+            .css_classes(["destructive-action"])
+            .sensitive(false)
+            .visible(false)
+            .build();
+        crate::testid::set_test_id(&button, ids::RECOVERY_KIT_LET_GO_BUTTON);
+        crate::offline_gate::declare_wire_kind(&button, "fauna.account.state.retire");
+
+        Self {
+            status_label,
+            confirm_row,
+            button,
+        }
+    }
+
+    /// The shared projection's `Some` is the one render gate, so no shell
+    /// re-derives it from the list; the button arms on the confirm word alone
+    /// (tui's `let_go_elements`).
+    fn repaint(&self, dead: &[DeadGeneration], busy: bool) {
+        let line = unreadable_status(dead, fauna_core::format::format_unix_local_date_ms)
+            .map(|line| line.resolve(crate::i18n::strings::lookup));
+        let shown = line.is_some();
+        set_optional_line(&self.status_label, line);
+        self.confirm_row.set_visible(shown);
+        self.button.set_visible(shown);
+        self.button
+            .set_sensitive(!busy && self.confirm_row.text() == LET_GO_CONFIRM_WORD);
+    }
 }
 
 /// The section's view state — mirrors tui's `RecoveryState`, narrowed to the
@@ -413,6 +476,10 @@ struct RecoveryState {
     busy: bool,
     aftermath: AftermathProgress,
     inherited_filters: usize,
+    /// The account runtime's dead read, refreshed on the section's nav edge
+    /// and replaced by the re-read after every let-go — the let-go trio's one
+    /// render gate (through the shared `unreadable_status`).
+    dead_generations: Vec<DeadGeneration>,
 }
 
 /// Build the "Recovery Kit" preferences group.
@@ -438,15 +505,16 @@ pub fn build_recovery_kit_group(error_label: &gtk::Label) -> (adw::PreferencesGr
     // other: eviction of the stolen identity and the roster the sweep cannot
     // vouch for are two facts, and there is no combined "you are safe" verdict
     // to render — the same refusal `SweepReport` itself makes.
-    let new_sweep_line = || {
+    let new_sweep_line = |id: &str| {
         let label = gtk::Label::builder().wrap(true).build();
         label.set_halign(gtk::Align::Start);
         label.set_visible(false);
+        crate::testid::set_test_id(&label, id);
         group.add(&label);
         label
     };
-    let sweep_outcome_label = new_sweep_line();
-    let sweep_unattested_label = new_sweep_line();
+    let sweep_outcome_label = new_sweep_line(ids::RECOVERY_KIT_SWEEP_STATUS);
+    let sweep_unattested_label = new_sweep_line(ids::RECOVERY_KIT_SWEEP_UNVOUCHED_STATUS);
 
     // The eight aftermath-progress lines, in the order the legs
     // run (`settings.md` § Recovery kit — leg 7 renders ABOVE leg 6). Every
@@ -537,6 +605,13 @@ pub fn build_recovery_kit_group(error_label: &gtk::Label) -> (adw::PreferencesGr
     crate::testid::set_test_id(&veto_btn, ids::RECOVERY_PENDING_VETO_BUTTON);
     crate::offline_gate::declare_wire_kind(&veto_btn, "fauna.recovery.replacement.veto");
     group.add(&veto_btn);
+
+    let let_go = LetGoWidgets::new();
+    group.add(&let_go.status_label);
+    group.add(&let_go.confirm_row);
+    group.add(&let_go.button);
+    let let_go_confirm_row = let_go.confirm_row.clone();
+    let let_go_btn = let_go.button.clone();
 
     // The no-escrow repair (ID user-approved 2026-08-16): renders in
     // `RegisteredNoEscrow` only — an affordance for a state, never a standing
@@ -678,6 +753,7 @@ pub fn build_recovery_kit_group(error_label: &gtk::Label) -> (adw::PreferencesGr
         drafts_reseal_status_label,
         mail_burn_status_label,
         inherited_filters_status_label,
+        let_go,
     });
     // Seeded from the session's aftermath so a section built after a leg
     // reported — a page rebuild, or the switch's window rebuild racing the
@@ -845,6 +921,20 @@ pub fn build_recovery_kit_group(error_label: &gtk::Label) -> (adw::PreferencesGr
         }
     });
 
+    // The let-go's gate re-arms on every keystroke, the stolen gate's shape:
+    // `repaint` decides the sensitivity from the whole state.
+    let_go_confirm_row.connect_changed({
+        let state = state.clone();
+        let widgets = widgets.clone();
+        move |_| repaint(&state.borrow(), &widgets)
+    });
+
+    let_go_btn.connect_clicked({
+        let state = state.clone();
+        let widgets = widgets.clone();
+        move |_| do_let_go(&state, &widgets)
+    });
+
     // ── Repaint hooks, invoked from `app.rs`'s `RecoveryStatusLoaded` /
     //    `RecoveryKitMinted` handlers via the thread-local registry in
     //    `settings::mod` (the same shape `inbox_mode`'s handler uses).
@@ -976,8 +1066,11 @@ pub fn build_recovery_kit_group(error_label: &gtk::Label) -> (adw::PreferencesGr
     if let Some(client) = crate::settings::get_client() {
         client.fetch_recovery_status();
     }
+    read_dead_generations(&state, &widgets);
 
     let refresh: Rc<dyn Fn()> = Rc::new({
+        let state = state.clone();
+        let widgets = widgets.clone();
         let minted = minted.clone();
         let minted_box = widgets.minted_box.clone();
         let secret_label = widgets.secret_label.clone();
@@ -1005,6 +1098,9 @@ pub fn build_recovery_kit_group(error_label: &gtk::Label) -> (adw::PreferencesGr
             if let Some(client) = crate::settings::get_client() {
                 client.fetch_recovery_status();
             }
+            // The let-go's render gate, read on the same nav edge as the
+            // status — tui's Account hydrate.
+            read_dead_generations(&state, &widgets);
             // A stolen-identity persist-failure message may have landed while
             // this page was off-screen — paint it now rather than leaving it
             // parked (`settings::show_stolen_failed_message`'s doc comment).
@@ -1013,6 +1109,103 @@ pub fn build_recovery_kit_group(error_label: &gtk::Label) -> (adw::PreferencesGr
     });
 
     (group, refresh)
+}
+
+/// Read the account runtime's dead generations and repaint the let-go trio
+/// from them. **Never an error on screen**: with no runtime yet, or on a
+/// failed read (logged), the list is left as it was — a let-go that cannot be
+/// shown is not offered (tui's hydrate fold; the UniFFI door's
+/// `recovery_dead_generations`).
+fn read_dead_generations(state: &Rc<RefCell<RecoveryState>>, widgets: &Rc<Widgets>) {
+    let (Some(client), Some(store)) = (
+        crate::settings::get_client(),
+        crate::account_runtime::handle(),
+    ) else {
+        return;
+    };
+    let state = state.clone();
+    let widgets = widgets.clone();
+    crate::async_helper::spawn_with_snapshot(
+        &client.runtime_handle(),
+        move || async move {
+            store
+                .dead_generations()
+                .await
+                .map_err(|e| tracing::warn!("[settings] dead-generation read failed: {e:#}"))
+                .ok()
+        },
+        move |dead| {
+            if let Some(dead) = dead {
+                state.borrow_mut().dead_generations = dead;
+                repaint(&state.borrow(), &widgets);
+            }
+        },
+    );
+}
+
+/// `recovery-kit-let-go-button` — the user's confirmed act, and the only
+/// caller there is. The confirm word is re-checked HERE and not only in the
+/// render (the stolen gate's reason: a test agent driving the id reaches this
+/// handler, and a destructive act refuses out loud rather than run). The
+/// runtime re-reads each generation dead before it retires anything; the
+/// refreshed dead read REPLACES the list, so the trio leaves the screen once
+/// nothing is dead, and what the act did is said on `error-message`'s line —
+/// a generation that became readable again is named as kept, never silently
+/// skipped (tui's `Outcome::RecoveryLetGoDone` fold).
+fn do_let_go(state: &Rc<RefCell<RecoveryState>>, widgets: &Rc<Widgets>) {
+    if widgets.let_go.confirm_row.text() != LET_GO_CONFIRM_WORD {
+        super::render_account_error_label(
+            &widgets.error_label,
+            Some(rk::LET_GO_CONFIRM_PLACEHOLDER),
+        );
+        return;
+    }
+    let (Some(client), Some(store)) = (
+        crate::settings::get_client(),
+        crate::account_runtime::handle(),
+    ) else {
+        super::render_account_error_label(&widgets.error_label, Some(common::STILL_LOADING));
+        return;
+    };
+    let generations: std::collections::BTreeSet<[u8; 32]> = state
+        .borrow()
+        .dead_generations
+        .iter()
+        .map(|d| d.generation_id)
+        .collect();
+    super::render_account_error_label(&widgets.error_label, None);
+    state.borrow_mut().busy = true;
+    repaint(&state.borrow(), widgets);
+    let state = state.clone();
+    let widgets = widgets.clone();
+    crate::async_helper::spawn_with_snapshot(
+        &client.runtime_handle(),
+        move || async move {
+            let report = store.let_go(generations).await?;
+            let dead = store.dead_generations().await?;
+            anyhow::Ok((report, dead))
+        },
+        move |result| {
+            let message = match result {
+                Ok((report, dead)) => {
+                    state.borrow_mut().dead_generations = dead;
+                    let mut message = rk::let_go_done(&report.retired.to_string());
+                    if !report.refused.is_empty() {
+                        message.push(' ');
+                        message.push_str(rk::LET_GO_KEPT);
+                    }
+                    message
+                }
+                Err(e) => rk::let_go_failed(&format!("{e:#}")),
+            };
+            state.borrow_mut().busy = false;
+            // Cleared before the repaint, with no borrow held: `set_text` fires
+            // the field's own `connect_changed`, which repaints from `state`.
+            widgets.let_go.confirm_row.set_text("");
+            super::render_account_error_label(&widgets.error_label, Some(&message));
+            repaint(&state.borrow(), &widgets);
+        },
+    );
 }
 
 /// Build the `fauna://recovery` display URI for a just-minted secret — the
@@ -1047,9 +1240,7 @@ fn repaint(state: &RecoveryState, widgets: &Widgets) {
     {
         let parked = LANDED_SWEEP.lock().unwrap_or_else(|e| e.into_inner());
         let view = parked.as_ref().map(SweepStatus::render_view);
-        let copy = view
-            .as_ref()
-            .map(|v| v.copy(SweepRetryAffordance::Rendered));
+        let copy = view.as_ref().map(|v| v.copy());
         set_optional_line(
             &widgets.sweep_outcome_label,
             copy.as_ref().and_then(|c| {
@@ -1100,6 +1291,8 @@ fn repaint(state: &RecoveryState, widgets: &Widgets) {
         &widgets.inherited_filters_status_label,
         inherited_filters_status_text(state.inherited_filters),
     );
+
+    widgets.let_go.repaint(&state.dead_generations, state.busy);
 
     widgets.status_label.set_text(&match status {
         Some(s) => s
@@ -1407,6 +1600,7 @@ mod tests {
                 drafts_reseal_status_label: gtk::Label::new(None),
                 mail_burn_status_label: gtk::Label::new(None),
                 inherited_filters_status_label: gtk::Label::new(None),
+                let_go: LetGoWidgets::new(),
             };
 
             let never_created = RecoveryState {
@@ -1619,6 +1813,7 @@ mod tests {
                 drafts_reseal_status_label: drafts.clone().downcast().unwrap(),
                 mail_burn_status_label: mail.clone().downcast().unwrap(),
                 inherited_filters_status_label: filters.clone().downcast().unwrap(),
+                let_go: LetGoWidgets::new(),
             };
 
             // All `None` (the ordinary account, or before the drive
@@ -2175,6 +2370,7 @@ mod tests {
                 drafts_reseal_status_label: gtk::Label::new(None),
                 mail_burn_status_label: gtk::Label::new(None),
                 inherited_filters_status_label: gtk::Label::new(None),
+                let_go: LetGoWidgets::new(),
             };
             let state = RecoveryState::default();
 
@@ -2232,6 +2428,78 @@ mod tests {
             // (measured here 2026-09-01: this test's first cut left it connected
             // and took the whole `walk::` suite down with it).
             crate::offline_gate::set_connection_state("disconnected");
+        });
+    }
+
+    /// The let-go trio renders ONLY while a generation reads dead, the line
+    /// is the shared projection's copy, the button arms on the confirm word
+    /// alone — and a gesture fired with the word wrong is refused out loud on
+    /// `error-message`, never dropped (tui's
+    /// `the_let_go_renders_only_while_a_generation_is_dead_and_arms_on_the_word`).
+    #[test]
+    fn the_let_go_renders_only_while_a_generation_is_dead_and_arms_on_the_word() {
+        crate::testid::run_on_gtk_thread(|| {
+            let _ = adw::init();
+            crate::offline_gate::reset_for_test("connected");
+            let error_label = gtk::Label::new(None);
+            let (group, _refresh) = build_recovery_kit_group(&error_label);
+            for id in [
+                "recovery-kit-unreadable-status",
+                "recovery-kit-let-go-confirm-field",
+                "recovery-kit-let-go-button",
+            ] {
+                let w = find_by_test_id(&group, id).unwrap_or_else(|| panic!("{id} is built"));
+                assert!(!w.is_visible(), "nothing is dead — {id} stays off the page");
+            }
+
+            // A wrong word: the section's own handler refuses in words.
+            let button: gtk::Button = find_by_test_id(&group, "recovery-kit-let-go-button")
+                .unwrap()
+                .downcast()
+                .unwrap();
+            button.emit_clicked();
+            assert_eq!(error_label.text(), rk::LET_GO_CONFIRM_PLACEHOLDER);
+
+            let let_go = LetGoWidgets::new();
+            let dead = [DeadGeneration {
+                generation_id: [7; 32],
+                minted_at_ms: None,
+                live_rows: 11,
+            }];
+            let_go.repaint(&dead, false);
+            assert!(let_go.status_label.is_visible());
+            let line = let_go.status_label.text();
+            assert!(line.contains("11"), "the row count: {line:?}");
+            assert!(
+                line.contains("sign in there first"),
+                "the one thing the app cannot know is said: {line:?}"
+            );
+            assert!(let_go.confirm_row.is_visible() && let_go.button.is_visible());
+            assert!(
+                !let_go.button.is_sensitive(),
+                "unarmed until the word is typed"
+            );
+
+            let_go.confirm_row.set_text("let go");
+            let_go.repaint(&dead, false);
+            assert!(
+                !let_go.button.is_sensitive(),
+                "the confirm word is a fixed literal, not a case-insensitive match"
+            );
+            let_go.confirm_row.set_text(LET_GO_CONFIRM_WORD);
+            let_go.repaint(&dead, false);
+            assert!(let_go.button.is_sensitive(), "the confirm word arms it");
+            let_go.repaint(&dead, true);
+            assert!(!let_go.button.is_sensitive(), "busy holds it");
+
+            // The re-read after a let-go replaces the list: empty takes the
+            // trio off the page again.
+            let_go.repaint(&[], false);
+            assert!(
+                !let_go.status_label.is_visible()
+                    && !let_go.confirm_row.is_visible()
+                    && !let_go.button.is_visible()
+            );
         });
     }
 }

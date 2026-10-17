@@ -203,7 +203,9 @@ impl CacheDb {
         let mut results = Vec::new();
         // Fetch (limit + offset) from each sub-query so we can merge-sort correctly,
         // then apply offset after merging.
-        let fetch = limit + offset;
+        // Saturating: the handler clamps both, but this is a storage-layer entry
+        // point and an overflow here would panic the request task.
+        let fetch = limit.saturating_add(offset);
 
         // Phase 1: public content. A bridge-corpus row (`bridge.<id>`) is
         // public content by the policy's own class split — a bridge's PUBLIC
@@ -622,6 +624,19 @@ mod profile_row_tests {
     async fn an_account_created_under_a_handle_is_found_by_it() {
         let db = created("quillon").await;
         assert_eq!(profile_hits(&db, "quillon").await, vec![key(&ACTOR)]);
+    }
+
+    /// `limit + offset` is the SQL `LIMIT`; an unclamped caller at this layer
+    /// must not overflow it into a panic (the handler clamps, this is the
+    /// belt to its braces).
+    #[tokio::test]
+    async fn a_huge_offset_does_not_overflow_the_fetch_window() {
+        let db = created("quillon").await;
+        let hits = db
+            .search_with_scoping("quillon", &ACTOR, None, None, None, 100, i64::MAX)
+            .await
+            .unwrap();
+        assert!(hits.is_empty());
     }
 
     #[tokio::test]

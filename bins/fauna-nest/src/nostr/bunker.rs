@@ -163,8 +163,10 @@ pub fn bind_client(
     )
 }
 
-/// The owner's roster view: pending + active rows (revoked tombstones are
-/// not listed — the mail-credentials row-disappears precedent).
+/// The owner's roster view: pending + active rows, plus `burned` rows (the
+/// identity-succession burn — kept so the successor sees which apps held
+/// authority, the mail-credentials precedent). User-revoked tombstones are not
+/// listed.
 pub fn list_apps(conn: &Connection, actor_id: &str) -> Result<Vec<BunkerApp>> {
     let mut stmt = conn.prepare(
         "SELECT id, app_pubkey, label, status, created_at, last_used_at, use_count, expires_at
@@ -211,7 +213,7 @@ pub fn set_label(
 ) -> Result<bool> {
     let n = conn.execute(
         "UPDATE nostr_bunker_apps SET label = ?3
-         WHERE id = ?1 AND actor_id = ?2 AND status != 'revoked'",
+         WHERE id = ?1 AND actor_id = ?2 AND status NOT IN ('revoked', 'burned')",
         params![connection_id, actor_id, label],
     )?;
     Ok(n > 0)

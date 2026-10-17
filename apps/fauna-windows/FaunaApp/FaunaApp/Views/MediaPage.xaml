@@ -616,6 +616,15 @@
                 <TextBlock Text="{loc:Localize Key=share_link/create_body}"
                            TextWrapping="Wrap" Opacity="0.8" />
 
+                <!-- share-link-key-notice: painted ONLY on a sealed file (the shared
+                     snapshot's key_in_fragment bit); Collapsed elsewhere, so it is
+                     absent from the UIA tree on a public file. AutomationId only. -->
+                <TextBlock x:Name="ShareKeyNotice"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.ShareLinkKeyNotice}"
+                           Text="{loc:Localize Key=share_link/key_notice}"
+                           TextWrapping="Wrap" Opacity="0.8"
+                           Visibility="Collapsed" />
+
                 <Grid x:Name="ShareExpiryRow" ColumnSpacing="8">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*" />

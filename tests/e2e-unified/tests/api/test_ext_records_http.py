@@ -54,7 +54,7 @@ from tests.api.test_ext_kinds import (  # noqa: F401 — metadata_server/consent
     consent_nest_env,
     metadata_server,
 )
-from tests.api.test_third_party_session import _alice, _Session, _upgrade
+from helpers.principal_session import alice_client, PrincipalSession, upgrade
 
 pytestmark = pytest.mark.tier_3
 
@@ -141,7 +141,7 @@ def test_a_remote_principal_reads_and_writes_its_records_over_http(
 
     # The grant the principal seals with — fetched over its session, as a
     # device app does; a remote server reads the same grant the same way.
-    session = _Session(_upgrade(nest, client, token))
+    session = PrincipalSession(upgrade(nest, client, token))
     ok, reply = session.call("fauna.capabilities.fetch", {})
     assert ok, reply
     grants = [bytes(g) for g in reply.get("grants", [])]
@@ -229,7 +229,7 @@ def test_a_remote_principal_reads_and_writes_its_records_over_http(
     assert status == 400, f"the floor: a sealed gen-0 envelope: {refused!r}"
 
     # ── Revoke closes the door. ──
-    with _alice(nest) as ws:
+    with alice_client(nest) as ws:
         principal = next(
             p for p in ws.call("fauna.principals.list", {})["principals"]
             if p["client_id"] == client.client_id

@@ -115,6 +115,8 @@ e2e-agent = [
     # `trust_clock`'s setter gates on `debug_assertions OR e2e-agent`, so a
     # RELEASE-profile e2e build needs this forward (convention 15).
     "fauna-client-capabilities/e2e-agent",
+    # The custody owner's send-again poke (`custody_owner_resend_now`).
+    "fauna-client-custody/e2e-agent",
     # The FAUNA_E2E_CREDENTIAL_DIR store redirect — where the identity secret
     # is read and written. Without this forward a release-profile e2e run
     # silently falls back to libsecret and writes into the box's real keyring.
@@ -158,6 +160,7 @@ e2e-agent = [
     "fauna-client-sync/test-helpers",
     "fauna-conversations/test-helpers",
     "fauna-feed/test-helpers",
+    "fauna-ws-substrate/test-helpers",
     "fauna-client-search/test-helpers",
     "fauna-onboarding-machine/test-helpers",
     "fauna-onboarding-machine/test-observer",
@@ -172,9 +175,17 @@ unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(feature, values("e2e-agent", "store-safe", "payments", "p2p-share"))',
 ] }
 
+[build-dependencies]
+# The one derivation of `FAUNA_BUILD_COMMIT` — the commit the Status page's
+# `status-build-sha` names (`ui/status.md` § State & data shape, the build leg).
+fauna-build-commit = { path = "../../libs/fauna-build-commit" }
+
 [dependencies]
+# Process-wide dial budget; the e2e reset arm clears it (`dial_budget::clear_for_test`,
+# `test-helpers` forwarded from `e2e-agent`).
+fauna-ws-substrate = { workspace = true }
 # Core — direct Rust dependency, no FFI boundary
-fauna-core = { path = "../../libs/fauna-core", features = ["qr_render", "local-clock"] }
+fauna-core ={ path = "../../libs/fauna-core", features = ["qr_render", "local-clock"] }
 # Generated element-id constants (build-system.md § Generated element-id constants).
 fauna-ui-ids = { path = "../../libs/fauna-ui-ids" }
 # Shared string table generated from i18n/strings/en.yaml (`just i18n-generate`),
@@ -266,7 +277,7 @@ fauna-folders-machine = { path = "../../libs/fauna-folders-machine", features = 
 # conflicts + embedded wizard + page error), rendered by views/peers/. `rpc-glue`
 # for the native `build_devices_machine` constructor over the session's WS-RPC
 # `NestClient` (no client-side HTTP). See docs/goal/ui/devices.md § State & data shape.
-fauna-devices-machine = { path = "../../libs/fauna-devices-machine", features = ["rpc-glue"] }
+fauna-devices-machine = { path = "../../libs/fauna-devices-machine", features = ["rpc-glue", "web"] }
 
 # BackupsMachine: the page-level Backups state machine — the SNAPSHOT half of
 # the Backups page (folder selector + snapshot list + create/delete/prune/
@@ -338,11 +349,6 @@ fauna-client-nostr = { path = "../../libs/fauna-client-nostr" }
 # `obligation_action_label` category/action → LocalizedText maps the queue rows
 # resolve natively (moderation.md § Where logic lives).
 fauna-client-moderation = { path = "../../libs/fauna-client-moderation" }
-# Typed `bluesky.feed.thread` WS-RPC seam — the one protocol-unique
-# consume-side Bluesky surface (the crossposted-post thread view shown on
-# post-detail). `BlueskyClient`; re-exports `fauna_protocol::bluesky::{BlueskyPost,...}` (the
-# DataMessage payload types). bridges.md § Bluesky-native thread view.
-fauna-client-bluesky = { path = "../../libs/fauna-client-bluesky" }
 # Typed `fauna.admin.*` WS-RPC seam — the admin surface (user list +
 # eviction + tier change + invite-code minting/delete + invite-request
 # approve/deny). The `AdminClient` mirrors `BridgesClient`; its re-exported
@@ -369,6 +375,11 @@ fauna-client-account = { path = "../../libs/fauna-client-account" }
 # joins `fauna.features.status` with `fauna.nest.info`'s capability set and
 # folds both into ready-to-render rows, same as tui.
 fauna-client-features = { path = "../../libs/fauna-client-features" }
+# The Status page's node/sync/MLS/build legs and their text projection
+# (`ui/status.md` § State & data shape): `StatusClient::node()`, the local
+# sync-agent embedding (`agent`) and `render` (`local-clock`) — consumed whole,
+# never re-derived here (priority #2), as tui does.
+fauna-client-status = { path = "../../libs/fauna-client-status", features = ["agent", "local-clock"] }
 # The region content plane's app side (src/region.rs) — the shared plane tui
 # leads with; linux paints it.
 fauna-client-region = { path = "../../libs/fauna-client-region" }
@@ -425,6 +436,7 @@ fauna-client-delegation = { path = "../../libs/fauna-client-delegation" }
 # brings the production WS-RPC seam, consumed directly as Rust (tui's shape).
 fauna-client-connected-apps = { path = "../../libs/fauna-client-connected-apps", features = [
     "rpc-glue",
+    "local-clock",
 ] }
 # `DraftsSync<Arc<NestClient>>` — the shared client half of draft-persistence v2
 # (file-sync.md § Drafts Sync): seal + `fauna.drafts.{get,put}` + the launch gate
@@ -498,7 +510,7 @@ fauna-client-mail-settings = { path = "../../libs/fauna-client-mail-settings", f
 # Typed `fauna.notifications.*` WS-RPC seam — the unified notifications
 # list/mark-read/count plane. Linux only calls `notifications_list`; replaces
 # the legacy `fauna_nest_http::paths::notifications` HTTP call-site.
-fauna-client-notifications = { path = "../../libs/fauna-client-notifications" }
+fauna-client-notifications = { path = "../../libs/fauna-client-notifications", features = ["local-clock"] }
 # Shared per-user nest-pairing ("Linked nests") machine — snapshot + Refresh/
 # Link/Unlink dispatch over `fauna.pair.{list,add,revoke}`. The user-settings
 # Linked-nests page (settings/linked_nests.rs) renders the snapshot and
@@ -515,7 +527,7 @@ fauna-client-backup = { path = "../../libs/fauna-client-backup", features = ["lo
 # create-post path keeps the HTTP blob/sidecar upload (content_api) and
 # swaps only the final signed-post submission onto `posts_create`.
 fauna-client-posts = { path = "../../libs/fauna-client-posts" }
-fauna-client-search = { path = "../../libs/fauna-client-search" }
+fauna-client-search = { path = "../../libs/fauna-client-search", features = ["query"] }
 # Typed `fauna.filesync.snapshot.*` WS-RPC seam (Backups restore surfaces:
 # snapshot list, restore history + divergence reads, the restore action).
 # First native consumer of this shared crate (priority #1/#2 — the other 5
@@ -632,6 +644,7 @@ serde_json = { workspace = true }
 # segment-backup coordinator.
 fauna-sync-engine = { path = "../../libs/fauna-sync-engine", features = [
     "engine-lifecycle",
+    "web",
 ] }
 
 # The W3 (account-data-plane.md § Workstreams) account-store runtime this app hosts (`crate::account_runtime`) — the
@@ -695,6 +708,9 @@ c2pa = { workspace = true, features = ["file_io"] }
 # Test builds never reach the live OS keyring — see the `no-live-keyring`
 # feature in libs/fauna-credential-store/Cargo.toml (dev-dependencies ONLY).
 fauna-credential-store = { workspace = true, features = ["no-live-keyring"] }
+# `registry_census` — the shared source scan `account_registry_census_test`
+# pins the registry choke point with (same census tui runs).
+fauna-client-accounts = { workspace = true, features = ["test-helpers"] }
 # `app_settings` round-trips its JSON store through a scratch dir rather than
 # the real `$XDG_CONFIG_HOME`.
 tempfile = { workspace = true }

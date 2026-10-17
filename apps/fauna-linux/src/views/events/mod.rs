@@ -17,6 +17,7 @@ pub mod event_list;
 pub mod event_popover;
 pub mod mini_month;
 pub mod month_grid;
+pub mod refused_changes;
 pub mod time_utils;
 pub mod week_grid;
 

@@ -459,7 +459,7 @@ class TestShellScript:
     ):
         """install.sh checks for `fusermount3` and names the package when it is
         missing (installers/linux-desktop.md § Installation Files; on-demand
-        folders mount through it — on-demand-files.md § Linux FUSE binding). The
+        folders mount through it — on-demand-files-linux.md § Linux FUSE binding). The
         install itself still succeeds: on-demand is a choice, not a prerequisite.
 
         Needs no built product: the script installs whatever sits at

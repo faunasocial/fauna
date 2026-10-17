@@ -217,6 +217,17 @@ pub fn show_family_sidebar_row(list_box: &gtk::ListBox) {
     }
 }
 
+/// Whether the Family sidebar row (`family-tab`) is currently gated in — the
+/// one fact the Notifications tap-through reads to offer a `Family` destination
+/// only while the tab it leads to is reachable (`notifications.md` § Deep-link
+/// destinations).
+pub fn family_sidebar_row_shown(list_box: &gtk::ListBox) -> bool {
+    let family_index = SidebarItem::ALL.len() as i32 + 1;
+    list_box
+        .row_at_index(family_index)
+        .is_some_and(|row| row.is_visible())
+}
+
 /// Build a single sidebar row: icon + label in a horizontal box.
 fn build_sidebar_row(item: SidebarItem) -> gtk::ListBoxRow {
     let icon = gtk::Image::from_icon_name(item.icon_name());

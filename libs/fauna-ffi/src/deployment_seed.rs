@@ -20,7 +20,9 @@
 //!   handle: at the post-auth edge through [`self_heal_deployment_seed_custody`]
 //!   and at the store-ready edge inside the account-runtime seat
 //!   (`crate::account_runtime::install`'s installed arm) — whichever lands
-//!   second finds the other half. The claim reply's seed is not consumed.
+//!   second finds the other half. The claim reply's seed is not consumed. The
+//!   warning a run owes the admin crosses as the shared [`LocalizedText`]
+//!   (`fauna_client_config::custody_leg_warning`); the glue only renders it.
 //! - **Rotation** ([`rotate_deployment_seed`]) is the plane drive: custody
 //!   merged and published before dispatch, no fan-out afterwards.
 //!
@@ -37,37 +39,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use fauna_client_config::{
-    DeploymentSeedCustody, ResolvingLedgerStore, recoverable_boxes_in,
-    run_deployment_seed_custody_leg, selfhosted_recovery_command_in,
+    ResolvingLedgerStore, custody_leg_unattempted_warning, recoverable_boxes_in,
+    selfhosted_recovery_command_in,
 };
 use fauna_core::data::DeploymentSeedEntry;
 use fauna_core::identity::ActorId;
-#[cfg(feature = "value-format")]
 use fauna_core::localized::LocalizedText;
-use fauna_sync_engine::deployment_seed_recovery::{StoreRoot, read_local_deployment_seeds};
+use fauna_sync_engine::deployment_seed_recovery::{
+    StoreRoot, read_local_deployment_seeds, replica_seal_key,
+};
 
 use crate::nest_client::FfiNestClient;
 use crate::{FfiError, general_err};
-
-/// Outcome of one custody capture, carried by
-/// [`FfiDeploymentSeedSelfHeal::Captured`] — the glue matches on it. [`Wrote`](Self::Wrote) = the custody leg merged
-/// the box's entry into the plane; [`RefusedMismatch`](Self::RefusedMismatch)
-/// = the fetched seed did not derive to the bound nest id (BR-2) — the glue
-/// surfaces its "recovery not protected" warning.
-#[derive(uniffi::Enum)]
-pub enum FfiDeploymentSeedCapture {
-    /// The box's entry was merged into the account plane.
-    Wrote,
-    /// An identical entry is already held — no write.
-    AlreadyHeldSame,
-    /// Retired: the plane map holds one row per box, so there is no
-    /// "different seed already held" refusal any more.
-    RefusedDiffering,
-    /// The fetched seed does **not** derive to this connection's bound
-    /// `nest_actor_id` (BR-2). Refused before any write — the glue surfaces a
-    /// loud "recovery not protected" warning.
-    RefusedMismatch,
-}
 
 /// The `nest_actor_id` this connection is **bound** to, as an [`ActorId`] —
 /// the one comparand every custody, rotation and backup drive keys on.
@@ -116,6 +99,12 @@ pub struct FfiSeedRotationResult {
 /// rotate request goes out; with no account-store handle the drive refuses
 /// plainly. There is no post-rotation fan-out.
 ///
+/// The store is this process's account-store handle resolved per call
+/// ([`ResolvingLedgerStore`]) — the same shape as tui, linux and web: a
+/// confirm clicked while the store is still assembling waits out
+/// [`fauna_client_config::LEDGER_READY_WAIT`], and a store that never comes is
+/// refused plainly, before any dispatch.
+///
 /// Resolves the `nest_actor_id` THIS connection is bound to first, while the
 /// box still answers as the predecessor.
 ///
@@ -132,8 +121,8 @@ pub struct FfiSeedRotationResult {
 ///
 /// - `FfiError::General` if `owner_secret` is not 32 bytes, if this nest's
 ///   identity can't be resolved, or resolves to a non-32-byte id.
-/// - `FfiError::General` carrying the drive's refusal (no account store, the
-///   custody merge refused, the successor row not published, the dispatch
+/// - `FfiError::General` carrying the drive's refusal (the account store never
+///   came up, the custody merge refused, the successor row not published, the dispatch
 ///   failed) — nothing rotated. A best-effort failure marking the predecessor
 ///   folds into [`FfiSeedRotationResult::verdict`] as a success-with-caveat.
 #[cfg(feature = "value-format")]
@@ -144,68 +133,21 @@ pub async fn rotate_deployment_seed(
 ) -> Result<FfiSeedRotationResult, FfiError> {
     crate::keypair_from_bytes(&owner_secret)?;
     let current = bound_nest_id(&nest).await?;
-    let handle = crate::account_runtime::handle();
-    let outcome = fauna_client_config::rotate_deployment_seed_on_plane(
-        &*nest.nest_arc(),
-        current,
-        handle.as_ref(),
-    )
-    .await
-    .map_err(general_err)?;
+    let store = ResolvingLedgerStore::new(crate::account_runtime::handle);
+    let outcome =
+        fauna_client_config::rotate_deployment_seed_on_plane(&*nest.nest_arc(), current, &store)
+            .await
+            .map_err(general_err)?;
     let rotated = matches!(outcome, fauna_client_config::SeedRotation::Rotated { .. });
     let verdict = fauna_client_config::seed_rotation_verdict(&outcome);
     Ok(FfiSeedRotationResult { rotated, verdict })
 }
 
-/// Outcome of [`self_heal_deployment_seed_custody`] — one custody-leg run,
-/// mapped from [`fauna_client_config::DeploymentSeedCustody`]. The glue
-/// surfaces its existing "recovery custody not yet saved / not protected"
-/// warning for the unconfirmed arms — [`HandoffUnavailable`](Self::HandoffUnavailable),
-/// [`NestHoldsNoSeed`](Self::NestHoldsNoSeed) and
-/// `Captured(RefusedMismatch)` — and logs the rest.
-#[derive(uniffi::Enum)]
-pub enum FfiDeploymentSeedSelfHeal {
-    /// The plane already holds a live entry for this nest — the steady state
-    /// on every connect after the first; no round trip.
-    AlreadyCustodied,
-    /// Not a current roster admin on this nest (or the admin check itself
-    /// failed) — nothing is owed.
-    NotAdmin,
-    /// Custody is owed but did not land this run — the fetch failed after its
-    /// bounded retry, the account store refused the merge, or the store is
-    /// not up yet (the seat's store-ready edge runs the leg then). Retried at
-    /// the next edge.
-    HandoffUnavailable,
-    /// Admin, and the fetch answered, but this nest holds no deployment key to
-    /// hand over — not expected post-boot.
-    NestHoldsNoSeed,
-    /// The leg fetched the seed: [`FfiDeploymentSeedCapture::Wrote`] when it
-    /// merged the entry, [`FfiDeploymentSeedCapture::RefusedMismatch`] when
-    /// the seed did not derive to the bound id.
-    Captured(FfiDeploymentSeedCapture),
-}
-
-impl From<DeploymentSeedCustody> for FfiDeploymentSeedSelfHeal {
-    fn from(o: DeploymentSeedCustody) -> Self {
-        match o {
-            DeploymentSeedCustody::AlreadyCustodied => Self::AlreadyCustodied,
-            DeploymentSeedCustody::NotAdmin => Self::NotAdmin,
-            DeploymentSeedCustody::HandoffUnavailable | DeploymentSeedCustody::StoreRefused(_) => {
-                Self::HandoffUnavailable
-            }
-            DeploymentSeedCustody::NestHoldsNoSeed => Self::NestHoldsNoSeed,
-            DeploymentSeedCustody::Captured => Self::Captured(FfiDeploymentSeedCapture::Wrote),
-            DeploymentSeedCustody::RefusedMismatch => {
-                Self::Captured(FfiDeploymentSeedCapture::RefusedMismatch)
-            }
-        }
-    }
-}
-
 /// **The custody leg's post-auth entry** — call at the app's universal
 /// post-auth hook, on **every** connect (`box-recovery.md` § The plane-era
-/// recovery floor, *(c) The writes*). It resolves the nest this connection is
-/// bound to and runs the shared `run_deployment_seed_custody_leg` over this
+/// recovery floor, *(c) The writes*). It runs the shared native seam
+/// (`fauna_client_account_runtime::deployment_seeds::run_custody_leg` — the
+/// same composition tui and linux call) over this connection and this
 /// process's account-store handle: a live entry for the box → done with no
 /// round trip; otherwise the admin check (fail-closed), the seed fetch, the
 /// seed→id refusal, the merge, and the supersession-mark reconcile.
@@ -216,39 +158,43 @@ impl From<DeploymentSeedCustody> for FfiDeploymentSeedSelfHeal {
 /// [`fauna_client_config::LEDGER_READY_WAIT`]) — the app's post-auth hook
 /// fires right beside the connect that spawns the assembly, so an unwaited
 /// read would miss the store on nearly every fresh launch. A store still
-/// absent after the wait answers
-/// [`FfiDeploymentSeedSelfHeal::HandoffUnavailable`] (custody unconfirmed,
-/// retried next connect); the account-runtime seat also runs the same leg at
-/// its store-ready edge, so no second app call is owed.
+/// absent after the wait is an unconfirmed custody (warned, retried next
+/// connect); the account-runtime seat also runs the same leg at its
+/// store-ready edge, so no second app call is owed.
+///
+/// Answers the warning the run owes the admin — the shared
+/// [`LocalizedText`] (`fauna_client_config::custody_leg_warning`), which the
+/// glue renders through its one resolver onto its warning surface — or `None`
+/// when nothing is owed. Never throws: a malformed `owner_secret` or a bound
+/// id that does not resolve means custody could not be attempted, which warns
+/// like any other unconfirmed run.
 ///
 /// `owner_secret` is validated as a 32-byte secret only; `app_data_dir` is
 /// unused (the device-local replica retired for this kind) and
 /// kept so no caller's signature changes.
-///
-/// # Errors
-///
-/// - `FfiError::General` if `owner_secret` is not 32 bytes, or if this nest's
-///   identity can't be resolved. Non-fatal to launch; the glue warns.
 #[fauna_uniffi_async::export]
 pub async fn self_heal_deployment_seed_custody(
     nest: Arc<FfiNestClient>,
     owner_secret: Vec<u8>,
     app_data_dir: String,
-) -> Result<FfiDeploymentSeedSelfHeal, FfiError> {
+) -> Option<LocalizedText> {
     let _ = app_data_dir;
-    crate::keypair_from_bytes(&owner_secret)?;
-    let bound = bound_nest_id(&nest).await?;
+    if let Err(e) = crate::keypair_from_bytes(&owner_secret) {
+        tracing::warn!("deployment-seed custody leg: not attempted: {e}");
+        return Some(custody_leg_unattempted_warning());
+    }
     let store = ResolvingLedgerStore::new(crate::account_runtime::handle);
-    let report = run_deployment_seed_custody_leg(&*nest.nest_arc(), bound, &store).await;
-    if matches!(report.custody, DeploymentSeedCustody::StoreRefused(_)) {
-        tracing::info!(
-            "deployment-seed custody leg: the account store refused or is not up yet — the store-ready edge and the next connect retry"
-        );
-    }
-    if report.custody.unconfirmed() {
-        tracing::warn!(outcome = ?report.custody, "deployment-seed custody leg: custody unconfirmed");
-    }
-    Ok(report.custody.into())
+    fauna_client_account_runtime::deployment_seeds::run_custody_leg(&nest.nest_arc(), &store).await
+}
+
+/// The warning owed when the glue could not even reach
+/// [`self_heal_deployment_seed_custody`] — no connection, no secret — the
+/// shared `fauna_client_config::custody_leg_unattempted_warning`, so the
+/// glue's failure path renders the same shared text instead of choosing a
+/// key of its own.
+#[uniffi::export]
+pub fn deployment_seed_custody_unattempted_warning() -> LocalizedText {
+    custody_leg_unattempted_warning()
 }
 
 /// One custodied box for the total-box-loss recovery box list — the native twin
@@ -269,10 +215,10 @@ pub struct FfiDeploymentSeedEntry {
 /// The account-store location for `store_container_dir` — the one mapping the
 /// account runtime opens the store under ([`crate::account_state::store_root_for`]:
 /// `Some(dir) => StoreRoot::at(dir)`, `None => StoreRoot::platform()`).
-fn store_root(store_container_dir: Option<String>) -> StoreRoot {
-    StoreRoot::at(crate::account_state::store_root_for(
-        store_container_dir.map(PathBuf::from),
-    ))
+///
+/// `Err` (the shared no-home refusal) when the platform location cannot resolve.
+fn store_root(store_container_dir: Option<String>) -> Result<StoreRoot, FfiError> {
+    crate::account_state::store_root_for(store_container_dir.map(PathBuf::from)).map(StoreRoot::at)
 }
 
 /// The recoverable rows (superseded boxes excluded) as FFI records.
@@ -300,7 +246,7 @@ async fn resolve_over(
     let resolved = fauna_client_account_runtime::deployment_seeds::resolve_over_connection(
         nest.nest_arc(),
         *secret,
-        store_root(store_container_dir),
+        store_root(store_container_dir)?,
     )
     .await;
     resolved
@@ -342,8 +288,10 @@ pub async fn deployment_seeds(
 /// never touches a transport. Empty for a store that does not exist (it
 /// never creates one).
 ///
-/// `owner_secret` is the admin actor's 32-byte identity seed (only its actor
-/// id is used, to locate the store); `app_data_dir` is **unused** — it rooted
+/// `owner_secret` is the admin actor's 32-byte identity seed (its actor id
+/// locates the store, and the replica seal key it derives opens the store's
+/// sealed rows — `account-replica-posture.md` § Local at-rest posture);
+/// `app_data_dir` is **unused** — it rooted
 /// the retired device-local replica and stays in the signature so
 /// the Swift and Kotlin call sites keep binding; `store_container_dir` locates
 /// the account store as the account runtime does (`None` = the platform
@@ -362,9 +310,13 @@ pub fn deployment_seeds_local(
 ) -> Result<Vec<FfiDeploymentSeedEntry>, FfiError> {
     let _ = app_data_dir;
     let keypair = crate::keypair_from_bytes(&owner_secret)?;
-    let root = store_root(store_container_dir);
-    let seeds = poll_once(read_local_deployment_seeds(&root, &keypair.actor_id_hex()))?
-        .map_err(|e| general_err(format!("{e:#}")))?;
+    let root = store_root(store_container_dir)?;
+    let seeds = poll_once(read_local_deployment_seeds(
+        &root,
+        &keypair.actor_id_hex(),
+        Some(replica_seal_key(keypair.secret_bytes())),
+    ))?
+    .map_err(|e| general_err(format!("{e:#}")))?;
     Ok(project_boxes(&seeds))
 }
 

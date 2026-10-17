@@ -103,10 +103,84 @@ fn device_set_record(row_value: &[u8]) -> DeviceSetStateView {
     }
 }
 
+/// One fauna-native channel's read marker as the e2e assertion reads it —
+/// `{"found": false}`, or `{"found": true, "through": N}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReadMarkerStateView {
+    pub found: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub through: Option<u64>,
+}
+
+/// The account store's read marker for `channel_id_hex` — the e2e's durability
+/// barrier for a read (`docs/goal/behavior/conversation-read-state.md` § The
+/// read-marker record): a test that must know a read reached the store before
+/// it quits the app asks this, never a clock. Built on
+/// [`AccountStoreHandle::read_markers`], the same read the conversations glue
+/// delivers from; the channel id compares case-insensitively. An on-demand
+/// reader exactly like [`device_set_state`] (async store I/O, never on the
+/// per-tick state path). No handle, a failed read or an absent row is
+/// `found: false`.
+pub async fn read_marker_state(
+    handle: Option<&AccountStoreHandle>,
+    channel_id_hex: &str,
+) -> ReadMarkerStateView {
+    let Some(handle) = handle else {
+        return ReadMarkerStateView::NOT_FOUND;
+    };
+    let Ok(markers) = handle.read_markers().await else {
+        return ReadMarkerStateView::NOT_FOUND;
+    };
+    read_marker_of(&markers, channel_id_hex)
+}
+
+/// The pure lookup, split out so it is unit-testable without an assembled store.
+fn read_marker_of(markers: &[(String, u64)], channel_id_hex: &str) -> ReadMarkerStateView {
+    match markers
+        .iter()
+        .find(|(channel, _)| channel.eq_ignore_ascii_case(channel_id_hex))
+    {
+        Some((_, through)) => ReadMarkerStateView {
+            found: true,
+            through: Some(*through),
+        },
+        None => ReadMarkerStateView::NOT_FOUND,
+    }
+}
+
+impl ReadMarkerStateView {
+    const NOT_FOUND: Self = Self {
+        found: false,
+        through: None,
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use fauna_core::generation::DeviceSetRecord;
+
+    #[test]
+    fn a_read_marker_is_found_case_insensitively() {
+        let markers = vec![("ABcd".to_string(), 9u64)];
+        let view = read_marker_of(&markers, "abCD");
+        assert!(view.found);
+        assert_eq!(view.through, Some(9));
+        assert_eq!(
+            serde_json::to_value(&view).expect("json"),
+            serde_json::json!({ "found": true, "through": 9 })
+        );
+    }
+
+    #[test]
+    fn an_absent_read_marker_reports_not_found() {
+        let view = read_marker_of(&[("aa".to_string(), 1)], "bb");
+        assert_eq!(view, ReadMarkerStateView::NOT_FOUND);
+        assert_eq!(
+            serde_json::to_value(&view).expect("json"),
+            serde_json::json!({ "found": false })
+        );
+    }
 
     #[test]
     fn a_removed_row_decodes_to_the_removed_shape() {

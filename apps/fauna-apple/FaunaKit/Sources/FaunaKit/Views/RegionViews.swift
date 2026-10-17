@@ -59,6 +59,7 @@ public struct RegionPlaceholderView: View {
     }
 }
 
+#if !FAUNA_KIDS
 /// The post detail's region arm — shared by iOS `PostDetailView` and macOS
 /// `PostDetailSheet`, which wrap their normal content in it: a post the region
 /// withholds paints the placeholder in place of the whole detail (a collapse
@@ -99,6 +100,7 @@ public struct RegionGatedPostContent<Content: View>: View {
         .regionBlockWitness(witnessKey, blocked: decision.isRegionBlocked)
     }
 }
+#endif
 
 /// The painted side of convention 17's `region_block_render` — a block
 /// placeholder counts while it is on screen. No-op in production.

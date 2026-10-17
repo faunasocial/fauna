@@ -16,6 +16,7 @@ import com.fauna.app.core.contactAskRender
 import com.fauna.app.core.foldContactAskFailed
 import com.fauna.app.core.foldContactAsked
 import com.fauna.app.core.foldKnockReply
+import com.fauna.ffi.accountDisplayHandle
 import com.fauna.ffi.actorIdFromSecret
 import com.fauna.ffi.knockRecipientNestUrl
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -66,15 +67,22 @@ class ProfileVM @Inject constructor(
     /** The actor whose profile is shown: the target (OTHER) or the viewer (SELF). */
     val profileActorIdHex: String? = targetActorId ?: ownActorIdHex
 
-    /** Header fallback when no profile is published: SELF → cached handle → own actor_id; OTHER → target actor_id. */
-    private val fallbackName: String =
+    /**
+     * Header fallback when no profile is published: SELF → the handle on the
+     * CURRENT primary (`<handle>@<domain>`, the shared `accountDisplayHandle`,
+     * never the bare handle — `mail-primary-domain-rename.md` § Display-handle
+     * interaction) → own actor_id; OTHER → target actor_id. A function, not a
+     * `val`: read from the live registry material at every [refreshHeader], so
+     * a primary rename lands without rebuilding this VM.
+     */
+    private fun fallbackName(): String =
         if (isSelf) {
-            secureStorage.handle?.takeIf { it.isNotBlank() } ?: ownActorIdHex ?: ""
+            selfDisplayHandle(secureStorage.handle, secureStorage.domain) ?: ownActorIdHex ?: ""
         } else {
             targetActorId ?: ""
         }
 
-    private val _displayName = MutableStateFlow(fallbackName)
+    private val _displayName = MutableStateFlow(fallbackName())
 
     /** Header label: the published display_name once [refreshHeader] returns, else the fallback. */
     val displayName: StateFlow<String> = _displayName.asStateFlow()
@@ -102,6 +110,17 @@ class ProfileVM @Inject constructor(
      *  the `profile-block-button` label Block ⇄ Unblock. */
     private val _blocked = MutableStateFlow(false)
     val blocked: StateFlow<Boolean> = _blocked.asStateFlow()
+
+    /** False until the open-time edge read (or the viewer's own press) sets
+     *  [blocked]: the `profile-block-button` is disabled meanwhile, since a press on
+     *  the not-blocked default would re-send `knocks_block` for an actor the viewer
+     *  already blocks (mirrors tui's `is_blocked: Option<bool>`). */
+    private val _blockKnown = MutableStateFlow(false)
+    val blockKnown: StateFlow<Boolean> = _blockKnown.asStateFlow()
+
+    /** The viewer's own press has decided [blocked] for this open: a late
+     *  open-time read must not rewind it. */
+    private var blockUserAuthored = false
 
     /** True while a [toggleBlock] round-trip is in flight (disables the toggle). */
     private val _blockWorking = MutableStateFlow(false)
@@ -150,7 +169,7 @@ class ProfileVM @Inject constructor(
                 ?.let { runCatching { api.decodeProfileDisplay(it).displayName }.getOrNull() }
                 ?.takeIf { it.isNotBlank() }
             _publishedName.value = published
-            _displayName.value = published ?: fallbackName
+            _displayName.value = published ?: fallbackName()
             if (targetActorId != null) {
                 knockRoute = body?.let {
                     runCatching { knockRecipientNestUrl(HexUtil.hexToBytes(targetActorId), it, api.nodeUrl) }.getOrNull()
@@ -242,13 +261,24 @@ class ProfileVM @Inject constructor(
     fun refreshBlockState() {
         val hex = targetActorId ?: return
         viewModelScope.launch {
-            _blocked.value = runCatching {
+            applyBlockRead(runCatching {
                 // Shared predicate (`contact_row_blocks_actor`): a `blocked` row whose
                 // peer-id matches this actor (case-insensitive hex). Single-sourced so
                 // the toggle state can't drift per-app. contacts.md § Where logic lives.
                 api.fetchContacts(hex).any { com.fauna.ffi.contactRowBlocksActor(it.peerId, it.status, hex) }
-            }.getOrDefault(false)
+            }.getOrDefault(false))
         }
+    }
+
+    /**
+     * Fold the open-time edge read in: it enables the toggle (a failed read lands as
+     * not-blocked, so the toggle never stays stuck off) and sets [blocked] — unless
+     * the viewer's own press already authored the edge, which a read issued before
+     * it must not rewind. Mirrors linux `apply_block_read`.
+     */
+    internal fun applyBlockRead(isBlocked: Boolean) {
+        if (!blockUserAuthored) _blocked.value = isBlocked
+        _blockKnown.value = true
     }
 
     /**
@@ -261,6 +291,7 @@ class ProfileVM @Inject constructor(
      */
     fun toggleBlock() {
         val hex = targetActorId ?: return
+        if (!_blockKnown.value) return
         val wasBlocked = _blocked.value
         viewModelScope.launch {
             errorMessage.value = null
@@ -272,6 +303,7 @@ class ProfileVM @Inject constructor(
                     api.blockKnock(hex, hex)
                 }
                 _blocked.value = !wasBlocked
+                blockUserAuthored = true
             } catch (e: Exception) {
                 errorMessage.value = e.message ?: "error"
             } finally {
@@ -280,3 +312,11 @@ class ProfileVM @Inject constructor(
         }
     }
 }
+
+/**
+ * The profile SELF header's display handle from the account's cached
+ * handle/domain — the shared `fauna_client_accounts::display_handle` (one
+ * resolution for all 7 apps); `null` while nothing resolves.
+ */
+internal fun selfDisplayHandle(handle: String?, domain: String?): String? =
+    accountDisplayHandle(handle.orEmpty(), handle, domain)

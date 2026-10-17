@@ -37,6 +37,7 @@ import com.fauna.app.ui.components.MarkdownWrap
 import com.fauna.app.ui.components.RecordingVisualTransformation
 import com.fauna.app.ui.components.RevealSpan
 import com.fauna.app.ui.components.naiveMarkdownWrap
+import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.components.utf16IndexToUtf8Byte
 import com.fauna.app.ui.util.localized
 import uniffi.fauna_conversations.ComposeState
@@ -69,10 +70,12 @@ import social.fauna.generated.Ids
 /**
  * Multi-rail recipient picker: chips + input + suggestions + resolve status.
  * Mirrors `recipient_picker.rs`. Chip/suggestion IDs are indexed per
- * conversations.md rule #4 (scoped queries). Chips render without an inline
- * remove affordance and suggestions are non-interactive — matching the linux
- * sibling; `remove_recipient_chip` / `accept_suggestion` are documented future
- * actions not yet exported by the manager binding.
+ * conversations.md rule #4 (scoped queries). A chip reads `"{address} ×"` and its
+ * click is `remove_recipient_chip(i)` ([onRemoveChip]); a suggestion row paints the
+ * manager-derived label with the address beside it when they differ and its click
+ * is `accept_suggestion(i)` ([onAcceptSuggestion]) — the Enter path run over that
+ * row's spelling, never the typed text's (`conversations.md` § Where logic lives →
+ * *Recipient suggestions*).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -80,6 +83,11 @@ fun RecipientPicker(
     state: RecipientPickerState,
     onInputChange: (String) -> Unit,
     onAccept: () -> Unit,
+    // `accept_suggestion(i)` / `remove_recipient_chip(i)` — indexed by the row the
+    // user touched. The defaults are for the Compose test harness only: an
+    // unwired suggestion click falls back to the typed text's `onAccept`.
+    onAcceptSuggestion: (Int) -> Unit = { onAccept() },
+    onRemoveChip: (Int) -> Unit = {},
     // Raw-address → display string, injected from the stateful Screen so this
     // Content stays FFI-free for Robolectric (the .so can't load there).
     // Production injects the shared `fauna_conversations::typed_address_display`
@@ -101,10 +109,10 @@ fun RecipientPicker(
         // Chips row (indexed `recipient-picker-chip`).
         if (state.chips.isNotEmpty()) {
             LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                itemsIndexed(state.chips) { _, chip ->
+                itemsIndexed(state.chips) { index, chip ->
                     AssistChip(
-                        onClick = {},
-                        label = { Text(displayAddress(chip)) },
+                        onClick = { onRemoveChip(index) },
+                        label = { Text("${displayAddress(chip)} ×") },
                         modifier = Modifier.testTag(Ids.RECIPIENT_PICKER_CHIP),
                     )
                 }
@@ -135,14 +143,18 @@ fun RecipientPicker(
             )
         }
 
-        // Suggestions (indexed `recipient-picker-suggestion`) — non-interactive
-        // display, parity with the linux sibling.
-        state.suggestions.forEachIndexed { _, sug ->
+        // Suggestions (indexed `recipient-picker-suggestion`): the finished label the
+        // manager derived (`suggestionDisplays`) with the address beside it when the
+        // two differ — the shape tui paints; a click accepts *that* person.
+        state.suggestions.forEachIndexed { index, sug ->
+            val address = displayAddress(sug)
+            val label = state.suggestionDisplays.getOrNull(index)
             Text(
-                displayAddress(sug),
+                if (!label.isNullOrEmpty() && label != address) "$label · $address" else address,
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier
                     .fillMaxWidth()
+                    .clickable { onAcceptSuggestion(index) }
                     .padding(vertical = 4.dp)
                     .testTag(Ids.RECIPIENT_PICKER_SUGGESTION),
             )
@@ -188,6 +200,11 @@ fun ComposeBar(
     onAddReplyRecipient: (String) -> Unit = {},
     onRemoveReplyRecipient: (TypedAddress) -> Unit = {},
     onRemoveAttachment: (Int) -> Unit = {},
+    // True on the new-thread composer when this send founds a community room
+    // (home-nest toggle on, prospective class community): that send is the
+    // `room.create` ceremony, so the send button gates on it, not on a channel
+    // append. Always false for the reply bar.
+    foundsRoom: Boolean = false,
     // Byte-size label for a staged attachment chip, injected like
     // [claimStatusLabel]/[providerStatusLabel] in ProfileTiersTab.kt so tests can
     // swap in a non-FFI double (the .so can't load under Robolectric); production
@@ -487,9 +504,11 @@ fun ComposeBar(
             // startConversationsSession` builds at login (the mocks under plain
             // E2E). A refusal lands on the shared `send_state`, which the page's
             // `error-message` mirrors (conversations.md §"Per-rail backends").
+            val sendIdle = compose.sendState !is SendState.Sending
+            val foundGate = if (foundsRoom) faunaGate("fauna.conversations.room.create", enabled = sendIdle) else null
             Button(
                 onClick = onSend,
-                enabled = compose.sendState !is SendState.Sending,
+                enabled = foundGate?.enabled ?: sendIdle,
                 modifier = Modifier.testTag(Ids.DM_SEND_BUTTON),
             ) {
                 Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, modifier = Modifier.size(18.dp))

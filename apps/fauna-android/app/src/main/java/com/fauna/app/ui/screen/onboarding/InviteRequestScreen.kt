@@ -247,12 +247,14 @@ fun InviteRequestScreen(
             )
         }
         // "This account will be supervised by X" — rendered BEFORE redemption
-        // when the checked code carries a supervised designation
-        // (family-safety.md § Wire & data shape / § App surface).
-        val supervisedByGuardian = (snap.outOfBandCodeState as? OobCodeState.Valid)?.supervisedBy
-        if (supervisedByGuardian != null) {
+        // when the checked code carries a supervised designation; the sentence
+        // (guardian, plus the code's age band) is derived in the shared machine
+        // (family-safety.md § Wire & data shape / § App surface). Its band arg
+        // is a nested key, hence the nested resolve.
+        val supervisedNotice = localizedNested(snap.supervisedNotice)
+        if (supervisedNotice != null) {
             Text(
-                stringResourceFmt(R.string.family_supervised_notice_onboarding, supervisedByGuardian),
+                supervisedNotice,
                 modifier = Modifier
                     .fillMaxWidth()
                     .testTag(Ids.INVITE_CODE_SUPERVISED_NOTICE),

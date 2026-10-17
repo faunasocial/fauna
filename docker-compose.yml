@@ -1,0 +1,142 @@
+# BYO Server — docker-compose.yml
+# Copy to your server and create a .env file with your settings.
+# See: https://fauna.social/app/setup for guided setup.
+
+# Cap every container's json logs so a chatty or runaway service can never
+# fill the host disk. This is the deployment-side backstop for the app-side
+# fix: a mail-bridge cert/DKIM refresh loop once busy-spun and grew a single
+# json log to 69 GB on a 75 GB box (2026-06-01), wedging the whole node.
+# 50 MB × 5 files = 250 MB max per container; the daemon rotates and discards
+# the oldest. Applied to every service via the *default-logging anchor.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
+services:
+  fauna-nest:
+    image: ghcr.io/faunasocial/nest:${FAUNA_IMAGE_TAG:-latest}
+    ports:
+      - "80:8080"
+      # 443 is fronted by the fauna-sni-router s6 service (L4 SNI passthrough,
+      # terminates no TLS): SNI `mail.<domain>` → the MDA's CalDAV listener
+      # (127.0.0.1:8444), every other SNI → nest (127.0.0.1:3000). nest never
+      # sees CalDAV plaintext even in transit. See
+      # docs/goal/behavior/caldav-server.md § Network exposure.
+      - "443:443"
+      # 7842/udp: the P2P relay's address discovery — it tells a device its own
+      # public address so two devices behind NATs can connect directly instead
+      # of through the relay. Bound on every interface by the fauna-iroh-relay
+      # s6 service itself (not the SNI router); it answers only once the box has
+      # a public name and the relay holds its certificate. See
+      # docs/goal/behavior/p2p.md § The relay → Address discovery.
+      - "7842:7842/udp"
+      # Mail: 25 inbound MX, 465 implicit-TLS + 587 STARTTLS submission, 993
+      # IMAPS. Bound inside the container by the fauna-mail-bridge MTA/MDA s6
+      # services once the admin enables mail from their Fauna app.
+      - "25:25"
+      - "465:465"
+      - "587:587"
+      - "993:993"
+    volumes:
+      - fauna-data:/data
+    environment:
+      FAUNA_MODE: ${FAUNA_MODE:-public}
+      # The update-channel seed: the same tag as `image:` above, read only while
+      # no admin has chosen a channel from their Fauna app; a tag that is no
+      # channel (`sha-…`, a version) leaves the box pinned
+      # (docs/goal/architecture/nest/update-channel.md § The channel as nest state).
+      FAUNA_IMAGE_TAG: ${FAUNA_IMAGE_TAG:-latest}
+      # Box-recovery deployment seed: the client-custodied Ed25519 signing seed
+      # (64-char hex) that re-instantiates THIS box's identity (nest_actor_id)
+      # after total box loss, so pinned clients reconnect to the same channel-
+      # binding identity (docs/goal/architecture/nest/box-recovery.md § Restore —
+      # the self-hosted analogue of the cloud-init env-injection). Empty on a
+      # fresh box ⇒ nest mints its own seed on first boot and hands it back at
+      # claim; consulted only on a fresh box (an established on-disk identity
+      # wins, key-material-hierarchy.md:26). Bucket-2 IPC the installer writes
+      # from its FAUNA_DEPLOYMENT_SEED input — recovery material, never a
+      # human-chosen preference (no operator).
+      FAUNA_DEPLOYMENT_SEED: ${FAUNA_DEPLOYMENT_SEED:-}
+      # nest's internal listener (the SNI router's loopback target). 3000 is the
+      # entrypoint + Dockerfile HEALTHCHECK + bridge default, so prod matches
+      # local-dev `just docker-run`. It is pure IPC behind :443 and is kept off
+      # 8443 so 8443 means CalDAV only (a bare-IP box serves CalDAV at <ip>:8443).
+      FAUNA_PORT: ${FAUNA_PORT:-3000}
+      # Co-located content-scan daemons (sidecars below). The mail bridge's
+      # scan gate is default-on + FAIL-CLOSED: an unreachable clamd/rspamd
+      # 451s every inbound message. docker/entrypoint.sh writes these into the
+      # bridge's operator-hatch; the bridge dials clamd over TCP and POSTs
+      # rspamd /checkv2.
+      FAUNA_CLAMD_ADDR: ${FAUNA_CLAMD_ADDR:-clamd:3310}
+      FAUNA_RSPAMD_URL: ${FAUNA_RSPAMD_URL:-http://rspamd:11333}
+    labels:
+      - "social.fauna.update=true"
+    logging: *default-logging
+    restart: unless-stopped
+    # On SIGTERM the nest broadcasts WS 1001 to every connected client and waits
+    # (ws::GRACEFUL_SHUTDOWN_TIMEOUT = 7 s) for in-flight requests to drain before
+    # flushing the DB (transport.md § Graceful shutdown). Give the container
+    # comfortably more than that drain + flush budget before Docker escalates to
+    # SIGKILL, so an updater re-create never truncates the 1001 broadcast.
+    stop_grace_period: 15s
+
+  # The Fauna updater (docs/goal/architecture/nest/update-channel.md § The
+  # updater): the nest image's second binary, run as its own container at the
+  # same tag. It follows the update channel the nest reports (chosen from your
+  # Fauna app; until then the tag above), asks the registry at the channel's
+  # interval (a minute on Dev and Test, an hour on Stable) and at once on a
+  # channel change, and re-creates the containers labelled
+  # social.fauna.update=true on a newer build — never an older one. It holds the
+  # Docker socket and nothing else: no environment, no port, no data.
+  fauna-updater:
+    image: ghcr.io/faunasocial/nest:${FAUNA_IMAGE_TAG:-latest}
+    entrypoint: ["/usr/local/bin/fauna-updater"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    logging: *default-logging
+    restart: unless-stopped
+
+  # ── Content-scan sidecars ───────────────────────────────────────────
+  # The mail bridge dials these from inside the fauna-nest container over the
+  # compose network. Both are required whenever mail is enabled: the bridge's
+  # scan gate defaults on and fail-closes (451) when a scanner is unreachable.
+  # NB: clamd holds the full signature DB in RAM (~1.5 GB) — the practical RAM
+  # floor for a mail-enabled deployment is well above the 1 GB VPS minimum.
+  clamd:
+    # ⚠ The `-debian` suffix is LOAD-BEARING — do not "simplify" it to :latest.
+    # clamav/clamav's UNSUFFIXED tags (latest, stable, 1.4, 1.5) are amd64-ONLY,
+    # while the -debian / -debian13-slim family from the same publisher carries
+    # amd64 + arm64 + ppc64le. We publish the nest image for arm64 too, and the
+    # scan gate is default-on and fail-closes: on an arm64 box an unreachable
+    # clamd 451s every inbound message forever, at shipped defaults, with the
+    # disable toggle still inert. scripts/vetted_images.py records the platforms
+    # this ref covers, and the release tooling checks every shipping copy of this
+    # bundle against the nest image's published platforms.
+    image: clamav/clamav:latest-debian@sha256:967334b92d1782e4d1314ddf903ae537d26792d21c9a39adecb8ac9757980514
+    # clamd listens on TCP 3310 (all interfaces) in this image, which ships its
+    # own HEALTHCHECK (clamdcheck.sh). First boot runs freshclam to download
+    # signatures (~1-2 min); the bridge fail-closes (451 retry) until clamd is
+    # reachable, which the sending MTA's retry curve absorbs.
+    logging: *default-logging
+    restart: unless-stopped
+
+  rspamd:
+    image: rspamd/rspamd:latest@sha256:86bc544548bc881276e19dcff4cf36bc4fb5c8a3050717f3c2315cb823938a80
+    # Bind the normal worker (the /checkv2 scan endpoint the bridge POSTs to)
+    # on all interfaces so the nest container can reach it; the stock config
+    # binds localhost only. Shipped inline so the compose bundle stays turnkey.
+    configs:
+      - source: rspamd-worker-normal
+        target: /etc/rspamd/local.d/worker-normal.inc
+    logging: *default-logging
+    restart: unless-stopped
+
+configs:
+  rspamd-worker-normal:
+    content: |
+      bind_socket = "*:11333";
+
+volumes:
+  fauna-data:

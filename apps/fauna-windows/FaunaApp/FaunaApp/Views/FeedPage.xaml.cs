@@ -109,6 +109,11 @@ public sealed partial class FeedPage : Page
         // app obtains its region's policy). Raised off the UI thread — marshal back.
         Loaded += (_, _) => RegionPlaneHost.Changed += OnRegionChanged;
         Unloaded += (_, _) => RegionPlaneHost.Changed -= OnRegionChanged;
+        // The same re-read when the private contact overlay moves: AuthorLabel is part
+        // of FeedPostItem.ContentEquals, so exactly the cards whose author was renamed
+        // rebuild. Raised off the UI thread — marshal back.
+        Loaded += (_, _) => ContactOverlayNames.Moved += OnRegionChanged;
+        Unloaded += (_, _) => ContactOverlayNames.Moved -= OnRegionChanged;
     }
 
     private void OnRegionChanged() => DispatcherQueue.TryEnqueue(Refresh);
@@ -187,6 +192,7 @@ public sealed partial class FeedPage : Page
         // seam is app-lifetime, so an un-cleaned VM would leak (and re-fetch into
         // an orphaned snapshot observer).
         _viewModel?.CleanupReconnect();
+        _viewModel?.CleanupStoreChange();
         // Draft-persistence v2, feed leg: navigating away destroys the compose
         // control, so flush a still-pending debounced save NOW in case the
         // debounce window hadn't elapsed — fire-and-forget, best-effort (mirrors
@@ -407,8 +413,10 @@ public sealed partial class FeedPage : Page
         // clearing on an empty snapshot error used to erase such a failure within
         // milliseconds of it being raised — the reader (and any e2e reading
         // `error-message`) then saw nothing at all. The snapshot error still wins when
-        // there is one; otherwise the page error persists until the next load.
-        var err = _viewModel.ErrorText;
+        // there is one; otherwise the page error persists until the next load. An open
+        // thread page's own failure leads ahead of both (FeedPage.Thread.cs).
+        var err = OpenThreadPageError();
+        if (string.IsNullOrEmpty(err)) err = _viewModel.ErrorText;
         if (string.IsNullOrEmpty(err)) err = _pageError;
         if (!string.IsNullOrEmpty(err))
         {
@@ -440,6 +448,8 @@ public sealed partial class FeedPage : Page
         var empty = _viewModel.EmptyState;
         FeedEmptyStateText.Visibility = empty == FeedEmptyState.NoPosts ? Visibility.Visible : Visibility.Collapsed;
         FeedNoResultsText.Visibility = empty == FeedEmptyState.NoMatches ? Visibility.Visible : Visibility.Collapsed;
+
+        PaintThreadPage();
 
         // Push to the E2E state bridge.
         AppDataSnapshot.SetFeedPosts(Posts);
@@ -496,8 +506,9 @@ public sealed partial class FeedPage : Page
         // § State & data shape). Generalizes the SyncFeeds/SyncAvailableBridges id-diff guard
         // to per-row content via FeedPostItem.ContentEquals.
         var target = new List<FeedPostItem>(snapshot.Count);
+        var bridgeRoster = _viewModel?.BridgeRoster;
         foreach (var p in snapshot)
-            target.Add(new FeedPostItem(p, _viewModel?.Manager));
+            target.Add(new FeedPostItem(p, _viewModel?.Manager, bridgeRoster));
         ObservableCollectionReconcile.Reconcile(
             Posts, target, item => item.PostId, static (a, b) => a.ContentEquals(b));
 
@@ -838,7 +849,39 @@ public sealed partial class FeedPage : Page
         buttonRow.Children.Add(submitBtn);
 
         var panel = new StackPanel { Spacing = 8 };
+
+        // Under a restricted target the dialog STATES where the reply goes —
+        // `feed-reply-audience`, the manager's own per-post answer, never decided here —
+        // and offers the explicit-public answer (`feed-reply-public-confirm`) only under
+        // *public by confirmation* (restricted-posts.md § Encryption at rest → *Ruling 5's
+        // build — the shape*, (d) + (e)). A public target paints neither. The checkbox is
+        // born unchecked at every open and never remembered.
+        var target = _viewModel.FindPost(postId);
+        var audience = target?.replyAudience;
+        CheckBox? publicConfirm = null;
+        if (target is not null && audience is { } a)
+        {
+            var audienceText = a switch
+            {
+                ReplyAudience.SealedToRoom => S.Format("feed/post/reply_audience_room", target.roomLabel ?? ""),
+                ReplyAudience.SealedToTier => S.Format("feed/post/reply_audience_tier", target.gatedTier ?? ""),
+                _ => S.Get("feed/post/reply_audience_public"),
+            };
+            var audienceLabel = new TextBlock { Text = audienceText, TextWrapping = TextWrapping.Wrap };
+            AutomationProperties.SetAutomationId(audienceLabel, Ids.FeedReplyAudience);
+            panel.Children.Add(audienceLabel);
+        }
         panel.Children.Add(textBox);
+        if (audience == ReplyAudience.PublicByConfirmation)
+        {
+            publicConfirm = new CheckBox
+            {
+                Content = S.Get("feed/post/reply_public_confirm"),
+                IsChecked = false,
+            };
+            AutomationProperties.SetAutomationId(publicConfirm, Ids.FeedReplyPublicConfirm);
+            panel.Children.Add(publicConfirm);
+        }
         panel.Children.Add(buttonRow);
 
         var dialog = new ContentDialog
@@ -855,7 +898,11 @@ public sealed partial class FeedPage : Page
         if (shouldReply)
         {
             var body = textBox.Text.Trim();
-            await RunVerbAsync("reply", () => _viewModel!.ReplyAsync(postId, body));
+            // The checkbox is only ever present (hence only ever checkable) under
+            // *public by confirmation*; the send path (prepare → upload → submit /
+            // confirmed / plain) lives in FeedViewModel.SendReplyAsync.
+            var confirmed = publicConfirm?.IsChecked == true;
+            await RunVerbAsync("reply", () => _viewModel!.SendReplyAsync(Nest, postId, body, confirmed));
         }
     }
 
@@ -1180,7 +1227,7 @@ public sealed partial class FeedPage : Page
         var target = FaunaFfiMethods.ReportPostTarget(
             post.PostId, post.AuthorHex, post.BodyText,
             post.GatedTier is { Length: > 0 } || !string.IsNullOrEmpty(post.RoomLabel));
-        var outcome = await Controls.ReportSheetDialog.ShowAsync(
+        var outcome = await Controls.ReportSheetDialog.OpenAsync(
             this.XamlRoot, _rpc, target, ReportPageError);
         if (outcome is null) return;
         ReportStatusText.Text = outcome.Acknowledgement ?? "";
@@ -1429,7 +1476,7 @@ public sealed partial class FeedPage : Page
     /// name — and trains the picked one. Also offers a "New trained topic…" link
     /// out to the Personalization home (ui.yaml's ratified "existing factors +
     /// New trained topic…" shape) rather than duplicating the create-form inline
-    /// — web's richer pattern; linux's own sheet omits it, priority #4.</summary>
+    /// — the sheet shape every app shares, priority #4.</summary>
     private void OpenTrainTargetSheet(FrameworkElement anchor, string postId, TrainVerb verb)
     {
         var panel = new StackPanel { Orientation = Orientation.Vertical, Spacing = 8, MinWidth = 220 };
@@ -1559,7 +1606,7 @@ public sealed partial class FeedPage : Page
 
         if (FindRenderedPost(postId) is { } loaded)
         {
-            await ShowPostDetailDialogAsync(new FeedPostItem(loaded, _viewModel.Manager));
+            await ShowPostDetailDialogAsync(new FeedPostItem(loaded, _viewModel.Manager, _viewModel.BridgeRoster));
             return;
         }
 
@@ -1577,7 +1624,11 @@ public sealed partial class FeedPage : Page
         };
         AutomationProperties.SetAutomationId(dialog, Ids.FeedPostDetailDialog);
 
-        await Controls.Dialogs.ShowAsync(dialog, prepare: () => _ = ResolveAndFillPostDetailAsync(dialog, postId));
+        await Controls.Dialogs.ShowAsync(dialog, prepare: () =>
+        {
+            TrackDetailDialog(dialog);
+            _ = ResolveAndFillPostDetailAsync(dialog, postId);
+        });
     }
 
     /// <summary>
@@ -1606,7 +1657,7 @@ public sealed partial class FeedPage : Page
             await _viewModel.Manager.ResolvePost(postId);
             if (FindRenderedPost(postId) is { } resolved)
             {
-                var resolvedItem = new FeedPostItem(resolved, _viewModel.Manager);
+                var resolvedItem = new FeedPostItem(resolved, _viewModel.Manager, _viewModel.BridgeRoster);
                 var panel = BuildPostDetailPanel(resolvedItem, out var bodyText, out var postImageInsertIndex);
                 dialog.Content = new ScrollViewer { Content = panel, MaxHeight = 400 };
                 if (resolvedItem.GatedTier is { Length: > 0 } && !resolvedItem.GatedUnlocked
@@ -1758,27 +1809,29 @@ public sealed partial class FeedPage : Page
 
         // Video thumbnail (video-thumbnail) — the D6b `Video` sibling of `Image`
         // (render-model.md § Implementation status today), the detail-dialog twin of the
-        // list card's XAML render above: play glyph + hash text, no poster frame (none
-        // exists to paint — see the list card's own note). A bridged post's `ProxiedVideo`
-        // paints its nest-relative path where the hash goes (render-model.md § D6c →
-        // Proxied video) and is never byte-loaded.
-        if ((DocumentRenderer.MediaVideoHash(item.Document)
-                ?? DocumentRenderer.MediaProxiedVideoPath(item.Document)) is { } videoText)
+        // list card's XAML render above: the SAME VideoThumbnailView, so the detail plays
+        // inline exactly as the card does (§ D6c → Inline playback), off the same block. A
+        // bridged post's `ProxiedVideo` paints its nest-relative path where the hash goes
+        // (§ D6c → Proxied video), is never byte-loaded before the tap, and plays off the
+        // ticketed path the shared decision answers for it.
+        if (DocumentRenderer.MediaVideoBlock(item.Document) is { } videoBlock)
         {
-            var videoRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, Margin = new Thickness(0, 4, 0, 0) };
-            AutomationProperties.SetAutomationId(videoRow, Ids.VideoThumbnail);
-            AutomationProperties.SetName(videoRow, videoText);
-            videoRow.Children.Add(new TextBlock { Text = "\uE768", FontFamily = new Microsoft.UI.Xaml.Media.FontFamily("Segoe MDL2 Assets"), FontSize = 14, VerticalAlignment = VerticalAlignment.Center });
-            videoRow.Children.Add(new TextBlock { Text = videoText, FontSize = 12, Opacity = 0.7, VerticalAlignment = VerticalAlignment.Center });
-            panel.Children.Add(videoRow);
+            var video = new Controls.VideoThumbnailView
+            {
+                Block = videoBlock,
+                Margin = new Thickness(0, 4, 0, 0),
+            };
+            AutomationProperties.SetAutomationId(video, Ids.VideoThumbnail);
+            panel.Children.Add(video);
         }
 
-        // The author alone carries the id — the same short form the card paints, as web's
+        // The author alone carries the id — the same resolved label the card paints (the
+        // viewer's nickname, else the public name, else the canonical short id), as web's
         // and linux's detail do — so "which post did this open" reads as an author, not a
         // sentence; the time sits beside it. (It was one hand-rolled English line,
         // "by ‹author› · ‹time›", which no other app's detail painted.)
         var authorRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
-        var authorText = new TextBlock { Text = item.ShortAuthor, Opacity = 0.6 };
+        var authorText = new TextBlock { Text = item.AuthorLabel, Opacity = 0.6 };
         // Dedicated detail-dialog author id (see feed-post-detail-body above) — matches
         // the e2e post_detail_author() reader and ui.yaml `post_detail` element scope.
         AutomationProperties.SetAutomationId(authorText, Ids.FeedPostDetailAuthor);
@@ -1891,6 +1944,11 @@ public sealed partial class FeedPage : Page
         AutomationProperties.SetName(quotedBorder, item.QuotedPostAccessibleName);
         panel.Children.Add(quotedBorder);
 
+        // *View Thread* (bridges.md § Bluesky-native thread view): a Bluesky post has a
+        // conversation to open, which takes this dialog's place (FeedPage.Thread.cs).
+        if (item.OffersThreadView)
+            panel.Children.Add(BuildViewThreadButton(item));
+
         return panel;
     }
 
@@ -1995,6 +2053,7 @@ public sealed partial class FeedPage : Page
         // survive the swap.
         await Controls.Dialogs.ShowAsync(dialog, prepare: () =>
         {
+            TrackDetailDialog(dialog);
             // Gated post: the body painted above is the public TEASER (item.Document). Kick
             // off the unlock — fetch the sealed blob + decrypt (author custody / subscriber
             // KeyBlob) — and repaint feed-post-detail-body with the full body. bodyText is a
@@ -2271,19 +2330,14 @@ public sealed partial class FeedPage : Page
         // `global: true` read-merge-written into the caller's global factor set.
         var factorCombo = new ComboBox { MinWidth = 160, HorizontalAlignment = HorizontalAlignment.Stretch };
         AutomationProperties.SetAutomationId(factorCombo, Ids.FeedFactorSelect);
-        // Tag/Name = the stable factor key (the logic value AND the driver.select
-        // key); Content localizes the DISPLAY — the ruleTypeCombo convention above.
-        // The built-in head (engagement, trending, …) comes from the shared FFI
-        // (feed.md § Where logic lives → Feed factor-picker built-ins), so a new
-        // built-in reaches every app without a per-app literal; subscribed
-        // labeler:<hex> factors and trained topics append once the fetches below
-        // resolve.
+        // Each option is a FactorOption: the painted label as its Name, the stable
+        // factor key as its Tag and AutomationId (see FactorOption). The built-in
+        // head (engagement, trending, …) comes from the shared FFI (feed.md § Where
+        // logic lives → Feed factor-picker built-ins), so a new built-in reaches
+        // every app without a per-app literal; subscribed labeler:<hex> factors and
+        // trained topics append once the fetches below resolve.
         foreach (var option in FaunaFfiMethods.BuiltinFactorOptions())
-        {
-            var item = new ComboBoxItem { Content = S.Resolve(option.label), Tag = option.value };
-            AutomationProperties.SetName(item, option.value);
-            factorCombo.Items.Add(item);
-        }
+            factorCombo.Items.Add(FactorOption(S.Resolve(option.label), option.value));
         factorCombo.SelectedIndex = 0;
 
         var factorWeightBox = new TextBox
@@ -2445,15 +2499,32 @@ public sealed partial class FeedPage : Page
             foreach (var entry in machine.Snapshot().entries)
             {
                 if (!entry.subscribed) continue;
-                var item = new ComboBoxItem { Content = entry.factor, Tag = entry.factor };
-                AutomationProperties.SetName(item, entry.factor);
-                factorCombo.Items.Add(item);
+                // A labeler has no display name anywhere in the system: its key IS
+                // what the picker paints.
+                factorCombo.Items.Add(FactorOption(entry.factor, entry.factor));
             }
         }
         catch (Exception ex)
         {
             ShellLog.Warn(nameof(FeedPage), $"factor options fetch failed: {ex.Message}");
         }
+    }
+
+    /// <summary>One <c>feed-factor-select</c> option. Its Name is the label it paints —
+    /// what a screen reader reads, and what the bridge's <c>options</c> attribute answers,
+    /// so the picker lists a trained topic by the name the user gave it and a Layer-B
+    /// signal as "Watched to the end", never <c>topic:&lt;hex&gt;</c> or
+    /// <c>signal:watch-complete</c> (the cross-app <c>option_texts</c> contract,
+    /// <c>drivers/base.py</c>; topic-factors.md § Authoring surface &amp; picker). The
+    /// stable key is its Tag (what the composition stores) and its AutomationId, which the
+    /// bridge's <c>Select</c> matches as well as the Name, so <c>driver.select</c> keeps
+    /// naming the key exactly as on every other app.</summary>
+    private static ComboBoxItem FactorOption(string label, string key)
+    {
+        var item = new ComboBoxItem { Content = label, Tag = key };
+        AutomationProperties.SetName(item, label);
+        AutomationProperties.SetAutomationId(item, key);
+        return item;
     }
 
     /// <summary>Grow the create-feed factor picker with the owner's trained topics
@@ -2468,9 +2539,7 @@ public sealed partial class FeedPage : Page
             foreach (var row in await _rpc.TrainedTopicsListAsync())
             {
                 if (row.factorKey is not { } key) continue;
-                var item = new ComboBoxItem { Content = row.name, Tag = key };
-                AutomationProperties.SetName(item, key);
-                factorCombo.Items.Add(item);
+                factorCombo.Items.Add(FactorOption(row.name, key));
             }
         }
         catch (Exception ex)
@@ -2652,6 +2721,10 @@ public sealed partial class FeedPage : Page
             {
                 sealedBlob = await _viewModel.PrepareGatedBlobAsync();
             }
+            // Which arm the submit takes is the first question about a post that went
+            // out but not as written: a restricted audience (a restored draft's sale,
+            // say) sends the teaser as the visible body.
+            Core.Logs.E2eTrace.Write($"[feed-compose] submit arm={(sealedBlob is null ? "plain" : "restricted")}");
             if (sealedBlob is not null && nest is not null)
             {
                 try

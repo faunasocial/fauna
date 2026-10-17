@@ -38,7 +38,7 @@ Stamped 2026-09-19 at 0bb8814071.
 | App | Status | Stamp |
 |---|---|---|
 | web | ✅ full | 0.1.2-dev+4bc2efab standalone |
-| linux | ✅ full | 0.1.2-dev+c4a95c20 standalone |
+| linux | ✅ full | 0.1.4-dev+ea391d07 standalone |
 | windows | ✅ full | 0.1.3-dev+3a518178 standalone |
 | macos | ⚠ partial | |
 | ios | ⚠ partial | |

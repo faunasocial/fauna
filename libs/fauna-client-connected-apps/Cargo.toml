@@ -10,6 +10,11 @@ default = []
 # Turn on UniFFI scaffolding when consumed by fauna-ffi. Forwards the ATProto
 # settings machine's, whose `ConsentCardRow` this snapshot carries.
 uniffi = ["dep:uniffi", "fauna-core/uniffi", "fauna-atproto-settings-machine/uniffi", "dep:fauna-uniffi-async"]
+# Native-only: forwards `fauna-core`'s `local-clock`, which `compose` needs for
+# `format_unix_local_ms` (wasm has no OS timezone database, so web renders
+# instants in JS — the same split `fauna-client-dns` and `fauna-client-status`
+# make). Native Rust consumers (tui, linux) enable it.
+local-clock = ["fauna-core/local-clock"]
 # Test helpers — FakeConnectedAppsNestApi.
 test-helpers = []
 # Test observer — CountingObserver / NullObserver.
@@ -68,9 +73,11 @@ fauna-rpc-wasm = { path = "../fauna-rpc-wasm", optional = true }
 fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
 
 [dev-dependencies]
+# The composed keys are checked against the real string table.
+fauna-i18n = { path = "../fauna-i18n" }
 fauna-client-testkit = { path = "../fauna-client-testkit" }
 tokio = { workspace = true }
-fauna-client-connected-apps = { path = ".", features = ["test-helpers", "test-observer", "rpc-glue"] }
+fauna-client-connected-apps = { path = ".", features = ["test-helpers", "test-observer", "rpc-glue", "local-clock"] }
 # The records-approve test: the in-memory kind-manifest and ledger doubles, and
 # the publisher key its fixture manifest is signed under.
 fauna-client-config = { path = "../fauna-client-config", features = ["test-helpers"] }

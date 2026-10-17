@@ -222,7 +222,22 @@ async fn reconcile_once<I, Fut>(
                 return;
             }
         }
+        // And the whole names hosted plugins claim (`<label>.<nest_domain>`,
+        // `plugin_ingress`'s whole-name door): the same reconcile, so the
+        // plugin's name is issued, renewed and — after uninstall — dropped by
+        // the one loop that owns the per-SNI map, and the plugin never sees a
+        // key (`security.md` § Co-resident process trust boundary → *Hosted
+        // third-party code*). Same skip-the-pass rule on a DB error.
+        match crate::plugin_runner::claimed_plugin_labels(db).await {
+            Ok(labels) => active.extend(labels.iter().map(|l| format!("{l}.{nest_domain}"))),
+            Err(e) => {
+                tracing::warn!("web_cert: list hosted plugins failed, skipping pass: {e:#}");
+                return;
+            }
+        }
     }
+    active.sort();
+    active.dedup();
 
     // Removal: any domain the resolver holds that is no longer active (the row
     // was deleted, or moved out of `active`) is dropped and its dir removed.
@@ -678,7 +693,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let acme_dir = dir.path().to_path_buf();
         let db = db();
-        // alice opts into subdomain hosting → cert for alice.example.com.
+        // alice opts into subdomain hosting → cert for alice.example.net.
         seed_subdomain_actor(&db, &[0x01u8; 32], "alice").await;
         // bob has a handle but did NOT opt in → no cert.
         db.create_user_with_handle(&[0x02u8; 32], "free", "bob", None)
@@ -701,19 +716,72 @@ mod tests {
             db.clone(),
             resolver.clone(),
             acme_dir,
-            Arc::new(HostResolver::new("example.com".to_string())),
+            Arc::new(HostResolver::new("example.net".to_string())),
             issue,
             Some(1),
         )
         .await;
 
-        // alice.example.com got its own cert; bob.example.com did not (not opted in)
+        // alice.example.net got its own cert; bob.example.net did not (not opted in)
         // → unknown SNI falls back to the default cert.
-        assert!(resolver.has_domain("alice.example.com"));
+        assert!(resolver.has_domain("alice.example.net"));
         assert_eq!(
-            spki_of(&resolver.cert_for_sni(Some("bob.example.com")).unwrap()),
+            spki_of(&resolver.cert_for_sni(Some("bob.example.net")).unwrap()),
             default_fp,
             "an actor who did not opt in must not get a subdomain cert"
+        );
+    }
+
+    /// A hosted plugin's claimed whole name (`[{ "sni": "matrix" }]` →
+    /// `matrix.<nest_domain>`) is issued by this same reconcile — and only
+    /// its whole names: a path entry claims nothing here.
+    #[tokio::test]
+    async fn issues_per_name_cert_for_a_hosted_plugins_claimed_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let acme_dir = dir.path().to_path_buf();
+        let db = db();
+        db.mint_hosted_plugin(&crate::db::third_party_principals::HostedPluginMint {
+            client_id: "https://plugin.example/fauna-client.json".into(),
+            label: None,
+            holder_x25519: [0x11; 32],
+            publisher_key: Some([0xEE; 32]),
+            declared_kinds: vec![],
+            requested_scopes: String::new(),
+            module_digest: "sha256:00".into(),
+            hosts: vec![],
+            ingress: serde_json::json!([{ "sni": "matrix" }, { "path": "/_matrix/" }]),
+            settings_schema: None,
+            manifest_jws: None,
+            installed_by: actor(),
+        })
+        .await
+        .unwrap();
+
+        let (resolver, default_fp) = default_resolver();
+        let issue = {
+            let acme_dir = acme_dir.clone();
+            move |domain: String| {
+                let acme_dir = acme_dir.clone();
+                async move {
+                    write_cert(&acme_dir, &domain, 90);
+                    Ok(())
+                }
+            }
+        };
+        web_cert_lifecycle_loop(
+            db.clone(),
+            resolver.clone(),
+            acme_dir,
+            Arc::new(HostResolver::new("example.net".to_string())),
+            issue,
+            Some(1),
+        )
+        .await;
+
+        assert_eq!(resolver.domain_names(), ["matrix.example.net"]);
+        assert_eq!(
+            spki_of(&resolver.cert_for_sni(Some("other.example.net")).unwrap()),
+            default_fp
         );
     }
 
@@ -742,13 +810,13 @@ mod tests {
             db.clone(),
             resolver.clone(),
             acme_dir.clone(),
-            Arc::new(HostResolver::new("example.com".to_string())),
+            Arc::new(HostResolver::new("example.net".to_string())),
             &issue,
             Some(1),
         )
         .await;
-        assert!(resolver.has_domain("alice.example.com"));
-        assert!(domain_dir(&acme_dir, "alice.example.com").exists());
+        assert!(resolver.has_domain("alice.example.net"));
+        assert!(domain_dir(&acme_dir, "alice.example.net").exists());
 
         // alice opts out → the reconcile drops the cert + dir.
         db.clear_subdomain_enabled(&alice).await.unwrap();
@@ -756,18 +824,18 @@ mod tests {
             db,
             resolver.clone(),
             acme_dir.clone(),
-            Arc::new(HostResolver::new("example.com".to_string())),
+            Arc::new(HostResolver::new("example.net".to_string())),
             &issue,
             Some(1),
         )
         .await;
 
         assert!(
-            !resolver.has_domain("alice.example.com"),
+            !resolver.has_domain("alice.example.net"),
             "an opted-out subdomain must be dropped from the resolver"
         );
         assert!(
-            !domain_dir(&acme_dir, "alice.example.com").exists(),
+            !domain_dir(&acme_dir, "alice.example.net").exists(),
             "the per-subdomain acme dir must be deleted on opt-out"
         );
     }

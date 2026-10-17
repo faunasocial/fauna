@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use fauna_protocol::folders::{
     ConflictReportRequest, ConflictResolveRequest, FolderDepositsListReply,
-    FolderDepositsListRequest, FolderDepositsRetireRequest, FolderUpdateRequest, ParkedDeposit,
+    FolderDepositsListRequest, FolderDepositsPartRequest, FolderDepositsRetireRequest,
+    FolderUpdateRequest, ParkedDeposit,
 };
 use fauna_protocol::web::WebFilesPruneSealedRequest;
 
@@ -35,6 +36,8 @@ pub enum RecordedControlCall {
     PruneSealedWebFiles(Box<WebFilesPruneSealedRequest>),
     /// `fauna.folders.deposits.list` — one page of the parked inbox.
     ListDeposits(FolderDepositsListRequest),
+    /// `fauna.folders.deposits.part` — one sealed part of a larger item.
+    FetchDepositPart(FolderDepositsPartRequest),
     /// `fauna.folders.deposits.retire` — the drain after adoption.
     RetireDeposit(FolderDepositsRetireRequest),
 }
@@ -47,11 +50,17 @@ struct FakeState {
     next_conflict_id: i64,
     /// When set, every call fails with this message — the fail-closed arm.
     fail_with: Option<String>,
+    /// How many of the next conflict reports fail before reports land again —
+    /// a resolved report refused, then the unresolved fallback accepted.
+    fail_reports_remaining: usize,
     /// Reply flag for `update_folder`.
     update_ok: bool,
     /// The parked third-party deposits `list_deposits` serves, by folder id,
     /// oldest first; `retire_deposit` drains them.
     inbox: Vec<(i64, ParkedDeposit)>,
+    /// The sealed parts of parked items larger than one message, by
+    /// `(deposit id, index)`; they go with their item's retire.
+    parts: Vec<((i64, u32), Vec<u8>)>,
 }
 
 /// Recording, scriptable [`SyncControlApi`]. Cheap-clone via `Arc<Mutex<..>>`,
@@ -69,8 +78,10 @@ impl Default for FakeSyncControl {
                 calls: Vec::new(),
                 next_conflict_id: 1,
                 fail_with: None,
+                fail_reports_remaining: 0,
                 update_ok: true,
                 inbox: Vec::new(),
+                parts: Vec::new(),
             })),
         }
     }
@@ -89,6 +100,15 @@ impl FakeSyncControl {
     pub fn failing(message: impl Into<String>) -> Self {
         let fake = Self::default();
         fake.inner.lock().unwrap().fail_with = Some(message.into());
+        fake
+    }
+
+    /// A fake whose first `n` conflict reports fail and every later call
+    /// succeeds — the ladder whose resolved rung is refused and whose
+    /// unresolved (chooser) rung lands.
+    pub fn failing_first_reports(n: usize) -> Self {
+        let fake = Self::default();
+        fake.inner.lock().unwrap().fail_reports_remaining = n;
         fake
     }
 
@@ -121,6 +141,16 @@ impl FakeSyncControl {
     /// door would.
     pub fn park_deposit(&self, folder_id: i64, item: ParkedDeposit) {
         self.inner.lock().unwrap().inbox.push((folder_id, item));
+    }
+
+    /// Park sealed part `index` of item `deposit_id`, as the nest's staged
+    /// upload would.
+    pub fn park_deposit_part(&self, deposit_id: i64, index: u32, sealed: Vec<u8>) {
+        self.inner
+            .lock()
+            .unwrap()
+            .parts
+            .push(((deposit_id, index), sealed));
     }
 
     /// The ids still parked in `folder_id`'s inbox.
@@ -172,6 +202,10 @@ impl SyncControlApi for FakeSyncControl {
             .push(RecordedControlCall::ReportConflict(Box::new(req)));
         if let Some(msg) = &st.fail_with {
             return Err(SyncControlError(msg.clone()));
+        }
+        if st.fail_reports_remaining > 0 {
+            st.fail_reports_remaining -= 1;
+            return Err(SyncControlError("scripted report refusal".to_string()));
         }
         let id = st.next_conflict_id;
         st.next_conflict_id += 1;
@@ -249,6 +283,31 @@ impl SyncControlApi for FakeSyncControl {
         let before = st.inbox.len();
         st.inbox
             .retain(|(f, d)| !(*f == req.folder_id && d.id == req.deposit_id));
-        Ok(st.inbox.len() < before)
+        let retired = st.inbox.len() < before;
+        if retired {
+            st.parts.retain(|((d, _), _)| *d != req.deposit_id);
+        }
+        Ok(retired)
+    }
+
+    async fn fetch_deposit_part(
+        &self,
+        req: FolderDepositsPartRequest,
+    ) -> Result<Vec<u8>, SyncControlError> {
+        let mut st = self.inner.lock().unwrap();
+        st.calls
+            .push(RecordedControlCall::FetchDepositPart(req.clone()));
+        if let Some(msg) = &st.fail_with {
+            return Err(SyncControlError(msg.clone()));
+        }
+        let parked = st
+            .inbox
+            .iter()
+            .any(|(f, d)| *f == req.folder_id && d.id == req.deposit_id);
+        st.parts
+            .iter()
+            .find(|((d, i), _)| parked && *d == req.deposit_id && *i == req.index)
+            .map(|(_, sealed)| sealed.clone())
+            .ok_or_else(|| SyncControlError("no such deposit part".into()))
     }
 }

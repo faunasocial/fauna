@@ -116,6 +116,9 @@ public partial class AdminUsersViewModel : ObservableObject
     public ObservableCollection<AdminInviteCodeRow> InviteCodes { get; } = new();
     /// <summary>Pending onboarding invite requests (<c>admin-invite-requests-list</c>).</summary>
     public ObservableCollection<AdminInviteRequestRow> InviteRequests { get; } = new();
+    /// <summary>Every account's still-pending admin action (<c>admin-pending-action-item</c>,
+    /// admin.md § Pending admin actions) — the standing co-admin approve / veto surface.</summary>
+    public ObservableCollection<AdminPendingActionRow> PendingActions { get; } = new();
     /// <summary>Tier *names* (free/personal/community…) that populate the tier
     /// ComboBoxes (the page renders one item per name).</summary>
     public ObservableCollection<string> Tiers { get; } = new();
@@ -161,6 +164,7 @@ public partial class AdminUsersViewModel : ObservableObject
             await ReloadUsersAsync();
             await ReloadInviteCodesAsync();
             await ReloadInviteRequestsAsync();
+            await ReloadPendingActionsAsync();
         }
         catch (Exception ex)
         {
@@ -213,6 +217,53 @@ public partial class AdminUsersViewModel : ObservableObject
         InviteRequests.Clear();
         foreach (var r in requests)
             if (r.isPending) InviteRequests.Add(AdminInviteRequestRow.From(r));
+    }
+
+    private async Task ReloadPendingActionsAsync()
+    {
+        var actions = await _rpc.AdminPendingActionsListAsync();
+        PendingActions.Clear();
+        foreach (var a in actions) PendingActions.Add(AdminPendingActionRow.From(a));
+    }
+
+    // ── Pending admin actions section (admin.md § Pending admin actions) ──
+
+    /// <summary>Add this admin's approval to a pending action. The nest refuses
+    /// self-approval and a row no longer pending (surfaced on <see cref="ActionError"/>);
+    /// re-list either way so the section ends on the live state.</summary>
+    public async Task ApprovePendingActionAsync(AdminPendingActionRow row)
+    {
+        ActionError = null;
+        try
+        {
+            await _rpc.AdminPendingActionApproveAsync(row.Id);
+        }
+        catch (Exception ex)
+        {
+            ActionError = Strings.Error(ex);
+        }
+        await ReloadPendingActionsSafelyAsync();
+    }
+
+    /// <summary>Cancel (veto) a pending admin action — one click, no confirm.</summary>
+    public async Task CancelPendingActionAsync(AdminPendingActionRow row)
+    {
+        ActionError = null;
+        try
+        {
+            await _rpc.AdminPendingActionCancelAsync(row.Id);
+        }
+        catch (Exception ex)
+        {
+            ActionError = Strings.Error(ex);
+        }
+        await ReloadPendingActionsSafelyAsync();
+    }
+
+    private async Task ReloadPendingActionsSafelyAsync()
+    {
+        try { await ReloadPendingActionsAsync(); }
+        catch (Exception ex) { ActionError ??= Strings.Error(ex); }
     }
 
     // ── Users section ──
@@ -306,6 +357,8 @@ public partial class AdminUsersViewModel : ObservableObject
         {
             await _rpc.AdminAdminsAddAsync(row.ActorId);
             await ReloadUsersAsync();
+            // The grant is a pending admin action: the standing section shows it.
+            await ReloadPendingActionsAsync();
         }
         catch (Exception ex)
         {
@@ -325,6 +378,7 @@ public partial class AdminUsersViewModel : ObservableObject
         {
             await _rpc.AdminAdminsRemoveAsync(row.ActorId);
             await ReloadUsersAsync();
+            await ReloadPendingActionsAsync();
         }
         catch (Exception ex)
         {
@@ -683,6 +737,25 @@ public sealed class AdminInviteCodeRow
         AgeBandText = c.ageBand is { } band && FaunaFfiMethods.AgeBandLabel(band) is { } label
             ? Strings.Resolve(label)
             : null,
+    };
+}
+
+/// <summary>A pending admin-action row (<c>admin-pending-action-*</c>) — the description
+/// is the shared <c>describe_pending_action</c> sentence plus the scheduling admin's short id
+/// (both derived in Rust on the <c>FfiAdminPendingAction</c>), never re-derived here.</summary>
+public sealed class AdminPendingActionRow
+{
+    public required long Id { get; init; }
+    public required string Description { get; init; }
+    public required string ExecuteAfterText { get; init; }
+    public required string ApprovalsText { get; init; }
+
+    internal static AdminPendingActionRow From(FfiAdminPendingAction a) => new()
+    {
+        Id = a.id,
+        Description = a.description + " " + Strings.Format("admin/users_page/pending_by", a.actorShort),
+        ExecuteAfterText = Strings.Format("settings/pending_actions/applies", FaunaFfiMethods.FormatUnixLocal(a.executeAfter)),
+        ApprovalsText = Strings.Format("admin/users_page/pending_approvals", a.approvals.Length, a.requiresQuorum),
     };
 }
 

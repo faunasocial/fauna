@@ -355,16 +355,19 @@ fn merging_a_newer_history_slice_keeps_every_unknown_value() {
     // This device's own copy is older (a lower watermark), so the newer side's
     // scalars and message copies win, as for any merge.
     let mine = known_slice(3);
-    let merged = merge_history_slices(&mine, &newer);
+    let merged = merge_history_slices(&mine, &newer).unwrap();
     assert_eq!(
         merged,
-        merge_history_slices(&newer, &mine),
+        merge_history_slices(&newer, &mine).unwrap(),
         "the merge stays symmetric"
     );
     assert_carries_the_newer_values(&merged);
     // A merge with itself writes back exactly what was read.
     assert_eq!(
-        merge_history_slices(&newer, &newer).to_bytes().unwrap(),
+        merge_history_slices(&newer, &newer)
+            .unwrap()
+            .to_bytes()
+            .unwrap(),
         newer.to_bytes().unwrap()
     );
 }

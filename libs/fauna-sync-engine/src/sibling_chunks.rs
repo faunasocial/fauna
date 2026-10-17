@@ -86,6 +86,20 @@ impl SiblingChannels {
             .retain(|(id, _)| id != node_id);
     }
 
+    /// Forget every sibling but `targets` — the pass's dial set. A node the
+    /// pass no longer dials (removed from the fleet, or its endpoints entry
+    /// gone) holds no channel past that pass: its last one was admitted
+    /// under a fleet view that has since moved, and nothing else would ever
+    /// replace or drop it (`account-sync-plane.md` § The admission seam →
+    /// *Validity and severance*, property (b)).
+    pub(crate) fn retain_only(&self, targets: &[[u8; 32]]) {
+        self.inner
+            .lock()
+            .expect("sibling registry")
+            .channels
+            .retain(|(id, _)| targets.contains(id));
+    }
+
     /// Forget every sibling — the leg went down.
     pub(crate) fn clear(&self) {
         self.inner

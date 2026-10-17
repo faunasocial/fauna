@@ -221,6 +221,10 @@ pub(crate) struct TrainedTopicsState {
     /// failure arm) accepted — the comparison `dispatch_seq` is checked
     /// against before any producer's result is allowed to touch `rows`.
     pub(crate) applied_seq: u64,
+    /// The error a background list read ([`super::Op::LoadTrainedTopics`]) put
+    /// on `error-message`, so the next good read retires that one and never a
+    /// gesture's (`PageErrors::retire_own`).
+    pub(crate) read_error: Option<String>,
 }
 
 impl TrainedTopicsState {
@@ -652,6 +656,17 @@ pub(super) fn load_op(state: &mut SettingsState) -> Option<super::Op> {
     })
 }
 
+/// The store-change re-read ([`super::store_resync_op`]): the list op, except
+/// while a gesture is in flight — its own answer is the fresher list, and a
+/// read dispatched after it would win the `seq` race and drop the gesture's
+/// outcome, leaving `busy` armed with nothing left to clear it.
+pub(super) fn resync_op(state: &mut SettingsState) -> Option<super::Op> {
+    if state.trained_topics.busy {
+        return None;
+    }
+    load_op(state)
+}
+
 /// A mutation op, arming `busy` as it goes.
 ///
 /// `busy` is armed **only when an op is actually produced** — an ungated flip
@@ -690,6 +705,18 @@ pub(super) fn commit_name_op(state: &mut SettingsState) -> Option<super::Op> {
         None => TrainedTopicsGesture::Create(name),
     };
     gesture_op(state, gesture)
+}
+
+/// The sentence a blank commit paints on `error-message`, or `None` when the
+/// buffer holds a name. The shared [`TrainedTopicsError::BlankName`] refusal's
+/// own text, so the local guard and the service say the same thing.
+pub(super) fn blank_name_refusal(state: &SettingsState) -> Option<String> {
+    state
+        .trained_topics
+        .input
+        .trim()
+        .is_empty()
+        .then(|| localize(&TrainedTopicsError::BlankName))
 }
 
 /// `-rename-button`: retarget the shared input at this row and seed it with the

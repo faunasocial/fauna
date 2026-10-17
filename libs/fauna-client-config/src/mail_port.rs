@@ -3,20 +3,27 @@
 //! § The client-side lifecycle → *The account port*, decisions (c) and (h)).
 //!
 //! The account's mail custody (`fauna.state.mail`) lives in the core chunk's
-//! runtime; the labeler catalog's machine, which mints a mail labeler's
-//! per-labeler grant from the MSEK, lives in its own chunk. So that chunk
-//! wires [`PortMailStore`] — the **forwarder**, which encodes a method's
-//! arguments, calls its door over the port and decodes the answer, and does
-//! nothing else — and the core chunk's `accountPortCall` hands each door to
-//! [`serve`] over the seam's one implementation on the account-store handle.
+//! runtime; two machines in other chunks read it — the labeler catalog's,
+//! which mints a mail labeler's per-labeler grant from the MSEK, and the
+//! Connected apps roster's own mail-settings machine, which lists, reveals and
+//! revokes the mail app passwords. So those chunks wire [`PortMailStore`] —
+//! the **forwarder**, which encodes a method's arguments, calls its door over
+//! the port and decodes the answer, and does nothing else — and the core
+//! chunk's `accountPortCall` hands each door to [`serve`] over the seam's one
+//! implementation on the account-store handle.
 //!
-//! **The crossing set is a positive list (decision (h)).** Only the READ fold
-//! crosses (`mail.load`): the grant mint needs the MSEK and nothing more. The
-//! row writes — the state row, a credential's put, re-wrap mark and revoke,
-//! and the raw rows read — are the mail-settings machine's, which runs in the
-//! core chunk; on the forwarder they refuse with `StoreError::Save` /
-//! `StoreError::Load` naming the door that does not cross, so a caller that
-//! reaches one learns it at once rather than writing nowhere.
+//! **The crossing set is a positive list (decision (h)).** Three doors cross:
+//! the READ fold (`mail.load` — the MSEK, and a revealed secret), the raw rows
+//! read (`mail.load_rows` — the roster's listing) and a credential's revoke
+//! (`mail.revoke` — the roster row's Revoke, after the machine deleted the
+//! row's nest-side blobs). The other writes — the state row, a credential's
+//! put, the re-wrap mark and a generation's retirement — are the enable, add,
+//! rotate and heal paths of the mail page's machine, which runs in the core
+//! chunk — and so is the publish those paths await; on the forwarder they
+//! refuse with `StoreError::Save` naming the door that does not cross, so a
+//! caller that reaches one learns it at once rather than writing nowhere. The
+//! walk the connect-time refresh takes runs there too, and refuses on the
+//! forwarder the same way as a `StoreError::Load` — nothing walked.
 //!
 //! **A port fault is never a success (decision (f)).** No runtime, another
 //! account's runtime, an unknown door, undecodable bytes and broken glue all
@@ -24,17 +31,56 @@
 
 use crate::store_seam::{MailStore, StoreError};
 use fauna_account_port::{PortFault, PortTransport, answer, forward};
-use fauna_core::data::{MailConfig, MailCredential, MsekFingerprint};
+use fauna_core::data::{MailConfig, MailCredential, MsekFingerprint, PriorMsekRetirement};
 use fauna_core::mail_rows::{MailRows, MailStateRow};
+use serde::{Deserialize, Serialize};
 
 /// The mail seam's doors — the crossing ones only (decision (h)). Prefixed
 /// with the seam, since the core chunk's dispatch holds every seam's doors in
 /// one namespace.
 pub mod doors {
     pub const LOAD: &str = "mail.load";
+    pub const LOAD_ROWS: &str = "mail.load_rows";
+    pub const REVOKE: &str = "mail.revoke";
 
     /// Every door of the seam that crosses.
-    pub const ALL: [&str; 1] = [LOAD];
+    pub const ALL: [&str; 3] = [LOAD, LOAD_ROWS, REVOKE];
+}
+
+/// [`MailRows`] as it crosses: the wire codec keys a map by text only, and the
+/// retired generations are keyed by fingerprint, so both maps cross as lists
+/// and the forwarder rebuilds them through the set's own joins.
+#[derive(Serialize, Deserialize)]
+struct RowsWire {
+    state: Option<MailStateRow>,
+    credentials: Vec<MailCredential>,
+    generations: Vec<PriorMsekRetirement>,
+}
+
+impl From<MailRows> for RowsWire {
+    fn from(rows: MailRows) -> Self {
+        Self {
+            state: rows.state,
+            credentials: rows.credentials.into_values().collect(),
+            generations: rows.generations.into_values().collect(),
+        }
+    }
+}
+
+impl From<RowsWire> for MailRows {
+    fn from(wire: RowsWire) -> Self {
+        let mut rows = MailRows {
+            state: wire.state,
+            ..MailRows::default()
+        };
+        for c in wire.credentials {
+            rows.credentials.insert(c.credential_id.clone(), c);
+        }
+        for g in wire.generations {
+            rows.join_generation(g);
+        }
+        rows
+    }
 }
 
 /// What a door answers: the seam method's own result, its failure as the
@@ -43,6 +89,8 @@ pub mod doors {
 /// the forwarder restores the same refusal and `StoreError::is_not_ready`
 /// still recognises the transient one on the far side.
 type Reply = Result<MailConfig, String>;
+type RowsReply = Result<RowsWire, String>;
+type RevokeReply = Result<bool, String>;
 
 /// A refusal's own message, without `StoreError`'s `Display` prefix.
 fn message(e: StoreError) -> String {
@@ -77,7 +125,10 @@ impl<T: PortTransport> MailStore for PortMailStore<T> {
     }
 
     async fn load_rows(&self) -> Result<MailRows, StoreError> {
-        Err(StoreError::Load(not_crossing("load_rows")))
+        let answered: RowsReply = forward(&self.transport, doors::LOAD_ROWS, &())
+            .await
+            .map_err(|f| StoreError::Load(f.to_string()))?;
+        answered.map(MailRows::from).map_err(StoreError::Load)
     }
 
     async fn write_state(&self, _state: MailStateRow) -> Result<bool, StoreError> {
@@ -96,8 +147,11 @@ impl<T: PortTransport> MailStore for PortMailStore<T> {
         Err(StoreError::Save(not_crossing("mark_wrapped")))
     }
 
-    async fn revoke(&self, _credential_id: String) -> Result<bool, StoreError> {
-        Err(StoreError::Save(not_crossing("revoke")))
+    async fn revoke(&self, credential_id: String) -> Result<bool, StoreError> {
+        let answered: RevokeReply = forward(&self.transport, doors::REVOKE, &credential_id)
+            .await
+            .map_err(|f| StoreError::Save(f.to_string()))?;
+        answered.map_err(StoreError::Save)
     }
 
     async fn retire_generation(
@@ -105,6 +159,14 @@ impl<T: PortTransport> MailStore for PortMailStore<T> {
         _generation: fauna_core::data::PriorMsekRetirement,
     ) -> Result<bool, StoreError> {
         Err(StoreError::Save(not_crossing("retire_generation")))
+    }
+
+    async fn publish(&self) -> Result<(), StoreError> {
+        Err(StoreError::Save(not_crossing("publish")))
+    }
+
+    async fn walk(&self) -> Result<(), StoreError> {
+        Err(StoreError::Load(not_crossing("walk")))
     }
 }
 
@@ -120,6 +182,20 @@ pub async fn serve(
         doors::LOAD => {
             answer(payload, |(): ()| async move {
                 let reply: Reply = seam.load().await.map_err(message);
+                reply
+            })
+            .await
+        }
+        doors::LOAD_ROWS => {
+            answer(payload, |(): ()| async move {
+                let reply: RowsReply = seam.load_rows().await.map(RowsWire::from).map_err(message);
+                reply
+            })
+            .await
+        }
+        doors::REVOKE => {
+            answer(payload, |credential_id: String| async move {
+                let reply: RevokeReply = seam.revoke(credential_id).await.map_err(message);
                 reply
             })
             .await
@@ -185,6 +261,12 @@ mod tests {
         ) -> Result<bool, StoreError> {
             Err(StoreError::Save(self.0.into()))
         }
+        async fn publish(&self) -> Result<(), StoreError> {
+            Err(StoreError::Save(self.0.into()))
+        }
+        async fn walk(&self) -> Result<(), StoreError> {
+            Err(StoreError::Load(self.0.into()))
+        }
     }
 
     /// The read crosses and comes back as the seam's own fold — the MSEK the
@@ -228,13 +310,87 @@ mod tests {
         }
     }
 
-    /// The row doors do not cross (decision (h)): each refuses on the
+    /// The rows read crosses and comes back as the seam's own set — the
+    /// credential rows and the retired generations rebuilt by key — and the
+    /// seam's refusal crosses as the same refusal.
+    #[tokio::test]
+    async fn load_rows_round_trips_both_arms() {
+        let seam = FakeMailStore::with(&enabled());
+        seam.put_credential(credential("phone")).await.unwrap();
+        seam.retire_generation(retirement()).await.unwrap();
+        let port = over(Arc::new(seam.clone()));
+        let read = port.load_rows().await.expect("the rows cross");
+        assert_eq!(read, seam.rows());
+        assert!(read.credentials.contains_key("phone"));
+        assert_eq!(read.generations.len(), 1);
+
+        let port = over(Arc::new(Refusing(crate::store_seam::LEDGER_NOT_READY)));
+        let err = port.load_rows().await.expect_err("the refusal crosses");
+        assert!(err.is_not_ready(), "{err:?}");
+    }
+
+    /// A credential's revoke crosses and lands on the seam, answering the
+    /// seam's own "did it change" — and the seam's refusal crosses as a
+    /// `Save` refusal.
+    #[tokio::test]
+    async fn revoke_round_trips_both_arms() {
+        let seam = FakeMailStore::with(&enabled());
+        seam.put_credential(credential("phone")).await.unwrap();
+        let port = over(Arc::new(seam.clone()));
+        assert!(matches!(port.revoke("phone".into()).await, Ok(true)));
+        assert!(seam.rows().credentials["phone"].revoked_at_unix.is_some());
+        assert!(
+            matches!(port.revoke("phone".into()).await, Ok(false)),
+            "already revoked"
+        );
+
+        let port = over(Arc::new(Refusing("down")));
+        assert!(
+            matches!(port.revoke("phone".into()).await, Err(StoreError::Save(m)) if m == "down")
+        );
+    }
+
+    /// A faulting transport answers the rows read and the revoke with a
+    /// refusal, never an empty set or a quiet no-op.
+    #[tokio::test]
+    async fn a_faulting_transport_refuses_rows_and_revoke() {
+        let fault = PortFault::NoRuntime("none".into());
+        let port = PortMailStore::new(Loopback::faulting(fault.clone()));
+        assert!(
+            matches!(port.load_rows().await, Err(StoreError::Load(m)) if m == fault.to_string())
+        );
+        assert!(
+            matches!(port.revoke("x".into()).await, Err(StoreError::Save(m)) if m == fault.to_string())
+        );
+    }
+
+    fn credential(id: &str) -> MailCredential {
+        MailCredential {
+            credential_id: id.into(),
+            display_name: "Phone".into(),
+            kind: fauna_core::data::MailCredentialKind::Plain,
+            secret: vec![7u8; 16].into(),
+            created_at: 1,
+            updated_at: Default::default(),
+            wrapped_under: None,
+            revoked_at_unix: None,
+            burned: None,
+        }
+    }
+
+    fn retirement() -> PriorMsekRetirement {
+        PriorMsekRetirement {
+            msek: [0x11u8; 32].into(),
+            retired_at_unix: 5,
+        }
+    }
+
+    /// The other row writes do not cross (decision (h)): each refuses on the
     /// forwarder without calling the port, and `serve` answers none of them.
     #[tokio::test]
-    async fn the_row_doors_do_not_cross() {
+    async fn the_row_writes_do_not_cross() {
         let seam = FakeMailStore::with(&enabled());
         let port = over(Arc::new(seam.clone()));
-        assert!(matches!(port.load_rows().await, Err(StoreError::Load(_))));
         assert!(matches!(
             port.write_state(MailStateRow::default()).await,
             Err(StoreError::Save(_))
@@ -259,12 +415,12 @@ mod tests {
                 .await,
             Err(StoreError::Save(_))
         ));
-        assert!(matches!(
-            port.revoke("default".into()).await,
-            Err(StoreError::Save(_))
-        ));
         assert_eq!(seam.writes(), 0, "nothing was written through the port");
-        for door in ["mail.load_rows", "mail.write_state", "mail.revoke"] {
+        for door in [
+            "mail.write_state",
+            "mail.put_credential",
+            "mail.mark_wrapped",
+        ] {
             assert!(serve(&seam, door, &[]).await.is_none(), "{door}");
         }
     }

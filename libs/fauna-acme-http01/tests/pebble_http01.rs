@@ -113,11 +113,13 @@ async fn http01_flow_issues_a_real_certificate_against_pebble() {
 /// an IP identifier needs **no DNS at all**: pebble dials the address itself on
 /// its baked `httpPort`, so the loopback the challenge listener is already bound
 /// to is exactly what the CA fetches from. The nest's own derive
-/// (`ip_bridge_addresses` → `fauna_core::resolve::is_global_ip`) would rightly
-/// refuse a loopback or RFC 1918 address, and it must not gain a knob to be
-/// talked out of that — so the *order* is
-/// pinned here, where the derive is not in the way, and the *derive* stays
-/// pinned by its own unit tests in the nest.
+/// (`ip_bridge_addresses` → `fauna_core::resolve::is_global_ip`) rightly
+/// refuses a loopback address, so the *order* is pinned here, where the derive
+/// is not in the way, and the *derive* stays pinned by its own unit tests in the
+/// nest. The whole file→order→serve flow through the packaged image is the
+/// tier_4 witness `test_acme_ip_bridge_host_published.py`, under the one
+/// widening § B-IP *Testing* rules (a host-published RFC 1918 address passes
+/// only while `[acme] directory_url` selects a test CA).
 ///
 /// What this proves that nothing else can: that an `Identifier::Ip` order is
 /// accepted, that HTTP-01 validation against a bare address works through the

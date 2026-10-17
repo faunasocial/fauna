@@ -2047,3 +2047,47 @@ async fn an_unknown_kind_refusal_of_the_probe_is_an_error_not_a_neutral_state() 
         "an unknown-kind refusal is an error, never a degraded status"
     );
 }
+
+// ── The signed-out door (`fauna.account.lockout`) ───────────────────────────
+
+#[tokio::test]
+async fn the_seed_locks_its_own_account_over_an_anonymous_connection() {
+    let identity = ActorKeypair::generate();
+    // No `signed_in_as`: the door has no session — the signature is the proof.
+    let client = RecoveryClient::new(FakeNest::new());
+
+    let locked = fauna_client_recovery::lock_account_with_seed(&client, &identity)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        client.transport().locked_until(&identity.actor_id()),
+        Some(locked.locked_until),
+        "the nest applied the window the ceremony reports"
+    );
+}
+
+#[tokio::test]
+async fn a_superseded_identity_is_refused_and_names_its_successor() {
+    let (identity, client) = signed_in();
+    let kit = create_kit(&client, &identity, None, &[]).await.unwrap();
+    let recovery = RecoveryKey::from_hex(kit.secret_hex()).unwrap();
+    let successor = ActorKeypair::generate();
+    succeed_identity(&client, identity.actor_id(), &recovery, &successor, None)
+        .await
+        .unwrap();
+
+    let err = fauna_client_recovery::lock_account_with_seed(&client, &identity)
+        .await
+        .unwrap_err();
+
+    let RecoveryError::Superseded { new_actor_id } = err else {
+        panic!("expected a superseded refusal, got {err:?}");
+    };
+    assert_eq!(new_actor_id, successor.actor_id().0);
+    assert_eq!(
+        client.transport().locked_until(&identity.actor_id()),
+        None,
+        "a refused lock applies nothing"
+    );
+}

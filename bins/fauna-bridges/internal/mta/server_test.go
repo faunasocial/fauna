@@ -451,6 +451,90 @@ func TestInboundBackendFCrDNSEnforceRejects(t *testing.T) {
 	}
 }
 
+// TestInboundBackendRejectNoRDNSRejectsPeerWithoutPTR drives the admin's
+// `reject_no_rdns` alone-reject (mail-policy-config.md § Inbound
+// perimeter; smtp-server.md § FCrDNS): a peer with no PTR at all is
+// refused 550 5.7.25 at MAIL FROM, even with the FCrDNS mode off.
+func TestInboundBackendRejectNoRDNSRejectsPeerWithoutPTR(t *testing.T) {
+	t.Parallel()
+	res := newFakeResolver()
+	res.nxAddr["127.0.0.1"] = true
+	clk := newFakeClock(time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC))
+	pol := &Policy{
+		RateLimiter:  NewRateLimiter(60, time.Minute, clk),
+		DNSBL:        NewDNSBLChecker(nil, res),
+		FCrDNS:       NewFCrDNSChecker(res),
+		FCrDNSMode:   FCrDNSModeOff,
+		RejectNoRDNS: true,
+		HELOResolver: res,
+	}
+	addr, cancel := startPolicyListener(t, pol)
+	defer cancel()
+	c, err := smtp.Dial(addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+	if err := c.Hello("loopback.example"); err != nil {
+		t.Fatalf("HELO: %v", err)
+	}
+	err = c.Mail("alice@example.org")
+	if err == nil {
+		t.Fatal("MAIL FROM must fail the no-rDNS gate")
+	}
+	if code := smtpCodeOf(err); code != 550 {
+		t.Errorf("no-rDNS code: got %d, want 550 (err=%v)", code, err)
+	}
+}
+
+// TestInboundBackendRejectNoRDNSAdmitsPeerWithPTR: a PTR that exists but
+// does not forward-confirm is the FCrDNS knob's business, not this one's —
+// with only `reject_no_rdns` on, the session is accepted. And with the knob
+// off, a PTR-less peer is accepted (the default: signal, not gate).
+func TestInboundBackendRejectNoRDNSAdmitsPeerWithPTR(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		reject bool
+		setup  func(*fakeResolver)
+	}{
+		{"ptr_without_forward_match", true, func(r *fakeResolver) {
+			r.ptr["127.0.0.1"] = []string{"evil.example."}
+			r.host["evil.example"] = []string{"5.6.7.8"}
+		}},
+		{"knob_off_no_ptr", false, func(r *fakeResolver) {
+			r.nxAddr["127.0.0.1"] = true
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := newFakeResolver()
+			tc.setup(res)
+			clk := newFakeClock(time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC))
+			pol := &Policy{
+				RateLimiter:  NewRateLimiter(60, time.Minute, clk),
+				DNSBL:        NewDNSBLChecker(nil, res),
+				FCrDNS:       NewFCrDNSChecker(res),
+				FCrDNSMode:   FCrDNSModeScoreSignal,
+				RejectNoRDNS: tc.reject,
+				HELOResolver: res,
+			}
+			addr, cancel := startPolicyListener(t, pol)
+			defer cancel()
+			c, err := smtp.Dial(addr)
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			defer func() { _ = c.Close() }()
+			if err := c.Hello("loopback.example"); err != nil {
+				t.Fatalf("HELO: %v", err)
+			}
+			if err := c.Mail("alice@example.org"); err != nil {
+				t.Fatalf("MAIL FROM must be accepted: %v", err)
+			}
+		})
+	}
+}
+
 // TestInboundBackendHELOIdentityRejects exercises the HELO identity
 // check with skipLoopbackExemption=true so the production-default
 // rejection path fires from a loopback peer. HELO is "host.example"
@@ -491,6 +575,59 @@ func TestInboundBackendHELOIdentityRejects(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "HELO identity") {
 		t.Errorf("HELO-identity error string should mention 'HELO identity', got: %v", err)
+	}
+}
+
+// TestInboundBackendHELOSelfClaimRejects pins the self-claim rule
+// (smtp-server.md § HELO / EHLO, the two self-claim rows): a greeting naming a
+// domain this server hosts mail for is refused 554 5.7.0 at MAIL FROM whatever
+// the identity check says — it is off here, so only the self-claim rule can
+// refuse — while another name passes, and a loopback peer keeps its exemption.
+func TestInboundBackendHELOSelfClaimRejects(t *testing.T) {
+	t.Parallel()
+	res := newFakeResolver()
+	clk := newFakeClock(time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC))
+	newPolicy := func(skipLoopback bool) *Policy {
+		return &Policy{
+			RateLimiter:      NewRateLimiter(60, time.Minute, clk),
+			DNSBL:            NewDNSBLChecker(nil, res),
+			FCrDNS:           NewFCrDNSChecker(res),
+			FCrDNSMode:       FCrDNSModeOff,
+			SkipHELOLoopback: skipLoopback,
+		}
+	}
+	mailAfter := func(pol *Policy, helo string) error {
+		t.Helper()
+		addr, cancel := startPolicyListener(t, pol)
+		defer cancel()
+		c, err := smtp.Dial(addr)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		defer func() { _ = c.Close() }()
+		if err := c.Hello(helo); err != nil {
+			t.Fatalf("HELO: %v", err)
+		}
+		return c.Mail("alice@example.org")
+	}
+
+	for _, helo := range []string{"test.example", "TEST.example."} {
+		err := mailAfter(newPolicy(true), helo)
+		if err == nil {
+			t.Fatalf("HELO %q names a domain we host: MAIL FROM must be refused", helo)
+		}
+		if code := smtpCodeOf(err); code != 554 {
+			t.Errorf("self-claim code for %q: got %d, want 554 (err=%v)", helo, code, err)
+		}
+		if !strings.Contains(err.Error(), "own name") {
+			t.Errorf("self-claim error should say the greeting claims our own name, got: %v", err)
+		}
+	}
+	if err := mailAfter(newPolicy(true), "other.example"); err != nil {
+		t.Errorf("a greeting naming another domain must pass, got: %v", err)
+	}
+	if err := mailAfter(newPolicy(false), "test.example"); err != nil {
+		t.Errorf("a loopback peer keeps its exemption from the self-claim rule, got: %v", err)
 	}
 }
 
@@ -627,6 +764,9 @@ type rcptDecision struct {
 	forwarderActorID []byte
 	rejectCode       uint16
 	discard          bool // resolve_recipient → Discard (RFC 8058 mailto unsubscribe)
+	// processor, when set, selects resolve_recipient → Processor{processor}
+	// (dmarc-report@ → "dmarc_report", tlsrpt@ → "tlsrpt_inbound").
+	processor string
 }
 
 // mockCaller is the test substitute for *wsrpc.Client. It exposes
@@ -680,6 +820,29 @@ type mockCaller struct {
 	// the fail-open path.
 	greylistPass bool
 	greylistErr  error
+	// Report hand-offs (ingest_dmarc_report / ingest_tlsrpt_report).
+	// The *IngestErr, when non-nil, is returned after the request is recorded.
+	dmarcIngests    []reportIngestRecord
+	dmarcIngestErr  error
+	tlsrptIngests   []reportIngestRecord
+	tlsrptIngestErr error
+	// DMARC aggregate-report observations (report_dmarc_observation).
+	dmarcObservations []dmarcObservationRecord
+}
+
+// dmarcObservationRecord captures one report_dmarc_observation call.
+type dmarcObservationRecord struct {
+	ClientIP    string                 `cbor:"client_ip"`
+	Dmarc       wsrpc.DmarcVerdict     `cbor:"dmarc"`
+	Observation wsrpc.DmarcObservation `cbor:"observation"`
+}
+
+// reportIngestRecord captures one ingest_dmarc_report / ingest_tlsrpt_report
+// call (the two share one request shape).
+type reportIngestRecord struct {
+	RawMessage     []byte                     `cbor:"raw_message"`
+	SourceEnvelope wsrpc.ReportSourceEnvelope `cbor:"source_envelope"`
+	ReceivedAt     int64                      `cbor:"received_at"`
 }
 
 // srsBounceDecision drives the mockCaller's decode_srs_bounce reply for one
@@ -767,9 +930,57 @@ func (m *mockCaller) Call(_ context.Context, method string, body, reply any) err
 		return m.callDecodeSrsBounce(bodyBytes, reply)
 	case wsrpc.MethodFetchRecipientFilters:
 		return m.callFetchRecipientFilters(bodyBytes, reply)
+	case wsrpc.MethodIngestDmarcReport, wsrpc.MethodIngestTlsrptReport:
+		return m.callIngestReport(method, bodyBytes, reply)
+	case wsrpc.MethodReportDmarcObservation:
+		return m.callReportDmarcObservation(bodyBytes, reply)
 	default:
 		return fmt.Errorf("mockCaller: unexpected method %q", method)
 	}
+}
+
+func (m *mockCaller) callReportDmarcObservation(bodyBytes []byte, reply any) error {
+	var rec dmarcObservationRecord
+	if err := cbor.Unmarshal(bodyBytes, &rec); err != nil {
+		return fmt.Errorf("mockCaller: decode report_dmarc_observation: %w", err)
+	}
+	m.mu.Lock()
+	m.dmarcObservations = append(m.dmarcObservations, rec)
+	m.mu.Unlock()
+	replyBytes, err := cbor.Marshal(map[string]any{"counted": true})
+	if err != nil {
+		return fmt.Errorf("mockCaller: encode report_dmarc_observation reply: %w", err)
+	}
+	return cbor.Unmarshal(replyBytes, reply)
+}
+
+func (m *mockCaller) callIngestReport(method string, bodyBytes []byte, reply any) error {
+	var rec reportIngestRecord
+	if err := cbor.Unmarshal(bodyBytes, &rec); err != nil {
+		return fmt.Errorf("mockCaller: decode %s: %w", method, err)
+	}
+	m.mu.Lock()
+	var ingestErr error
+	if method == wsrpc.MethodIngestTlsrptReport {
+		m.tlsrptIngests = append(m.tlsrptIngests, rec)
+		ingestErr = m.tlsrptIngestErr
+	} else {
+		m.dmarcIngests = append(m.dmarcIngests, rec)
+		ingestErr = m.dmarcIngestErr
+	}
+	m.mu.Unlock()
+	if ingestErr != nil {
+		return ingestErr
+	}
+	replyMap := map[string]any{"outcome": "stored", "kind": "aggregate"}
+	if method == wsrpc.MethodIngestTlsrptReport {
+		replyMap = map[string]any{"outcome": "stored"}
+	}
+	replyBytes, err := cbor.Marshal(replyMap)
+	if err != nil {
+		return fmt.Errorf("mockCaller: encode %s reply: %w", method, err)
+	}
+	return cbor.Unmarshal(replyBytes, reply)
 }
 
 func (m *mockCaller) callValidateRecipient(bodyBytes []byte, reply any) error {
@@ -829,6 +1040,8 @@ func (m *mockCaller) callResolveRecipient(bodyBytes []byte, reply any) error {
 	switch {
 	case ok && dec.discard:
 		replyMap = map[string]any{"outcome": "discard"}
+	case ok && dec.processor != "":
+		replyMap = map[string]any{"outcome": "processor", "processor": dec.processor}
 	case ok && dec.forward:
 		replyMap = map[string]any{
 			"outcome":            "forward",
@@ -2357,5 +2570,74 @@ func TestSenderDomainRejectPaysTarpit(t *testing.T) {
 	want := []time.Duration{250 * time.Millisecond, 500 * time.Millisecond}
 	if len(slept) != 2 || slept[0] != want[0] || slept[1] != want[1] {
 		t.Errorf("tarpit sequence = %v, want %v (null sender must not sleep)", slept, want)
+	}
+}
+
+// TestInboundMessageRatePerIPRefusesOverTheHourlyCap pins the port-25 per-IP
+// message rate (smtp-server.md § Connection-time limits, "Per-IP message rate
+// | 50/hour"): a source IP's accepted MAIL FROM transactions are counted in a
+// one-hour fixed window, the (cap+1)-th is refused 451 4.7.1 through the
+// tarpit, a different IP keeps its own budget, the window rolling restores
+// service, and loopback is exempt (the in-container router dials over it).
+func TestInboundMessageRatePerIPRefusesOverTheHourlyCap(t *testing.T) {
+	t.Parallel()
+	clk := newFakeClock(time.Unix(1_700_000_000, 0))
+	limiter := NewRateLimiter(2, time.Hour, clk)
+	var slept []time.Duration
+	session := func(ip string) *inboundSession {
+		return &inboundSession{
+			logger:      slog.Default(),
+			clientIP:    ip,
+			policy:      &Policy{},
+			mailChecked: true, // HELO gates are not under test
+			msgRate:     limiter,
+			sleep:       func(d time.Duration) { slept = append(slept, d) },
+		}
+	}
+	mail := func(s *inboundSession) error { return s.Mail("sender@external.test", nil) }
+
+	s := session("192.0.2.10")
+	for i := 0; i < 2; i++ {
+		if err := mail(s); err != nil {
+			t.Fatalf("message %d within the cap must be accepted, got %v", i+1, err)
+		}
+	}
+	err := mail(s)
+	var smtpErr *gosmtp.SMTPError
+	if !errors.As(err, &smtpErr) || smtpErr.Code != 451 ||
+		smtpErr.EnhancedCode != (gosmtp.EnhancedCode{4, 7, 1}) {
+		t.Fatalf("message over the per-IP hourly cap: got %v, want 451 4.7.1", err)
+	}
+	if len(slept) != 1 {
+		t.Errorf("the over-cap refusal must pay the tarpit once, slept %v", slept)
+	}
+	// A fresh connection from the same IP is still over the cap: the budget is
+	// the IP's, not the session's.
+	if err := mail(session("192.0.2.10")); err == nil {
+		t.Fatal("a new session from the capped IP must still be refused")
+	}
+	// Another source keeps its own budget.
+	if err := mail(session("192.0.2.11")); err != nil {
+		t.Fatalf("a different IP must not share the capped IP's budget, got %v", err)
+	}
+	// Loopback is exempt however many it sends.
+	lo := session("127.0.0.1")
+	for i := 0; i < 5; i++ {
+		if err := mail(lo); err != nil {
+			t.Fatalf("loopback message %d must be exempt, got %v", i+1, err)
+		}
+	}
+	// The window rolling restores service.
+	clk.Advance(time.Hour + time.Second)
+	if err := mail(session("192.0.2.10")); err != nil {
+		t.Fatalf("after the hour rolls the IP must be served again, got %v", err)
+	}
+}
+
+// TestInboundMessageRateCapIsFiftyAnHour pins the compile-time value
+// smtp-server.md § Connection-time limits names.
+func TestInboundMessageRateCapIsFiftyAnHour(t *testing.T) {
+	if maxInboundMsgsPerIPPerHour != 50 {
+		t.Fatalf("maxInboundMsgsPerIPPerHour = %d, want 50", maxInboundMsgsPerIPPerHour)
 	}
 }

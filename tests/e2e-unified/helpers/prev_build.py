@@ -189,19 +189,24 @@ def prev_commit() -> str:
 
 #: The cells of the real-binary grid, by the DIRECTION of skew each exercises — a break
 #: names the cells it is expected to fail, because one direction can break without the
-#: other (the folders rename did). Four are journey cells; the fifth is the previous-nest
+#: other (the folders rename did). Five are journey cells; the sixth is the previous-nest
 #: build-identity guard, whose only skew is the HEAD *harness* claiming admin on the
 #: pinned nest (`common.nest.start_nest` → `claim_admin`, a signed actor-key ceremony) in
 #: the module fixture it shares with cell 1 — a break that reaches the harness's own
 #: signer, as the sig_domain reset does, takes that fixture down and with it the guard.
+#: The mixed-nests cell is cell 1's direction (HEAD app ↔ pinned nest) inside one install
+#: that also holds an account on a HEAD nest, so it stands in every window cell 1 does and
+#: in none that names only the pinned-client cells.
 CELL_HEAD_CLIENT_PREV_NEST = "head_client_prev_nest"   # skew cell 1: HEAD app ↔ pinned nest
 CELL_PREV_CLIENT_HEAD_NEST = "prev_client_head_nest"   # skew cell 2: pinned app ↔ HEAD nest
+CELL_HEAD_CLIENT_MIXED_NESTS = "head_client_mixed_nests"  # one HEAD app, accounts on both nests
 CELL_AT_REST_UPGRADE = "at_rest_upgrade"               # pinned app WRITES against a HEAD nest
 CELL_AT_REST_DOWNGRADE = "at_rest_downgrade"           # pinned app OPENS (logs in to a HEAD nest)
 CELL_HARNESS_CLAIMS_PREV_NEST = "harness_claims_prev_nest"  # the guard: HEAD harness claims the pinned nest
 GRID_CELLS = (
     CELL_HEAD_CLIENT_PREV_NEST,
     CELL_PREV_CLIENT_HEAD_NEST,
+    CELL_HEAD_CLIENT_MIXED_NESTS,
     CELL_AT_REST_UPGRADE,
     CELL_AT_REST_DOWNGRADE,
     CELL_HARNESS_CLAIMS_PREV_NEST,
@@ -218,8 +223,21 @@ _ALL_CELLS = frozenset(GRID_CELLS)
 CELL_IMAGE_UPGRADE_SMOKE = "image_upgrade_smoke"
 PIPELINE_CELLS = (CELL_IMAGE_UPGRADE_SMOKE,)
 
+#: The nest UPGRADED IN PLACE (`tests/test_nest_data_upgrade.py`): the pinned nest binary
+#: is seeded through the HEAD harness, stopped, and the HEAD nest binary opens the SAME
+#: data dir. It is the one tier_3 cell that crosses an at-rest boundary, so a nest-DB
+#: genesis reaches it as it reaches the image smoke, and every wire break the HEAD
+#: harness's seeding meets at the pinned nest reaches it as it reaches the journeys.
+#: Outside `GRID_CELLS` because it is no skew-grid cell: no app, no fixture shared with
+#: the grid. **A future at-rest break inside the 0.1.x window** (`version-compatibility.md`
+#: § Dimension 2, the fifth exception) turns it red until the pin passes the break — the
+#: honest signal; the break's entry here names this cell.
+CELL_NEST_DATA_UPGRADE = "nest_data_upgrade"
+UPGRADE_CELLS = (CELL_NEST_DATA_UPGRADE,)
+_UPGRADE = frozenset(UPGRADE_CELLS)
+
 #: Every cell a break may name.
-KNOWN_CELLS = _ALL_CELLS | frozenset(PIPELINE_CELLS)
+KNOWN_CELLS = _ALL_CELLS | frozenset(PIPELINE_CELLS) | _UPGRADE
 
 
 @dataclass(frozen=True)
@@ -257,8 +275,10 @@ RATIFIED_INPLACE_BREAKS: tuple[InplaceBreak, ...] = (
         ),
         # Only the cells where the PINNED client is the one decoding the renamed reply. The
         # downgrade cell logs the pinned build in (auth is untouched by the rename) and asserts
-        # only destroy-nothing, which the measurement confirmed still passes.
-        cells=frozenset({CELL_PREV_CLIENT_HEAD_NEST, CELL_AT_REST_UPGRADE}),
+        # only destroy-nothing, which the measurement confirmed still passes. The nest upgrade
+        # cell's HEAD harness seeds a folder through the renamed kinds, which a pre-rename
+        # pinned nest does not know — by construction.
+        cells=frozenset({CELL_PREV_CLIENT_HEAD_NEST, CELL_AT_REST_UPGRADE}) | _UPGRADE,
     ),
     InplaceBreak(
         commit="08a638699aa42908a7c13cccd7c15dad038a31c3",
@@ -272,7 +292,7 @@ RATIFIED_INPLACE_BREAKS: tuple[InplaceBreak, ...] = (
             "signs untagged; witnessed on the linux leg 2026-08-27: every cell, the guard's "
             "claim_admin fixture included, refused at its first ceremony)"
         ),
-        cells=_ALL_CELLS,
+        cells=_ALL_CELLS | _UPGRADE,
     ),
     InplaceBreak(
         commit="bdbdd8f28627ed2cbe4f4669bf8350c391ae8e49",
@@ -287,7 +307,7 @@ RATIFIED_INPLACE_BREAKS: tuple[InplaceBreak, ...] = (
             "does not verify at a pinned nest (fauna.auth.signature_failed) — by construction, "
             "the same shape as the sig_domain reset above"
         ),
-        cells=_ALL_CELLS,
+        cells=_ALL_CELLS | _UPGRADE,
     ),
     InplaceBreak(
         commit="22ed97a03c5bfb0547014132de3c60cabad16c1f",
@@ -305,7 +325,7 @@ RATIFIED_INPLACE_BREAKS: tuple[InplaceBreak, ...] = (
             "client's unbound NAT-mode / expires_in-less shapes are refused at a HEAD nest "
             "(fauna.protocol.malformed) — by construction, the same shape as the two above"
         ),
-        cells=_ALL_CELLS,
+        cells=_ALL_CELLS | _UPGRADE,
     ),
     InplaceBreak(
         commit="c346e33bdad8702713ff8b09522c2e264ed2e5d8",
@@ -322,7 +342,7 @@ RATIFIED_INPLACE_BREAKS: tuple[InplaceBreak, ...] = (
             "peer's older shapes are refused or ignored at a HEAD peer — by construction, "
             "every cell"
         ),
-        cells=_ALL_CELLS,
+        cells=_ALL_CELLS | _UPGRADE,
     ),
     InplaceBreak(
         commit="5d0da014547bf9f341a99862f59c891fa027352e",
@@ -336,7 +356,7 @@ RATIFIED_INPLACE_BREAKS: tuple[InplaceBreak, ...] = (
             "therefore does not boot under a HEAD image — by construction; the grid's "
             "cells are untouched, since every HEAD nest there opens a data dir of its own"
         ),
-        cells=frozenset({CELL_IMAGE_UPGRADE_SMOKE}),
+        cells=frozenset({CELL_IMAGE_UPGRADE_SMOKE}) | _UPGRADE,
     ),
     # ── The breaks after the genesis (backfilled 2026-10-02) ─────────────────────────
     # One entry per `ratified-breaks.txt` block or § Dimension 2 rider that reaches a cell,
@@ -394,7 +414,7 @@ RATIFIED_INPLACE_BREAKS: tuple[InplaceBreak, ...] = (
             "pinned peer's shapes are refused in BOTH directions, at rest too — by "
             "construction, every journey cell"
         ),
-        cells=_ALL_CELLS - {CELL_HARNESS_CLAIMS_PREV_NEST},
+        cells=(_ALL_CELLS - {CELL_HARNESS_CLAIMS_PREV_NEST}) | _UPGRADE,
     ),
     InplaceBreak(
         commit="e1696ddd34e49ae840200c523631d11339fed336",
@@ -442,7 +462,7 @@ RATIFIED_INPLACE_BREAKS: tuple[InplaceBreak, ...] = (
             "no read-fallback; the DM leg's MLS payloads and the stores the at-rest cells "
             "reopen are such fields — by construction, every journey cell"
         ),
-        cells=_ALL_CELLS - {CELL_HARNESS_CLAIMS_PREV_NEST},
+        cells=(_ALL_CELLS - {CELL_HARNESS_CLAIMS_PREV_NEST}) | _UPGRADE,
     ),
     InplaceBreak(
         commit="1ed041e891d06f7c5cee3214501afc6834d06a0d",
@@ -453,7 +473,7 @@ RATIFIED_INPLACE_BREAKS: tuple[InplaceBreak, ...] = (
             "decoder refuses the old spelling, so a feed post and every stored record a cell "
             "reopens fail in BOTH directions — by construction, every journey cell"
         ),
-        cells=_ALL_CELLS - {CELL_HARNESS_CLAIMS_PREV_NEST},
+        cells=(_ALL_CELLS - {CELL_HARNESS_CLAIMS_PREV_NEST}) | _UPGRADE,
     ),
     InplaceBreak(
         commit="c21c75d65f11f0afe5b38f28b170ab68a1c27f01",
@@ -477,7 +497,7 @@ RATIFIED_INPLACE_BREAKS: tuple[InplaceBreak, ...] = (
             "HEAD app launch, and a pinned app's `fauna.node.info` meets "
             "fauna.protocol.unknown_kind at a HEAD nest — by construction, every journey cell"
         ),
-        cells=_ALL_CELLS - {CELL_HARNESS_CLAIMS_PREV_NEST},
+        cells=(_ALL_CELLS - {CELL_HARNESS_CLAIMS_PREV_NEST}) | _UPGRADE,
     ),
     InplaceBreak(
         commit="d9360afe8b0f85d65f107862cb2708c9ec783c5f",
@@ -491,7 +511,27 @@ RATIFIED_INPLACE_BREAKS: tuple[InplaceBreak, ...] = (
             "first genesis's entry; the grid's cells are untouched, since every HEAD nest "
             "there opens a data dir of its own"
         ),
-        cells=frozenset({CELL_IMAGE_UPGRADE_SMOKE}),
+        cells=frozenset({CELL_IMAGE_UPGRADE_SMOKE}) | _UPGRADE,
+    ),
+    # ── Inside the 0.1.x compat-free window (the fifth exception, 2026-10-08) ───────
+    # No `ratified-breaks.txt` line is written for these (the window owes none), but a
+    # grid cell still meets them, so each still needs an entry here to read as a named
+    # XFAIL rather than an anonymous red.
+    InplaceBreak(
+        commit="b4a80e397abecc00b0077e523d25a2c3fa70a44d",
+        landed="2026-10-11",
+        what=(
+            "the starter-key count made owner-only, with a by-id `keypackage.addressable` "
+            "probe (0.1.x window) — a HEAD app resolves a typed actor id through the new "
+            "kind, which a pinned nest answers fauna.protocol.unknown_kind, so the DM "
+            "recipient never becomes a chip; a pinned app resolves through "
+            "`keypackage.count` on the recipient, which a HEAD nest refuses with "
+            "fauna.conversations.permission_denied — measured 2026-10-13 on linux in both "
+            "skew cells (the DM leg, after login and the feed post pass); the at-rest "
+            "upgrade cell, whose pinned app sends the DM, by construction"
+        ),
+        cells=frozenset({
+            CELL_HEAD_CLIENT_PREV_NEST, CELL_PREV_CLIENT_HEAD_NEST, CELL_AT_REST_UPGRADE}),
     ),
 )
 
@@ -543,7 +583,8 @@ def expected_incompatible_reasons(cell: str, pin_commit: str | None = None) -> t
     """Why `cell` is expected to fail against the pin right now — one reason per pending
     break that covers it; empty when the cell is expected to assert its journey."""
     if cell not in KNOWN_CELLS:
-        raise ValueError(f"unknown cell {cell!r}; one of {GRID_CELLS + PIPELINE_CELLS}")
+        raise ValueError(
+            f"unknown cell {cell!r}; one of {GRID_CELLS + PIPELINE_CELLS + UPGRADE_CELLS}")
     pin_commit = pin_commit or prev_commit()
     return tuple(
         b.reason(pin_commit) for b in pending_inplace_breaks(pin_commit) if cell in b.cells
@@ -876,9 +917,64 @@ def prev_binaries(
     return build_prev(commit, profile, client)
 
 
+def prev_nest_binary(profile: str = "debug", build: bool = True) -> Path:
+    """The pinned previous release's NEST alone, for a cell whose app side is HEAD's.
+
+    A cell that drives only HEAD's app (the mixed-nests cell, on the tui leg) needs no
+    pinned app, so it reads the nest out of whatever build this machine has cached at
+    the pin. Cold, it builds through `prev_binaries` with this machine's own client, so
+    the cache keeps the one shape every other cell reads.
+    """
+    nest = cache_dir(prev_commit(), profile) / NEST[1]
+    if nest.exists():
+        return nest
+    return prev_binaries(profile, build=build)["nest"]
+
+
+#: The command line, all of it. Flags are read by membership, so anything outside this
+#: set must be refused rather than ignored: the fall-through is a real build, and an
+#: ignored `--help` once started an unslotted one beside a build already warming the
+#: same source tree (`tests/test_prev_build_cli.py`).
+_USAGE = """\
+usage: prev_build.py [--build] [--client <app>] [--profile debug|release]
+       prev_build.py --path [--client <app>] [--profile debug|release]
+       prev_build.py --expected-incompatible <cell> [--pin <sha>]
+
+  --build    build the pinned previous release's nest + client into the cache
+             (a no-op when warm; slow when cold — run it as `just e2e-prev-build`,
+             which takes a build slot)
+  --path     print the cached binaries, or exit 1 when the cache is cold
+  --expected-incompatible <cell>
+             print why <cell> is expected to fail against the pin (exit 0), or exit 3
+"""
+_FLAGS_WITH_VALUE = ("--client", "--profile", "--pin", "--expected-incompatible")
+_BARE_FLAGS = ("--build", "--path")
+
+
+def _unknown_flag(args: list[str]) -> str | None:
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in _FLAGS_WITH_VALUE:
+            i += 2
+            continue
+        if arg not in _BARE_FLAGS:
+            return arg
+        i += 1
+    return None
+
+
 def main() -> int:
     profile = "debug"
     args = sys.argv[1:]
+    if "--help" in args or "-h" in args:
+        print(_USAGE, end="")
+        return 0
+    unknown = _unknown_flag(args)
+    if unknown is not None:
+        print(f"prev_build.py: unrecognised argument {unknown!r}\n{_USAGE}", end="",
+              file=sys.stderr)
+        return 2
     if "--expected-incompatible" in args:
         # The upgrade smoke's question, answered from pin ancestry: exit 0 and print each
         # reason when `cell` is inside an open window against `--pin` (default: the pin

@@ -136,6 +136,36 @@ pub fn test_text(widget: &impl IsA<gtk::Widget>) -> Option<String> {
     }
 }
 
+pub const TEST_OPTION_KEYS_KEY: &str = "fauna-e2e-option-keys";
+
+/// Declare the stable token each option of a picker stands for, in model order
+/// — what `select(id, token)` matches before the painted labels. The other apps
+/// key their pickers by token already (tui's `Element::select` options, android's
+/// `TokenSelect`, apple's `.automationSelect(options:)`, windows' item name); a
+/// GTK `StringList` paints only labels, so a label that is not its token
+/// ("Something else" for the report reason `other`) was unselectable here.
+pub fn set_test_option_keys(widget: &impl IsA<gtk::Widget>, keys: &[&str]) {
+    let keys: Vec<String> = keys.iter().map(|k| (*k).to_owned()).collect();
+    // SAFETY: as `set_test_text` — `Vec<String>` is the only type stored under
+    // this key, and `test_option_keys` is its only reader.
+    unsafe {
+        widget
+            .as_ref()
+            .set_data::<Vec<String>>(TEST_OPTION_KEYS_KEY, keys);
+    }
+}
+
+/// Read back what [`set_test_option_keys`] declared, if anything.
+pub fn test_option_keys(widget: &impl IsA<gtk::Widget>) -> Option<Vec<String>> {
+    // SAFETY: see `set_test_option_keys`.
+    unsafe {
+        widget
+            .as_ref()
+            .data::<Vec<String>>(TEST_OPTION_KEYS_KEY)
+            .map(|p| p.as_ref().clone())
+    }
+}
+
 /// Expose a readable string test attribute (`get_attr(id, name)`) as a CSS
 /// class `test-attr-{name}-{value}`.
 ///
@@ -153,6 +183,32 @@ pub fn set_test_attr(widget: &impl IsA<gtk::Widget>, name: &str, value: &str) {
         }
     }
     widget.add_css_class(&format!("{prefix}{value}"));
+}
+
+/// Expose a FREE-TEXT test attribute (`get_attr(id, name)`) — the
+/// [`set_test_text`] carrier for an attribute whose value is painted text, not
+/// a CSS-safe token (a queue row's `"88%"` confidence, a localized action
+/// label). The agent's generic attribute read checks this before the
+/// [`set_test_attr`] CSS class.
+pub fn set_test_attr_text(widget: &impl IsA<gtk::Widget>, name: &str, value: &str) {
+    // SAFETY: as `set_test_text` — `String` is the only type stored under a
+    // `fauna-e2e-attr-*` key, and `test_attr_text` the only reader.
+    unsafe {
+        widget
+            .as_ref()
+            .set_data::<String>(&format!("fauna-e2e-attr-{name}"), value.to_owned());
+    }
+}
+
+/// Read back what [`set_test_attr_text`] declared for `name`, if anything.
+pub fn test_attr_text(widget: &impl IsA<gtk::Widget>, name: &str) -> Option<String> {
+    // SAFETY: see `set_test_attr_text`.
+    unsafe {
+        widget
+            .as_ref()
+            .data::<String>(&format!("fauna-e2e-attr-{name}"))
+            .map(|p| p.as_ref().clone())
+    }
 }
 
 /// Declare `container` the automation **scope** of the `id`-carrying widget

@@ -39,8 +39,12 @@ Go-bridge build wall that holds the rest of the CalDAV family on macOS.
 
 from __future__ import annotations
 
+import time
+from urllib.parse import urlparse
+
 import pytest
 
+from clients.ws_rpc_admin_client import WsRpcAdminClient
 from helpers.mail_dedicated_nest import mint_caldav_mailbox
 
 pytestmark = [
@@ -55,7 +59,8 @@ pytestmark = [
 
 
 @pytest.mark.feature("turn-on-mail")
-def test_caldav_only_mail_settings_render_gate(dedicated_no_mail_app):
+@pytest.mark.feature("calendar-in-standard-apps")
+def test_caldav_only_mail_settings_render_gate(dedicated_no_mail_app, dedicated_no_mail_nest):
     """Seed caldav-on + email-off on a dedicated fresh actor (never enabled mail),
     then assert the mail-settings page's per-row visibility gate: the CalDAV MUA
     row + the shared credential-management controls show; the email-only IMAP/SMTP
@@ -87,6 +92,36 @@ def test_caldav_only_mail_settings_render_gate(dedicated_no_mail_app):
     assert driver.is_visible_scrolled("mail-settings-mua-caldav-port"), (
         "mail-settings-mua-caldav-port must render alongside -caldav-host "
         f"(both gated on caldav_enabled); error: {app.error_text()!r}"
+    )
+
+    # The two VALUES a calendar app needs (calendar-in-standard-apps outcome 28):
+    # on a nest with no domain — this one is reached at a bare loopback locator —
+    # the host is that locator itself (no `mail.` prefix) and the port is the
+    # admin-set CalDAV port the nest holds (`caldav-server.md` § Network
+    # exposure; the shared `MuaInstructions::for_node_url` +
+    # `apply_admin_caldav_port`).
+    locator = urlparse(dedicated_no_mail_nest["url"]).hostname
+    admin = dedicated_no_mail_nest["admin"]
+    with WsRpcAdminClient(
+        dedicated_no_mail_nest["url"],
+        actor_id=bytes(admin["signing_key"].verify_key),
+        signing_key=bytes(admin["signing_key"]),
+    ) as client:
+        caldav_port = int(client.call("fauna.bridges.get_mail_config", {})["caldav_port"])
+    host_text = (driver.get_text("mail-settings-mua-caldav-host") or "").strip()
+    assert host_text == locator, (
+        f"on a domainless nest the CalDAV host must be the nest's own locator "
+        f"{locator!r}, got {host_text!r}"
+    )
+    deadline = time.monotonic() + 20.0
+    while (
+        time.monotonic() < deadline
+        and (driver.get_text("mail-settings-mua-caldav-port") or "").strip() != str(caldav_port)
+    ):
+        time.sleep(0.3)  # sleep-ok: poll interval of a deadline loop
+    port_text = (driver.get_text("mail-settings-mua-caldav-port") or "").strip()
+    assert port_text == str(caldav_port), (
+        f"the CalDAV port must be the one the nest holds ({caldav_port}), got {port_text!r}"
     )
 
     # Email was never enabled on this dedicated actor — the email-specific MUA

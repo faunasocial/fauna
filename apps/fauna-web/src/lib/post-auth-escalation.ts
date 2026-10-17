@@ -65,8 +65,11 @@ import { base } from '$app/paths';
 
 import { clearTokenCache } from './api';
 import {
+  AccountLockedError,
+  AppOutdatedError,
   IdentitySupersededError,
   NestIdentityChangedError,
+  NestOutdatedError,
   SignInRefusedError,
   classifyChallengeError,
 } from './auth-errors';
@@ -227,6 +230,59 @@ export function escalateSignInRefused(): boolean {
 }
 
 /**
+ * Route the home nest's `fauna.nest.outdated` — met mid-session when the nest
+ * restarted into its degraded needs-update mode, by the WS client's re-mint or
+ * the background silent challenge — to the launch surface, where the
+ * `LaunchMachine` meets the same refusal on its own challenge and lands the
+ * non-retry `needs_update` state (`version-compatibility.md` § Dimension 4, the
+ * *Mid-session* bullet; native apps route `SessionEndingVerdict::NestOutdated`
+ * the same way). No retry clears it until an admin updates the nest, so a tab
+ * left on its route would only show per-screen failures. Credentials stay put:
+ * nothing is wrong with the identity.
+ */
+export function escalateNestOutdated(): boolean {
+  return escalateToLaunchSurface(
+    '[identity] this nest restarted needing an update (fauna.nest.outdated) — ' +
+      'ending the session and re-entering the launch flow',
+  );
+}
+
+/**
+ * Route the other direction — the home nest no longer serves this app's
+ * subprotocol (a 4426 close, met by the WS client's own dial or by a re-mint's
+ * anonymous dial) — to the launch surface, whose `LaunchMachine` meets the same
+ * close on its own challenge and lands the non-retry `needs_update` state naming
+ * the APP (`version-compatibility.md` § Dimension 4, *The other direction*;
+ * native apps route `SessionEndingVerdict::AppOutdated` the same way). No retry
+ * clears it until this app is updated. Credentials stay put.
+ */
+export function escalateAppOutdated(): boolean {
+  return escalateToLaunchSurface(
+    '[identity] this nest no longer serves this app version (4426) — ' +
+      'ending the session and re-entering the launch flow',
+  );
+}
+
+/**
+ * Route the account LOCK — `fauna.auth.account_locked`, met by a bearer
+ * re-mint or the background silent challenge, or landed by this app's own
+ * press on the Sessions page (`sessions-lockout-button`) — to the launch
+ * surface, where the `LaunchMachine` meets the same refusal on its own
+ * challenge, parks on it, and the page paints `launch_account_locked`
+ * (`devices.md` § The locked state; `ui/sessions.md` § User actions: "on
+ * success the app leaves the shell for the locked surface"). Every session the
+ * account held ended with the lock, so the tab's session is dead; the machine
+ * owns the one refresh at the unlock time. Credentials stay put: the identity
+ * is the user's own, and the locked surface's ceremony needs it.
+ */
+export function escalateAccountLocked(lockedUntilSecs: number | null): boolean {
+  return escalateToLaunchSurface(
+    `[identity] this account is locked${lockedUntilSecs === null ? '' : ` until ${lockedUntilSecs}`} ` +
+      '(fauna.auth.account_locked) — ending the session and re-entering the launch flow',
+  );
+}
+
+/**
  * The one-line adapter for a background path's catch: escalate when `e` is a
  * TERMINAL post-auth verdict, and report whether it was.
  *
@@ -252,8 +308,14 @@ export function escalateIfTerminalAuthVerdict(e: unknown): boolean {
   if (e instanceof NestIdentityChangedError) return escalateNestIdentityChanged(e);
   if (e instanceof IdentitySupersededError) return escalateIdentitySuperseded(e);
   if (e instanceof SignInRefusedError) return escalateSignInRefused();
+  if (e instanceof NestOutdatedError) return escalateNestOutdated();
+  if (e instanceof AppOutdatedError) return escalateAppOutdated();
+  if (e instanceof AccountLockedError) return escalateAccountLocked(e.lockedUntilSecs);
   const verdict = classifyChallengeError(e);
   if (verdict instanceof NestIdentityChangedError) return escalateNestIdentityChanged(verdict);
   if (verdict instanceof IdentitySupersededError) return escalateIdentitySuperseded(verdict);
+  if (verdict instanceof NestOutdatedError) return escalateNestOutdated();
+  if (verdict instanceof AppOutdatedError) return escalateAppOutdated();
+  if (verdict instanceof AccountLockedError) return escalateAccountLocked(verdict.lockedUntilSecs);
   return false;
 }

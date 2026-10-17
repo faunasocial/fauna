@@ -48,6 +48,8 @@ pytestmark = [
     # others join through the room model's batched trickle-down, each with its
     # own marker AND a `helpers.room_seats.ROOM_APPS` entry.
     pytest.mark.tui,
+    pytest.mark.linux,
+    pytest.mark.windows,
 ]
 
 

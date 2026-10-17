@@ -106,6 +106,44 @@ async fn serve_part(
     // This is also why the path's `actor_hex` — not the bearer's actor — is
     // what everything below reads: on the custody path they are deliberately
     // different actors, and the bytes belong to the one in the path.
+    // The custodian-NEST serve door's byte half: an owner-fleet device
+    // fetches a pair this nest HOLDS for its owner, from the custodied store
+    // (`crate::custody_fleet`). Same `403 non-owner` on refusal.
+    if actor_bytes != bearer.0.0
+        && crate::bridge_method_allowlist::caller_class_for_actor(&state.db, &bearer.0.0)
+            .await
+            .ok()
+            .flatten()
+            == Some(crate::bridge_method_allowlist::CallerClass::CustodiedFleet)
+    {
+        use crate::custody_fleet::FleetSegmentError;
+        let fleet_part = match part {
+            Part::Dat => fauna_peer_sync::store_serve::SegmentPart::Dat,
+            Part::Meta => fauna_peer_sync::store_serve::SegmentPart::Meta,
+        };
+        let file_bytes = match crate::custody_fleet::serve_segment_part(
+            &state,
+            &bearer.0.0,
+            &actor_bytes,
+            &kind,
+            segment_id,
+            fleet_part,
+        )
+        .await
+        {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+            Err(FleetSegmentError::Refused) => {
+                return ApiError::forbidden("non-owner").into_response();
+            }
+            Err(FleetSegmentError::Internal(e)) => {
+                tracing::error!("read held segment: {e:#}");
+                return ApiError::internal("read segment file").into_response();
+            }
+        };
+        return serve_bytes(&headers, file_bytes);
+    }
+
     if actor_bytes != bearer.0.0
         && crate::custody_admission::admit_segment_plane_for_custody(
             &state,
@@ -151,10 +189,16 @@ async fn serve_part(
         }
     };
 
+    serve_bytes(&headers, file_bytes)
+}
+
+/// Answer one segment half's bytes, honouring `Range` — the one response shape
+/// both the owner/custodian path and the custodied-fleet path return.
+fn serve_bytes(headers: &HeaderMap, file_bytes: Vec<u8>) -> axum::response::Response {
     // Range support — partial fetch on resume, through the nest's one range
     // parser (`crate::http_range`, shared with the blob route).
     let total = file_bytes.len() as u64;
-    match crate::http_range::requested(&headers, total) {
+    match crate::http_range::requested(headers, total) {
         crate::http_range::ByteRange::Satisfiable { start, end } => {
             let slice = Bytes::copy_from_slice(&file_bytes[start as usize..=end as usize]);
             return crate::http_range::partial_content(Response::builder(), start, end, total)

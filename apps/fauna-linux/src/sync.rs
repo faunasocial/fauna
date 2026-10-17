@@ -59,7 +59,7 @@ fn flat_sync_dir() -> PathBuf {
 
 /// The active account's scoped sync-state dir — `<flat_sync_dir>/<actor-hex>/`
 /// — the same scope the external agent's `apply_actor_scope` selects at
-/// boot/provision (`file-sync.md` § Multi-account × File Provider,
+/// boot/provision (`on-demand-files-apple.md` § Multi-account × File Provider,
 /// consequence 3). With no account active — which none of this module's real
 /// call sites, all post-login, should meet — it resolves under the shared
 /// `-unresolved-` scope, exactly as a malformed actor id does; never the
@@ -90,6 +90,22 @@ pub(crate) fn device_id() -> anyhow::Result<[u8; 32]> {
     let actor_id = fauna_core::hex32::decode(&actor)
         .map_err(|e| anyhow::anyhow!("the active actor id is not 32-byte hex: {e}"))?;
     load_device_id_for_actor(&flat_sync_dir(), &sync_state_dir(), &actor_id)
+}
+
+/// [`device_id`] for a named account rather than the active one, hex — the
+/// named row a remove-account's nest half retires (`crate::account_runtime::
+/// finish_removal`). Same get-or-create over the same account-scoped
+/// `device.db`, so it reads the id that account registered under.
+pub(crate) fn device_id_hex_for(actor_id_hex: &str) -> Option<String> {
+    let actor_id = fauna_core::hex32::decode(actor_id_hex)
+        .inspect_err(|e| tracing::warn!("sync: the actor id is not 32-byte hex: {e}"))
+        .ok()?;
+    let flat = flat_sync_dir();
+    let scope = fauna_sync_engine::db::actor_state_dir_or_unresolved(&flat, actor_id_hex);
+    load_device_id_for_actor(&flat, &scope, &actor_id)
+        .inspect_err(|e| tracing::warn!("sync: could not read the device id: {e:#}"))
+        .ok()
+        .map(|id| fauna_core::hex32::encode(&id))
 }
 
 /// Adopt an externally-provided device id as this account's sync identity —

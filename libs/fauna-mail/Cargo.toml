@@ -131,6 +131,9 @@ imap-client = [
     "dep:base64",
     "dep:fauna-protocol",
     "dep:fauna-core",
+    # The Outlook source's device-code sign-in (`imap_client::oauth_device`)
+    # reads the identity platform's JSON answers — wasm-safe, already a dep.
+    "dep:serde_json",
 ]
 # The NATIVE half of the `imap-client` transport seam (`imap_client::native`):
 # a `tokio::net::TcpStream` + `tokio-rustls` impl of `ImapTransport` (both TLS
@@ -151,6 +154,9 @@ imap-client-native = [
     "dep:tokio-rustls",
     "dep:rustls",
     "dep:fauna-tls-bootstrap",
+    # `NativeOAuthHttp`, the native `OAuthHttp` seam of the Outlook sign-in,
+    # over the `reqwest` client the native apps already carry.
+    "dep:reqwest",
 ]
 # Real-TLS server test fixtures (`imap_client::test_fixtures`): mints a
 # self-signed cert and builds the `rustls` `TlsAcceptor` that terminates it,
@@ -200,6 +206,17 @@ filter = []
 # onboarding provisioner (libs/fauna-provisioning) assemble the identical body.
 # In `default` so nest gets it; provisioning opts in with default-features=false.
 dmarc-policy = ["dep:serde_json", "dep:fauna-protocol"]
+# DMARC aggregate + forensic report receive (docs/goal/behavior/dmarc-reporting.md
+# § Aggregate-report receive): find the report attachment (`parser`), bound and
+# decompress it (gzip via flate2, zip via the in-tree `zip`), and read the XML
+# with the module's own strict reader — no XML-parser dependency. Native only
+# in practice (the nest's ingest kind); nothing here needs tokio or the network.
+dmarc-report = ["parser", "dep:flate2", "dep:zip", "dep:fauna-protocol"]
+# TLSRPT inbound report receive (docs/goal/behavior/smtp-server.md § TLSRPT
+# inbound report listener): the DMARC receive leg's twin, sharing its bounded
+# unpack + error type (hence `dmarc-report`); the RFC 8460 JSON is read with the
+# in-tree `serde_json`, the RFC 3339 date range with the in-tree `chrono`.
+tlsrpt-report = ["dmarc-report", "dep:serde_json", "dep:chrono"]
 # Perimeter content-scan logic (ClamAV reply parse + rspamd response parse/scale
 # + delivery-action decision) per docs/goal/behavior/mail-content-scanning.md +
 # docs/goal/architecture/content-scoring.md. PURE functions only — the network

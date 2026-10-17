@@ -385,6 +385,108 @@ impl ImapClock for TokioClock {
     }
 }
 
+/// The native [`super::OAuthHttp`]: the Outlook sign-in's form POSTs over the
+/// `reqwest` client the native apps already carry (`mailbox-migration.md`
+/// § Where the IMAP client runs, the `OAuthHttp` row). One impl for every
+/// native consumer — `rpc_glue` (linux, tui) and `fauna-ffi` (apple, android,
+/// windows) build it beside their [`NativeImapConnector`] — so the rules
+/// below live once (priority #2).
+///
+/// `https://` only and no redirects followed: the device code and the
+/// refresh token ride these requests, and a redirect is never part of the
+/// device-code grant. Trusts the WebPKI roots, plus — in a test-capable
+/// build only — the source-IMAP trust seed's PEM ([`E2E_EXTRA_CA_ENV`]),
+/// which is how the fake identity far end is trusted with no second trust
+/// variable (`e2e-automation-surface-gating.md` § The Microsoft authority
+/// seed).
+pub struct NativeOAuthHttp {
+    client: reqwest::Client,
+}
+
+/// How long one sign-in request may take before it counts as unreachable.
+const OAUTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+impl NativeOAuthHttp {
+    pub fn new() -> Result<Self, NativeTransportError> {
+        let builder = reqwest::Client::builder()
+            .https_only(true)
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(OAUTH_REQUEST_TIMEOUT);
+        let client = e2e_extra_oauth_root(builder)?
+            .build()
+            .map_err(|e| NativeTransportError::TrustAnchor(e.to_string()))?;
+        Ok(Self { client })
+    }
+}
+
+/// The source-IMAP trust seed, honoured by the sign-in's HTTPS client too —
+/// the same gate, the same loud failure on a malformed value as
+/// [`NativeImapConnector::e2e_extra_root`].
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+fn e2e_extra_oauth_root(
+    mut builder: reqwest::ClientBuilder,
+) -> Result<reqwest::ClientBuilder, NativeTransportError> {
+    use rustls::pki_types::{CertificateDer, pem::PemObject};
+    let Ok(pem) = std::env::var(E2E_EXTRA_CA_ENV) else {
+        return Ok(builder);
+    };
+    if pem.trim().is_empty() {
+        return Ok(builder);
+    }
+    let mut added = 0usize;
+    for cert in CertificateDer::pem_slice_iter(pem.as_bytes()) {
+        let cert = cert.unwrap_or_else(|e| {
+            panic!("{E2E_EXTRA_CA_ENV} is set but is not a usable PEM trust anchor: {e}")
+        });
+        let cert = reqwest::Certificate::from_der(&cert).unwrap_or_else(|e| {
+            panic!("{E2E_EXTRA_CA_ENV} holds a certificate reqwest cannot use: {e}")
+        });
+        builder = builder.add_root_certificate(cert);
+        added += 1;
+    }
+    assert!(
+        added > 0,
+        "{E2E_EXTRA_CA_ENV} is set but holds no CERTIFICATE block — a harness bug"
+    );
+    Ok(builder)
+}
+
+/// The production twin: a shipped build has no trust seed.
+#[cfg(not(any(test, debug_assertions, feature = "test-helpers")))]
+fn e2e_extra_oauth_root(
+    builder: reqwest::ClientBuilder,
+) -> Result<reqwest::ClientBuilder, NativeTransportError> {
+    Ok(builder)
+}
+
+impl super::OAuthHttp for NativeOAuthHttp {
+    type Error = reqwest::Error;
+
+    async fn post_form(
+        &self,
+        url: &str,
+        form: &str,
+    ) -> Result<super::OAuthHttpResponse, Self::Error> {
+        let response = self
+            .client
+            .post(url)
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
+            .header(reqwest::header::ACCEPT, "application/json")
+            .body(form.to_string())
+            .send()
+            .await?;
+        let status = response.status().as_u16();
+        let body = response.text().await?;
+        Ok(super::OAuthHttpResponse {
+            status,
+            body: body.into(),
+        })
+    }
+}
+
 /// `LOGOUT` on the session held behind `slot`, clearing it either way — the
 /// take-lock-logout-drop shape every "own an `Option<ImapSession<NativeTlsTransport>>`
 /// behind a `Mutex`" caller hand-copies (`fauna-ffi`'s and

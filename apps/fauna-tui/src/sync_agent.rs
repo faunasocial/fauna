@@ -344,6 +344,29 @@ impl CustodianStoreHandle {
         }
         None
     }
+
+    /// Recover what the owner's nest lost from the store this agent owns and
+    /// wait for it to end — the confirmed `backup-audit-recover-button` action
+    /// on this device's own custodian row, through the shared
+    /// `fauna_client_sync::recover_wire::await_agent_recover`. The agent's job
+    /// grants `nest_backup_key` to the owner's nest before it delivers, so the
+    /// app only hands the key over. `None` where tui drives no agent.
+    #[cfg_attr(not(any(unix, windows)), allow(unused_variables))]
+    pub async fn recover(
+        &self,
+        nest_backup_key: [u8; 32],
+    ) -> Option<Result<fauna_client_backup::recover::RecoveryOutcome, String>> {
+        #[cfg(any(unix, windows))]
+        if let Some(provisioner) = self.provisioner.as_ref() {
+            use fauna_client_sync::recover_wire::{AGENT_RECOVER_POLL, await_agent_recover};
+            return Some(
+                await_agent_recover(provisioner.as_ref(), nest_backup_key, AGENT_RECOVER_POLL)
+                    .await
+                    .map_err(|e| e.to_string()),
+            );
+        }
+        None
+    }
 }
 
 /// The session-scoped sync-agent surface held on `App` (mirrors `media`).
@@ -355,6 +378,11 @@ impl CustodianStoreHandle {
 pub struct SyncAgentState {
     #[cfg(any(unix, windows))]
     inner: Option<native::AgentSurface>,
+    /// **Test-only.** The sync device id [`Self::custodian_store`] reports
+    /// when no agent surface is installed, so a page test can name this
+    /// device's own custodian row without an agent.
+    #[cfg(all(test, any(unix, windows)))]
+    pub test_device_id: Option<String>,
 }
 
 impl SyncAgentState {
@@ -511,8 +539,14 @@ impl SyncAgentState {
         CustodianStoreHandle {
             #[cfg(any(unix, windows))]
             provisioner: self.inner.as_ref().map(|s| s.custodian_provisioner()),
-            #[cfg(any(unix, windows))]
+            #[cfg(all(any(unix, windows), not(test)))]
             device_id: self.inner.as_ref().map(|s| s.device_id().to_string()),
+            #[cfg(all(any(unix, windows), test))]
+            device_id: self
+                .inner
+                .as_ref()
+                .map(|s| s.device_id().to_string())
+                .or_else(|| self.test_device_id.clone()),
         }
     }
 
@@ -909,7 +943,7 @@ mod native {
         /// Optimistic add (the twin of linux `sync_agent::add_binding`): record the
         /// row in the model — it renders on the next frame — then push the bind.
         /// The set's content keys are the agent's to resolve: the bind's reconcile
-        /// re-reads its holder's custody (`on-demand-files.md` § Shared sets on a
+        /// re-reads its holder's custody (`on-demand-files-shared-sets.md` § Shared sets on a
         /// capability host → *One mechanism*).
         pub(super) fn add_binding(&self, path: String, folder: String, folder_id: String) {
             let pending = self.model.lock().unwrap().add(path, folder, folder_id);
@@ -1283,6 +1317,8 @@ mod native {
 
         SyncAgentState {
             inner: Some(surface),
+            #[cfg(test)]
+            test_device_id: None,
         }
     }
 

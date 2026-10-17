@@ -67,7 +67,7 @@ real things:
 
 Why this file exists (no existing harness covers it locally):
   - `test_mail_enable_live_nest.py` is the admin round-trip, but live-remote-only
-    (factory-resets example.com, env-gated) — it never runs in local CI.
+    (factory-resets the live nest, env-gated) — it never runs in local CI.
   - `test_mail_auto_enable_first_setup.py` proves the *non-admin* auto-enable
     policy branch (`auto_enable_mail_for_new_users`), an unrelated axis from
     the admin's own claim + mail-settings-enable flow this file covers.
@@ -140,33 +140,18 @@ pytestmark = [pytest.mark.tier1, pytest.mark.tier_3]
 # where is documented there) — a private copy is what traced two 120s windows hangs to.
 _LOGGED_IN_MARKERS = SHELL_MARKERS
 
-# ── Budgets for the claim-axis pin (test 4) — convention 14 ────────────────────
+# ── The post-claim glue's causal anchor — convention 14 ────────────────────────
 #
-# The negative half of test 4 ("a sign-in enables nothing") is anchored causally,
-# not by a settle-sleep, in three layers:
-#
-#   (a) the sign-in leg's own positive completion — the authed shell renders, so
-#       the wizard genuinely reached `WizardOutcome::LoggedIn`;
-#   (b) `driver.barrier()` — the ack lands only once the app has drained the
-#       UI-thread work enqueued before it, and the LoggedIn handler is where the
-#       spawn decision is made SYNCHRONOUSLY (`wizard/mod.rs`'s `let enable_email
-#       = …` / `if enable_caldav { … }` read the getters and either spawn the
-#       enable tasks or do not). After the barrier the decision is a fact: on the
-#       correct code path nothing was ever spawned, so there is no in-flight RPC
-#       that a longer wait could reveal;
-#   (c) the leftover — the network leg of a task that the BUGGY path *did* spawn
-#       — is bounded by a ceiling MEASURED IN THE SAME RUN. The claim leg
-#       immediately before it exercises the very same spawn→nest-write path on
-#       the very same nest, app and process, so its observed latency is the
-#       honest scale for "long enough that a fired enable would have landed".
-#       That is what keeps this from being latency luck: the window is derived
-#       from a positive control, never tuned to a machine.
-#
-# Sized far above any non-pathological delay, per convention 14's positive-wait
-# rule; a green run pays only the true latency of (a)+(b) plus the floor.
-_CONTROL_ENABLE_WAIT_S = 120.0   # ceiling for the CLAIM leg's enable to land
-_SIGNIN_SETTLE_FLOOR_S = 20.0    # never sample a shorter window than this
-_SIGNIN_SETTLE_FACTOR = 5.0      # × the measured control latency
+# Every "what did the post-claim glue do" assertion here (the stays-OFF cases
+# included) anchors on `SERVING_ENABLEMENT_KEY`, never on a settle window:
+# `helpers.waiting.await_serving_enablement_for` returns once the run for the
+# identity this test onboarded is `completed`, i.e. every step the glue planned
+# has answered (the decide-nothing run included). From then on the deployment
+# toggles are final for this onboarding, so ONE read of them is a sound verdict
+# in both directions: a slow enable cannot miss it and a late wrong enable
+# cannot slip past it. `_CONTROL_ENABLE_WAIT_S` only bounds the claim leg's
+# positive wait for its enable to land.
+_CONTROL_ENABLE_WAIT_S = 120.0
 
 
 # ── Fixture: a fresh UNCLAIMED nest, mail NOT pre-enabled ──────────────────────
@@ -471,52 +456,28 @@ def _disable_deployment_serving(admin_secret_hex: str, nest_url: str) -> None:
             ws.call(kind, {"enabled": False})
 
 
-def _settled_deployment_mail_enabled(nest_url: str, settle_s: float = 20.0) -> bool:
-    """Poll `fauna.setup.status` for the FULL `settle_s` window and return the
-    SETTLED `email_enabled` reading — used to pin the "stays OFF" case, which
-    has no positive event to short-circuit on. The calendar-onboarding
-    witnesses replaced this shape with the post-claim step's completion anchor
-    (`helpers.waiting.await_serving_enablement_for`); this file has not moved
-    yet."""
-    deadline = time.monotonic() + settle_s
-    last = False
-    with WsRpcAnonClient(nest_url) as anon:
-        while time.monotonic() < deadline:
-            reply = anon.call("fauna.setup.status", {})
-            last = bool(reply.get("email_enabled"))
-            time.sleep(2.0)
-    return last
+def _glue_verdict(
+    app, admin_secret_hex: str, nest_url: str, *, prior_runs: int = 0
+) -> tuple[dict, dict[str, bool]]:
+    """Wait for the post-claim serving-enablement run of this admin to finish,
+    then read the four deployment toggles ONCE.
 
+    Returns ``(decided, enables)``: what the app's glue decided (the anchor's
+    own record) and what the nest holds afterwards. The anchor replaces the
+    fixed settle windows the "stays OFF" cases used to sleep out: the step is
+    the only writer of these toggles between the claim and this read (no UI
+    action intervenes), so once its run is `completed` a single read also
+    answers "was one EVER enabled" — an enable that fired and was undone would
+    need a second writer."""
+    from nacl.signing import SigningKey
 
-def _ever_enabled_in_window(
-    admin_secret_hex: str, nest_url: str, settle_s: float = 30.0
-) -> dict[str, bool]:
-    """Watch all four axes for the FULL `settle_s` window and return, per axis,
-    whether it was EVER seen enabled.
+    from helpers.waiting import await_serving_enablement_for
 
-    The all-four twin of `_settled_deployment_mail_enabled`, and deliberately
-    OR-accumulating rather than returning the last reading: the thing under test
-    is that the launch glue never *requests* an enable, and a request that fired
-    and was then undone is exactly as much of a violation as one that stuck —
-    the four enables are Admin-class writes, and on the home-relay box the mail
-    one mints an MSEK that diverges from the fleet's the moment it runs
-    (`onboarding.md` § 3b). A last-reading check would report that as clean.
-
-    There is no positive event to short-circuit on, so the window is watched to
-    the end. That is the one shape convention 14 does sanction for a
-    "stays false" assertion, and it is why this costs real seconds.
-    """
-    ever = {
-        axis: False
-        for axis in ("mail_enabled", "caldav_enabled", "carddav_enabled", "webdav_enabled")
-    }
-    deadline = time.monotonic() + settle_s
-    while time.monotonic() < deadline:
-        for axis, on in _read_deployment_enables(admin_secret_hex, nest_url).items():
-            if on:
-                ever[axis] = True
-        time.sleep(2.0)  # sleep-ok: pacing a settle window that must run to the end — there is no positive event to poll for, the assertion is that none ever arrives
-    return ever
+    actor_id_hex = bytes(SigningKey(bytes.fromhex(admin_secret_hex)).verify_key).hex()
+    decided = await_serving_enablement_for(
+        app.driver, actor_id_hex, prior_runs=prior_runs
+    )
+    return decided, _read_deployment_enables(admin_secret_hex, nest_url)
 
 
 # ── The real-domain (derived-ON) fixture ──────────────────────────────────────
@@ -611,16 +572,17 @@ def unclaimed_real_domain_nest(request, app, nest_mode, tmp_path_factory):
 # ── The tests ─────────────────────────────────────────────────────────────────
 
 
-def _claim_fresh_admin(app, nest) -> None:
+def _claim_fresh_admin(app, nest) -> str:
     """Import a fresh identity and claim `nest` through the wizard with a
     LOOPBACK handle (needed for local-nest discovery with no real DNS) — the
     address type the handle-locality derived default treats as non-real, so
     mail/CalDAV/CardDAV/WebDAV all derive OFF at claim (see module
-    docstring)."""
+    docstring). Returns the admin's secret (hex)."""
     localpart = "admin" + secrets.token_hex(3)
     secret_hex = secrets.token_hex(32)
     typed_handle = f"{localpart}@127.0.0.1:{nest['port']}"
     _drive_admin_claim_to_logged_in(app, nest, secret_hex, typed_handle)
+    return secret_hex
 
 
 @pytest.mark.feature("claim-a-fresh-nest")
@@ -644,11 +606,13 @@ def test_admin_claim_with_loopback_handle_derives_mail_disabled(app, unclaimed_m
         )
 
     nest = unclaimed_mail_nest
-    _claim_fresh_admin(app, nest)
+    secret_hex = _claim_fresh_admin(app, nest)
 
-    assert _settled_deployment_mail_enabled(nest["url"], settle_s=20.0) is False, (
+    decided, enables = _glue_verdict(app, secret_hex, nest["url"])
+    assert not decided.get("email") and enables["mail_enabled"] is False, (
         "claiming with a loopback handle must derive mail-enable OFF (no "
-        "real-domain target), but deployment mail ended up enabled anyway"
+        "real-domain target), but the glue decided "
+        f"{decided!r} and the nest reads {enables}"
     )
 
 
@@ -749,14 +713,14 @@ def test_marking_the_box_private_at_claim_leaves_all_four_serving_off(
     )
 
     # No UI action between the claim and this read: whatever the launch glue
-    # requested is all that can have moved these. Watched for the whole window
-    # rather than sampled once — a late-firing enable is the failure this is
-    # here to catch.
-    ever = _ever_enabled_in_window(secret_hex, nest["url"], settle_s=30.0)
-    assert not any(ever.values()), (
+    # requested is all that can have moved these. The glue's completion anchor
+    # orders the single read after every write it could make, so a late-firing
+    # enable — the failure this is here to catch — cannot miss it.
+    decided, ever = _glue_verdict(app, secret_hex, nest["url"])
+    assert not any(ever.values()) and not any(decided.values()), (
         "a box marked private at claim must derive ALL FOUR serving intents OFF, "
         "but at least one was requested during the launch glue's window: "
-        f"{ever}. The handle targets a real domain, so the ONLY thing that may "
+        f"{ever} (the glue decided {decided!r}). The handle targets a real domain, so the ONLY thing that may "
         "hold these off is the NAT conjunct — on a home-relay box a mail enable "
         "here mints an MSEK that diverges from the fleet's. "
         f"app error: {app.error_text()!r}"
@@ -786,14 +750,15 @@ def test_a_returning_admin_sign_in_issues_no_deployment_enable(
         (`AlreadyOnNest`) instead of claiming. Nothing may be enabled.
 
     So a regression cannot pass this by disabling the glue outright: leg 1 would
-    go red first. And leg 2's negative is anchored on leg 1's measured latency
-    rather than on a guessed window — see the `_SIGNIN_SETTLE_*` note above.
+    go red first. And leg 2's negative is anchored on the sign-in's own
+    serving-enablement completion, not a guessed window — see the anchor note
+    above.
 
     The defect this pins, verbatim from the live box (2026-08-16): a returning
     admin signing in on a real-domain public box fired `provision_mail_at_first_
     setup` + `set_caldav_enabled(true)` + `set_carddav_enabled(true)` +
     `set_webdav_enabled(true)` against a box they had already configured — four
-    Admin-class deployment writes nobody asked for. example.com escaped only
+    Admin-class deployment writes nobody asked for. The live nest escaped only
     because that run's RPC channel happened to be down. Fixed by the
     `claim_completed` conjunct in `fauna-onboarding-machine` (so all 7 apps
     inherit it); pinned at tier_1 by `serving_enablement_derivation.rs::
@@ -820,7 +785,6 @@ def test_a_returning_admin_sign_in_issues_no_deployment_enable(
 
     # ── leg 1: the control. A claim on this box DOES enable. ───────────────────
     _drive_admin_claim_to_logged_in(app, nest, secret_hex, typed_handle)
-    control_started = time.monotonic()
     assert _wait_deployment_mail_enabled(nest["url"], timeout=_CONTROL_ENABLE_WAIT_S), (
         "the CONTROL leg failed: a real-domain admin claim must auto-enable "
         "deployment mail (onboarding.md § 3b derived default ON), but "
@@ -828,7 +792,6 @@ def test_a_returning_admin_sign_in_issues_no_deployment_enable(
         "below proves nothing — a glue that enables NOTHING would also pass it. "
         f"app error: {app.error_text()!r}"
     )
-    control_latency = time.monotonic() - control_started
 
     # ── back to "already configured, serving currently OFF" ────────────────────
     _disable_deployment_serving(secret_hex, nest["url"])
@@ -843,41 +806,30 @@ def test_a_returning_admin_sign_in_issues_no_deployment_enable(
     # so leg 2 reaches the same nest.
     app.driver.reset()
 
+    # The claim leg already left a COMPLETED run for this identity in the app's
+    # records (unless the reset relaunched); the sign-in's own run is the one past
+    # those. Read after the reset, before the drive: a relaunch zeroes the count.
+    from helpers.waiting import serving_enablement_completed_runs
+
+    actor_id_hex = _admin_keys(secret_hex)[0].hex()
+    prior_runs = serving_enablement_completed_runs(app.driver, actor_id_hex)
+
     # ── leg 2: the pin. The same admin signs in; nothing may be enabled. ───────
     _drive_sign_in_to_logged_in(app, secret_hex, typed_handle)
 
-    # Convention 14 anchor (b): the `WizardOutcome::LoggedIn` handler — where the
-    # spawn decision is made synchronously — has run to completion.
-    app.driver.barrier(timeout=30.0)
-
-    settle_s = max(_SIGNIN_SETTLE_FLOOR_S, control_latency * _SIGNIN_SETTLE_FACTOR)
-
-    # Inverted polarity, deliberately: `wait_until` is the shared deadline poll,
-    # and here the thing being polled for is the FAILURE (an enable landing), so
-    # the timeout is the PASS. Written this way rather than as a bare sleep loop
-    # so the poll cadence lives in `helpers.waiting` — the same reason every
-    # other convention-14 wait in the suite does (and so the sleep ratchet keeps
-    # meaning what it says).
-    try:
-        fired = wait_until(
-            lambda: sorted(
-                axis
-                for axis, on in _read_deployment_enables(secret_hex, nest["url"]).items()
-                if on
-            )
-            or None,
-            settle_s,
-            interval=1.0,
-        )
-    except AssertionError:
-        fired = []  # the window elapsed with every toggle still off — the expected outcome
-    assert not fired, (
-        f"a plain SIGN-IN enabled deployment serving: {fired} flipped ON within "
-        f"{settle_s:.0f}s of reaching the authed shell (the claim leg's own "
-        f"enable landed in {control_latency:.1f}s, so this window is ~"
-        f"{_SIGNIN_SETTLE_FACTOR:.0f}x the measured latency of the very same "
-        "path). onboarding.md § 3b's gating rule: the two defaulting axes are "
-        "evaluated ONLY on a wizard run that actually claimed the box, so a "
+    # Convention 14: the sign-in's serving-enablement run (all four intents OFF,
+    # a decide-nothing plan) is the causal anchor — `completed` passing the
+    # baseline is the verdict the old settle window only approximated — and ONE
+    # read of the toggles after it is final.
+    decided, enables = _glue_verdict(
+        app, secret_hex, nest["url"], prior_runs=prior_runs
+    )
+    fired = sorted(axis for axis, on in enables.items() if on)
+    assert not fired and not any(decided.values()), (
+        f"a plain SIGN-IN enabled deployment serving: {fired} read ON after the "
+        f"sign-in's serving-enablement run completed (the glue decided "
+        f"{decided!r}). onboarding.md § 3b's gating rule: the two defaulting axes "
+        "are evaluated ONLY on a wizard run that actually claimed the box, so a "
         "sign-in derives all four OFF regardless of handle and NAT axis — "
         "re-asserting deployment state from a client-side derivation is an "
         "unrequested Admin-class write against a box the admin already "

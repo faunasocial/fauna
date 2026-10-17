@@ -3,6 +3,7 @@ package com.fauna.app.core.feed
 import com.fauna.app.core.ApiClient
 import com.fauna.app.core.ShellLog
 import com.fauna.app.core.conversations.ConversationsManagerHost
+import com.fauna.ffi.FfiCueTracker
 import com.fauna.ffi.FfiFeedManager
 import com.fauna.ffi.autosaveDebounceMs
 import kotlinx.coroutines.CoroutineScope
@@ -16,6 +17,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import uniffi.fauna_feed.FeedSnapshot
 import uniffi.fauna_feed.FeedSnapshotObserver
+import uniffi.fauna_feed.LeaveModel
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -118,6 +120,32 @@ class FeedManagerHost @Inject constructor(
             draftsScope.launch { installRoomPostSeam(m) }
         }
         return m
+    }
+
+    /** The engagement-cue capture tracker of [cueTrackerManager]. */
+    private var cueTracker: FfiCueTracker? = null
+    private var cueTrackerManager: FfiFeedManager? = null
+
+    /**
+     * The ONE engagement-cue capture tracker of [m] — one per auth, never one
+     * per Feed-page mount, so what the tracker holds (its frozen test clock
+     * included, `fauna_feed::CueTracker` § The test clock) outlives a trip off
+     * the page, as on tui, linux and web (`cueTrackerFor`). A rebuilt manager
+     * (a re-auth or account switch) gets a fresh tracker.
+     *
+     * Compose's `LazyColumn` is virtualized: a card scrolled well away is
+     * DISPOSED and simply absent from `visibleItemsInfo` while its post is
+     * still loaded, so absence from a non-empty read is real leave-evidence —
+     * [LeaveModel.ABSENCE_IS_LEAVE]. linux/windows/apple use the opposite model
+     * for their eager containers.
+     */
+    @Synchronized
+    fun cueTracker(m: FfiFeedManager): FfiCueTracker {
+        cueTracker?.takeIf { cueTrackerManager === m }?.let { return it }
+        return FfiCueTracker(LeaveModel.ABSENCE_IS_LEAVE).also {
+            cueTracker = it
+            cueTrackerManager = m
+        }
     }
 
     /**

@@ -32,15 +32,15 @@ from i18n.strings import S
 
 # tui leads (the lead app); the other six apps join by adding their marker once
 # their run is green.
-pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.macos, pytest.mark.ios]
+pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.linux, pytest.mark.macos, pytest.mark.ios, pytest.mark.web, pytest.mark.windows]
 
 DOMAIN = "lists-controls-e2e.test"
 MEMBER_DOMAIN = "external.test"
 
 # Apps that render `mail-list-members-import-result` (outcome 9); tui led.
-_TALLY_BUILT_APPS = {"tui", "macos", "ios"}
+_TALLY_BUILT_APPS = {"tui", "linux", "macos", "ios", "web", "windows"}
 # Apps whose sheet Submit arms on an off-server archive link (outcome 15); tui led.
-_ARCHIVE_CONFIRM_BUILT_APPS = {"tui", "macos", "ios"}
+_ARCHIVE_CONFIRM_BUILT_APPS = {"tui", "linux", "macos", "ios", "web", "windows"}
 
 
 def _user_client(nest_instance, user):
@@ -132,6 +132,7 @@ def _index_of(app, fragment):
     return next(i for i, n in enumerate(app.mail_lists.names()) if fragment in n)
 
 
+@pytest.mark.android
 @pytest.mark.feature("mailing-lists")
 def test_row_shows_member_count_last_send_and_todays_meter(
     logged_in_app, mail_bridge_mta, test_user, nest_instance
@@ -183,6 +184,7 @@ def test_row_shows_member_count_last_send_and_todays_meter(
             _reset(api)
 
 
+@pytest.mark.android
 @pytest.mark.feature("mailing-lists")
 def test_add_sheet_sets_description_links_and_per_send_cap(
     logged_in_app, test_user, nest_instance
@@ -217,6 +219,7 @@ def test_add_sheet_sets_description_links_and_per_send_cap(
             _reset(api)
 
 
+@pytest.mark.android
 @pytest.mark.feature("mailing-lists")
 def test_edit_sheet_changes_a_lists_details(logged_in_app, test_user, nest_instance):
     """Outcome 4: the edit sheet opens pre-populated and a save changes the
@@ -249,6 +252,7 @@ def test_edit_sheet_changes_a_lists_details(logged_in_app, test_user, nest_insta
             _reset(api)
 
 
+@pytest.mark.android
 @pytest.mark.feature("mailing-lists")
 def test_delete_confirm_says_the_members_go_too(logged_in_app, test_user, nest_instance):
     """Outcome 6: the first Delete only asks, and the question says the members
@@ -279,6 +283,7 @@ def test_delete_confirm_says_the_members_go_too(logged_in_app, test_user, nest_i
             _reset(api)
 
 
+@pytest.mark.android
 @pytest.mark.feature("mailing-lists")
 def test_resubscribe_from_the_members_page(logged_in_app, test_user, nest_instance):
     """Outcome 8: a member who unsubscribed can be re-subscribed from the

@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import SwiftUI
 
 /// Thin SwiftUI-friendly proxy over the page-level `AtprotoSettingsMachine`
@@ -192,3 +195,4 @@ final class AtprotoSettingsObserverBox: AtprotoSettingsObserver, @unchecked Send
         notifyOnMainActor(target) { $0.onMachineChanged() }
     }
 }
+#endif // !FAUNA_KIDS

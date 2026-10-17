@@ -24,6 +24,7 @@ from __future__ import annotations
 import imaplib
 import re
 import ssl
+import time
 
 import pytest
 
@@ -175,6 +176,72 @@ def test_the_enumerate_and_fetch_shapes_our_client_sends_are_answered():
         assert source.fetched_uids == [("INBOX", 1), ("INBOX", 2)]
 
 
+def test_per_message_dates_and_flags_are_served_on_both_fetch_shapes():
+    """A mailbox's own `dates` and `flags` reach the client: the enumeration
+    carries each message's INTERNALDATE (the Confirm estimate counts a since
+    range by it) and the body fetch carries the same date and the message's
+    own flags (what the import hands the nest as the message's marks)."""
+    mailbox = SourceMailbox(
+        name="INBOX",
+        messages=[sample_message("old"), sample_message("new")],
+        internal_dates=["01-Jun-2019 08:00:00 +0000", "01-Mar-2024 09:00:00 +0000"],
+        flags=[("\\Seen",), ("\\Flagged", "\\Answered")],
+    )
+    with FakeImapSource([mailbox]) as source:
+        sock = _raw_session(source)
+        try:
+            sock.sendall(f"a1 LOGIN {source.username} {source.password}\r\n".encode())
+            _read_until_tagged(sock, "a1")
+            sock.sendall(b'a2 EXAMINE "INBOX"\r\n')
+            _read_until_tagged(sock, "a2")
+
+            sock.sendall(b"a3 UID FETCH 1:* (UID RFC822.SIZE INTERNALDATE)\r\n")
+            enum = _read_until_tagged(sock, "a3")
+            assert b'UID 1 RFC822.SIZE' in enum
+            assert b'INTERNALDATE "01-Jun-2019 08:00:00 +0000"' in enum
+            assert b'INTERNALDATE "01-Mar-2024 09:00:00 +0000"' in enum
+
+            sock.sendall(b"a4 UID FETCH 2 (UID FLAGS INTERNALDATE BODY.PEEK[])\r\n")
+            body = _read_until_tagged(sock, "a4")
+            assert b"FLAGS (\\Flagged \\Answered)" in body, body
+            assert b'INTERNALDATE "01-Mar-2024 09:00:00 +0000"' in body
+        finally:
+            sock.close()
+
+
+def test_a_held_fetch_is_answered_only_once_released():
+    """`hold` parks one body fetch until `release`, and `is_waiting_at` says
+    the client got there — the handle a journey test pauses or cancels an
+    import mid-window by, without racing the run."""
+    with FakeImapSource(_mailboxes()) as source:
+        source.hold("INBOX", 2)
+        sock = _raw_session(source)
+        try:
+            sock.sendall(f"a1 LOGIN {source.username} {source.password}\r\n".encode())
+            _read_until_tagged(sock, "a1")
+            sock.sendall(b'a2 EXAMINE "INBOX"\r\n')
+            _read_until_tagged(sock, "a2")
+            sock.sendall(
+                b"a3 UID FETCH 1 (UID FLAGS INTERNALDATE BODY.PEEK[])\r\n"
+                b"a4 UID FETCH 2 (UID FLAGS INTERNALDATE BODY.PEEK[])\r\n"
+            )
+            first = _read_until_tagged(sock, "a3")
+            assert b"Subject: first" in first
+
+            deadline = time.monotonic() + 10
+            while not source.is_waiting_at("INBOX", 2) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert source.is_waiting_at("INBOX", 2)
+            assert source.fetched_uids == [("INBOX", 1)], "a held fetch was served"
+
+            source.release("INBOX", 2)
+            second = _read_until_tagged(sock, "a4")
+            assert b"Subject: second" in second
+        finally:
+            sock.close()
+        assert source.fetched_uids == [("INBOX", 1), ("INBOX", 2)]
+
+
 def test_an_unknown_command_is_refused_rather_than_dropped():
     """Convention 11's rule, applied to the fake: an unanswered tag is a client
     hang, and a hang diagnoses nothing."""
@@ -257,3 +324,165 @@ def test_the_seeded_anchor_is_a_ca_and_the_served_cert_is_not():
     ).value
     assert "localhost" in names.get_values_for_type(x509.DNSName)
     assert str(names.get_values_for_type(x509.IPAddress)[0]) == "127.0.0.1"
+
+
+# ── misbehaviours (the module docs' list) ──────────────────────────────────
+
+
+def _signed_in_examining_inbox(source: FakeImapSource) -> ssl.SSLSocket:
+    sock = _raw_session(source)
+    sock.sendall(f"a1 LOGIN {source.username} {source.password}\r\n".encode())
+    _read_until_tagged(sock, "a1")
+    sock.sendall(b'a2 EXAMINE "INBOX"\r\n')
+    _read_until_tagged(sock, "a2")
+    return sock
+
+
+def test_a_refused_starttls_answers_no_and_records_a_downgraded_login():
+    """`refuse_starttls`: the `NO` the client must give up on. A client that
+    fell back to plaintext and sent `LOGIN` anyway is caught in `logins`."""
+    import socket
+
+    with FakeImapSource(_mailboxes(), tls_mode="starttls", refuse_starttls=True) as source:
+        raw = socket.create_connection(("localhost", source.port), timeout=10)
+        try:
+            assert b"* OK" in raw.recv(4096)
+            raw.sendall(b"b1 STARTTLS\r\n")
+            assert b"b1 NO" in raw.recv(4096)
+            raw.sendall(f"b2 LOGIN {source.username} {source.password}\r\n".encode())
+            assert b"b2 OK" in raw.recv(4096)
+        finally:
+            raw.close()
+        assert source.starttls_refusals == 1
+        assert source.logins == [(source.username, source.password)]
+
+
+def test_every_command_is_recorded_without_the_password():
+    with FakeImapSource(_mailboxes()) as source:
+        sock = _signed_in_examining_inbox(source)
+        sock.close()
+        assert source.commands == [f"LOGIN {source.username}", 'EXAMINE "INBOX"']
+        assert source.examines == [("INBOX", "OK")]
+        assert not any(source.password in c for c in source.commands)
+
+
+def test_an_unreadable_message_is_answered_no_and_the_rest_are_served():
+    with FakeImapSource(_mailboxes(), unreadable={("INBOX", 1)}) as source:
+        sock = _signed_in_examining_inbox(source)
+        try:
+            sock.sendall(
+                b"a3 UID FETCH 1 (UID FLAGS INTERNALDATE BODY.PEEK[])\r\n"
+                b"a4 UID FETCH 2 (UID FLAGS INTERNALDATE BODY.PEEK[])\r\n"
+            )
+            both = _read_until_tagged(sock, "a4")
+            assert b"a3 NO" in both
+            assert b"Subject: second" in both
+        finally:
+            sock.close()
+        assert source.refused_fetches == [("INBOX", 1)]
+        assert source.fetched_uids == [("INBOX", 2)]
+
+
+def test_a_vanishing_mailbox_is_listed_until_the_first_body_is_fetched():
+    with FakeImapSource(_mailboxes(), vanish_on_fetch=("Archive",)) as source:
+        sock = _signed_in_examining_inbox(source)
+        try:
+            sock.sendall(b'a3 LIST "" "*"\r\n')
+            assert b'"Archive"' in _read_until_tagged(sock, "a3")
+            sock.sendall(b"a4 UID FETCH 1 (UID FLAGS INTERNALDATE BODY.PEEK[])\r\n")
+            _read_until_tagged(sock, "a4")
+            sock.sendall(b'a5 EXAMINE "Archive"\r\n')
+            assert b"a5 NO" in _read_until_tagged(sock, "a5")
+        finally:
+            sock.close()
+        assert source.examines == [("INBOX", "OK"), ("Archive", "NO")]
+
+
+def test_a_held_mailbox_serves_its_bodies_only_once_released():
+    import threading
+
+    with FakeImapSource(_mailboxes(), hold_fetch_in="INBOX") as source:
+        sock = _signed_in_examining_inbox(source)
+        got: list[bytes] = []
+        try:
+            sock.sendall(b"a3 UID FETCH 1 (UID FLAGS INTERNALDATE BODY.PEEK[])\r\n")
+            reader = threading.Thread(
+                target=lambda: got.append(_read_until_tagged(sock, "a3"))
+            )
+            reader.start()
+            assert source.holding.wait(timeout=10)
+            assert source.fetched_uids == []
+            source.release_hold()
+            reader.join(timeout=10)
+        finally:
+            sock.close()
+        assert got and b"Subject: first" in got[0]
+        assert source.fetched_uids == [("INBOX", 1)]
+
+
+def test_a_revoked_password_drops_the_connection_and_refuses_the_next_login():
+    with FakeImapSource(_mailboxes(), revoke_password_after=1) as source:
+        old = source.password
+        sock = _signed_in_examining_inbox(source)
+        try:
+            sock.sendall(b"a3 UID FETCH 1 (UID FLAGS INTERNALDATE BODY.PEEK[])\r\n")
+            assert b"a3 OK" in _read_until_tagged(sock, "a3")
+            sock.sendall(b"a4 UID FETCH 2 (UID FLAGS INTERNALDATE BODY.PEEK[])\r\n")
+            assert b"a4" not in _read_until_tagged(sock, "a4"), "answered, not dropped"
+        finally:
+            sock.close()
+        assert source.password_revoked
+        sock = _raw_session(source)
+        try:
+            sock.sendall(f"b1 LOGIN {source.username} {old}\r\n".encode())
+            assert b"b1 NO" in _read_until_tagged(sock, "b1")
+        finally:
+            sock.close()
+
+
+def test_list_advertises_each_mailboxs_special_use_alongside_noselect():
+    mailboxes = [
+        SourceMailbox(name="INBOX"),
+        SourceMailbox(name="Papierkorb", special_use="\\Trash"),
+        SourceMailbox(name="[Gmail]/Wichtig", special_use="\\Important"),
+        SourceMailbox(name="[Gmail]", selectable=False),
+    ]
+    with FakeImapSource(mailboxes) as source:
+        sock = _raw_session(source)
+        try:
+            sock.sendall(f"a1 LOGIN {source.username} {source.password}\r\n".encode())
+            _read_until_tagged(sock, "a1")
+            sock.sendall(b'a2 LIST "" "*"\r\n')
+            listed = _read_until_tagged(sock, "a2").decode()
+        finally:
+            sock.close()
+    assert '* LIST () "/" "INBOX"' in listed
+    assert '* LIST (\\Trash) "/" "Papierkorb"' in listed
+    assert '* LIST (\\Important) "/" "[Gmail]/Wichtig"' in listed
+    assert '* LIST (\\Noselect) "/" "[Gmail]"' in listed
+
+
+def test_a_dropped_source_stays_down_until_it_comes_back():
+    with FakeImapSource(_mailboxes(), drop_after=1) as source:
+        sock = _signed_in_examining_inbox(source)
+        try:
+            sock.sendall(b"a3 UID FETCH 1 (UID FLAGS INTERNALDATE BODY.PEEK[])\r\n")
+            assert b"a3 OK" in _read_until_tagged(sock, "a3")
+            sock.sendall(b"a4 UID FETCH 2 (UID FLAGS INTERNALDATE BODY.PEEK[])\r\n")
+            assert b"a4" not in _read_until_tagged(sock, "a4"), "answered, not dropped"
+        finally:
+            sock.close()
+        assert source.down.is_set()
+        for attempt in (1, 2):
+            with pytest.raises(OSError):
+                _raw_session(source).close()
+            assert source.refused_connections == attempt
+        source.come_back()
+        sock = _signed_in_examining_inbox(source)
+        try:
+            sock.sendall(b"a3 UID FETCH 2 (UID FLAGS INTERNALDATE BODY.PEEK[])\r\n")
+            assert b"a3 OK" in _read_until_tagged(sock, "a3"), "the outage did not end"
+        finally:
+            sock.close()
+        assert source.fetched_uids == [("INBOX", 1), ("INBOX", 2)]
+        assert source.refused_connections == 2

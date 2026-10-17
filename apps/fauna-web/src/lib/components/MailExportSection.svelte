@@ -24,10 +24,12 @@
   //     nest's URL, which would hand the user the still-sealed blob. The save
   //     itself is `$lib/mail-export-save` (§ Download flow step 5), and the
   //     Done summary then names the saved file, so the press is visible.
-  import { identity } from '$lib/store';
-  import { mailExportMachine } from '$lib/rpc';
+  import { identity, reconnectTick } from '$lib/store';
+  import { mailExportMachine, onPushEvent, staleSurfacesForPushKind } from '$lib/rpc';
+  import { isFailedExport } from '$lib/mail-export-failed';
   import { sweepStaleExportArchives } from '$lib/mail-export-save';
-  import { ensureWasm, exportFormatLabel } from '$lib/wasm';
+  import { ensureWasm, exportConfirmEstimate, exportFormatLabel, transferTiming, type ExportConfirmEstimate, type TransferTiming } from '$lib/wasm';
+  import { byteSize, durationSecs } from '$lib/value-format';
   import { resolveLocalized } from '$lib/i18n/localized';
   import { onDestroy, onMount } from 'svelte';
   import { t } from '$lib/i18n/strings';
@@ -41,7 +43,7 @@
   // Shapes mirror the shared `MailExportSnapshot` serde JSON (snake_case across
   // the serde_wasm_bindgen boundary; the step/format enums serialize as their
   // PascalCase variant-name string).
-  interface MailboxOption { name: string; selected: boolean; }
+  interface MailboxOption { name: string; selected: boolean; message_count: number; sealed_bytes: number; }
   interface MailboxProgressView { name: string; exported: number; total: number; }
   interface ExportSnapshot {
     step: string; // "Format" | "Scope" | "Confirm" | "Progress" | "Done"
@@ -60,6 +62,8 @@
     blob_bytes: number | null;
     download_url: string;
     saved_archive_path: string; // the saved file's name once Download finished
+    started_at: number; // the session's epoch seconds; 0 before a session exists
+    last_progress_at: number;
     status: string; // "Idle" | "Loading" | "Working"
     error: string | null;
   }
@@ -83,6 +87,26 @@
     if (snap?.error) error = snap.error;
   }
 
+  // The wizard open here follows an export started, finished, failed or
+  // dismissed on another device (`StaleSurfaces::mail_export`, `mail-export.md`
+  // § A failed export is a record the wizard shows until the user moves on): the
+  // push re-runs the machine's own hydrate, which ignores the nudge while this
+  // device holds a run. Page-gated by construction — this section is mounted
+  // only while the Export page shows, and a visit re-reads anyway. A reconnect
+  // re-reads too: a push sent while the socket was down is never replayed.
+  let unsubPush: (() => void) | null = null;
+  let unsubReconnect: (() => void) | null = null;
+
+  async function rehydrate(): Promise<void> {
+    if (!machine) return;
+    try {
+      await machine.hydrate();
+      applySnapshot();
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+  }
+
   onMount(async () => {
     const id = $identity;
     if (!id?.secretHex) return;
@@ -94,11 +118,22 @@
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     }
+    unsubPush = onPushEvent((kind) => {
+      if (staleSurfacesForPushKind(kind).mail_export) void rehydrate();
+    });
+    // `reconnectTick` fires once on subscribe — skip that seed value.
+    let firstTick = true;
+    unsubReconnect = reconnectTick.subscribe(() => {
+      if (firstTick) { firstTick = false; return; }
+      void rehydrate();
+    });
     // Temporary archives an earlier download left behind (best-effort).
     void sweepStaleExportArchives();
   });
 
   onDestroy(() => {
+    unsubPush?.();
+    unsubReconnect?.();
     stopProgressTick();
     if (cancelArmTimer) clearTimeout(cancelArmTimer);
   });
@@ -162,12 +197,81 @@
     cancelArmTimer = setTimeout(() => { cancelArmed = false; }, CANCEL_ARM_MS);
   }
 
+  // The confirm step's summary (`mail-export.md` § Wizard steps step 3): the
+  // counts line, with the shared estimate's bytes and time folded in when the
+  // nest reports sizes. Every figure comes from `exportConfirmEstimate`.
+  function confirmSummary(snap: ExportSnapshot, estimate: ExportConfirmEstimate): string {
+    const summary = t.mail_export.confirm_summary_count_fmt({
+      format: formatLabel(snap.format),
+      mailboxes: String(snap.mailboxes.filter((m) => m.selected).length),
+      messages: String(estimate.messages),
+    });
+    if (estimate.sealed_bytes === 0) return summary;
+    return t.mail_export.confirm_summary_estimated_fmt({
+      summary,
+      bytes: byteSize(estimate.sealed_bytes),
+      duration: durationSecs(estimate.secs),
+    });
+  }
+
   // The format→label comes from the shared Rust map
   // (`fauna_client_mail_settings::export_format_label`, WASM twin `exportFormatLabel`)
   // — the same source the native apps consume, single-sourced (priority #2).
   // `f` is the serde `ExportFormat` variant-name string the snapshot carries.
   function formatLabel(f: string): string {
     return resolveLocalized(exportFormatLabel(f));
+  }
+
+  // Elapsed time and time left, from the shared `transfer_timing`
+  // (`mail-export.md` § Wizard steps steps 4–5) — never derived here. A running
+  // session reads this device's clock; the snapshot repaint tick re-renders it.
+  function timing(s: ExportSnapshot): TransferTiming {
+    return transferTiming(
+      s.started_at,
+      s.last_progress_at,
+      s.session_state === 'Running',
+      s.exported_count + s.skipped_count + s.errored_count,
+      s.total_count,
+      Math.floor(Date.now() / 1000),
+    );
+  }
+
+  function progressSummary(s: ExportSnapshot): string {
+    const summary = t.mail_export.progress_summary_fmt({
+      exported: String(s.exported_count),
+      total: String(s.total_count),
+      skipped: String(s.skipped_count),
+      errored: String(s.errored_count),
+    });
+    const { elapsed_secs: elapsed, remaining_secs: remaining } = timing(s);
+    if (elapsed == null) return summary;
+    if (remaining == null) {
+      return t.mail_export.progress_elapsed_fmt({ summary, elapsed: durationSecs(elapsed) });
+    }
+    return t.mail_export.progress_remaining_fmt({
+      summary,
+      elapsed: durationSecs(elapsed),
+      remaining: durationSecs(remaining),
+    });
+  }
+
+  // § Wizard steps step 5: "X messages exported, Y bytes, time elapsed". A
+  // snapshot with no clock yet (not read from the nest) keeps the untimed form.
+  function doneSummary(s: ExportSnapshot): string {
+    const format = formatLabel(s.format);
+    if (s.blob_bytes == null) return format;
+    const bytes = String(s.blob_bytes);
+    const took = timing(s).elapsed_secs;
+    if (took == null) {
+      return s.saved_archive_path
+        ? t.mail_export.saved_summary_fmt({ format, bytes, path: s.saved_archive_path })
+        : t.mail_export.done_summary_fmt({ format, bytes });
+    }
+    const exported = String(s.exported_count);
+    const elapsed = durationSecs(took);
+    return s.saved_archive_path
+      ? t.mail_export.saved_summary_timed_fmt({ exported, format, bytes, elapsed, path: s.saved_archive_path })
+      : t.mail_export.done_summary_timed_fmt({ exported, format, bytes, elapsed });
   }
 
   // Format picker (step 1): a select bound to the snapshot's current format.
@@ -258,14 +362,15 @@
 
     <!-- Step 3 — Confirm + Start. -->
     {#if snap.step === 'Confirm'}
+      {@const estimate = exportConfirmEstimate(snap.mailboxes)}
       <div class="step">
         <h3 class="muted small">{t.mail_export.confirm_title}</h3>
         <p class="summary" data-testid={IDS.MAIL_EXPORT_CONFIRM_SUMMARY}>
-          {t.mail_export.confirm_summary_fmt({
-            format: formatLabel(snap.format),
-            mailboxes: String(snap.mailboxes.filter((m) => m.selected).length),
-          })}
+          {confirmSummary(snap, estimate)}
         </p>
+        {#if estimate.messages > 0 && estimate.sealed_bytes === 0}
+          <p class="muted small">{t.mail_export.confirm_estimate_unavailable}</p>
+        {/if}
         <div class="nav">
           <button class="btn" data-testid={IDS.WIZARD_BACK_BUTTON} onclick={() => dispatch('Back')} disabled={busy}>{t.mail_export.back}</button>
           <button class="btn primary" data-testid={IDS.MAIL_EXPORT_START_BUTTON} onclick={() => dispatch('Start')} disabled={busy}>
@@ -280,12 +385,7 @@
       <div class="step">
         <h3 class="muted small">{t.mail_export.progress_title}</h3>
         <p class="summary" data-testid={IDS.MAIL_EXPORT_PROGRESS_SUMMARY}>
-          {t.mail_export.progress_summary_fmt({
-            exported: String(snap.exported_count),
-            total: String(snap.total_count),
-            skipped: String(snap.skipped_count),
-            errored: String(snap.errored_count),
-          })}
+          {progressSummary(snap)}
         </p>
         <progress data-testid={IDS.MAIL_EXPORT_PROGRESS_BAR} value={snap.exported_count} max={snap.total_count || 1}></progress>
         <div class="progress-list" data-testid={IDS.MAIL_EXPORT_MAILBOX_PROGRESS_LIST}>
@@ -302,11 +402,16 @@
           </div>
         {/if}
         <div class="nav">
-          <button class="btn" data-testid={IDS.MAIL_EXPORT_PAUSE_BUTTON} onclick={() => dispatch('Pause')} disabled={busy}>{t.mail_export.pause_button}</button>
-          <button class="btn" data-testid={IDS.MAIL_EXPORT_RESUME_BUTTON} onclick={() => dispatch('Resume')} disabled={busy}>{t.mail_export.resume_button}</button>
-          <button class="btn danger" class:armed={cancelArmed} data-testid={IDS.MAIL_EXPORT_CANCEL_BUTTON} onclick={onCancel} disabled={busy}>
-            {cancelArmed ? t.common.confirm_q : t.mail_export.cancel_button}
-          </button>
+          {#if isFailedExport(snap.session_state)}
+            <!-- A failed export is a record: Dismiss is its one control. -->
+            <button class="btn danger" data-testid={IDS.MAIL_EXPORT_DISCARD_BUTTON} onclick={() => dispatch('Discard')} disabled={busy}>{t.mail_export.dismiss_failed_button}</button>
+          {:else}
+            <button class="btn" data-testid={IDS.MAIL_EXPORT_PAUSE_BUTTON} onclick={() => dispatch('Pause')} disabled={busy}>{t.mail_export.pause_button}</button>
+            <button class="btn" data-testid={IDS.MAIL_EXPORT_RESUME_BUTTON} onclick={() => dispatch('Resume')} disabled={busy}>{t.mail_export.resume_button}</button>
+            <button class="btn danger" class:armed={cancelArmed} data-testid={IDS.MAIL_EXPORT_CANCEL_BUTTON} onclick={onCancel} disabled={busy}>
+              {cancelArmed ? t.common.confirm_q : t.mail_export.cancel_button}
+            </button>
+          {/if}
         </div>
       </div>
     {/if}
@@ -316,17 +421,7 @@
       <div class="step">
         <h3 class="muted small">{t.mail_export.done_title}</h3>
         <p class="summary" data-testid={IDS.MAIL_EXPORT_DONE_SUMMARY}>
-          {#if snap.blob_bytes != null && snap.saved_archive_path}
-            {t.mail_export.saved_summary_fmt({
-              format: formatLabel(snap.format),
-              bytes: String(snap.blob_bytes),
-              path: snap.saved_archive_path,
-            })}
-          {:else if snap.blob_bytes != null}
-            {t.mail_export.done_summary_fmt({ format: formatLabel(snap.format), bytes: String(snap.blob_bytes) })}
-          {:else}
-            {formatLabel(snap.format)}
-          {/if}
+          {doneSummary(snap)}
         </p>
         <button
           class="btn primary"

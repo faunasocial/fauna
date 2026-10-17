@@ -172,7 +172,9 @@ fn presence_handler() -> RpcHandler {
                 .ok_or_else(|| internal("presence called outside a client connection"))?;
             // A socket already gone has nothing left to tag; its presence ended
             // with it, which is the answer the dispatch needs anyway.
-            let _ = state.ws.announce_device(&actor_id, conn_id, &req.device_id);
+            let _ = state
+                .ws
+                .announce_device(&actor_id, conn_id, &req.device_id, req.stand_in);
             encode_reply(&PresenceReply {
                 ok: true,
                 extra: Default::default(),

@@ -42,8 +42,19 @@ public sealed partial class SettingsSubscriptionsPage : Page
         if (e.Parameter is ServiceClients clients && clients.Rpc is not null)
         {
             _vm = new SubscriptionsSettingsViewModel(clients.Rpc);
+            // A rename (this device's Save, a sibling device's edit, a late load after a
+            // relaunch) repaints the creators' names with no nest round trip.
+            ContactOverlayNames.Moved += OnOverlayMoved;
         }
     }
+
+    protected override void OnNavigatedFrom(NavigationEventArgs e)
+    {
+        ContactOverlayNames.Moved -= OnOverlayMoved;
+        base.OnNavigatedFrom(e);
+    }
+
+    private void OnOverlayMoved() => DispatcherQueue.TryEnqueue(() => _vm?.RepaintNames());
 
     private async void Page_Loaded(object sender, RoutedEventArgs e)
     {

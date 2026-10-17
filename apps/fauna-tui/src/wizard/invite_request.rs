@@ -73,22 +73,20 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
     // `invite-code-supervised-notice` — "This account will be supervised by X",
     // rendered BEFORE redemption when the checked out-of-band code carries a
     // guardian designation (`family-safety.md` § Wire & data shape: the additive
-    // `supervised_by` on the `fauna.account.invite_code.verify` reply, surfaced by
-    // the shared machine as `OobCodeState::Valid { supervised_by }`). Transparency
-    // at creation — the supervised user knows before they redeem.
+    // `supervised_by` on the `fauna.account.invite_code.verify` reply), and the
+    // age band the code was minted with in the same sentence (§ App surface →
+    // *Age-band surfaces*). Transparency at creation — the supervised user knows
+    // before they redeem. The text is the shared machine's `supervised_notice`;
+    // its `{band}` argument is a nested key, hence `resolve_nested`.
     //
-    // Registered ONLY for a *valid* code that names a guardian (an idle/verifying/
-    // invalid code, or a valid ordinary one, registers nothing), so the driver's
-    // `is_visible` is an honest witness — the linux label's `set_visible(false)`
-    // arm, expressed the terminal way.
-    if let fauna_onboarding_machine::OobCodeState::Valid {
-        supervised_by: Some(guardian),
-        ..
-    } = &snap.out_of_band_code_state
-    {
+    // The machine sets it ONLY for a *valid* code that names a guardian (an
+    // idle/verifying/invalid code, or a valid ordinary one, registers nothing),
+    // so the driver's `is_visible` is an honest witness — the linux label's
+    // `set_visible(false)` arm, expressed the terminal way.
+    if let Some(notice) = &snap.supervised_notice {
         out.push(Element::label(
             ids::INVITE_CODE_SUPERVISED_NOTICE,
-            fauna_i18n::strings::family::supervised_notice_onboarding(guardian),
+            notice.resolve_nested(fauna_i18n::strings::lookup),
         ));
     }
 

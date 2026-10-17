@@ -17,7 +17,18 @@ uniffi = ["dep:uniffi", "fauna-core/uniffi"]
 # page tests can assert their projection of a given snapshot without a
 # transport. Compiled into debug + explicit test builds only — the exact mirror
 # of `fauna-feed/test-helpers`.
-test-helpers = []
+test-helpers = ["query"]
+# The nest-query half — `SearchClient` (the `fauna.search.query` sender) and
+# the `SearchManager` built on it — plus the plane's kind-catalog entries
+# (`fauna-protocol/search`). Opt-in, NOT default, by the deep-crate rule of
+# `dynamic-features.md` § Compile-time excision: the KIDS flavor still links
+# this crate for the on-device index seam (`local` — `LocalSearchIndex`, which
+# `fauna-client-conversations` and `fauna-feed` implement), and a default-on
+# feature here would be switched back on by any of those consumers. Every
+# build with a Search page turns it on: `fauna-ffi` from its own
+# `search-client` / `search-manager` features (rule (b)), `fauna-wasm`, tui and
+# linux on their dependency lines.
+query = ["fauna-protocol/search"]
 
 [dependencies]
 # fauna-protocol carries the typed `fauna.search.*` wire types + the
@@ -59,6 +70,10 @@ fauna-core = { path = "../fauna-core", default-features = false, features = ["js
 # The shared `RecordingRequester` / `block_on` test double the wire-contract
 # tests below drive (one owner for the `RpcRequester` seam's fake).
 fauna-client-testkit = { path = "../fauna-client-testkit" }
+# The crate's own tests exercise the `query` half (the wire-contract and
+# manager flow tests), so they build with it on — the self-forward
+# `fauna-devices-machine` uses for its test features.
+fauna-client-search = { path = ".", features = ["query"] }
 # The generated string table, so the badge-key tests check each key against
 # en.yaml itself — a key the table lacks resolves to its own spelling and
 # paints `search_page.badge_…` on every app. Dependency-free; dev-only.

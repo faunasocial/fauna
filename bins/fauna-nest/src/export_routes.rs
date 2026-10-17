@@ -110,7 +110,7 @@ pub async fn handle_export(
     // succeeded"), `identity-succession.md:108` leaves every attribution row
     // under the old id, and the sanctioned post-succession door — an
     // admin-re-issued eviction token pulling the retired identity's archive
-    // (`succession-aftermath.md` § the eviction-token fallback) — comes
+    // (`succession-repoint-axis.md`, the `eviction_tokens` ruling) — comes
     // through exactly this route and is the ONE credential the refusal plane
     // never sees. Gating the old id would leave all of that exportable by
     // nobody. `export_api.rs::the_identity_plane_rides_including_the_published_key_halves`
@@ -1108,6 +1108,8 @@ fn now_epoch_secs() -> i64 {
 ///   download, and this is where that is enforced rather than merely implied
 ///   by `download_url` being absent from the wire reply: a client that
 ///   constructed the URL itself gets the same answer as one that did not.
+/// - **Expired → 404.** A row past `expires_at` is gone from the route before
+///   the periodic tick reaps it (§ Expiry).
 /// - **Row present, file gone → 404** (§ Expiry: "a blob that's been GC'd but
 ///   the user references via a stale URL gets a `404 Not Found` — there's no
 ///   zombie-blob recovery shape").
@@ -1163,6 +1165,13 @@ pub async fn handle_export_session_blob(
         Err(_) => return ApiError::internal("db error").into_response(),
     };
     if row.state != crate::db::mail_export::EXPORT_STATE_COMPLETED {
+        return ApiError::not_found("export not found").into_response();
+    }
+    // Expired → 404 in its own right: the periodic tick deletes the row and
+    // file, but an expired row outlives its window by up to one pass
+    // (§ Expiry), and the blob must not be served in that gap. Refuse only —
+    // deletion stays the tick's (§ Reclaim rule 2).
+    if row.expires_at < crate::db::now_epoch_secs() {
         return ApiError::not_found("export not found").into_response();
     }
     let Some(data_dir) = crate::mail_enable::data_dir_from_db_path(&state.config.nest.db_path)

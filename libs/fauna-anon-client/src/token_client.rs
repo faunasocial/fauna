@@ -38,6 +38,8 @@ use crate::error::AnonClientError;
 /// supervisor). Dropping it aborts the inbound driver, closing the WS.
 pub struct TokenNestClient {
     dispatcher: Arc<RpcDispatcher>,
+    /// How the nest closed the connection, read when a request fails.
+    close: crate::ws::CloseSignal,
     kind_registry: Arc<KindRegistry>,
     /// Drives the inbound stream for the connection's lifetime; aborted on drop
     /// (so dropping the client closes the WS).
@@ -58,6 +60,7 @@ impl TokenNestClient {
         token: &str,
     ) -> Result<Self, AnonClientError> {
         let adapter = crate::ws::connect_authed(nest_url, actor_id_hex, token).await?;
+        let close = adapter.close_signal();
         let (dispatcher, driver) = RpcDispatcher::new(adapter);
         // The wire `replay_forbidden` hint comes off this registry; a fresh
         // dispatcher has none attached, so without this every request would
@@ -66,6 +69,7 @@ impl TokenNestClient {
         let driver = tokio::spawn(driver);
         Ok(Self {
             dispatcher: Arc::new(dispatcher),
+            close,
             kind_registry: Arc::new(KindRegistry::full()),
             _driver: driver,
         })
@@ -82,7 +86,14 @@ impl TokenNestClient {
         Req: serde::Serialize,
         Reply: serde::de::DeserializeOwned,
     {
-        crate::dispatch::request_typed(&self.dispatcher, &self.kind_registry, kind, payload).await
+        crate::dispatch::request_typed(
+            &self.dispatcher,
+            &self.close,
+            &self.kind_registry,
+            kind,
+            payload,
+        )
+        .await
     }
 }
 

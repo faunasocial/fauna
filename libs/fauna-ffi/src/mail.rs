@@ -44,9 +44,6 @@ pub use fauna_mail::{
 };
 
 // spam
-pub use fauna_mail::spam::{
-    BayesianKnobs, default_bayesian_knobs, weighted_bayesian_milli_for_model,
-};
 pub use fauna_mail::{
     SpamDisposition, SpamPolicy, combined_spam_score_milli, decide_spam_disposition,
 };
@@ -1599,10 +1596,11 @@ pub fn unwrap_msek_blob(
 
 /// Plaintext side of an AEAD-unwrapped `WrappedSubmissionTokenBlob`.
 /// Mirrors `fauna_mls::wrapped_blob::SubmissionToken`'s public policy
-/// fields; `user_sig` is verified inside the FFI and dropped from the
-/// returned shape (the consumer authenticates the user via the FFI's
-/// Ok/Err outcome, and uses the policy fields for D.3/D.7's quota +
-/// expiry enforcement).
+/// fields; `user_sig` is verified inside the FFI and kept only inside
+/// `canonical_bytes` (the consumer authenticates the user via the FFI's
+/// Ok/Err outcome, uses the policy fields for D.3/D.7's quota + expiry
+/// enforcement, and forwards `canonical_bytes` to the nest as its proof
+/// of the submitter).
 #[derive(uniffi::Record, Clone, Debug)]
 pub struct SubmissionTokenFfi {
     pub actor_id: Vec<u8>,
@@ -1611,6 +1609,12 @@ pub struct SubmissionTokenFfi {
     pub expires_at: u64,
     pub max_recipients: u32,
     pub max_messages_per_day: u32,
+    /// The verified token's canonical DAG-CBOR plaintext, `user_sig` included —
+    /// the bytes the MTA hands the nest as `submission_token` on every
+    /// `enqueue_outbound_mail`, so the nest proves the submitter itself
+    /// (`mail-multidomain.md` § From: header ownership → *Per door,
+    /// nest-side*). Signed policy data, no secret.
+    pub canonical_bytes: Vec<u8>,
 }
 
 /// AEAD-unwrap a per-credential `WrappedSubmissionTokenBlob`, returning
@@ -1749,7 +1753,11 @@ pub fn unseal_submission_token_blob(
         });
     }
 
+    let canonical_bytes = token.to_canonical_bytes().map_err(|e| FfiError::General {
+        msg: format!("invalid format: re-encode submission token: {e}"),
+    })?;
     Ok(SubmissionTokenFfi {
+        canonical_bytes,
         actor_id: token.actor_id,
         credential_id: token.credential_id,
         issued_at: token.issued_at,

@@ -5,20 +5,20 @@
 //! additional policy is the bsky CDN **host allowlist** ([`validate_media_url`]):
 //! it may proxy only `cdn.bsky.app` / `video.bsky.app`, never an arbitrary URL.
 //!
-//! Unlike the shared `media/proxy` route it does **not** require a bearer —
-//! today. Its original premise, that all 7 apps render these paths as a plain
-//! `<img src>` / `<video>` subresource that cannot carry an `Authorization`
-//! header, is RETIRED (render-model.md § D6c, ruled 2026-09-28): a bridged
-//! post's picture is a `RenderBlock::ProxiedImage` every app fetches from its
-//! own nest WITH the session bearer, exactly like `/api/v1/blob/<hash>` (web
-//! through its authenticated `fetch` and an object URL). Requiring the bearer
-//! here too — the CDN host allowlist stays regardless — is a follow-on once
-//! every app's loader carries it. Until then the navigable-XSS vector a
-//! credential would close is
-//! closed by the shared core's content-type allowlist + `nosniff` +
+//! Like the shared `media/proxy` route it requires a valid session bearer (a
+//! missing or invalid one is the same `401`). Its original premise, that all 7
+//! apps render these paths as a plain `<img src>` / `<video>` subresource that
+//! cannot carry an `Authorization` header, is RETIRED (render-model.md § D6c):
+//! a bridged post's picture is a `RenderBlock::ProxiedImage` every app fetches
+//! from its own nest WITH the session bearer, exactly like
+//! `/api/v1/blob/<hash>` (web through its authenticated `fetch` and an object
+//! URL). The CDN host allowlist stays regardless. Only `media/proxy` also
+//! accepts a playback ticket (`crate::media_ticket` binds to that path), because
+//! no Bluesky video folds to a `ProxiedVideo` today. The navigable-XSS vector
+//! the bearer closes is
+//! additionally closed by the shared core's content-type allowlist + `nosniff` +
 //! `Content-Disposition: inline`, so attacker-influenced CDN bytes (e.g. an
-//! uploaded `image/svg+xml`) can never execute as script on our origin even when
-//! the URL is navigated to directly.
+//! uploaded `image/svg+xml`) can never execute as script on our origin.
 
 use axum::Router;
 use axum::extract::{Query, State};
@@ -28,6 +28,7 @@ use axum::routing::get;
 use serde::Deserialize;
 use std::sync::Arc;
 
+use crate::auth::BearerAuth;
 use crate::routes::AppState;
 use fauna_bridge_atproto::media::validate_media_url;
 
@@ -37,6 +38,7 @@ pub struct MediaProxyQuery {
 }
 
 pub async fn proxy_media(
+    _auth: BearerAuth,
     State(_state): State<Arc<AppState>>,
     Query(query): Query<MediaProxyQuery>,
 ) -> Response {
@@ -68,16 +70,49 @@ mod tests {
         Arc::new(AppState::for_test(db))
     }
 
+    /// A registered actor's bearer — the door asks the actor's standing, so the
+    /// actor needs a `users` row.
+    async fn bearer(state: &Arc<AppState>) -> String {
+        state
+            .db
+            .create_user(&[0x31u8; 32], "free", "bsky-media-user")
+            .await
+            .unwrap();
+        let token = state
+            .auth
+            .token_store
+            .insert(fauna_core::identity::ActorId([0x31u8; 32]), 3600)
+            .await;
+        format!("Bearer {token}")
+    }
+
+    /// D6c consequence: an unauthenticated GET is refused with the same 401 as
+    /// `media/proxy`, before the allowlist or any fetch.
+    #[tokio::test]
+    async fn requires_a_bearer() {
+        let mut router = routes().with_state(build_state());
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v1/bluesky/media?url=https://cdn.bsky.app/img/x.jpg")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.call(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
     /// The host allowlist is this route's first line and must survive the
     /// dedup onto the shared core — any host outside the bsky CDN is rejected
     /// with 400 before anything is dialed (so the shared SSRF-safe fetch only
     /// ever sees an already-allowlisted bsky host).
     #[tokio::test]
     async fn rejects_non_allowlisted_host() {
-        let mut router = routes().with_state(build_state());
+        let state = build_state();
+        let auth = bearer(&state).await;
+        let mut router = routes().with_state(state);
         let req = Request::builder()
             .method(Method::GET)
             .uri("/api/v1/bluesky/media?url=https://evil.example/x.svg")
+            .header("Authorization", auth)
             .body(Body::empty())
             .unwrap();
         let resp = router.call(req).await.unwrap();
@@ -93,10 +128,13 @@ mod tests {
     /// the shared core with a downgraded scheme.
     #[tokio::test]
     async fn rejects_non_https_scheme() {
-        let mut router = routes().with_state(build_state());
+        let state = build_state();
+        let auth = bearer(&state).await;
+        let mut router = routes().with_state(state);
         let req = Request::builder()
             .method(Method::GET)
             .uri("/api/v1/bluesky/media?url=http://cdn.bsky.app/img/x.jpg")
+            .header("Authorization", auth)
             .body(Body::empty())
             .unwrap();
         let resp = router.call(req).await.unwrap();

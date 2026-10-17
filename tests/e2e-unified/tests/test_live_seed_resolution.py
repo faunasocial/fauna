@@ -314,7 +314,7 @@ def test_a_destructive_module_runs_on_a_declared_disposable_box(rel, _staging_ho
     """Under the declaration it runs on the staging-box file's seed AND mailbox,
     with no FAUNA_LIVE_MAIL_* exported — and drives the declared box even when
     the env names another one."""
-    monkeypatch.setenv("FAUNA_LIVE_NEST_URL", "https://example.com")
+    monkeypatch.setenv("FAUNA_LIVE_NEST_URL", "https://example.net")
     for var in _MAIL_VARS:
         monkeypatch.delenv(var, raising=False)
     declared = nest_mode.declare_box(nest_mode.parse_nest_mode(f"live:{_BOX_URL}"), nest_mode.BOX_DISPOSABLE)
@@ -390,7 +390,7 @@ def test_resolve_mailbox_reads_the_box_file_per_field_under_env(_staging_home, m
         monkeypatch.delenv(var, raising=False)
     assert resolve_mailbox(_BOX_URL) == (_BOX_HANDLE, _BOX_MAIL_PASSWORD)
     # Another box's file is never consulted: this machine holds none for it.
-    assert resolve_mailbox("https://test.example.com") == (None, None)
+    assert resolve_mailbox("https://test.fauna.build") == (None, None)
     # Each env var overrides its own field only.
     monkeypatch.setenv("FAUNA_LIVE_MAIL_PASSWORD", "exported")
     assert resolve_mailbox(_BOX_URL) == (_BOX_HANDLE, "exported")

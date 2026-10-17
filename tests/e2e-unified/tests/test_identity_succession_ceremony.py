@@ -464,16 +464,19 @@ def test_the_ceremony_tells_you_what_it_swept_and_whom_it_cannot_vouch_for(
     either — the same refusal ``SweepReport`` makes structurally.
     """
     driver = ungranted_app.driver
-    if not (driver.is_tui() or driver.is_macos() or driver.is_ios()):
+    if not (
+        driver.is_tui() or driver.is_macos() or driver.is_ios()
+        or driver.is_web() or driver.is_linux()
+    ):
         # Every other app that runs the ceremony PAINTS these lines already
         # (settings.md § Implementation status today); what they lack is the
         # two approved ids — parity debt, not a platform absence. tui leads,
-        # macos/ios follow (the shared FaunaKit RecoveryKitSection).
+        # macos/ios/web/linux follow (windows is still untagged).
         skip_unbuilt(
             driver,
             surface="recovery-kit-sweep-status / recovery-kit-sweep-unvouched-status",
             detail="the sweep's two lines are painted but the ids approved 2026-09-25 "
-                   "are not tagged yet; tui, macos and ios tag them",
+                   "are not tagged yet; tui, macos, ios, web and linux tag them",
             tracked="",
         )
     app = ungranted_app
@@ -964,18 +967,19 @@ def test_after_the_recovery_a_contact_can_still_add_you_to_a_conversation(
     new_actor = wait_for_successor_actor(app, old_actor)
 
     # ── the new key is invitable ─────────────────────────────────────────
+    # The boolean another account may ask — the successor's count is its own.
     wait_until(
-        lambda: conv_api.keypackage_count(port, alice, new_actor) > 0,
+        lambda: conv_api.actor_addressable(port, alice, new_actor),
         MLS_HANDSHAKE_S,
         diagnose=lambda: (
             "the successor published no key package, so nobody can add the "
-            "recovered account to a conversation; old key's pool holds "
-            f"{conv_api.keypackage_count(port, alice, old_actor)}, error "
+            "recovered account to a conversation; old key addressable: "
+            f"{conv_api.actor_addressable(port, alice, old_actor)}, error "
             f"surface: {app.error_text()!r}"
         ),
     )
     kp = conv_api.keypackage_fetch(port, alice, new_actor)
-    assert kp is not None, "a counted key package must be fetchable"
+    assert kp is not None, "an addressable actor's key package must be fetchable"
 
     body = f"welcome back {uuid.uuid4().hex[:6]}"
     channel, welcome, envelope = conv_api.mint_group_welcome_with_message(
@@ -1212,6 +1216,20 @@ _OUTCOME_UNKNOWN_SAVED = _resolved(
         cause=_DIAGNOSTIC, reported=_DIAGNOSTIC
     )
 )
+# The unsaved half: the same undecided outcome, but this device could not store
+# the successor's seed, so the sentence CARRIES it (`{secret}`, a 64-hex run) —
+# the only copy in existence. Cause and reported are diagnostics; the secret is
+# captured, never compared as text.
+_SECRET_MARK = "\x01"
+_OUTCOME_UNKNOWN_UNSAVED = re.compile(
+    "(?P<secret>[0-9a-fA-F]{64})".join(
+        ".+".join(re.escape(piece) for piece in part.split(_DIAGNOSTIC))
+        for part in S.settings.recovery_kit.stolen_outcome_unknown_unsaved(
+            cause=_DIAGNOSTIC, secret=_SECRET_MARK, reported=_DIAGNOSTIC
+        ).split(_SECRET_MARK)
+    ),
+    re.DOTALL,
+)
 # Any undecided sentence, either half — what a reconcile that FOUND the
 # succession must never show.
 _OUTCOME_UNKNOWN_HEADLINE = S.settings.recovery_kit.stolen_outcome_unknown_saved(
@@ -1419,6 +1437,120 @@ def test_a_lost_reply_you_cannot_check_says_so_and_reopening_signs_you_in(
             f"in the staged group; error={_redacted(app.error_text())!r}"
         ),
     )
+    # web holds no local MLS store: its discharge sweeps from the retired leaf
+    # the reopened session's restore door parked in the successor's own replica
+    # plane (`succession-propagation.md` § Propagation → *Own device fleet*, the
+    # retired-leaf sub-bullet), so every app re-points the group here.
     _assert_the_group_was_swept(
         app, nest_instance, group, app.driver.get_state("data.succession_sweep")
+    )
+
+
+@pytest.mark.standalone_only
+@pytest.mark.feature("take-your-account-back")
+def test_a_lost_reply_you_cannot_check_or_store_keeps_the_only_key_on_screen(
+    succeedable_app, nest_instance
+):
+    """the submit commits and its reply is dropped, the reconcile's lookup is
+    turned away, AND this device's keystore refuses the successor's seed → the
+    page paints the whole undecided-unsaved sentence carrying that seed → a later
+    write to the same error slot cannot take it off screen → leaving Account
+    discharges it.
+
+    ``settings.md`` § Recovery kit → *The ceremony's outcome is headlined by its
+    arm*: the unsaved half of the undecided arm is the worst cell of the
+    succession matrix — the account may already belong to a key that exists
+    only in this sentence — so it is parked exactly as the persist-failure
+    message is. The two sibling journeys pin each fault alone; this one stages
+    both, the only way to see the shared ceremony choose
+    ``Undecided { persisted: false }`` and the flag reach a real app that then
+    holds against a real gesture.
+    """
+    from helpers.rpc_hold import (
+        drop_rpc_reply,
+        refuse_rpc,
+        release_rpc_hold,
+        rpc_hold_status,
+        wait_for_dropped_rpc,
+        wait_for_refused_rpc,
+    )
+
+    app, user = succeedable_app
+    port = nest_instance["port"]
+    stolen_seed = bytes(user["signing_key"]).hex()
+    if app_name(app.driver) not in _REFUSAL_DOOR_APPS:
+        skip_unbuilt(
+            app.driver,
+            surface="the registry E2E bridge delegation (`refuse_secret_writes_for_test`)",
+            detail="one arm in this app's agent handing "
+            "`fauna_client_accounts::call_registry_method_for_test` its own "
+            "`AccountRegistry` — the fault and its name are already shared Rust",
+            tracked="behavior/onboarding.md § E2E bridge contract — the registry "
+            "dispatcher's per-app delegation",
+        )
+
+    _old_actor, held = _kit_in_hand(app)
+
+    dropped_before = rpc_hold_status(port, _SUBMIT_KIND)["dropped"]
+    refused_before = rpc_hold_status(port, _LOOKUP_KIND)["refused"]
+    app.driver.call_machine_method(
+        "refuse_secret_writes_for_test", json.dumps({"refuse": True})
+    )
+    drop_rpc_reply(port, _SUBMIT_KIND)
+    refuse_rpc(port, _LOOKUP_KIND)
+    try:
+        app.settings.succeed_identity_with_held_kit(held)
+        wait_for_dropped_rpc(port, _SUBMIT_KIND, count=dropped_before + 1)
+        wait_for_refused_rpc(port, _LOOKUP_KIND, count=refused_before + 1)
+
+        # ── The whole sentence, carrying the seed. ───────────────────────────
+        wait_until(
+            lambda: _OUTCOME_UNKNOWN_UNSAVED.fullmatch(app.error_text()) is not None,
+            SUCCESSION_AND_RELAUNCH_S,
+            diagnose=lambda: (
+                "a succession whose reply was lost, whose outcome could not be "
+                "checked and whose seed could not be saved must paint "
+                "settings.recovery_kit.stolen_outcome_unknown_unsaved verbatim; "
+                f"error surface: {_redacted(app.error_text())!r}"
+            ),
+        )
+        shown = app.error_text()
+        key = _OUTCOME_UNKNOWN_UNSAVED.fullmatch(shown).group("secret")
+        # Booleans, never the strings: a failed comparison prints both operands.
+        is_new_key = key not in (stolen_seed, held)
+        assert is_new_key, (
+            "the key shown must be the NEW identity's, not the stolen seed or "
+            "the recovery kit just spent"
+        )
+
+        # ── Another writer of the same slot cannot wipe it. ──────────────────
+        # The export click's outcome writes this very slot; the agent folds it
+        # before acking, so on return the write has been attempted.
+        app.driver.click("settings-export-data-button")
+        after = app.error_text()
+        kept = after == shown
+        assert kept, (
+            "a later write to the Account page's error slot replaced the only "
+            f"copy of the new key; it now reads {_redacted(after)!r}"
+        )
+        # The ceremony did not switch onto a key it never saved: no kit for a
+        # successor is on screen.
+        switched = kit_on_screen(app) == key
+        assert not switched, "the app switched onto a key this device never saved"
+    finally:
+        app.driver.call_machine_method(
+            "refuse_secret_writes_for_test", json.dumps({"refuse": False})
+        )
+        release_rpc_hold(port, _SUBMIT_KIND)
+        release_rpc_hold(port, _LOOKUP_KIND)
+
+    # ── Leaving Account is the acknowledgment. ────────────────────────────────
+    app.settings.leave_account()
+    wait_until(
+        lambda: key not in app.error_text(),
+        STOLEN_GATE_REVEAL_S,
+        diagnose=lambda: (
+            "leaving Account must discharge the undecided-unsaved sentence; it "
+            f"still reads {_redacted(app.error_text())!r}"
+        ),
     )

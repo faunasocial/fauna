@@ -31,6 +31,24 @@ import pytest
 pytestmark = [pytest.mark.tier_3]
 
 
+@pytest.fixture(autouse=True)
+def _discard_the_wrapped_draft(logged_in_app):
+    """Discard the new-thread draft each test leaves behind.
+
+    Every test here types a marked-up placeholder into the new-thread composer,
+    and that draft persists across switching and relaunch by design
+    (``docs/goal/ui/conversations.md`` § Persistence) — so without the
+    composer's own Cancel it rides into the next module that opens the
+    composer (the 2026-10-12 sweep's new-thread-cancel red read ``## text``
+    ahead of its own body)."""
+    yield
+    try:
+        if logged_in_app.driver.is_visible("new-conversation-cancel"):
+            logged_in_app.conversations.cancel_new_conversation()
+    except Exception:
+        pass  # a teardown courtesy; the next test's own precondition still holds
+
+
 @pytest.mark.web
 @pytest.mark.linux
 @pytest.mark.macos

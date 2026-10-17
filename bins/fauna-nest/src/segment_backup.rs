@@ -110,6 +110,89 @@ const _: () = assert!(
      parks the kind on that client indefinitely",
 );
 
+/// How long the coordinator waits before re-sending a custody record the
+/// destination's federation throttle answered `rate_limited`
+/// (`segment-backup-protocol.md` § Cross-location backup protocol →
+/// *Backpressure*). A Rust constant, refutable with telemetry.
+pub const RECORD_BACKPRESSURE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Consecutive `rate_limited` answers to one custody record after which the
+/// coordinator **pauses** that `(destination, kind)` tuple: thirty refusals two
+/// seconds apart span one full throttle window, so a destination still refusing
+/// is not merely mid-window. A pause keeps progress and is never a failure.
+pub const MAX_RECORD_BACKPRESSURE_RETRIES: u32 = 30;
+
+/// The generic throttle refusal the federation channel answers
+/// (`rpc_errors::rate_limited`).
+const RATE_LIMITED_CODE: &str = "fauna.protocol.rate_limited";
+
+/// The coordinator's backpressure contract on a custody record: wait, retry,
+/// pause after `max_retries` consecutive refusals. [`Default`] is the
+/// production constants; [`NestBackupCoordinator::with_backpressure`] exists so
+/// a test need not sit out a real throttle window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Backpressure {
+    pub wait: std::time::Duration,
+    pub max_retries: u32,
+}
+
+impl Default for Backpressure {
+    fn default() -> Self {
+        Self {
+            wait: RECORD_BACKPRESSURE_WAIT,
+            max_retries: MAX_RECORD_BACKPRESSURE_RETRIES,
+        }
+    }
+}
+
+/// A custody record the destination's throttle kept refusing: the
+/// `(destination, kind)` tuple is **paused**, not failed. Every path recorded
+/// before it already advanced its state row, so the next tick resumes where
+/// this one stopped. Typed so [`NestBackupCoordinator::run_all_tuples`] can
+/// tell it from an error through any context chain.
+#[derive(Debug, thiserror::Error)]
+#[error("destination throttle refused the custody record {refusals} times in a row; tuple paused")]
+pub struct CustodyPaused {
+    pub refusals: u32,
+}
+
+/// Whether a pass ended in a [`CustodyPaused`].
+pub fn is_paused(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<CustodyPaused>().is_some()
+}
+
+/// Send one custody record under the backpressure contract: a
+/// `rate_limited` answer waits `bp.wait` and re-sends the same record; after
+/// `bp.max_retries` consecutive refusals it returns [`CustodyPaused`]. Any
+/// other peer error or transport fault is returned as it was — the peer's
+/// error CODE in the text, which is what [`is_writer_refusal`] reads.
+async fn send_with_backpressure<T, F, Fut>(bp: Backpressure, mut attempt: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<
+            Output = std::result::Result<
+                std::result::Result<T, fauna_protocol::RpcError>,
+                federation_pool::PoolError,
+            >,
+        >,
+{
+    let mut refusals = 0u32;
+    loop {
+        match attempt().await {
+            Ok(Ok(reply)) => return Ok(reply),
+            Ok(Err(e)) if e.code == RATE_LIMITED_CODE => {
+                refusals += 1;
+                if refusals >= bp.max_retries {
+                    return Err(CustodyPaused { refusals }.into());
+                }
+                tokio::time::sleep(bp.wait).await;
+            }
+            Ok(Err(e)) => anyhow::bail!("peer backup.changes.record: {}", e.code),
+            Err(e) => anyhow::bail!("{e}"),
+        }
+    }
+}
+
 /// The three things a custody relay needs to reach a destination: who it is,
 /// where it is, and the id its handshake is pinned against.
 ///
@@ -242,6 +325,10 @@ pub struct PassOutcome {
     pub attempted: usize,
     /// How many of them returned an error.
     pub failed: usize,
+    /// How many the destination's throttle paused ([`CustodyPaused`]) — never
+    /// counted in `failed`, so a throttled destination cannot stall the
+    /// `backup-upload` lease (`participants.md` § The nest as runner).
+    pub paused: usize,
 }
 
 impl PassOutcome {
@@ -362,6 +449,21 @@ fn state_root(state: &AppState) -> Result<PathBuf> {
         })
 }
 
+/// The last segment of the destination writer gate's typed refusal,
+/// `fauna.backup.writer_not_seated` (`federation_handlers::require_backup_writer`).
+/// It reaches the coordinator flattened into the federation error's text,
+/// through the byte plane's bearer as well as the custody relay, so it is
+/// matched there — on this one spelling, by both readers.
+const WRITER_NOT_SEATED: &str = "writer_not_seated";
+
+/// Whether a pass failed because the destination's writer gate refused this
+/// box — the refusal the status row reports as `writer_state: refused`, as
+/// against an outage, which changes nothing
+/// (`backup-destinations.md` § Per-destination status read).
+fn is_writer_refusal(e: &anyhow::Error) -> bool {
+    format!("{e:#}").contains(WRITER_NOT_SEATED)
+}
+
 /// Map a federation-originate failure into the bearer's error vocabulary.
 ///
 /// The split is load-bearing in the same way it is for the client's cross-nest
@@ -374,7 +476,7 @@ fn classify_mint_error(e: &federation_pool::PoolError) -> ApiError {
     let msg = e.to_string();
     // The writer gate's typed refusal; `forbidden` is the custody set's own
     // (the name is a live rail on the destination).
-    if msg.contains("writer_not_seated") || msg.contains("forbidden") {
+    if msg.contains(WRITER_NOT_SEATED) || msg.contains("forbidden") {
         ApiError::Status {
             code: 403,
             message: format!("nest-backup write_token.mint refused: {msg}"),
@@ -412,6 +514,8 @@ pub struct NestBackupCoordinator {
     /// Inert scratch the destination engines are constructed against — they only
     /// ever `upload_bytes`, never watch a tree.
     scratch_dir: PathBuf,
+    /// The custody relay's backpressure contract ([`Backpressure`]).
+    backpressure: Backpressure,
 }
 
 impl NestBackupCoordinator {
@@ -493,6 +597,7 @@ impl NestBackupCoordinator {
             covered_folders,
             source,
             scratch_dir: owner_dir,
+            backpressure: Backpressure::default(),
         }))
     }
 
@@ -633,22 +738,14 @@ impl NestBackupCoordinator {
             folder_id: None,
             path_sealed: None,
         };
-        federation_pool::originate_backup_changes_record(
-            &self.state.federation_pool,
-            &self.state,
-            dest.nest_url,
-            dest.nest_id,
-            &req,
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))
-        .with_context(|| {
-            format!(
-                "record backup custody destination={} kind={kind} path={path}",
-                dest.destination_id
-            )
-        })?;
-        Ok(())
+        self.relay_custody_record(dest, &req)
+            .await
+            .with_context(|| {
+                format!(
+                    "record backup custody destination={} kind={kind} path={path}",
+                    dest.destination_id
+                )
+            })
     }
 
     /// Relay one **ordinary-folder mirror** custody record. `folder_id` present
@@ -679,22 +776,73 @@ impl NestBackupCoordinator {
             folder_id: Some(folder_id),
             path_sealed,
         };
-        federation_pool::originate_backup_changes_record(
-            &self.state.federation_pool,
-            &self.state,
-            dest.nest_url,
-            dest.nest_id,
-            &req,
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))
-        .with_context(|| {
-            format!(
-                "record folder-mirror custody destination={} folder={folder_id} path={path}",
-                dest.destination_id
+        self.relay_custody_record(dest, &req)
+            .await
+            .with_context(|| {
+                format!(
+                    "record folder-mirror custody destination={} folder={folder_id} path={path}",
+                    dest.destination_id
+                )
+            })
+    }
+
+    /// The ONE relay under every custody record — the content pass, the
+    /// placement journal, the folder-mirror axis and the removal/detach
+    /// teardowns all reach the destination through here, so all of them carry
+    /// the backpressure contract (`segment-backup-protocol.md` § Cross-location
+    /// backup protocol → *Backpressure*): a `rate_limited` answer is waited out
+    /// and re-sent, and a destination still refusing after a full window
+    /// pauses the tuple ([`CustodyPaused`]).
+    async fn relay_custody_record(
+        &self,
+        dest: DestinationRef<'_>,
+        req: &FedBackupChangesRecordRequest,
+    ) -> Result<()> {
+        send_with_backpressure(self.backpressure, || {
+            federation_pool::originate_backup_changes_record(
+                &self.state.federation_pool,
+                &self.state,
+                dest.nest_url,
+                dest.nest_id,
+                req,
             )
-        })?;
-        Ok(())
+        })
+        .await?;
+        self.note_writer_accepted(dest.destination_id)
+    }
+
+    /// Replace the backpressure contract — a test's way to see a pause or a
+    /// drain without sitting out a real throttle window. Production keeps
+    /// [`Backpressure::default`].
+    #[doc(hidden)]
+    pub fn with_backpressure(mut self, backpressure: Backpressure) -> Self {
+        self.backpressure = backpressure;
+        self
+    }
+
+    /// The destination accepted a custody record from this box: its writer
+    /// gate let the write through, so any refusal it answered before is over
+    /// (`backup-destinations.md` § Per-destination status read).
+    fn note_writer_accepted(&self, destination_id: &str) -> Result<()> {
+        self.db().clear_backup_writer_refused(destination_id)
+    }
+
+    /// A pass over `destination_id` ended in `result`: when the destination's
+    /// writer gate refused it, record the refusal beside the pass state; any
+    /// other failure — an unreachable destination above all — leaves the
+    /// state as it was, and a success has already cleared it where the
+    /// destination answered ([`Self::note_writer_accepted`]).
+    fn note_pass_result<T>(&self, destination_id: &str, result: &Result<T>) {
+        if let Err(e) = result
+            && is_writer_refusal(e)
+            && let Err(db_err) = self.db().set_backup_writer_refused(destination_id)
+        {
+            tracing::warn!(
+                destination_id,
+                error = %format!("{db_err:#}"),
+                "nest segment backup: could not record the writer refusal"
+            );
+        }
     }
 
     /// One `(destination, kind)` pass over the kind's **content** family, with
@@ -958,7 +1106,17 @@ impl NestBackupCoordinator {
     /// [`RunReport::placement`]. A journal failure fails the tuple, so it is
     /// retried next tick — but only after the content family's progress has
     /// been recorded, which is why content goes first.
+    ///
+    /// A pass the destination's writer gate refuses is recorded as the row's
+    /// `writer_state` ([`Self::note_pass_result`]).
     pub async fn run_once(&self, dest: &BackupDestinationRow, kind: &str) -> Result<RunReport> {
+        let result = self.run_kind(dest, kind).await;
+        self.note_pass_result(&dest.destination_id, &result);
+        result
+    }
+
+    /// [`Self::run_once`]'s pass itself.
+    async fn run_kind(&self, dest: &BackupDestinationRow, kind: &str) -> Result<RunReport> {
         let scope_hex = hex::encode(self.owner);
         let src_listing = self.source.list_segments(kind, &scope_hex).await?;
         let mut report = self.run_once_with_src_refs(dest, kind, src_listing).await?;
@@ -992,7 +1150,21 @@ impl NestBackupCoordinator {
     /// an **empty** head: every previously pushed path tombstones (retained
     /// under the grace window T, like any writer delete), and the now-pointless
     /// coverage row is dropped so the sweep stops revisiting it.
+    ///
+    /// A pass the destination's writer gate refuses is recorded as the row's
+    /// `writer_state`, as on the segment axis.
     pub async fn run_folder_once(
+        &self,
+        dest: &BackupDestinationRow,
+        folder_id: i64,
+    ) -> Result<FolderRunReport> {
+        let result = self.run_folder(dest, folder_id).await;
+        self.note_pass_result(&dest.destination_id, &result);
+        result
+    }
+
+    /// [`Self::run_folder_once`]'s pass itself.
+    async fn run_folder(
         &self,
         dest: &BackupDestinationRow,
         folder_id: i64,
@@ -1447,7 +1619,13 @@ impl NestBackupCoordinator {
         for dest in &self.destinations {
             for &kind in BACKED_UP_KINDS {
                 outcome.attempted += 1;
-                if let Err(e) = self.run_once(dest, kind).await {
+                let result = self.run_once(dest, kind).await;
+                if let Err(e) = &result
+                    && is_paused(e)
+                {
+                    outcome.paused += 1;
+                    self.log_pause(dest, kind).await;
+                } else if let Err(e) = result {
                     outcome.failed += 1;
                     tracing::warn!(
                         owner = %hex::encode(self.owner),
@@ -1465,7 +1643,13 @@ impl NestBackupCoordinator {
                     continue;
                 }
                 outcome.attempted += 1;
-                if let Err(e) = self.run_folder_once(dest, *folder_id).await {
+                let result = self.run_folder_once(dest, *folder_id).await;
+                if let Err(e) = &result
+                    && is_paused(e)
+                {
+                    outcome.paused += 1;
+                    self.log_pause(dest, FOLDER_MIRROR_KIND).await;
+                } else if let Err(e) = result {
                     outcome.failed += 1;
                     tracing::warn!(
                         owner = %hex::encode(self.owner),
@@ -1480,11 +1664,29 @@ impl NestBackupCoordinator {
         Ok(outcome)
     }
 
+    /// A paused tuple is an ordinary lag, logged at info with what is left —
+    /// the destination's backlog the status row reads, so the log and the
+    /// Backups page say the same thing.
+    async fn log_pause(&self, dest: &BackupDestinationRow, kind: &str) {
+        let remaining = self.status().await.ok().and_then(|rows| {
+            rows.into_iter()
+                .find(|r| r.destination_id == dest.destination_id)
+                .map(|r| r.backlog_count)
+        });
+        tracing::info!(
+            owner = %hex::encode(self.owner),
+            destination_id = %dest.destination_id,
+            kind = kind,
+            remaining = ?remaining,
+            "nest segment backup: destination throttle paused the pass; resuming next tick"
+        );
+    }
+
     /// Per-destination status rows for the Backups page
     /// (`docs/goal/behavior/backup-destinations.md` § State & data shape → status read), computed
     /// from the same local state the pass advances: `last_upload_time` from the
     /// manifest-mirror rows, `backlog_count` from re-diffing the live source
-    /// list. Correct before the first pass too — a freshly enrolled destination
+    /// list, `writer_state` from the refusal the passes record. Correct before the first pass too — a freshly enrolled destination
     /// reports `None` and its full backlog, which is exactly true.
     pub fn status_with_src_lists(
         &self,
@@ -1505,10 +1707,18 @@ impl NestBackupCoordinator {
                         .saturating_add(diff_segments(src_refs, &local).to_upload.len() as u32);
                 }
             }
+            let writer_state = if self.db().backup_writer_refused(&dest.destination_id)? {
+                fauna_protocol::backup::WRITER_STATE_REFUSED
+            } else {
+                fauna_protocol::backup::WRITER_STATE_OK
+            };
             out.push(BackupDestinationStatusItem {
                 destination_id: dest.destination_id.clone(),
                 last_upload_time,
                 backlog_count,
+                // A refused writer is a state, never a lag
+                // (`backup-destinations.md` § Per-destination status read).
+                writer_state: Some(writer_state.to_string()),
                 // Nest destinations have no capacity cap and no held-bytes
                 // figure; leaving both `None` is what lets a render tell "not
                 // applicable" from "zero". The custodian arm that fills them
@@ -1717,6 +1927,40 @@ mod tests {
         );
     }
 
+    // ── A refused writer is a state, never a lag ──
+
+    /// Only the writer gate's typed refusal reads as refused: an outage, or
+    /// the custody set's own `forbidden`, leaves the row's state as it was
+    /// (`backup-destinations.md` § Per-destination status read).
+    #[test]
+    fn only_the_writer_gates_typed_refusal_reads_as_refused() {
+        let refused = anyhow::anyhow!(
+            "rpc error fauna.backup.writer_not_seated: calling nest does not hold the seat"
+        )
+        .context("record backup custody destination=d kind=mail path=p");
+        assert!(
+            is_writer_refusal(&refused),
+            "the refusal survives the context chain"
+        );
+        let minted = anyhow::anyhow!(
+            "{}",
+            classify_mint_error(&federation_pool::PoolError::Dial(
+                "fauna.backup.writer_not_seated".into(),
+            ))
+        );
+        assert!(
+            is_writer_refusal(&minted),
+            "the mint's refusal reads the same"
+        );
+        for other in [
+            anyhow::anyhow!("dial: connection refused"),
+            anyhow::anyhow!("peer offers no federation channel"),
+            anyhow::anyhow!("fauna.backup.forbidden: not the owner's set"),
+        ] {
+            assert!(!is_writer_refusal(&other), "{other:#} is not a refusal");
+        }
+    }
+
     // ── The pass-health half of backup-upload sufficiency ──
 
     #[test]
@@ -1726,6 +1970,7 @@ mod tests {
             !PassOutcome {
                 attempted: 0,
                 failed: 0,
+                paused: 0,
             }
             .wholly_failed(),
             "no tuples means nothing got it wrong — sufficiency already requires a destination"
@@ -1737,17 +1982,130 @@ mod tests {
         assert!(
             PassOutcome {
                 attempted: 3,
-                failed: 3
+                failed: 3,
+                paused: 0,
             }
             .wholly_failed()
         );
         assert!(
             !PassOutcome {
                 attempted: 3,
-                failed: 2
+                failed: 2,
+                paused: 0,
             }
             .wholly_failed(),
             "one destination working is progress; a client takeover would not fix the other"
+        );
+    }
+
+    // ── Backpressure on a custody record (`segment-backup-protocol.md`
+    // § Cross-location backup protocol → *Backpressure*) ──
+
+    #[test]
+    fn a_paused_tuple_is_not_a_failed_one() {
+        assert!(
+            !PassOutcome {
+                attempted: 2,
+                failed: 0,
+                paused: 2,
+            }
+            .wholly_failed(),
+            "a throttled destination is a lag, never a stall toward the lease"
+        );
+        assert!(
+            !PassOutcome {
+                attempted: 2,
+                failed: 1,
+                paused: 1,
+            }
+            .wholly_failed(),
+            "one paused tuple beside a failed one is not every tuple erroring"
+        );
+    }
+
+    fn quick() -> Backpressure {
+        Backpressure {
+            wait: std::time::Duration::ZERO,
+            max_retries: 5,
+        }
+    }
+
+    /// A scripted peer: answers `rate_limited` `refusals` times, then accepts.
+    /// Returns the attempt counter and the number of accepted records.
+    async fn drive(bp: Backpressure, refusals: u32) -> (Result<u32>, u32, u32) {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let attempts = AtomicU32::new(0);
+        let accepted = AtomicU32::new(0);
+        let out = send_with_backpressure(bp, || {
+            let n = attempts.fetch_add(1, Ordering::SeqCst);
+            let accepted = &accepted;
+            async move {
+                if n < refusals {
+                    Ok(Err(crate::rpc_errors::rate_limited()))
+                } else {
+                    Ok(Ok(accepted.fetch_add(1, Ordering::SeqCst) + 1))
+                }
+            }
+        })
+        .await;
+        (
+            out,
+            attempts.load(Ordering::SeqCst),
+            accepted.load(Ordering::SeqCst),
+        )
+    }
+
+    #[tokio::test]
+    async fn refusals_then_an_accept_land_the_record_once() {
+        let (out, attempts, accepted) = drive(quick(), 3).await;
+        assert_eq!(out.expect("the record lands after the refusals"), 1);
+        assert_eq!(attempts, 4, "three refusals, each re-sent, then the accept");
+        assert_eq!(accepted, 1, "the record lands exactly once");
+    }
+
+    #[tokio::test]
+    async fn a_full_window_of_refusals_pauses_rather_than_fails() {
+        let (out, attempts, accepted) = drive(quick(), u32::MAX).await;
+        let err = out.expect_err("a destination that never admits pauses the tuple");
+        let err = err.context("record backup custody destination=d kind=mail path=p");
+        assert!(
+            is_paused(&err),
+            "the pause survives the context chain: {err:#}"
+        );
+        assert!(!is_writer_refusal(&err), "a pause is not a writer refusal");
+        assert_eq!(
+            attempts,
+            quick().max_retries,
+            "no more than the retry budget"
+        );
+        assert_eq!(accepted, 0);
+    }
+
+    #[tokio::test]
+    async fn any_other_peer_error_is_an_error_carrying_its_code() {
+        let err = send_with_backpressure::<(), _, _>(quick(), || async {
+            Ok(Err(fauna_protocol::RpcError::new(
+                "fauna.backup.writer_not_seated",
+                "error.backup.writer_not_seated",
+            )))
+        })
+        .await
+        .expect_err("a refusal is not backpressure");
+        assert!(!is_paused(&err));
+        assert!(
+            is_writer_refusal(&err),
+            "the code reaches the reader: {err:#}"
+        );
+    }
+
+    #[test]
+    fn the_production_contract_spans_one_throttle_window() {
+        let bp = Backpressure::default();
+        assert_eq!(bp.wait, RECORD_BACKPRESSURE_WAIT);
+        assert_eq!(bp.max_retries, MAX_RECORD_BACKPRESSURE_RETRIES);
+        assert!(
+            bp.wait * bp.max_retries >= crate::bridge_rate_limit::LimiterConfig::default().window,
+            "the coordinator must wait out a whole window before it pauses"
         );
     }
 
@@ -1763,6 +2121,7 @@ mod tests {
             PassOutcome {
                 attempted: 1,
                 failed: 1,
+                paused: 0,
             },
         );
         assert!(
@@ -1779,6 +2138,7 @@ mod tests {
         let bad = PassOutcome {
             attempted: 1,
             failed: 1,
+            paused: 0,
         };
 
         for _ in 0..MAX_CONSECUTIVE_FAILED_PASSES - 1 {
@@ -1803,6 +2163,7 @@ mod tests {
                 PassOutcome {
                     attempted: 2,
                     failed: 2,
+                    paused: 0,
                 },
             );
         }
@@ -1813,6 +2174,7 @@ mod tests {
             PassOutcome {
                 attempted: 2,
                 failed: 1,
+                paused: 0,
             },
         );
         assert!(
@@ -1831,6 +2193,7 @@ mod tests {
         let bad = PassOutcome {
             attempted: 1,
             failed: 1,
+            paused: 0,
         };
         for _ in 0..MAX_CONSECUTIVE_FAILED_PASSES {
             health.record_pass(gone, bad);

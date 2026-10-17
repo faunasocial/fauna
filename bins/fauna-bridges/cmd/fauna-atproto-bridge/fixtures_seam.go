@@ -212,3 +212,21 @@ func (f fixtureProofFetcher) FetchProof(ctx context.Context, url string) ([]byte
 	}
 	return f.real.FetchProof(ctx, url)
 }
+
+// crawlRelayEnv is a TEST-ONLY seam, the fifth under this tag: the base URL of
+// the ONE relay an e2e bridge announces itself to with requestCrawl, so a
+// tier_3 can witness the announce against a fake relay. Unset, the e2e flavor
+// announces to NO relay, never to the real network: an e2e host name means
+// nothing to a public relay, and a test run must never reach one unasked. Its
+// payload is where the bridge dials, so it sits under the tag with the other
+// redirects rather than shipping as a knob.
+const crawlRelayEnv = "FAUNA_ATPROTO_RELAY_URL"
+
+// crawlRelays returns the relays the bridge announces to: the fixture relay
+// when the harness names one, otherwise none.
+func crawlRelays() []string {
+	if v := strings.TrimSpace(os.Getenv(crawlRelayEnv)); v != "" {
+		return []string{v}
+	}
+	return nil
+}

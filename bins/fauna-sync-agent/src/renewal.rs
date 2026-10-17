@@ -279,7 +279,13 @@ pub async fn run(state: Arc<SyncServiceState>, mut shutdown: tokio::sync::watch:
                                 {
                                     Ok(minted) => {
                                         let expires_at = minted.expires_at;
-                                        adopt_minted(&state, minted.token, expires_at).await;
+                                        adopt_minted(
+                                            &state,
+                                            &SlotKey::of_snapshot(&slot),
+                                            minted.token,
+                                            expires_at,
+                                        )
+                                        .await;
                                         tracing::info!(
                                             expires_at,
                                             "bearer self-renewed over device handshake"
@@ -301,7 +307,12 @@ pub async fn run(state: Arc<SyncServiceState>, mut shutdown: tokio::sync::watch:
                                              store principal) — dropping the bearer and reporting \
                                              not enrolled until a renewal succeeds"
                                         );
-                                        refuse_renewal(&state, evidence).await;
+                                        refuse_renewal(
+                                            &state,
+                                            &SlotKey::of_snapshot(&slot),
+                                            evidence,
+                                        )
+                                        .await;
                                         backoff.reset();
                                         retry_after = None;
                                         Duration::from_secs(IDLE_RECHECK_SECS)
@@ -419,6 +430,42 @@ where
     })
 }
 
+/// The account a renewal pass minted (or was refused) for: the nest and actor
+/// the slot named when the pass took its snapshot. The slot can be
+/// re-provisioned for another account while the mint is in flight (a bare
+/// `ProvisionCapability` with no un-provision first is a supported switch), so
+/// every write-back re-checks it under the write lock — a minted bearer is never
+/// written into a capability that names a different account
+/// .
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SlotKey {
+    pub(crate) nest_url: String,
+    pub(crate) actor_id: [u8; 32],
+}
+
+impl SlotKey {
+    fn of_snapshot(slot: &Snapshot) -> Self {
+        Self {
+            nest_url: slot.nest_url.clone(),
+            actor_id: slot.actor_id,
+        }
+    }
+
+    /// The key a capability names now, if its actor id is well formed.
+    #[cfg(test)]
+    pub(crate) fn of_capability(cap: &fauna_ipc::sync::SyncCapability) -> Option<Self> {
+        Some(Self {
+            nest_url: cap.nest_url.clone(),
+            actor_id: cap.actor_id_array()?,
+        })
+    }
+
+    /// Whether `cap` is still the capability this key was taken from.
+    fn holds(&self, cap: &fauna_ipc::sync::SyncCapability) -> bool {
+        cap.nest_url == self.nest_url && cap.actor_id_array() == Some(self.actor_id)
+    }
+}
+
 /// What one pass reads off the capability slot.
 struct Snapshot {
     nest_url: String,
@@ -437,7 +484,7 @@ fn read_principal(
 ) -> Option<(ed25519_dalek::SigningKey, RefusalRecord)> {
     let credentials = Arc::new(fauna_sync_engine::account_runtime::production_credential_store());
     let store_dir = fauna_sync_engine::account_runtime::StoreRoot::platform()
-        .store_dir(&hex::encode(actor_id))
+        .and_then(|root| root.store_dir(&hex::encode(actor_id)))
         .ok();
     principal_evidence(credentials, store_dir, nest_url, actor_id)
 }
@@ -511,10 +558,22 @@ pub(crate) fn wake_if_refused(state: &SyncServiceState) {
 /// just refused, so the same evidence is never probed twice — and wake the
 /// account host so its mount, and the device-principal leg that rides the
 /// same dead grant, comes down.
-async fn refuse_renewal(state: &Arc<SyncServiceState>, refused: RefusalRecord) {
+///
+/// It also closes the capability connection already open
+/// (`sync-agent-credentials.md` § Credential model → *A refused renewal is
+/// terminal*, ruled 2026-10-09): emptying the bearer stops every client from
+/// dialling *again*, but the retained socket would live on, still announcing
+/// the device as a push stand-in. Dropping it ends the announce and the push
+/// arm with the credential; an app's `RefreshBearer` or provision rebuilds and
+/// re-announces.
+pub(crate) async fn refuse_renewal(
+    state: &Arc<SyncServiceState>,
+    key: &SlotKey,
+    refused: RefusalRecord,
+) {
     {
         let mut guard = state.capability.write().await;
-        if let Some(cap) = guard.as_mut() {
+        if let Some(cap) = guard.as_mut().filter(|cap| key.holds(cap)) {
             crate::bearer::mark_renewal_refused(cap);
             if let Some(store) = &state.credentials {
                 crate::credentials::persist_capability(store, cap);
@@ -522,34 +581,50 @@ async fn refuse_renewal(state: &Arc<SyncServiceState>, refused: RefusalRecord) {
             }
             set_refusal(state, Some(refused));
         }
-        // Slot emptied meanwhile (an un-provision won): nothing to refuse.
+        // Slot emptied or re-provisioned for another account meanwhile (an
+        // un-provision or a switch won): the refusal was about the old account
+        // and must not mark the new one.
     }
+    state.invalidate_nest_rpc().await;
     crate::account_host::recheck_now(state);
+    crate::push_arm::recheck_now(state);
 }
 
 /// A renewal under the principal succeeded: write the fresh bearer into the
 /// slot, persist it, and end the refused state if one stood — the one thing
 /// that does. The account host is woken then, because its device-principal
 /// leg follows the refusal and may come back.
-async fn adopt_minted(state: &Arc<SyncServiceState>, token: String, expires_at: u64) {
+async fn adopt_minted(
+    state: &Arc<SyncServiceState>,
+    key: &SlotKey,
+    token: String,
+    expires_at: u64,
+) {
+    use zeroize::Zeroize;
     {
         let mut guard = state.capability.write().await;
-        if let Some(cap) = guard.as_mut() {
-            use zeroize::Zeroize;
-            cap.bearer.token.zeroize();
-            cap.bearer.token = token;
-            cap.bearer.expires_at = expires_at;
-            if let Some(store) = &state.credentials {
-                crate::credentials::persist_capability(store, cap);
-            }
+        let Some(cap) = guard.as_mut().filter(|cap| key.holds(cap)) else {
+            // Slot emptied, or re-provisioned for another account, between the
+            // snapshot and the mint's return (an un-provision or a switch won):
+            // the token is the old account's session bearer — drop it, never
+            // hand it to the new account's nest, and leave the new account's
+            // refusal state alone.
+            let mut token = token;
+            token.zeroize();
+            return;
+        };
+        cap.bearer.token.zeroize();
+        cap.bearer.token = token;
+        cap.bearer.expires_at = expires_at;
+        if let Some(store) = &state.credentials {
+            crate::credentials::persist_capability(store, cap);
         }
-        // Slot emptied between read and mint (an un-provision won): drop the
-        // token.
     }
     if standing_refusal(state).is_some() {
         forget_refusal(state);
         tracing::info!("this machine is enrolled again; the refused state is over");
         crate::account_host::recheck_now(state);
+        crate::push_arm::recheck_now(state);
     }
 }
 
@@ -585,8 +660,8 @@ pub(crate) async fn refresh_store_principal_presence(state: &Arc<SyncServiceStat
         let actor_hex = hex::encode(actor);
         let credentials =
             std::sync::Arc::new(fauna_sync_engine::account_runtime::production_credential_store());
-        let Ok(store_dir) =
-            fauna_sync_engine::account_runtime::StoreRoot::platform().store_dir(&actor_hex)
+        let Ok(store_dir) = fauna_sync_engine::account_runtime::StoreRoot::platform()
+            .and_then(|root| root.store_dir(&actor_hex))
         else {
             return false;
         };
@@ -768,7 +843,7 @@ mod tests {
             crate::config::SyncConfig::default(),
             shutdown_tx,
             event_tx,
-            crate::config::SyncPaths::new(None),
+            crate::config::SyncPaths::new(None).expect("this box has an absolute home"),
         );
         *state.capability.write().await = Some(fauna_ipc::sync::SyncCapability::new(
             vec![1u8; 32],
@@ -777,7 +852,7 @@ mod tests {
             "dev".into(),
             fauna_ipc::sync::BearerToken::new("tok".into(), 1),
         ));
-        refuse_renewal(&state, refused_evidence()).await;
+        refuse_renewal(&state, &slot_key(&state).await, refused_evidence()).await;
         let cap = state.capability.read().await;
         let cap = cap.as_ref().expect("the capability itself stays");
         assert!(crate::bearer::renewal_refused(cap));
@@ -803,6 +878,75 @@ mod tests {
         )
     }
 
+    /// The key the slot names right now — what a pass's snapshot would hold.
+    async fn slot_key(state: &Arc<SyncServiceState>) -> SlotKey {
+        let cap = state.capability.read().await;
+        SlotKey::of_capability(cap.as_ref().expect("a provisioned slot")).expect("32-byte actor")
+    }
+
+    /// Account B's capability: another actor on another nest, with its own bearer.
+    fn other_account_capability() -> fauna_ipc::sync::SyncCapability {
+        fauna_ipc::sync::SyncCapability::new(
+            vec![2u8; 32],
+            vec![8u8; 32],
+            "https://nest-b.example".into(),
+            "dev".into(),
+            fauna_ipc::sync::BearerToken::new("b-tok".into(), u64::MAX),
+        )
+    }
+
+    /// An account switch (a bare `ProvisionCapability`, no un-provision first)
+    /// landing inside account A's mint round trip: A's minted bearer must not
+    /// be written into B's capability, in memory or in the store (finding
+    /// ).
+    #[tokio::test]
+    async fn a_minted_bearer_is_dropped_when_the_slot_switched_accounts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = agent_store(dir.path());
+        let state = state_over(dir.path(), Some(store.clone()));
+        *state.capability.write().await = Some(provisioned_capability());
+        let snapshot = slot_key(&state).await;
+
+        // The switch lands between the snapshot and the write-back.
+        let b = other_account_capability();
+        crate::credentials::persist_capability(&store, &b);
+        *state.capability.write().await = Some(b);
+
+        adopt_minted(&state, &snapshot, "a-minted".into(), 4_000_000_000).await;
+
+        let cap = state.capability.read().await;
+        let cap = cap.as_ref().expect("B's capability");
+        assert_eq!(cap.bearer.token, "b-tok", "B's bearer is untouched");
+        assert_ne!(cap.bearer.expires_at, 4_000_000_000);
+        assert_eq!(
+            crate::credentials::load_capability(&store).map(|c| c.bearer.token.clone()),
+            Some("b-tok".into()),
+            "nothing of A's lands in the store"
+        );
+    }
+
+    /// The same switch in a refusal's round trip: A's `not_registered` must not
+    /// empty B's bearer or stand as B's refusal record.
+    #[tokio::test]
+    async fn a_refusal_is_dropped_when_the_slot_switched_accounts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = agent_store(dir.path());
+        let state = state_over(dir.path(), Some(store.clone()));
+        *state.capability.write().await = Some(provisioned_capability());
+        let snapshot = slot_key(&state).await;
+
+        *state.capability.write().await = Some(other_account_capability());
+
+        refuse_renewal(&state, &snapshot, refused_evidence()).await;
+
+        let cap = state.capability.read().await;
+        let cap = cap.as_ref().expect("B's capability");
+        assert!(!crate::bearer::renewal_refused(cap), "B is not refused");
+        assert_eq!(cap.bearer.token, "b-tok");
+        assert!(standing_refusal(&state).is_none());
+        assert!(crate::credentials::load_refusal(&store).is_none());
+    }
+
     /// A state over a tempdir: scoped paths, and — with `store` — the agent's
     /// own credential store on a file backend, never the OS keyring.
     fn state_over(
@@ -815,7 +959,7 @@ mod tests {
             crate::config::SyncConfig::default(),
             shutdown_tx,
             event_tx,
-            crate::config::SyncPaths::new(Some(dir.to_path_buf())),
+            crate::config::SyncPaths::at(dir.to_path_buf()),
             store,
         )
     }
@@ -865,7 +1009,7 @@ mod tests {
         *state.capability.write().await = Some(provisioned_capability());
         assert!(!reports_needs_reenrollment(&state).await);
 
-        refuse_renewal(&state, refused_evidence()).await;
+        refuse_renewal(&state, &slot_key(&state).await, refused_evidence()).await;
         assert!(reports_needs_reenrollment(&state).await);
 
         let pushed = request(
@@ -920,7 +1064,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let state = state_over(dir.path(), None);
         *state.capability.write().await = Some(provisioned_capability());
-        refuse_renewal(&state, refused_evidence()).await;
+        refuse_renewal(&state, &slot_key(&state).await, refused_evidence()).await;
 
         let provisioned = request(
             &state,
@@ -1018,7 +1162,7 @@ mod tests {
         let store = agent_store(dir.path());
         let state = state_over(dir.path(), Some(store.clone()));
         *state.capability.write().await = Some(provisioned_capability());
-        refuse_renewal(&state, refused_evidence()).await;
+        refuse_renewal(&state, &slot_key(&state).await, refused_evidence()).await;
 
         let successor = RefusalRecord {
             principal_key: hex::encode([0xd4u8; 32]),
@@ -1032,7 +1176,7 @@ mod tests {
         if let Some(cap) = state.capability.write().await.as_mut() {
             cap.bearer = fauna_ipc::sync::BearerToken::new("app-tok".into(), u64::MAX);
         }
-        refuse_renewal(&state, successor.clone()).await;
+        refuse_renewal(&state, &slot_key(&state).await, successor.clone()).await;
 
         let after = standing_refusal(&state).unwrap();
         assert_eq!(after, successor);
@@ -1055,10 +1199,16 @@ mod tests {
         let store = agent_store(dir.path());
         let state = state_over(dir.path(), Some(store.clone()));
         *state.capability.write().await = Some(provisioned_capability());
-        refuse_renewal(&state, refused_evidence()).await;
+        refuse_renewal(&state, &slot_key(&state).await, refused_evidence()).await;
         assert!(crate::credentials::load_refusal(&store).is_some());
 
-        adopt_minted(&state, "minted".into(), 4_000_000_000).await;
+        adopt_minted(
+            &state,
+            &slot_key(&state).await,
+            "minted".into(),
+            4_000_000_000,
+        )
+        .await;
 
         assert!(!reports_needs_reenrollment(&state).await);
         assert!(crate::credentials::load_refusal(&store).is_none());
@@ -1077,7 +1227,7 @@ mod tests {
         {
             let state = state_over(dir.path(), Some(store.clone()));
             *state.capability.write().await = Some(provisioned_capability());
-            refuse_renewal(&state, refused_evidence()).await;
+            refuse_renewal(&state, &slot_key(&state).await, refused_evidence()).await;
         }
 
         let restarted = state_over(dir.path(), Some(store.clone()));
@@ -1096,7 +1246,7 @@ mod tests {
         let store = agent_store(dir.path());
         let state = state_over(dir.path(), Some(store.clone()));
         *state.capability.write().await = Some(provisioned_capability());
-        refuse_renewal(&state, refused_evidence()).await;
+        refuse_renewal(&state, &slot_key(&state).await, refused_evidence()).await;
 
         crate::pipe_server::unprovision_now(&state).await;
 
@@ -1312,7 +1462,7 @@ mod tests {
             crate::config::SyncConfig::default(),
             shutdown_tx.clone(),
             event_tx,
-            crate::config::SyncPaths::new(Some(dir.clone())),
+            crate::config::SyncPaths::at(dir.clone()),
             Some(store.clone()),
         );
 

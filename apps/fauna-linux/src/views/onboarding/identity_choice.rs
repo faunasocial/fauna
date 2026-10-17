@@ -8,12 +8,12 @@ use fauna_onboarding_machine::OnboardingMachine;
 use crate::i18n::strings::onboarding::identity_choice as strings;
 
 /// Build the identity choice step: Create New, Import, restore from a
-/// recovery kit, or recover a lost box.
+/// recovery kit, recover a lost box, or lock an account from here.
 ///
 /// Conforms to the universal handle-first signature
 /// `build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>)`.
-/// The refresh closure is a no-op — this page is purely button-driven and
-/// doesn't render any machine state.
+/// The refresh closure paints only the residue view — `error-message` (the
+/// signed-out door's confirmation included) is the wizard's own banner.
 pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
     page.set_vexpand(true);
@@ -93,6 +93,19 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
     }
     content.append(&recover_btn);
 
+    // The third optional entry: not a recovery at all — it LOCKS an account
+    // from a device the owner will not sign in on, and persists nothing
+    // (`ui/sessions.md` § The signed-out door). The label says so.
+    let lockout_btn = gtk::Button::with_label(strings::EMERGENCY_LOCKOUT_ENTRY);
+    lockout_btn.add_css_class("flat");
+    lockout_btn.set_hexpand(true);
+    crate::testid::set_test_id(&lockout_btn, ids::EMERGENCY_LOCKOUT_ENTRY_BUTTON);
+    {
+        let m = m.clone();
+        lockout_btn.connect_clicked(move |_| m.begin_emergency_lockout_entry());
+    }
+    content.append(&lockout_btn);
+
     // Error label (hidden by default).
     let error_label = gtk::Label::new(None);
     error_label.set_visible(false);
@@ -104,9 +117,10 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
 
     page.append(&content);
 
-    // No machine-derived UI on this page; the residue view is the app's own
-    // state, re-read on every tick so a sign-out, a launch re-check and a
-    // Remove Again all reach it the same way.
+    // No machine-derived UI on this page (`error-message`, the signed-out
+    // door's confirmation included, rides the wizard's banner); the residue
+    // view is the app's own state, re-read on every tick so a sign-out, a
+    // launch re-check and a Remove Again all reach it the same way.
     let refresh: Rc<dyn Fn()> = Rc::new(move || {
         let _ = &m;
         paint_residue();

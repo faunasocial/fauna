@@ -123,7 +123,7 @@ public partial class BackupsViewModel : ViewModelBase
     /// nest derives the owner from the authenticated connection — the retired
     /// `(device_id, data_dir)` canonical-path contract was the always-on upload
     /// driver's, deleted with it; backups.md § Per-destination status read). Plumbed
-    /// by the page from <c>ISessionAccount.DeviceId</c>; empty in unit tests.
+    /// by the page from <c>ISessionAccount.ResolveDeviceId()</c>; empty in unit tests.
     private readonly string _deviceId;
 
     /// LIVE per-destination status keyed by destination_id (backups.md § Per-destination
@@ -165,7 +165,87 @@ public partial class BackupsViewModel : ViewModelBase
     /// currently failing its audit, rendered above the destinations/snapshot
     /// scroller (the <c>restore-divergence-banner</c> idiom; backups.md § Audit-
     /// alert surface). Empty while every destination's last audit passed.
-    public ObservableCollection<string> AuditAlerts { get; } = new();
+    public ObservableCollection<AuditBanner> AuditAlerts { get; } = new();
+
+    /// <summary>One <c>backup-audit-alert</c> banner: its sentence, the destination
+    /// it names, and whether it carries <c>backup-audit-recover-button</c> — the
+    /// shared offered-rule's answer resolved by the VM, never a kind or deadline
+    /// check on the page.</summary>
+    public sealed record AuditBanner(string Text, string DestinationId, bool OfferRecover = false);
+
+    /// <summary>The <c>destination_id</c> whose <c>backup-audit-recover-confirm-modal</c>
+    /// is open, or null (backups.md § Audit-alert surface, the fifth reason).</summary>
+    [ObservableProperty] private string? _recoverConfirming;
+
+    /// <summary>A recovery is running: every recover button is disarmed until it
+    /// ends, so one click cannot start two runs.</summary>
+    [ObservableProperty] private bool _recoverRunning;
+
+    /// <summary><c>backup-audit-recover-result</c>: the running line while the run
+    /// goes, then the shared face's resolved lines (verdict first) or the stop
+    /// sentence. Null before a first run.</summary>
+    [ObservableProperty] private string? _recoverResultText;
+
+    /// <summary><c>backup-audit-recover-button[i]</c>: arm the confirm for
+    /// <paramref name="destinationId"/>. Arms only over a banner that paints the
+    /// button, and never while a run is in flight.</summary>
+    public void ArmRecover(string destinationId)
+    {
+        if (RecoverRunning) return;
+        if (!AuditAlerts.Any(a => a.OfferRecover && a.DestinationId == destinationId)) return;
+        RecoverConfirming = destinationId;
+    }
+
+    /// <summary><c>backup-audit-recover-cancel-button</c>: close the confirm, no
+    /// side effect.</summary>
+    public void CancelRecover() => RecoverConfirming = null;
+
+    /// <summary><c>backup-audit-recover-confirm-button</c>: run the shared recovery
+    /// once, then re-run the audit pass so the cleared notice is read back from the
+    /// store, never assumed. A thrown failure folds into the result as its reason;
+    /// re-running is safe (nothing is recovered twice). No ConfigureAwait(false) —
+    /// WinUI bound-state rule.</summary>
+    public async Task ConfirmRecoverAsync()
+    {
+        var destinationId = RecoverConfirming;
+        if (destinationId is null || RecoverRunning) return;
+        RecoverConfirming = null;
+        RecoverRunning = true;
+        RecoverResultText = Strings.Get("backups/backup_recover_running");
+        try
+        {
+            if (string.IsNullOrEmpty(_deviceId) || string.IsNullOrEmpty(_auditStatePath))
+                throw new InvalidOperationException("no device id");
+            // The row's kind decides the leg (client-device-custodian.md § Restore →
+            // *Recovery from this device's own store*): a nest runs the shared face
+            // over the app's connection; this device's own custodian row runs in the
+            // sync agent that owns the store. The shared offered-rule armed only an
+            // own row, so a client-device id here IS this device's. The app grants
+            // nothing — the agent verb derives the key and its job grants first.
+            FfiRecoveryResult ran;
+            if (RowIsAClientDevice(destinationId))
+            {
+                var channel = _agentChannel?.Invoke()
+                    ?? throw new InvalidOperationException(Strings.Get("backups/backup_reseed_no_agent"));
+                ran = await _nest.RecoverOwnCustodianStoreAsync(channel);
+            }
+            else
+            {
+                ran = await _nest.BackupRecoverFromDestinationAsync(
+                    _deviceId, destinationId, _auditStatePath);
+            }
+            RecoverResultText = string.Join("\n", ran.lines);
+        }
+        catch (Exception ex)
+        {
+            RecoverResultText = Strings.Get("backups/backup_recover_failed").Replace("{reason}", ex.Message);
+        }
+        finally
+        {
+            RecoverRunning = false;
+        }
+        await RefreshAuditAsync();
+    }
 
     /// The single-file-restore save step (backups.md § Where logic lives →
     /// *Single-file byte download*) — the only part of that leg that is platform
@@ -508,9 +588,61 @@ public partial class BackupsViewModel : ViewModelBase
     // list the seam returns. The add/edit/remove methods return whether they
     // succeeded so the page can close its dialog only on success.
 
+    // Destination reads/writes in flight and a sequence bumped at each one's
+    // start and end: a store-change re-read waits them out, and drops an answer a
+    // whole op overtook (the op's own list is the fresher one).
+    private int _destOpsInFlight;
+    private int _destOpSeq;
+
+    private DestinationOpScope DestinationOp()
+    {
+        _destOpSeq++;
+        _destOpsInFlight++;
+        return new DestinationOpScope(this);
+    }
+
+    private readonly struct DestinationOpScope(BackupsViewModel vm) : IDisposable
+    {
+        public void Dispose()
+        {
+            vm._destOpsInFlight--;
+            vm._destOpSeq++;
+        }
+    }
+
+    /// <summary>Start re-reading the destinations on the shared store-change
+    /// notice — call from the page's <c>Page_Loaded</c>, pair with
+    /// <see cref="ViewModelBase.CleanupStoreChange"/> on navigate-away.</summary>
+    public void WatchStore() => WatchStoreChange(_nest, StoreResyncAsync);
+
+    /// <summary>The store-change re-read of the destinations half
+    /// (<c>account-runtime.md</c> § A runtime's own pump is a source of the notice
+    /// too, part 4): a destination another device enrolled shows on the OPEN page
+    /// with no re-visit. One list read; an answer equal to the painted list costs
+    /// no further round trip and paints nothing; a different one swaps the rows in
+    /// and re-reads the statuses, the audit and the orphaned-store verdict the
+    /// way every destination reload does. Skipped while a destination read or write
+    /// is in flight and dropped when one overtook it; never touches
+    /// <see cref="ViewModelBase.ErrorMessage"/> or the page's dialogs and buffers.</summary>
+    internal async Task<bool> StoreResyncAsync()
+    {
+        if (_destOpsInFlight > 0) return false;
+        var seq = _destOpSeq;
+        var list = await _nest.BackupDestinationsListAsync();
+        if (_destOpsInFlight > 0 || seq != _destOpSeq) return false;
+        if (list.SequenceEqual(_destinationViews)) return false;
+        using var op = DestinationOp();
+        RepopulateDestinations(list);
+        await RefreshStatusesAsync();
+        await RefreshAuditAsync();
+        await RefreshOrphanedStoreAsync();
+        return true;
+    }
+
     /// <summary>Hydrate the destination rows from <c>backup_destinations_list</c>.</summary>
     public async Task LoadDestinationsAsync()
     {
+        using var op = DestinationOp();
         ErrorMessage = null;
         try
         {
@@ -532,6 +664,7 @@ public partial class BackupsViewModel : ViewModelBase
     /// defaults to the destination domain.</summary>
     public async Task<bool> AddDestinationAsync(string url, string name)
     {
+        using var op = DestinationOp();
         ErrorMessage = null;
         try
         {
@@ -555,6 +688,7 @@ public partial class BackupsViewModel : ViewModelBase
     /// remove-and-re-add hint.</summary>
     public async Task<bool> EditDestinationAsync(string id, string url, string name)
     {
+        using var op = DestinationOp();
         ErrorMessage = null;
         try
         {
@@ -587,6 +721,7 @@ public partial class BackupsViewModel : ViewModelBase
     /// ordering.</para></summary>
     public async Task<bool> RemoveDestinationAsync(string id, bool alsoReclaim = false)
     {
+        using var op = DestinationOp();
         ErrorMessage = null;
         try
         {
@@ -630,6 +765,7 @@ public partial class BackupsViewModel : ViewModelBase
     /// (mirrors apple <c>BackupDestinationsVM.keep</c>).</summary>
     public async Task<bool> KeepDestinationAsync(string id)
     {
+        using var op = DestinationOp();
         ErrorMessage = null;
         try
         {
@@ -653,6 +789,7 @@ public partial class BackupsViewModel : ViewModelBase
     /// this (<see cref="TryParseCapacity"/>).</summary>
     public async Task<bool> EnrollCustodianAsync(string name, ulong? capacityCapBytes)
     {
+        using var op = DestinationOp();
         ErrorMessage = null;
         try
         {
@@ -1016,6 +1153,30 @@ public partial class BackupsViewModel : ViewModelBase
         }
     }
 
+    /// <summary>This device's own custodian store read, shaped for the audit pass's
+    /// source-regression fold (client-device-custodian.md § Implementation status
+    /// today → *The fold*): the same agent <c>CustodianStore()</c> read and device
+    /// id the orphaned-store verdict uses. No logic here — the shared pass picks the
+    /// row. A missing agent, a missing device id or a failed read answers
+    /// <c>null</c> ("no store was read"), which leaves the row's record standing.</summary>
+    private async Task<FfiOwnCustodianStore?> ReadOwnCustodianAsync()
+    {
+        var channel = _agentChannel?.Invoke();
+        if (channel is null || string.IsNullOrEmpty(_deviceId))
+        {
+            return null;
+        }
+        try
+        {
+            var info = await channel.CustodianStore();
+            return new FfiOwnCustodianStore(_deviceId, info.sourceRegressions);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
     /// <summary>Run the client-side audit pass and rebuild the <c>_auditRows</c> map
     /// keyed by destination_id, then the <see cref="AuditAlerts"/> banner list
     /// (backups.md § Audit-alert surface). Skipped at zero destinations or before
@@ -1038,7 +1199,8 @@ public partial class BackupsViewModel : ViewModelBase
         }
         try
         {
-            var rows = await _nest.BackupAuditRunPassAsync(_auditStatePath, _syncStateDir);
+            var rows = await _nest.BackupAuditRunPassAsync(
+                _auditStatePath, _syncStateDir, await ReadOwnCustodianAsync());
             _auditRows = rows.ToDictionary(r => r.destinationId);
             RebuildAuditAlerts();
         }
@@ -1066,9 +1228,23 @@ public partial class BackupsViewModel : ViewModelBase
         AuditAlerts.Clear();
         foreach (var d in Destinations)
         {
-            if (_auditRows.TryGetValue(d.Id, out var row) && row.alertReason is { } reason)
+            if (!_auditRows.TryGetValue(d.Id, out var row))
             {
-                AuditAlerts.Add(Strings.Resolve(FaunaFfiMethods.BackupAuditAlertLabel(reason, d.Label)));
+                continue;
+            }
+            // Every reason the shared `alert_reasons(now)` yields — the standing
+            // verdict and/or the open accepted-source-regression recovery notice —
+            // in the same flat list (backups.md § Audit-alert surface → fifth reason).
+            // The button is the shared offered-rule's answer (`recover_offered`),
+            // taken whole: a nest row and this device's own custodian row are both
+            // offered, another device's is not; the confirm picks the leg.
+            foreach (var reason in row.alertReasons)
+            {
+                AuditAlerts.Add(new AuditBanner(
+                    Strings.Resolve(FaunaFfiMethods.BackupAuditAlertLabel(reason, d.Label)),
+                    d.Id,
+                    OfferRecover: reason is BackupAuditAlertReason.SourceRegressed &&
+                                  row.recoverOffered));
             }
         }
         foreach (var d in Destinations)
@@ -1076,8 +1252,9 @@ public partial class BackupsViewModel : ViewModelBase
             if (RowIsAClientDevice(d.Id) &&
                 FaunaFfiMethods.BackupSelfAuditIsAlerting(_statuses.GetValueOrDefault(d.Id)?.auditState))
             {
-                AuditAlerts.Add(Strings.Resolve(
-                    FaunaFfiMethods.BackupAuditAlertLabel(new BackupAuditAlertReason.SelfReported(), d.Label)));
+                AuditAlerts.Add(new AuditBanner(
+                    Strings.Resolve(FaunaFfiMethods.BackupAuditAlertLabel(new BackupAuditAlertReason.SelfReported(), d.Label)),
+                    d.Id));
             }
         }
     }
@@ -1208,7 +1385,7 @@ public partial class BackupsViewModel : ViewModelBase
     /// Pure backlog-count → i18n mapping. null ⇒ "0 queued". Mirrors apple
     /// <c>BackupDestinationsVM.backlogText</c>.
     internal static string BacklogText(FfiBackupDestinationStatus? status) =>
-        Strings.Resolve(FaunaFfiMethods.BackupBacklogLabel(status?.backlogCount));
+        Strings.Resolve(FaunaFfiMethods.BackupBacklogLabel(status?.backlogCount, status?.writerState));
 
     // ── Restore surface (backups.md §§ Restore history / divergence / from destination) ──
     // Thin glue over the shared FfiSnapshotsClient restore reads + the local
@@ -1364,11 +1541,12 @@ public partial class BackupsViewModel : ViewModelBase
         {
             var reply = await _nest.SnapshotRestoreMessageKindAsync(
                 SelectedRestoreSnapshot.Id, RestoreConfirmInput);
-            RestoreProgressText = Strings.Get("backups/restore_progress_done");
             // config_present == false → the bridge can't AUTH until the wrapped-MLS blob bundle is
-            // restored too; surface the reply note as a warning (backups.md).
-            if (!reply.configPresent && !string.IsNullOrEmpty(reply.note))
-                RestoreWarning = reply.note;
+            // restored too; paint the shared string keyed off the typed bool, never the reply's
+            // diagnostic note (backups.md). Set in the same update that reaches DONE.
+            if (!reply.configPresent)
+                RestoreWarning = Strings.Get("backups/restore_warning_config_absent");
+            RestoreProgressText = Strings.Get("backups/restore_progress_done");
             // The restore wrote a restore_history row — reflect it.
             await LoadRestoreHistoryAsync();
         }

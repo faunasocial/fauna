@@ -2,7 +2,7 @@ package com.fauna.app.provider
 
 /**
  * What [FaunaDocumentsProvider] serves from — the read path of the android
- * on-demand binding (`on-demand-files.md` § Android SAF DocumentsProvider
+ * on-demand binding (`on-demand-files-android.md` § Android SAF DocumentsProvider
  * binding). The provider only translates `DocumentsContract` calls into these
  * and builds cursors; it holds no sync state and makes no sync decision. The
  * production source is [FfiOnDemandSource] (one shared-Rust

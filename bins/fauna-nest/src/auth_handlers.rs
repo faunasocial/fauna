@@ -107,7 +107,8 @@ fn build_cert_binding(
 /// wrong without lying about its own variant.
 ///
 /// **`CertHandshake` and `VerifyFold` are split, not one `Cert` variant**: [`build_cert_binding`]'s three bearer-minting callers
-/// (`handshake`, `device_handshake`, `custody_handshake`) can only ever
+/// (`handshake`, `device_handshake`, `custody_handshake`,
+/// `custodied_fleet_handshake`) can only ever
 /// legitimately produce a bare `client_nonce`; only the verify-path caller
 /// legitimately produces the 64-byte NT-1 fold. A single `Cert` variant whose
 /// accept set was the union let the three bearer-minting kinds inherit a
@@ -124,7 +125,8 @@ enum BindingKind {
     /// `client_nonce`. `fauna.auth.nest_handshake` folds nothing onto it.
     Handshake,
     /// [`build_cert_binding`]'s shape at the three bearer-minting handshake
-    /// call sites (`handshake`, `device_handshake`, `custody_handshake`): a
+    /// call sites (`handshake`, `device_handshake`, `custody_handshake`,
+    /// `custodied_fleet_handshake`): a
     /// bare `client_nonce`, the only shape these callers can ever produce.
     CertHandshake,
     /// [`build_cert_binding`]'s shape at the verify-path call site: the bare
@@ -365,6 +367,50 @@ fn custody_handshake_handler() -> RpcHandler {
     })
 }
 
+// ── fauna.auth.custodied_fleet_handshake (owner-fleet restore-read mint) ────
+
+/// Mint an OWNER-FLEET device's restore-read bearer at this custodian nest
+/// against its root-signed `DeviceAuthorization` + a live hosting row for its
+/// owner (the custodian-NEST serve door — `account-replica-posture.md` §
+/// Replica posture → *The custody grant + ceremony*, ruling 2). The
+/// verification body is `auth_core::custodied_fleet_auth_core`; the reply
+/// mirrors the custody handshake's, TLS channel binding included (ruling 7: a
+/// device's trust toward the nest is the transport stack plus the accept's
+/// key↔URL binding — no nest counter-proof rides the reply).
+fn custodied_fleet_handshake_handler() -> RpcHandler {
+    Box::new(|state, _actor, payload| {
+        Box::pin(async move {
+            let req: fauna_protocol::auth::CustodiedFleetHandshakeRequest =
+                decode(&payload).map_err(malformed)?;
+            let mint = auth_core::custodied_fleet_auth_core(
+                &state,
+                &req.owner_actor_id,
+                &req.device_key,
+                req.timestamp,
+                &req.signature,
+                req.client_nonce.as_slice(),
+                &req.authorization,
+                &req.nest_id,
+            )
+            .await
+            .map_err(auth_error_to_rpc)?;
+            let cert_binding = build_cert_binding(
+                &state,
+                Some(req.client_nonce.as_slice()),
+                BindingKind::CertHandshake,
+            );
+            encode_reply(&HandshakeReply {
+                token: mint.token,
+                token_id: mint.token_id,
+                expires_at: mint.expires_at,
+                expires_in: mint.expires_in,
+                cert_binding,
+                extra: Default::default(),
+            })
+        })
+    })
+}
+
 // ── fauna.auth.nest_handshake (pre-identity nest-identity handshake) ─────────
 
 /// The nest proves *its* identity over the live TLS channel before any actor
@@ -576,6 +622,14 @@ pub fn register_auth_handlers(b: &mut RpcRouterBuilder) {
             forbid_replay: false,
             default_deadline: deadline,
             handler: custody_handshake_handler(),
+        },
+    );
+    b.add(
+        fauna_protocol::auth::CUSTODIED_FLEET_HANDSHAKE_KIND,
+        RpcKindMeta {
+            forbid_replay: false,
+            default_deadline: deadline,
+            handler: custodied_fleet_handshake_handler(),
         },
     );
     // Registered here — beside the pre-identity kinds — rather than with the

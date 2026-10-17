@@ -467,8 +467,11 @@ class PlatformDriver(ABC):
         ...
 
     @abstractmethod
-    def clear_and_type(self, element_id: str, text: str, *, scope: str | None = None) -> None:
-        """Clear existing content and type new text."""
+    def clear_and_type(self, element_id: str, text: str, *, index: int = 0,
+                       scope: str | None = None) -> None:
+        """Clear existing content and type new text. ``index`` picks the n-th
+        occurrence of a flat indexed id (a per-row field with no row container),
+        the same occurrence ``click``'s ``index`` names; every agent reads it."""
         ...
 
     def fill(self, element_id: str, text: str, *, scope: str | None = None) -> None:
@@ -517,9 +520,13 @@ class PlatformDriver(ABC):
           * WinUI: ``"disabled"`` -> ``"true"`` / ``"false"`` based on
             ``!IsEnabled``; ``"checked"`` -> HelpText if published, else the
             TogglePattern state; other names map to ``AutomationProperties.HelpText``.
-            (UIA exposes a single application-supplied string per element;
-            tests that need multiple attributes per element should pack
-            them e.g. ``"state=resolved;rail=fauna"`` and parse on read.)
+            (UIA exposes a single application-supplied string per element; an
+            element publishing several attributes packs them there as
+            ``key=value`` pairs joined by ``;`` — e.g.
+            ``"state=playing;position=1.250;source=…"`` — and the FlaUI bridge
+            answers each key's own value (``flaui-bridge/PackedAttr.cs``; the
+            app-side writer is ``AutomationAttributePack.Pack``), so a test reads
+            it exactly as on every other app and never parses.)
           * tui / linux / apple: served by the shared ``GET /element/attr``
             route (`libs/fauna-e2e-agent`, `apps/fauna-linux/src/automation`,
             FaunaKit's `InProcessAutomationServer`).
@@ -560,14 +567,28 @@ class PlatformDriver(ABC):
             ``"error"`` (nothing playable, or the player's own error)
             (`render-model.md` § D6c → *Inline playback*). web publishes it as
             ``data-state``, macos + ios through the registry (FaunaKit's
-            ``VideoThumbnailView``); the other apps add it as their player leg
-            lands.
+            ``VideoThumbnailView``), windows in the packed HelpText of its
+            ``VideoThumbnailView``, linux as a ``test-attr-state-*`` class on the
+            element (``views/feed/video_thumbnail.rs``), android as its
+            ``stateDescription`` (``FeedPostVideo.kt``); tui's leg is the OS
+            handoff, its own test.
           * ``"position"`` / ``"source"`` (``video-thumbnail``) — the native
             player's position in seconds (``"0.000"`` while there is none) and
             the URL it was handed (``""`` while there is none): what web reads
             off its ``<video>``'s ``currentTime`` / ``currentSrc``, published as
             attributes by the apps whose player no script can reach (macos +
-            ios today).
+            ios, windows, linux — whose ``position`` is the live GTK media
+            stream's timestamp, or its whole length once it has ended). A video
+            played to its end reads its length, never 0 again, as a
+            ``<video>``'s ``currentTime`` does. A sealed video has no URL on windows or linux — its
+            opened bytes play from memory — so its ``source`` is
+            ``sealed:<hash>``.
+          * ``"href"`` (``admin-mail-health-delist-link``) — the URL a link
+            element opens (or, on tui, copies), since the apps render a link
+            as a button whose text carries only its label. tui publishes it
+            as an element attr, linux as a ``set_test_attr_text`` attribute,
+            web as ``data-href``, android as the button's ``stateDescription``,
+            windows as its HelpText.
         """
         ...
 

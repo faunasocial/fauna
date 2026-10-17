@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/textproto"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -713,6 +714,10 @@ func TestExtractEnhancedStatus(t *testing.T) {
 		{"421 service unavailable", ""},
 		{"550", ""},                // bare reply code is not enhanced
 		{"550 5.7 incomplete", ""}, // two-part is not a valid enhanced code
+		// Since go1.26 `textproto.Error` quotes the reply text, so the code
+		// arrives glued to a quote.
+		{`550 "5.1.1 <recipient> User unknown"`, "5.1.1"},
+		{"554 (5.7.1) rejected", "5.7.1"},
 	}
 	for _, c := range cases {
 		if got := extractEnhancedStatus(c.msg); got != c.want {
@@ -751,6 +756,12 @@ func TestClassifyTreat5xxAsTransient(t *testing.T) {
 	}
 	if err := classify(errors.New("550 no enhanced code here"), allow); !isPermanent(err) {
 		t.Errorf("5xx w/o enhanced code, 5.0.0 not allowlisted → permanent; got %T %v", err, err)
+	}
+	// A real remote refusal as net/smtp hands it over — a *textproto.Error,
+	// whose text the toolchain formats (quoted since go1.26) — must match too.
+	remote := &textproto.Error{Code: 550, Msg: "5.1.1 <recipient> Recipient address rejected: User unknown"}
+	if err := classify(remote, []string{"5.1.1"}); !isTemporary(err) {
+		t.Errorf("a remote 550 5.1.1 with 5.1.1 allowlisted must be temporary; got %T %v", err, err)
 	}
 }
 

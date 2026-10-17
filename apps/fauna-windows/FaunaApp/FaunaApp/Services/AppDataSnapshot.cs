@@ -43,6 +43,7 @@ internal static class AppDataSnapshot
             QuoteCount: item.QuoteCount,
             ViewerLiked: item.ViewerLiked,
             RepostedPostId: item.RepostedPostId,
+            QuotedPostId: item.QuotedPostId,
             ViewerRepostId: item.ViewerRepostId,
             // Every link preview in the body with its state, in body order, off the
             // shared face (`RenderDocument::link_previews` — render-model.md § D4,
@@ -114,6 +115,9 @@ internal static class AppDataSnapshot
                 // today).
                 ["reposted_post_id"] = p.RepostedPostId,
                 ["viewer_repost_id"] = p.ViewerRepostId,
+                // The quote carrier: an empty-commentary quote's card text is only its
+                // folded embed, so a test finds it by the post it quotes. tui's key.
+                ["quoted_post_id"] = p.QuotedPostId,
                 // `{url, state}` per link preview (see SetFeedPosts) — tui's key.
                 ["link_previews"] = p.LinkPreviews,
             }).ToList();
@@ -416,6 +420,7 @@ internal static class AppDataSnapshot
         long QuoteCount,
         bool ViewerLiked,
         string? RepostedPostId,
+        string? QuotedPostId,
         string? ViewerRepostId,
         List<Dictionary<string, object?>> LinkPreviews);
 

@@ -129,7 +129,10 @@ mod with_zaps {
     use fauna_bridge_nostr::types::{Event, UnsignedEvent};
     use fauna_nest::nostr::{db, store, zap_ingest};
 
-    use common::zap::{designate_zap_signer as designate, link_payee, zap_receipt};
+    use common::zap::{
+        anon_sender, designate_zap_signer as designate, link_payee, zap_receipt,
+        zap_receipt_embedding, zap_request,
+    };
 
     /// Store a kind-1 note authored by `author` and map it to `fauna_post_id`
     /// the way the outbound publish path does — this is the link that makes
@@ -217,7 +220,7 @@ mod with_zaps {
             &payee.public_key_hex(),
             &payee.public_key_hex(),
             &note_id,
-            &"d".repeat(64),
+            &anon_sender(),
             Some(LNBC_21_SATS),
             1_700_000_000,
         );
@@ -256,7 +259,7 @@ mod with_zaps {
             &payee.public_key_hex(),
             &payee.public_key_hex(),
             &note_id,
-            &"d".repeat(64),
+            &anon_sender(),
             Some(LNBC_21_SATS),
             1_700_000_000,
         );
@@ -290,7 +293,7 @@ mod with_zaps {
                 &payee.public_key_hex(),
                 &payee.public_key_hex(),
                 &note_id,
-                &"d".repeat(64),
+                &anon_sender(),
                 invoice,
                 at,
             );
@@ -326,16 +329,14 @@ mod with_zaps {
         let post_id = a_post_id(0x44);
         let note_id = publish_note_as(&state, &payee, &post_id).await;
 
-        for (sender, at) in [
-            (tipper.public_key_hex(), 1_700_000_000),
-            ("d".repeat(64), 1_700_000_001),
-        ] {
+        let anon = anon_sender();
+        for (sender, at) in [(&tipper, 1_700_000_000), (&anon, 1_700_000_001)] {
             let receipt = zap_receipt(
                 &signer,
                 &payee.public_key_hex(),
                 &payee.public_key_hex(),
                 &note_id,
-                &sender,
+                sender,
                 Some(LNBC_1_SAT),
                 at,
             );
@@ -354,6 +355,54 @@ mod with_zaps {
         assert!(
             reply.tips.iter().all(|t| t.sender_ref.is_some()),
             "both carry the mechanism-native reference"
+        );
+    }
+
+    /// The sender conjunct (`monetization.md` § Zap receipts): a request's
+    /// `pubkey` names a tipper only when that key signed the request. The
+    /// designated signer here is honest about the receipt, but the embedded
+    /// request claims a LOCAL actor's pubkey with a signature that does not
+    /// verify — so the tip still counts (the signer is designated, `description`
+    /// is optional in the wild) but is attributed to nobody.
+    #[tokio::test]
+    async fn a_request_claiming_a_local_actor_without_their_signature_attributes_nobody() {
+        let (router, state) = router_and_state().await;
+        let payee_actor = [7u8; 32];
+        let payee = link_payee(&state, payee_actor).await;
+        let signer = Keypair::generate();
+        designate(&state, payee_actor, &signer).await;
+
+        let victim_actor = [8u8; 32];
+        let victim = link_payee(&state, victim_actor).await;
+
+        let post_id = a_post_id(0x77);
+        let note_id = publish_note_as(&state, &payee, &post_id).await;
+
+        // Signed by an outsider, then relabelled with the victim's pubkey.
+        let mut forged = zap_request(&anon_sender(), &payee.public_key_hex(), 1_700_000_000);
+        forged.pubkey = victim.public_key_hex();
+        let receipt = zap_receipt_embedding(
+            &signer,
+            &payee.public_key_hex(),
+            &note_id,
+            serde_json::to_string(&forged).unwrap(),
+            Some(LNBC_1_SAT),
+            1_700_000_000,
+        );
+        assert!(
+            ingest(&state, &receipt).await,
+            "an unverifiable sender costs only the attribution, not the tip"
+        );
+
+        let reply = tips_list(&router, state, &post_id, None).await.unwrap();
+        assert_eq!(reply.tip_count, 1);
+        assert!(
+            reply.tips[0].sender.is_none(),
+            "the local actor never signed this request"
+        );
+        assert!(
+            reply.tips[0].sender_ref.is_none(),
+            "and the unverified pubkey is not recorded as the sender reference either"
         );
     }
 
@@ -378,7 +427,7 @@ mod with_zaps {
                 &payee.public_key_hex(),
                 &payee.public_key_hex(),
                 &note_id,
-                &"d".repeat(64),
+                &anon_sender(),
                 Some(LNBC_1_SAT),
                 1_700_000_000 + i,
             );
@@ -433,7 +482,7 @@ mod with_zaps {
             &payee.public_key_hex(),
             &payee.public_key_hex(),
             &note.id,
-            &"d".repeat(64),
+            &anon_sender(),
             Some(LNBC_21_SATS),
             1_700_000_000,
         );

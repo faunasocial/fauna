@@ -32,6 +32,7 @@ class PhotoBackupControlsContentTest {
         isSyncing: Boolean = false,
         syncedCount: Int = 0,
         pendingCount: Int = 0,
+        passTotal: Int = 0,
         lastError: String? = null,
         actions: PhotoBackupActions = PhotoBackupActions(),
     ) {
@@ -44,6 +45,7 @@ class PhotoBackupControlsContentTest {
                 pendingCount = pendingCount,
                 lastError = lastError,
                 actions = actions,
+                passTotal = passTotal,
             )
         }
     }
@@ -96,6 +98,19 @@ class PhotoBackupControlsContentTest {
         render(autoBackup = true, isSyncing = true)
         composeTestRule.onNodeWithTag("photo-backup-sync-progress").assertExists()
         composeTestRule.onNodeWithTag("photo-backup-sync-now-button").assertIsNotEnabled()
+    }
+
+    @Test
+    fun syncProgressNamesThePassPositionOnceItHasCounted() {
+        // 5 items in the pass, 2 still pending => 3 have left the loop.
+        render(autoBackup = true, isSyncing = true, passTotal = 5, pendingCount = 2)
+        composeTestRule.onNodeWithTag("photo-backup-sync-progress").assertTextContains("Syncing 3 of 5...")
+    }
+
+    @Test
+    fun syncProgressIsIndeterminateBeforeThePassHasCounted() {
+        render(autoBackup = true, isSyncing = true, passTotal = 0)
+        composeTestRule.onNodeWithTag("photo-backup-sync-progress").assertTextContains("Backup in progress...")
     }
 
     @Test

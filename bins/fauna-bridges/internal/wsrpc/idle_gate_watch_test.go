@@ -65,6 +65,28 @@ func (c *gateWatchCaller) setSnapshot(s ConfigSnapshot) {
 	c.mu.Unlock()
 }
 
+// waitFetches blocks until at least n fetch_config calls have been answered (or
+// failed) — the causal barrier these tests use instead of sleeping. The helper
+// re-fetches once as soon as it is subscribed, so `waitFetches(t, 1)` is "the
+// startup re-fetch has run"; a test that changes the snapshot after it knows
+// the next fetch is the push's.
+func (c *gateWatchCaller) waitFetches(t *testing.T, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c.mu.Lock()
+		got := c.fetchN
+		c.mu.Unlock()
+		if got >= n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("waited for %d fetch_config call(s), saw %d", n, got)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // pushConfigChanged delivers a config_changed push through the installed
 // handler, waiting for the install first.
 func (c *gateWatchCaller) pushConfigChanged(t *testing.T) {
@@ -118,6 +140,33 @@ func TestIdleUntilGatesOpen_PushThatOpensGatesEndsTheIdle(t *testing.T) {
 	}
 }
 
+// TestIdleUntilGatesOpen_GateOpenedBeforeTheSubscriptionIsNotMissed: the
+// role's startup fetch saw the gate shut, and the admin's enable — with its one
+// config_changed push — landed before this helper installed its push handler.
+// No push will ever come again, so the helper must re-fetch once it is
+// subscribed, or the bridge idles until a restart (an e2e mail venue's MTA was
+// caught doing exactly that: "neither served nor exited for rebind").
+func TestIdleUntilGatesOpen_GateOpenedBeforeTheSubscriptionIsNotMissed(t *testing.T) {
+	t.Parallel()
+	caller := newGateWatchCaller(ConfigSnapshot{MailEnabled: true})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan bool, 1)
+	go func() {
+		done <- IdleUntilGatesOpen(ctx, caller, nil, time.Second, nil, mailOn)
+	}()
+
+	select {
+	case opened := <-done:
+		if !opened {
+			t.Fatal("IdleUntilGatesOpen returned false; want true (gates opened, not a process cancel)")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("IdleUntilGatesOpen kept idling on a gate that opened before it subscribed (a missed push)")
+	}
+}
+
 // TestIdleUntilGatesOpen_PushThatLeavesGatesShutKeepsIdling — the negative half.
 // A config_changed for an unrelated edit (a policy tweak while mail stays off)
 // must NOT end the idle: exiting there would make the supervisor restart a
@@ -134,26 +183,16 @@ func TestIdleUntilGatesOpen_PushThatLeavesGatesShutKeepsIdling(t *testing.T) {
 	}()
 
 	// A real edit that leaves the gate shut: the snapshot changes, mail doesn't.
+	caller.waitFetches(t, 1)
 	caller.setSnapshot(ConfigSnapshot{MailEnabled: false, IMAP: ImapPolicy{IdleTimeoutSecs: 77}})
 	caller.pushConfigChanged(t)
 
 	// Latency-independent negative assert (e2e-conventions.md convention 14):
 	// the causal barrier is the re-fetch the push provoked — once the fetch
-	// count has advanced, the applier has run and its verdict is final, so a
-	// still-blocked helper is blocked for good, not merely slow.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		caller.mu.Lock()
-		n := caller.fetchN
-		caller.mu.Unlock()
-		if n > 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the push never provoked a re-fetch — the idle subscription is not wired")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	// count has advanced past the startup re-fetch, the applier has run on the
+	// edited snapshot and its verdict is final, so a still-blocked helper is
+	// blocked for good, not merely slow.
+	caller.waitFetches(t, 2)
 	select {
 	case <-done:
 		t.Fatal("IdleUntilGatesOpen returned on a push that left its gates shut (a restart loop)")
@@ -192,8 +231,10 @@ func TestIdleUntilGatesOpen_TransientFetchFailureRetries(t *testing.T) {
 		done <- IdleUntilGatesOpen(ctx, caller, nil, time.Second, nil, mailOn)
 	}()
 
-	// The admin enables mail; the push-provoked re-fetch fails once before
-	// the (already-updated) snapshot is answered normally.
+	// The admin enables mail (after the startup re-fetch saw it off); the
+	// push-provoked re-fetch fails once before the (already-updated) snapshot
+	// is answered normally.
+	caller.waitFetches(t, 1)
 	caller.setSnapshot(ConfigSnapshot{MailEnabled: true})
 	caller.mu.Lock()
 	caller.failN = 1
@@ -211,8 +252,8 @@ func TestIdleUntilGatesOpen_TransientFetchFailureRetries(t *testing.T) {
 	caller.mu.Lock()
 	n := caller.fetchN
 	caller.mu.Unlock()
-	if n < 2 {
-		t.Fatalf("want at least 2 fetch attempts (the failure plus a retry), got %d", n)
+	if n < 3 {
+		t.Fatalf("want at least 3 fetch attempts (the startup re-fetch, the failure, a retry), got %d", n)
 	}
 }
 

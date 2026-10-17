@@ -10,6 +10,7 @@ import (
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/fxamacker/cbor/v2"
+	"lukechampine.com/blake3"
 
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/dagcbor"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mailfauna"
@@ -46,6 +47,12 @@ type storeCaller struct {
 	// train path must never open or train on.
 	spamModelBlob         []byte
 	spamModelStoredSealed bool
+	// spamModelRefetchBlobs answers the 2nd, 3rd, … fetch_spam_model with
+	// these stored-sealed blobs in order (the model another writer's put
+	// left, re-fetched after a "stale_model"); past its end, and on the
+	// first fetch, spamModelBlob answers.
+	spamModelRefetchBlobs [][]byte
+	spamFetchCalls        int
 	// spamModelFetchErr fails fetch_spam_model ⇒ the signal is skipped.
 	spamModelFetchErr error
 	// spamModelContributeBaseline / spamModelHolderSealTarget answer the
@@ -76,6 +83,9 @@ type capturedPutSpam struct {
 		Insert *capturedHistoryInsert `cbor:"Insert"`
 	} `cbor:"history_op"`
 	HolderCopy *wsrpc.SpamModelHolderCopy `cbor:"holder_copy"`
+	// ExpectedModel is the compare-and-swap precondition: nil ⇒ the key
+	// was absent; non-nil and empty ⇒ the "no stored model" marker.
+	ExpectedModel *[]byte `cbor:"expected_model"`
 }
 
 type capturedHistoryInsert struct {
@@ -192,9 +202,14 @@ func (c *storeCaller) Call(_ context.Context, method string, body, reply any) er
 		if c.spamModelFetchErr != nil {
 			return c.spamModelFetchErr
 		}
+		c.spamFetchCalls++
+		blob, storedSealed := c.spamModelBlob, c.spamModelStoredSealed
+		if i := c.spamFetchCalls - 2; i >= 0 && i < len(c.spamModelRefetchBlobs) {
+			blob, storedSealed = c.spamModelRefetchBlobs[i], true
+		}
 		rep, _ := dagcbor.Marshal(map[string]any{
-			"blob":                c.spamModelBlob,
-			"stored_sealed":       c.spamModelStoredSealed,
+			"blob":                blob,
+			"stored_sealed":       storedSealed,
 			"contribute_baseline": c.spamModelContributeBaseline,
 			"holder_seal_target":  c.spamModelHolderSealTarget,
 		})
@@ -803,6 +818,144 @@ func TestStoreAddJunkOnSealedModelDuplicateKeepsTheLastAcceptedModel(t *testing.
 			t.Fatalf("the duplicate's mutation was carried into the next UID (the text trained twice)")
 		}
 		t.Fatalf("second write-back is neither the once- nor the twice-trained model: %q", got)
+	}
+}
+
+// junkStaleFixture is the shared one-message \Junk train the
+// compare-and-swap tests drive: the stored model `envA` (opening to an
+// empty model), and `envB`, the model another writer's put left behind
+// (opening to `otherModel`, a fresh model taught one ham lesson).
+type junkStaleFixture struct {
+	caller     *storeCaller
+	opener     *storeOpenerStub
+	plaintext  []byte
+	envA, envB []byte
+	otherModel []byte
+}
+
+func newJunkStaleFixture(t *testing.T, uids int, replies []string) junkStaleFixture {
+	t.Helper()
+	msgID := bytes32x(0xCA)
+	ciphertext := sealedEnvelopeFixture(t, []byte("payload-sealed-train-cas"))
+	plaintext := []byte("Subject: free crypto\r\n\r\nclick here!")
+	f := junkStaleFixture{
+		plaintext:  plaintext,
+		envA:       []byte("sealed-model-envelope-a"),
+		envB:       []byte("sealed-model-envelope-b"),
+		otherModel: mailfauna.ApplySpamTraining(nil, "Subject: lunch\r\n\r\nsee you at noon", false).NewModelBytes,
+	}
+	updated := make([]wsrpc.StoreFlagsResultEntry, 0, uids)
+	for uid := 1; uid <= uids; uid++ {
+		updated = append(updated, wsrpc.StoreFlagsResultEntry{UID: uint32(uid), Flags: []string{"\\Junk"}, ModSeq: 2})
+	}
+	f.caller = &storeCaller{
+		metaReplies: []wsrpc.MessageMeta{
+			{UID: 1, MessageID: msgID, Flags: []string{}, Modseq: 1, InternalDate: 1, CiphertextSize: uint32(len(ciphertext))},
+		},
+		storeReply:            wsrpc.StoreFlagsReply{Updated: updated, HighestModSeq: 2},
+		cipherByID:            map[string][]byte{string(msgID): ciphertext},
+		spamModelBlob:         f.envA,
+		spamModelStoredSealed: true,
+		putSpamReplies:        replies,
+	}
+	f.opener = &storeOpenerStub{table: map[string][]byte{
+		string(ciphertext): plaintext,
+		string(f.envA):     {},
+		string(f.envB):     f.otherModel,
+	}}
+	stubSealToRecipient(t)
+	return f
+}
+
+func (f junkStaleFixture) store(t *testing.T, uids ...imap.UID) {
+	t.Helper()
+	s := &Session{
+		client:          f.caller,
+		actorID:         bytes32x(0x94),
+		actorMLSPubkey:  bytes32x(0x95),
+		selectedMailbox: "INBOX",
+		logger:          slog.Default(),
+	}
+	err := s.store(context.Background(), &storeFetchWriterFake{}, imap.UIDSetNum(uids...),
+		&imap.StoreFlags{Op: imap.StoreFlagsAdd, Flags: []imap.Flag{"\\Junk"}},
+		nil, f.opener)
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+}
+
+func requireExpectedModel(t *testing.T, put capturedPutSpam, want []byte) {
+	t.Helper()
+	if put.ExpectedModel == nil {
+		t.Fatalf("every agent-side put must name the model it was computed from (expected_model absent)")
+	}
+	if string(*put.ExpectedModel) != string(want) {
+		t.Errorf("expected_model: got %x, want %x", *put.ExpectedModel, want)
+	}
+}
+
+// The compare-and-swap precondition (mail-spam.md § Transactional update):
+// the put names the blake3 digest of the stored model it was computed from;
+// when another writer's put landed in between, the nest answers
+// "stale_model" having written nothing, and the event re-fetches the model
+// now stored, re-applies its lesson to IT and retries — so the write that
+// lands carries the other writer's lesson too.
+func TestStoreAddJunkStaleModelRefetchesAndRetriesOnTheModelNowStored(t *testing.T) {
+	f := newJunkStaleFixture(t, 1, []string{"stale_model", "written"})
+	f.caller.spamModelRefetchBlobs = [][]byte{f.envB}
+	f.store(t, 1)
+
+	if len(f.caller.putSpamCalls) != 2 {
+		t.Fatalf("expected the stale put and its retry, got %d puts", len(f.caller.putSpamCalls))
+	}
+	if f.caller.spamFetchCalls != 2 {
+		t.Errorf("the retry must re-fetch the stored model: got %d fetches, want 2", f.caller.spamFetchCalls)
+	}
+	digestA, digestB := blake3.Sum256(f.envA), blake3.Sum256(f.envB)
+	requireExpectedModel(t, f.caller.putSpamCalls[0], digestA[:])
+	requireExpectedModel(t, f.caller.putSpamCalls[1], digestB[:])
+	want := mailfauna.ApplySpamTraining(f.otherModel, string(f.plaintext), true).NewModelBytes
+	if got := f.caller.putSpamCalls[1].SealedModel; string(got) != "sealed:"+string(want) {
+		t.Errorf("the retry must carry the other writer's lesson plus this one, got %q", got)
+	}
+	requireHistoryInsert(t, f.caller.putSpamCalls[1])
+}
+
+// An untrained actor's first put names the "no stored model" marker (a
+// present, empty expected_model); each accepted write then becomes the
+// stored model the batch's next put names — the digest of exactly the
+// re-sealed bytes just written.
+func TestStoreAddJunkPreconditionTracksEachAcceptedWrite(t *testing.T) {
+	f := newJunkStaleFixture(t, 2, []string{"written", "written"})
+	f.caller.spamModelBlob, f.caller.spamModelStoredSealed = nil, false
+	f.store(t, 1, 2)
+
+	if len(f.caller.putSpamCalls) != 2 {
+		t.Fatalf("expected 2 puts (one per UID), got %d", len(f.caller.putSpamCalls))
+	}
+	requireExpectedModel(t, f.caller.putSpamCalls[0], []byte{})
+	first := blake3.Sum256(f.caller.putSpamCalls[0].SealedModel)
+	requireExpectedModel(t, f.caller.putSpamCalls[1], first[:])
+}
+
+// A writer that keeps losing the race gives the event up after
+// wsrpc.SpamModelStaleRetries retries — it never falls back to an
+// unconditional write over the other writers' models.
+func TestStoreAddJunkStaleModelGivesUpAfterTheRetryBound(t *testing.T) {
+	replies := make([]string, wsrpc.SpamModelStaleRetries+2)
+	for i := range replies {
+		replies[i] = "stale_model"
+	}
+	f := newJunkStaleFixture(t, 1, replies)
+	f.store(t, 1)
+
+	if got, want := len(f.caller.putSpamCalls), wsrpc.SpamModelStaleRetries+1; got != want {
+		t.Fatalf("puts: got %d, want %d (one put plus the bounded retries)", got, want)
+	}
+	for i, put := range f.caller.putSpamCalls {
+		if put.ExpectedModel == nil {
+			t.Errorf("put %d fell back to an unconditional write", i)
+		}
 	}
 }
 

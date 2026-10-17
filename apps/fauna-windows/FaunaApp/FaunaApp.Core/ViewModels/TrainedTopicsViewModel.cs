@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Linq;
 using System.Threading.Tasks;
 using FaunaApp.Core.Services;
 using uniffi.fauna_feed;
@@ -51,7 +52,52 @@ public partial class TrainedTopicsViewModel : ViewModelBase
     internal TrainedTopicsViewModel(INestRpcClient nest) => _nest = nest;
 
     /// <summary>Hydrate the facet from <c>list_trained_topics</c>.</summary>
-    public async Task LoadAsync() => await RunAsync(() => _nest.TrainedTopicsListAsync());
+    public async Task LoadAsync()
+    {
+        _ownReadError = null;
+        if (!await RunAsync(() => _nest.TrainedTopicsListAsync())) _ownReadError = ErrorMessage;
+    }
+
+    // The error text a failed LOAD put up (a gesture's message is never this):
+    // the only error a store-change re-read may retire on a good read.
+    private string? _ownReadError;
+
+    // RunAsync calls (the load and every gesture) in flight: a store-change
+    // re-read waits them out, their own answer repaints the list.
+    private int _opsInFlight;
+
+    /// <summary>Start re-reading the topics on the shared store-change notice —
+    /// call from the page's <c>Page_Loaded</c>, pair with
+    /// <see cref="ViewModelBase.CleanupStoreChange"/> on navigate-away.</summary>
+    public void WatchStore() => WatchStoreChange(_nest, StoreResyncAsync);
+
+    /// <summary>The store-change re-read (<c>account-runtime.md</c> § A runtime's
+    /// own pump is a source of the notice too, part 4): a topic another device
+    /// trained shows on the OPEN page with no re-visit. Skipped while a gesture
+    /// is in flight and dropped when one overtook the read; replaces the rows
+    /// only when they differ; a failed read writes nothing (the publish sheet's
+    /// error precedence is never crossed); retires only the error a failed load
+    /// put up — a gesture's message stays.</summary>
+    internal async Task<bool> StoreResyncAsync()
+    {
+        if (_opsInFlight > 0) return false;
+        var seq = _dispatchSeq;
+        var rows = await _nest.TrainedTopicsListAsync();
+        if (_opsInFlight > 0 || seq != _dispatchSeq) return false;
+        var changed = false;
+        if (!Topics.SequenceEqual(rows, SameRowComparer.Instance))
+        {
+            Repopulate(rows);
+            changed = true;
+        }
+        if (_ownReadError is not null && ErrorMessage == _ownReadError)
+        {
+            _ownReadError = null;
+            ErrorMessage = null;
+            changed = true;
+        }
+        return changed;
+    }
 
     /// <summary>Mint a factor (trimmed; a blank name is a client-side no-op —
     /// the shared service's <c>BlankName</c> rejection is defense in depth, never
@@ -162,6 +208,19 @@ public partial class TrainedTopicsViewModel : ViewModelBase
 
     private async Task<bool> RunAsync(Func<Task<FfiTrainedTopicRow[]>> op)
     {
+        _opsInFlight++;
+        try
+        {
+            return await RunCoreAsync(op);
+        }
+        finally
+        {
+            _opsInFlight--;
+        }
+    }
+
+    private async Task<bool> RunCoreAsync(Func<Task<FfiTrainedTopicRow[]>> op)
+    {
         var capturedSeq = ++_dispatchSeq;
         ErrorMessage = null;
         try
@@ -191,6 +250,24 @@ public partial class TrainedTopicsViewModel : ViewModelBase
             ShowError(ex);
             return false;
         }
+    }
+
+    /// <summary>Row equality by content: the generated record compares its
+    /// <c>id</c> byte array by reference, so two reads of one factor would never
+    /// look equal.</summary>
+    private sealed class SameRowComparer : IEqualityComparer<FfiTrainedTopicRow>
+    {
+        public static readonly SameRowComparer Instance = new();
+
+        public bool Equals(FfiTrainedTopicRow? a, FfiTrainedTopicRow? b) =>
+            a is not null && b is not null
+            && a.id.AsSpan().SequenceEqual(b.id)
+            && a.name == b.name
+            && a.factorKey == b.factorKey
+            && a.exampleCount == b.exampleCount
+            && a.learnFromEngagement == b.learnFromEngagement;
+
+        public int GetHashCode(FfiTrainedTopicRow row) => row.name.GetHashCode();
     }
 
     private void Repopulate(FfiTrainedTopicRow[] rows)

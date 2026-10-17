@@ -73,6 +73,11 @@ pub struct FfiBackupDestinationStatus {
     /// is never handed `now`), so a shell rendering the stamp alone would show
     /// a freshly-rotted custodian as just-verified.
     pub last_audit_passed_at: Option<u64>,
+    /// Nest rows only: `WRITER_STATE_OK` / `WRITER_STATE_REFUSED`, passed
+    /// straight to the shared `backup_backlog_label` — a destination that turns
+    /// this box away reads as refused, never as an ordinary lag. `None` on a
+    /// client-device row.
+    pub writer_state: Option<String>,
 }
 
 /// The wire row the **nest's** `fauna.backup.status` projection returns — the
@@ -99,6 +104,7 @@ impl From<fauna_protocol::backup::BackupDestinationStatusItem> for FfiBackupDest
             cap_state: s.cap_state,
             audit_state: s.audit_state,
             last_audit_passed_at: s.last_audit_passed_at,
+            writer_state: s.writer_state,
         }
     }
 }

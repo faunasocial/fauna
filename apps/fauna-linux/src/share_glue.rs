@@ -182,7 +182,7 @@ impl SharePlaneHost for LinuxShareHost {
 
     async fn bind_seat(
         &self,
-        evidence: Option<Vec<String>>,
+        evidence: Option<fauna_sync_engine::peer_leg::PeerLegNestFacts>,
         membership: &Arc<dyn fauna_peer_share::admission::SetMembership + Send + Sync>,
         group_roster: &Arc<dyn fauna_peer_share::admission::GroupRosterState + Send + Sync>,
     ) -> Result<(Arc<CeremonySeat>, Vec<std::net::SocketAddr>), String> {
@@ -219,8 +219,10 @@ impl SharePlaneHost for LinuxShareHost {
             .send(UiMessage::Data(DataMessage::SharePlaneChanged));
     }
 
-    async fn live_capabilities(&self) -> Result<Vec<String>, String> {
-        self.seams.live_capabilities().await
+    async fn live_nest_facts(
+        &self,
+    ) -> Result<fauna_sync_engine::peer_leg::PeerLegNestFacts, String> {
+        self.seams.live_nest_facts().await
     }
 
     async fn transfer_policy(&self) -> Option<EffectivePolicy> {

@@ -55,6 +55,24 @@ pub enum Custodian {
     /// key-encryption key; performs through the nest's own NIP-46 signer
     /// (`docs/goal/ui/nostr.md` § The nest as the user's NIP-46 signer).
     NostrDepositedKey,
+    /// The account's ActivityPub actor key (RSA), sealed under the
+    /// nest-internal key-encryption key; signs outbound HTTP Signatures
+    /// (`docs/goal/behavior/activitypub.md` § Architecture → *Identity &
+    /// keys*).
+    ActivityPubActorKey,
+    /// The account's delegated authoring sub-key `K`, sealed under the
+    /// nest-internal key-encryption key and authorized by the account's
+    /// identity-signed `DeviceAuthorization` carrying `Capability::Post`;
+    /// signs Fauna `Post` and post-`Tombstone` envelopes
+    /// (`docs/goal/behavior/atproto-pds-full.md` § D10).
+    AccountAuthoringKey,
+    /// The account's ATProto repo signing key, held by the first-party
+    /// `atproto.pds` bridge — sealed to that bridge's attested X25519, which
+    /// only it opens. The nest holds the policy and the sealed blob and never
+    /// signs: it asks the bridge to mint
+    /// (`docs/goal/architecture/key-material-hierarchy.md` § The oracle →
+    /// *The bridge-held custodian*).
+    AtprotoRepoKey,
 }
 
 /// An operation class the oracle performs — the built rows of the goal doc's
@@ -68,12 +86,29 @@ pub enum IdentityOpClass {
     NostrSignEvent,
     /// `nostr.nip44` — NIP-44 encrypt / decrypt with the deposited key.
     NostrNip44,
+    /// `activitypub.http_sig` — an HTTP Signature over an outbound
+    /// ActivityPub request with the account's actor key, to a host in the
+    /// principal's declared peer set, never over a sovereign activity shape.
+    ActivityPubHttpSig,
+    /// `post.author` — author a **public** Fauna post as the account, or
+    /// retract one this principal authored, signed with the account's
+    /// delegated authoring sub-key.
+    PostAuthor,
+    /// `atproto.service_auth` — a short-lived ATProto service JWT for an
+    /// `(aud, lxm)` pair in the principal's declared set, minted by the PDS
+    /// bridge with the account's repo signing key.
+    AtprotoServiceAuth,
 }
 
 impl IdentityOpClass {
     /// Every built class, in table order.
-    pub const ALL: &'static [IdentityOpClass] =
-        &[IdentityOpClass::NostrSignEvent, IdentityOpClass::NostrNip44];
+    pub const ALL: &'static [IdentityOpClass] = &[
+        IdentityOpClass::NostrSignEvent,
+        IdentityOpClass::NostrNip44,
+        IdentityOpClass::ActivityPubHttpSig,
+        IdentityOpClass::PostAuthor,
+        IdentityOpClass::AtprotoServiceAuth,
+    ];
 
     /// The class's name — the `identity.op` tuple's `kind` and the scope
     /// string's qualifier (`fauna:identity:op:<name>`).
@@ -82,6 +117,9 @@ impl IdentityOpClass {
         match self {
             IdentityOpClass::NostrSignEvent => "nostr.sign_event",
             IdentityOpClass::NostrNip44 => "nostr.nip44",
+            IdentityOpClass::ActivityPubHttpSig => "activitypub.http_sig",
+            IdentityOpClass::PostAuthor => "post.author",
+            IdentityOpClass::AtprotoServiceAuth => "atproto.service_auth",
         }
     }
 
@@ -93,6 +131,9 @@ impl IdentityOpClass {
             IdentityOpClass::NostrSignEvent | IdentityOpClass::NostrNip44 => {
                 Custodian::NostrDepositedKey
             }
+            IdentityOpClass::ActivityPubHttpSig => Custodian::ActivityPubActorKey,
+            IdentityOpClass::PostAuthor => Custodian::AccountAuthoringKey,
+            IdentityOpClass::AtprotoServiceAuth => Custodian::AtprotoRepoKey,
         }
     }
 
@@ -106,6 +147,15 @@ impl IdentityOpClass {
             }
             IdentityOpClass::NostrNip44 => {
                 "Ask your nest to encrypt and decrypt Nostr direct messages with your Nostr key (the key itself is never shared)"
+            }
+            IdentityOpClass::ActivityPubHttpSig => {
+                "Ask your nest to sign requests to the fediverse servers this app names with your fediverse key (the key itself is never shared)"
+            }
+            IdentityOpClass::PostAuthor => {
+                "Post public posts as you, and delete the ones this app posted (your key is never shared — your nest signs for it)"
+            }
+            IdentityOpClass::AtprotoServiceAuth => {
+                "Ask your nest to issue short-lived tokens for the Bluesky services this app names, signed with your Bluesky account's key (the key itself is never shared)"
             }
         }
     }
@@ -315,10 +365,23 @@ mod tests {
     fn every_class_parses_from_its_own_name_and_names_a_custodian() {
         for class in IdentityOpClass::ALL {
             assert_eq!(IdentityOpClass::parse(class.name()), Ok(*class));
-            // Exhaustive by construction; the assertion pins the Nostr pair.
-            assert_eq!(class.custodian(), Custodian::NostrDepositedKey);
             assert!(class.card_row().contains("never shared"));
         }
+        // Exhaustive by construction; the table pins each class's custodian.
+        let custodians: Vec<(&str, Custodian)> = IdentityOpClass::ALL
+            .iter()
+            .map(|c| (c.name(), c.custodian()))
+            .collect();
+        assert_eq!(
+            custodians,
+            [
+                ("nostr.sign_event", Custodian::NostrDepositedKey),
+                ("nostr.nip44", Custodian::NostrDepositedKey),
+                ("activitypub.http_sig", Custodian::ActivityPubActorKey),
+                ("post.author", Custodian::AccountAuthoringKey),
+                ("atproto.service_auth", Custodian::AtprotoRepoKey),
+            ]
+        );
     }
 
     /// The deny list, read back as refusals: every sovereign name is refused
@@ -353,6 +416,15 @@ mod tests {
             "NOSTR.SIGN_EVENT",
             "nostr.nip04",
             "identity.op",
+            "activitypub",
+            "activitypub.http_sig.get",
+            "activitypub.move",
+            "post",
+            "post.write",
+            "post.author.delete",
+            "atproto",
+            "atproto.service_auth.x",
+            "atproto.service",
         ] {
             assert_eq!(
                 IdentityOpClass::parse(bad),

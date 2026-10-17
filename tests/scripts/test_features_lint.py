@@ -538,3 +538,63 @@ def test_rule_4_counts_a_module_import_of_a_seat_factory_module_as_app_driving(t
                    '    sync_seats.start_seats(["tui"])\n')
     features, e2e, repo = build(tmp_path, contract=CONTRACT_ONE, tests_py=module_form)
     assert run(features, e2e, repo) == []
+
+
+# ── rule 6: stale ledger records (§ The ledger, *Stale records*) ─────────────
+def _rec(outcome):
+    return {"linux": {
+        "outcome": outcome, "skip_class": None, "stamp": "0.1.2-dev+abc standalone",
+        "version": "0.1.2", "commit": "abc", "image_digest": None,
+        "nest_mode": "standalone", "date": "2026-08-26", "platform": "linux"}}
+
+
+def _tui_ledger(features, feats):
+    (features / "ledger" / "tui.json").write_text(
+        json.dumps({"schema": 2, "app": "tui", "features": feats}, indent=2, sort_keys=True)
+        + "\n", encoding="utf-8")
+
+
+MAPPED = "tests/e2e-unified/tests/test_feed.py::test_own_post_appears"
+MOVED = "tests/e2e-unified/tests/test_feed.py::test_a_test_re_marked_elsewhere"
+
+
+def _stale_world(tmp_path):
+    features, e2e, repo = build(tmp_path, contract=CONTRACT_ONE, tests_py=TAGGED)
+    _tui_ledger(features, {
+        "feed-read": {"tests": {MAPPED: _rec("passed"), MOVED: _rec("failed")}},
+        "gone-feature": {"cell": {"stamp": "x", "date": "2026-08-26", "complete": True},
+                         "tests": {MAPPED: _rec("passed")}},
+    })
+    return features, e2e, repo
+
+
+def test_rule_6_flags_a_record_under_a_feature_that_no_longer_maps_its_test(tmp_path):
+    features, e2e, repo = _stale_world(tmp_path)
+    problems = run(features, e2e, repo)
+    assert any("ledger/tui.json: 1 record(s) under `feed-read`" in p and MOVED in p
+               for p in problems)
+    # a feature whose page is gone is stale too
+    assert any("under `gone-feature`" in p for p in problems)
+    # the mapped record is not reported
+    assert not any(f"`{MAPPED}`" in p and "feed-read" in p for p in problems)
+
+
+def test_prune_removes_exactly_the_stale_records_and_the_lint_goes_green(tmp_path):
+    features, e2e, repo = _stale_world(tmp_path)
+    removed = fc.prune_ledger(features)
+    assert removed == [("tui", "feed-read", MOVED), ("tui", "gone-feature", MAPPED)]
+    left = json.loads((features / "ledger" / "tui.json").read_text(encoding="utf-8"))
+    assert list(left["features"]) == ["feed-read"]
+    assert list(left["features"]["feed-read"]["tests"]) == [MAPPED]
+    assert run(features, e2e, repo) == []
+    assert fc.prune_ledger(features) == []  # idempotent
+
+
+def test_rule_6_absence_ignores_a_passing_record_for_an_unmapped_test(tmp_path):
+    features, e2e, repo = build(
+        tmp_path, contract=CONTRACT_ONE, tests_py=TAGGED,
+        absences="  tui: docs/goal/ui/feed.md § Compose")
+    _tui_ledger(features, {"feed-read": {"tests": {MOVED: _rec("passed")}}})
+    problems = run(features, e2e, repo)
+    assert not any("the declaration is stale" in p for p in problems)
+    assert any("no longer maps" in p for p in problems)

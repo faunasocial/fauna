@@ -199,9 +199,10 @@ pub fn build_privacy_page(
     // mapping from `fauna_protocol::spam` (reached via the `fauna-client-spam`
     // re-export), the single source of truth every app renders from
     // (docs/goal/ui/settings.md § Spam threshold slider labels). Mirrors web's
-    // `pref-hint` span; updates on value-changed. No inline buckets, and no test
-    // id (web's hint carries none either, so we don't invent a linux-only ID).
+    // `pref-hint` span; updates on value-changed. No inline buckets; tagged
+    // `spam-threshold-band` like every app.
     let band_label = gtk::Label::new(Some(spam_band_label(spam_scale.value())));
+    crate::testid::set_test_id(&band_label, ids::SPAM_THRESHOLD_BAND);
     band_label.add_css_class("dim-label");
     band_label.set_valign(gtk::Align::Center);
     spam_row.add_suffix(&band_label);

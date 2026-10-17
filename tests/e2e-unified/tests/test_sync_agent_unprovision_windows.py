@@ -98,7 +98,7 @@ produced no diagnosis between them. All three now announce themselves:
 and shared Rust's `SyncAgentProvisioner::unprovision` logs the push's own outcome
 (delivered / unreachable / refused) instead of discarding it. The prime suspect is
 the last one under load: the push is best-effort by design and a lost message is
-*anticipated* by `on-demand-files.md` § Multi-account × File Provider ("is asked to
+*anticipated* by `on-demand-files-apple.md` § Multi-account × File Provider ("is asked to
 unprovision, and made to reconcile if the asking fails"), with the signed-out
 marker as the backstop — so a recurrence is a load artifact to be read off the app
 log, not a mystery to re-instrument. Both reds were at 06:43 inside/behind a
@@ -405,7 +405,7 @@ def test_windows_unprovision_on_switch_and_signout(
                 raise AssertionError(
                     "the switch must unprovision the OLD identity's capability "
                     "before re-provisioning under the new one "
-                    "(on-demand-files.md § Multi-account × File Provider, "
+                    "(on-demand-files-apple.md § Multi-account × File Provider, "
                     f"consequence 1).\n{e}\n{_app_trace()}"
                 ) from None
 
@@ -478,7 +478,7 @@ def test_windows_unprovision_on_switch_and_signout(
             assert status.get("connection") == "Disconnected", (
                 f"the agent is STILL PROVISIONED after sign-out, with no install left in "
                 f"flight to explain it — a signed-out account is being served "
-                f"(on-demand-files.md § Multi-account × File Provider, consequence 1); "
+                f"(on-demand-files-apple.md § Multi-account × File Provider, consequence 1); "
                 f"status={status!r}\n"
                 f"agent log since sign-out:\n"
                 f"{_read_log_delta(log_path, offset_before_signout)[-4000:]}"

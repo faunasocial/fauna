@@ -7,6 +7,7 @@ import com.fauna.app.core.HexUtil
 import com.fauna.app.core.ShellLog
 import com.fauna.ffi.FfiAdminInviteCode
 import com.fauna.ffi.FfiAdminInviteRequest
+import com.fauna.ffi.FfiAdminPendingAction
 import com.fauna.ffi.FfiAdminUser
 import com.fauna.ffi.FfiRegistrationMode
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -72,6 +73,11 @@ class AdminUsersVM @Inject constructor(
     private val _pendingRequests = MutableStateFlow<List<FfiAdminInviteRequest>>(emptyList())
     val pendingRequests: StateFlow<List<FfiAdminInviteRequest>> = _pendingRequests
 
+    /** Section 6 — every account's still-`pending` admin action (admin.md §
+     *  Pending admin actions): the standing co-admin approve / veto surface. */
+    private val _pendingActions = MutableStateFlow<List<FfiAdminPendingAction>>(emptyList())
+    val pendingActions: StateFlow<List<FfiAdminPendingAction>> = _pendingActions
+
     /** The freshly minted invite token, surfaced for the copy button. */
     private val _mintedCode = MutableStateFlow<String?>(null)
     val mintedCode: StateFlow<String?> = _mintedCode
@@ -131,6 +137,8 @@ class AdminUsersVM @Inject constructor(
                 _inviteCodes.value = api.adminInviteCodesList()
                 _pendingRequests.value =
                     api.adminInviteRequestsList().filter { it.status == STATUS_PENDING }
+
+                _pendingActions.value = api.adminPendingActionsList()
 
                 reloadRegistration()
             } catch (e: Exception) {
@@ -198,6 +206,8 @@ class AdminUsersVM @Inject constructor(
         action {
             api.adminAdminsAdd(user.actorId)
             reloadUsers()
+            // The grant is a pending admin action: the standing section shows it.
+            _pendingActions.value = api.adminPendingActionsList()
         }
     }
 
@@ -210,6 +220,7 @@ class AdminUsersVM @Inject constructor(
         action {
             api.adminAdminsRemove(user.actorId)
             reloadUsers()
+            _pendingActions.value = api.adminPendingActionsList()
         }
     }
 
@@ -267,6 +278,24 @@ class AdminUsersVM @Inject constructor(
         }
     }
 
+    /** Add this admin's approval to a pending action, then re-list. The nest
+     *  refuses self-approval and a row no longer pending; the failure routes to
+     *  `admin-users-action-error`. */
+    fun approvePendingAction(pending: FfiAdminPendingAction) {
+        action {
+            api.adminPendingActionApprove(pending.id)
+            _pendingActions.value = api.adminPendingActionsList()
+        }
+    }
+
+    /** Cancel (veto) a pending admin action — one click, no confirm. */
+    fun cancelPendingAction(pending: FfiAdminPendingAction) {
+        action {
+            api.adminPendingActionCancel(pending.id)
+            _pendingActions.value = api.adminPendingActionsList()
+        }
+    }
+
     fun clearMintedCode() {
         _mintedCode.value = null
     }
@@ -312,7 +341,13 @@ class AdminUsersVM @Inject constructor(
      * handle-less account). The form is never cleared here on success or
      * failure — the new row in the Users-section refetch is the feedback.
      */
-    fun admitUser(actorHex: String, handle: String, tier: String, invalidActorHint: String) {
+    fun admitUser(
+        actorHex: String,
+        handle: String,
+        tier: String,
+        guardianActor: ByteArray?,
+        invalidActorHint: String,
+    ) {
         val trimmed = actorHex.trim()
         val isHex = trimmed.length == 64 &&
             trimmed.all { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' }
@@ -321,7 +356,12 @@ class AdminUsersVM @Inject constructor(
             return
         }
         action {
-            api.adminUsersCreate(HexUtil.hexToBytes(trimmed), tier, handle.trim().takeIf { it.isNotEmpty() })
+            api.adminUsersCreate(
+                HexUtil.hexToBytes(trimmed),
+                tier,
+                handle.trim().takeIf { it.isNotEmpty() },
+                guardianActor,
+            )
             reloadUsers()
         }
     }

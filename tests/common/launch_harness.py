@@ -95,8 +95,7 @@ def reached_authenticated_app(driver, timeout: float = 30) -> None:
         anchors = (FEED_TAB, *SHELL_SWAP_ANCHORS)
         deadline = time.monotonic() + timeout
         while True:
-            visible = next((a for a in anchors if driver.is_visible(a)), None)
-            if visible is not None:
+            if in_authenticated_app(driver):
                 return
             if time.monotonic() >= deadline:
                 raise AssertionError(
@@ -111,6 +110,17 @@ def reached_authenticated_app(driver, timeout: float = 30) -> None:
         driver.wait_for_state(
             lambda s: bool(s.get("session", {}).get("authenticated")), timeout=timeout
         )
+
+
+def in_authenticated_app(driver) -> bool:
+    """One non-blocking read of :func:`reached_authenticated_app`'s signal — for
+    a caller that polls it beside other work (a wizard it is still stepping
+    through). Native: ``session.authenticated``; web: one of the authenticated
+    shells rendered, never web's stricter verified-this-load flag (the reason is
+    :func:`reached_authenticated_app`'s)."""
+    if driver.is_web():
+        return any(driver.is_visible(a) for a in (FEED_TAB, *SHELL_SWAP_ANCHORS))
+    return bool(driver.get_state("session.authenticated"))
 
 
 class LaunchHarness:
@@ -280,6 +290,22 @@ class NativeLaunchHarness(LaunchHarness):
         self._seed(self._config)
         self.driver.launch(self._config)
 
+    def relaunch_as_launched(self) -> None:
+        """Force-quit + relaunch with the escrow-trust seed the FIRST launch
+        read, never a fresh read of the nest.
+
+        Two cases need it, and ``relaunch()`` fails both. A nest that is down
+        has no identity to read, so the fresh read would fail before the app
+        starts — the unreachable-on-reopen case. And a case whose subject is
+        that the nest's identity did NOT change must not let the harness name
+        whatever the nest serves now: a reseed would hide exactly the change
+        the case exists to catch (the factory-reset reconnect case).
+
+        Like ``relaunch()``, the client store survives only once the caller has
+        pinned it (``driver.preserve_state_across_relaunch()``)."""
+        self.driver.teardown()
+        self.driver.launch(self._config)
+
     def _seed(self, config: dict) -> None:
         """Seed ``config``'s escrow trust in this launch's nest, read afresh on
         every launch: a relaunch after a rotation must name the identity the nest
@@ -365,6 +391,10 @@ class WebLaunchHarness(LaunchHarness):
     #: ``fauna_launch_machine::launch_clock::OFFSET_ENV``).
     WEB_LAUNCH_ENV = frozenset({"FAUNA_E2E_CLOCK_OFFSET_SECS"})
 
+    #: The onboarding route's empty-store surface (identity_choice): what a
+    #: fresh browser at `/app/` settles on once the layout has routed it.
+    EMPTY_STORE_SURFACE = "create-identity-button"
+
     def __init__(self, spa_url: str, environment: dict[str, str] | None = None):
         #: The SPA proxy origin the wasm pins by (== the web ``node_url``).
         self._spa_url = spa_url
@@ -406,6 +436,15 @@ class WebLaunchHarness(LaunchHarness):
         self.driver.launch({"url": self._spa_url.rstrip("/") + "/app/"})
         with contextlib.suppress(Exception):
             self.driver.wait_for_state(lambda s: s is not None, timeout=30)
+        # Seed only once the empty-store launch has LANDED on the onboarding
+        # route's identity_choice — a state, not a window (convention 14). The
+        # layout's empty-store guard moves `/app/` on to `/app/onboarding` on its
+        # own schedule, and `relaunch()` reloads whatever URL the page is on: an
+        # identity seeded before that guard has run is read by it as a signed-in
+        # store (no redirect), and a reload that beats the redirect re-enters
+        # `/app/` with a stored identity, which the layout sends to the main app
+        # — either way the routed launch machine never runs.
+        self.driver.wait_for(self.EMPTY_STORE_SURFACE, timeout=60)
         self._cred = WebCredStore(self.driver)
         # Seed the identity into localStorage but do NOT reload here: the SPA stays
         # UNAUTHENTICATED on the reset launch surface. The caller seeds the pin next
@@ -447,6 +486,13 @@ class WebLaunchHarness(LaunchHarness):
 
     def relaunch(self) -> None:
         self.driver.hard_reload()
+
+    def relaunch_as_launched(self) -> None:
+        """``NativeLaunchHarness.relaunch_as_launched``'s twin: a ``relaunch()``,
+        since a browser reads no escrow-trust seed — there is nothing a fresh
+        read of the nest could re-name, and a reload needs no nest at all (the
+        SPA is served by its proxy, up while the nest is down)."""
+        self.relaunch()
 
     def teardown(self) -> None:
         if self.driver is not None:

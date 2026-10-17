@@ -42,7 +42,10 @@ pub struct DomainRegistration {
 /// row would shadow the apex actor), enforces the per-account domain limit,
 /// rejects duplicates, generates a verification token, and inserts the row with
 /// `status = "pending"`. `apex_domain` is the nest's serving domain
-/// (`AppState::web_serving_domain`; empty on a domainless box).
+/// (`AppState::web_serving_domain`; empty on a domainless box); `plugin_names`
+/// are the whole names this nest's hosted plugins claim under it
+/// (`plugin_runner::claimed_plugin_labels`, each as `<label>.<apex>`), which a
+/// custom domain may not take either.
 ///
 /// The reserved/self rejection is defense-in-depth *behind* DNS verification (a
 /// non-admin cannot publish `_fauna-verify` for the apex), so isolation no longer
@@ -52,14 +55,19 @@ pub async fn register_domain(
     actor_id: &[u8; 32],
     domain: &str,
     apex_domain: &str,
+    plugin_names: &[String],
 ) -> anyhow::Result<DomainRegistration> {
     // Normalize + validate (shared, WASM-safe) before anything touches the DB.
     let domain = fauna_core::web::normalize_custom_domain(domain)
         .map_err(|e| anyhow::anyhow!("invalid domain: {e}"))?;
 
-    // Never let a custom domain claim a name the nest serves itself.
+    // Never let a custom domain claim a name the nest serves itself — or one
+    // a plugin it hosts answers on (`plugin_ingress`'s whole-name door).
     if fauna_core::web::is_nest_owned_host(&domain, apex_domain) {
         anyhow::bail!("domain is reserved by this nest");
+    }
+    if plugin_names.iter().any(|n| n == &domain) {
+        anyhow::bail!("domain is claimed by a plugin this nest hosts");
     }
 
     // Enforce per-account limit.
@@ -255,15 +263,11 @@ mod tests {
         CacheDb::open_in_memory().unwrap()
     }
 
-    // ⚠ The nest apex in these tests is `nest.example.org`, NOT `example.com`.
-    // Every test here contrasts a user's custom domain (`*.example.com`)
-    // against the nest's own apex, and the publish scrub rules rewrite
-    // `example.com` -> `example.com`. With the apex on the
-    // scrub target the two collapse in the shipped tree, so `register_domain`
-    // would be handed the very apex it exists to refuse — turning six passing
-    // tests red in the public repo and nowhere else. `transform.py`'s
-    // `verify_no_scrub_collisions` gate now fails the dry-run on this.
-    // (Found by the local public-CI replay, 2026-08-24.)
+    // ⚠ The nest apex in these tests is `nest.example.org`, never an
+    // `example.com` name: every test here contrasts a user's custom domain
+    // (`*.example.com`) against the nest's own apex, and were the two to
+    // collapse `register_domain` would be handed the very apex it exists to
+    // refuse.
 
     // ---- register_domain_creates_pending_entry ----
 
@@ -272,7 +276,7 @@ mod tests {
         let db = db();
         let actor = actor();
 
-        let reg = register_domain(&db, &actor, "example.com", "nest.example.org")
+        let reg = register_domain(&db, &actor, "example.com", "nest.example.org", &[])
             .await
             .expect("registration should succeed");
 
@@ -305,13 +309,14 @@ mod tests {
         // Register exactly MAX_DOMAINS_PER_ACCOUNT (3) domains — all must succeed.
         for i in 0..MAX_DOMAINS_PER_ACCOUNT {
             let domain = format!("domain{}.example.com", i);
-            register_domain(&db, &actor, &domain, "nest.example.org")
+            register_domain(&db, &actor, &domain, "nest.example.org", &[])
                 .await
                 .unwrap_or_else(|e| panic!("domain {i} registration failed: {e}"));
         }
 
         // The 4th registration must fail.
-        let result = register_domain(&db, &actor, "fourth.example.com", "nest.example.org").await;
+        let result =
+            register_domain(&db, &actor, "fourth.example.com", "nest.example.org", &[]).await;
         assert!(result.is_err(), "4th registration should be rejected");
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -333,13 +338,13 @@ mod tests {
         let actor2 = actor2();
 
         // First registration succeeds.
-        register_domain(&db, &actor, "shared.example.com", "nest.example.org")
+        register_domain(&db, &actor, "shared.example.com", "nest.example.org", &[])
             .await
             .unwrap();
 
         // Same domain by the same actor must be rejected.
         let same_actor_result =
-            register_domain(&db, &actor, "shared.example.com", "nest.example.org").await;
+            register_domain(&db, &actor, "shared.example.com", "nest.example.org", &[]).await;
         assert!(
             same_actor_result.is_err(),
             "duplicate by same actor should be rejected"
@@ -353,7 +358,7 @@ mod tests {
 
         // Same domain by a different actor must also be rejected.
         let other_actor_result =
-            register_domain(&db, &actor2, "shared.example.com", "nest.example.org").await;
+            register_domain(&db, &actor2, "shared.example.com", "nest.example.org", &[]).await;
         assert!(
             other_actor_result.is_err(),
             "duplicate by different actor should be rejected"
@@ -382,7 +387,7 @@ mod tests {
             // case-insensitively too (normalize lowercases first)
             "App.Nest.Example.ORG",
         ] {
-            let err = register_domain(&db, &actor, host, "nest.example.org")
+            let err = register_domain(&db, &actor, host, "nest.example.org", &[])
                 .await
                 .expect_err("nest-owned host must be rejected");
             assert!(
@@ -409,7 +414,7 @@ mod tests {
             "localhost",
             "",
         ] {
-            let err = register_domain(&db, &actor, bad, "nest.example.org")
+            let err = register_domain(&db, &actor, bad, "nest.example.org", &[])
                 .await
                 .expect_err("malformed domain must be rejected");
             assert!(
@@ -426,9 +431,15 @@ mod tests {
     async fn register_domain_normalizes_before_store() {
         let db = db();
         let actor = actor();
-        let reg = register_domain(&db, &actor, "  Blog.Example.COM.  ", "nest.example.org")
-            .await
-            .expect("registration should succeed");
+        let reg = register_domain(
+            &db,
+            &actor,
+            "  Blog.Example.COM.  ",
+            "nest.example.org",
+            &[],
+        )
+        .await
+        .expect("registration should succeed");
         assert_eq!(
             reg.domain, "blog.example.com",
             "stored domain is normalized"
@@ -440,7 +451,7 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
-        let dup = register_domain(&db, &actor, "BLOG.EXAMPLE.COM", "nest.example.org").await;
+        let dup = register_domain(&db, &actor, "BLOG.EXAMPLE.COM", "nest.example.org", &[]).await;
         assert!(
             dup.unwrap_err().to_string().contains("already registered"),
             "a case-variant of an existing domain is a duplicate"
@@ -454,7 +465,7 @@ mod tests {
         let db = db();
         let actor = actor();
 
-        let reg = register_domain(&db, &actor, "example.com", "nest.example.org")
+        let reg = register_domain(&db, &actor, "example.com", "nest.example.org", &[])
             .await
             .expect("registration should succeed");
 
@@ -492,7 +503,7 @@ mod tests {
         let db = db();
         let actor = actor();
 
-        register_domain(&db, &actor, "example.com", "nest.example.org")
+        register_domain(&db, &actor, "example.com", "nest.example.org", &[])
             .await
             .expect("registration should succeed");
 
@@ -532,7 +543,7 @@ mod tests {
         let actor = actor();
         let resolver = HostResolver::new("nest.example.org".to_string());
 
-        let reg = register_domain(&db, &actor, "example.com", "nest.example.org")
+        let reg = register_domain(&db, &actor, "example.com", "nest.example.org", &[])
             .await
             .expect("registration should succeed");
 
@@ -577,7 +588,7 @@ mod tests {
         let actor = actor();
         let resolver = HostResolver::new("nest.example.org".to_string());
 
-        register_domain(&db, &actor, "example.com", "nest.example.org")
+        register_domain(&db, &actor, "example.com", "nest.example.org", &[])
             .await
             .unwrap();
         db.update_web_domain_status("example.com", "active")
@@ -612,7 +623,7 @@ mod tests {
         resolver.set_apex_actor(Some(other)).await;
         resolver.register_subdomain("alice", other).await;
 
-        register_domain(&db, &actor, "example.com", "nest.example.org")
+        register_domain(&db, &actor, "example.com", "nest.example.org", &[])
             .await
             .unwrap();
         db.update_web_domain_status("example.com", "active")

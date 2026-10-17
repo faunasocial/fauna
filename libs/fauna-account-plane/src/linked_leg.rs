@@ -92,12 +92,14 @@ use fauna_client_core::recovery_chain::{
     ChainReconcile, RpcChainDoor, reconcile_registration_chains,
 };
 use fauna_core::crypto::AccountStateKeySchedule;
-use fauna_core::generation::{FleetView, GenerationMintRecord};
+use fauna_core::generation::FleetView;
 use fauna_protocol::account_state::{ACCOUNT_STATE_FLEET_SCOPE, ACCOUNT_STATE_SCOPE};
 use fauna_protocol::generation_escrow::{
     EscrowDeleteReply, EscrowDeleteRequest, KIND_ESCROW_DELETE,
 };
-use fauna_protocol::merge_policy::{KIND_ESCROW_RECEIPT, KIND_GENERATION_MINT};
+use fauna_protocol::merge_policy::{
+    KIND_ESCROW_RECEIPT, KIND_ESCROW_WRAP, KIND_GENERATION_MINT, KIND_GENERATION_SHRED,
+};
 use fauna_protocol::pair::{PairListReply, PairListRequest};
 use fauna_protocol::{ByteBuf, RpcErrorClass, RpcRequester};
 
@@ -377,11 +379,12 @@ pub fn mirrored_retires(
     owed
 }
 
-/// The generations merged state reads **authored** `Shredded` at `view` —
-/// signed by a verified, non-removed member over the row's own id
-/// (`GenerationMintRecord::shred_is_authored`). An unauthored shred sweeps
-/// nothing (`account-data-taxonomy.md` § *Fleet-scope reclamation* → *the
-/// authored shred*).
+/// The generations an **authored** shred cell attests at `view` — an
+/// attestation in a verified, non-removed member's own
+/// `fauna.state.generation-shred` cell
+/// (`fauna_core::generation::authored_shred_generations`). A mint row's
+/// `Shredded` marker alone sweeps nothing (`fleet-scope-reclamation.md`
+/// § *Fleet-scope reclamation* → *the authored shred*, *the shred cell*).
 ///
 /// # Errors
 ///
@@ -390,30 +393,20 @@ pub async fn shredded_generations<B: StoreBackend>(
     store: &AccountStore<B>,
     view: &FleetView,
 ) -> Result<BTreeSet<[u8; 32]>> {
-    let mut shredded = BTreeSet::new();
-    for entry in live_rows(store, KIND_GENERATION_MINT).await? {
-        let Ok(id) = fauna_core::hex32::decode(&entry.key) else {
-            continue;
-        };
-        if fauna_core::hex32::encode(&id) != entry.key {
-            continue;
-        }
-        if fauna_core::encoding::canonical_decode::<GenerationMintRecord>(&entry.value)
-            .is_ok_and(|record| record.shred_is_authored(view) == Ok(id))
-        {
-            shredded.insert(id);
-        }
-    }
-    Ok(shredded)
+    let cells = live_rows(store, KIND_GENERATION_SHRED).await?;
+    Ok(fauna_core::generation::authored_shred_generations(
+        view,
+        cells.iter().map(crate::generation_store::row_ref),
+    ))
 }
 
 /// The shred half of step 6 on one linked plane: every row `listing` shows
 /// that is sealed under a `shredded` generation (by its cleartext header, read
 /// from the relay row this reconcile recorded — never opened: no device keeps
 /// the key), whoever wrote it; then, on the fleet scope, each shredded
-/// generation's mint rows behind the dataless belt and its receipts behind the
-/// sweeping one. `Shredded` is absorbing, so any member retires them
-/// (`account-data-taxonomy.md` § *Fleet-scope reclamation*, the second-holder
+/// generation's mint rows and shred cells behind the dataless belt and its
+/// receipts behind the sweeping one. `Shredded` is absorbing, so any member retires them
+/// (`fleet-scope-reclamation.md` § *Fleet-scope reclamation*, the second-holder
 /// ruling).
 ///
 /// # Errors
@@ -484,6 +477,30 @@ where
             }
         }
     }
+    // The shred cells are the mint row's company, behind the same belt and
+    // after it — and stay in merged state for the same reason: they are
+    // what keeps the generation authored-shredded here.
+    for cell in live_rows(store, KIND_GENERATION_SHRED).await? {
+        let Some((g, _)) = fauna_core::generation::parse_shred_cell_key(&cell.key) else {
+            continue;
+        };
+        if !shredded.contains(&g) {
+            continue;
+        }
+        let Some(item_key) = plane.gen0_item_key(KIND_GENERATION_SHRED, &cell.key) else {
+            continue;
+        };
+        for (writer, writer_seq) in listed_at(item_key) {
+            owed.push(OwedRetire {
+                item_key,
+                writer,
+                writer_seq,
+                no_rows_sealed_under: Some(g),
+                delete_escrow_wraps: false,
+                forget_after: false,
+            });
+        }
+    }
     for receipt in live_rows(store, KIND_ESCROW_RECEIPT).await? {
         let Some(g) = crate::generation_reclaim::receipt_generation(&receipt.key) else {
             continue;
@@ -501,6 +518,30 @@ where
                 writer_seq,
                 no_rows_sealed_under: Some(g),
                 delete_escrow_wraps: true,
+                forget_after: true,
+            });
+        }
+    }
+    // The fleet plane's copy of the wrap follows its receipt by coordinates
+    // (*Escrow custody*, ruling (3)); the receipt's retire already takes the
+    // linked holder's wraps.
+    for wrap in live_rows(store, KIND_ESCROW_WRAP).await? {
+        let Some(g) = crate::generation_reclaim::receipt_generation(&wrap.key) else {
+            continue;
+        };
+        if !shredded.contains(&g) {
+            continue;
+        }
+        let Some(item_key) = plane.gen0_item_key(KIND_ESCROW_WRAP, &wrap.key) else {
+            continue;
+        };
+        for (writer, writer_seq) in listed_at(item_key) {
+            owed.push(OwedRetire {
+                item_key,
+                writer,
+                writer_seq,
+                no_rows_sealed_under: Some(g),
+                delete_escrow_wraps: false,
                 forget_after: true,
             });
         }
@@ -965,9 +1006,17 @@ mod tests {
              is the bound nest's walk alone (`succession-aftermath.md` § Re-key \
              scope → *Which walks carry*)"
         );
+        assert!(
+            !production.contains("ext_plane("),
+            "the linked leg derives an `ext:<kind>` plane: the driver's are handed \
+             the bound nest's predecessor schedules (`account_driver::pass::\
+             bound_ext_plane`), and one here must be handed none \
+             (`succession-aftermath.md` § Re-key scope → *Which walks carry*)"
+        );
         for retired in [
             "with_predecessor_mint_keys(",
             "with_predecessor_machinery_keys(",
+            ".predecessor_schedules()",
         ] {
             assert!(
                 !production.contains(retired),
@@ -1316,12 +1365,9 @@ mod tests {
         let f = fixture().await;
         f.put(enrollment_row(US)).await;
         let (g, gen_key, core) = f.mint_over(&[member_of(US), member_of(THEM)]).await;
-        f.put(machinery_row(
-            KIND_GENERATION_MINT,
-            fauna_core::hex32::encode(&g),
-            &fauna_core::generation::sign_shred(&device_key(US), core, 9_000).unwrap(),
-        ))
-        .await;
+        for row in authored_shred_rows(US, core, 9_000) {
+            f.put(row).await;
+        }
         // THEM's device-endpoints row, sealed under `g`, as the linked walk
         // recorded it.
         let them = device_key(THEM);
@@ -1419,36 +1465,31 @@ mod tests {
         );
     }
 
-    /// **An unauthored shred sweeps nothing** (`account-data-taxonomy.md`
-    /// § *Fleet-scope reclamation* → *the authored shred*): a sig-less
-    /// `Shredded` — what any `BackupKey` holder can write — or one signed by
-    /// a device that is no verified member is not in the linked leg's sweep
-    /// set, so no row under it is owed a retire. Red-verified: with the
-    /// filter back to `matches!(.., Shredded { .. })` the set holds `g`.
+    /// **An unauthored shred sweeps nothing** (`fleet-scope-reclamation.md`
+    /// § *Fleet-scope reclamation* → *the authored shred*, *the shred
+    /// cell*): a `Shredded` marker with no authored cell — what any
+    /// `BackupKey` holder can write — or one beside a cell by a device that
+    /// is no verified member is not in the linked leg's sweep set, so no row
+    /// under it is owed a retire. Red-verified: with the set read from the
+    /// mint rows' markers again, it holds the generation.
     #[tokio::test]
     async fn an_unauthored_shred_is_not_in_the_linked_legs_sweep_set() {
         let f = fixture().await;
         f.put(enrollment_row(US)).await;
-        let (g, _, core) = f.mint_over(&[member_of(US), member_of(THEM)]).await;
+        let (_, _, core) = f.mint_over(&[member_of(US), member_of(THEM)]).await;
         let view = crate::fleet_removal::fleet_view(&f.store, &f.trust)
             .await
             .unwrap();
         for forged in [
-            GenerationMintRecord::Shredded {
-                core: core.clone(),
-                shredded_at_ms: 9_000,
-                shredded_by: device_id_of(US),
-                shredder_sig: vec![],
-            },
-            // THEM is named by the mint but never enrolled: no verified member.
-            fauna_core::generation::sign_shred(&device_key(THEM), core.clone(), 9_000).unwrap(),
+            // The marker alone, naming a verified member.
+            vec![shred_marker_row(US, core.clone(), 9_000)],
+            // THEM is named by the mint but never enrolled: no verified
+            // member, so its verifying cell attests nothing.
+            authored_shred_rows(THEM, core.clone(), 9_000).to_vec(),
         ] {
-            f.put(machinery_row(
-                KIND_GENERATION_MINT,
-                fauna_core::hex32::encode(&g),
-                &forged,
-            ))
-            .await;
+            for row in forged {
+                f.put(row).await;
+            }
             assert!(
                 shredded_generations(&f.store, &view)
                     .await

@@ -92,6 +92,15 @@ pub struct HeldGeneration {
     /// holds no bytes; its role is to end the path's liveness while still letting
     /// the generations beneath it age out through the normal grace window.
     pub deleted: bool,
+    /// This generation is **held up** by a standing source regression: a copy
+    /// the source lost, kept until the owner's recovery runs
+    /// (`segment-backup-protocol.md` § Client-device custodian (pull) →
+    /// *Restore* → *Recovery from this device's own store*, part (0′), the
+    /// hold). [`plan_reclaim`] never names a pinned generation — not past the
+    /// grace window and not under cap pressure — though its bytes count toward
+    /// `held_bytes` like any other retained generation's. The caller derives
+    /// it; nothing here reads a regression.
+    pub pinned: bool,
 }
 
 /// Whether the custodian may keep pulling.
@@ -293,6 +302,10 @@ impl ReclaimPlan {
 /// 3. **Under cap pressure the remaining retained generations reclaim too**,
 ///    oldest-supersede first — and if the live corpus alone still meets the cap,
 ///    the answer is [`CapState::Reached`], never an eviction.
+///
+/// A [`HeldGeneration::pinned`] generation is outside rules 2 and 3: it is
+/// held, counted, and never named, so a store whose pinned copy alone meets
+/// the cap reports [`CapState::Reached`] as a live corpus would.
 pub fn plan_reclaim(held: &[HeldGeneration], cap_bytes: Option<u64>, now: i64) -> ReclaimPlan {
     // Order each path's generations newest-first so the live one and every
     // retained one's supersede time fall out of the same single pass.
@@ -332,16 +345,22 @@ pub fn plan_reclaim(held: &[HeldGeneration], cap_bytes: Option<u64>, now: i64) -
     retained.sort_by_key(|&(idx, superseded_at)| (superseded_at, idx));
     let mut reclaim: Vec<usize> = Vec::new();
     let mut surviving: Vec<(usize, u64)> = Vec::new();
+    // A pinned generation is held up by a standing source regression: counted,
+    // never named, by either rule.
+    let mut pinned_bytes: u64 = 0;
     for &(idx, superseded_at) in &retained {
-        if now.saturating_sub(superseded_at) >= CUSTODIAN_GRACE_SECS {
+        if held[idx].pinned {
+            pinned_bytes = pinned_bytes.saturating_add(held[idx].size_bytes);
+        } else if now.saturating_sub(superseded_at) >= CUSTODIAN_GRACE_SECS {
             reclaim.push(idx);
         } else {
             surviving.push((idx, held[idx].size_bytes));
         }
     }
 
-    let mut held_bytes =
-        live_bytes.saturating_add(surviving.iter().map(|&(_, size)| size).sum::<u64>());
+    let mut held_bytes = live_bytes
+        .saturating_add(pinned_bytes)
+        .saturating_add(surviving.iter().map(|&(_, size)| size).sum::<u64>());
 
     let Some(cap) = cap_bytes else {
         return ReclaimPlan {
@@ -401,6 +420,14 @@ mod tests {
             size_bytes: size,
             stored_at,
             deleted: false,
+            pinned: false,
+        }
+    }
+
+    fn pinned(path: &str, hash: &str, size: u64, stored_at: i64) -> HeldGeneration {
+        HeldGeneration {
+            pinned: true,
+            ..held_gen(path, hash, size, stored_at)
         }
     }
 
@@ -411,6 +438,7 @@ mod tests {
             size_bytes: 0,
             stored_at,
             deleted: true,
+            pinned: false,
         }
     }
 
@@ -494,6 +522,45 @@ mod tests {
             CapState::Ok,
             "reclaiming got us under the cap, so pulling continues"
         );
+    }
+
+    /// A generation the source lost is kept until recovered: past the grace
+    /// window a pinned superseded generation stays while its unpinned
+    /// neighbour goes (part (0′), the hold).
+    #[test]
+    fn a_pinned_generation_outlives_the_grace_window() {
+        let held = vec![
+            pinned("a/seg-1.dat", "lost", 100, 0),
+            held_gen("a/seg-1.dat", "reused", 100, DAY),
+            held_gen("b/seg-1.dat", "old", 100, 0),
+            held_gen("b/seg-1.dat", "new", 100, DAY),
+        ];
+        let plan = plan_reclaim(&held, None, 40 * DAY);
+
+        assert_eq!(plan.reclaim, vec![2], "only the unpinned superseded copy");
+        assert_eq!(plan.held_bytes, 300, "the pinned copy is still counted");
+    }
+
+    /// Cap pressure gives up every unpinned retained generation and never the
+    /// pinned one — and a cap the pinned copy alone keeps breached is reported,
+    /// never relieved by an eviction.
+    #[test]
+    fn cap_pressure_spares_a_pinned_generation_and_reclaims_the_rest() {
+        let held = vec![
+            pinned("a/seg-1.dat", "lost", 300, 0),
+            held_gen("a/seg-1.dat", "reused", 100, 5 * DAY),
+            held_gen("b/seg-1.dat", "old", 100, 0),
+            held_gen("b/seg-1.dat", "new", 100, 2 * DAY),
+        ];
+        let plan = plan_reclaim(&held, Some(450), 5 * DAY);
+
+        assert_eq!(
+            plan.reclaim,
+            vec![2],
+            "the unpinned retained copy gives way"
+        );
+        assert_eq!(plan.held_bytes, 500);
+        assert_eq!(plan.cap_state, CapState::Reached);
     }
 
     /// Under pressure the oldest supersede goes first.

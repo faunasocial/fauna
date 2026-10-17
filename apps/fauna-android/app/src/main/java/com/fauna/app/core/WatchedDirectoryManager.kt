@@ -48,7 +48,7 @@ class WatchedDirectoryManager @Inject constructor(
     private fun stateDir(): String = accountStores.syncStateDir()
 
     suspend fun scanDirectory(dir: WatchedDirectory): Int {
-        val deviceIdHex = secureStorage.deviceId ?: return 0
+        val deviceIdHex = secureStorage.resolveDeviceId() ?: return 0
         val host = api.syncEngineHost(deviceIdHex, stateDir()) ?: return 0
         // The set this directory ingests into, by identity — the row's only
         // key, so a rename of the set does not touch it.

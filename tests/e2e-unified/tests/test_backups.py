@@ -1,6 +1,7 @@
 import os
 import re
 import secrets
+import shutil
 import tempfile
 import time
 
@@ -14,11 +15,22 @@ from common.auth import (
     user_folder_ref,
 )
 from helpers.app_surface import app_name, skip_unbuilt
+from helpers.backup_destinations import DestinationEnrollment
 from helpers.harness_writer import HarnessWriter
 from helpers.waiting import wait_until
 from i18n.strings import S
 
 pytestmark = [pytest.mark.tier2, pytest.mark.tier_3]
+
+# Against a release nest (`--nest live:`), this file's discovery draw is the
+# test's cadence, not a user's: every `logged_in_app` test re-signs the shared
+# `test_user` (a sign-out + sign-in, about two authenticated connections — the
+# app's and the sync agent's), about 13 sign-ins a minute, and each draws
+# `fauna.nest.info` on the actor's 60 / 60 s discovery budget (`federation.md`
+# § Security). The draw per sign-in is pinned by `test_nest_info_draw.py`; at
+# its 2026-10-10 figure the whole tui file draws no `rate_limited` refusal. If
+# it ever does again, give the custodian tests their own actor — never a sleep
+# (convention 14).
 
 
 def _seed_folder_with_snapshot(nest_instance, owner, name=None, with_snapshot=True):
@@ -632,6 +644,7 @@ def _snapshot_rows_from_nest(nest_instance, owner, folder: str) -> list[dict]:
     indistinguishable.
     """
     from clients.ws_rpc_admin_client import WsRpcAdminClient
+    from helpers.set_names import addressed
 
     client = WsRpcAdminClient(
         nest_instance["url"],
@@ -639,7 +652,9 @@ def _snapshot_rows_from_nest(nest_instance, owner, folder: str) -> list[dict]:
         signing_key=bytes(owner["signing_key"]),
     )
     with client:
-        return client.call("fauna.filesync.snapshot.list", {"folder": folder})["rows"]
+        # By the set's `name_hash`, not its name: a sealed set rests no plaintext
+        # name, so `{"folder": name}` answers `folder not found`.
+        return client.call("fauna.filesync.snapshot.list", addressed(folder))["rows"]
 
 
 def _expected_size_text(total_bytes: int) -> str:
@@ -869,6 +884,11 @@ def test_a_snapshot_on_its_way_out_says_so_on_its_own_row(
         f"deadline; this one did ({queued['execute_after']}), so an empty tail "
         f"means the row dropped it (§ *Row content contract*)."
     )
+    assert "undefined" not in pending_text.split(_DELETION_PENDING_PREFIX, 1)[1], (
+        f"the row reads {pending_text!r} — the deadline slot rendered the literal "
+        f"'undefined': the localized text's `args` crossed the wasm seam as a "
+        f"`Map`, not a plain object, so `resolveLocalized` read nothing."
+    )
 
     # -- Soft deleted: "how long you can still get it back" ------------------
     assert logged_in_app.backups.prune_until_preview(), (
@@ -903,6 +923,10 @@ def test_a_snapshot_on_its_way_out_says_so_on_its_own_row(
         f"how long it stays recoverable. The 30-day window is the whole promise "
         f"the undelete affordance rests on; a row that names no date makes it "
         f"unactionable."
+    )
+    assert "undefined" not in soft_text.split(_SOFT_DELETED_PREFIX, 1)[1], (
+        f"the row reads {soft_text!r} — the deadline slot rendered the literal "
+        f"'undefined' (a `Map`-shaped `args` across the wasm seam)."
     )
 
 
@@ -1059,7 +1083,7 @@ def test_snapshot_delete_button_indexed(logged_in_app, fresh_backup_set):
 
 
 @pytest.mark.feature("backup-destinations-and-restore")
-def test_backup_destination_crud(logged_in_app, second_nest, test_user):
+def test_backup_destination_crud(logged_in_app, nest_instance, second_nest, test_user, request):
     """Add, edit, and remove a backup destination through the Backups page.
 
     The destination-management surface is being lifted across the 6 clients
@@ -1101,11 +1125,12 @@ def test_backup_destination_crud(logged_in_app, second_nest, test_user):
         f"{app.driver.diagnose('backup-destination-add-button')} "
         f"error={app.error_text()!r}"
     )
-    assert app.backups.destination_count() == 0
 
-    # Add: resolve + record a destination pointing at the second (owned) nest.
-    app.backups.add_destination(second_nest["url"], name="Offsite")
-    app.backups.wait_for_destination_count(1)
+    # Add: resolve + record a destination pointing at the second (owned) nest —
+    # alone on the page (`test_user` is session-scoped), and removed on failure.
+    dest = DestinationEnrollment(app, nest_instance, test_user)
+    request.addfinalizer(dest.leave_none)
+    enrolled = dest.add_destination(second_nest["url"], "Offsite")
     assert "Offsite" in app.backups.destination_text(0)
     # The status sub-elements render inside the row (scoped query resolves them).
     assert app.driver.is_visible(
@@ -1118,13 +1143,16 @@ def test_backup_destination_crud(logged_in_app, second_nest, test_user):
     )
 
     # Edit: rename the destination.
-    app.backups.edit_destination(0, name="Offsite-renamed")
+    # The new name keeps the enrolled one as its prefix, so the finalizer
+    # still knows the row as this test's.
+    renamed = f"{enrolled}-renamed"
+    app.backups.edit_destination(0, name=renamed)
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
-        if "Offsite-renamed" in app.backups.destination_text(0):
+        if renamed in app.backups.destination_text(0):
             break
         time.sleep(0.5)
-    assert "Offsite-renamed" in app.backups.destination_text(0)
+    assert renamed in app.backups.destination_text(0)
 
     # Remove: drop it (a plain config edit; coordinator reconciles offsite).
     # NOTE for anyone tracing state across this module: this does NOT return the
@@ -1146,7 +1174,9 @@ def test_backup_destination_crud(logged_in_app, second_nest, test_user):
 @pytest.mark.tui
 @pytest.mark.web
 @pytest.mark.feature("backup-destinations-and-restore")
-def test_client_device_custodian_destination(logged_in_app, second_nest, test_user, request):
+def test_client_device_custodian_destination(
+    logged_in_app, nest_instance, second_nest, test_user, request
+):
     """Enroll this device as a client-device custodian destination, and verify
     the third-kind UI (`ui/backups.md` § Third destination kind — client device
     as custodian): the kind select swaps the URL input for a capacity input,
@@ -1167,15 +1197,13 @@ def test_client_device_custodian_destination(logged_in_app, second_nest, test_us
     logged_in_app.backups.require_destination_management_supported()
     app = logged_in_app
     app.backups.navigate()
-    assert app.backups.destination_count() == 0
     # Registered BEFORE the enroll: `test_user` is session-scoped, so a row this
-    # test leaves behind on any failure fails every later test's zero-count
-    # precondition.
-    request.addfinalizer(lambda: _leave_no_custodian_behind(app))
+    # test leaves behind on any failure is every later test's leftover.
+    dest = DestinationEnrollment(app, nest_instance, test_user)
+    request.addfinalizer(lambda: _leave_no_custodian_behind(app, dest))
 
-    # Enroll: no URL at all — the custodian kind has no address.
-    app.backups.add_custodian_destination(name="This Mac", capacity="50 GB")
-    app.backups.wait_for_destination_count(1)
+    # Enroll, alone on the page: no URL at all — the custodian kind has no address.
+    dest.add_custodian_destination("This Mac", capacity="50 GB")
     assert "This Mac" in app.backups.destination_text(0)
 
     # Every configured destination is a client device -> the standing warning
@@ -1217,7 +1245,7 @@ def test_client_device_custodian_destination(logged_in_app, second_nest, test_us
         )
     except Exception:
         pass
-    app.backups.add_destination(second_nest["url"], name="Offsite")
+    dest.add_destination(second_nest["url"], "Offsite")
     app.backups.wait_for_destination_count(2)
     assert not app.backups.sole_client_destination_warning_visible(), (
         "the sole-client-destination warning must clear once a nest "
@@ -1371,14 +1399,12 @@ def test_a_hosted_custodian_pulls_checks_in_and_the_owners_row_reports_it(
     _seed_one_mail_segment(app, nest_instance, test_user)
 
     app.backups.navigate()
-    app.backups.wait_for_destination_count(0)
-
     # Registered BEFORE the enroll, so a failure anywhere below still leaves no
-    # row for the file's later zero-count preconditions (it once failed four
-    # later tests on "Expected 0 backup-destination rows, got 2").
-    request.addfinalizer(lambda: _leave_no_custodian_behind(app))
-    app.backups.add_custodian_destination(name="This device", capacity="50 GB")
-    app.backups.wait_for_destination_count(1)
+    # row behind for the file's later tests (it once failed four of them on
+    # "Expected 0 backup-destination rows, got 2").
+    dest = DestinationEnrollment(app, nest_instance, test_user)
+    request.addfinalizer(lambda: _leave_no_custodian_behind(app, dest))
+    dest.add_custodian_destination("This device", capacity="50 GB")
 
     # Pre-state. Without it the post-assert proves nothing: a row already
     # reporting held bytes would satisfy the final check too.
@@ -1477,7 +1503,7 @@ def test_a_hosted_custodian_pulls_checks_in_and_the_owners_row_reports_it(
 @pytest.mark.tui
 @pytest.mark.feature("backup-destinations-and-restore")
 def test_a_custodian_whose_store_rots_reports_a_failing_row_to_its_owner(
-    logged_in_app, nest_instance, test_user
+    logged_in_app, nest_instance, test_user, request
 ):
     """A custodian whose local store fails its **self-audit** raises
     `backup-audit-alert` on the OWNER's device — the second pin
@@ -1558,11 +1584,9 @@ def test_a_custodian_whose_store_rots_reports_a_failing_row_to_its_owner(
     _seed_one_mail_segment(app, nest_instance, test_user)
 
     app.backups.navigate()
-    app.backups.wait_for_destination_count(0)
-
-    DESTINATION_NAME = "Rotting device"
-    app.backups.add_custodian_destination(name=DESTINATION_NAME, capacity="50 GB")
-    app.backups.wait_for_destination_count(1)
+    dest = DestinationEnrollment(app, nest_instance, test_user)
+    request.addfinalizer(lambda: _leave_no_custodian_behind(app, dest))
+    DESTINATION_NAME = dest.add_custodian_destination("Rotting device", capacity="50 GB")
 
     # Pass 1 — the healthy baseline. Every poll runs a pass the moment the agent
     # has found its assignment, so this is a deadline poll, never a wait.
@@ -1703,9 +1727,10 @@ def _reclaim_the_orphaned_store(app, budget_s: float = 30.0) -> None:
     """Reclaim the store a plain removal just orphaned, through the orphaned-store
     row, and wait for the row to retire. The agent's reclaim handler stops a live
     custodian stint before it deletes, so this is what ends the removed
-    destination's replica. (The remove dialog's reclaim tick is meant to do the
-    same in one gesture, but on linux it did not reach the agent in the
-    2026-09-22 grading run, and nothing else exercises it.) Raises if no orphaned-store row paints: the custodian
+    destination's replica. (The remove dialog's reclaim tick does the same in one
+    gesture and is pinned by
+    `test_removing_a_custodian_with_the_opt_in_frees_the_local_store`; these
+    callers keep the orphaned-store route to exercise that row.) Raises if no orphaned-store row paints: the custodian
     tests that call it all leave a non-empty store behind."""
     wait_until(app.backups.orphaned_store_visible, budget_s,
                diagnose=lambda: "no orphaned-store row after the removal")
@@ -1715,18 +1740,17 @@ def _reclaim_the_orphaned_store(app, budget_s: float = 30.0) -> None:
                                 f"error={app.error_text()!r}")
 
 
-def _leave_no_custodian_behind(app) -> None:
+def _leave_no_custodian_behind(app, dest) -> None:
     """Teardown for a custodian test that may stop anywhere: remove every
-    remaining destination, then reclaim whatever store is left orphaned. A no-op
-    on the happy path, which ends with neither."""
-    app.backups.navigate()
-    remaining = app.backups.destination_count()
-    while remaining:
-        app.backups.remove_destination(0)
-        app.backups.wait_for_destination_count(remaining - 1)
-        remaining -= 1
-    if app.backups.orphaned_store_visible():
-        app.backups.reclaim_orphaned_store()
+    destination the test enrolled (`dest`, its `DestinationEnrollment`), then
+    reclaim whatever store is left orphaned. A no-op on the happy path, which
+    ends with neither."""
+    try:
+        dest.leave_none()
+    finally:
+        app.backups.navigate()
+        if app.backups.orphaned_store_visible():
+            app.backups.reclaim_orphaned_store()
 
 
 @pytest.mark.tui
@@ -1734,6 +1758,7 @@ def _leave_no_custodian_behind(app) -> None:
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.windows
+@pytest.mark.android
 # macos and windows: each spawns its agent only under this marker (without it the
 # app binds folders with nothing behind them, and the pass would fall to the
 # in-app host, whose store the agent's root never contains). Inert for every other
@@ -1845,9 +1870,14 @@ def test_removing_a_custodian_without_the_opt_in_leaves_a_reclaimable_orphaned_s
       only `hosting` / `held_bytes` (plus segment counts) and refuses a non-zero
       `now_offset_secs` by name, so a test that needs the agent's `checked_in` /
       `audit_state` or a shifted clock cannot yet widen to it.
-    * **android** — no `custodian_pull_run_now` arm in its test agent at all, so
-      `wait_for_custodian_hosting` has nothing to poke, and it hosts in-app like
-      ios, leaving no agent path for the store root to be derived from.
+    * **android** — hosts in-app like ios: its test agent answers
+      `custodian_pull_run_now` with ios's in-app reply shape (`via: "in-app"`,
+      `hosting`, `held_bytes`, `stored_segments`, `tombstoned_segments`,
+      `cap_reached`, `checked_in`) and refuses a non-zero `now_offset_secs` by
+      name. The store sits inside the emulator's app sandbox, so the disk half
+      reads it through `visible_custodian_blobs` (adb `run-as` listing), not a
+      local path. Its emulator RUN is gated on the emulator
+      venue being installed on the host, so the ledger record follows that run.
     * **web** — not a short column but an absent one: it hosts no custodian and
       so can hold no orphaned store (`ui/backups.md` § Manage backup
       destinations → *Reclaim this device's copy*: "the one remaining leg is
@@ -1855,12 +1885,7 @@ def test_removing_a_custodian_without_the_opt_in_leaves_a_reclaimable_orphaned_s
       coverage contract that is a page split with a page-level absence, never a
       per-outcome annotation — a gated contract move, open with the user.
     """
-    from helpers.sync_agent_config import (
-        custodian_store_blobs,
-        custodian_store_roots,
-        describe_agent_state_base,
-        describe_custodian_store,
-    )
+    from helpers.sync_agent_config import visible_custodian_blobs
 
     custodian_pull_app.backups.require_destination_management_supported()
     app = custodian_pull_app
@@ -1872,15 +1897,13 @@ def test_removing_a_custodian_without_the_opt_in_leaves_a_reclaimable_orphaned_s
     _seed_one_mail_segment(app, nest_instance, test_user)
 
     app.backups.navigate()
-    app.backups.wait_for_destination_count(0)
-
     # Whatever fails below — the enroll's own wait included — leave no
     # destination and no custodian store behind: `test_user` is session-scoped,
     # and a leftover row here once failed the next three tests on their
     # "Expected 0 backup-destination rows" precondition.
-    request.addfinalizer(lambda: _leave_no_custodian_behind(app))
-    app.backups.add_custodian_destination(name="Departing device", capacity="50 GB")
-    app.backups.wait_for_destination_count(1)
+    dest = DestinationEnrollment(app, nest_instance, test_user)
+    request.addfinalizer(lambda: _leave_no_custodian_behind(app, dest))
+    dest.add_custodian_destination("Departing device", capacity="50 GB")
 
     first = app.backups.wait_for_custodian_hosting()
     assert first["held_bytes"] > 0, (
@@ -1898,31 +1921,20 @@ def test_removing_a_custodian_without_the_opt_in_leaves_a_reclaimable_orphaned_s
         f"names this device. error={app.error_text()!r}"
     )
 
-    # Pre-state on DISK: the independent witness. `sync_agent_state_base` is the
-    # driver's answer for a launch whose store root is not derivable from an XDG
-    # config home — windows (an explicit `--data-dir`) and apple (a pinned HOME;
-    # no `config_home` at all, hence the `getattr`) — and `config_home` derives it
-    # otherwise (unix). The same pair the rot proof above reads, minus its
-    # unconditional `config_home` access.
-    roots = custodian_store_roots(
-        getattr(app.driver, "config_home", None),
-        getattr(app.driver, "sync_agent_state_base", None),
-    )
-    assert roots, (
+    # Pre-state on DISK: the independent witness, through the driver-aware seam
+    # (`visible_custodian_blobs`): a local directory found via `config_home` /
+    # `sync_agent_state_base` (unix, windows, apple), or — android — the app
+    # sandbox listed over adb `run-as`, where no host path reaches it.
+    located, blobs_before, store_diag = visible_custodian_blobs(app.driver)
+    assert located, (
         f"the agent reported hosting a replica ({first!r}) but created no store "
         f"under its own state root — either the layout moved out of "
         f"`custodian_store_root` or the agent is writing outside this launch's "
-        f"isolation, which convention 10 forbids. "
-        + describe_agent_state_base(
-            getattr(app.driver, "config_home", None),
-            getattr(app.driver, "sync_agent_state_base", None),
-        )
+        f"isolation, which convention 10 forbids. {store_diag}"
     )
-    blobs_before = [b for root in roots for b in custodian_store_blobs(root)]
     assert blobs_before, (
         f"the pass reported held_bytes={first['held_bytes']} but wrote no blob "
-        f"files this test can see. "
-        + "; ".join(describe_custodian_store(r) for r in roots)
+        f"files this test can see. {store_diag}"
     )
 
     # The gesture: remove WITHOUT the opt-in. The product rule under test is that
@@ -1934,12 +1946,12 @@ def test_removing_a_custodian_without_the_opt_in_leaves_a_reclaimable_orphaned_s
     # than an equal count, because the rule under test is that nothing was
     # DELETED — a count would also go red if a scheduled pass happened to add a
     # blob in this window, which is not a failure of anything.
-    blobs_after_removal = [b for root in roots for b in custodian_store_blobs(root)]
+    _, blobs_after_removal, _ = visible_custodian_blobs(app.driver)
     deleted = sorted(set(blobs_before) - set(blobs_after_removal))
     assert not deleted, (
         f"removing a client-device destination WITHOUT the reclaim opt-in deleted "
         f"{len(deleted)} of {len(blobs_before)} sealed blob(s) anyway: "
-        f"{[str(b) for b in deleted[:5]]}. The default keeps the copy on purpose — "
+        f"{deleted[:5]}. The default keeps the copy on purpose — "
         f"it is the owner's only offline one — which is the whole reason the opt-in "
         f"is a separate tick the removal must not imply."
     )
@@ -2019,18 +2031,96 @@ def test_removing_a_custodian_without_the_opt_in_leaves_a_reclaimable_orphaned_s
     # Half two, on disk: the bytes are actually gone. The assertion the UI cannot
     # make — a retired row proves the app stopped offering, never that the disk
     # space came back.
-    blobs_after_reclaim = [b for root in roots for b in custodian_store_blobs(root)]
+    _, blobs_after_reclaim, store_diag = visible_custodian_blobs(app.driver)
     assert not blobs_after_reclaim, (
         f"the page retired the orphaned-store row, but {len(blobs_after_reclaim)} "
         f"of {len(blobs_before)} sealed blob(s) are still on disk: "
-        f"{[str(b) for b in blobs_after_reclaim[:5]]}. The user was told their "
-        f"space came back and it did not. "
-        + "; ".join(describe_custodian_store(r) for r in roots)
+        f"{blobs_after_reclaim[:5]}. The user was told their "
+        f"space came back and it did not. {store_diag}"
     )
 
     # `nest_instance`/`test_user` are session-scoped and a sibling test asserts a
     # zero destination count; the destination is already gone and the store is
     # empty, so the surface is as we found it.
+
+
+@pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
+@pytest.mark.android
+@pytest.mark.real_sync_agent
+@pytest.mark.isolated_sync_agent
+@pytest.mark.feature("backup-destinations-and-restore")
+def test_removing_a_custodian_with_the_opt_in_frees_the_local_store(
+    custodian_pull_app, nest_instance, test_user, request
+):
+    """Remove a client-device destination WITH `backup-destination-remove-reclaim-checkbox`
+    ticked and the same gesture frees this device's sealed copy: the agent receives
+    the reclaim, the bytes leave the disk, and no orphaned-store row ever paints.
+
+    The twin of the no-opt-in test above (`ui/backups.md` § Manage backup
+    destinations → *Remove*; `behavior/backup-destinations.md` § Implementation
+    status today → *Reclaiming a client custodian's local copy*). On linux the tick
+    once removed the row without the reclaim reaching the agent (2026-09-22 grading
+    run), and nothing exercised it, so the custodian tests reclaimed through the
+    orphaned-store row instead (`_reclaim_the_orphaned_store`).
+
+    Latency-independent (convention 14): the removal and the reclaim are one
+    gesture whose reply is the causal barrier, and the polls are deadline-bounded
+    reads of a page that has already been told the answer.
+    """
+    from helpers.sync_agent_config import visible_custodian_blobs
+
+    custodian_pull_app.backups.require_destination_management_supported()
+    app = custodian_pull_app
+
+    # Precondition only (convention 8 exempts fixture setup): a real segment, so
+    # the store is non-empty and the final emptiness assert cannot pass vacuously.
+    _seed_one_mail_segment(app, nest_instance, test_user)
+
+    app.backups.navigate()
+    dest = DestinationEnrollment(app, nest_instance, test_user)
+    request.addfinalizer(lambda: _leave_no_custodian_behind(app, dest))
+    dest.add_custodian_destination("Departing device", capacity="50 GB")
+
+    first = app.backups.wait_for_custodian_hosting()
+    assert first["held_bytes"] > 0, (
+        f"the pass stored nothing ({first!r}), so there is nothing for the tick "
+        f"to free and the assertions below would pass vacuously."
+    )
+    located, blobs_before, store_diag = visible_custodian_blobs(app.driver)
+    assert located and blobs_before, (
+        f"the agent reported hosting ({first!r}) but this test cannot see its "
+        f"sealed blobs. {store_diag}"
+    )
+
+    # The gesture under test: remove WITH the opt-in.
+    app.backups.remove_destination(0, reclaim=True)
+    app.backups.wait_for_destination_count(0)
+
+    RECLAIM_BUDGET_S = 60
+    deadline = time.monotonic() + RECLAIM_BUDGET_S
+    blobs_after = blobs_before
+    while time.monotonic() < deadline:
+        _, blobs_after, store_diag = visible_custodian_blobs(app.driver)
+        if not blobs_after:
+            break
+        time.sleep(0.5)  # sleep-ok: poll interval inside the deadline loop above — the reclaim is reported on the same gesture, so this waits only on the page's own repaint
+
+    assert not blobs_after, (
+        f"removing a client-device destination with the reclaim tick left "
+        f"{len(blobs_after)} of {len(blobs_before)} sealed blob(s) on disk after "
+        f"{RECLAIM_BUDGET_S}s: {blobs_after[:5]}. The removal landed but the "
+        f"reclaim never reached the agent (or was refused). "
+        f"error={app.error_text()!r}. {store_diag}"
+    )
+    assert not app.backups.orphaned_store_visible(), (
+        f"the store is gone from disk but `backup-orphaned-store-row` still "
+        f"paints — the page's re-measure disagrees with the disk. "
+        f"error={app.error_text()!r}"
+    )
 
 
 # The "nothing has ever synced" row copy. Both branches of
@@ -2045,6 +2135,11 @@ _NEVER_UPLOAD_TEXT = S.backups.backup_destination_last_upload_never
 # `backup-destination-last-audit-time` until this client's own audit first
 # *passes* against the destination.
 _NEVER_AUDIT_TEXT = S.backups.backup_destination_last_audit_never
+
+# `backups.backup_destination_writer_refused` — what
+# `backup-destination-backlog-count` reads, in place of the queued count, while
+# the destination turns this box away as the account's backup writer.
+_WRITER_REFUSED_TEXT = S.backups.backup_destination_writer_refused
 
 
 def _backlog_count(row_text: str) -> int:
@@ -2100,11 +2195,17 @@ def _seed_one_mail_segment(app, nest_instance, owner) -> None:
     seals to the owner's published epoch key, and the app's next sign-in re-registers its
     own standing key.) e2e convention 10: a test must not poison the shared identity.
     """
-    from clients.ws_rpc_admin_client import WsRpcAdminClient
-    from helpers.mail_envelope_key import envelope_key
-
     app.mail_settings.navigate()
     app.mail_settings.ensure_mail_enabled()
+    _import_one_mail(nest_instance, owner)
+
+
+def _import_one_mail(nest_instance, owner) -> None:
+    """Import one unique INBOX message for ``owner`` through the import surface —
+    `_seed_one_mail_segment`'s write, for a caller whose owner's mailbox is
+    already enabled. Precondition-only (convention 8 exempts fixture setup)."""
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+    from helpers.mail_envelope_key import envelope_key
 
     nonce = secrets.token_hex(6)
     message_id = f"backup-upload-proof-{nonce}@example.org"
@@ -2160,7 +2261,7 @@ def _seed_one_mail_segment(app, nest_instance, owner) -> None:
 
 @pytest.mark.feature("backup-destinations-and-restore")
 def test_backup_destination_last_upload_time_reflects_a_nest_side_pass(
-    logged_in_app, nest_instance, second_nest, test_user
+    logged_in_app, nest_instance, second_nest, test_user, request
 ):
     """`backup-destination-last-upload-time` advances off a **nest-side** upload.
 
@@ -2210,10 +2311,9 @@ def test_backup_destination_last_upload_time_reflects_a_nest_side_pass(
     _seed_one_mail_segment(app, nest_instance, test_user)
 
     app.backups.navigate()
-    app.backups.wait_for_destination_count(0)
-
-    app.backups.add_destination(second_nest["url"], name="Upload-proof")
-    app.backups.wait_for_destination_count(1)
+    dest = DestinationEnrollment(app, nest_instance, test_user)
+    request.addfinalizer(dest.leave_none)
+    dest.add_destination(second_nest["url"], "Upload-proof")
 
     # Pre-state. Without this the post-assert proves nothing: a row that read
     # "Last synced: 3 seconds ago" before the sweep would pass the final check too.
@@ -2376,6 +2476,163 @@ def test_backup_destination_last_upload_time_reflects_a_nest_side_pass(
     app.backups.wait_for_destination_count(0)
 
 
+def _nest_status_row(nest_instance, owner) -> dict:
+    """The nest's own `fauna.backup.status` row for the owner's one
+    destination — the exact projection the page renders, read beside it so a
+    red is split nest-side vs app-side (e2e convention 5)."""
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+
+    client = WsRpcAdminClient(
+        nest_instance["url"],
+        actor_id=owner["actor_id_bytes"],
+        signing_key=bytes(owner["signing_key"]),
+    )
+    with client:
+        projection = client.call("fauna.backup.status", {})
+    rows = projection.get("destinations", [])
+    assert len(rows) == 1, f"expected one destination row, got {projection!r}"
+    return rows[0]
+
+
+def _wait_for_backlog_text(app, accept, budget_s: float = 30.0) -> str:
+    """Poll `backup-destination-backlog-count` on row 0 until ``accept(text)``,
+    re-reading the page each time (convention 14: a named generous budget, a
+    green run pays only the page's own re-read)."""
+    deadline = time.monotonic() + budget_s
+    text = ""
+    while time.monotonic() < deadline:
+        text = app.driver.get_text(
+            "backup-destination-backlog-count",
+            scope="backup-destination-status-row[0]",
+        ).strip()
+        if accept(text):
+            return text
+        time.sleep(0.5)
+    return text
+
+
+@pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.windows
+@pytest.mark.feature("backup-destinations-and-restore")
+def test_a_destination_that_refuses_this_box_reads_refused_not_queued(
+    logged_in_app, nest_instance, second_nest, test_user, request
+):
+    """A destination that turns this box away reads as REFUSED on the row,
+    never as an ordinary lag — and an accepted pass brings the queued count
+    back.
+
+    `backup-destinations.md` § Per-destination status read → *A refused writer
+    is a state, never a lag*: a stale "Last synced" and a backlog are also what
+    a busy box shows, so the row's `writer_state` (`refused` once the
+    destination's writer gate answered this box's last pass with its typed
+    refusal) replaces the count in `backup-destination-backlog-count`.
+
+    Flow under test::
+
+        enroll via UI        → writer grant registered at the destination
+        revoke via UI        → Nests page trust facet → writer_grant.revoke at the destination
+        run-now poke         → the pass's write-token mint is refused
+                               fauna.backup.writer_not_seated → the coordinator records it
+        fauna.backup.status  → writer_state: refused → the row reads the refusal
+        remove + re-add (UI) → a fresh writer grant (a re-register clears a revoke)
+        run-now poke         → accepted, the seeded mail uploaded
+        fauna.backup.status  → writer_state: ok, backlog 0 → the row reads "0 queued"
+
+    Every mutation is a UI gesture (convention 8) but the seed, which the
+    convention exempts; both nest passes are the synchronous test-hooks barrier,
+    never a settle-sleep (convention 14).
+    """
+    app = logged_in_app
+    app.backups.require_destination_management_supported()
+    app.nest_trust.require_backup_trust_rows_supported()
+    try:
+        register_user(
+            second_nest["port"],
+            test_user["actor_id_hex"],
+            admin_signing_key=second_nest["admin"]["signing_key"],
+        )
+    except Exception:
+        pass  # already registered (the session-scoped nest persists across reruns)
+
+    # A segment the refused pass must try to write — without one, nothing
+    # would ever ask the destination, and nothing could refuse it.
+    _seed_one_mail_segment(app, nest_instance, test_user)
+
+    app.backups.navigate()
+    dest = DestinationEnrollment(app, nest_instance, test_user)
+    request.addfinalizer(dest.leave_none)
+    dest.add_destination(second_nest["url"], "Refuses")
+    backlog_before = _backlog_count(_wait_for_backlog_text(app, lambda t: "queued" in t))
+    assert backlog_before >= 1, (
+        f"the seeded mail must be queued before the pass, got {backlog_before}. "
+        f"error={app.error_text()!r}"
+    )
+
+    # The owner freezes this box's writes at the destination, on the Nests page.
+    app.linked_nests.navigate()
+    assert app.nest_trust.wait_for_backup_row_count(2), (
+        f"expected the seal row and one writer row, got "
+        f"{app.nest_trust.backup_row_count()}. error={app.error_text()!r}"
+    )
+    app.nest_trust.revoke_backup(index=1)
+    # The writer row settles to `missing` once the destination holds no grant.
+    wait_until(
+        lambda: app.nest_trust.backup_status_text(1) == S.nests.backup_status_missing,
+        20.0,
+        diagnose=lambda: (
+            f"writer row reads {app.nest_trust.backup_status_text(1)!r}; "
+            f"error={app.error_text()!r}"
+        ),
+    )
+
+    _push_backup(nest_instance)
+    refused = _nest_status_row(nest_instance, test_user)
+    assert refused.get("writer_state") == "refused", (
+        f"NEST-SIDE failure: the destination refused this box's pass, but the "
+        f"status row reads writer_state={refused.get('writer_state')!r} ({refused!r})"
+    )
+    assert refused["backlog_count"] >= 1, refused
+
+    app.backups.navigate()
+    app.backups.wait_for_destination_count(1)
+    shown = _wait_for_backlog_text(app, lambda t: t == _WRITER_REFUSED_TEXT)
+    assert shown == _WRITER_REFUSED_TEXT, (
+        f"CLIENT-SIDE failure: the nest projects writer_state=refused, but the "
+        f"row reads {shown!r} — a refused box must never read as an ordinary "
+        f"lag ({_WRITER_REFUSED_TEXT!r} expected). error={app.error_text()!r}"
+    )
+
+    # Re-granting: the owner removes and re-adds the destination, which
+    # registers this box's writer grant afresh. One accepted pass sends the
+    # queue and the row reads its count again.
+    app.backups.remove_destination(0)
+    app.backups.wait_for_destination_count(0)
+    dest.add_destination(second_nest["url"], "Refuses")
+    app.backups.wait_for_destination_count(1)
+    _push_backup(nest_instance)
+    accepted = _nest_status_row(nest_instance, test_user)
+    assert accepted.get("writer_state") == "ok", (
+        f"NEST-SIDE failure: the re-granted pass was accepted but the row reads "
+        f"writer_state={accepted.get('writer_state')!r} ({accepted!r})"
+    )
+    assert accepted["backlog_count"] == 0, accepted
+
+    app.driver.navigate_to("feed")
+    app.backups.navigate()
+    app.backups.wait_for_destination_count(1)
+    shown = _wait_for_backlog_text(app, lambda t: t != _WRITER_REFUSED_TEXT and "queued" in t)
+    assert _backlog_count(shown) == 0, (
+        f"CLIENT-SIDE failure: the nest projects writer_state=ok and an empty "
+        f"queue, but the row reads {shown!r}. error={app.error_text()!r}"
+    )
+
+    # Session-scoped nest + user: leave the surface as we found it.
+    app.backups.remove_destination(0)
+    app.backups.wait_for_destination_count(0)
+
+
 @pytest.mark.web
 @pytest.mark.linux
 @pytest.mark.tui
@@ -2384,7 +2641,7 @@ def test_backup_destination_last_upload_time_reflects_a_nest_side_pass(
 @pytest.mark.windows
 @pytest.mark.feature("backup-destinations-and-restore")
 def test_backup_audit_pass_advances_the_last_checked_row(
-    logged_in_app, second_nest, test_user
+    logged_in_app, nest_instance, second_nest, test_user, request
 ):
     """A real client-side audit pass runs against a real destination and renders.
 
@@ -2450,18 +2707,15 @@ def test_backup_audit_pass_advances_the_last_checked_row(
 
     app = logged_in_app
     app.backups.navigate()
-    # The baseline is the ABSENCE of the row, not a "never" reading in it: enroll
-    # itself triggers a pass (`apply` → `refresh_audit`), so "Last checked: never"
-    # is real but transient and racing it would be exactly the wall-clock
-    # dependence convention 14 forbids. A row that does not exist cannot be
-    # showing a stale timestamp, which is the property the assertion needs.
-    app.backups.wait_for_destination_count(0)
-    assert app.driver.count("backup-destination-last-audit-time") == 0, (
-        "no destination is configured, so no audit row may exist yet"
-    )
-
-    app.backups.add_destination(second_nest["url"], name="Audit-proof")
-    app.backups.wait_for_destination_count(1)
+    # The baseline is a row that did not exist before this test, not a "never"
+    # reading in it: enroll itself triggers a pass (`apply` → `refresh_audit`),
+    # so "Last checked: never" is real but transient and racing it would be
+    # exactly the wall-clock dependence convention 14 forbids. A destination
+    # this test just enrolled, alone on the page, cannot be showing a stale
+    # timestamp, which is the property the assertion needs.
+    dest = DestinationEnrollment(app, nest_instance, test_user)
+    request.addfinalizer(dest.leave_none)
+    dest.add_destination(second_nest["url"], "Audit-proof")
 
     # Generous named budget + deadline poll: a green run pays only the real
     # connect + handshake + custody read against the destination.
@@ -2530,7 +2784,7 @@ def test_backup_audit_pass_advances_the_last_checked_row(
 @pytest.mark.windows
 @pytest.mark.feature("backup-destinations-and-restore")
 def test_backup_audit_alerts_when_the_destination_goes_dark(
-    logged_in_app, test_user, stoppable_nest
+    logged_in_app, nest_instance, test_user, stoppable_nest, request
 ):
     """The **alerting** arm end to end: a real verdict reaches a rendered banner.
 
@@ -2588,13 +2842,9 @@ def test_backup_audit_alerts_when_the_destination_goes_dark(
     # intended 8 d into 167 h and missed AUDIT_OVERDUE (168 h) by one hour.
     # Resetting makes the assertion depend only on this test's own actions.
     app.driver.call_command("backup_audit_run_now", {"now_offset_secs": 0}, timeout=60)
-    app.backups.wait_for_destination_count(0)
-    assert app.driver.count("backup-audit-alert") == 0, (
-        "no destination is configured, so no alert may stand"
-    )
-
-    app.backups.add_destination(stoppable_nest["url"], name="Going-dark")
-    app.backups.wait_for_destination_count(1)
+    dest = DestinationEnrollment(app, nest_instance, test_user)
+    request.addfinalizer(dest.leave_none)
+    dest.add_destination(stoppable_nest["url"], "Going-dark")
 
     # Step 1 — establish a REAL passed audit, so the alert below cannot be
     # explained by a destination that was never reachable in the first place.
@@ -3110,6 +3360,22 @@ def test_after_losing_the_nest_the_devices_copy_restores_the_mail_onto_the_rebui
                          f"error={app.error_text()!r}",
     )
     result = app.backups.reseed_result_text()
+    # The folder's own line first, so a device that never learned the name fails
+    # here, on the cause, rather than on the whole verdict it also spoils: the
+    # line names the folder by its display name (`reseed.rs` `set_label`), never
+    # the `folder_unnamed` refusal (`segment-backup-protocol.md` § *Where a
+    # restored folder's name comes from*).
+    if folder is not None:
+        before_count, after_count = S.backups.reseed_set_restored(
+            set=folder, count="\0").split("\0")
+        assert S.backups.reseed_refused_folder_unnamed not in result, (
+            f"the device restored the folder without its name: result={result!r}"
+        )
+        assert re.search(
+            re.escape(before_count) + r"\d+" + re.escape(after_count), result), (
+            f"the result view must name the restored folder {folder!r}: "
+            f"result={result!r} error={app.error_text()!r}"
+        )
     assert result.startswith(S.backups.reseed_result_whole), (
         f"the restore must report the corpus whole: result={result!r} "
         f"error={app.error_text()!r}"
@@ -3157,8 +3423,12 @@ def test_after_losing_the_nest_the_devices_copy_restores_the_mail_onto_the_rebui
         "a re-enrolled device's copy is claimed again, so the orphaned row retires"
     )
 
-    # Leave nothing hosting behind for the next custodian test on this launch.
-    _leave_no_custodian_behind(app)
+    # Leave nothing hosting behind for the next custodian test on this launch
+    # (the wait above saw the row, so the count is the loaded list's).
+    app.backups.remove_destination(0)
+    app.backups.wait_for_destination_count(0)
+    if app.backups.orphaned_store_visible():
+        app.backups.reclaim_orphaned_store()
 
     # LAST: the restored message is back in the mailbox it was in, because the
     # materialize adopts the placement journal with the content
@@ -3169,3 +3439,417 @@ def test_after_losing_the_nest_the_devices_copy_restores_the_mail_onto_the_rebui
         f"box; INBOX holds {restored} message(s). A live record in no mailbox "
         f"means the placement journal was not restored with the content."
     )
+
+
+def _push_backup(nest) -> dict:
+    """One synchronous nest-side backup sweep (the test-hooks run-now barrier
+    `test_backup_destination_last_upload_time_reflects_a_nest_side_pass`
+    documents): when it returns, the pass has happened or definitively failed."""
+    resp = requests.post(f"{nest['url']}/api/v1/test/backup/run-now", json={}, timeout=120)
+    assert resp.status_code == 200, f"backup run-now returned {resp.status_code}: {resp.text}"
+    payload = resp.json()
+    assert payload.get("ok") is True and payload.get("owners_run", 0) >= 1, (
+        f"the sweep ran no owner ({payload!r}): the enroll did not leave the owner "
+        f"with a granted key and a registered destination"
+    )
+    return payload
+
+
+def _mail_segments(nest, owner) -> dict:
+    """The owner's mail segment listing on ``nest`` (`fauna.segments.list`): the
+    saved counter and the live ids — the nest-side half of every regression
+    verdict below (convention 5)."""
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+
+    with WsRpcAdminClient(
+        nest["url"],
+        actor_id=owner["actor_id_bytes"],
+        signing_key=bytes(owner["signing_key"]),
+    ) as client:
+        reply = client.call(
+            "fauna.segments.list", {"kind": "mail", "actor_id": owner["actor_id_hex"]}
+        )
+    return {
+        "next_segment_id": reply.get("next_segment_id"),
+        "ids": sorted(s["segment_id"] for s in reply.get("segments", [])),
+    }
+
+
+def _banner_texts(app) -> list[str]:
+    """Every banner's text; one an audit pass rebuilt away mid-read is left out."""
+    texts = []
+    for i in range(app.driver.count("backup-audit-alert")):
+        try:
+            texts.append(app.driver.get_text("backup-audit-alert", index=i))
+        except LookupError:
+            break
+    return texts
+
+
+@pytest.mark.tui
+@pytest.mark.web
+@pytest.mark.linux
+# The other apps follow in their batched trickle-down lifts; each adds its
+# marker here, and `require_recover_supported` names the gap meanwhile.
+@pytest.mark.feature("backup-destinations-and-restore")
+def test_a_nest_that_went_back_in_time_gets_its_lost_mail_back_from_the_backup(
+    app, request, nest_mode, tmp_path_factory
+):
+    """**The owner's nest was restored from an older copy of its data directory;
+    the backup still holds what it lost, and the owner gets it back from the
+    app** (`ui/backups.md` § Audit-alert surface, the fifth reason and its
+    gesture; the recovery `segment-backup-protocol.md` § Recovery into the
+    lived-in nest that regressed).
+
+    The regression is real, not injected: the nest tier_3 recipe
+    (`nest_backup_coordinator.rs`,
+    `a_regressed_source_recovers_its_lost_records_by_record`) reproduced over
+    dedicated nests — A is stopped, its data directory copied, restarted, lives
+    on, then stopped again and the copy restored over it.
+
+    Flow under test::
+
+        box A (owner), box B (destination, owner registered)
+        one kept message; enroll B (UI); push   -> B holds A's mail
+        stop A, copy its data dir, restart A
+        two more messages, each pushed          -> B holds them too
+        audit pass (+25 h)                      -> this device pins B's ledger
+        stop A, restore the copy, restart A     -> A lost the two messages
+        one post-rollback message; push         -> A's counter reuses a lost id
+        audit pass (+50 h)                      -> the regression is accepted:
+                                                   the fifth-reason banner, and
+                                                   its recover button (B is a nest)
+        press recover, confirm                  -> the shared driver's verdict
+        INBOX on A                              -> kept + lost + post-rollback,
+                                                   each exactly once
+        banner                                  -> gone; and a later pass keeps
+                                                   it gone (the copy's unnamed
+                                                   rows were retired at B)
+
+    Latency-independent (convention 14): every wait is a deadline poll on the
+    state it waits for; the only time values are explicit audit-clock offsets.
+    """
+    from common.nest import start_nest_in_place, stop_nest
+    from conftest import _login_app_as, _start_dedicated_nest
+
+    box_a, cleanup_a = _start_dedicated_nest(request, nest_mode, tmp_path_factory, "recover-src")
+    request.addfinalizer(cleanup_a)
+    box_b, cleanup_b = _start_dedicated_nest(request, nest_mode, tmp_path_factory, "recover-dst")
+    request.addfinalizer(cleanup_b)
+    owner = box_a["admin"]
+    register_user(
+        box_b["port"], owner["actor_id_hex"], admin_signing_key=box_b["admin"]["signing_key"]
+    )
+
+    # A browser reaches its own nest only through an SPA proxy (CORS); this
+    # test's box A is its own, so it serves A's. B needs none: the recovery
+    # dials B's WebSocket and its CORS-open byte routes directly, as the audit
+    # does.
+    spa_url = None
+    if app.driver.is_web():
+        from conftest import _serve_spa_proxy
+
+        spa_url, spa_server = _serve_spa_proxy(request.getfixturevalue("static_dir"), box_a["url"])
+        request.addfinalizer(spa_server.shutdown)
+    _login_app_as(app, request, box_a, owner, spa_url=spa_url)
+    app.backups.require_destination_management_supported()
+    app.backups.require_recover_supported()
+    app.backups.navigate()
+    # A process-wide static nothing resets; zero it so this test's offsets are
+    # its own, and put it back afterwards.
+    app.driver.call_command("backup_audit_run_now", {"now_offset_secs": 0}, timeout=60)
+    request.addfinalizer(
+        lambda: app.driver.call_command(
+            "backup_audit_run_now", {"now_offset_secs": 0}, timeout=60
+        )
+    )
+
+    _seed_one_mail_segment(app, box_a, owner)
+    app.backups.navigate()
+    app.backups.wait_for_destination_count(0)
+    app.backups.add_destination(box_b["url"], name="Recovery-proof")
+    app.backups.wait_for_destination_count(1)
+    _push_backup(box_a)
+
+    # ── The copy, taken while A is stopped so it is consistent ───────────────
+    copy_dir = str(tmp_path_factory.mktemp("recover-src-copy") / "data")
+    stop_nest(box_a, graceful=True)
+    shutil.copytree(box_a["tmp_dir"], copy_dir)
+    start_nest_in_place(box_a)
+    at_copy = _mail_segments(box_a, owner)
+
+    for _ in range(2):
+        _import_one_mail(box_a, owner)
+        _push_backup(box_a)
+    before_rollback = _mail_segments(box_a, owner)
+    assert before_rollback["next_segment_id"] >= at_copy["next_segment_id"] + 2, (
+        f"each pushed message must sit in a segment the copy does not hold, or "
+        f"nothing is lost: at the copy {at_copy!r}, before the rollback "
+        f"{before_rollback!r}"
+    )
+    assert _inbox_count(box_a, owner) == 3
+
+    # This device pins the ledger generation B now serves.
+    app.backups.navigate()
+    app.driver.call_command(
+        "backup_audit_run_now", {"now_offset_secs": 25 * 60 * 60}, timeout=120
+    )
+    assert app.error_text() == "", f"the pinning pass failed: {app.error_text()!r}"
+    assert app.backups.recover_button_in_banner() is None, (
+        f"no regression yet, so no banner may carry the recovery: {_banner_texts(app)!r}"
+    )
+
+    # ── The regression ───────────────────────────────────────────────────────
+    stop_nest(box_a, graceful=True)
+    shutil.rmtree(box_a["tmp_dir"])
+    shutil.copytree(copy_dir, box_a["tmp_dir"])
+    start_nest_in_place(box_a)
+    assert _inbox_count(box_a, owner) == 1, "the restored copy predates the two messages"
+    _import_one_mail(box_a, owner)
+    _push_backup(box_a)
+    after_rollback = _mail_segments(box_a, owner)
+    assert after_rollback["next_segment_id"] < before_rollback["next_segment_id"], (
+        f"A's saved counter must read below what B's copy numbered, or the device "
+        f"sees no regression: before {before_rollback!r}, after {after_rollback!r}"
+    )
+
+    app.backups.navigate()
+    app.driver.call_command(
+        "backup_audit_run_now", {"now_offset_secs": 50 * 60 * 60}, timeout=120
+    )
+    wait_until(
+        lambda: app.backups.recover_button_in_banner() is not None,
+        60.0,
+        diagnose=lambda: (
+            f"the accepted regression's banner never carried the recover button: "
+            f"banners {_banner_texts(app)!r}; A {after_rollback!r} vs before "
+            f"{before_rollback!r}; error={app.error_text()!r}"
+        ),
+    )
+    assert _inbox_count(box_a, owner) == 2, "pre-state: kept + post-rollback only"
+
+    # ── The gesture under test ───────────────────────────────────────────────
+    app.backups.recover_from_banner(app.backups.recover_button_in_banner())
+    wait_until(
+        lambda: app.backups.recover_result_text() not in ("", S.backups.backup_recover_running)
+        or bool(app.error_text()),
+        300.0,
+        diagnose=lambda: f"the recovery never reached a verdict; "
+                         f"result={app.backups.recover_result_text()!r} "
+                         f"error={app.error_text()!r}",
+    )
+    result = app.backups.recover_result_text()
+    assert result.startswith(S.backups.recover_result_whole), (
+        f"the recovery must report everything back: result={result!r} "
+        f"error={app.error_text()!r}"
+    )
+
+    # Nest-side, independent of the page (convention 5): every message A ever
+    # held is in its INBOX, exactly once — the kept one, the two lost ones,
+    # and the one taken after the rollback.
+    recovered = _inbox_count(box_a, owner)
+    assert recovered == 4, (
+        f"NEST-SIDE failure: the page says {result!r}, but A's INBOX holds "
+        f"{recovered} message(s), not the 4 it ever held"
+    )
+
+    # The notice has nothing left to say, now and on the next pass.
+    assert app.driver.count("backup-audit-alert") == 0, (
+        f"a whole recovery clears the notice: {_banner_texts(app)!r}"
+    )
+    app.driver.call_command(
+        "backup_audit_run_now", {"now_offset_secs": 75 * 60 * 60}, timeout=120
+    )
+    assert app.driver.count("backup-audit-alert") == 0, (
+        f"a later pass must not raise the notice again: {_banner_texts(app)!r} "
+        f"error={app.error_text()!r}"
+    )
+
+
+@pytest.mark.tui
+@pytest.mark.linux
+# The other five apps follow in their batched trickle-down lifts; each adds its
+# marker here, and `require_recover_supported` names the gap meanwhile. web is
+# never a custodian, so it is never marked. android's witness is its Robolectric
+# test (no e2e lane).
+@pytest.mark.real_sync_agent
+@pytest.mark.feature("backup-destinations-and-restore")
+def test_a_nest_that_went_back_in_time_gets_its_lost_mail_back_from_this_devices_copy(
+    app, request, nest_mode, tmp_path_factory
+):
+    """**The owner's nest was restored from an older copy of its data directory;
+    the copy this device holds as a custodian still has what it lost, and the
+    owner gets it back from the app** (`ui/backups.md` § Audit-alert surface,
+    the fifth reason's client-device arm; the leg
+    `segment-backup-protocol.md` § Client-device custodian (pull) → *Restore* →
+    *Recovery from this device's own store*, whose proof obligation this is).
+
+    The regression is real, not injected: the nest journey's rollback above, with
+    this device's own custodian store in the destination's place.
+
+    Flow under test::
+
+        box A (owner); one kept message
+        enroll this device (UI)                 -> a poked pass holds the mail
+        stop A, copy its data dir, restart A
+        two more messages; poked passes         -> the device holds them too
+        stop A, restore the copy, restart A     -> A lost the two messages
+        poked pass + audit pass                 -> the device's pass accepts the
+                                                   regression; the banner stands
+                                                   on this device's row with the
+                                                   recover button
+        press recover, confirm                  -> the leg runs in the sync agent;
+                                                   the shared driver's verdict
+        INBOX on A                              -> kept + both lost, each once
+        banner                                  -> gone, and a later pull pass +
+                                                   audit pass keep it gone, so no
+                                                   second press is offered
+
+    A second run of the leg asks nothing once the duty cleared the store's
+    record (`run_store_recovery` over no standing set) — the unit tier pins it;
+    here the cleared banner is the user-facing half: there is nothing to press.
+
+    Latency-independent (convention 14): every wait is a deadline poll that runs
+    the pass it waits on (the agent's pull poke, the app's audit poke).
+    """
+    from common.nest import start_nest_in_place, stop_nest
+    from conftest import _login_app_as, _start_dedicated_nest
+
+    box_a, cleanup_a = _start_dedicated_nest(
+        request, nest_mode, tmp_path_factory, "recover-store-src")
+    request.addfinalizer(cleanup_a)
+    owner = box_a["admin"]
+
+    _login_app_as(app, request, box_a, owner)
+    app.backups.require_destination_management_supported()
+    app.backups.require_recover_supported()
+    app.backups.navigate()
+    # A process-wide static nothing resets; zero it so this test's passes run at
+    # the real clock, and put it back afterwards.
+    app.driver.call_command("backup_audit_run_now", {"now_offset_secs": 0}, timeout=60)
+    request.addfinalizer(
+        lambda: app.driver.call_command(
+            "backup_audit_run_now", {"now_offset_secs": 0}, timeout=60
+        )
+    )
+    dest = DestinationEnrollment(app, box_a, owner)
+    request.addfinalizer(lambda: _leave_no_custodian_behind(app, dest))
+
+    _seed_one_mail_segment(app, box_a, owner)
+    app.backups.navigate()
+    dest.add_custodian_destination("This device", capacity="50 GB")
+    kept_only = app.backups.wait_for_custodian_hosting()
+    assert kept_only["held_bytes"] > 0, f"the device must hold the mail: {kept_only!r}"
+
+    # ── The copy, taken while A is stopped so it is consistent ───────────────
+    copy_dir = str(tmp_path_factory.mktemp("recover-store-src-copy") / "data")
+    stop_nest(box_a, graceful=True)
+    shutil.copytree(box_a["tmp_dir"], copy_dir)
+    start_nest_in_place(box_a)
+    at_copy = _mail_segments(box_a, owner)
+
+    for _ in range(2):
+        _import_one_mail(box_a, owner)
+    before_rollback = _mail_segments(box_a, owner)
+    # No push seals a segment between the two imports here (no nest destination
+    # sweeps), so both may share one: what matters is that the copy lacks it.
+    assert before_rollback["next_segment_id"] > at_copy["next_segment_id"], (
+        f"the two messages must sit in a segment the copy does not hold, or "
+        f"nothing is lost: at the copy {at_copy!r}, before the rollback "
+        f"{before_rollback!r}"
+    )
+    assert _inbox_count(box_a, owner) == 3
+
+    # The device holds the two messages the rollback will take. Each poll RUNS
+    # a pass (convention 14).
+    reports: list[dict] = []
+
+    def holds_the_lost_mail():
+        reports.append(app.backups.custodian_pull_run_now())
+        return (
+            bool(reports[-1].get("checked_in"))
+            and reports[-1].get("held_bytes", 0) > kept_only["held_bytes"]
+        )
+
+    wait_until(holds_the_lost_mail, 120.0, interval=2.0,
+               diagnose=lambda: f"the device never pulled the two later messages: "
+                                f"kept-only {kept_only!r}, last {reports[-1:]!r}")
+    held_before = reports[-1]["held_bytes"]
+
+    # ── The regression ───────────────────────────────────────────────────────
+    stop_nest(box_a, graceful=True)
+    shutil.rmtree(box_a["tmp_dir"])
+    shutil.copytree(copy_dir, box_a["tmp_dir"])
+    start_nest_in_place(box_a)
+    assert _inbox_count(box_a, owner) == 1, "the restored copy predates the two messages"
+    after_rollback = _mail_segments(box_a, owner)
+    assert after_rollback["next_segment_id"] < before_rollback["next_segment_id"], (
+        f"A's saved counter must read below what the device's copy numbered, or "
+        f"the pull sees no regression: before {before_rollback!r}, after "
+        f"{after_rollback!r}"
+    )
+
+    # The device's pass accepts the regression; the app's audit pass folds the
+    # store's record onto this device's own row, whose banner carries the button.
+    app.backups.navigate()
+
+    def banner_offers_recovery():
+        reports.append(app.backups.custodian_pull_run_now())
+        app.driver.call_command("backup_audit_run_now", {"now_offset_secs": 0}, timeout=120)
+        return app.backups.recover_button_in_banner() is not None
+
+    wait_until(
+        banner_offers_recovery, 120.0, interval=2.0,
+        diagnose=lambda: (
+            f"this device's row never carried the recover button: banners "
+            f"{_banner_texts(app)!r}; last pass {reports[-1:]!r}; A {after_rollback!r} "
+            f"vs before {before_rollback!r}; error={app.error_text()!r}"
+        ),
+    )
+    assert reports[-1].get("held_bytes", 0) >= held_before, (
+        f"the accepting pass must keep every byte the device held: "
+        f"{held_before} before the rollback, {reports[-1]!r} now"
+    )
+    assert _inbox_count(box_a, owner) == 1, "pre-state: the kept message only"
+
+    # ── The gesture under test ───────────────────────────────────────────────
+    app.backups.recover_from_banner(app.backups.recover_button_in_banner())
+    wait_until(
+        lambda: app.backups.recover_result_text() not in ("", S.backups.backup_recover_running)
+        or bool(app.error_text()),
+        300.0,
+        diagnose=lambda: f"the recovery never reached a verdict; "
+                         f"result={app.backups.recover_result_text()!r} "
+                         f"error={app.error_text()!r}",
+    )
+    result = app.backups.recover_result_text()
+    assert result.startswith(S.backups.recover_result_whole), (
+        f"the recovery must report everything back: result={result!r} "
+        f"error={app.error_text()!r}"
+    )
+
+    # Nest-side, independent of the page (convention 5): every message A ever
+    # held is in its INBOX, exactly once — the kept one and the two lost ones.
+    recovered = _inbox_count(box_a, owner)
+    assert recovered == 3, (
+        f"NEST-SIDE failure: the page says {result!r}, but A's INBOX holds "
+        f"{recovered} message(s), not the 3 it ever held"
+    )
+
+    # The notice has nothing left to say, now and after the next passes: the
+    # duty cleared the store's record, so no button is left to press twice.
+    # The result paints first and the page then re-lists and re-audits, so the
+    # banner goes a beat later (linux's `render_recover`): a deadline poll, never
+    # a read straight after the result (convention 14).
+    wait_until(
+        lambda: app.driver.count("backup-audit-alert") == 0,
+        30.0,
+        diagnose=lambda: f"a whole recovery clears the notice: {_banner_texts(app)!r}",
+    )
+    after = app.backups.custodian_pull_run_now()
+    app.driver.call_command("backup_audit_run_now", {"now_offset_secs": 0}, timeout=120)
+    assert app.driver.count("backup-audit-alert") == 0, (
+        f"a later pass must not raise the notice again: {_banner_texts(app)!r} "
+        f"pass {after!r} error={app.error_text()!r}"
+    )
+    assert _inbox_count(box_a, owner) == 3, "a later pass recovers nothing twice"

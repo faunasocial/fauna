@@ -26,9 +26,10 @@ use fauna_nest::db::bridge_service_users::BridgeRole;
 use fauna_nest::routes::AppState;
 use fauna_nest::rpc_router::RpcRouter;
 use fauna_protocol::bridge_routing::{
-    AliasPolicy, FetchConfigReply, FetchConfigRequest, GetAliasPolicyRequest,
-    PutAliasPolicyRequest, PutAuthPolicyRequest, PutImapPolicyRequest, PutOutboundPolicyRequest,
-    PutPolicyReply, PutSpamPolicyRequest, PutSubmissionPolicyRequest,
+    AliasPolicy, DmarcForensicOptions, DmarcReportingPolicy, FetchConfigReply, FetchConfigRequest,
+    GetAliasPolicyRequest, GetDmarcPolicyRequest, PutAliasPolicyRequest, PutAuthPolicyRequest,
+    PutDmarcPolicyRequest, PutImapPolicyRequest, PutOutboundPolicyRequest, PutPolicyReply,
+    PutSpamPolicyRequest, PutSubmissionPolicyRequest,
 };
 use fauna_protocol::{RpcError, decode_strict as decode};
 
@@ -398,11 +399,12 @@ async fn get_alias_policy_returns_catalog_defaults_before_any_override() {
     let (_mta, admin) = mta_and_admin(&state).await;
 
     // Fresh nest: the effective alias policy is the `fauna_mail::aliases`
-    // catalog default verbatim.
+    // catalog default verbatim — and no reserved ADDITIONS: the six role names
+    // are a floor the admin cannot edit, so the read twin never reports them.
     let reply = get_alias_policy_as_admin(state, admin).await;
     assert_eq!(reply, AliasPolicy::default());
     assert_eq!(reply.exact_aliases_max, 20);
-    assert_eq!(reply.reserved_local_parts.len(), 6);
+    assert!(reply.reserved_local_parts.is_empty());
     assert!(reply.subaddressing_enabled);
     assert!(reply.wildcard_prefix_enabled);
 }
@@ -423,10 +425,8 @@ async fn admin_put_alias_policy_reflected_in_get_alias_policy() {
     let reply = get_alias_policy_as_admin(state, admin).await;
     assert_eq!(reply.exact_aliases_max, 3);
     assert!(!reply.subaddressing_enabled);
-    assert_eq!(
-        reply.reserved_local_parts,
-        vec!["postmaster".to_string(), "sales".to_string()]
-    );
+    // The admin's additions only: a stored role name is not an addition.
+    assert_eq!(reply.reserved_local_parts, vec!["sales".to_string()]);
     // The unmentioned override keeps the catalog default.
     assert!(reply.wildcard_prefix_enabled);
 }
@@ -449,5 +449,98 @@ async fn get_alias_policy_rejects_non_admin_callers() {
         .await
         .expect_err("non-admin must be denied on get_alias_policy");
         assert_eq!(err.code, "fauna.bridges.permission_denied");
+    }
+}
+
+// ── put_dmarc_policy / get_dmarc_policy — the deployment-wide `mail.dmarc.*`
+// catalog, nest-consumed like the alias knobs (the DNS surface's record
+// assembler + the daily report prunes), never in `FetchConfigReply`.
+
+async fn get_dmarc_policy_as_admin(state: Arc<AppState>, admin: [u8; 32]) -> DmarcReportingPolicy {
+    let reply_bytes = dispatch(
+        state,
+        admin,
+        "fauna.bridges.get_dmarc_policy",
+        encode(&GetDmarcPolicyRequest::default()),
+    )
+    .await
+    .expect("get_dmarc_policy ok");
+    decode::<DmarcReportingPolicy>(&reply_bytes).expect("decode DmarcReportingPolicy")
+}
+
+#[tokio::test]
+async fn get_dmarc_policy_returns_catalog_defaults_before_any_override() {
+    let state = fixture_state().await;
+    let (_mta, admin) = mta_and_admin(&state).await;
+
+    let reply = get_dmarc_policy_as_admin(state, admin).await;
+    assert_eq!(reply, DmarcReportingPolicy::default());
+    assert!(
+        !reply.ruf_publish,
+        "forensic reports are off by default (PII)"
+    );
+    assert_eq!(reply.aggregate_retention_days, 90);
+    assert_eq!(reply.forensic_retention_days, 30);
+}
+
+#[tokio::test]
+async fn admin_put_dmarc_policy_reflected_in_get_dmarc_policy() {
+    let state = fixture_state().await;
+    let (_mta, admin) = mta_and_admin(&state).await;
+
+    let put = PutDmarcPolicyRequest {
+        ruf_publish: Some(true),
+        fo_mode: Some(DmarcForensicOptions::Dkim),
+        forensic_retention_days: Some(60),
+        ..Default::default()
+    };
+    put_as_admin(&state, admin, "fauna.bridges.put_dmarc_policy", &put).await;
+
+    let reply = get_dmarc_policy_as_admin(state.clone(), admin).await;
+    assert!(reply.ruf_publish);
+    assert_eq!(reply.fo_mode, DmarcForensicOptions::Dkim);
+    assert_eq!(reply.forensic_retention_days, 60);
+    // The unmentioned knobs keep the catalog default.
+    assert_eq!(reply.aggregate_retention_days, 90);
+    assert_eq!(reply.pct, 100);
+
+    // Full PUT: a later write without the opt-in clears it.
+    put_as_admin(
+        &state,
+        admin,
+        "fauna.bridges.put_dmarc_policy",
+        &PutDmarcPolicyRequest::default(),
+    )
+    .await;
+    assert_eq!(
+        get_dmarc_policy_as_admin(state, admin).await,
+        DmarcReportingPolicy::default()
+    );
+}
+
+#[tokio::test]
+async fn dmarc_policy_kinds_reject_non_admin_callers() {
+    let state = fixture_state().await;
+    let mta = [1u8; 32];
+    approve_bridge(&state.db, &mta, BridgeRole::Mta, &[0x99u8; 32]).await;
+    let user = [7u8; 32];
+
+    for actor in [mta, user] {
+        for (kind, payload) in [
+            (
+                "fauna.bridges.get_dmarc_policy",
+                encode(&GetDmarcPolicyRequest::default()),
+            ),
+            (
+                "fauna.bridges.put_dmarc_policy",
+                encode(&PutDmarcPolicyRequest::default()),
+            ),
+        ] {
+            let err = dispatch(state.clone(), actor, kind, payload)
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("non-admin must be denied on {kind}"));
+            assert_eq!(err.code, "fauna.bridges.permission_denied", "{kind}");
+        }
     }
 }

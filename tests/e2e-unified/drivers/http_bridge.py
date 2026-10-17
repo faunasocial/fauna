@@ -154,7 +154,10 @@ class HttpBridgeDriver(PlatformDriver):
         failure must diagnose itself) applied to the ack path.
 
         Default is empty — a driver whose app writes no log it can reach adds
-        nothing to the message. Overridden where the log exists (``linux``).
+        nothing to the message. Overridden where the log exists (``linux``,
+        ``windows``). Every ack-polling command here appends it to its own
+        timeout — ``set_state`` (every ``logged_in_app`` sign-in), ``reset``,
+        ``logout``, ``call_command``, ``call_machine_method``.
         """
         return ""
 
@@ -420,10 +423,9 @@ class HttpBridgeDriver(PlatformDriver):
         the MRO rather than tabulated per app (convention 7's
         `app_capabilities.py` lesson — a hand-kept table answers wrongly for
         a driver it never heard of), and equality-pinned per driver by
-        `tests/test_module_relaunch.py`. Today only android inherits the base
-        (its bridge keeps no relaunchable session).
+        `tests/test_module_relaunch.py`. Every driver overrides it today.
         Consumed by the module-boundary relaunch contract
-        (`helpers/module_relaunch.py`, testing.md § point 10)."""
+        (`helpers/module_relaunch.py`, e2e-launch-isolation.md convention 10)."""
         return type(self).recover is not HttpBridgeDriver.recover
 
     def launch_environment(self) -> dict | None:
@@ -712,35 +714,58 @@ class HttpBridgeDriver(PlatformDriver):
         has already forgotten (principal succession mints a successor on a fresh
         row, and the revoked-key handshake's retries stretch that sign-in long
         enough for the next reset's stop to lapse and strand the row)."""
-        store = self._principal_slot_store(cred_dir, keyring_app)
-        if store is None:
+        stored = self._read_principal_slots(cred_dir, keyring_app)
+        if stored is None:
             return
         signed_in = set(getattr(self, "_principal_slots_restored", ()))
+        vault = self.__dict__.setdefault("_principal_slot_vault", {})
+        for actor, slot in stored.items():
+            vault[actor] = slot
+            self._harvest_replica(actor)
+        for actor in signed_in - set(stored):
+            vault.pop(actor, None)
+            self.__dict__.get("_replica_vault", {}).pop(actor, None)
+
+    def _read_principal_slots(self, cred_dir, keyring_app) -> dict[str, dict] | None:
+        """Every whole per-actor slot one launch's store holds, as ``{actor:
+        slot}`` — the harvest's read, and the discarded machine's view of the
+        actors it still holds. ``None`` when the launch resolved no file-backed
+        store or the file cannot be read; ``{}`` when the erase took the file."""
+        store = self._principal_slot_store(cred_dir, keyring_app)
+        if store is None:
+            return None
         path, prefix = store
         try:
             with open(path) as f:
                 stored = json.load(f)
         except FileNotFoundError:
             # The erase can take the whole namespace file: a store holding nothing.
-            stored = {}
+            return {}
         except (OSError, ValueError):
-            return
+            return None
         if not isinstance(stored, dict):
-            return
+            return None
         # The namespace's own rows by their account names — on iOS the file is the
         # app's whole keychain, and only the prefixed rows are the account store's.
-        stored = {k[len(prefix):]: v for k, v in stored.items() if k.startswith(prefix)}
-        vault = self.__dict__.setdefault("_principal_slot_vault", {})
+        return self._whole_slots(
+            {k[len(prefix):]: v for k, v in stored.items() if k.startswith(prefix)}
+        )
+
+    @staticmethod
+    def _whole_slots(stored: dict) -> dict[str, dict]:
+        """Every whole per-actor slot in an account-store ``account -> value``
+        map, as ``{actor: slot}``: an actor's bare writer-key entry plus every
+        ``<actor>/…`` entry beside it. Entries with no writer key are not a
+        machine's principal. The one spelling of "a slot", shared by the file
+        read above and the attached read (`_attached_slots`)."""
+        slots = {}
         for actor in stored:
             if len(actor) == 64 and all(c in "0123456789abcdef" for c in actor):
-                prefix = f"{actor}/"
-                vault[actor] = {
-                    k: v for k, v in stored.items() if k == actor or k.startswith(prefix)
+                own = f"{actor}/"
+                slots[actor] = {
+                    k: v for k, v in stored.items() if k == actor or k.startswith(own)
                 }
-                self._harvest_replica(actor)
-        for actor in signed_in - set(stored):
-            vault.pop(actor, None)
-            self.__dict__.get("_replica_vault", {}).pop(actor, None)
+        return slots
 
     @staticmethod
     def _replica_dir(store_root, actor) -> str | None:
@@ -866,6 +891,133 @@ class HttpBridgeDriver(PlatformDriver):
                 os.fsync(f.fileno())
             os.replace(tmp, path)
         return True
+
+    # ── A discarded driver retires its machine (convention 10, ruled 2026-10-13)
+    #
+    # The carry above makes a relaunch the same machine; this is the other end
+    # of a machine's life. A driver torn down is a machine nobody starts again,
+    # and before this rule it walked away signed in: its grant stayed live on
+    # the nest, so its walk mark on the account's fleet scope kept COUNTING at
+    # the retention gate (`fleet-scope-reclamation.md` clause (1): a mark counts
+    # while its key holds a live grant) and pinned the gate's watermark at the
+    # seq it last walked, for the rest of the run. On a SHARED actor
+    # (`helpers/shared_identity.py`) every later test signs in on that same
+    # account, so every retire above the pin was withheld, each later sign-in's
+    # rows stayed, and the session account met the nest's 4096-entry cap
+    # mid-sweep (`scope_full`, then every state read "not ready"). The product's
+    # control for a dead machine is removal, and what a user does to a machine
+    # they give away is sign it out — so the discarded machine signs out through
+    # its own app, which retires its enrollment and grant and severs its fleet
+    # rows exactly as production does. Any shared row this machine latched that
+    # the nest still lists holding a grant afterwards (the app died, the
+    # sign-out wedged, a spawned sibling instance served the actor, or an
+    # earlier launch of this machine held it) is deleted nest-side as the
+    # actor, which revokes the grant — the half of removal that unpins the gate.
+    #
+    # Only a SHARED actor, and only a machine the driver OWNS. A dedicated
+    # actor dies with its test, and its tests model what they mean by a stopped
+    # device — a lost one, removed later through the UI (`test_device_member_
+    # removal.py`), included. A store the caller supplied, or one pinned with
+    # `preserve_state_across_relaunch()`, is a machine a later launch resumes.
+
+    #: The sign-out a discarded machine performs through its own app — the same
+    #: reset the `app` fixture runs between tests, at its default budget.
+    RETIRE_SIGN_OUT_S = 10.0
+
+    def _discards_machine_at_teardown(self) -> bool:
+        """True when this driver's teardown throws its machine away: the store
+        is the driver's own (the carry is live) and no relaunch pin keeps it."""
+        return bool(getattr(self, "_principal_slot_carry_live", False)) and not getattr(
+            self, "_preserve_pinned_keys", None
+        )
+
+    def _current_slots(self) -> dict[str, dict] | None:
+        """This launch's per-actor slots (`_read_principal_slots`). A driver
+        whose store has no host-side file (web, android) answers with
+        `_attached_slots` instead."""
+        return self._read_principal_slots(
+            getattr(self, "_resolved_credential_dir", None),
+            getattr(self, "_resolved_keyring_app", None),
+        )
+
+    def _attached_slots(self) -> dict[str, dict] | None:
+        """This launch's per-actor slots read through the running app's own
+        store seam — the harness's one table of them,
+        `common.cred_store.attach_account_store` (web: the page's
+        `localStorage`; android: the on-device credential file over the bridge).
+        For a driver whose principal store rests where no host path reaches.
+        ``None`` when the read fails (the page or the bridge is gone): the
+        discarded machine then retires nothing it cannot name."""
+        from common.cred_store import attach_account_store
+        from helpers.app_surface import app_name
+
+        try:
+            stored = attach_account_store(app_name(self), self).read_map()
+        except Exception as exc:  # noqa: BLE001 — a teardown never fails a test
+            print(f"[e2e] discarded machine: could not read the store ({type(exc).__name__}: {exc})")
+            return None
+        return self._whole_slots(stored) if isinstance(stored, dict) else None
+
+    def _retire_discarded_machine(self) -> None:
+        """Sign the discarded machine out of every shared actor it holds, then
+        remove nest-side any shared actor's row whose latch survived. Never
+        fails a teardown; what it could not do is printed for the next sweep's
+        attribution."""
+        from helpers.shared_identity import is_shared_actor
+
+        if not self._discards_machine_at_teardown():
+            return
+        before = self._current_slots() or {}
+        # A shared actor an earlier launch of this machine held and this one
+        # never signed in: that enrollment is live too — a relaunch signs
+        # nothing out — and this launch's sign-out cannot reach it.
+        vault_only = {
+            actor: slot
+            for actor, slot in getattr(self, "_principal_slot_vault", {}).items()
+            if actor not in before
+        }
+        if not any(is_shared_actor(a) for a in (*before, *vault_only)):
+            return
+        if any(is_shared_actor(a) for a in before) and self._health_raw(timeout=2.0):
+            try:
+                self.reset(timeout=self.RETIRE_SIGN_OUT_S)
+            except Exception as exc:  # noqa: BLE001 — the nest half follows
+                print(f"[e2e] discarded machine: sign-out failed ({type(exc).__name__}: {exc})")
+        # The nest, not the store, says what the sign-out reached: a reset erases
+        # every account's slot, but signs out only the account its process
+        # SERVES — a slot a spawned sibling instance held (`spawn_bound_instance`)
+        # is erased with its grant still live. So every shared row this machine
+        # latched is asked about, and removed if it still holds a grant.
+        for actor, slot in {**before, **vault_only}.items():
+            if is_shared_actor(actor):
+                self._remove_row_still_granted(actor, slot)
+        self.__dict__.get("_principal_slot_vault", {}).clear()
+
+    @staticmethod
+    def _remove_row_still_granted(actor: str, slot: dict) -> None:
+        """Delete the row ``actor``'s latch in ``slot`` names, as ``actor``, when
+        the nest still lists it holding a grant — which revokes the grant, so its
+        walk mark stops counting at the gate. A row the sign-out retired lists no
+        principal and is left as the sign-out left it."""
+        from helpers.enrollment import latched_row_in
+        from helpers.shared_identity import shared_actor_session
+
+        row = latched_row_in(slot, actor)
+        session = shared_actor_session(actor)
+        if row is None or session is None:
+            return
+        url, seed = session
+        try:
+            from clients.ws_rpc_admin_client import WsRpcAdminClient
+
+            with WsRpcAdminClient(url, bytes.fromhex(actor), seed) as client:
+                devices = client.call("fauna.sync.devices.list", {}).get("devices", [])
+                if not any(d.get("device_id") == row and d.get("principal") for d in devices):
+                    return
+                client.call("fauna.sync.devices.delete", {"device_id": row})
+            print(f"[e2e] discarded machine: removed {actor[:12]}…'s still-granted row {row[:12]}…")
+        except Exception as exc:  # noqa: BLE001 — a teardown never fails a test
+            print(f"[e2e] discarded machine: could not remove {actor[:12]}…'s row ({exc})")
 
     # ── The install-device-secret carry (convention 10, ruled 2026-09-20) ───
     #
@@ -1335,8 +1487,37 @@ class HttpBridgeDriver(PlatformDriver):
     def launch(self, config: dict) -> None:
         raise NotImplementedError("Subclasses must implement launch()")
 
-    def teardown(self) -> None:
-        raise NotImplementedError("Subclasses must implement teardown()")
+    def teardown(self, **kwargs) -> None:
+        """Discard this driver's machine, then stop its app.
+
+        A test that tears a driver down throws its machine away for good, and a
+        user who gives a machine away signs it out first — so before the app
+        stops, `_retire_discarded_machine` signs out every actor this launch
+        still holds (convention 10, `e2e-launch-isolation.md` → *A discarded
+        driver retires its machine*). Stopping the app WITHOUT discarding the
+        machine — every relaunch, `recover()` included — is `_stop_app`, which
+        each driver implements and never calls this."""
+        try:
+            self._retire_discarded_machine()
+        finally:
+            self._stop_app(**kwargs)
+
+    def _stop_app(self, **kwargs) -> None:
+        """Stop the app process and release what the launch holds, keeping the
+        machine — the half of `teardown()` a relaunch also runs."""
+        raise NotImplementedError("Subclasses must implement _stop_app()")
+
+    def quit_app(self) -> None:
+        """The user quits the app and leaves the machine as it is — the first
+        half of `hard_reload()`, with the reopen left for later.
+
+        A journey whose story needs a device OFFLINE while other seats act
+        (a reader whose first fetch must follow a takedown) quits here and
+        reopens with `hard_reload()`; pin the store first
+        (`preserve_state_across_relaunch()`), or the reopened app is a fresh
+        device rather than the one that quit. Never `teardown()` for this: that
+        discards the machine and signs its actors out."""
+        self._stop_app()
 
     def find_element(self, element_id: str, index: int = 0, *, scope: str | None = None):
         return _ElementStub(self, element_id, index, scope)
@@ -1362,9 +1543,10 @@ class HttpBridgeDriver(PlatformDriver):
             body["scope"] = wire
         self._post_with_scroll("/element/type", body)
 
-    def clear_and_type(self, element_id: str, text: str, *, scope: str | None = None) -> None:
-        body_clear: dict = {"id": element_id}
-        body_type: dict = {"id": element_id, "text": text}
+    def clear_and_type(self, element_id: str, text: str, *, index: int = 0,
+                       scope: str | None = None) -> None:
+        body_clear: dict = {"id": element_id, "index": index}
+        body_type: dict = {"id": element_id, "text": text, "index": index}
         wire = self._scope_wire(scope)
         if wire:
             body_clear["scope"] = wire
@@ -1746,7 +1928,10 @@ class HttpBridgeDriver(PlatformDriver):
             except Exception:
                 pass
             time.sleep(0.2)
-        raise TimeoutError(f"App did not acknowledge command {cmd_id} within {timeout}s")
+        raise TimeoutError(
+            f"App did not acknowledge command {cmd_id} within {timeout}s"
+            f"{self.ack_timeout_diagnostics()}"
+        )
 
     def get_state(self, path: str | None = None, *,
                   wait_for=None, timeout: float = 5.0) -> dict | None:
@@ -1942,8 +2127,14 @@ class HttpBridgeDriver(PlatformDriver):
                 pass
             time.sleep(0.2)
         if not acked:
-            raise TimeoutError(f"App did not acknowledge reset within {timeout}s")
-        raise TimeoutError(f"App acknowledged reset but session still authenticated after {timeout}s")
+            raise TimeoutError(
+                f"App did not acknowledge reset within {timeout}s"
+                f"{self.ack_timeout_diagnostics()}"
+            )
+        raise TimeoutError(
+            f"App acknowledged reset but session still authenticated after {timeout}s"
+            f"{self.ack_timeout_diagnostics()}"
+        )
 
     def logout(self, timeout: float = 10.0) -> None:
         """Clear session but keep data, return to onboarding."""
@@ -1959,7 +2150,10 @@ class HttpBridgeDriver(PlatformDriver):
             except Exception:
                 pass
             time.sleep(0.2)
-        raise TimeoutError(f"App did not acknowledge logout within {timeout}s")
+        raise TimeoutError(
+            f"App did not acknowledge logout within {timeout}s"
+            f"{self.ack_timeout_diagnostics()}"
+        )
 
     def wait_for_state(self, predicate, timeout: float = 10.0) -> dict:
         """Poll until the app state satisfies predicate. Returns the matching state."""

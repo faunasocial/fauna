@@ -21,6 +21,7 @@
 mod claim_code;
 mod dns_config;
 mod dns_post_instructions;
+mod emergency_lockout_entry;
 mod generic_provider_form;
 mod handle_entry;
 mod identity_choice;
@@ -40,6 +41,7 @@ mod vps_config;
 mod widgets;
 
 pub mod awaiting_manual_dns;
+pub mod nest_retire;
 
 use fauna_ui_ids as ids;
 use std::cell::RefCell;
@@ -69,6 +71,7 @@ pub const STEP_NAT_MODE_CHOICE: &str = "nat_mode_choice";
 pub const STEP_TRUST_PROMPT: &str = "trust_prompt";
 pub const STEP_RECOVERY_KIT: &str = "recovery_kit";
 pub const STEP_RECOVERY_ENTRY: &str = "recovery_entry";
+pub const STEP_EMERGENCY_LOCKOUT_ENTRY: &str = "emergency_lockout_entry";
 pub const STEP_NEST_PROVISIONING: &str = "nest_provisioning";
 pub const STEP_NEST_RECOVERY: &str = "nest_recovery";
 pub const STEP_RECOVER_SELFHOSTED_INSTRUCTIONS: &str = "recover_selfhosted_instructions";
@@ -103,6 +106,9 @@ fn step_to_name(step: OnboardingStep) -> Option<&'static str> {
         // and the phrase restore (`restore-from-recovery-kit-button`).
         RecoveryKit => STEP_RECOVERY_KIT,
         RecoveryEntry => STEP_RECOVERY_ENTRY,
+        // The signed-out lock door (`ui/sessions.md` § The signed-out door) —
+        // built on linux 2026-10-11 after tui led.
+        EmergencyLockoutEntry => STEP_EMERGENCY_LOCKOUT_ENTRY,
         // The one-tap trust offer (onboarding.md § 3b-ter) — BUILT on linux
         // 2026-08-14 (tui led it the same day), so `make_machine` declares
         // `set_renders_trust_prompt(true)` and both NAT-step exits route here.
@@ -176,6 +182,13 @@ fn pages(
             Box::new({
                 let m = m.clone();
                 move || recovery_entry::build(m, append)
+            }),
+        ),
+        (
+            STEP_EMERGENCY_LOCKOUT_ENTRY,
+            Box::new({
+                let m = m.clone();
+                move || emergency_lockout_entry::build(m)
             }),
         ),
         (
@@ -336,7 +349,7 @@ fn persist_awaiting_dns(
         &record,
     ) {
         tracing::error!("[onboarding] persisting the awaiting-DNS account failed: {e:#}");
-        m.set_error_message(session_error::persist_account(&e.to_string()));
+        m.set_error_message(add_refusal_line(&e, session_error::persist_account));
     }
 }
 
@@ -427,7 +440,7 @@ pub(super) fn persist_pending_invite_slot(m: &OnboardingMachine, append: bool) {
         Ok(_) => {}
         Err(e) => {
             tracing::error!("[onboarding] pending-invite add_account failed: {e:#}");
-            m.set_error_message(session_error::persist_account(&e.to_string()));
+            m.set_error_message(add_refusal_line(&e, session_error::persist_account));
         }
     }
 }
@@ -510,17 +523,15 @@ fn start_awaiting_dns_poll(m: &Arc<OnboardingMachine>) {
     });
 }
 
-/// Clear the pending-factory-reset resume slot at a claim terminal (gap CR-1,
-/// `common.md` § Client-state recoverability).
-///
-/// Addressed by the *active* account — the same way
-/// `RegistryLaunchPersistence::load_pending_factory_reset` reads it — so the
-/// row is written (pre-dispatch), read (at launch), and cleared (here) against
-/// one notion of whose slot it is. (The awaiting-DNS slot needs no such helper
-/// any more: `persist_logged_in` spends it by actor id.)
-fn clear_pending_factory_reset_slot(registry: &fauna_client_accounts::AccountRegistry) {
-    if let Some(actor_id) = registry.active() {
-        registry.clear_pending_factory_reset(&actor_id);
+/// The line an account add refused by the registry paints: the shared
+/// [`fauna_client_accounts::add_refused_copy`] when the user can act on the
+/// refusal (the device's account list is full — `long-term-store.md`
+/// § Multi-account evolution → *The index is bounded*), else `wrap` around
+/// the error's own message. tui's `add_refusal_line`, same shape.
+fn add_refusal_line(err: &fauna_client_accounts::AccountError, wrap: fn(&str) -> String) -> String {
+    match fauna_client_accounts::add_refused_copy(err) {
+        Some(line) => line.resolve(fauna_i18n::strings::lookup),
+        None => wrap(&err.to_string()),
     }
 }
 
@@ -538,10 +549,11 @@ fn persist_logged_in_terminal(
     secret_hex: Option<&str>,
     nest_url: &str,
     append: bool,
-) {
+) -> Option<String> {
     if append {
-        return;
+        return None;
     }
+    let mut refusal = None;
     if let Some(secret_hex) = secret_hex {
         // Moment 4, through the shared helper — this sequence (register
         // the home nest per-actor, activate, spend the invite slot) was
@@ -553,21 +565,26 @@ fn persist_logged_in_terminal(
         // is evaluated *before* the silent challenge and would otherwise
         // pin every later launch on "Almost ready" — at this terminal
         // and nowhere earlier (ratified 2026-09-21).
-        let _ = fauna_client_accounts::persist_logged_in(
+        if let Err(e) = fauna_client_accounts::persist_logged_in(
             registry, secret_hex, nest_url, None,
             // No reach hint on this path yet: linux reads the wizard's
             // captured address at its own `LoggedIn` terminal only once
             // its leg lands (`onboarding.md` § Reach hint). `None` is
             // the honest value and behaves exactly as today.
             None,
-        );
+        ) {
+            tracing::error!("[onboarding] persisting the logged-in account failed: {e:#}");
+            // Only a refusal the user can act on (the account list is full)
+            // gets a painted line; any other failure stays log-only, as before.
+            refusal = fauna_client_accounts::add_refused_copy(&e)
+                .map(|line| line.resolve(fauna_i18n::strings::lookup));
+        }
     }
-    // Claim terminal #3 (CR-1). The re-claim after a factory reset has
-    // landed, so the pre-dispatch slot is spent. Leaving it set would pin
-    // every future launch to the pre-filled claim surface for a box the
-    // admin has already re-claimed — that row is evaluated before *all*
-    // the others.
-    clear_pending_factory_reset_slot(registry);
+    // Claim terminal #3 (CR-1) is spent inside `persist_logged_in`. A skipped
+    // or failed helper (no secret, a refused add) deliberately leaves the slot
+    // set: the claim was never recorded on this device, so the next launch
+    // resuming the pre-filled claim surface is the recoverable state.
+    refusal
 }
 
 /// Route a Done step to the right post-wizard persistence action, keyed on
@@ -595,12 +612,14 @@ fn handle_wizard_done(m: &Arc<OnboardingMachine>, append: bool) -> Option<Wizard
             // (there is no single slot beside the registry any more). Callers
             // needing the secret at this terminal take it from
             // `effective_secret()` — see the `LoggedIn` arm in `handle_change`.
-            persist_logged_in_terminal(
+            if let Some(line) = persist_logged_in_terminal(
                 &crate::account_registry(),
                 m.effective_secret().as_deref(),
                 nest_url.as_str(),
                 append,
-            );
+            ) {
+                m.set_error_message(line);
+            }
         }
         WizardOutcome::AwaitingManualDns {
             nest_url,
@@ -1238,7 +1257,18 @@ fn handle_change(
                                     tracing::error!(
                                         "[onboarding] add_account failed: {e:#}; dismissing wizard"
                                     );
-                                    window.close();
+                                    // A full account list is a refusal the user can
+                                    // act on: paint the shared line and keep the
+                                    // wizard open so they can read it, instead of
+                                    // closing on a silent failure.
+                                    if let Some(line) = fauna_client_accounts::add_refused_copy(&e)
+                                    {
+                                        m.set_error_message(
+                                            line.resolve(fauna_i18n::strings::lookup),
+                                        );
+                                    } else {
+                                        window.close();
+                                    }
                                 }
                             }
                         } else {
@@ -1608,6 +1638,28 @@ mod tests {
         assert!(
             registry.pending_factory_reset_json(&live).is_some(),
             "the live account's slot is not this wizard's to spend"
+        );
+    }
+
+    /// A refused add on a full account list paints the shared line, not the
+    /// seat's wrapper around the registry's English text.
+    #[test]
+    fn a_full_account_list_paints_the_shared_line() {
+        let full = fauna_client_accounts::AccountError::IndexFull {
+            needed: 2600,
+            limit: 2560,
+        };
+        let want = fauna_client_accounts::add_refused_copy(&full)
+            .unwrap()
+            .resolve(fauna_i18n::strings::lookup);
+        assert_eq!(
+            super::add_refusal_line(&full, super::session_error::persist_account),
+            want
+        );
+        let other = fauna_client_accounts::AccountError::UnknownActor("aa11".into());
+        assert!(
+            super::add_refusal_line(&other, super::session_error::persist_account)
+                .starts_with("Couldn't save your new account")
         );
     }
 

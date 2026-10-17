@@ -261,8 +261,8 @@ pub struct RelayRow {
     /// (`SyncChange.seq`) — the serve order the feed's retention gate and
     /// its `retirable_through_seq` watermark are expressed in, which the
     /// reclamation pass compares to withhold a retire the gate would refuse
-    /// (`account-data-taxonomy.md` § The generation machinery → *Fleet-scope
-    /// reclamation*, clause (1) → *the gate's watermark*). Known for a row
+    /// (`fleet-scope-reclamation.md`
+    /// § *Fleet-scope reclamation*, clause (1) → *the gate's watermark*). Known for a row
     /// walked off the nest feed and for an own row the nest's put reply
     /// stamped; `None` for a row that arrived over a store-served leg (no
     /// cross-writer order), for an own row still unpublished, and for every
@@ -293,6 +293,41 @@ pub struct IssuedRetire {
     pub delete_escrow_wraps: bool,
     /// The row is off the nest's feed now (`Retired` or already gone).
     pub settled: bool,
+}
+
+/// A custodied owner's **recovery material** — what a custodian's pair store
+/// holds so the custodian can answer the owner's phrase restore when the home
+/// nest is gone (`identity-succession.md` § Seed escrow → *The custodian copy*).
+///
+/// Three rows, read and replaced together, outside the relay plane: they are
+/// not account rows, carry no writer, and are never metered or served on the
+/// sync doors. Every byte is the owner's nest's verbatim answer — the chain
+/// and the statements as their signers' canonical bytes, the blob as the
+/// opaque ciphertext sealed to a RecoveryKey the custodian never holds.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CustodiedRecovery {
+    /// The owner's RecoveryKey registration chain, oldest link first — each
+    /// the verbatim canonical bytes of a `SignedRecoveryKeyRegistration`.
+    /// Empty: nothing custodied yet.
+    pub chain: Vec<Vec<u8>>,
+    /// The succession statements from the owner forward, oldest first — each
+    /// the verbatim bytes of a `SignedIdentitySuccession`. Non-empty means the
+    /// owner was succeeded, and the kit the blob was sealed to retired.
+    pub successions: Vec<Vec<u8>>,
+    /// The seed-escrow blob, while one rests.
+    pub escrow: Option<CustodiedEscrow>,
+}
+
+/// The custodied seed-escrow blob ([`CustodiedRecovery::escrow`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustodiedEscrow {
+    /// The opaque blob, byte-identical to the owner's.
+    pub blob: Vec<u8>,
+    /// The owner's nest's write stamp (unix seconds) — a newer one replaces.
+    pub updated_at: i64,
+    /// The `seq` of the chain head the blob was pulled under: a chain whose
+    /// head has advanced past it retired the kit the blob is sealed to.
+    pub head_seq: u64,
 }
 
 /// One row of the **record index** — the always-present layer of the block

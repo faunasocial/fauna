@@ -88,6 +88,79 @@ public class AdminSettingsViewModelTests
         Assert.NotNull(vm.ErrorMessage);
     }
 
+    private static void FillAddForm(AdminSettingsViewModel vm, string name = "  gold ")
+    {
+        vm.AddTierName = name;
+        vm.AddMaxInboxBytesText = "1";
+        vm.AddMaxStorageBytesText = " 2 ";
+        vm.AddMaxDevicesText = "-3";
+        vm.AddMaxBlobSizeText = "4";
+        vm.AddMaxFeedsText = "5";
+    }
+
+    [Fact]
+    public async Task AddTier_TrimsNameParsesCaps_CreatesRefetchesAndClearsForm()
+    {
+        var rpc = new MockNestRpcClient();
+        var vm = new AdminSettingsViewModel(rpc);
+        FillAddForm(vm);
+
+        await vm.AddTierAsync();
+
+        // Name trimmed, caps through the shared parse_cap (trim; negative → 0).
+        Assert.Equal(("gold", 1L, 2L, 0L, 4L, 5L), rpc.LastTierCreate);
+        Assert.Contains("AdminTiersList", rpc.Calls);
+        Assert.Null(vm.ErrorMessage);
+        Assert.Equal(string.Empty, vm.AddTierName);
+        Assert.Equal(string.Empty, vm.AddMaxFeedsText);
+    }
+
+    [Fact]
+    public async Task AddTier_EmptyName_RefusedLocally_NoWireCall()
+    {
+        var rpc = new MockNestRpcClient();
+        var vm = new AdminSettingsViewModel(rpc);
+        FillAddForm(vm, name: "   ");
+
+        await vm.AddTierAsync();
+
+        Assert.NotNull(vm.ErrorMessage);
+        Assert.DoesNotContain("AdminTiersCreate", rpc.Calls);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("1.5")]
+    [InlineData("abc")]
+    public async Task AddTier_BadCap_RefusedLocally_KeepsForm(string bad)
+    {
+        var rpc = new MockNestRpcClient();
+        var vm = new AdminSettingsViewModel(rpc);
+        FillAddForm(vm);
+        vm.AddMaxBlobSizeText = bad;
+
+        await vm.AddTierAsync();
+
+        Assert.NotNull(vm.ErrorMessage);
+        Assert.DoesNotContain("AdminTiersCreate", rpc.Calls);
+        Assert.Equal("  gold ", vm.AddTierName);
+    }
+
+    [Fact]
+    public async Task AddTier_NestRefusal_SurfacesError_KeepsForm()
+    {
+        var rpc = new MockNestRpcClient();
+        var vm = new AdminSettingsViewModel(rpc);
+        FillAddForm(vm);
+
+        rpc.NextError = "conflict";
+        await vm.AddTierAsync();
+
+        Assert.NotNull(vm.ErrorMessage);
+        Assert.Equal("  gold ", vm.AddTierName);
+        Assert.Equal("5", vm.AddMaxFeedsText);
+    }
+
     [Theory]
     [InlineData("42", 7L, 42L)]    // parses (trims), clamps non-negative
     [InlineData("  42  ", 7L, 42L)]

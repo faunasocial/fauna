@@ -56,6 +56,7 @@ import requests
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from common.auth import register_user
+from helpers.backup_destinations import DestinationEnrollment
 from helpers.folder_content import atomic_write, await_agent_upload, bind_location_under_set
 from helpers.sync_agent_config import agent_state_base
 from helpers.waiting import wait_until
@@ -145,18 +146,6 @@ def _custody_paths(second_nest) -> list[str]:
         conn.close()
 
 
-def _remove_destination_if_any(backups) -> None:
-    """Finalizer: best-effort, so a failed test keeps its own diagnosis."""
-    try:
-        backups.navigate()
-        while backups.destination_count() > 0:
-            n = backups.destination_count()
-            backups.remove_destination(0)
-            backups.wait_for_destination_count(n - 1)
-    except Exception:
-        pass
-
-
 @pytest.mark.parametrize("delist", [False, True], ids=["control", "delisted"])
 def test_a_delisted_covered_folder_row_is_caught_by_the_replica_anchor(
     logged_in_app, nest_instance, second_nest, test_user, tmp_path, request, delist
@@ -177,11 +166,12 @@ def test_a_delisted_covered_folder_row_is_caught_by_the_replica_anchor(
     # left shifted; zero it before anything is stamped through it.
     b.navigate()
     app.driver.call_command("backup_audit_run_now", {"now_offset_secs": 0}, timeout=60)
-    _remove_destination_if_any(b)
-    request.addfinalizer(lambda: _remove_destination_if_any(b))
-
-    b.add_destination(second_nest["url"], name="Replica-anchor")
-    b.wait_for_destination_count(1)
+    # Enroll alone and leave nothing: `test_user` is session-scoped, so an
+    # earlier module's destination (or this test's) would otherwise be what
+    # `destinations[0]` below names, and every later module's count.
+    dest = DestinationEnrollment(app, nest_instance, test_user)
+    request.addfinalizer(dest.leave_none)
+    dest.add_destination(second_nest["url"], "Replica-anchor")
 
     # ── A synced folder with one uploaded file (UI + the real agent). ──
     name = f"anchored-{secrets.token_hex(4)}"
@@ -201,11 +191,21 @@ def test_a_delisted_covered_folder_row_is_caught_by_the_replica_anchor(
     covered_before = {c["folder_id"] for d in before["destinations"] for c in d.get("covered_folders", [])}
     destination_id = before["destinations"][0]["destination_id"]
     b.navigate_folders()
-    b.find_and_expand_folder(name)
+    # The binding gesture above may have left the row open (linux keeps it).
+    b.open_folder(name)
     app.driver.wait_for("folder-destination-attach-select", timeout=15.0)
     app.driver.select("folder-destination-attach-select", destination_id)
     app.driver.click("folder-destination-attach-button")
-    app.driver.wait_for("folder-destination-row", timeout=15.0)
+    wait_until(
+        lambda: app.driver.is_visible("folder-destination-row"),
+        15.0,
+        diagnose=lambda: (
+            f"the attach of {name!r} to destination {destination_id} painted no "
+            f"folder-destination-row; enrolled destinations={len(before['destinations'])} "
+            f"attach-select={app.driver.is_visible('folder-destination-attach-select')} "
+            f"error={app.error_text()!r}"
+        ),
+    )
     attached_by = int(time.time()) + 1
     with client:
         after = client.call("fauna.backup.destination.list", {})

@@ -177,10 +177,7 @@ pub(crate) fn consent_grant_seams(
     let keypair = fauna_core::identity::ActorKeypair::from_secret_hex(secret_hex)
         .inspect_err(|e| tracing::error!("[settings] consent grant seams: decode secret_hex: {e}"))
         .ok()?;
-    let folders = fauna_atproto_settings_machine::CustodyConsentFolders {
-        keys: super::folder_key_door(runtime.clone()),
-        nest,
-    };
+    let keys = super::folder_key_door(runtime.clone());
     let door = Arc::new(fauna_client_config::ResolvingLedgerStore::new(move || {
         runtime.lock().ok().and_then(|handle| handle.clone())
     }));
@@ -190,7 +187,7 @@ pub(crate) fn consent_grant_seams(
             door.clone(),
             door,
         )
-        .with_folders(Arc::new(folders)),
+        .with_nest_custody(keys, nest),
     ))
 }
 
@@ -274,7 +271,7 @@ pub(super) fn atproto_elements(app: &App, state: &AtprotoState) -> Vec<Element> 
         if card.show_history_backfill {
             els.push(Element::checkbox_gesture(
                 ids::ATPROTO_HISTORY_BACKFILL,
-                t::HISTORY_BACKFILL_LABEL,
+                resolve(&card.history_backfill_label),
                 snap.history_backfill,
                 Gesture::Settings(Action::AtprotoSetHistoryBackfill(!snap.history_backfill)),
             ));
@@ -443,6 +440,10 @@ pub(super) fn atproto_elements(app: &App, state: &AtprotoState) -> Vec<Element> 
                 },
             ),
         );
+        // What OFF pauses — every connected app, principals included
+        // (`atproto-pds-full.md` § F1 detail). Untagged: ui.yaml gives the
+        // hint no id of its own.
+        els.push(Element::chrome(t::EXTERNAL_APPS_HINT));
 
         els.push(Element::gesture_button(
             ids::ATPROTO_APP_CREDENTIAL_MINT,
@@ -1005,10 +1006,23 @@ mod tests {
                     LocalizedText::key("line two"),
                 ],
                 show_history_backfill: true,
+                history_backfill_label: LocalizedText::key_arg(
+                    "atproto_settings.history_backfill_count_label",
+                    "count",
+                    "17",
+                ),
                 in_progress: true,
             });
         }));
         let els = atproto_elements(&app, &app.settings.atproto);
+        assert_eq!(
+            els.iter()
+                .find(|e| e.id == "atproto-history-backfill")
+                .expect("the opt-in renders on a minting card")
+                .text,
+            "Also publish my 17 existing public posts.",
+            "the label names the nest's count"
+        );
         let card = els
             .iter()
             .find(|e| e.id == "atproto-depth-confirm-card")
@@ -1612,5 +1626,20 @@ mod tests {
                 .map(|(_, v)| v.as_str()),
             Some("off")
         );
+    }
+
+    /// The hint under the switch says what OFF pauses: every connected app,
+    /// the ones using Fauna directly included.
+    #[test]
+    fn the_kill_switch_hint_says_what_off_pauses() {
+        let app = app_with_snapshot(snap(|s| {
+            s.level = "hosted_full".to_string();
+        }));
+        let els = atproto_elements(&app, &app.settings.atproto);
+        let toggle = els
+            .iter()
+            .position(|e| e.id == "atproto-external-apps-enable")
+            .unwrap();
+        assert_eq!(els[toggle + 1].text, t::EXTERNAL_APPS_HINT);
     }
 }

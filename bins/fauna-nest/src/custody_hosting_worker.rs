@@ -21,8 +21,10 @@
 //! later, never reaches `connect()`; refusals are tallied separately from
 //! weather), witness decode
 //! and scope derivation, a fresh custody session (the handshake mints at
-//! connect, so a revoked capability row takes its honest refusal there),
-//! the pull (account-state scopes verbatim into the keyless per-owner store,
+//! connect, so a revoked capability row takes its honest refusal there, and
+//! its verdict is recorded for the serve door — a row the host STOPPED ends
+//! here, dialed for that verdict only, never pulled, its pair store never
+//! opened), the pull (account-state scopes verbatim into the keyless per-owner store,
 //! then each content scope bulk-first), the T15 budget
 //! ([`meter_and_evict`] — cap `0` falls back to the ceremony default, never
 //! "hold nothing"; the host's number is re-clamped to
@@ -32,6 +34,15 @@
 //! passes (unlike the client leg): one handshake per row per interval is
 //! noise, and a nest holding standing sockets to every custodied owner's nest
 //! would pay a liveness tax for no freshness win.
+//!
+//! The owner's **recovery material** rides the same session, after the pull
+//! and before the budget (`identity-succession.md` § Seed escrow → *The
+//! custodian copy*): for an `Account`-form witness, the shared leg
+//! ([`fauna_sync_engine::custody_recovery::pull_recovery_material`]) reads the
+//! registration chain, the succession record and the seed-escrow blob into the
+//! pair store's three recovery rows — outside the relay plane, so the budget
+//! pass neither meters nor evicts them (ruling 5) — and the escrow door's
+//! custodied arm answers the owner's phrase restore from them.
 //!
 //! Receipts (stage (c)) ride the same pass: after the budget, a due receipt
 //! (`receipt_due` — first pass, 24 h cadence, an eviction, or a degraded
@@ -45,10 +56,45 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use fauna_account_store::{sqlite::SqliteBackend, store::AccountStore, types::WriterId};
 use fauna_sync_engine::custody_leg::{
-    NestLegSession, meter_and_evict, pull_from_owner_nest, pullable_scopes,
+    LegConnectError, METERING_FAILURES_BRAKE, NestLegSession, meter_and_evict,
+    pull_from_owner_nest, pullable_scopes,
 };
 
 use crate::routes::AppState;
+
+/// The T15 ingest brake per hosted custody, keyed
+/// `(host, grant_id)`. Lives on [`AppState`] rather than the worker because a
+/// sweep builds a fresh worker each tick — the brake must outlive the pass
+/// that closed it. In-memory by design (a restart re-meters on its first
+/// pass, the honest reset), exactly as the device leg's brake.
+#[derive(Default)]
+pub struct CustodyHostingBrakes {
+    by_custody: std::sync::Mutex<
+        std::collections::HashMap<
+            (Vec<u8>, Vec<u8>),
+            Arc<fauna_sync_engine::custody_leg::IngestBrake>,
+        >,
+    >,
+}
+
+impl CustodyHostingBrakes {
+    /// The brake for one hosted custody, created open on first use.
+    pub fn for_custody(
+        &self,
+        host: &[u8],
+        grant_id: &[u8],
+    ) -> Arc<fauna_sync_engine::custody_leg::IngestBrake> {
+        let mut map = self.by_custody.lock().unwrap_or_else(|p| p.into_inner());
+        Arc::clone(map.entry((host.to_vec(), grant_id.to_vec())).or_default())
+    }
+
+    /// Drop brakes for custodies no longer enumerated (rows removed), so the
+    /// map is bounded by the live registry.
+    fn retain_seen(&self, seen: &std::collections::HashSet<(Vec<u8>, Vec<u8>)>) {
+        let mut map = self.by_custody.lock().unwrap_or_else(|p| p.into_inner());
+        map.retain(|k, _| seen.contains(k));
+    }
+}
 
 /// Pull cadence. Hard-coded (bucket 1 — no human would choose this): custody
 /// freshness is bounded by the owner's own write rate, receipts are due on a
@@ -62,7 +108,9 @@ pub const PULL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15
 pub struct CustodyHostingPassReport {
     /// Rows enumerated (stopped included — the honest denominator).
     pub rows: usize,
-    /// Rows skipped because the host stopped them.
+    /// Rows whose pull the host paused (stopped) — still dialed each pass
+    /// for the owner nest's verdict (ruling 5's *stopped rows* paragraph),
+    /// never pulled, metered or receipted.
     pub stopped: usize,
     /// Rows refused by the counterparty dial policy this pass — deliberately
     /// distinct from `failed`: policy is a verdict, weather is not.
@@ -81,10 +129,21 @@ pub struct CustodyHostingPassReport {
     /// Rows that failed this pass (unreadable witness, refused handshake,
     /// pull error) — logged, skipped, retried next tick.
     pub failed: usize,
+    /// Of `failed`, plus stopped rows the owner refused: rows whose custody
+    /// handshake the owner's nest refused with an authenticated
+    /// `fauna.auth.not_registered` — each now marked `owner_refused_at`, so
+    /// the serve door refuses it (ruling 5). A refused stopped row counts here
+    /// and under `stopped`, never under `failed` (its dial is a verdict read).
+    pub owner_refused: usize,
     /// Receipts minted AND acked by the owner's nest this pass (stage c).
     pub receipts_deposited: usize,
     /// Due receipts whose deposit failed — they stay due and redrive.
     pub receipts_failed: usize,
+    /// Rows whose recovery-material leg read all three answers this pass
+    /// (an `Account`-form witness only — ruling 1 of *The custodian copy*).
+    pub recovery_pulled: usize,
+    /// Rows whose pair store holds a custodied seed-escrow blob after the pass.
+    pub escrows_custodied: usize,
     /// Rows skipped because their witness is expired — never dialed (the
     /// owner-side handshake would refuse them anyway; this is the learn-early
     /// half, row 67).
@@ -94,6 +153,13 @@ pub struct CustodyHostingPassReport {
     /// HOSTING_EXPIRED_STORE_GC_GRACE_SECS`] (the GC; stopped or merely
     /// expired rows keep their bytes).
     pub stores_reclaimed: usize,
+    /// Rows whose pull was skipped by the T15 ingest brake — at the
+    /// floor, or metering dark for [`METERING_FAILURES_BRAKE`] passes. The
+    /// budget arm still ran for them, which is how the brake releases.
+    pub braked: usize,
+    /// Rows whose budget pass failed outright this pass (the brake's
+    /// failure counter ticked).
+    pub metering_failed: usize,
 }
 
 /// The always-on hosting pump. See the module doc for the pass anatomy.
@@ -107,6 +173,22 @@ impl CustodyHostingWorker {
     /// can drive the loop without waiting.
     pub fn new(state: Arc<AppState>, interval: std::time::Duration) -> Self {
         Self { state, interval }
+    }
+
+    /// The pass's `now` (microseconds) that the expiry skip and the expired-store
+    /// GC judge rows against: the wall clock, shifted under `test-hooks` by
+    /// [`AppState::custody_hosting_clock_offset_secs`] so a test can reach a
+    /// month past an expiry without waiting one (always 0 unless a test set it).
+    fn pass_now_micros(&self) -> fauna_core::data::Timestamp {
+        let now_ms = fauna_core::data::Timestamp::now_millis();
+        #[cfg(feature = "test-hooks")]
+        let now_ms = now_ms.saturating_add_signed(
+            self.state
+                .custody_hosting_clock_offset_secs
+                .load(std::sync::atomic::Ordering::SeqCst)
+                .saturating_mul(1000),
+        );
+        fauna_core::data::Timestamp(now_ms.saturating_mul(1000))
     }
 
     /// One sweep over every hosting row. A single row's failure is logged and
@@ -188,9 +270,14 @@ impl CustodyHostingWorker {
         // stopped, over-cap, or URL-refused row still holds its pair's bytes
         // alive, and an unreadable witness is conservatively keep-alive (a
         // corrupt row must never steer reclamation).
-        let now_micros = fauna_core::data::Timestamp(
-            fauna_core::data::Timestamp::now_millis().saturating_mul(1000),
-        );
+        let now_micros = self.pass_now_micros();
+        let seen_custodies: std::collections::HashSet<(Vec<u8>, Vec<u8>)> = rows
+            .iter()
+            .map(|(host, row)| (host.clone(), row.grant_id.clone()))
+            .collect();
+        self.state
+            .custody_hosting_brakes
+            .retain_seen(&seen_custodies);
         let mut pair_reclaimable: std::collections::HashMap<(Vec<u8>, Vec<u8>), bool> =
             std::collections::HashMap::new();
         let mut pair_grants: std::collections::HashMap<(Vec<u8>, Vec<u8>), Vec<Vec<u8>>> =
@@ -228,10 +315,6 @@ impl CustodyHostingWorker {
                      (a row the register door would refuse today)"
                 );
                 report.refused_fan_out += 1;
-                continue;
-            }
-            if row.stopped {
-                report.stopped += 1;
                 continue;
             }
             // An expired witness never dials: the owner-side handshake would
@@ -291,6 +374,65 @@ impl CustodyHostingWorker {
                 }
             };
             let owner_hex = fauna_core::hex32::encode(&owner);
+            // Read off the witness before the session consumes it: only the
+            // `Account` form covers the recovery material.
+            let covers_recovery =
+                fauna_sync_engine::custody_recovery::recovery_material_covered(&witness);
+            // A fresh session per pass — the handshake mints here, so a
+            // revoked capability row takes its honest refusal at connect.
+            // Connect comes BEFORE the store open: it needs only the URL, the
+            // owner, the key and the witness, and a stopped row must not open
+            // (and so create) a pair store it will not fill.
+            let connected =
+                NestLegSession::connect(&row.owner_nest_url, owner, signing_key.clone(), witness)
+                    .await;
+            // The owner nest's verdict on the grant, recorded for the serve
+            // door (ruling 5): an authenticated refusal marks the row, a
+            // successful handshake clears the mark, and anything else proves
+            // nothing and leaves it as it was.
+            let verdict = match &connected {
+                Ok(_) => Some(0),
+                Err(LegConnectError::Refused) => Some(owner_refusal_stamp()),
+                Err(LegConnectError::Failed(_)) => None,
+            };
+            if let Some(refused_at) = verdict
+                && let Err(e) = self
+                    .state
+                    .db
+                    .set_custody_hosting_owner_refused(&host, &row.grant_id, refused_at)
+                    .await
+            {
+                tracing::warn!(
+                    owner = %owner_hex,
+                    "custody hosting pump: recording the owner nest's verdict failed: {e:#}"
+                );
+            }
+            // A stopped row takes the handshake for its verdict only (ruling
+            // 5's *stopped rows* paragraph): the pull is paused, the owner's
+            // revoke is not. The session is dropped unused — no pull, adopt,
+            // metering, budget arm or receipt — and a refusal or an
+            // unreachable owner is a verdict read, never a failed pull.
+            if row.stopped {
+                if matches!(connected, Err(LegConnectError::Refused)) {
+                    report.owner_refused += 1;
+                }
+                report.stopped += 1;
+                continue;
+            }
+            let session = match connected {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::debug!(
+                        owner = %owner_hex,
+                        "custody hosting pump: the owner's nest refused or is unreachable: {e}"
+                    );
+                    if matches!(e, LegConnectError::Refused) {
+                        report.owner_refused += 1;
+                    }
+                    report.failed += 1;
+                    continue;
+                }
+            };
             let dir = root.join(hex::encode(&host)).join(&owner_hex);
             let store = match open_custodied_store(&dir, &owner_hex, nest_pub).await {
                 Ok(s) => s,
@@ -298,26 +440,6 @@ impl CustodyHostingWorker {
                     tracing::warn!(
                         owner = %owner_hex,
                         "custody hosting pump: custodied store unavailable ({e:#}) — skipped"
-                    );
-                    report.failed += 1;
-                    continue;
-                }
-            };
-            // A fresh session per pass — the handshake mints here, so a
-            // revoked capability row takes its honest refusal at connect.
-            let session = match NestLegSession::connect(
-                &row.owner_nest_url,
-                owner,
-                signing_key.clone(),
-                witness,
-            )
-            .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::debug!(
-                        owner = %owner_hex,
-                        "custody hosting pump: the owner's nest refused or is unreachable: {e}"
                     );
                     report.failed += 1;
                     continue;
@@ -333,18 +455,60 @@ impl CustodyHostingWorker {
                 tier_bound,
                 others_held,
             );
-            match pull_from_owner_nest(&store, &session, &owner, &scopes, Some(cap)).await {
-                Ok(tally) => {
-                    report.pulled += 1;
-                    report.recorded += tally.recorded;
-                    report.adopted_segments += tally.adopted_segments;
+            // The T15 ingest brake, the same one the device
+            // legs carry: a custody at the floor, or whose budget pass has
+            // failed [`METERING_FAILURES_BRAKE`] times running, accumulates
+            // nothing. Only the plane PULL is braked — the budget arm below
+            // always runs (that is how the brake releases), the session stays
+            // up for the receipt, and the recovery copy is small, unmetered and
+            // not accumulation.
+            let brake = self
+                .state
+                .custody_hosting_brakes
+                .for_custody(&host, &row.grant_id);
+            if !brake.admits_ingest() {
+                report.braked += 1;
+            } else {
+                match pull_from_owner_nest(&store, &session, &owner, &scopes, Some(cap)).await {
+                    Ok(tally) => {
+                        report.pulled += 1;
+                        report.recorded += tally.recorded;
+                        report.adopted_segments += tally.adopted_segments;
+                    }
+                    Err(e) => {
+                        report.failed += 1;
+                        tracing::debug!(
+                            owner = %owner_hex,
+                            "custody hosting pump: pull failed: {e:#}"
+                        );
+                    }
                 }
-                Err(e) => {
-                    report.failed += 1;
-                    tracing::debug!(
-                        owner = %owner_hex,
-                        "custody hosting pump: pull failed: {e:#}"
-                    );
+            }
+            // The recovery material — independent of the plane pull's
+            // outcome (a failed page must not starve the copy), and never
+            // fatal to the pass: a failed read keeps the copy as it was.
+            if covers_recovery {
+                match fauna_sync_engine::custody_recovery::pull_recovery_material(
+                    &store,
+                    session.client().as_ref(),
+                    &owner,
+                )
+                .await
+                {
+                    Ok(tally) => {
+                        if tally.failed_reads == 0 {
+                            report.recovery_pulled += 1;
+                        }
+                        if tally.escrow_held {
+                            report.escrows_custodied += 1;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            owner = %owner_hex,
+                            "custody hosting pump: recovery-material leg failed: {e:#}"
+                        );
+                    }
                 }
             }
             // T15 runs unconditionally — a failed pull does not excuse the
@@ -363,8 +527,20 @@ impl CustodyHostingWorker {
             // it is passed as `Some(..)`: a tier squeeze legitimately reaches 0,
             // and `Some(0)` means "hold the floor, no payload" where a bare 0
             // would have meant "no cap recorded" and handed the row 8 GiB.
-            match meter_and_evict(&store, Some(cap)).await {
+            let metered = meter_and_evict(&store, Some(cap)).await;
+            #[cfg(feature = "test-hooks")]
+            let metered = if self
+                .state
+                .custody_hosting_meter_fault
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                Err(anyhow::anyhow!("injected metering fault (test-hooks)"))
+            } else {
+                metered
+            };
+            match metered {
                 Ok(budget) => {
+                    brake.record_metered(budget.unreclaimable > 0);
                     if let Err(e) = self
                         .state
                         .db
@@ -427,9 +603,16 @@ impl CustodyHostingWorker {
                     }
                 }
                 Err(e) => {
+                    // No longer fail-open on the ingest side: the
+                    // likeliest cause — a full disk, a wedged store — is the
+                    // condition the cap exists to bound. Holding and serving
+                    // continue; consecutive failures close the pull.
+                    brake.record_metering_failure();
+                    report.metering_failed += 1;
                     tracing::warn!(
                         owner = %owner_hex,
-                        "custody hosting pump: budget pass failed: {e:#}"
+                        "custody hosting pump: budget pass failed (ingest brakes after \
+                         {METERING_FAILURES_BRAKE} consecutive failures): {e:#}"
                     );
                 }
             }
@@ -595,6 +778,16 @@ fn periodic_pass_allowed(state: &AppState) -> bool {
 /// `<root>/<host_hex>/<owner_hex>/`. The writer identity tag is the NEST's
 /// own key — the custodied store never authors, exactly like the
 /// custodian-device leg's stores.
+/// The `owner_refused_at` stamp for a refusal seen now: Unix seconds, never
+/// `0` (which reads as "not refused").
+fn owner_refusal_stamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        .max(1)
+}
+
 async fn open_custodied_store(
     dir: &std::path::Path,
     owner_hex: &str,
@@ -703,6 +896,82 @@ mod tests {
         );
     }
 
+    /// Ruling 5's "distinct from an unreachable nest": a handshake that never
+    /// reached an answer proves nothing about the grant, so it neither marks
+    /// an unmarked row nor clears a marked one. (The refused → marked and
+    /// success → cleared arms run against a real owner nest in
+    /// `tests/conformance_custody_hosting_pump_client.rs`.)
+    #[tokio::test]
+    async fn an_unreachable_owner_nest_neither_marks_nor_clears_a_row() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db = std::sync::Arc::new(crate::db::CacheDb::open_in_memory().expect("db"));
+        let mut state = crate::routes::AppState::for_test(db.clone());
+        state.custody_hosting_root = Some(tmp.path().to_path_buf());
+        let state = std::sync::Arc::new(state);
+
+        let host = [0x51u8; 32];
+        let owner_kp = fauna_core::identity::ActorKeypair::from_secret([0x62; 32]);
+        let owner = owner_kp.actor_id().0;
+        let live = fauna_core::data::Timestamp(9_000_000_000_000_000);
+        for grant in [[0x01u8; 16], [0x02u8; 16]] {
+            db.put_custody_hosting(
+                &host,
+                &grant,
+                &owner,
+                &witness_expiring_at(&owner_kp, &grant, live),
+                // Reserved: the dial policy admits it, nothing answers there.
+                "https://owner.example/",
+                b"",
+                4096,
+                false,
+            )
+            .await
+            .expect("plant");
+        }
+        // A STOPPED row is dialed too, for its verdict only (ruling 5's
+        // *stopped rows* paragraph): unreachable keeps its mark, and its dial
+        // counts as `stopped`, never as a failed pull.
+        db.put_custody_hosting(
+            &host,
+            &[0x03; 16],
+            &owner,
+            &witness_expiring_at(&owner_kp, &[0x03; 16], live),
+            "https://owner.example/",
+            b"",
+            4096,
+            true,
+        )
+        .await
+        .expect("plant stopped");
+        db.set_custody_hosting_owner_refused(&host, &[0x02; 16], 1_000)
+            .await
+            .unwrap();
+        db.set_custody_hosting_owner_refused(&host, &[0x03; 16], 2_000)
+            .await
+            .unwrap();
+
+        let worker = CustodyHostingWorker::new(state, std::time::Duration::from_secs(3600));
+        let report = worker.run_once().await.expect("one pass");
+
+        assert_eq!(report.failed, 2, "only the two live rows fail: {report:?}");
+        assert_eq!(report.stopped, 1, "{report:?}");
+        assert_eq!(report.owner_refused, 0, "{report:?}");
+        let marks: std::collections::HashMap<Vec<u8>, u64> = db
+            .list_custody_hosting(&host)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.grant_id, r.owner_refused_at))
+            .collect();
+        assert_eq!(marks[&vec![0x01; 16]], 0, "unreachable never marks");
+        assert_eq!(marks[&vec![0x02; 16]], 1_000, "unreachable never clears");
+        assert_eq!(
+            marks[&vec![0x03; 16]],
+            2_000,
+            "unreachable never clears a stopped row either"
+        );
+    }
+
     /// A real owner-signed witness with a chosen expiry — the GC predicate
     /// reads the expiry through the signature check, so the fixture must be
     /// honestly signed.
@@ -800,8 +1069,9 @@ mod tests {
             .unwrap();
         // Pair 2: expired but within the grace — kept.
         plant([0x02; 16], owners[1].0, within_grace, false).await;
-        // Pair 3: one expired-past-grace + one live (stopped so this rig
-        // never dials) — the live grant keeps the pair's bytes.
+        // Pair 3: one expired-past-grace + one live (stopped, so its verdict
+        // dial at this rig's reserved URL fails to connect and nothing is
+        // pulled) — the live grant keeps the pair's bytes.
         plant([0x03; 16], owners[2].0, past_grace, false).await;
         plant([0x04; 16], owners[2].0, live, true).await;
         // Pair 4: stopped with a live witness — stop is a pause, bytes stay.

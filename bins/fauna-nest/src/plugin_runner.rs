@@ -43,12 +43,14 @@ use fauna_plugin_host::{
     IngressResponse, LogLevel, OutboundPolicy, PluginEngine, PluginInstance, RpcRefusal,
 };
 use fauna_protocol::atproto_pds::ConsentInstallInfo;
+use fauna_protocol::kind_manifest::IngressEntry;
 use fauna_protocol::plugins::{
     PLUGIN_STATE_RESTARTING, PLUGIN_STATE_RUNNING, PLUGIN_STATE_STOPPED, PluginStatus,
 };
 use sha2::Digest as _;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::db::CacheDb;
 use crate::db::third_party_principals::{HostedPluginMint, HostedPluginRow};
 use crate::principal_handlers::{PrincipalBinding, dispatch_hosted_install, dispatch_principal};
 use crate::routes::AppState;
@@ -69,6 +71,18 @@ const STOP_GRACE: Duration = Duration::from_secs(5);
 pub const MODULE_FILE: &str = "plugin.wasm";
 /// The holder secret under a plugin's directory (mode 0600).
 pub const HOLDER_FILE: &str = "holder.key";
+/// A development reinstall's new module, written beside [`MODULE_FILE`]
+/// before the rows change and renamed over it after.
+const STAGED_MODULE_FILE: &str = "plugin.wasm.new";
+
+/// The plugin's holder key, from its directory's [`HOLDER_FILE`].
+fn read_holder(dir: &std::path::Path) -> Result<HolderKey, String> {
+    let secret: [u8; 32] = std::fs::read(dir.join(HOLDER_FILE))
+        .map_err(|e| format!("holder key missing: {e}"))?
+        .try_into()
+        .map_err(|_| "holder key file is not 32 bytes".to_string())?;
+    Ok(HolderKey::from_secret(secret))
+}
 /// The most install cards one nest holds open at once — each holds a module
 /// of up to [`fauna_plugin_host::PLUGIN_MODULE_MAX_BYTES`] in memory; the
 /// consent table's own per-bucket ceiling.
@@ -97,13 +111,16 @@ pub struct PendingInstall {
 pub struct PendingMint {
     pub client_id: String,
     pub label: Option<String>,
-    pub publisher_key: [u8; 32],
+    /// `None` for a development plugin, whose manifest is unsigned.
+    pub publisher_key: Option<[u8; 32]>,
     pub declared_kinds: Vec<String>,
     pub requested_scopes: String,
     pub module_digest: String,
     pub hosts: Vec<String>,
     pub ingress: serde_json::Value,
     pub settings_schema: Option<serde_json::Value>,
+    /// Empty for a development plugin, whose manifest is unsigned.
+    pub manifest_jws: String,
 }
 
 /// Why an approved install did not complete.
@@ -152,6 +169,60 @@ struct Entry {
     /// missing or its module does not compile).
     tx: Option<mpsc::Sender<Command>>,
     status: Arc<Mutex<Status>>,
+    /// The path prefixes and whole-name labels its document declared
+    /// (`ingress`), which [`PluginRunner::route`] and
+    /// [`PluginRunner::route_host`] match — kept for a stopped plugin too, so
+    /// its paths and names answer 502 rather than falling through to the
+    /// nest.
+    ingress: Vec<IngressEntry>,
+}
+
+/// The entries a stored `ingress` member declares. The member was validated
+/// at resolution (`fauna_protocol::kind_manifest::parse_ingress`), so a
+/// refusal here is a row no install could have written: logged, and the
+/// plugin routes nothing.
+pub(crate) fn parsed_ingress(ingress: &serde_json::Value) -> Vec<IngressEntry> {
+    match fauna_protocol::kind_manifest::parse_ingress(ingress) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!("plugin ingress member refused, nothing routed: {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// The path prefixes a stored `ingress` member declares.
+pub(crate) fn ingress_prefixes(ingress: &serde_json::Value) -> Vec<String> {
+    parsed_ingress(ingress)
+        .iter()
+        .filter_map(|e| e.path().map(str::to_string))
+        .collect()
+}
+
+/// The whole-name labels a stored `ingress` member declares.
+pub(crate) fn ingress_labels(ingress: &serde_json::Value) -> Vec<String> {
+    parsed_ingress(ingress)
+        .iter()
+        .filter_map(|e| e.name().map(str::to_string))
+        .collect()
+}
+
+/// Every whole-name label an installed plugin claims, read from the table
+/// that is the authority (`hosted_plugins`), so the callers that must agree
+/// with the runner's routing — the subdomain opt-in, the custom-domain
+/// registration, the boot seed of the host resolver, the per-name cert
+/// reconcile and the DNS matrix — read one source and never the runner's
+/// in-memory mirror, which boot fills after some of them have run.
+pub(crate) async fn claimed_plugin_labels(db: &CacheDb) -> anyhow::Result<Vec<String>> {
+    let mut labels: Vec<String> = db
+        .list_hosted_plugins()
+        .await?
+        .iter()
+        .flat_map(|p| ingress_labels(&p.ingress))
+        .collect();
+    labels.sort();
+    labels.dedup();
+    Ok(labels)
 }
 
 /// The registry on [`AppState`]: one engine, the running plugins, the
@@ -272,8 +343,14 @@ impl PluginRunner {
         if self.plugins_dir.is_none() {
             return Err(InstallError::NoDataDir);
         }
+        if fauna_protocol::plugins::is_development_client_id(&install.mint.client_id)
+            && let Some(existing) = state.db.get_hosted_plugin(&install.mint.client_id).await?
+        {
+            return self.replace_development(state, existing, install).await;
+        }
         let holder = HolderKey::mint();
         let m = install.mint;
+        let ingress = parsed_ingress(&m.ingress);
         let principal_id = state
             .db
             .mint_hosted_plugin(&HostedPluginMint {
@@ -287,6 +364,7 @@ impl PluginRunner {
                 hosts: m.hosts.clone(),
                 ingress: m.ingress,
                 settings_schema: m.settings_schema,
+                manifest_jws: (!m.manifest_jws.is_empty()).then_some(m.manifest_jws),
                 installed_by: install.installed_by,
             })
             .await?;
@@ -312,10 +390,109 @@ impl PluginRunner {
             principal_id.clone(),
             m.client_id,
             &m.hosts,
+            ingress,
             install.compiled,
             holder,
         );
         Ok(principal_id)
+    }
+
+    /// The developer loop's reinstall (`third-party.md` § Developer loop):
+    /// an approved card for a development plugin already installed replaces
+    /// it in place — stop, swap the module, start — under the same install
+    /// row, so the principal id, the holder key, every user's binding and the
+    /// plugin's state scope all survive the edit-run cycle. Only the
+    /// development form reaches here; a published document stays installed
+    /// until it is uninstalled.
+    ///
+    /// The new module is written beside the old before the rows change and
+    /// renamed over it after, so a crash in between leaves either the old
+    /// plugin whole or a row whose digest the boot walk finds off its file —
+    /// listed `stopped`, and fixed by installing again.
+    async fn replace_development(
+        &self,
+        state: &Arc<AppState>,
+        existing: HostedPluginRow,
+        install: PendingInstall,
+    ) -> Result<Vec<u8>, InstallError> {
+        let principal_id = existing.principal_id;
+        let dir = self
+            .plugin_dir(&principal_id)
+            .ok_or(InstallError::NoDataDir)?;
+        let holder = read_holder(&dir).map_err(|e| InstallError::Other(anyhow::anyhow!(e)))?;
+        let staged = dir.join(STAGED_MODULE_FILE);
+        std::fs::write(&staged, &install.module)
+            .map_err(|e| InstallError::Other(anyhow::Error::from(e).context("stage the module")))?;
+        self.halt(&principal_id).await;
+        let m = install.mint;
+        let client_id = m.client_id.clone();
+        let hosts = m.hosts.clone();
+        let ingress = parsed_ingress(&m.ingress);
+        let swapped = async {
+            state
+                .db
+                .replace_hosted_plugin(
+                    &principal_id,
+                    &HostedPluginMint {
+                        client_id: m.client_id,
+                        label: m.label,
+                        holder_x25519: *holder.public(),
+                        publisher_key: m.publisher_key,
+                        declared_kinds: m.declared_kinds,
+                        requested_scopes: m.requested_scopes,
+                        module_digest: m.module_digest,
+                        hosts: m.hosts,
+                        ingress: m.ingress,
+                        settings_schema: m.settings_schema,
+                        manifest_jws: (!m.manifest_jws.is_empty()).then_some(m.manifest_jws),
+                        installed_by: install.installed_by,
+                    },
+                )
+                .await?;
+            std::fs::rename(&staged, dir.join(MODULE_FILE)).map_err(anyhow::Error::from)
+        }
+        .await;
+        if let Err(e) = swapped {
+            let _ = std::fs::remove_file(&staged);
+            // Bring back whatever the rows and the files now say — the old
+            // plugin whole when the rows did not change, or `stopped` with
+            // the boot walk's reason when only the rename failed.
+            self.restart(state, &client_id).await;
+            return Err(InstallError::Other(
+                e.context("replace the development plugin"),
+            ));
+        }
+        self.start(
+            state,
+            principal_id.clone(),
+            client_id,
+            &hosts,
+            ingress,
+            install.compiled,
+            holder,
+        );
+        Ok(principal_id)
+    }
+
+    /// Start one installed plugin from its rows and files, as the boot walk
+    /// does — `stopped` with the reason when it cannot run.
+    async fn restart(&self, state: &Arc<AppState>, client_id: &str) {
+        let Ok(Some(plugin)) = state.db.get_hosted_plugin(client_id).await else {
+            return;
+        };
+        let ingress = parsed_ingress(&plugin.ingress);
+        match self.load(&plugin).await {
+            Ok((compiled, holder)) => self.start(
+                state,
+                plugin.principal_id.clone(),
+                plugin.client_id.clone(),
+                &plugin.hosts,
+                ingress,
+                compiled,
+                holder,
+            ),
+            Err(reason) => self.register_stopped(plugin.principal_id.clone(), ingress, reason),
+        }
     }
 
     // ── Running ──────────────────────────────────────────────────────────
@@ -332,12 +509,14 @@ impl PluginRunner {
             }
         };
         for plugin in plugins {
+            let ingress = parsed_ingress(&plugin.ingress);
             match self.load(&plugin).await {
                 Ok((compiled, holder)) => self.start(
                     state,
                     plugin.principal_id.clone(),
                     plugin.client_id.clone(),
                     &plugin.hosts,
+                    ingress,
                     compiled,
                     holder,
                 ),
@@ -347,7 +526,7 @@ impl PluginRunner {
                         client_id = %plugin.client_id,
                         "plugin not started: {reason}"
                     );
-                    self.register_stopped(plugin.principal_id.clone(), reason);
+                    self.register_stopped(plugin.principal_id.clone(), ingress, reason);
                 }
             }
         }
@@ -366,24 +545,22 @@ impl PluginRunner {
         if digest != plugin.module_digest {
             return Err("module file does not match the pinned digest".into());
         }
-        let secret: [u8; 32] = std::fs::read(dir.join(HOLDER_FILE))
-            .map_err(|e| format!("holder key missing: {e}"))?
-            .try_into()
-            .map_err(|_| "holder key file is not 32 bytes".to_string())?;
+        let holder = read_holder(&dir)?;
         let compiled = self
             .compile(module)
             .await
             .map_err(|e| format!("module no longer compiles: {e:#}"))?;
-        Ok((compiled, HolderKey::from_secret(secret)))
+        Ok((compiled, holder))
     }
 
-    fn register_stopped(&self, principal_id: Vec<u8>, reason: String) {
+    fn register_stopped(&self, principal_id: Vec<u8>, ingress: Vec<IngressEntry>, reason: String) {
         let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
         entries.insert(
             principal_id,
             Entry {
                 tx: None,
                 status: Arc::new(Mutex::new(Status::stopped(reason))),
+                ingress,
             },
         );
     }
@@ -394,13 +571,18 @@ impl PluginRunner {
         principal_id: Vec<u8>,
         client_id: String,
         hosts: &[String],
+        ingress: Vec<IngressEntry>,
         compiled: Arc<CompiledPlugin>,
         holder: HolderKey,
     ) {
         let engine = match self.engine() {
             Ok(e) => e,
             Err(e) => {
-                self.register_stopped(principal_id, format!("plugin engine unavailable: {e:#}"));
+                self.register_stopped(
+                    principal_id,
+                    ingress,
+                    format!("plugin engine unavailable: {e:#}"),
+                );
                 return;
             }
         };
@@ -432,6 +614,7 @@ impl PluginRunner {
                 Entry {
                     tx: Some(tx),
                     status,
+                    ingress,
                 },
             );
         }
@@ -444,6 +627,18 @@ impl PluginRunner {
     /// gone. Waits up to [`STOP_GRACE`] for the plugin's best-effort `stop`,
     /// then deletes its directory.
     pub async fn stop(&self, principal_id: &[u8]) {
+        self.halt(principal_id).await;
+        if let Some(dir) = self.plugin_dir(principal_id)
+            && let Err(e) = std::fs::remove_dir_all(&dir)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(dir = %dir.display(), "plugin directory not removed: {e}");
+        }
+    }
+
+    /// End a plugin's task and forget it, keeping its files — [`Self::stop`]'s
+    /// first half, and the development reinstall's before it swaps the module.
+    async fn halt(&self, principal_id: &[u8]) {
         let entry = {
             let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
             entries.remove(principal_id)
@@ -453,12 +648,6 @@ impl PluginRunner {
             if tx.send(Command::Stop(ack)).await.is_ok() {
                 let _ = tokio::time::timeout(STOP_GRACE, done).await;
             }
-        }
-        if let Some(dir) = self.plugin_dir(principal_id)
-            && let Err(e) = std::fs::remove_dir_all(&dir)
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(dir = %dir.display(), "plugin directory not removed: {e}");
         }
     }
 
@@ -478,6 +667,41 @@ impl PluginRunner {
             reason: s.reason,
             extra: Default::default(),
         }
+    }
+
+    /// The installed plugin whose declared `ingress` prefix `path` falls
+    /// under — the longest prefix when two would match (install refuses an
+    /// overlap, so only two cards approved together can produce one).
+    pub fn route(&self, path: &str) -> Option<Vec<u8>> {
+        let entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+        entries
+            .iter()
+            .flat_map(|(id, e)| {
+                e.ingress
+                    .iter()
+                    .filter_map(IngressEntry::path)
+                    .map(move |p| (id, p))
+            })
+            .filter(|(_, prefix)| path.starts_with(prefix))
+            .max_by_key(|(_, prefix)| prefix.len())
+            .map(|(id, _)| id.clone())
+    }
+
+    /// The installed plugin whose declared whole name is `<label>.<apex>` —
+    /// `label` being the one DNS label under the nest's apex the request's
+    /// `Host` named (`plugin_ingress::plugin_host_label`). Install refuses a
+    /// label another plugin holds, so at most one matches.
+    pub fn route_host(&self, label: &str) -> Option<Vec<u8>> {
+        let entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+        entries
+            .iter()
+            .find(|(_, e)| {
+                e.ingress
+                    .iter()
+                    .filter_map(IngressEntry::name)
+                    .any(|n| n == label)
+            })
+            .map(|(id, _)| id.clone())
     }
 
     /// Hand one request to a plugin's `ingress.handle` (the nest-terminated
@@ -698,6 +922,7 @@ impl NestServices {
             account,
             principal_id,
             token_scopes: granted.split_whitespace().map(str::to_string).collect(),
+            family_id: None,
         };
         dispatch_principal(self.state.clone(), &binding, &kind, Bytes::from(payload))
             .await

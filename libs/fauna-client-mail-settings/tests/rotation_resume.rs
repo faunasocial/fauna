@@ -14,7 +14,7 @@ use fauna_core::mail_rows::{MailRotationSentinel, MailRows, MailStateRow};
 use fauna_core::secret::SecretArray32;
 
 mod common;
-use common::{ACTOR, build};
+use common::{ACTOR, build, machine_over};
 
 async fn enable(machine: &fauna_client_mail_settings::MailSettingsMachine) {
     machine
@@ -177,6 +177,59 @@ async fn four_rotations_keep_every_generation_in_custody_and_snapshot() {
     assert_eq!(snap.leaf_init_keypairs.len(), 5);
     assert_eq!(snap.mail_epoch_grace_roots.len(), 4);
     assert_eq!(snap.generation_retired_at_unix, instants);
+}
+
+/// **The snapshot carries the instant finalize RECORDED, not step (d)'s
+/// clock read.** Step (d) provisions the snapshot with a fresh clock read for
+/// the outgoing generation; finalize then records its own instant — or keeps
+/// one already recorded (a re-drive or a resume after a crash between the
+/// generation row's write and the swap). The re-wrap loop between the two
+/// takes seconds to minutes, so the snapshot must be re-provisioned after
+/// finalize or the MDA's seal-time trial order reads a different instant than
+/// the custody. Seeding a recorded instant makes the two reads differ on
+/// purpose; without the post-finalize re-provision this failed only when the
+/// clock crossed a second inside one rotation (public CI, 2026-10-08).
+#[tokio::test]
+async fn the_snapshot_carries_the_instant_finalize_recorded() {
+    let (machine, nest, mail) = build();
+    enable(&machine).await;
+    let old = mail.current().msek.unwrap();
+    mail.mutate(|rows| {
+        rows.generations.insert(
+            MsekFingerprint::of(&old),
+            fauna_core::data::PriorMsekRetirement {
+                msek: old.clone(),
+                retired_at_unix: 7,
+            },
+        );
+    });
+    machine
+        .dispatch(MailSettingsAction::StartRotation {
+            excluded_credentials: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let stored = mail.current();
+    assert_eq!(
+        stored.prior_msek_retired_at(&old),
+        Some(7),
+        "finalize kept the recorded instant"
+    );
+    let current = stored.msek.clone().unwrap();
+    let blob = nest
+        .state()
+        .provision_mls_snapshot
+        .last()
+        .cloned()
+        .expect("a snapshot was provisioned");
+    let plain = fauna_mls::wrapped_blob::unseal_mls_snapshot(&blob, &current.to_array())
+        .expect("the snapshot opens under the current MSEK");
+    let snap = fauna_mls::wrapped_blob::MlsSnapshotPlaintext::from_canonical_bytes(&plain)
+        .expect("snapshot decodes");
+    assert_eq!(
+        snap.generation_retired_at_unix,
+        stored.prior_retired_at_unix()
+    );
 }
 
 #[tokio::test]
@@ -694,4 +747,498 @@ async fn rotation_uses_per_credential_kind_for_kdf() {
         .expect("rotate");
     let s = nest.state();
     assert_eq!(s.provision_wrapped_mls.len(), baseline_mls + 2);
+}
+
+/// Whether the snapshot the nest holds last opens under `msek`.
+fn snapshot_opens_under(
+    nest: &fauna_client_mail_settings::testing::FakeNestClient,
+    msek: &SecretArray32,
+) -> bool {
+    let s = nest.state();
+    let last = s
+        .provision_mls_snapshot
+        .last()
+        .expect("a snapshot was provisioned");
+    fauna_mls::wrapped_blob::unseal_mls_snapshot(last, &msek.to_array()).is_ok()
+}
+
+/// **A relaunch right after the rotate form closes** (`mail-credentials.md`
+/// § Hard revoke → *Published before the nest moves*). The relaunched app
+/// hydrates its custody from the nest, then runs the connect-time refresh,
+/// which re-seals the snapshot under the custody's `msek`. Were the swap
+/// still unsent when the app died, the fresh replica would read the
+/// pre-rotation MSEK and seal the snapshot under it while every credential's
+/// blob is wrapped under MSEK′ — the MDA unwraps MSEK′ and the snapshot fails
+/// its AEAD (`decrypt mls-snapshot: AEAD verify failed`), the tier_3 finding
+/// this pins. The rotation publishes the custody before it returns, so the
+/// replica reads MSEK′ and the refresh re-seals under it.
+#[tokio::test]
+async fn a_relaunch_right_after_rotation_reseals_the_snapshot_under_the_new_key() {
+    use fauna_client_config::MailStore as _;
+    let (machine, nest, mail) = build();
+    enable(&machine).await;
+    add(&machine, "Thunderbird", 0xCC).await;
+    // Enabled long ago: the pump has published it.
+    mail.publish().await.unwrap();
+
+    machine
+        .dispatch(MailSettingsAction::StartRotation {
+            excluded_credentials: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let rotated = mail.current().msek.unwrap();
+    assert!(
+        snapshot_opens_under(&nest, &rotated),
+        "the rotation sealed under MSEK′"
+    );
+
+    let fresh = mail.fresh_replica();
+    let custody = fresh.current();
+    assert_eq!(
+        (custody.msek.as_ref(), custody.pending_rotation.is_none()),
+        (Some(&rotated), true),
+        "the nest holds the finished rotation, so the relaunched page reads \
+         up to date rather than offering a resume"
+    );
+    let relaunched = machine_over(&nest, &fresh);
+    relaunched.refresh_epoch_schedule().await.unwrap();
+
+    assert!(
+        snapshot_opens_under(&nest, &rotated),
+        "the relaunched app's refresh must not re-seal the snapshot under a \
+         generation the credentials are not wrapped under"
+    );
+}
+
+/// The standing recipient pubkey the nest holds for this actor now — the last
+/// provision's (an atomic replace).
+fn nest_pubkey(nest: &fauna_client_mail_settings::testing::FakeNestClient) -> Option<[u8; 32]> {
+    nest.state()
+        .provision_recipient_pubkey
+        .iter()
+        .rev()
+        .find(|r| r.0 == ACTOR)
+        .map(|r| r.1)
+}
+
+/// The standing recipient pubkey `msek` derives.
+fn pubkey_of(msek: &SecretArray32) -> [u8; 32] {
+    fauna_mls::wrapped_blob::derive_recipient_hpke_keypair(&msek.to_array()).1
+}
+
+/// **A stale sibling's connect-time refresh** (`mail-credentials.md` § Hard
+/// revoke → *Published before the nest moves*, the stale-sibling rule). The
+/// sibling listed the fleet scope before this device rotated and has not
+/// walked since, so it reads the pre-rotation `msek` with no sentinel — the
+/// read gate lets it through, because it has listed. A reconnect in the same
+/// process (a laptop waking) runs the refresh before the runtime's own walk:
+/// re-sealing under that custody would strand every credential the rotation
+/// re-wrapped under MSEK′. The nest's recipient pubkey names a generation the
+/// sibling's custody has never held, so the refresh walks first — and moves
+/// nothing when it cannot walk, re-sealing under MSEK′ once it can.
+#[tokio::test]
+async fn a_stale_sibling_refresh_never_reseals_under_a_generation_it_has_not_walked() {
+    use fauna_client_config::MailStore as _;
+    let (machine, nest, mail) = build();
+    enable(&machine).await;
+    add(&machine, "Thunderbird", 0xCC).await;
+    mail.publish().await.unwrap();
+    // The sibling lists the fleet scope now, before the rotation.
+    let sibling = mail.stale_replica();
+    let old = sibling.current().msek.expect("enabled");
+
+    machine
+        .dispatch(MailSettingsAction::StartRotation {
+            excluded_credentials: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let rotated = mail.current().msek.unwrap();
+    assert_ne!(old, rotated);
+    let custody = sibling.current();
+    assert_eq!(
+        (custody.msek.as_ref(), custody.pending_rotation.is_none()),
+        (Some(&old), true),
+        "the sibling has not walked: it reads the pre-rotation custody, no sentinel"
+    );
+
+    // A runtime that cannot walk now: the refresh moves nothing.
+    let stale = machine_over(&nest, &sibling);
+    let baseline_snapshot = nest.state().provision_mls_snapshot.len();
+    let baseline_pubkey = nest.state().provision_recipient_pubkey.len();
+    sibling.refuse_next_walks(1);
+    stale.refresh_epoch_schedule().await.unwrap();
+    assert!(
+        snapshot_opens_under(&nest, &rotated),
+        "a stale sibling's refresh must not re-seal the snapshot under a \
+         generation the credentials are not wrapped under"
+    );
+    let moved = {
+        let s = nest.state();
+        (
+            s.provision_mls_snapshot.len(),
+            s.provision_recipient_pubkey.len(),
+        )
+    };
+    assert_eq!(
+        moved,
+        (baseline_snapshot, baseline_pubkey),
+        "nothing moved on the nest while the custody could not be walked"
+    );
+
+    // Once the walk can be taken, the refresh reads MSEK′ and re-seals under it.
+    stale.refresh_epoch_schedule().await.unwrap();
+    assert_eq!(sibling.current().msek.as_ref(), Some(&rotated), "walked");
+    assert_eq!(
+        nest.state().provision_mls_snapshot.len(),
+        baseline_snapshot + 1,
+        "the refresh ran on the walked custody"
+    );
+    assert!(snapshot_opens_under(&nest, &rotated));
+    assert_eq!(nest_pubkey(&nest), Some(pubkey_of(&rotated)));
+}
+
+/// **An up-to-date replica's refresh takes no walk.** The nest's recipient
+/// pubkey is the custody's own generation, so the refresh re-seals and
+/// republishes as it always did — the walk is paid only on a mismatch.
+#[tokio::test]
+async fn a_current_replica_refresh_takes_no_walk() {
+    let (machine, nest, mail) = build();
+    enable(&machine).await;
+    let baseline_snapshot = nest.state().provision_mls_snapshot.len();
+
+    machine.refresh_epoch_schedule().await.unwrap();
+
+    assert_eq!(mail.walks(), 0, "the nest's key is the custody's: no walk");
+    assert_eq!(
+        nest.state().provision_mls_snapshot.len(),
+        baseline_snapshot + 1
+    );
+}
+
+/// **A nest behind or beside the custody is re-sealed.** When the nest's
+/// recipient pubkey is a generation the custody has RETIRED, the custody is
+/// the newer side: the refresh re-seals under its `msek` with no walk. When
+/// the nest names a generation the custody has never held even after a walk
+/// — the losing side of two concurrent rotations, whose key the MSEK join
+/// displaced — the walked custody is the account's, and the refresh re-seals
+/// under it too.
+#[tokio::test]
+async fn a_nest_behind_or_beside_the_walked_custody_is_resealed() {
+    let (machine, nest, mail) = build();
+    enable(&machine).await;
+    let old = mail.current().msek.unwrap();
+    machine
+        .dispatch(MailSettingsAction::StartRotation {
+            excluded_credentials: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let rotated = mail.current().msek.unwrap();
+
+    // Behind: the nest holds the retired generation's pubkey.
+    nest.state()
+        .provision_recipient_pubkey
+        .push((ACTOR, pubkey_of(&old), vec![0u8; 1184], None));
+    machine.refresh_epoch_schedule().await.unwrap();
+    assert_eq!(mail.walks(), 0, "a retired generation needs no walk");
+    assert_eq!(nest_pubkey(&nest), Some(pubkey_of(&rotated)));
+    assert!(snapshot_opens_under(&nest, &rotated));
+
+    // Beside: a generation the custody never held, still unknown after a walk.
+    nest.state().provision_recipient_pubkey.push((
+        ACTOR,
+        pubkey_of(&SecretArray32::from([0x5A; 32])),
+        vec![0u8; 1184],
+        None,
+    ));
+    machine.refresh_epoch_schedule().await.unwrap();
+    assert_eq!(mail.walks(), 1, "an unknown generation is walked first");
+    assert_eq!(nest_pubkey(&nest), Some(pubkey_of(&rotated)));
+    assert!(snapshot_opens_under(&nest, &rotated));
+}
+
+/// **The connect-time refresh leaves a pending rotation's nest state alone.**
+/// While the sentinel stands the custody cannot say whether step (d) already
+/// moved the snapshot and the pubkey to MSEK′, so the refresh re-seals and
+/// republishes nothing — the resume (the banner the page shows) is what moves
+/// them. Re-sealing under `msek` here would break every credential step (e)
+/// already re-wrapped.
+#[tokio::test]
+async fn refresh_while_a_rotation_is_pending_moves_nothing_on_the_nest() {
+    let (machine, nest, mail) = build();
+    enable(&machine).await;
+    stage_sentinel(&mail, [0x77; 32]);
+    let baseline_snapshot = nest.state().provision_mls_snapshot.len();
+    let baseline_pubkey = nest.state().provision_recipient_pubkey.len();
+
+    machine.refresh_epoch_schedule().await.unwrap();
+
+    let s = nest.state();
+    assert_eq!(
+        s.provision_mls_snapshot.len(),
+        baseline_snapshot,
+        "no re-seal"
+    );
+    assert_eq!(
+        s.provision_recipient_pubkey.len(),
+        baseline_pubkey,
+        "no republish"
+    );
+}
+
+/// **The sentinel reaches the nest before the nest moves.** MSEK′ is
+/// irrecoverable once its pubkey is published and its blobs wrapped
+/// (§ Cross-device finalize race), and a replica that hydrates from the nest
+/// must read the sentinel — never the bare pre-rotation `msek` — beside blobs
+/// wrapped under MSEK′. So a publish the nest does not acknowledge stops the
+/// rotation before its first nest write, resumable; the resume publishes and
+/// completes.
+#[tokio::test]
+async fn an_unacknowledged_sentinel_stops_the_rotation_before_the_nest_moves() {
+    let (machine, nest, mail) = build();
+    enable(&machine).await;
+    let (snapshots, pubkeys, wraps) = {
+        let s = nest.state();
+        (
+            s.provision_mls_snapshot.len(),
+            s.provision_recipient_pubkey.len(),
+            s.provision_wrapped_mls.len(),
+        )
+    };
+    mail.refuse_next_publishes(1);
+
+    let result = machine
+        .dispatch(MailSettingsAction::StartRotation {
+            excluded_credentials: Vec::new(),
+        })
+        .await;
+    assert!(result.is_err(), "an unsent sentinel stops the rotation");
+    {
+        let s = nest.state();
+        assert_eq!(
+            s.provision_mls_snapshot.len(),
+            snapshots,
+            "snapshot untouched"
+        );
+        assert_eq!(
+            s.provision_recipient_pubkey.len(),
+            pubkeys,
+            "pubkey untouched"
+        );
+        assert_eq!(s.provision_wrapped_mls.len(), wraps, "no blob re-wrapped");
+    }
+    assert!(mail.current().pending_rotation.is_some(), "resumable");
+
+    machine
+        .dispatch(MailSettingsAction::ResumeRotation)
+        .await
+        .expect("the resume publishes and completes");
+    let published = mail.published().config();
+    assert!(
+        published.pending_rotation.is_none(),
+        "the nest holds the cleared sentinel"
+    );
+    assert_eq!(
+        published.msek,
+        mail.current().msek,
+        "the nest holds the swap"
+    );
+}
+
+// ─── First-enable is a degenerate rotation (`mail-credentials.md`
+//     § Partial-state-during-minting): it runs under the resume sentinel, so a
+//     stop anywhere in its blob set reads pending and resumes to a working
+//     mailbox. ───
+
+/// Relaunch over the same custody and nest after a stopped first-enable, and
+/// assert what the page then shows.
+async fn relaunch_reads_pending(
+    nest: &fauna_client_mail_settings::testing::FakeNestClient,
+    mail: &FakeMailStore,
+) -> fauna_client_mail_settings::MailSettingsMachine {
+    let relaunched = machine_over(nest, mail);
+    relaunched.hydrate().await.expect("hydrate");
+    assert!(
+        relaunched.snapshot().pending_rotation.is_some(),
+        "the resume banner shows after the stopped first-enable"
+    );
+    relaunched
+}
+
+/// Assert a resumed first-enable left one working mailbox: mail on, the
+/// sentinel cleared, the one credential wrapped under the account's MSEK and
+/// holding a submission token, and the deployment subsystem flipped on.
+fn assert_first_enable_completed(
+    nest: &fauna_client_mail_settings::testing::FakeNestClient,
+    mail: &FakeMailStore,
+    machine: &fauna_client_mail_settings::MailSettingsMachine,
+) {
+    let stored = mail.current();
+    assert!(stored.pending_rotation.is_none(), "sentinel cleared");
+    assert!(stored.is_mail_enabled(), "email is on");
+    assert_eq!(
+        stored.credentials.len(),
+        1,
+        "one credential, no second mint"
+    );
+    let fp = MsekFingerprint::of(stored.msek.as_ref().expect("an msek"));
+    assert_eq!(
+        stored.credentials[0].wrapped_under,
+        Some(fp),
+        "the credential is wrapped under the account's MSEK"
+    );
+    let s = nest.state();
+    assert!(
+        s.provision_submission_token
+            .iter()
+            .any(|t| t.index.1 == stored.credentials[0].credential_id),
+        "step 4 — the submission token — landed for the credential"
+    );
+    assert!(
+        s.provision_wrapped_mls
+            .iter()
+            .any(|b| b.index.1 == stored.credentials[0].credential_id),
+        "step 3 — the wrapped MSEK — landed for the credential"
+    );
+    assert_eq!(
+        s.set_mail_enabled.last(),
+        Some(&true),
+        "the mail subsystem is flipped on"
+    );
+    drop(s);
+    let snap = machine.snapshot();
+    assert!(snap.pending_rotation.is_none(), "the banner is gone");
+    assert!(snap.error.is_none(), "no error left on the page");
+}
+
+#[tokio::test]
+async fn a_first_enable_stopped_before_its_submission_token_resumes_to_a_working_mailbox() {
+    let (machine, nest, mail) = build();
+    nest.state().fail_provision_submission_token_for_n_calls = 1;
+
+    let result = machine
+        .dispatch(MailSettingsAction::EnableMail {
+            display_name: "default".into(),
+            kind: CredentialKind::OAuthBearer,
+            secret: SecretBytes::from(vec![0xAA; 32]),
+        })
+        .await;
+    assert!(result.is_err(), "the refused step 4 stops the enable");
+    assert!(
+        nest.state().provision_submission_token.is_empty(),
+        "no submission token reached the nest"
+    );
+    assert_eq!(
+        mail.current().credentials.len(),
+        1,
+        "the credential row — and its secret — outlives the stop"
+    );
+
+    let relaunched = relaunch_reads_pending(&nest, &mail).await;
+    relaunched
+        .dispatch(MailSettingsAction::ResumeRotation)
+        .await
+        .expect("the resume finishes the enable");
+    assert_first_enable_completed(&nest, &mail, &relaunched);
+}
+
+#[tokio::test]
+async fn a_first_enable_stopped_before_its_wrapped_msek_resumes_to_a_working_mailbox() {
+    let (machine, nest, mail) = build();
+    nest.state().fail_provision_wrapped_mls_for_n_calls = 1;
+
+    let result = machine
+        .dispatch(MailSettingsAction::EnableMail {
+            display_name: "default".into(),
+            kind: CredentialKind::OAuthBearer,
+            secret: SecretBytes::from(vec![0xAA; 32]),
+        })
+        .await;
+    assert!(result.is_err(), "the refused step 3 stops the enable");
+    let msek = mail.current().msek.expect("the MSEK persisted first");
+
+    let relaunched = relaunch_reads_pending(&nest, &mail).await;
+    relaunched
+        .dispatch(MailSettingsAction::ResumeRotation)
+        .await
+        .expect("the resume finishes the enable");
+    assert_first_enable_completed(&nest, &mail, &relaunched);
+    assert_eq!(
+        mail.current().msek,
+        Some(msek),
+        "the resume keeps the minted MSEK — never a fresh one"
+    );
+}
+
+/// The submission token is the *email* half: resuming a rotation on a
+/// calendar-only mailbox (email off) that stopped after its swap — the one
+/// rotation state shaped like a first-enable — must not turn email on.
+#[tokio::test]
+async fn resuming_a_calendar_only_rotation_never_turns_email_on() {
+    let (machine, nest, mail) = build();
+    machine
+        .enable_caldav_mailbox_with_password("default".into(), "a-calendar-password".into())
+        .await
+        .expect("calendar-only mailbox");
+    let new_msek: SecretArray32 = [0x5A; 32].into();
+    let fp = MsekFingerprint::of(&new_msek);
+    mail.mutate(|rows| {
+        let state = rows.state.as_mut().unwrap();
+        state.msek = Some(new_msek.clone());
+        state.pending_rotation = Some(MailRotationSentinel {
+            new_msek: new_msek.clone(),
+        });
+        for c in rows.credentials.values_mut() {
+            c.wrapped_under = Some(fp);
+        }
+    });
+
+    machine
+        .dispatch(MailSettingsAction::ResumeRotation)
+        .await
+        .expect("resume completes");
+    let stored = mail.current();
+    assert!(stored.pending_rotation.is_none(), "sentinel cleared");
+    assert!(!stored.is_mail_enabled(), "email stays off");
+    let s = nest.state();
+    assert!(
+        s.provision_submission_token.is_empty(),
+        "no submission token for a calendar-only mailbox"
+    );
+    assert!(
+        s.set_mail_enabled.is_empty(),
+        "the mail subsystem untouched"
+    );
+}
+
+/// An unfinished rotation is resumed, never overtaken: turning email on while
+/// one stands is refused with the resume hint, the sentinel untouched.
+#[tokio::test]
+async fn enabling_email_while_a_rotation_is_pending_is_refused() {
+    let (machine, nest, mail) = build();
+    machine
+        .enable_caldav_mailbox_with_password("default".into(), "a-calendar-password".into())
+        .await
+        .expect("calendar-only mailbox");
+    stage_sentinel(&mail, [0x5A; 32]);
+
+    let err = machine
+        .dispatch(MailSettingsAction::EnableMail {
+            display_name: "default".into(),
+            kind: CredentialKind::OAuthBearer,
+            secret: SecretBytes::from(vec![0xAA; 32]),
+        })
+        .await
+        .expect_err("refused while a rotation is pending");
+    assert!(err.to_string().contains("resume"), "{err}");
+    let stored = mail.current();
+    assert_eq!(
+        stored.pending_rotation.as_ref().map(|p| p.new_msek.clone()),
+        Some([0x5A; 32].into()),
+        "the sentinel is untouched"
+    );
+    assert!(!stored.is_mail_enabled(), "email stays off");
+    assert!(nest.state().provision_submission_token.is_empty());
 }

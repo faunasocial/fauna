@@ -186,6 +186,10 @@ public class ActorScopeTests : IDisposable
         ScreenTimeCache.SetWardScreenTime(
             FfiScreenTimePolicyFixture.Make(dailyMinutes: 120),
             guardianHandle: "guardian1", usageTodayMinutes: 45);
+        var outgoingPeer = new byte[32];
+        WardAsksCache.SetFromStatus(
+            true, [new uniffi.fauna_ffi.FfiFamilyContactRequest(outgoingPeer, "peer", 1)], []);
+        WardAsksCache.NoteFeedRefusal(new FeedTriple("b", "link", ""));
 
         // Each assertion below is paired with its pre-drop opposite, so none can
         // pass vacuously on a default-constructed cache. Guardian Notify is the one
@@ -203,6 +207,7 @@ public class ActorScopeTests : IDisposable
         Assert.True(MutedKeywordsCache.IsRevealed("msg-1"));
         Assert.NotEmpty(MutedKeywordsCache.Words);
         Assert.Equal(45u, ScreenTimeCache.UsedTodayMinutes());
+        Assert.True(WardAsksCache.ContactAskPending(Convert.ToHexString(outgoingPeer)));
 
         ActorScope.DropActorScopedState();
 
@@ -226,6 +231,10 @@ public class ActorScopeTests : IDisposable
         // Guardian Notify pair above, just on the other pillar.
         Assert.Null(ScreenTimeCache.UsedTodayMinutes());
         Assert.Null(ScreenTimeCache.LockMessage);
+        // The outgoing ward's asks and refusals: a survivor would paint "asked —
+        // waiting for your guardian" for a peer the INCOMING account never asked about.
+        Assert.False(WardAsksCache.ContactAskPending(Convert.ToHexString(outgoingPeer)));
+        Assert.Empty(WardAsksCache.RefusedFeed);
     }
 
     /// <summary>

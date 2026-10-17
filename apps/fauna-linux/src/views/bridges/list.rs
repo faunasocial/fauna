@@ -75,9 +75,7 @@ pub fn update_bridge_list(
     bridges: &[fauna_client_bridges::bridges_ui::BridgeStatus],
 ) {
     // Remove existing rows.
-    while let Some(child) = list_box.first_child() {
-        list_box.remove(&child);
-    }
+    crate::views::layout::clear_list_box_rows(list_box);
 
     // The unified Bridges page shows only the providers that have no dedicated
     // settings page of their own — Nostr and Bluesky each own one, so the

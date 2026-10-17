@@ -873,6 +873,32 @@ pub async fn approve_bridge(db: &CacheDb, pk: &[u8; 32], role: BridgeRole, x2551
     approve_bridge_as(db, pk, role, TEST_BRIDGE_SERVICE_ID, x25519).await;
 }
 
+/// An MTA submitter the nest's enqueue door can hold to its proof
+/// (`mail-multidomain.md` § From: header ownership → *Per door, nest-side*):
+/// the Ed25519 actor `seed` derives, a wrapped submission token on file for its
+/// `default` credential, and the canonical plaintext of a token it signed,
+/// valid for a day — the `on_behalf_of_actor` / `submission_token` pair of an
+/// MTA-class `enqueue_outbound_mail`.
+pub async fn proven_mta_submitter(
+    state: &Arc<AppState>,
+    seed: [u8; 32],
+) -> ([u8; 32], serde_bytes::ByteBuf) {
+    let key = SigningKey::from_bytes(&seed);
+    let actor = key.verifying_key().to_bytes();
+    state
+        .db
+        .put_wrapped_submission_token(&actor, "default", b"wrapped")
+        .await
+        .expect("file the wrapped submission token");
+    let expires_at = u64::try_from(state.outbound_now()).expect("clock") + 86_400;
+    let token =
+        fauna_mls::wrapped_blob::submission_token::signed_token_until(&key, "default", expires_at);
+    (
+        actor,
+        serde_bytes::ByteBuf::from(token.to_canonical_bytes().expect("encode token")),
+    )
+}
+
 /// [`approve_bridge`] with the service id spelled out — for a fixture enrolling
 /// more than one bridge, where the ids must differ.
 pub async fn approve_bridge_as(
@@ -1896,6 +1922,24 @@ pub mod zap {
         drop(conn);
     }
 
+    /// A fixed key standing for "some external zapper who is not a local
+    /// account" — the same key on every call, so two receipts from it share a
+    /// sender (the counterparty-standing case).
+    pub fn anon_sender() -> Keypair {
+        Keypair::from_secret_bytes([0xd4; 32]).unwrap()
+    }
+
+    /// A genuine kind-9734 zap request naming `recipient`, signed by `sender`.
+    pub fn zap_request(sender: &Keypair, recipient: &str, created_at: u64) -> Event {
+        sender.sign_event(UnsignedEvent {
+            pubkey: sender.public_key_bytes(),
+            created_at,
+            kind: 9734,
+            tags: vec![Tag::new(vec!["p".into(), recipient.to_string()])],
+            content: String::new(),
+        })
+    }
+
     /// A real, signature-valid kind-9735 receipt — the gate verifies the
     /// signature itself, so a forged fixture would be refused before the
     /// trust question is even asked and would make a green test vacuous.
@@ -1904,23 +1948,42 @@ pub mod zap {
     /// value lets a caller build a receipt whose outer envelope and inner
     /// request name different recipients (the trust gate's stapling-forgery
     /// case).
+    ///
+    /// The embedded request is signed by `sender`: a request's `pubkey` names
+    /// a sender only when that key signed it (`monetization.md` § Zap receipts
+    /// — the sender conjunct), so a fixture sender must hold a real key.
     #[allow(clippy::too_many_arguments)]
     pub fn zap_receipt(
         signer: &Keypair,
         payee_pubkey: &str,
         request_recipient: &str,
         target_event_id: &str,
-        sender_pubkey: &str,
+        sender: &Keypair,
         bolt11: Option<&str>,
         created_at: u64,
     ) -> Event {
-        let description = serde_json::json!({
-            "kind": 9734,
-            "pubkey": sender_pubkey,
-            "tags": [["p", request_recipient]],
-            "content": "",
-        })
-        .to_string();
+        let description =
+            serde_json::to_string(&zap_request(sender, request_recipient, created_at)).unwrap();
+        zap_receipt_embedding(
+            signer,
+            payee_pubkey,
+            target_event_id,
+            description,
+            bolt11,
+            created_at,
+        )
+    }
+
+    /// A signature-valid kind-9735 receipt carrying `description` verbatim —
+    /// for a receipt whose embedded request is deliberately not a genuine one.
+    pub fn zap_receipt_embedding(
+        signer: &Keypair,
+        payee_pubkey: &str,
+        target_event_id: &str,
+        description: String,
+        bolt11: Option<&str>,
+        created_at: u64,
+    ) -> Event {
         let mut tags = vec![
             Tag::new(vec!["p".into(), payee_pubkey.to_string()]),
             Tag::new(vec!["e".into(), target_event_id.to_string()]),

@@ -34,6 +34,19 @@ pub fn err_to_js<E: std::fmt::Display>(e: E) -> JsValue {
     JsValue::from_str(&e.to_string())
 }
 
+/// Serialize `value` for the SPA the way its TS types declare it: every
+/// `Option::None` crosses as `null` (not `undefined`) and every map — a
+/// `LocalizedText`'s `args` above all — as a plain object (not a `Map`).
+/// The default `serde_wasm_bindgen::to_value` does neither, so a face built on
+/// it silently breaks `=== null` checks and `resolveLocalized`'s `args.x`
+/// reads. Every `fauna-wasm*` chunk uses this; a site that really wants
+/// `undefined` says so in a comment.
+pub fn to_js<T: serde::Serialize + ?Sized>(
+    value: &T,
+) -> Result<JsValue, serde_wasm_bindgen::Error> {
+    value.serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+}
+
 /// Install a panic hook that mirrors every panic to the browser console,
 /// naming `chunk` in the message — the only way to tell which wasm module
 /// panicked from the console alone, since each chunk is a separate runtime —

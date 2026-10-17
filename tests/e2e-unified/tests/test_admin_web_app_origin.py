@@ -33,7 +33,7 @@ from i18n.strings import S
 pytestmark = pytest.mark.tier_3
 
 # The apps whose admin-nest renders the section. tui leads.
-BUILT = {"tui"}
+BUILT = {"tui", "web", "linux", "windows"}
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):

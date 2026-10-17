@@ -11,7 +11,7 @@
 //! `!Sync` driving loop. The bytes / placeholders are delivered later by the
 //! driving thread via `CfExecute` — cfapi permits async completion keyed by the
 //! transfer key. See `docs/goal/architecture/apps/windows.md` § On-demand
-//! hydration host and `docs/goal/behavior/file-sync.md` § On-Demand Files.
+//! hydration host and `docs/goal/behavior/on-demand-files.md` § On-Demand Files.
 //!
 //! ## Per-root callback context, keyed by connection key
 //!
@@ -583,6 +583,10 @@ struct CfApiTransferSink {
     /// The originating callback's `RequestKey` — cfapi correlates the completion
     /// with the request through it; a zero here is rejected outright.
     request_key: i64,
+    /// The range the callback asked for (`RequiredFileOffset`, `RequiredLength`),
+    /// which a failure must name ([`fauna_cfapi::transfer_failed`]).
+    required_offset: i64,
+    required_length: i64,
 }
 
 impl TransferSink for CfApiTransferSink {
@@ -600,6 +604,8 @@ impl TransferSink for CfApiTransferSink {
             &self.conn_key,
             self.transfer_key,
             self.request_key,
+            self.required_offset,
+            self.required_length,
             STATUS_UNSUCCESSFUL,
         )
     }
@@ -691,6 +697,8 @@ unsafe extern "system" fn fetch_data_callback(
         conn_key,
         transfer_key,
         request_key,
+        required_offset: offset,
+        required_length: length,
     };
     match normalized_path_to_rel(&root, &full) {
         Some(rel) => {

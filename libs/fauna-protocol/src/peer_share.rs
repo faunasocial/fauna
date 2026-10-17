@@ -44,7 +44,6 @@ use serde_bytes::ByteBuf;
 use std::collections::BTreeMap;
 
 use crate::Value;
-use crate::sync::SyncChange;
 
 /// Peer-channel kind: the share leg's admission exchange (see module docs).
 pub const KIND_PEER_SHARE_ADMIT: &str = "fauna.peer.share.admit";
@@ -177,40 +176,9 @@ pub struct PeerShareChangesListRequest {
     pub extra: BTreeMap<String, Value>,
 }
 
-/// One served change row, with the marking the provenance ruling requires
-/// (`p2p.md` § *Peer-served change-row provenance*).
-///
-/// **Self-contained** (`mls-group-key-material.md` § M2 → *Writer-signed change
-/// records*, ruling (3)): a writer-signed row verifies on its own — its
-/// `signature`/`signer_key` pair, plus [`Self::signer_cert`] for a delegated
-/// signer — so a peer serves every row it holds, its own and other writers'
-/// alike, and the receiver judges each through the one shared reader
-/// ([`crate::sync_row_verify`]). An unsigned row has only the channel's proof
-/// (PT-1b), which admits nothing outside the signature check's class
-/// exemptions: every writer signs.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct PeerShareChange {
-    /// The row itself — the same shape the nest serves
-    /// ([`crate::sync::SyncChange`]), so a receiver folds a peer-served row
-    /// through exactly one row vocabulary.
-    pub change: SyncChange,
-    /// `true` ⇒ the serving replica holds this row **nest-sequenced** (some
-    /// nest stamped and ordered it). `false` ⇒ no nest has sequenced it yet (a
-    /// writer's offline-authored pending row, the serving peer's or one it
-    /// relays) — a receiver may overlay it provisionally but must never treat
-    /// it as converged log.
-    pub sequenced: bool,
-    /// The row's delegated signer cert, inline — the embed-as-bytes
-    /// `DeviceAuthorization` its `signer_key` chains to the signed actor
-    /// through. Absent for a direct (identity-key) signer and on an unsigned
-    /// row. Inline per row rather than a page side table so the row stays
-    /// self-contained across every hop (the relay's retention, the app → agent
-    /// ingest door).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub signer_cert: Option<fauna_core::encoding::EmbedAsBytes>,
-    #[serde(flatten, default)]
-    pub extra: BTreeMap<String, Value>,
-}
+/// The served change row — [`crate::peer_row::PeerChangeRow`], shared with the
+/// same-account leg (a rename, no wire change).
+pub type PeerShareChange = crate::peer_row::PeerChangeRow;
 
 /// `fauna.peer.share.changes.list` reply — one page of the rows the serving
 /// peer holds for the set.
@@ -431,6 +399,7 @@ pub struct PeerShareCeremonyAcceptPollReply {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync::SyncChange;
     use crate::{decode_strict, encode_canonical};
 
     fn set_id(b: u8) -> ByteBuf {

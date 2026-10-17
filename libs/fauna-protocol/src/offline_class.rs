@@ -213,10 +213,14 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     m.insert("fauna.bridges.generate_disposable_alias", OnlineOnly);
     m.insert("fauna.bridges.get_alias_policy", Read);
     m.insert("fauna.bridges.get_caldav_port", Read);
+    m.insert("fauna.bridges.get_dmarc_policy", Read);
     m.insert("fauna.bridges.get_forward_all_to", Read);
     m.insert("fauna.bridges.get_forward_per_hour", Read);
+    m.insert("fauna.bridges.get_mail_quotas", Read);
+    m.insert("fauna.bridges.get_mail_switches", Read);
     m.insert("fauna.bridges.get_mail_config", Read);
     m.insert("fauna.bridges.get_mail_serving_enabled", Read);
+    m.insert("fauna.bridges.get_message_scan_result", Read);
     m.insert("fauna.bridges.get_primary_domain_rename_status", Read);
     m.insert("fauna.bridges.get_quota", Read);
     m.insert("fauna.bridges.get_spam_baseline_state", Read);
@@ -231,6 +235,12 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     m.insert("fauna.bridges.list_forwarders", Read);
     m.insert("fauna.bridges.list_list_members", Read);
     m.insert("fauna.bridges.list_list_send_history", Read);
+    m.insert("fauna.bridges.list_dmarc_aggregate_reports", Read);
+    m.insert("fauna.bridges.get_dmarc_aggregate_report", Read);
+    m.insert("fauna.bridges.list_dmarc_forensic_reports", Read);
+    m.insert("fauna.bridges.get_dmarc_forensic_report", Read);
+    m.insert("fauna.bridges.list_tlsrpt_inbound_reports", Read);
+    m.insert("fauna.bridges.get_tlsrpt_inbound_report", Read);
     m.insert("fauna.bridges.list_local_domains", Read);
     m.insert("fauna.bridges.list_pending_bridges", Read);
     m.insert("fauna.bridges.list_primary_domain_renames", Read);
@@ -247,6 +257,7 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     m.insert("fauna.bridges.publish_spam_baseline", OnlineOnly);
     m.insert("fauna.bridges.put_alias_policy", OnlineOnly);
     m.insert("fauna.bridges.put_auth_policy", OnlineOnly);
+    m.insert("fauna.bridges.put_dmarc_policy", OnlineOnly);
     m.insert("fauna.bridges.put_imap_policy", OnlineOnly);
     m.insert("fauna.bridges.put_outbound_policy", OnlineOnly);
     m.insert("fauna.bridges.put_spam_model", OnlineOnly);
@@ -257,6 +268,9 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     m.insert("fauna.bridges.rename_mailbox", OnlineOnly);
     m.insert("fauna.bridges.report_log_events", OnlineOnly);
     m.insert("fauna.bridges.report_rejected_scan", OnlineOnly);
+    m.insert("fauna.bridges.ingest_dmarc_report", OnlineOnly);
+    m.insert("fauna.bridges.ingest_tlsrpt_report", OnlineOnly);
+    m.insert("fauna.bridges.report_dmarc_observation", OnlineOnly);
     m.insert("fauna.bridges.report_tls_attempt", OnlineOnly);
     m.insert("fauna.bridges.request_enrollment", OnlineOnly);
     m.insert("fauna.bridges.reset_spam_model", OnlineOnly);
@@ -284,6 +298,7 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     m.insert("fauna.bridges.set_dkim_rotation_days", OnlineOnly);
     m.insert("fauna.bridges.set_forward_all_to", OnlineOnly);
     m.insert("fauna.bridges.set_forward_per_hour", OnlineOnly);
+    m.insert("fauna.bridges.set_mail_switches", OnlineOnly);
     m.insert("fauna.bridges.set_mail_enabled", OnlineOnly);
     m.insert("fauna.bridges.set_mail_serving_enabled", OnlineOnly);
     m.insert("fauna.bridges.set_role_address", OnlineOnly);
@@ -310,6 +325,9 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     // authoring is the creator's own owner-keyed data; approving/rejecting a
     // request has a side effect on the subscriber, so it queues.
     m.insert("fauna.subscriptions.delegate.upload", OnlineOnly);
+    // The account's own derived encapsulation key, upserted: an owner-keyed
+    // idempotent overwrite of the same bytes.
+    m.insert("fauna.subscriptions.encaps_key.publish", OfflineSafe);
     m.insert("fauna.subscriptions.key_blob.get", Read);
     // key_blob.rotate: OnlineOnly, and not because it moves money. The upload
     // is verified against LIVE nest state on both axes — `roster_mismatch`
@@ -391,6 +409,7 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
         m.insert("fauna.payments.claims.list", Read);
         m.insert("fauna.payments.claims.mint", OnlineOnly);
         m.insert("fauna.payments.claims.redeem", OnlineOnly);
+        m.insert("fauna.payments.claims.void", OnlineOnly);
         m.insert("fauna.payments.providers.list", Read);
         m.insert("fauna.payments.providers.remove", OnlineOnly);
         m.insert("fauna.payments.providers.set", OnlineOnly);
@@ -488,6 +507,7 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     // needs the nest's answer that the connection is GONE, never a queued
     // optimism.
     m.insert("fauna.principals.list", Read);
+    m.insert("fauna.principals.ops", Read);
     m.insert("fauna.principals.revoke", OnlineOnly);
     // The events doors' poll (`transport.md` § Push events → *Third-party
     // event doors*): a pure read, issued by a principal, never by an app.
@@ -499,6 +519,12 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     m.insert("fauna.plugins.install", OnlineOnly);
     m.insert("fauna.plugins.list", Read);
     m.insert("fauna.plugins.uninstall", OnlineOnly);
+    // The user's half. Bind opens a card the user answers now; a settings
+    // write is checked against the account's binding and the plugin's
+    // schema, a refusal the user must see rather than a queued write.
+    m.insert("fauna.plugins.available", Read);
+    m.insert("fauna.plugins.bind", OnlineOnly);
+    m.insert("fauna.plugins.set_settings", OnlineOnly);
 
     // ── register_tls_kinds ──────────────────────────────────────────
     // Certificate provisioning.
@@ -578,6 +604,7 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     m.insert("fauna.bridges.start_import_session", OnlineOnly);
     m.insert("fauna.bridges.import_message", OnlineOnly);
     m.insert("fauna.bridges.import_message_batch", OnlineOnly);
+    m.insert("fauna.bridges.record_import_outcomes", OnlineOnly);
     m.insert("fauna.bridges.list_import_sessions", Read);
     m.insert("fauna.bridges.pause_import_session", OnlineOnly);
     m.insert("fauna.bridges.resume_import_session", OnlineOnly);
@@ -613,6 +640,7 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     m.insert("fauna.bridges.atproto.list_pending_consents", Read);
     m.insert("fauna.bridges.atproto.resolve_consent", OnlineOnly);
     m.insert("fauna.bridges.atproto.deliver_permission_set", OnlineOnly);
+    m.insert("fauna.bridges.atproto.deliver_service_auth", OnlineOnly);
     m.insert("fauna.bridges.atproto.get_integration_status", Read);
     m.insert("fauna.bridges.atproto.set_integration_level", OnlineOnly);
     m.insert("fauna.bridges.atproto.fetch_authoring_key", Read);
@@ -669,6 +697,9 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     m.insert("fauna.recovery.escrow.challenge", OnlineOnly);
     m.insert("fauna.recovery.escrow.fetch", OnlineOnly);
     m.insert("fauna.recovery.escrow.status", Read);
+    // The custodian copy's pull is spoken only by the custodian NEST's pump
+    // (never an app), which redrives on its own next pass.
+    m.insert(crate::recovery::ESCROW_PULL_KIND, OnlineOnly);
     m.insert("fauna.recovery.replacement.request", OnlineOnly);
     m.insert("fauna.recovery.replacement.challenge", OnlineOnly);
     m.insert("fauna.recovery.replacement.veto", OnlineOnly);
@@ -817,6 +848,22 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     // the answer (the connect string) is the point of the call.
     m.insert("fauna.nostr.bunker.bind", OnlineOnly);
 
+    // ── register_activitypub_oracle_kinds ──────────────────────────
+    // The oracle's ActivityPub door — a principal asks for a signature over a
+    // request it is about to send; the answer is the point of the call.
+    m.insert("fauna.activitypub.oracle.http_sig", OnlineOnly);
+
+    // ── register_post_author_kinds ──────────────────────────────────
+    // The oracle's posting door — a principal's call; the custodian signs
+    // with a key only the nest holds, so nothing queues offline.
+    m.insert("fauna.posts.author.create", OnlineOnly);
+    m.insert("fauna.posts.author.delete", OnlineOnly);
+
+    // ── register_atproto_oracle_kinds ──────────────────────────────
+    // The oracle's ATProto door — a principal asks for a service token it is
+    // about to present; the answer is the point of the call.
+    m.insert("fauna.atproto.oracle.service_auth", OnlineOnly);
+
     // ── register_bridged_conversation_kinds ─────────────────────────
     // The bridged-conversation family (Phase G). The bridge's six are a
     // principal's, all online; the user's reads are reads, `rooms.open`
@@ -877,6 +924,7 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     m.insert("fauna.conversations.keypackage.upload", OnlineOnly);
     m.insert("fauna.conversations.keypackage.fetch", OnlineOnly);
     m.insert("fauna.conversations.keypackage.count", Read);
+    m.insert("fauna.conversations.keypackage.addressable", Read);
 
     // ── register_conversations_welcome_kinds ────────────────────────
     // MLS Welcome delivery — a membership op, online-only per devices.md.
@@ -1032,9 +1080,13 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     // ── register_family_kinds ───────────────────────────────────────
     // Family/guardian plane. Custody transfer and graduation are irreversible
     // lifecycle ceremonies; approvals and reports have effects on the other
-    // party, so they queue; policy and device marks are the guardian's own data.
+    // party, so they queue; device marks are the guardian's own data.
+    // `policy.update` is `OnlineOnly` (`account-offline-mutation.md` § A policy
+    // the nest enforces is written online): there is nothing to apply locally,
+    // a queued whole-policy replace goes stale, and a restriction must not land
+    // silently late. The ruling is deliberately one kind wide.
     m.insert("fauna.family.status", Read);
-    m.insert("fauna.family.policy.update", OfflineSafe);
+    m.insert("fauna.family.policy.update", OnlineOnly);
     m.insert("fauna.family.graduate", OnlineOnly);
     m.insert("fauna.family.transfer", OnlineOnly);
     m.insert("fauna.family.transfer.accept", OnlineOnly);
@@ -1057,6 +1109,7 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     m.insert("fauna.auth.nest_handshake", OnlineOnly);
     m.insert("fauna.auth.device_handshake", OnlineOnly);
     m.insert("fauna.auth.custody_handshake", OnlineOnly);
+    m.insert("fauna.auth.custodied_fleet_handshake", OnlineOnly);
     // ⚠ The one member of this family that is NOT an auth ceremony, and the
     // block comment above must not be read onto it. `rotation_chain` mints
     // nothing and authenticates nobody — it is a pure read of the box's
@@ -1141,10 +1194,14 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     // deposit ingress), not replay-safe and issued by no app — never queued,
     // the `fauna.bridges.conversation.deposit` grade.
     m.insert("fauna.folders.deposit", OnlineOnly);
+    m.insert("fauna.folders.deposit.begin", OnlineOnly);
+    m.insert("fauna.folders.deposit.part", OnlineOnly);
+    m.insert("fauna.folders.deposit.commit", OnlineOnly);
     // The owner's half of the inbox — issued by the sync engine's adoption
-    // pass, which runs only while connected: a read, and an idempotent
+    // pass, which runs only while connected: reads, and an idempotent
     // retire keyed by the item's id.
     m.insert("fauna.folders.deposits.list", Read);
+    m.insert("fauna.folders.deposits.part", Read);
     m.insert("fauna.folders.deposits.retire", OfflineSafe);
     // public.fetch: the phase-4 public folder read plane — a pure read of
     // another account's `public`-audience folder (same grade as
@@ -1257,8 +1314,8 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     // is its `(writer_id, writer_seq, item_key)` coordinates, which the writer
     // owns.
     m.insert(crate::account_state::KIND_STATE_PUT, OfflineSafe);
-    // `state.put`'s retire counterpart (`account-data-taxonomy.md` § The
-    // generation machinery → *Fleet-scope reclamation*): also
+    // `state.put`'s retire counterpart (`fleet-scope-reclamation.md`
+    // § *Fleet-scope reclamation*): also
     // client-assigned identity (the caller's own cleartext coordinates,
     // never a nest-allocated one) and a converging effect — the retire
     // probe early-returns once the row is already superseded, so a
@@ -1275,25 +1332,28 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     m.insert(crate::media_ticket::KIND_MEDIA_PLAYBACK_TICKET, Read);
 
     // ── register_web_kinds ──────────────────────────────────────────
-    // Web publishing. Domain and apex/subdomain wiring is provisioning; the
-    // publish set is the user's own idempotent mapping; minting a paywall token
-    // is a one-shot.
-    m.insert("fauna.web.publish.set", OfflineSafe);
-    m.insert("fauna.web.publish.unset", OfflineSafe);
-    m.insert("fauna.web.publish.list", Read);
-    m.insert("fauna.web.domain.set", OnlineOnly);
-    m.insert("fauna.web.domain.get", Read);
-    m.insert("fauna.web.domain.delete", OnlineOnly);
-    m.insert("fauna.web.set_apex_actor", OnlineOnly);
-    m.insert("fauna.web.get_apex_actor", Read);
-    m.insert("fauna.web.set_subdomain_enabled", OnlineOnly);
-    m.insert("fauna.web.get_subdomain_enabled", Read);
-    m.insert("fauna.web.paywall.mint_token", OnlineOnly);
-    // The sealed-projection complete-set declaration is only meaningful in the
-    // same live session as the fully successful re-record walk it follows
-    // (`web.rs`, `WebFilesPruneSealedRequest`) — a deferred or replayed-stale
-    // set deletes live content, so it is never applied locally or queued.
-    m.insert("fauna.web.files.prune_sealed", OnlineOnly);
+    // `web` cargo feature. Web publishing. Domain and apex/subdomain wiring is
+    // provisioning; the publish set is the user's own idempotent mapping;
+    // minting a paywall token is a one-shot.
+    #[cfg(feature = "web")]
+    {
+        m.insert("fauna.web.publish.set", OfflineSafe);
+        m.insert("fauna.web.publish.unset", OfflineSafe);
+        m.insert("fauna.web.publish.list", Read);
+        m.insert("fauna.web.domain.set", OnlineOnly);
+        m.insert("fauna.web.domain.get", Read);
+        m.insert("fauna.web.domain.delete", OnlineOnly);
+        m.insert("fauna.web.set_apex_actor", OnlineOnly);
+        m.insert("fauna.web.get_apex_actor", Read);
+        m.insert("fauna.web.set_subdomain_enabled", OnlineOnly);
+        m.insert("fauna.web.get_subdomain_enabled", Read);
+        m.insert("fauna.web.paywall.mint_token", OnlineOnly);
+        // The sealed-projection complete-set declaration is only meaningful in the
+        // same live session as the fully successful re-record walk it follows
+        // (`web.rs`, `WebFilesPruneSealedRequest`) — a deferred or replayed-stale
+        // set deletes live content, so it is never applied locally or queued.
+        m.insert("fauna.web.files.prune_sealed", OnlineOnly);
+    }
 
     // ── register_labels_kinds ───────────────────────────────────────
     // Label attachment — an idempotent keyed write.
@@ -1364,6 +1424,11 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     // would re-assert what `/app` answers after the admin had moved it back.
     m.insert("fauna.admin.web_app_origin.get", Read);
     m.insert("fauna.admin.web_app_origin.set", OnlineOnly);
+    // The update channel: an ordinary admin read, and a `set` that is
+    // `OnlineOnly` for the same reason — a choice replayed out of an offline
+    // queue would move the box's updater after the admin had moved it back.
+    m.insert("fauna.admin.update_channel.get", Read);
+    m.insert("fauna.admin.update_channel.set", OnlineOnly);
     // The app's region relay: a read of the nest's own cache (the log fetch
     // happens off the request path) — the `list_roster` grading, not a
     // nest-to-nest relay's `OnlineOnly`.
@@ -1485,22 +1550,26 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     m.insert("fauna.inbox.mode.set", OfflineSafe);
 
     // ── register_feed_kinds ─────────────────────────────────────────
-    // Feeds. `create` inserts a row with a fresh random `feed_id` — the registry
-    // notes a replay would duplicate it — so it needs a client-generated id and
-    // queues. The rest are owner-keyed idempotent overwrites/removals.
-    m.insert("fauna.feed.list", Read);
-    m.insert("fauna.feed.get", Read);
-    m.insert("fauna.feed.posts", Read);
-    m.insert("fauna.feed.local.posts", Read);
-    m.insert("fauna.feed.trending.posts", Read);
-    m.insert("fauna.feed.contributors.list", Read);
-    m.insert("fauna.feed.create", OfflineQueued);
-    m.insert("fauna.feed.update", OfflineSafe);
-    m.insert("fauna.feed.delete", OfflineSafe);
-    m.insert("fauna.feed.contributors.grant", OfflineSafe);
-    m.insert("fauna.feed.contributors.revoke", OfflineSafe);
-    m.insert("fauna.feed.factors.get", Read);
-    m.insert("fauna.feed.factors.set", OfflineSafe);
+    // `feed` cargo feature. Feeds. `create` inserts a row with a fresh random
+    // `feed_id` — the registry notes a replay would duplicate it — so it needs
+    // a client-generated id and queues. The rest are owner-keyed idempotent
+    // overwrites/removals.
+    #[cfg(feature = "feed")]
+    {
+        m.insert("fauna.feed.list", Read);
+        m.insert("fauna.feed.get", Read);
+        m.insert("fauna.feed.posts", Read);
+        m.insert("fauna.feed.local.posts", Read);
+        m.insert("fauna.feed.trending.posts", Read);
+        m.insert("fauna.feed.contributors.list", Read);
+        m.insert("fauna.feed.create", OfflineQueued);
+        m.insert("fauna.feed.update", OfflineSafe);
+        m.insert("fauna.feed.delete", OfflineSafe);
+        m.insert("fauna.feed.contributors.grant", OfflineSafe);
+        m.insert("fauna.feed.contributors.revoke", OfflineSafe);
+        m.insert("fauna.feed.factors.get", Read);
+        m.insert("fauna.feed.factors.set", OfflineSafe);
+    }
 
     // ── register_personalization_kinds ──────────────────────────────
     // The sealed personalization model — an idempotent whole-row overwrite keyed
@@ -1510,8 +1579,11 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     m.insert("fauna.personalization.model.delete", OfflineSafe);
 
     // ── register_search_kinds ───────────────────────────────────────
-    // A pure read.
-    m.insert("fauna.search.query", Read);
+    // `search` cargo feature. A pure read.
+    #[cfg(feature = "search")]
+    {
+        m.insert("fauna.search.query", Read);
+    }
 
     // ── register_segments_kinds ─────────────────────────────────────
     // Segment listing + the changed push event; `compact` is nest-side

@@ -30,8 +30,8 @@
 //! `the_writers_real_sidecar_is_adoptable` pins them together against the real
 //! writer, which is a stronger check than any struct-shape assertion.
 
+use fauna_carv2::ReadAt;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Read, Seek};
 
 use anyhow::{Context, Result, bail};
 use fauna_core::data::ContentHash;
@@ -89,6 +89,35 @@ impl std::fmt::Display for SegmentKindMismatch {
 }
 
 impl std::error::Error for SegmentKindMismatch {}
+
+/// A segment half's body crossed the caller's byte bound and was refused
+/// mid-read — never buffered whole (`message-segment-store.md` § Segment size:
+/// no legal ceiling exists, so the bound is the caller's budget or the
+/// listing's declared size, never a constant). Raised by a bootstrap source's
+/// `fetch_segment`; typed here so
+/// [`crate::store::AccountStore::bootstrap_scope_segments_within`] can count it as
+/// `skipped_over_budget` and move on to the next offer instead of ending the
+/// scope's pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegmentBodyTooLarge {
+    pub kind: String,
+    pub segment_id: u32,
+    /// `".dat"` or `".meta"`.
+    pub half: &'static str,
+    pub max_bytes: u64,
+}
+
+impl std::fmt::Display for SegmentBodyTooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} segment {} {} refused: the body exceeds the {}-byte bound",
+            self.kind, self.segment_id, self.half, self.max_bytes
+        )
+    }
+}
+
+impl std::error::Error for SegmentBodyTooLarge {}
 
 /// The sidecar fields an adopting replica reads, decoded from the `.meta`
 /// file's canonical dag-cbor (`message-segment-store.md` § Segment file
@@ -264,13 +293,15 @@ pub const ADOPTABLE_KINDS: &[&str] = &["post", "mail", "calendar", "card", "conv
 ///    (a smuggled block would be served by `block_get` while appearing in no
 ///    index rebuild, which is precisely a block nothing accounts for).
 ///
-/// The `.dat` is read through `dat` — the staged file on a backend with one
+/// The `.dat` is read through `dat` — the staged file, by range
 /// ([`crate::backend::SegmentStaging::dat_reader`]) — one record at a time, so
 /// admitting a segment holds one record (at most
-/// `fauna_carv2::v1::MAX_RECORD_LEN`) and the index, never the container. The
-/// `.meta` is decoded whole: it is the index of the admission itself
-/// (`record_order`), the same order of size as the sets this check builds.
-pub fn admit<R: Read + Seek>(
+/// `fauna_carv2::v1::MAX_RECORD_LEN`) and the index, never the container, on
+/// every arm: the read is async, so a medium with no synchronous random access
+/// (the web's OPFS) is read the same way. The `.meta` is decoded whole: it is
+/// the index of the admission itself (`record_order`), the same order of size
+/// as the sets this check builds.
+pub async fn admit<R: ReadAt>(
     dat: R,
     meta: &[u8],
     expect_actor: &[u8; 32],
@@ -295,13 +326,18 @@ pub fn admit<R: Read + Seek>(
         .into());
     }
 
-    let mut reader = fauna_carv2::Reader::new(dat)
+    let mut reader = fauna_carv2::RangedReader::new(dat)
+        .await
         .map_err(|e| anyhow::anyhow!("segment .dat is not a finalized CARv2 container: {e}"))?;
 
     // Keyed by CID: a segment's record count has no ceiling, so the length
     // lookup below must not be a scan per record.
     let mut in_file: BTreeMap<[u8; 36], u64> = BTreeMap::new();
-    for block in reader.iter() {
+    for i in 0..reader.len() {
+        let block = reader
+            .block_at(i)
+            .await
+            .expect("i is below the reader's length");
         let (cid, bytes) = block.context("segment .dat: reading an indexed block")?;
         // The reader compares the on-disk CID to its index entry but never
         // re-hashes the body (its own docs say so). Adoption is exactly the
@@ -355,14 +391,26 @@ mod tests {
     use serde::Serialize;
     use std::io::Cursor;
 
-    /// [`admit`] over an in-memory `.dat`.
+    /// [`admit`] over an in-memory `.dat` — a medium that answers every read
+    /// at once, so the admission finishes in one poll.
     fn admit_bytes(
         dat: &[u8],
         meta: &[u8],
         expect_actor: &[u8; 32],
         expect_kind: Option<&str>,
     ) -> Result<SegmentAdmission> {
-        admit(Cursor::new(dat), meta, expect_actor, expect_kind)
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+        let admission = admit(
+            fauna_carv2::SeekReadAt(Cursor::new(dat)),
+            meta,
+            expect_actor,
+            expect_kind,
+        );
+        match std::pin::pin!(admission).poll(&mut Context::from_waker(Waker::noop())) {
+            Poll::Ready(out) => out,
+            Poll::Pending => panic!("an in-memory .dat never pends"),
+        }
     }
 
     /// A hand-built sidecar so tests can produce shapes the real writer never

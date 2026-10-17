@@ -55,6 +55,9 @@ fauna-atproto-settings-machine = { path = "../fauna-atproto-settings-machine" }
 # answers). The base, fauna-mls-free feature set: wasm-clean, and it never
 # depends back on the account runtime.
 fauna-client-folders = { path = "../fauna-client-folders" }
+# `refused_change_view` — the row composition `refused_changes::load_views`
+# hands every Events surface (it never depends back on this crate).
+fauna-client-caldav = { path = "../fauna-client-caldav" }
 # `GroupReceptionKeyRecord` — the record the group-reception seam moves.
 fauna-core = { path = "../fauna-core", default-features = false }
 # The store-observer poll — the one wait the watchers take, cross-target.

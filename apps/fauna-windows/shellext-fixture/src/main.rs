@@ -48,13 +48,13 @@ use fauna_ipc::sync_pipe_client::SyncPipeClient;
 use fauna_sync_engine::db::{SyncDb, SyncState};
 
 /// Base dir where the target service opens `config.toml` + per-folder DBs. With
-/// `--data-dir` it matches a test service's `SyncPaths::new(Some(root))` (everything
+/// `--data-dir` it matches a test service's `SyncPaths::at(root)` (everything
 /// under the root); without it, the production layout —
 /// `fauna_sync_engine::root::platform_state_base()` (`%LOCALAPPDATA%\Fauna\sync`),
 /// the same per-user root `SyncPaths` itself delegates to, deduping the hand-rolled copy this fixture used to carry.
-fn base_dir(args: &[String]) -> PathBuf {
+fn base_dir(args: &[String]) -> Result<PathBuf> {
     if let Some(root) = flag(args, "--data-dir") {
-        return PathBuf::from(root);
+        return Ok(PathBuf::from(root));
     }
     fauna_sync_engine::root::platform_state_base()
 }
@@ -98,8 +98,8 @@ fn folder_ref(args: &[String]) -> Result<FolderRef> {
 
 /// The set's identity-keyed state DB — the path the agent's status read opens
 /// (`SyncPaths::sync_db_path_for_ref`).
-fn set_db_path(args: &[String], set: FolderRef) -> PathBuf {
-    base_dir(args).join(format!("{}.db", set.db_component()))
+fn set_db_path(args: &[String], set: FolderRef) -> Result<PathBuf> {
+    Ok(base_dir(args)?.join(format!("{}.db", set.db_component())))
 }
 
 /// Send one request and unwrap the service's `Ok`/`Err` reply.
@@ -180,7 +180,7 @@ fn seed(args: &[String]) -> Result<()> {
     // 3. Seed the per-set DB row (folder-relative path, forward slashes) as
     //    Synced. `%LOCALAPPDATA%\Fauna\sync\fsid-<ref>.db`; opened on demand by the
     //    service per query (WAL, 5 s busy_timeout) so an external writer is safe.
-    let db_path = set_db_path(args, set);
+    let db_path = set_db_path(args, set)?;
     let rel = file.replace('\\', "/");
     {
         let db = SyncDb::open(&db_path)
@@ -233,7 +233,7 @@ fn teardown(args: &[String]) -> Result<()> {
     }
 
     // Delete the seeded DB (+ WAL/SHM sidecars) and the on-disk folder.
-    let db_path = set_db_path(args, set);
+    let db_path = set_db_path(args, set)?;
     for suffix in ["", "-wal", "-shm"] {
         let p = PathBuf::from(format!("{}{suffix}", db_path.display()));
         let _ = std::fs::remove_file(&p);

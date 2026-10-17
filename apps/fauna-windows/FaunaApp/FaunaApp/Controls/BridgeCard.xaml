@@ -45,6 +45,7 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
         <TextBlock Grid.Row="0" Grid.Column="0" x:Name="NameText"
@@ -118,6 +119,17 @@
                    AutomationProperties.AutomationId="{x:Bind ids:Ids.BridgeLinkBlockedReason}"
                    Margin="0,8,0,0" Opacity="0.8" TextWrapping="Wrap"
                    Visibility="Collapsed" />
+
+        <!-- The supervised ward's feed-source ask (family-safety.md § Feed-source
+             approvals → App affordance): one bridge-source-request-state label per
+             durable ask on THIS bridge and one bridge-source-request-button per refused
+             link/follow with no durable row yet. Built imperatively in RenderSourceAsks
+             (a card can carry several — a blocked link AND two blocked follows are three
+             independent asks, each with its own verdict) and EMPTY in the common case:
+             both inputs are supervised-only by construction, so the card re-tests no
+             supervision. -->
+        <StackPanel Grid.Row="5" Grid.ColumnSpan="2" x:Name="SourceAskPanel"
+                    Spacing="4" Margin="0,8,0,0" Visibility="Collapsed" />
 
         <!-- Feed-subscription shim (bridge-feed-subscriptions / bridge-feed-item /
              bridge-subscribe-feed-button) retired 2026-06-29 per bridges.md

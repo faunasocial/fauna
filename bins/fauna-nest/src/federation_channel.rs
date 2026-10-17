@@ -1210,38 +1210,20 @@ async fn serve_request(state: &Arc<AppState>, conn: &Arc<FederationConnection>, 
         return;
     }
 
-    // (2.5) per-SOURCE-IP throttle (F4). The per-nest throttle below is keyed on
-    // the peer `nest_id`, which the peer CHOOSES — a fresh keypair per connection
-    // mints a fresh bucket, so a Sybil sprays unboundedly under distinct ids.
-    // Also cap on the PROXY-v2-resolved source IP, which the attacker does not
-    // control (it can't forge its source past the loopback-only PROXY trust).
-    // Checked FIRST so a throttled IP cannot even create per-nest buckets,
-    // bounding `federation_rate_limit`'s map growth. Distinct key slot
-    // (`FED_IP_SLOT`) so an IP bucket can never collide with a `(nest_id, 0)` one.
-    if let Some(ip) = conn.source_ip {
-        const FED_IP_SLOT: [u8; 32] = [0xffu8; 32];
-        if !state.federation_rate_limit.check(
-            &crate::anonymous_rate_limit::ip_key_bytes(ip),
-            &FED_IP_SLOT,
-            &kind,
-        ) {
-            tracing::debug!(kind = %kind, "federation: per-source-IP throttle tripped");
-            send_error(&conn.dispatcher, correlation_id, rate_limited()).await;
-            return;
-        }
-    }
-
-    // (3) per-originating-nest throttle, keyed on the verified peer `nest_id` +
-    // the kind (the slice-2 `federation_rate_limit` analogue). A trip →
-    // `rate_limited`, connection stays open.
-    if !state
-        .federation_rate_limit
-        .check(&conn.peer_nest_id, &[0u8; 32], &kind)
-    {
+    // (2.5) + (3) the per-source-IP and per-nest throttles, at the kind's
+    // budget. A trip → `rate_limited`, connection stays open.
+    if let Err(trip) = throttle_admits(
+        &state.federation_rate_limit,
+        &state.federation_router,
+        conn.source_ip,
+        &conn.peer_nest_id,
+        &kind,
+    ) {
         tracing::debug!(
             peer = %conn.peer_nest_id_hex(),
             kind = %kind,
-            "federation: per-nest throttle tripped"
+            throttle = ?trip,
+            "federation: throttle tripped"
         );
         send_error(&conn.dispatcher, correlation_id, rate_limited()).await;
         return;
@@ -1258,6 +1240,56 @@ async fn serve_request(state: &Arc<AppState>, conn: &Arc<FederationConnection>, 
         req,
     )
     .await;
+}
+
+/// Which of the channel's two throttles refused a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThrottleTrip {
+    SourceIp,
+    Nest,
+}
+
+/// The channel's two throttles, in order, each at `kind`'s budget — the one it
+/// declared at registration ([`crate::federation_router::FederationRouter::max_events`]), else the
+/// limiter's default (`federation.md` § Security → *Rate limiting is the
+/// primary DoS defense*; the writer kinds' budget: § Nest-writer backup plane
+/// → *Throttling*). One window for the whole channel: only the count varies.
+///
+/// (2.5) per-SOURCE-IP (F4). The per-nest throttle is keyed on the peer
+/// `nest_id`, which the peer CHOOSES — a fresh keypair per connection mints a
+/// fresh bucket, so a Sybil sprays unboundedly under distinct ids. So also cap
+/// on the PROXY-v2-resolved source IP, which the attacker does not control (it
+/// can't forge its source past the loopback-only PROXY trust). Checked FIRST so
+/// a throttled IP cannot even create per-nest buckets, bounding the limiter's
+/// map growth. Distinct key slot (`FED_IP_SLOT`) so an IP bucket can never
+/// collide with a `(nest_id, 0)` one.
+///
+/// (3) per-originating-nest, keyed on the verified peer `nest_id` + the kind.
+fn throttle_admits(
+    limiter: &crate::bridge_rate_limit::Limiter,
+    router: &crate::federation_router::FederationRouter,
+    source_ip: Option<std::net::IpAddr>,
+    peer_nest_id: &[u8; 32],
+    kind: &str,
+) -> Result<(), ThrottleTrip> {
+    const FED_IP_SLOT: [u8; 32] = [0xffu8; 32];
+    let budget = router
+        .max_events(kind)
+        .unwrap_or_else(|| limiter.max_events());
+    if let Some(ip) = source_ip
+        && !limiter.check_with_max(
+            &crate::anonymous_rate_limit::ip_key_bytes(ip),
+            &FED_IP_SLOT,
+            kind,
+            budget,
+        )
+    {
+        return Err(ThrottleTrip::SourceIp);
+    }
+    if !limiter.check_with_max(peer_nest_id, &[0u8; 32], kind, budget) {
+        return Err(ThrottleTrip::Nest);
+    }
+    Ok(())
 }
 
 fn rate_limited() -> RpcError {
@@ -1395,6 +1427,73 @@ mod tests {
         assert!(
             lim.check(&ip_key, &[0u8; 32], kind),
             "the per-nest key slot is an independent bucket (no collision)"
+        );
+    }
+
+    /// A kind registered with the writer-plane budget admits past the channel
+    /// default where a default kind is refused, at BOTH checks — per source IP
+    /// and per nest (`federation.md` § Nest-writer backup plane → *Throttling*).
+    #[test]
+    fn a_writer_budget_kind_admits_past_the_channel_default_at_both_checks() {
+        use crate::bridge_rate_limit::Limiter;
+        use crate::federation_router::WRITER_RECORD_MAX_EVENTS;
+
+        fn meta() -> crate::rpc_router::RpcKindMeta {
+            crate::rpc_router::RpcKindMeta {
+                forbid_replay: false,
+                default_deadline: std::time::Duration::from_secs(30),
+                handler: Box::new(|_s, _a, _p| Box::pin(async { Ok(bytes::Bytes::new()) })),
+            }
+        }
+        const WRITER: &str = "fauna.federation.backup.changes.record";
+        const DEFAULT: &str = "fauna.federation.backup.write_token.mint";
+        let mut b = crate::federation_router::FederationRouter::builder();
+        b.add_with_budget(WRITER, meta(), WRITER_RECORD_MAX_EVENTS);
+        b.add(DEFAULT, meta());
+        let router = b.build();
+
+        let default_budget = Limiter::new().max_events();
+        // Admitted count over a burst of `n` from one (ip, nest) pair.
+        let burst = |source_ip, nest: [u8; 32], kind, n: u32| {
+            let lim = Limiter::new();
+            (0..n)
+                .filter(|_| throttle_admits(&lim, &router, source_ip, &nest, kind).is_ok())
+                .count() as u32
+        };
+        let ip = Some("203.0.113.7".parse::<std::net::IpAddr>().unwrap());
+
+        // Per-nest check alone (no source IP), then both checks together.
+        for source_ip in [None, ip] {
+            assert_eq!(
+                burst(source_ip, [7u8; 32], DEFAULT, default_budget + 1),
+                default_budget,
+                "a default kind refuses request {} in a window",
+                default_budget + 1
+            );
+            assert_eq!(
+                burst(source_ip, [7u8; 32], WRITER, WRITER_RECORD_MAX_EVENTS + 1),
+                WRITER_RECORD_MAX_EVENTS,
+                "the writer kind admits its own budget and no more"
+            );
+        }
+
+        // The per-SOURCE-IP check honours the budget too: nests rotating their
+        // id behind one IP share the writer budget, not the default.
+        let lim = Limiter::new();
+        let admitted = (0..=WRITER_RECORD_MAX_EVENTS)
+            .filter(|i| {
+                let mut nest = [0u8; 32];
+                nest[..4].copy_from_slice(&i.to_be_bytes());
+                throttle_admits(&lim, &router, ip, &nest, WRITER).is_ok()
+            })
+            .count() as u32;
+        assert_eq!(admitted, WRITER_RECORD_MAX_EVENTS);
+        let mut fresh = [0u8; 32];
+        fresh[0] = 0xEE;
+        assert_eq!(
+            throttle_admits(&lim, &router, ip, &fresh, WRITER),
+            Err(ThrottleTrip::SourceIp),
+            "a fresh nest id behind a spent IP is refused at the IP check"
         );
     }
 

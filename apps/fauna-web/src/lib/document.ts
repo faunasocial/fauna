@@ -430,6 +430,21 @@ export function documentMediaBlocks(doc: RenderDocument | undefined): RenderBloc
 }
 
 /**
+ * A stable `{#each}` key for one of {@link documentMediaBlocks}' blocks: its position plus its
+ * content address (a blob hash or a proxied path). Keyed, a document rebuilt with the same media
+ * (a feed refresh, a quote folding in) keeps each live `video-thumbnail` and its player instead of
+ * re-creating it idle (render-model.md § D6c → *Inline playback*); the position keeps two
+ * attachments of the same bytes distinct.
+ */
+export function mediaBlockKey(block: RenderBlock, index: number): string {
+  if ('Image' in block) return `${index}:${block.Image.hash}`;
+  if ('Video' in block) return `${index}:${block.Video.hash}`;
+  if ('ProxiedImage' in block) return `${index}:${block.ProxiedImage.path}`;
+  if ('ProxiedVideo' in block) return `${index}:${block.ProxiedVideo.path}`;
+  return `${index}`;
+}
+
+/**
  * The urls of this document's link previews still `Resolving` (render-model.md § D4), in body
  * order — the shared producer appends one below each standalone bare-url paragraph, and the page
  * fires `manager.resolveLinkPreview(url)` for each (re-emitting it `Resolved`/`Failed`).

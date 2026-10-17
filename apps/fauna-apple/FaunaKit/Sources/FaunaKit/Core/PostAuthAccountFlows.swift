@@ -73,7 +73,7 @@ public func escalateSessionEnding(
     switch verdict {
     case .superseded:
         await (ceremonyHold ?? .shared).escalate(escalate)
-    case .nestIdentityChanged, .signInRefused:
+    case .nestIdentityChanged, .signInRefused, .appOutdated, .nestOutdated:
         await escalate()
     }
 }

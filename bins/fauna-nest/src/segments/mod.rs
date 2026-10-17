@@ -723,6 +723,14 @@ pub trait AdoptableJournal: PlacementKind {
     /// recorded after it? True means the journal on disk is this ceremony's
     /// own earlier adoption of that same corpus.
     fn is_adoption_of(current: &Self::Manifest, corpus: &Self::Manifest) -> bool;
+
+    /// Does `current` hold every placement of `corpus`, unchanged? True for
+    /// an earlier adoption of `corpus` plus whatever was journaled since —
+    /// post-gesture arrivals included, which [`Self::is_adoption_of`] reads
+    /// as history of the account's own. The in-flight marker's question
+    /// ([`PlacementJournal::adopt_staged_superseding`]): an interrupted flip
+    /// keeps an adoption it already made and supersedes anything else.
+    fn extends_adoption_of(current: &Self::Manifest, corpus: &Self::Manifest) -> bool;
 }
 
 /// What a target's journal is, relative to a corpus about to be adopted.
@@ -980,6 +988,99 @@ impl<K: AdoptableJournal> PlacementJournal<K> {
             .map_err(|e| anyhow::anyhow!("save the adopted {label} manifest: {e}"))?;
         state.manifest = adopted.clone();
         Ok(Ok(adopted))
+    }
+
+    /// Adopt a staged corpus as the actor's journal **under a standing
+    /// in-flight marker** (`backup-destinations.md` § Third destination kind →
+    /// *Re-seed* → *the in-flight marker*), and return the fold the journal
+    /// now holds.
+    ///
+    /// [`Self::adopt_staged`]'s steps under its lock, with no `LivedIn`
+    /// refusal: freshness was judged once, at the gesture, so whatever the
+    /// journal carries beyond the corpus is post-gesture activity. Two cases:
+    ///
+    /// * **The journal already extends this corpus's adoption** — an earlier
+    ///   run adopted it ([`AdoptableJournal::extends_adoption_of`], and every
+    ///   corpus file is still in place byte for byte) and arrivals may have
+    ///   been journaled on top. Everything is kept, and the journal's fold is
+    ///   returned as it stands.
+    /// * **Anything else** — the journal is pre-adoption: scaffolding plus
+    ///   whatever arrived since the gesture. The corpus supersedes it whole
+    ///   (the fresh branch of [`Self::adopt_staged`]). The caller re-files
+    ///   what arrived from the rows the arrival doors wrote, which the
+    ///   commit transaction alone removes — so a crash anywhere in here
+    ///   leaves those rows to file from on the retry.
+    pub async fn adopt_staged_superseding(
+        &self,
+        actor_id: &[u8; 32],
+        staged: StagedJournal<K>,
+    ) -> Result<K::Manifest> {
+        let label = K::Manifest::LABEL;
+        let actor_state = self.actor_state(actor_id).await?;
+        let mut state = actor_state.lock().await;
+        state
+            .store
+            .finalize_open()
+            .with_context(|| format!("finalize open {label} segment before adoption"))?;
+
+        let root = K::segments_root(&self.data_dir, actor_id);
+        let corpus_names: HashSet<String> = staged
+            .ids
+            .iter()
+            .flat_map(|id| segment_file_names(*id))
+            .collect();
+        let mut in_place = true;
+        for name in &corpus_names {
+            let wanted = std::fs::read(staged.dir.join(name))
+                .with_context(|| format!("read the staged {name}"))?;
+            if !std::fs::read(root.join(name)).is_ok_and(|held| held == wanted) {
+                in_place = false;
+                break;
+            }
+        }
+        if in_place && K::extends_adoption_of(&state.manifest, &staged.fold) {
+            // Kept whole. The manifest in memory is saved after every append,
+            // so it is the journal's fold — and, unlike a rebuild, it keeps
+            // what the retention prune recorded since.
+            return Ok(state.manifest.clone());
+        }
+
+        // 1 — every corpus file into place, whole (a name already holding
+        // exactly these bytes is left alone).
+        for id in &staged.ids {
+            for name in segment_file_names(*id) {
+                let (from, to) = (staged.dir.join(&name), root.join(&name));
+                let wanted = std::fs::read(&from)
+                    .with_context(|| format!("read the staged {}", from.display()))?;
+                if std::fs::read(&to).is_ok_and(|held| held == wanted) {
+                    continue;
+                }
+                std::fs::rename(&from, &to)
+                    .with_context(|| format!("place {} in the journal", to.display()))?;
+            }
+        }
+        // 2 — what the corpus supersedes goes, after the placing above.
+        for entry in std::fs::read_dir(&root)
+            .with_context(|| format!("read the journal area {}", root.display()))?
+        {
+            let entry = entry.context("read a journal area entry")?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if name.starts_with("seg-") && !corpus_names.contains(name) {
+                std::fs::remove_file(entry.path()).with_context(|| {
+                    format!("remove superseded journal file {}", entry.path().display())
+                })?;
+            }
+        }
+
+        // 3 — the fold, from the journal as it now stands, saved last.
+        let adopted = K::rebuild_from_segments(&root)
+            .with_context(|| format!("rebuild the {label} manifest from the adopted journal"))?;
+        adopted
+            .save_atomic(&state.manifest_path)
+            .map_err(|e| anyhow::anyhow!("save the adopted {label} manifest: {e}"))?;
+        state.manifest = adopted.clone();
+        Ok(adopted)
     }
 }
 

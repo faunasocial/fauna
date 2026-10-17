@@ -118,7 +118,7 @@ fauna-cbor.workspace = true
 fauna-proxy-protocol.workspace = true
 fauna-conn-limit.workspace = true
 fauna-index.workspace = true
-fauna-mail = { workspace = true, features = ["tokenizer", "post-text", "nest-segments", "outbound", "outbound-net", "multidomain", "routing", "deliverability", "warmup", "health", "lists", "spam", "body-ref", "staged-envelope", "received-header", "sender-auth", "icalendar", "parser", "dedup-key"] }
+fauna-mail = { workspace = true, features = ["tokenizer", "post-text", "nest-segments", "outbound", "outbound-net", "multidomain", "routing", "deliverability", "warmup", "health", "lists", "spam", "body-ref", "staged-envelope", "received-header", "sender-auth", "icalendar", "parser", "dedup-key", "dmarc-report", "tlsrpt-report"] }
 fauna-calendar = { workspace = true, features = ["nest-segments"] }
 fauna-contacts = { workspace = true, features = ["nest-segments"] }
 # Neither `payments` nor `zaps` is named here: both are forwarded from this
@@ -131,7 +131,13 @@ fauna-contacts = { workspace = true, features = ["nest-segments"] }
 # This supersedes the interim dep-line naming W1.5 added: that commit called it
 # "the MINIMUM that keeps this binary compiling" and named row 62 — this change —
 # as the owner of the real nest-side carve.
-fauna-protocol = { workspace = true, features = ["tls-spki"] }
+#
+# `feed` / `search` / `web` (the kind-catalog entries of the three planes the
+# kids APP flavor excises) ARE named on this line, deliberately: no nest flavor
+# excises them — a nest serves every client, kids builds included — so there is
+# no `--no-default-features` switch for them to survive, and the router/registry
+# parity test needs their catalog entries in every nest build.
+fauna-protocol = { workspace = true, features = ["tls-spki", "feed", "search", "web"] }
 # The per-set `folders.retention_policy` column's canonical serialization — the
 # 2-field `RetentionPolicy { max_snapshots, max_age_days }` this crate's wizard
 # writes (`backup-restore.md` § 8 RULING, consequence (ii)). The nest's auto-prune
@@ -213,6 +219,14 @@ fauna-nest-http = { path = "../../libs/fauna-nest-http" }
 # conformance suites); already in the build graph through fauna-sync-engine —
 # this only makes the store/backend/types modules reachable from prod code.
 fauna-account-store.workspace = true
+# The custodian-NEST serve door (`custody_fleet`): it answers an owner device's
+# restore read from the custodied store through the ONE store-serving
+# implementation the peer channel also calls (`fauna_peer_sync::store_serve`),
+# and derives the owner's device exclusions with the peer plane's own
+# `admission::CustodiedExclusions`. Was a dev-dep (the peer-leg assembly
+# tests); already in the build graph through fauna-client-capabilities, and it
+# does not depend on fauna-nest, so no cycle — this only makes the use direct.
+fauna-peer-sync.workspace = true
 # The CARv2 record cap the segment write path must refuse to exceed — a record over
 # it is refused on READ, so writing one stores mail that can never be read back
 # (`segments::mail::append_record`; smtp-server.md § Message size limits).
@@ -418,7 +432,7 @@ fauna-launch-machine = { path = "../../libs/fauna-launch-machine", features = ["
 # conformance_actor_by_handle_client.rs connects an AUTHENTICATED `NestClient`
 # over a real socket to an in-process nest and drives the conversations
 # address-resolution adapter (`FaunaMlsBackend::resolve_address` →
-# `NestConversationsRpc` → `fauna.actor.by_handle` + `keypackage.count`)
+# `NestConversationsRpc` → `fauna.actor.by_handle` + `keypackage.addressable`)
 # end-to-end — the first real-wire test of the conversations client surface
 # (tier_1's MockNest can't catch the cross-binary request/reply mapping). These
 # four are client/shared crates that do not depend on fauna-nest, so no cycle.
@@ -468,10 +482,8 @@ fauna-credential-store.workspace = true
 # V12 (W5.7 — the peer-leg assembly seam) proves the elected runtime binds the
 # same-account peer listener and that a dialing sibling admits + walks it: the
 # seam double comes from fauna-transport's `testing` module, the dial side
-# rides the real `PeerChannel` (prod-dep above) + admission client. Dev-dep
-# only; fauna-peer-sync does not depend on fauna-nest, so no cycle.
+# rides the real `PeerChannel` + the admission client (both prod-deps above).
 fauna-transport = { workspace = true, features = ["test-helpers"] }
-fauna-peer-sync.workspace = true
 # conformance_backup_generation_client.rs drives the shared generation-recovery
 # projection (`fauna_client_backup::generations` + the production
 # `impl_backup_nest_seam!` expansion) against a real destination nest, proving
@@ -502,7 +514,7 @@ fauna-client-index = { path = "../../libs/fauna-client-index" }
 # `MailLocalSearch` behind `fauna_client_search`'s `LocalSearchIndex` seam, which
 # is what actually serves backend 2 to the page (`ui/search.md` § State & data
 # shape). Dev-dep only, same no-cycle reasoning as above.
-fauna-client-search = { path = "../../libs/fauna-client-search" }
+fauna-client-search = { path = "../../libs/fauna-client-search", features = ["query"] }
 # conformance_caldav_client.rs drives the real `fauna-client-caldav` crate
 # (CalDavClient + seal/unseal + the native read path) against the in-process nest
 # `fauna.bridges.*` CalDAV handlers — the cross-binary proof that the crate and
@@ -557,6 +569,12 @@ fauna-client-sync = { path = "../../libs/fauna-client-sync" }
 # `mls` feature stays isolated to the test build; no cycle (fauna-client-folders
 # does not depend on fauna-nest).
 fauna-client-folders = { path = "../../libs/fauna-client-folders", features = ["mls"] }
+# `conformance_relay_serving_two_engines.rs` downloads a metadata-only folder's
+# file through the real `MediaMachine` the Media page runs
+# (`build_media_machine_with_folder_keys`, behind `rpc-glue`). Already in the
+# test graph through fauna-client-folders' `mls` feature; named here so the test
+# may use it. No cycle.
+fauna-media-machine = { path = "../../libs/fauna-media-machine", features = ["rpc-glue"] }
 # `conformance_public_follow_client.rs` (folders re-model phase 4 slice 4f-iv)
 # drives the production followed-folders list source
 # (`StoreFollowedFoldersSource`, behind `rpc-glue`) against two in-process
@@ -565,7 +583,7 @@ fauna-client-folders = { path = "../../libs/fauna-client-folders", features = ["
 # why it needs a conformance seat rather than a stub. Test-only, like the
 # siblings above; `fauna-devices-machine` does not depend on fauna-nest, so no
 # cycle (verified `cargo tree -e no-dev`).
-fauna-devices-machine = { path = "../../libs/fauna-devices-machine", features = ["rpc-glue"] }
+fauna-devices-machine = { path = "../../libs/fauna-devices-machine", features = ["rpc-glue", "web"] }
 # The recipient's durable-inbox surface: `conformance_shared_folders.rs`'s
 # decline pin peeks the staged share (`list_folder_pending_shares`) to learn the
 # `inbox_id` it declines, then drives the shared
@@ -605,7 +623,7 @@ fauna-client-capabilities = { path = "../../libs/fauna-client-capabilities" }
 # the app-dead host — handed only the owner `BackupKey` + a bearer, no seed —
 # reads it back (populate → enumerate → hydrate → decrypt). This is the interim
 # FFI-seam read-path proof while the appex-driven tier_3 is signing-gated
-# (`file-sync.md` § Apple File Provider binding → Headless-first testing).
+# (`on-demand-files-apple.md` § Apple File Provider binding → Headless-first testing).
 # `default-features = false` + `file-provider-host` trims to exactly the
 # `file_provider_host` module (which implies `sync-engine-host` ->
 # `fauna-sync-engine/engine-lifecycle`, already in the nest dev-dep closure) —
@@ -754,4 +772,10 @@ required-features = ["test-hooks"]
 # `protocol_test` gate), so its WebSocket round-trip proof needs the feature.
 [[test]]
 name = "echo_round_trip"
+required-features = ["test-hooks"]
+
+# The T15 ingest brake's metering-failure pin faults the pump's budget pass
+# through `AppState::custody_hosting_meter_fault`, a `test-hooks` field.
+[[test]]
+name = "conformance_custody_hosting_pump_client"
 required-features = ["test-hooks"]

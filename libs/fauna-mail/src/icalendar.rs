@@ -185,13 +185,22 @@ pub fn expand_recurrence(
         .ok_or_else(|| ICalError::Malformed("component has no DTSTART".to_string()))?;
     let dtstart_secs = parse_ical_datetime_utc(dtstart)?;
 
+    // Both forms are client-influenced (inbound iMIP keeps DURATION
+    // verbatim), so the offset is bounded before it is added to each occurrence.
     let dtend_offset_secs = match property_value(component, "DTEND") {
-        Some(dtend) => parse_ical_datetime_utc(dtend)? - dtstart_secs,
+        Some(dtend) => parse_ical_datetime_utc(dtend)?
+            .checked_sub(dtstart_secs)
+            .ok_or_else(|| ICalError::BadDateTime("DTEND out of range".to_string()))?,
         None => match property_value(component, "DURATION") {
             Some(d) => parse_iso_duration_secs(d)?,
             None => 0,
         },
     };
+    if dtend_offset_secs.unsigned_abs() > MAX_EVENT_SPAN_SECS {
+        return Err(ICalError::BadDateTime(
+            "event span out of range".to_string(),
+        ));
+    }
 
     let rrule_str = property_value(component, "RRULE");
     let occurrences: Vec<i64> = match rrule_str {
@@ -242,10 +251,14 @@ pub fn expand_recurrence(
         .map(|t| ExpandedOccurrence {
             component: component.clone(),
             dtstart: t,
-            dtend: t + dtend_offset_secs,
+            dtend: t.saturating_add(dtend_offset_secs),
         })
         .collect())
 }
+
+/// Ceiling on an event's DTSTART→end span (10 years): far beyond any real
+/// event, far below `i64` overflow of `occurrence + span`.
+const MAX_EVENT_SPAN_SECS: u64 = 10 * 366 * 86_400;
 
 fn property_value<'a>(component: &'a ICalComponent, name: &str) -> Option<&'a str> {
     component
@@ -1188,6 +1201,39 @@ END:VCALENDAR\r\n";
             expand_recurrence(&comp, 0, 1),
             Err(ICalError::Malformed(_))
         ));
+    }
+
+    #[test]
+    fn expand_huge_duration_errors_never_panics() {
+        // A DURATION that parses (no i64 overflow) but sits near
+        // i64::MAX made `t + offset` overflow — a panic under the shipped
+        // `overflow-checks = true` — so one invitation broke every REPORT over
+        // its window. It must be a graceful error, for DURATION and for the
+        // DTEND-derived offset alike.
+        let prop = |name: &str, value: &str| ICalProperty {
+            name: name.into(),
+            value: value.into(),
+            parameters: vec![],
+        };
+        let comp = |end: ICalProperty| ICalComponent {
+            name: "VEVENT".into(),
+            properties: vec![prop("DTSTART", "20260601T100000Z"), end],
+            sub_components: vec![],
+        };
+        let (w0, w1) = (epoch(2026, 6, 1, 0), epoch(2026, 6, 2, 0));
+        for huge in ["PT9223372036854775000S", "-PT9223372036854775000S"] {
+            assert!(matches!(
+                expand_recurrence(&comp(prop("DURATION", huge)), w0, w1),
+                Err(ICalError::BadDateTime(_))
+            ));
+        }
+        // Well past the ceiling but nowhere near overflow: still refused.
+        assert!(expand_recurrence(&comp(prop("DURATION", "P99999W")), w0, w1).is_err());
+        // A DTEND decades past DTSTART is bounded by the same ceiling.
+        assert!(expand_recurrence(&comp(prop("DTEND", "99991231T235959Z")), w0, w1).is_err());
+        // A multi-day event is unaffected.
+        let ok = expand_recurrence(&comp(prop("DURATION", "P3D")), w0, w1).unwrap();
+        assert_eq!(ok[0].dtend, epoch(2026, 6, 4, 10));
     }
 
     #[test]

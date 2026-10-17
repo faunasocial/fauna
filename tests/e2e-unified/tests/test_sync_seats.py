@@ -674,12 +674,13 @@ def test_the_hello_body_and_path_carry_the_token():
     assert ms._shared_path(folder, run_id=token).name == f"{token}-shared.txt"
 
 
-def _app_seat(name: str, folder: Path, *, agent_data_dir: Path | None = None):
+def _app_seat(name: str, folder: Path, *, agent_data_dir: Path | None = None,
+              app_name: str = "tui"):
     """An :class:`AppSeatDriver` that has never been started — enough to pin the
     pure observation half with no driver, no app and no nest in sight."""
     folder.mkdir(parents=True, exist_ok=True)
     return sync_seats.AppSeatDriver(
-        "tui",
+        app_name,
         name=name,
         run_token="2seat-20260802-deadbeef",
         path=folder,
@@ -809,6 +810,184 @@ def test_a_macos_seat_finds_its_agent_log_through_the_drivers_state_base(tmp_pat
     note = seat.agent_log_note()
     assert "not locatable" not in note
     assert "fauna.log.2026-10-01" in note, "the note must name the file it read"
+
+
+# ── the seat's own agent: where it answers, and how it stops ─────────────────
+
+
+class _FakeAgentClient:
+    """Stands in for both transports' ``SyncAgentClient`` — records which
+    address it was opened on and answers ``GetServiceStatus`` with a reading."""
+
+    opened: list = []
+
+    def __init__(self, address, timeout=10.0):
+        type(self).opened.append(address)
+
+    def service_status(self):
+        return {"peer_files": {"siblings": 1, "chunks": 2, "bytes": 3, "to_nest": 0}}
+
+
+def _fake_transport(monkeypatch, module: str):
+    import types
+
+    fake = types.ModuleType(module)
+    fake.SyncAgentClient = type(f"{module}.Client", (_FakeAgentClient,), {"opened": []})
+    monkeypatch.setitem(__import__("sys").modules, module, fake)
+    return fake.SyncAgentClient
+
+
+def test_a_unix_seat_reads_its_agent_on_the_socket_its_driver_publishes(tmp_path, monkeypatch):
+    unix = _fake_transport(monkeypatch, "helpers.sync_agent_ipc_unix")
+    pipe = _fake_transport(monkeypatch, "helpers.sync_agent_ipc")
+    seat = _app_seat("b", tmp_path / "b")
+
+    class _UnixDriver:
+        sync_agent_socket = "/run/user/1000/fauna/sync-agent.sock"
+        sync_agent_pipe = None
+
+    seat._driver = _UnixDriver()
+    assert seat.peer_files() == {"siblings": 1, "chunks": 2, "bytes": 3, "to_nest": 0}
+    assert unix.opened == ["/run/user/1000/fauna/sync-agent.sock"] and pipe.opened == []
+
+
+def test_a_windows_seat_reads_its_agent_on_its_per_launch_pipe(tmp_path, monkeypatch):
+    """The windows app publishes no socket — its agent serves the per-launch
+    Win32 pipe the seat pinned — and before this arm `peer_files` answered
+    None there, so a windows seat could never say where a file's bytes came
+    from."""
+    unix = _fake_transport(monkeypatch, "helpers.sync_agent_ipc_unix")
+    pipe = _fake_transport(monkeypatch, "helpers.sync_agent_ipc")
+    seat = _app_seat("b", tmp_path / "b", app_name="windows")
+
+    class _WindowsDriver:
+        sync_agent_pipe = r"\\.\pipe\fauna-sync-e2e-seats-1-b"
+
+    seat._driver = _WindowsDriver()
+    assert seat.peer_files()["chunks"] == 2
+    assert pipe.opened == [r"\\.\pipe\fauna-sync-e2e-seats-1-b"] and unix.opened == []
+
+
+def test_a_seat_whose_driver_publishes_no_agent_endpoint_reads_none(tmp_path):
+    seat = _app_seat("b", tmp_path / "b")
+
+    class _BareDriver:
+        pass
+
+    seat._driver = _BareDriver()
+    assert seat.peer_files() is None
+
+
+class _RecordingWindowsDriver:
+    """A launched windows driver as the seat sees it, recording the order of the
+    lifecycle calls the seat makes."""
+
+    sync_agent_pipe = r"\\.\pipe\fauna-sync-e2e-seats-1-a"
+
+    def __init__(self, calls):
+        self.calls = calls
+
+    def preserve_state_across_relaunch(self):
+        self.calls.append("preserve")
+        return True
+
+    def kill_uncleanly(self):
+        self.calls.append("kill_app")
+
+    def teardown(self):
+        self.calls.append("teardown")
+
+
+def _fake_agent_stop(monkeypatch, calls):
+    import types
+
+    fake = types.ModuleType("helpers.windows_sync_agent")
+    fake.stop_agent_if_serving = lambda pipe: calls.append(("stop_agent", pipe))
+    monkeypatch.setitem(__import__("sys").modules, "helpers.windows_sync_agent", fake)
+
+
+def test_a_windows_seat_stops_its_agent_after_its_app(tmp_path, monkeypatch):
+    """A windows agent is built to outlive its app, so a stopped seat whose
+    agent still serves is not stopped at all: its sibling goes on fetching from
+    it. The agent goes through its own `Shutdown`, after the app — never
+    before, or the app's convergence tick respawns it."""
+    calls: list = []
+    _fake_agent_stop(monkeypatch, calls)
+    seat = _app_seat("a", tmp_path / "a", app_name="windows")
+    seat._driver = _RecordingWindowsDriver(calls)
+
+    seat.stop()
+    assert calls == ["teardown", ("stop_agent", r"\\.\pipe\fauna-sync-e2e-seats-1-a")]
+    seat.stop()  # a second stop (the ExitStack's, after the body's) is a no-op
+    assert len(calls) == 2
+
+
+def test_a_windows_seat_keeping_its_state_quits_through_the_bridge_not_teardown(
+    tmp_path, monkeypatch
+):
+    """windows' teardown also stops the bridge and drops the per-instance
+    stores, so a seat stopped that way could never `restart` as the same
+    device. Its keep-state stop is the bridge's app kill — the first step of
+    every windows relaunch — and then the agent's own `Shutdown`."""
+    calls: list = []
+    _fake_agent_stop(monkeypatch, calls)
+    seat = _app_seat("a", tmp_path / "a", app_name="windows")
+    seat._driver = _RecordingWindowsDriver(calls)
+
+    seat.stop_keeping_state()
+    assert calls == [
+        "preserve",
+        "kill_app",
+        ("stop_agent", r"\\.\pipe\fauna-sync-e2e-seats-1-a"),
+    ]
+
+
+def test_a_unix_seat_stops_through_its_drivers_teardown_alone(tmp_path, monkeypatch):
+    """The unix agent is the app's group child, reaped by the driver's own
+    teardown — there is no surviving agent to stop."""
+    calls: list = []
+    _fake_agent_stop(monkeypatch, calls)
+    seat = _app_seat("a", tmp_path / "a")
+
+    class _UnixDriver(_RecordingWindowsDriver):
+        sync_agent_pipe = None
+        sync_agent_socket = "/run/user/1000/fauna/sync-agent.sock"
+
+    seat._driver = _UnixDriver(calls)
+    seat.stop_keeping_state()
+    assert calls == ["preserve", "teardown"]
+
+
+def test_a_files_own_owed_seat_is_filtered_and_named():
+    """A seat mode built for the seat module but still owed by ONE journey file
+    — the device-to-device transfer's linux and macOS legs — is that file's
+    debt, not the platform's: it filters through the same machinery and prints
+    the same note, without filing the platform's native seat as unbuilt for
+    every other file."""
+    owed = {"linux": {"native": "the linux leg of this journey is not built yet"}}
+    assert sync_seats.seat_sets_for_platform("linux", unbuilt=owed) == (("tui", "tui"),)
+    assert sync_seats.seat_sets_for_platform("win32", unbuilt=owed) == (
+        ("native", "native"),
+    )
+    assert ("native", "native") in sync_seats.seat_sets_for_platform("linux")
+    note = sync_seats.unbuilt_note("linux", unbuilt=owed)
+    assert note is not None and "the linux leg of this journey" in note
+    assert sync_seats.unbuilt_note("win32", unbuilt=owed) is None
+
+
+def test_the_device_to_device_journey_runs_each_platforms_own_seats():
+    """windows runs its native pair (tui drives no agent there); linux runs
+    the tui pair and its native pair; macOS runs the tui pair until its native
+    leg lands, and each owed leg says what is missing."""
+    import tests.test_device_to_device_file_transfer as d2d
+
+    assert d2d.seat_pairs("win32") == (("native", "native"),)
+    assert d2d.seat_pairs("linux") == (("tui", "tui"), ("native", "native"))
+    assert d2d.seat_pairs("darwin") == (("tui", "tui"),)
+    for platform, modes in d2d.OWED_SEATS.items():
+        for mode, reason in modes.items():
+            assert mode in sync_seats.SEAT_MODES, (platform, mode)
+            assert len(reason) > 20, f"{platform}/{mode} reason is too thin: {reason!r}"
 
 
 def test_a_pinned_agent_dir_surfaces_the_agents_own_rolling_log(tmp_path):
@@ -1270,6 +1449,44 @@ def test_two_folders_armed_at_different_cadences_both_surface():
 
 def test_no_armed_line_reads_as_no_cadence():
     assert sync_seats.adopted_rescan_ms(["INFO x: engine serving"]) == set()
+
+
+# ── the ignore cell's causal barrier ─────────────────────────────────────────
+
+
+def test_converge_passes_read_the_completion_line_in_order():
+    """`converge_passes` reads the line `LocalWriteHost::converge` writes, in
+    the agent log's own shape (tracing puts the field after the message), and
+    keeps a failed pass as `False` — only a clean one is a barrier."""
+    lines = [
+        "2026-10-09T10:00:00.1Z  INFO fauna_sync_engine::always_resident: "
+        "folder~1a2b: local converge pass complete clean=false",
+        "2026-10-09T10:00:00.2Z DEBUG fauna_sync_agent::pipe_server: pipe request ListEngines",
+        "2026-10-09T10:00:05.1Z  INFO fauna_sync_engine::always_resident: "
+        "folder~1a2b: local converge pass complete clean=true",
+    ]
+    assert sync_seats.converge_passes(lines) == [False, True]
+    assert sync_seats.converge_passes(["INFO x: rescan tick armed"]) == []
+
+
+def test_ignore_plan_covers_each_rule_once_and_names_a_leak_by_its_rule(tmp_path):
+    """One file per ignore rule (`.faunaignore`, a built-in default, a
+    dotfile), a kept control outside all three, and a leak reported with the
+    rule that should have stopped it."""
+    from helpers import seat_ignore
+
+    plan = seat_ignore.build_plan("2seat-00000000-00000000")
+    assert len(plan.ignored) == 3 and plan.kept not in plan.ignored
+    assert not plan.kept.startswith(".") and not plan.kept.endswith((".tmp", ".secret"))
+
+    seat_ignore.seed(tmp_path, plan)
+    assert (tmp_path / ".faunaignore").read_text() == f"{seat_ignore.FAUNAIGNORE_PATTERN}\n"
+    assert {p.name for p in tmp_path.iterdir()} == {".faunaignore", *plan.bodies()}
+
+    secret = next(rel for rel in plan.ignored if rel.endswith(".secret"))
+    assert seat_ignore.leaked(plan, {plan.kept}) == []
+    [leak] = seat_ignore.leaked(plan, {plan.kept, secret})
+    assert secret in leak and ".faunaignore" in leak
 
 
 # ── the scenario plan's acts diagnose themselves ─────────────────────────────

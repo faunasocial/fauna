@@ -20,6 +20,7 @@ def _register_test_device(
     signing_key: bytes,
     label: str = "test-device",
     device_id: str | None = None,
+    seal: bool = True,
 ) -> None:
     """Register a sync device the way a client's sync daemon does — the
     `fauna.sync.register` WS-RPC kind, as the device-owning actor.
@@ -40,7 +41,8 @@ def _register_test_device(
     Note what that does NOT break: the card still renders and `device-card`
     counts stay correct — this plane's degrade keeps a nameless row rather than
     dropping it (`DevicesMachine::render_devices`), which is precisely what makes
-    the mistake easy to miss. The seal rides the real funnel
+    the mistake easy to miss (`seal=False` seeds exactly that row on purpose, for
+    `test_nameless_device_card_is_still_counted`). The seal rides the real funnel
     (`fauna_ffi.seal_device_label` → `fauna_core::label_custody::seal_device_label`)
     rather than being reimplemented here: a drifted seal fails silently, as an
     empty name, never as an error.
@@ -49,7 +51,9 @@ def _register_test_device(
 
     if device_id is None:
         device_id = os.urandom(32).hex()
-    label_sealed = seal_device_label(signing_key, bytes.fromhex(device_id), label)
+    label_sealed = (
+        seal_device_label(signing_key, bytes.fromhex(device_id), label) if seal else None
+    )
     payload = {"device_id": device_id, "label": label, "capabilities": "read,write"}
     if label_sealed is not None:
         payload["label_sealed"] = label_sealed
@@ -239,6 +243,47 @@ class TestDeviceCards:
         assert painted == expected, (
             f"the page paints {painted} device-card(s) but the nest holds "
             f"{expected} for this actor after {ROSTER_CONVERGE_BUDGET_S}s: "
+            f"{[self.app.driver.get_text('device-name', index=i) for i in range(painted)]} "
+            f"{self.app.driver.diagnose('device-card')}"
+        )
+
+    @pytest.mark.feature("devices")
+    def test_nameless_device_card_is_still_counted(self):
+        """A device whose label renders empty (a register with NO seal — the nest
+        rests no plaintext label, so the row's label is `''`) is still listed,
+        and its `device-card` is still counted.
+
+        The rule is `DevicesMachine::render_devices`' (`machine.rs`: it keeps the
+        row rather than hide a device the user may need to revoke) and
+        `path-sealing.md` § the sixth instance. On windows an empty
+        `AutomationProperties.Name` pruned the whole card from the UIA content
+        view, so FlaUI counted one fewer than the nest held (`painted 1 != nest
+        2`) and a screen reader skipped the row; the card's Name now falls back
+        to a fixed "Unnamed device" while the visible `device-name` stays the raw
+        (empty) label.
+        """
+        _register_test_device(
+            self.nest_url, self.actor_id, self.signing_key,
+            label="sealless-device", seal=False,
+        )
+
+        self.app.backups.navigate_devices()
+        ROSTER_CONVERGE_BUDGET_S = 30.0
+        deadline = time.monotonic() + ROSTER_CONVERGE_BUDGET_S
+        last_nav = time.monotonic()
+        painted = self.app.driver.count("device-card")
+        expected = self._nest_device_count()
+        while time.monotonic() < deadline and painted != expected:
+            time.sleep(0.5)
+            if time.monotonic() - last_nav >= _DEVICES_NAV_SETTLE_S:
+                _refresh_devices(self.app)
+                last_nav = time.monotonic()
+            painted = self.app.driver.count("device-card")
+            expected = self._nest_device_count()
+
+        assert painted == expected, (
+            f"the page paints {painted} device-card(s) but the nest holds {expected} "
+            f"for this actor (one registered with no seal) after {ROSTER_CONVERGE_BUDGET_S}s: "
             f"{[self.app.driver.get_text('device-name', index=i) for i in range(painted)]} "
             f"{self.app.driver.diagnose('device-card')}"
         )

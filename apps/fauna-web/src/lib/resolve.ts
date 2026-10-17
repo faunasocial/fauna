@@ -1,29 +1,16 @@
 import { nodeUrl } from './api';
-import { classifyRecipient, nestResolve, actorByHandle } from './wasm';
+import { classifyRecipient, findUser } from './wasm';
 
 export interface ResolvedRecipient {
   actorId: string;
+  /** The nest the actor lives on: this nest's URL, or the peer's. */
   nodeUrl: string;
+  /** The peer nest the lookup resolved on — `null` for a home-nest actor. The
+   *  knock hands it to `fauna.inbox.send` as `recipientNestUrl`; carried from the
+   *  lookup, never re-derived (`contacts.md` § Cross-nest knocks). */
+  nestUrl: string | null;
   handle?: string;
   domain?: string;
-}
-
-/** Resolve a domain to its canonical fauna node URL over the pre-identity
- *  anonymous WS-RPC `fauna.nest.resolve` kind (replacing the deleted HTTP
- *  `GET /api/v1/resolve-node/{domain}`; `api-layers.md` § Public). */
-export async function resolveNodeUrl(domain: string): Promise<string> {
-  const url = await nestResolve(domain, nodeUrl());
-  if (!url) throw new Error(`No node URL returned for ${domain}`);
-  return url;
-}
-
-/** Resolve a handle to its actor ID over the anonymous WS-RPC
- *  `fauna.actor.by_handle` kind (replacing the deleted HTTP
- *  `GET /api/v1/actor/by-handle/{handle}`). The anonymous WS is CORS-exempt, so
- *  resolving against a remote `targetNodeUrl` works where the HTTP fetch was
- *  cross-origin-blocked. */
-export async function resolveHandle(handle: string, targetNodeUrl: string, domain?: string): Promise<{ actor_id: string; handle: string; domain: string }> {
-  return actorByHandle(handle, targetNodeUrl, domain);
 }
 
 export async function parseRecipient(input: string): Promise<ResolvedRecipient> {
@@ -33,20 +20,22 @@ export async function parseRecipient(input: string): Promise<ResolvedRecipient> 
   const classified = classifyRecipient(input);
 
   if (classified.kind === 'actor_id') {
-    return { actorId: classified.actorId, nodeUrl: nodeUrl() };
+    return { actorId: classified.actorId, nodeUrl: nodeUrl(), nestUrl: null };
   }
 
   if (classified.kind === 'handle') {
-    const targetUrl = await resolveNodeUrl(classified.domain);
-    // Pass the typed domain as the multi-domain qualifier so the nest echoes it
-    // back (`bob@domain2` stays `bob@domain2` rather than collapsing to the
-    // canonical identity domain) — mail-multidomain.md § Multi-domain handles.
-    const resolved = await resolveHandle(classified.user, targetUrl, classified.domain);
+    // One shared lookup (`find_user_across_nests` over wasm): a home probe with
+    // the typed domain as the multi-domain qualifier (so `bob@domain2` stays
+    // `bob@domain2` — mail-multidomain.md § Multi-domain handles), and, when the
+    // domain is foreign, a direct dial of the peer. It names the nest it
+    // resolved on, so the foreign decision and URL are never re-derived here.
+    const hit = await findUser(classified.user, nodeUrl(), classified.domain);
     return {
-      actorId: resolved.actor_id,
-      nodeUrl: targetUrl,
-      handle: resolved.handle,
-      domain: resolved.domain,
+      actorId: hit.actor_id,
+      nodeUrl: hit.nest_url ?? nodeUrl(),
+      nestUrl: hit.nest_url,
+      handle: hit.handle,
+      domain: hit.domain,
     };
   }
 

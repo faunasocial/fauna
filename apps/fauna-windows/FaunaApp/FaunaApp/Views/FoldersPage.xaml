@@ -106,6 +106,15 @@
                             HorizontalAlignment="Stretch"
                             HorizontalContentAlignment="Stretch" />
 
+            <!-- The peer-transfer plane's six-id surface (p2p.md § Cross-user
+                 shared-set transfer), directly under the ceremony panel — tui's
+                 placement. Same excision shape as the host above: its markup is
+                 Views/P2pShare/SharePlaneSection.xaml, filled under
+                 `#if P2P_SHARE`, and it paints NOTHING while no plane runs. -->
+            <ContentControl x:Name="SharePlaneSectionHost"
+                            HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Stretch" />
+
             <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
 
             <!-- ══════════════════════════════════════════════════════

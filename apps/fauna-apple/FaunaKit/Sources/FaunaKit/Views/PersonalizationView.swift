@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import SwiftUI
 
 /// The shared "Personalization" Settings sub-page (macOS + iOS, one FaunaKit
@@ -829,3 +832,4 @@ public struct PersonalizationView: View {
     /// (`trainedTopics`' own read, and the engagement-cue controls').
     private var labelersLoaded: Bool { vm.snapshot?.loaded ?? false }
 }
+#endif // !FAUNA_KIDS

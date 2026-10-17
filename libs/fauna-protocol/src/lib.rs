@@ -5,9 +5,11 @@
 
 pub mod account;
 pub mod account_state;
+pub mod activitypub_oracle;
 pub mod admin;
 pub mod age;
 pub mod atproto;
+pub mod atproto_oracle;
 pub mod atproto_pds;
 pub mod auth;
 pub mod backup;
@@ -57,6 +59,7 @@ pub mod linkpreview;
 pub mod log_plane;
 pub mod media;
 pub mod media_ticket;
+pub mod member_rows;
 /// The class-2 merge-policy seam — which of the charter's five closed policies
 /// a class-2 kind merges under, and the reader-side application of one incoming
 /// entry (`account-data-plane.md` § Merge-policy seam).
@@ -64,6 +67,7 @@ pub mod merge_policy;
 pub mod mls_replica;
 pub mod moderation;
 pub mod nat_mode;
+pub mod nest_info_memo;
 /// The deployment-seed rotation statement + chain verification
 /// (`nest/box-recovery.md` § Deployment-seed rotation) — shared by the nest that
 /// mints the chain and every app that walks it before re-pinning.
@@ -94,6 +98,7 @@ pub mod pair;
 #[cfg(feature = "payments")]
 pub mod payments;
 pub mod peer;
+pub mod peer_row;
 /// The `fauna.peer.share.*` wire plane — the cross-user share leg, a
 /// controversial-class registry feature (`p2p-share`), so it compiles away
 /// with the `p2p-share` feature (`dynamic-features.md` § The cargo feature
@@ -104,6 +109,7 @@ pub mod peer_sync;
 pub mod pending_actions;
 pub mod personalization;
 pub mod plugins;
+pub mod post_author;
 pub mod posts;
 pub mod principals;
 pub mod profile;
@@ -151,6 +157,7 @@ pub mod tls;
 pub mod tls_spki;
 pub mod transport;
 pub mod unknown;
+pub mod update_channel;
 pub mod web;
 pub mod web_app_origin;
 pub mod wrapped_blob;
@@ -164,11 +171,12 @@ pub use envelope::{Cancel, Frame, FrameError, Push, Reply, Request, decode_frame
 pub use error::{LocalizedText, RpcError, RpcErrorAction};
 pub use fauna_cbor::Value;
 pub use kind::{KindRegistry, RpcKindMeta};
+pub use nest_info_memo::{NestInfoMemo, read_nest_info};
 pub use protocol_kinds::{EchoReply, EchoRequest};
 pub use push_events::{PushEvent, StaleSurfaces};
 pub use requester::{
-    KeyedRpcRequester, MaybeSendSync, NestSeamError, RpcErrorClass, RpcRequester,
-    classify_rpc_error, nest_seam_error,
+    KeyedRpcRequester, MaybeSendSync, NestSeamError, ProvenIdentityMemo, ProvenNestIdentity,
+    RpcErrorClass, RpcRequester, classify_rpc_error, nest_seam_error,
 };
 /// Re-exported so consumers (client wrappers, nest handlers) can build
 /// the byte-buffer fields of the wire types without a direct

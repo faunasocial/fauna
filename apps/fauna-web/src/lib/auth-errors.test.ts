@@ -12,6 +12,7 @@
 
 import {
   AccountLockedError,
+  AppOutdatedError,
   classifyChallengeError,
   IdentitySupersededError,
   NestOutdatedError,
@@ -112,7 +113,7 @@ Deno.test('a thrown IdentitySupersededError survives re-classification unchanged
 // `getAuthToken`'s `fauna.auth.not_registered`. Its `code` is a contract with
 // the wasm WS client, whose token provider reads it off the rejection to stop
 // the reconnect loop as a refusal instead of backing off into a retry loop
-// (`fauna_rpc_wasm`'s `is_sign_in_refusal`) — so the field, not the message,
+// (`fauna_rpc_wasm`'s `typed_refusal`) — so the field, not the message,
 // is what must hold.
 
 Deno.test('SignInRefusedError carries the wire code the wasm token provider keys on', () => {
@@ -122,6 +123,50 @@ Deno.test('SignInRefusedError carries the wire code the wasm token provider keys
   }
   if (err.origin !== 'https://nest.example') {
     throw new Error(`expected the refusing origin carried, got ${err.origin}`);
+  }
+});
+
+// The degraded-nest twin: a signed-in tab whose nest restarted degraded meets
+// `fauna.nest.outdated` on its WS client's re-mint, and the token provider
+// keys the needs-update stop on this `code` — never on the `"outdated:"` text
+// the classifier strips (`version-compatibility.md` § Dimension 4, the
+// *Mid-session* bullet).
+Deno.test('a classified NestOutdatedError carries the wire code the wasm token provider keys on', () => {
+  const err = classifyChallengeError('outdated: This nest must be updated.');
+  if (Reflect.get(err, 'code') !== 'fauna.nest.outdated') {
+    throw new Error(`the wire code must be a readable property (wasm reads it by Reflect.get), got ${Reflect.get(err, 'code')}`);
+  }
+});
+
+// ── The other direction: the app is the one too old ─────────────────────────
+//
+// The nest closed the anonymous dial 4426 — it no longer serves this app's
+// subprotocol. The wasm `map_silent_err` prefixes it `app-outdated:`; it must
+// classify apart from the nest-outdated verdict (different remedy, different
+// text — `version-compatibility.md` § Dimension 4, *The other direction*), and
+// carry the `arm` the wasm token provider keys the app-outdated stop on.
+
+Deno.test('an "app-outdated:" rejection → AppOutdatedError, never NestOutdatedError', () => {
+  const localized = "Your app is out of date and can't connect to this nest. Please update to continue.";
+  const err = classifyChallengeError(`app-outdated: ${localized}`);
+  if (!(err instanceof AppOutdatedError)) {
+    throw new Error(`expected AppOutdatedError, got ${err.constructor.name}`);
+  }
+  if (err instanceof NestOutdatedError) {
+    throw new Error('the app-outdated verdict must not read as the nest being outdated');
+  }
+  if (err.message !== localized) {
+    throw new Error(`expected the localized message without the prefix, got: ${err.message}`);
+  }
+});
+
+Deno.test('a classified AppOutdatedError carries the arm the wasm token provider keys on', () => {
+  const err = classifyChallengeError('app-outdated: update the app');
+  if (Reflect.get(err, 'arm') !== 'subprotocol_mismatch') {
+    throw new Error(`the WsRpcError arm must be a readable property (wasm reads it by Reflect.get), got ${Reflect.get(err, 'arm')}`);
+  }
+  if (Reflect.get(err, 'code') !== undefined) {
+    throw new Error('a 4426 has no wire code; carrying one would misroute the stop');
   }
 });
 

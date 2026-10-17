@@ -12,6 +12,7 @@
     backupDestinationRemove,
     backupDestinationStatus,
     backupAuditRunPass,
+    backupRecoverFromDestination,
     type DestinationAuditRow,
     type MessageKindSnapshot,
     type RestoreHistoryRow,
@@ -20,14 +21,13 @@
     type BackupDestinationStatus,
   } from '$lib/rpc';
   import { nodeUrl } from '$lib/api';
-  import { sharedRpcPort } from '$lib/rpc';
+  import { sharedRpcPort, downloadSnapshotFileBytes } from '$lib/rpc';
   import {
     ensureWasm,
     backupDestinationLabel,
     everyDestinationIsAClientDevice,
     hexShort,
     immediateDeleteAckText,
-    downloadSnapshotFileBytes,
     offlineAffordance,
     backupSelfAuditIsAlerting,
     backupSelfReportedAlertReason,
@@ -48,10 +48,10 @@
     type SnapshotRow,
   } from '$lib/backups-machine';
   import { bytesFromHex } from '$lib/hex';
-  import { resolveLocalized } from '$lib/i18n/localized';
+  import { resolveLocalized, resolveLocalizedNested } from '$lib/i18n/localized';
   import type { BackupsMachine } from '../../../static/fauna_wasm_backups.js';
   import { onMount, onDestroy } from 'svelte';
-  import { ensureAccountRuntime } from '$lib/conversations';
+  import { onStoreChange } from '$lib/store-change';
   import MessageBanner from '$lib/components/MessageBanner.svelte';
   import { t } from '$lib/i18n/strings';
   import {
@@ -64,7 +64,7 @@
     backupDestinationKindText,
     backupUsageText,
   } from '$lib/value-format';
-  import { auditAlertReasons } from '$lib/backup-audit-alerts';
+  import { auditAlertBanners } from '$lib/backup-audit-alerts';
   import { IDS } from '$lib/generated/uiIds';
 
   // W4 (account-data-plane.md § Workstreams) phase 4's UI desensitizing (`account-data-plane.md` § The
@@ -167,6 +167,15 @@
   // first must not blank the other. Empty until the first pass returns, which
   // renders "never" per the shared label's `None` arm.
   let destAudit: Record<string, DestinationAuditRow> = $state({});
+  // The recovery gesture on the fifth audit-alert reason (backups.md
+  // § Audit-alert surface): closed → confirming one destination → running →
+  // done with the shared result lines. tui's `RecoverView`, the same states.
+  type RecoverView =
+    | { kind: 'closed' }
+    | { kind: 'confirming'; destinationId: string }
+    | { kind: 'running' }
+    | { kind: 'done'; text: string };
+  let recoverView: RecoverView = $state({ kind: 'closed' });
 
   // The restore button arms only when the typed id exactly matches the
   // selected snapshot's id (same friction bar as the immediate-delete modal).
@@ -246,15 +255,20 @@
   /**
    * Download one snapshot file's bytes and save them.
    *
-   * The bytes are resolved + decrypted entirely client-side by the shared walk
-   * (`downloadSnapshotFileBytes` → `fauna_core::file_download` over wasm). This
-   * page cannot ask the nest to reassemble the file: owner chunks are sealed and
-   * the nest holds no opening key.
+   * The bytes are resolved + decrypted entirely client-side by the shared
+   * snapshot entry reader (`downloadSnapshotFileBytes` → the wasm twin of the
+   * natives' `SyncEngine::download_snapshot_entry_bytes`): the entry, sealed
+   * or plaintext, licensed by the signed change row of the open detail's set
+   * that named it under its path, then opened under the owner key. This page
+   * cannot ask
+   * the nest to reassemble the file: owner chunks are sealed and the nest
+   * holds no opening key.
    * Only the save below is web-specific (`ui/backups.md` § Where logic lives).
    */
   async function downloadSnapshotFile(file: SnapshotFileRow) {
     const id = $identity;
-    if (!id) return;
+    const detail = snap?.detail;
+    if (!id || !detail) return;
     // The machine hands `manifest_hash` across the boundary as hex (the same
     // reason `SnapshotRow.device_id` is hex); the download walk wants bytes.
     const manifestHash = bytesFromHex(file.manifest_hash);
@@ -265,10 +279,12 @@
     downloadingPath = file.path;
     try {
       const bytes = await downloadSnapshotFileBytes(
+        id.secretHex,
         manifestHash,
         file.path,
-        id.secretHex,
         nodeUrl(),
+        detail.folder,
+        detail.folder_hash,
       );
       const url = URL.createObjectURL(new Blob([bytes as BlobPart]));
       try {
@@ -392,10 +408,6 @@
   }
 
   onMount(async () => {
-    // The destination list is an account-plane row (`fauna.state.backup`), so
-    // this page needs the tab's account runtime even when no conversations
-    // page has been opened yet.
-    ensureAccountRuntime();
     // FIRST, before any await: the `backup_audit_run_now` agent command drives
     // *this* — the production audit path, same call and same render, not a
     // test-only shortcut. Installed up front so "the page is mounted" (which is all
@@ -619,10 +631,18 @@
   // successfully read yet" from "we read, and it is empty", so the template can
   // render the empty placeholder ONLY in the second case.
   let destinationsHydrated = $state(false);
+  /** The text of the spent-retries failure `loadDestinations` put up, so the
+   *  store-change re-read below retires only its OWN message — a gesture's
+   *  (a failed add, a form left open to fix) stays. */
+  let destinationsReadError = '';
+  /** Bumped by every `loadDestinations`, so a store-change re-read that a
+   *  gesture's own re-read overtook paints nothing. */
+  let destinationsLoads = 0;
 
   async function loadDestinations() {
     const id = $identity;
     if (!id) return;
+    destinationsLoads += 1;
     let lastError: unknown = null;
     for (let attempt = 0; attempt < DESTINATION_LOAD_ATTEMPTS; attempt++) {
       try {
@@ -639,10 +659,39 @@
     // Retries spent. Say so rather than rendering a confident empty list: the
     // rows we hold are stale-or-absent and we do not know which.
     destinationsHydrated = false;
-    showPageError(
-      lastError instanceof Error ? lastError.message : String(lastError),
-    );
+    destinationsReadError = lastError instanceof Error ? lastError.message : String(lastError);
+    showPageError(destinationsReadError);
   }
+
+  // The open page's re-read on a store-change notice (`$lib/store-change`):
+  // the destination list rests in the account store, so another device's add
+  // or edit walking in repaints it. Level-shaped: skipped while a gesture is in
+  // flight or overtaken by one (its own re-read follows), one read with no retries, a failed read
+  // replaces nothing, an unchanged answer paints nothing and costs no further
+  // round trip, and the form, its buffers and an armed remove are their own
+  // state. A changed list re-reads its status and re-runs the audit, as a
+  // mutation does.
+  async function rereadDestinations() {
+    const id = $identity;
+    if (!id || destBusy) return;
+    const loads = destinationsLoads;
+    let fresh: BackupDestination[];
+    try {
+      fresh = await backupDestinationList(id.secretHex);
+    } catch {
+      return;
+    }
+    if (destBusy || loads !== destinationsLoads) return;
+    if (destinationsReadError && error === destinationsReadError && !errorFromMachine) error = '';
+    destinationsReadError = '';
+    if (destinationsHydrated && JSON.stringify(fresh) === JSON.stringify(destinations)) return;
+    destinations = fresh;
+    destinationsHydrated = true;
+    await loadDestinationStatus();
+    await refreshAudit();
+  }
+  const unsubStoreChange = onStoreChange(() => void rereadDestinations());
+  onDestroy(unsubStoreChange);
 
   // Live per-destination status (backups.md § Per-destination status read).
   // Re-read on mount and after every add/edit/remove. Skipped at zero
@@ -675,7 +724,10 @@
   }
 
   function backlogText(destId: string): string {
-    return backupBacklogText(destStatus[destId]?.backlog_count ?? null);
+    return backupBacklogText(
+      destStatus[destId]?.backlog_count ?? null,
+      destStatus[destId]?.writer_state ?? null,
+    );
   }
 
   // --- The client-side audit (backups.md § Audit-alert surface) ---
@@ -733,11 +785,16 @@
   // regression recovery window) is `DestinationAuditRecord::alert_reasons()`'s
   // single shared answer, never re-derived here, so web cannot start alerting on
   // a transient `Unreachable` (the laptop-on-a-plane case the loop keeps quiet).
-  let auditAlerts = $derived([
+  //
+  // A banner carries `backup-audit-recover-button` exactly where the row's
+  // shared `recover_offered` says so (`auditAlertBanners`): on the fifth
+  // reason's own banner, for a regressed nest destination.
+  let auditAlerts: { text: string; recoverDestinationId: string | null }[] = $derived([
     ...destinations.flatMap((d) =>
-      auditAlertReasons(destAudit[d.destination_id]).map((reason) =>
-        backupAuditAlertText(reason, destLabel(d)),
-      ),
+      auditAlertBanners(destAudit[d.destination_id]).map((banner) => ({
+        text: backupAuditAlertText(banner.reason, destLabel(d)),
+        recoverDestinationId: banner.recover ? d.destination_id : null,
+      })),
     ),
     // A client-device custodian reporting its OWN copy as failing — the only
     // failure signal that exists for a kind the owner-side loop can never
@@ -746,8 +803,47 @@
     // `backupSelfAuditIsAlerting`.
     ...destinations
       .filter((d) => backupSelfAuditIsAlerting(destStatus[d.destination_id]?.audit_state ?? null))
-      .map((d) => backupAuditAlertText(backupSelfReportedAlertReason(), destLabel(d))),
+      .map((d) => ({
+        text: backupAuditAlertText(backupSelfReportedAlertReason(), destLabel(d)),
+        recoverDestinationId: null,
+      })),
   ]);
+
+  // --- The recovery gesture (backups.md § Audit-alert surface, the fifth
+  // reason; the run: segment-backup-protocol.md § Recovery into the lived-in
+  // nest that regressed) ---
+  //
+  // Web implements NO recovery logic: `backupRecoverFromDestination` is one call
+  // into shared Rust — which sets run, the leg, the verb, the duties and the
+  // result's text are all the shared driver's. The page only opens the confirm,
+  // shows the run, and re-audits afterwards so the cleared notice is read from
+  // the store, never assumed.
+  function openRecoverConfirm(destinationId: string) {
+    recoverView = { kind: 'confirming', destinationId };
+  }
+
+  function cancelRecover() {
+    recoverView = { kind: 'closed' };
+  }
+
+  async function confirmRecover() {
+    const id = $identity;
+    if (!id || recoverView.kind !== 'confirming') return;
+    const target = recoverView.destinationId;
+    recoverView = { kind: 'running' };
+    try {
+      const result = await backupRecoverFromDestination(id.secretHex, target);
+      recoverView = {
+        kind: 'done',
+        text: result.lines.map((line) => resolveLocalizedNested(line)).join('\n'),
+      };
+      error = '';
+    } catch (e: any) {
+      recoverView = { kind: 'closed' };
+      showPageError(t.backups.backup_recover_failed({ reason: e?.message ?? String(e) }));
+    }
+    await refreshAudit();
+  }
 
   // Row label: the display name, else the destination URL's host (an unnamed destination
   // carries null). Shared `fauna_core::format` over wasm
@@ -977,8 +1073,46 @@
      reason, from the shared `backup_audit_alert_label`; which verdicts are loud is
      `DestinationAuditRecord::alert_reason()`'s answer, not this page's. -->
 {#each auditAlerts as alert}
-  <p data-testid={IDS.BACKUP_AUDIT_ALERT} class="banner audit-alert">{alert}</p>
+  <div data-testid={IDS.BACKUP_AUDIT_ALERT} class="banner audit-alert">
+    <span>{alert.text}</span>
+    {#if alert.recoverDestinationId !== null}
+      {@const destinationId = alert.recoverDestinationId}
+      <!-- The recovery gesture, beside the fifth reason's text (the
+           2026-09-30 rule-A answer); disarmed while a run is in flight. -->
+      <button
+        data-testid={IDS.BACKUP_AUDIT_RECOVER_BUTTON}
+        class="btn"
+        onclick={() => openRecoverConfirm(destinationId)}
+        disabled={recoverView.kind === 'running'}
+      >{t.backups.backup_audit_recover_button}</button>
+    {/if}
+  </div>
 {/each}
+
+{#if recoverView.kind === 'confirming'}
+  <!-- Plain confirm, no re-type: nothing is deleted on either side, and a
+       re-run recovers nothing twice. -->
+  <div data-testid={IDS.BACKUP_AUDIT_RECOVER_CONFIRM_MODAL} class="dest-remove-confirm">
+    <p><strong>{t.backups.backup_recover_confirm_title}</strong></p>
+    <p>{t.backups.backup_recover_confirm_body}</p>
+    <div class="dest-form-actions">
+      <button
+        data-testid={IDS.BACKUP_AUDIT_RECOVER_CANCEL_BUTTON}
+        class="btn"
+        onclick={cancelRecover}
+      >{t.backups.backup_recover_cancel_button}</button>
+      <button
+        data-testid={IDS.BACKUP_AUDIT_RECOVER_CONFIRM_BUTTON}
+        class="btn primary"
+        onclick={confirmRecover}
+      >{t.backups.backup_recover_confirm_button}</button>
+    </div>
+  </div>
+{:else if recoverView.kind === 'running'}
+  <p data-testid={IDS.BACKUP_AUDIT_RECOVER_RESULT} class="recover-result">{t.backups.backup_recover_running}</p>
+{:else if recoverView.kind === 'done'}
+  <p data-testid={IDS.BACKUP_AUDIT_RECOVER_RESULT} class="recover-result">{recoverView.text}</p>
+{/if}
 
 <div data-testid={IDS.SNAPSHOT_LIST}>
 {#if !ready}
@@ -1576,14 +1710,24 @@
     cursor: pointer;
     font-size: 0.8125rem;
   }
-  /* The audit banner is a `<p>`, not the clickable `restore-divergence-banner`
-     `<button>` this class was written for — it opens nothing, it states a finding.
-     Full width so it reads as a page-level warning rather than an inline chip. */
+  /* The audit banner is a stating block, not the clickable
+     `restore-divergence-banner` `<button>` this class was written for — it
+     states a finding (the fifth reason's banner also holds the recovery
+     button). Full width so it reads as a page-level warning rather than an
+     inline chip. */
   .audit-alert {
     cursor: default;
-    display: block;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem;
     margin: 0.25rem 0;
     padding: 0.375rem 0.625rem;
+  }
+  /* The recovery's result: the shared lines, verdict first, one per line. */
+  .recover-result {
+    white-space: pre-line;
+    margin: 0.25rem 0;
   }
   /* The sole-client warning shares the audit banner's page-level shape (a
      stating `<p>`, not the clickable chip `.banner` was written for), but it is

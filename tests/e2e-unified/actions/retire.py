@@ -49,9 +49,15 @@ class RetireActions:
 
     def enter_token(self, provider_id: str, token: str) -> None:
         """Pick a provider with a typed token field and verify it."""
+        self.enter_credentials(provider_id, {"api-token": token})
+
+    def enter_credentials(self, provider_id: str, fields: dict[str, str]) -> None:
+        """Pick a provider, type each credential field (by its registry field
+        id — OVH's three keys, say) and verify."""
         self.driver.click(f"vps-provider-row[{provider_id}]")
-        self.driver.wait_for("vps-credentials-form-api-token", timeout=10)
-        self.driver.fill("vps-credentials-form-api-token", token)
+        for field_id, value in fields.items():
+            self.driver.wait_for(f"vps-credentials-form-{field_id}", timeout=10)
+            self.driver.fill(f"vps-credentials-form-{field_id}", value)
         self.verify()
 
     def sign_in_bundled(self, base_url: str) -> None:

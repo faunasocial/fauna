@@ -91,12 +91,16 @@ pub mod permission_set;
 /// it walks raw dag-cbor with the same decoder [`reverse_translate`] uses, so
 /// exporting it over FFI costs the cdylib none of `atrium_api`'s tree.
 pub mod record_refs;
+#[cfg(feature = "client")]
+pub mod reverse_translate;
 /// F2 reverse translation — an external app's ATProto record back into the
 /// intermediate Fauna shape the D10 authoring sub-key then signs. The mirror
 /// of [`outbound`] (Fauna → record); `client`-gated because it parses via
 /// `atrium_api`'s record types, and nest-side only (no FFI export).
-#[cfg(feature = "client")]
-pub mod reverse_translate;
+/// The oracle's `atproto.service_auth` class — the token-lifetime cap the
+/// nest door and the Go bridge's mint both read, and the clamp. Pure +
+/// wasm-clean, in the always-on core beside [`authz`] (the class's deny half).
+pub mod service_auth;
 #[cfg(feature = "client")]
 pub mod store;
 #[cfg(feature = "client")]

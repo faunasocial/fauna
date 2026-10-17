@@ -58,11 +58,23 @@ class AdminSettingsContentTest {
         createdAt = createdAt,
     )
 
+    /** A cap input inside a tier row (not the add-a-tier form's same-id inputs). */
+    private fun rowNode(tag: String) = composeTestRule.onNode(
+        hasTestTag(tag) and hasAnyAncestor(hasTestTag("admin-settings-tier-item")),
+    )
+
+    /** A cap input / control inside the add-a-tier form. */
+    private fun addNode(tag: String) = composeTestRule.onNode(
+        hasTestTag(tag) and hasAnyAncestor(hasTestTag("admin-settings-tier-add-section")),
+    )
+
     private fun render(
         tiers: List<FfiAdminTier> = listOf(tier("free")),
         ownMembershipTierNames: List<String> = emptyList(),
         membershipTiers: List<FfiAdminMembershipTier> = emptyList(),
         onSaveTier: (String, Long, Long, Long, Long, Long) -> Unit = { _, _, _, _, _, _ -> },
+        onAddTier: (String, Long, Long, Long, Long, Long) -> Unit = { _, _, _, _, _, _ -> },
+        onAddRefused: (String) -> Unit = {},
         onSaveMembershipTier: (String, String, String) -> Unit = { _, _, _ -> },
         onClearMembershipTier: (String) -> Unit = {},
         // FFI-free stub mirroring the shared `parse_cap` (trim, parse i64, clamp ≥0)
@@ -76,6 +88,8 @@ class AdminSettingsContentTest {
                 membershipTiers = membershipTiers,
                 onBack = {},
                 onSaveTier = onSaveTier,
+                onAddTier = onAddTier,
+                onAddRefused = onAddRefused,
                 onSaveMembershipTier = onSaveMembershipTier,
                 onClearMembershipTier = onClearMembershipTier,
                 parseCap = parseCap,
@@ -95,8 +109,9 @@ class AdminSettingsContentTest {
     fun tierRowsRenderWithCapFieldsAndSaveButton() {
         render(tiers = listOf(tier("free"), tier("personal")))
         assertEquals(2, composeTestRule.onAllNodesWithTag("admin-settings-tier-item").fetchSemanticsNodes().size)
-        assertEquals(2, composeTestRule.onAllNodesWithTag("admin-settings-tier-cap-inbox").fetchSemanticsNodes().size)
-        assertEquals(2, composeTestRule.onAllNodesWithTag("admin-settings-tier-cap-feeds").fetchSemanticsNodes().size)
+        // Each cap id also appears once in the add-a-tier form (3 = 2 rows + the form).
+        assertEquals(3, composeTestRule.onAllNodesWithTag("admin-settings-tier-cap-inbox").fetchSemanticsNodes().size)
+        assertEquals(3, composeTestRule.onAllNodesWithTag("admin-settings-tier-cap-feeds").fetchSemanticsNodes().size)
         assertEquals(2, composeTestRule.onAllNodesWithTag("admin-settings-tier-save-button").fetchSemanticsNodes().size)
     }
 
@@ -107,7 +122,7 @@ class AdminSettingsContentTest {
             tiers = listOf(tier("free", inbox = 100, storage = 200, devices = 3, blob = 50, feeds = 10)),
             onSaveTier = { n, i, s, d, b, f -> saved = listOf(n, i, s, d, b, f) },
         )
-        composeTestRule.onNodeWithTag("admin-settings-tier-cap-inbox").performScrollTo()
+        rowNode("admin-settings-tier-cap-inbox").performScrollTo()
             .performTextReplacement("999")
         composeTestRule.onNodeWithTag("admin-settings-tier-save-button").performScrollTo().performClick()
         // Edited inbox; the untouched caps carry their persisted values.
@@ -122,11 +137,51 @@ class AdminSettingsContentTest {
             onSaveTier = { n, i, s, d, b, f -> saved = listOf(n, i, s, d, b, f) },
         )
         // Clearing a cap must not silently zero it — parseCap falls back to 100.
-        composeTestRule.onNodeWithTag("admin-settings-tier-cap-inbox").performScrollTo()
+        rowNode("admin-settings-tier-cap-inbox").performScrollTo()
             .performTextClearance()
         composeTestRule.onNodeWithTag("admin-settings-tier-save-button").performScrollTo().performClick()
         assertEquals(100L, (saved as List<*>)[1])
     }
+    private fun fillAddForm(name: String, cap: String = "1") {
+        addNode("admin-settings-tier-add-name-input").performScrollTo().performTextReplacement(name)
+        for (id in listOf("inbox", "storage", "devices", "blob-size", "feeds")) {
+            addNode("admin-settings-tier-cap-$id").performScrollTo().performTextReplacement(cap)
+        }
+    }
+
+    @Test
+    fun addTierFormRendersEvenWithNoTiers() {
+        render(tiers = emptyList())
+        composeTestRule.onNodeWithTag("admin-settings-tier-add-section").assertExists()
+        composeTestRule.onNodeWithTag("admin-settings-tier-add-name-input").assertExists()
+        composeTestRule.onNodeWithTag("admin-settings-tier-add-button").assertExists()
+    }
+
+    @Test
+    fun addTierFiresWithTrimmedNameAndParsedCaps() {
+        var added: List<Any>? = null
+        render(onAddTier = { n, i, s, d, b, f -> added = listOf(n, i, s, d, b, f) })
+        fillAddForm("  gold ", cap = "7")
+        addNode("admin-settings-tier-add-button").performScrollTo().performClick()
+        assertEquals(listOf<Any>("gold", 7L, 7L, 7L, 7L, 7L), added)
+    }
+
+    @Test
+    fun addTierRefusesEmptyNameAndBlankCapLocally() {
+        var added = false
+        val refusals = mutableListOf<String>()
+        render(onAddTier = { _, _, _, _, _, _ -> added = true }, onAddRefused = { refusals += it })
+        fillAddForm("")
+        addNode("admin-settings-tier-add-button").performScrollTo().performClick()
+        fillAddForm("gold")
+        addNode("admin-settings-tier-cap-feeds").performScrollTo().performTextClearance()
+        addNode("admin-settings-tier-add-button").performScrollTo().performClick()
+        assertFalse("a refused form must not reach the wire", added)
+        assertEquals(2, refusals.size)
+        assertEquals(true, refusals[0].contains("name"))
+        assertEquals(true, refusals[1].contains("whole number"))
+    }
+
     // The raw parse-and-clamp semantics now live in shared Rust
     // (`fauna_core::format::parse_cap`, Rust-tested) and are consumed via the
     // injected `parseCap`; `saveTierFallsBackToPersistedOnEmptyCap` above covers

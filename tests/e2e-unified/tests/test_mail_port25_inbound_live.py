@@ -1,5 +1,5 @@
 """tier_4 (live-remote, OPT-IN): external inbound over **port 25** against a live
-nest (e.g. example.com). This is the regression guard for the deployment bugs that
+nest (e.g. the dev nest). This is the regression guard for the deployment bugs that
 silently broke real external mail (an external sender → bounce), which neither
 the UI-only receive test nor the IMAP-APPEND tests catch because they bypass the
 real MX + port-25 perimeter:

@@ -16,8 +16,8 @@ pytestmark = pytest.mark.tier_1
 
 def test_lock_path_keys_on_normalized_url(monkeypatch, tmp_path):
     monkeypatch.setenv("FAUNA_E2E_LIVE_BOX_LOCK_DIR", str(tmp_path))
-    a = live_box_lock._lock_path("https://example.com")
-    a_slash = live_box_lock._lock_path("https://example.com/")
+    a = live_box_lock._lock_path("https://example.net")
+    a_slash = live_box_lock._lock_path("https://example.net/")
     b = live_box_lock._lock_path("https://other.example")
     assert a == a_slash, "a trailing slash must not change the lock key"
     assert a != b, "different live boxes must map to different lock files"
@@ -29,7 +29,7 @@ def test_acquire_serializes_the_same_box(monkeypatch, tmp_path):
     the same file must fail non-blocking — i.e. a sibling session would wait."""
     fcntl = pytest.importorskip("fcntl")  # POSIX-only; the lock is a no-op elsewhere
     monkeypatch.setenv("FAUNA_E2E_LIVE_BOX_LOCK_DIR", str(tmp_path))
-    url = "https://example.com"
+    url = "https://example.net"
 
     fd = live_box_lock.acquire(url)
     assert fd is not None
@@ -57,7 +57,7 @@ def test_different_boxes_do_not_contend(monkeypatch, tmp_path):
     if it blocked, `acquire` would hang and this test would time out."""
     pytest.importorskip("fcntl")
     monkeypatch.setenv("FAUNA_E2E_LIVE_BOX_LOCK_DIR", str(tmp_path))
-    fd_a = live_box_lock.acquire("https://example.com")
+    fd_a = live_box_lock.acquire("https://example.net")
     fd_b = live_box_lock.acquire("https://other.example")
     try:
         assert fd_a is not None and fd_b is not None

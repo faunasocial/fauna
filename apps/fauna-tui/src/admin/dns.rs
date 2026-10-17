@@ -39,7 +39,7 @@
 
 use fauna_client_dns::{CertStatusRow, DelegationView, DomainView, PendingCertIssue};
 use fauna_client_mail_settings::local_domains::{
-    LocalDomainView, LocalDomainsSnapshot, RoleAddressKind,
+    LocalDomainView, LocalDomainsSnapshot, RoleAddressKind, dmarc_policy_options,
 };
 use fauna_i18n::strings::admin as t_admin;
 use fauna_i18n::strings::admin::dns as t;
@@ -184,14 +184,19 @@ pub(super) fn dns_elements(state: &AdminState) -> Vec<Element> {
     let all_managed = dns
         .map(|s| s.all_domains_managed(Some(&active_names)))
         .unwrap_or(false);
-    els.push(Element::checkbox_gesture(
-        ids::ADMIN_DNS_MANAGE_ALL_TOGGLE,
-        t::MANAGE_ALL,
-        all_managed,
-        Gesture::Admin(Action::ToggleDnsManageAll {
-            managed: !all_managed,
-        }),
-    ));
+    els.push(
+        Element::checkbox_gesture(
+            ids::ADMIN_DNS_MANAGE_ALL_TOGGLE,
+            t::MANAGE_ALL,
+            all_managed,
+            Gesture::Admin(Action::ToggleDnsManageAll {
+                managed: !all_managed,
+            }),
+        )
+        // The toggle convention's automation mirror (the per-domain auto-renew
+        // checkbox's): the label is constant, so the checked state rides an attr.
+        .attr("state", if all_managed { "on" } else { "off" }),
+    );
 
     // ── Held DNS-provider credentials (client-held; multi) ──────────────────
     els.push(Element::label(
@@ -570,6 +575,27 @@ fn domain_section(
             t::CATCH_ALL_CLEARED_BY_SUCCESSION,
         )));
     }
+
+    // The domain's published DMARC policy (`dmarc-reporting.md` § Multi-domain
+    // deployments) — a raw-value picker over the shared catalog: the RFC 7489
+    // tag is the select's text (the driver contract), the localized option
+    // text only paints. `reject`, the default, clears the override.
+    let dmarc_options = dmarc_policy_options();
+    let dmarc_text =
+        |label: &fauna_core::localized::LocalizedText| label.resolve(fauna_i18n::strings::lookup);
+    els.push(
+        scope(
+            Element::select(
+                ids::ADMIN_DNS_DOMAIN_DMARC_POLICY_SELECT,
+                row.dmarc_policy.as_tag(),
+                SelectTarget::DnsDmarcPolicy { row: i },
+                dmarc_options.iter().map(|o| o.value.clone()).collect(),
+            )
+            .display_value(dmarc_text(&row.dmarc_policy.label()))
+            .option_labels(dmarc_options.iter().map(|o| dmarc_text(&o.label)).collect()),
+        )
+        .labelled(t::DMARC_POLICY_LABEL),
+    );
 
     // The four RFC 2142 role-address overrides ("Admin (default)" clears). The
     // nest atomic-merges, so each role is independent.
@@ -982,7 +1008,9 @@ pub(crate) mod tests {
     use fauna_client_dns::{
         CertHealthState, CredentialSummary, DnsRecordRow, DnsStatus, RecordVerdict, VerifyStatus,
     };
-    use fauna_client_mail_settings::local_domains::{LocalDomainStatus, RoleAddressOverrideView};
+    use fauna_client_mail_settings::local_domains::{
+        DomainDmarcPolicy, LocalDomainStatus, RoleAddressOverrideView,
+    };
     use fauna_client_mail_settings::primary_domain_rename::PrimaryDomainRenameView;
 
     fn record(name: &str, kind: &str, value: &str) -> DnsRecordRow {
@@ -1014,6 +1042,7 @@ pub(crate) mod tests {
             pending_cert: None,
             delegations: Vec::new(),
             cert_statuses: Vec::new(),
+            cert_issuance_errors: Vec::new(),
         }
     }
 
@@ -1700,6 +1729,36 @@ pub(crate) mod tests {
             texts(&els, "admin-dns-domain-role-address-noc-select"),
             vec![t::ROLE_ADDRESS_ADMIN_DEFAULT]
         );
+    }
+
+    /// Each domain row carries its DMARC policy picker, whose text is the RFC
+    /// 7489 tag of the domain's own policy (the raw-value driver contract) and
+    /// whose gesture names the row it was painted on.
+    #[test]
+    fn dmarc_policy_picker_reads_each_rows_own_policy_tag() {
+        let strict = domain_row("a.test", true);
+        let mut soft = domain_row("b.test", false);
+        soft.dmarc_policy = DomainDmarcPolicy::Monitor;
+        let app = app_with(None, Some(domains_snapshot(vec![strict, soft], Vec::new())));
+        let els = dns_elements(&app.admin);
+        assert_eq!(
+            texts(&els, "admin-dns-domain-dmarc-policy-select"),
+            vec!["reject", "none"]
+        );
+        let picker = els
+            .iter()
+            .filter(|e| e.id == "admin-dns-domain-dmarc-policy-select")
+            .nth(1)
+            .expect("the second row's picker");
+        match &picker.role {
+            crate::element::Role::Select {
+                target, options, ..
+            } => {
+                assert!(matches!(target, SelectTarget::DnsDmarcPolicy { row: 1 }));
+                assert_eq!(options, &["reject", "quarantine", "none"]);
+            }
+            other => panic!("expected a select, got {other:?}"),
+        }
     }
 
     /// The succession-cleared explainer renders ONLY when the nest says a

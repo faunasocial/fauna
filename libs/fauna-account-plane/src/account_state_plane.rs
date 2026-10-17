@@ -104,7 +104,7 @@ pub struct ItemId {
 }
 
 /// What the nest answered a [`AccountStatePlane::retire`] — a verdict, never
-/// an error (charter § The generation machinery → *Fleet-scope reclamation*,
+/// an error (`fleet-scope-reclamation.md` § *Fleet-scope reclamation*,
 /// clause (1)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetireOutcome {
@@ -1136,6 +1136,15 @@ impl<'a, B: StoreBackend, R: RpcRequester> AccountStatePlane<'a, B, R> {
         !self.predecessors.is_empty()
     }
 
+    /// The predecessor schedules this plane was handed
+    /// ([`Self::with_predecessor_schedules`]) — what the account driver
+    /// passes on to the bound nest's `ext:<kind>` planes, which are derived
+    /// from its fleet plane ([`Self::ext_plane`]) yet carry as delegable-rung
+    /// planes do.
+    pub fn predecessor_schedules(&self) -> &'a [DelegableSchedule] {
+        self.predecessors
+    }
+
     /// A row the walk in flight carried under a predecessor's schedule —
     /// collected when that walk is a full-state reconcile.
     fn note_inherited(&self, row: Option<InheritedRow>) {
@@ -1289,8 +1298,8 @@ impl<'a, B: StoreBackend, R: RpcRequester> AccountStatePlane<'a, B, R> {
     /// The feed's retention-gate watermark as this plane's last walk page
     /// read it ([`Self::retirable_through`]) — what the reclamation pass
     /// compares a relay row's `feed_seq` against to withhold a retire the
-    /// gate would refuse (`account-data-taxonomy.md` § The generation
-    /// machinery → *Fleet-scope reclamation*, clause (1) → *the gate's
+    /// gate would refuse (`fleet-scope-reclamation.md`
+    /// § *Fleet-scope reclamation*, clause (1) → *the gate's
     /// watermark*). `None` withholds nothing.
     pub fn retirable_through_seq(&self) -> Option<u64> {
         *self
@@ -1362,8 +1371,8 @@ impl<'a, B: StoreBackend, R: RpcRequester> AccountStatePlane<'a, B, R> {
     /// Hand the reclamation pass its attested predecessors' generation-0 keys
     /// for every fleet-only machinery kind
     /// (`AttestedPredecessors::retired_machinery_keys`;
-    /// `account-data-taxonomy.md` § The generation machinery → *Fleet-scope
-    /// reclamation*, clause (3)(i); `owner-key-material.md` § Path
+    /// `fleet-scope-reclamation.md`
+    /// § *Fleet-scope reclamation*, clause (3)(i); `owner-key-material.md` § Path
     /// A-sibling-2 → *Rotation*, *The retired machinery keys open only to
     /// retire*). Only [`Self::open_predecessor_machinery_row`] tries them:
     /// the walk keeps [`Self::with_predecessor_mint_keys`]' one kind, and
@@ -1467,7 +1476,11 @@ impl<'a, B: StoreBackend, R: RpcRequester> AccountStatePlane<'a, B, R> {
     /// admitted kind from its bound fleet plane at every pass. An `ext.*`
     /// kind is `Gen0` on the delegable rung, so none of this plane's
     /// generation custody, predecessor keys or first-listing gate carries
-    /// over: the new plane is plane-native in all of them.
+    /// over: the new plane is plane-native in all of them. The succession
+    /// carry's schedules are the delegable plane's, not this one's, so the
+    /// driver hands them on explicitly
+    /// ([`Self::with_predecessor_schedules`], on the bound nest's planes only;
+    /// `succession-aftermath.md` § Re-key scope → *Which walks carry*).
     pub fn ext_plane<'p>(
         &self,
         kind: &fauna_protocol::ext_kind::ExtKind,
@@ -1710,8 +1723,8 @@ impl<'a, B: StoreBackend, R: RpcRequester> AccountStatePlane<'a, B, R> {
     }
 
     /// [`Self::put`] for a writer's **last word** — the sign-out severance's
-    /// own `Removed` row (`account-data-taxonomy.md` § The generation
-    /// machinery → *Fleet-scope reclamation*, clause (4)), written while the
+    /// own `Removed` row (`fleet-scope-reclamation.md`
+    /// § *Fleet-scope reclamation*, clause (4)), written while the
     /// runtime still holds the writer key the sign-out is about to erase.
     ///
     /// The ordered own publish drains every unsent own row first, as
@@ -2015,8 +2028,8 @@ impl<'a, B: StoreBackend, R: RpcRequester> AccountStatePlane<'a, B, R> {
             Err(e) => {
                 let text = e.to_string();
                 if text.contains("scope_full") {
-                    // The count cap (charter § The generation machinery →
-                    // *Fleet-scope reclamation*, clause (5)): a full scope is
+                    // The count cap (`fleet-scope-reclamation.md`
+                    // § *Fleet-scope reclamation*, clause (5)): a full scope is
                     // recoverable with no user act — a pass's retires need no
                     // headroom — so the refusal names them rather than
                     // reading as a dead end, and is typed so the walk's carry
@@ -2265,8 +2278,8 @@ impl<'a, B: StoreBackend, R: RpcRequester> AccountStatePlane<'a, B, R> {
         Ok(())
     }
 
-    // ── Reclamation (charter § The generation machinery → *Fleet-scope
-    // reclamation*) ────────────────────────────────────────────────────────
+    // ── Reclamation (`fleet-scope-reclamation.md`
+    // § *Fleet-scope reclamation*) ────────────────────────────────────────────────────────
 
     /// Ask the nest to retire one live row of this scope by its cleartext
     /// coordinates — `fauna.account.state.retire`, clause (1): the row is
@@ -2813,6 +2826,16 @@ impl<'a, B: StoreBackend, R: RpcRequester> AccountStatePlane<'a, B, R> {
             .await
             .context("writing the first-need mint's spill top-ups")?;
         }
+        // The wrap's replicated copy, just ahead of the receipt — so every
+        // replica, a custodian's included, that holds the ack holds what a
+        // seed opens (`account-replica-posture.md` § *Escrow custody*).
+        let wrap_item = ItemId {
+            kind: minted.wrap_entry.kind,
+            key: minted.wrap_entry.key,
+        };
+        Box::pin(self.put_local(&wrap_item, minted.wrap_entry.value, None))
+            .await
+            .context("writing the first-need mint's escrow-wrap row")?;
         let receipt_item = ItemId {
             kind: minted.receipt_entry.kind,
             key: minted.receipt_entry.key,
@@ -2863,7 +2886,10 @@ impl<'a, B: StoreBackend, R: RpcRequester> AccountStatePlane<'a, B, R> {
             writer_seq,
             scope: &self.scope,
         };
-        match sealing_epoch(&plaintext.kind) {
+        // The overlay's answer, so an admitted `ext.*` kind seals as the `Gen0`
+        // delegable kind it is — the carry and the hand-over re-author such a
+        // row as this device's own (`succession-aftermath.md` § Re-key scope).
+        match self.kinds().sealing_epoch(&plaintext.kind) {
             Some(SealingEpoch::GenerationTip) => {
                 let tip = self.resolved_tip_or_refuse(&plaintext.kind).await?;
                 let gen_key =
@@ -3406,9 +3432,8 @@ impl<'a, B: StoreBackend, R: RpcRequester> AccountStatePlane<'a, B, R> {
                             scope: Some(self.scope.clone()),
                             frontier: Some(cursor.frontier().clone()),
                             held_through_seq: cursor.held_through_seq(),
-                            // The retention gate's mark (charter § The
-                            // generation machinery → *Fleet-scope
-                            // reclamation*, clause (1)): naming ourselves
+                            // The retention gate's mark (`fleet-scope-reclamation.md`
+                            // § *Fleet-scope reclamation*, clause (1)): naming ourselves
                             // beside the watermark we bank is what lets the
                             // nest hold every row we have not walked past
                             // yet. Nest leg only — a peer keeps no marks.
@@ -4401,41 +4426,44 @@ impl<'a, B: StoreBackend, R: RpcRequester> AccountStatePlane<'a, B, R> {
         Ok(())
     }
 
-    /// The walk-side half of the crypto-shred contract (W5.4a): a mint row
-    /// whose applied/merged state is an **authored** `Shredded` drops the
-    /// retained bundle's key the moment it lands — not only when a later read
-    /// happens to name that generation (`generation_tip::RetainedKeyCustody`,
-    /// duty three). Authored is judged against the device set this replica
-    /// has merged at hook time ([`GenerationMintRecord::shred_is_authored`],
-    /// read only once a row decodes `Shredded`, so the walk's hot path reads
-    /// nothing extra); an unauthored shred drops nothing (`account-data-taxonomy.md`
-    /// § *Fleet-scope reclamation* → *the authored shred*). Per-writer
-    /// frontiers interleave, so the shredder's `Enrolled` row may merge after
-    /// its shred and the hook see it too early: the reclamation pass drops
-    /// every authored shred's key again, idempotently, so the drop is
-    /// eventual. Row content never aborts anything here: an undecodable mint
-    /// row is the resolver's business, not this hook's; `Err` is a store read.
+    /// The walk-side half of the crypto-shred contract (W5.4a): an
+    /// **authored** shred cell drops the retained bundle's key the moment it
+    /// lands — not only when a later read happens to name that generation
+    /// (`generation_tip::RetainedKeyCustody`, duty three). The hook fires on
+    /// `fauna.state.generation-shred` rows, the authored act, and never on a
+    /// mint row's `Shredded` marker, which any `BackupKey` holder writes and
+    /// whose bytes win nothing a reader honors (`fleet-scope-reclamation.md`
+    /// § *Fleet-scope reclamation* → *the authored shred*, *the shred
+    /// cell*). Authored is judged against the device set this replica has
+    /// merged at hook time ([`ShredAttestation::is_authored_at`], read only
+    /// once a row is of the shred kind, so the walk's hot path reads nothing
+    /// extra). Per-writer frontiers interleave, so the shredder's `Enrolled`
+    /// row may merge after its cell and the hook see it too early: the
+    /// reclamation pass drops every authored shred's key again,
+    /// idempotently, so the drop is eventual. Row content never aborts
+    /// anything here: a cell that does not parse or decode drops nothing;
+    /// `Err` is a store read.
     ///
-    /// [`GenerationMintRecord::shred_is_authored`]: fauna_core::generation::GenerationMintRecord::shred_is_authored
+    /// [`ShredAttestation::is_authored_at`]: fauna_core::generation::ShredAttestation::is_authored_at
     async fn drop_retained_if_shredded(&self, state: &EntryPlaintext) -> Result<()> {
         let Some(custody) = self.custody else {
             return Ok(());
         };
-        if state.kind != fauna_protocol::merge_policy::KIND_GENERATION_MINT || state.tombstone {
+        if state.kind != fauna_protocol::merge_policy::KIND_GENERATION_SHRED || state.tombstone {
             return Ok(());
         }
-        let Ok(record @ fauna_core::generation::GenerationMintRecord::Shredded { .. }) =
-            fauna_core::encoding::canonical_decode::<fauna_core::generation::GenerationMintRecord>(
-                &state.value,
-            )
+        let Some((generation, shredder)) = fauna_core::generation::parse_shred_cell_key(&state.key)
         else {
             return Ok(());
         };
+        let Ok(cell) = fauna_core::encoding::canonical_decode::<
+            fauna_core::generation::ShredAttestation,
+        >(&state.value) else {
+            return Ok(());
+        };
         let view = crate::fleet_removal::fleet_view(self.store, self.trust).await?;
-        if let Ok(id) = record.shred_is_authored(&view)
-            && fauna_core::hex32::encode(&id) == state.key
-        {
-            custody.drop_generation_key(&id);
+        if cell.is_authored_at(&generation, &shredder, &view) {
+            custody.drop_generation_key(&generation);
         }
         Ok(())
     }
@@ -4553,7 +4581,10 @@ impl<'a, B: StoreBackend, R: RpcRequester> AccountStatePlane<'a, B, R> {
     /// The trial set is the registry's delegable rung, never a hand-list, and
     /// the schedule type holds no fleet branch: a fleet-only kind has no key
     /// here to be tried under. The one fleet-only kind that crosses has its
-    /// own keys and its own gate — [`Self::trial_open_predecessor_mint`].
+    /// own keys and its own gate — [`Self::trial_open_predecessor_mint`]. An
+    /// `ext:<kind>` plane's trial set is its one kind, while the overlay
+    /// admits it — the rows the consent grant opens cross by this same carry
+    /// (the section's `ext:<kind>` sentence).
     fn trial_open_inherited(
         &self,
         coords: &EntryCoordinates<'_>,
@@ -4562,6 +4593,14 @@ impl<'a, B: StoreBackend, R: RpcRequester> AccountStatePlane<'a, B, R> {
     ) -> Option<EntryPlaintext> {
         if self.predecessors.is_empty() || peek_generation_id(envelope).is_some() {
             return None;
+        }
+        if let Some(kind) = self.ext_kind() {
+            // An unadmitted kind is "not on the plane here" for a predecessor's
+            // row as for an own one ([`Self::trial_open`]'s `ext` arm).
+            self.kinds().audience_rung(&kind)?;
+            return self.predecessors.iter().find_map(|schedule| {
+                open_entry(&schedule.for_kind(&kind), coords, item_key, envelope).ok()
+            });
         }
         // Gen-0 delegable kinds only: v1 IS the gen-0 form (see
         // [`Self::trial_open`]'s v1 arm), so a `GenerationTip` kind is never
@@ -4588,8 +4627,8 @@ impl<'a, B: StoreBackend, R: RpcRequester> AccountStatePlane<'a, B, R> {
     ///   of a mint row applies), and a `Minted` record's authorship verifies
     ///   ([`fauna_core::generation::verify_mint_authorship`]). A `Shredded`
     ///   record carries no minter signature; it crosses on the binding and
-    ///   on (b), and the key then drops only if the shred is authored by a
-    ///   verified member of this replica's view
+    ///   on (b), and the key then drops only on an authored shred cell — a
+    ///   verified member's of this replica's view
     ///   ([`Self::drop_retained_if_shredded`]).
     /// - **(b) the key is in hand.** The retained bundle holds, at that id, a
     ///   key matching the core's commitment. A device carries no record of a
@@ -5411,19 +5450,23 @@ mod door_tests {
             "journal order: {sent:?}"
         );
     }
-    /// **The walk's hook drops a key on an authored shred only**
-    /// (`account-data-taxonomy.md` § *Fleet-scope reclamation* → *the
-    /// authored shred*): a sig-less `Shredded` landing on the
-    /// walk leaves the retained key, and so does one signed by a device this
-    /// replica has not merged as a verified member — which is also the
-    /// too-early case, the shredder's `Enrolled` row merging after its shred.
-    /// Once that row has merged the same shred drops the key (the reclamation
-    /// pass is the eventual drop when no later merge re-runs the hook).
-    /// Red-verified: with the hook back on `Shredded { .. }` alone, the first
-    /// assertion fails.
+    /// **The walk's hook drops a key on an authored shred cell only**
+    /// (`fleet-scope-reclamation.md` § *Fleet-scope reclamation* → *the
+    /// authored shred*, *the shred cell*): a mint row's `Shredded`
+    /// marker landing on the walk — a byte-greater forged one included —
+    /// leaves the retained key, and so does a cell that does not verify at
+    /// its key, and one by a device this replica has not merged as a
+    /// verified member — which is also the too-early case, the shredder's
+    /// `Enrolled` row merging after its cell. Once that row has merged the
+    /// same cell drops the key (the reclamation pass is the eventual drop
+    /// when no later merge re-runs the hook). Red-verified: with the hook
+    /// back on the mint kind's `Shredded { .. }`, the first assertion fails;
+    /// with `is_authored_at` reduced to `verifies_at`, the third does.
     #[tokio::test]
     async fn the_walk_hook_drops_a_retained_key_on_an_authored_shred_only() {
-        use crate::generation_fixture_test_support::{Bundle, THEM, device_id_of, enrollment_row};
+        use crate::generation_fixture_test_support::{
+            Bundle, THEM, enrollment_row, machinery_row, shred_cell_row, shred_marker_row,
+        };
         use crate::generation_tip::RetainedKeyCustody as _;
         let f = fixture().await;
         f.put(enrollment_row(US)).await;
@@ -5431,47 +5474,62 @@ mod door_tests {
         let bundle = Bundle::default();
         bundle.record_generation_key(&g, &key);
         let p = f.plane().with_generation_custody(&bundle);
-        let landed = |record: &GenerationMintRecord| EntryPlaintext {
-            kind: KIND_GENERATION_MINT.into(),
-            key: fauna_core::hex32::encode(&g),
+        let landed = |row: StateEntry| EntryPlaintext {
+            kind: row.kind,
+            key: row.key,
             merge_meta: None,
-            value: fauna_core::encoding::canonical_encode(record)
-                .unwrap()
-                .into(),
+            value: row.value.into(),
             tombstone: false,
         };
 
-        let unsigned = GenerationMintRecord::Shredded {
-            core: core.clone(),
-            shredded_at_ms: 9_000,
-            shredded_by: device_id_of(US),
-            shredder_sig: vec![],
-        };
-        p.drop_retained_if_shredded(&landed(&unsigned))
+        // The marker, honest attribution or forged — the hook ignores both.
+        let forged_marker = machinery_row(
+            KIND_GENERATION_MINT,
+            fauna_core::hex32::encode(&g),
+            &GenerationMintRecord::Shredded {
+                core: core.clone(),
+                shredded_at_ms: 9_000,
+                shredded_by: [0xff; 32],
+            },
+        );
+        for marker in [shred_marker_row(US, core, 9_000), forged_marker] {
+            p.drop_retained_if_shredded(&landed(marker)).await.unwrap();
+            assert!(
+                bundle.retained_generation_key(&g).is_some(),
+                "a marker drops no key"
+            );
+        }
+
+        // A forged attestation at US's own cell: junk for a signature.
+        let mut forged_cell = shred_cell_row(US, &g, 9_000);
+        let mut record: fauna_core::generation::ShredAttestation =
+            fauna_core::encoding::canonical_decode(&forged_cell.value).unwrap();
+        record.shredder_sig = vec![0xff; 64];
+        forged_cell.value = fauna_core::encoding::canonical_encode(&record).unwrap();
+        p.drop_retained_if_shredded(&landed(forged_cell))
             .await
             .unwrap();
         assert!(
             bundle.retained_generation_key(&g).is_some(),
-            "a sig-less shred drops no key"
+            "a cell that does not verify drops no key"
         );
 
-        // THEM signs; THEM's enrollment has not merged here yet.
-        let by_them = fauna_core::generation::sign_shred(&device_key(THEM), core, 9_000).unwrap();
-        p.drop_retained_if_shredded(&landed(&by_them))
+        // THEM attests; THEM's enrollment has not merged here yet.
+        p.drop_retained_if_shredded(&landed(shred_cell_row(THEM, &g, 9_000)))
             .await
             .unwrap();
         assert!(
             bundle.retained_generation_key(&g).is_some(),
-            "a shred by no verified member (yet) drops no key"
+            "a cell by no verified member (yet) drops no key"
         );
 
         f.put(enrollment_row(THEM)).await;
-        p.drop_retained_if_shredded(&landed(&by_them))
+        p.drop_retained_if_shredded(&landed(shred_cell_row(THEM, &g, 9_000)))
             .await
             .unwrap();
         assert!(
             bundle.retained_generation_key(&g).is_none(),
-            "an authored shred drops the retained key"
+            "an authored shred cell drops the retained key"
         );
     }
 }

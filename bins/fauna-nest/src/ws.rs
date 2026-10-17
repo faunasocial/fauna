@@ -132,9 +132,11 @@ pub struct RpcConnection {
     /// (anonymous) connection.
     pub anonymous: bool,
     /// The **principal binding** of a third-party principal's session
-    /// (`GET /api/v1/principal/ws`): the account it acts for, the principal id
-    /// and the scopes of the token it was opened with. `None` on every other
-    /// connection.
+    /// (`GET /api/v1/principal/ws`): the account it acts for, the principal id,
+    /// the scopes of the token it was opened with and that token's grant
+    /// family — what door (c)'s per-family sweep
+    /// ([`WsState::disconnect_grant_family`]) selects on. `None` on every
+    /// other connection.
     ///
     /// A bound connection's [`Self::actor_id`] is the zero placeholder and it
     /// is never in `WsState.subs`: it lives in the principal registry instead
@@ -194,7 +196,7 @@ pub struct RpcConnection {
     /// test-subscribed connections.
     pub bound_device_key: Option<[u8; 32]>,
     /// The push `device_id` this connection **announced** it serves, over
-    /// `fauna.push.presence` — `None` until it does (no app announces presence yet). The input to the per-device push decision
+    /// `fauna.push.presence` — `None` until it does. The input to the per-device push decision
     /// ([`WsState::device_presence`]; `apps/common.md` § Dispatch Logic).
     ///
     /// Deliberately a separate fact from [`Self::bound_device_key`]: that one
@@ -203,7 +205,10 @@ pub struct RpcConnection {
     /// which is enough — all a connection can do with it is suppress or receive
     /// its own actor's push (`apps/common.md` § Registration → *Every
     /// connection announces*). A later announce replaces an earlier one.
-    announced_device: std::sync::Mutex<Option<String>>,
+    /// Carries whether the announce was a wake stand-in's (`stand_in: true`),
+    /// which delivers the device's `ws-device` row and never suppresses its
+    /// relay rows (ruled 2026-10-03).
+    announced_device: std::sync::Mutex<Option<crate::push::Announce>>,
     /// The folders this connection announced it serves relay reads for, over
     /// `fauna.sync.serve.announce` (`file-sync.md` § Relay serving, step (1)) —
     /// `None` until it does. Already admitted: the handler keeps only folder
@@ -267,6 +272,16 @@ pub struct RpcConnection {
     /// (`anonymous_rate_limit::check_conn`, whose authenticated arm keys on
     /// [`Self::actor_id`] instead precisely because this is absent there).
     pub peer_addr: Option<std::net::SocketAddr>,
+    /// Whether the upgrade's peer was a loopback address — the nest's own box
+    /// (the direct TCP peer, or the PROXY-v2 source behind the SNI router,
+    /// which an external client never makes loopback). Recorded on the
+    /// authenticated connection too, where [`Self::peer_addr`] deliberately
+    /// stays `None`: this field feeds only
+    /// [`crate::dispatch_core::CallerRef::loopback_peer`], which the
+    /// developer carve-out asks (`third-party.md` § Developer loop), and never
+    /// the dispatcher's `requires_loopback_peer` gate, which keeps failing
+    /// closed for every authenticated caller.
+    pub loopback_peer: bool,
     /// Flips `true` when this connection's actor loses its authority — account
     /// lockout, suspension, or deletion. Each live `run_connection` watches it;
     /// on the flip it stops reading new requests and closes the socket with WS
@@ -373,10 +388,12 @@ impl FatalCloseReason {
 /// ([`RpcConnection::bound_device_key`]), from the token row's
 /// `minted_by_device` tag.
 ///
-/// The tag is overloaded by one mint: `fauna.auth.custody_handshake` files
+/// The tag is overloaded by two mints: `fauna.auth.custody_handshake` files
 /// the **custodian's own actor id** there so the sessions list can label the
-/// session, and that session's actor *is* the custodian — so a tag equal to
-/// the connection's own actor is the custody signature and never a device key
+/// session, and that session's actor *is* the custodian (its custodied-fleet
+/// twin, `fauna.auth.custodied_fleet_handshake`, files the owner device's key,
+/// which is likewise that session's actor) — so a tag equal to
+/// the connection's own actor is such a signature and never a device key
 /// (`devices.md` § Listing Devices → *The binding*). Every other `Some` is a
 /// `device_handshake` mint's renewal key. A pure function so the exclusion
 /// has a witness without an HTTP upgrade (`conformance_device_online.rs`).
@@ -424,6 +441,7 @@ impl RpcConnection {
         bound_device_key: Option<[u8; 32]>,
         peer_addr: Option<std::net::SocketAddr>,
         durable: Option<std::sync::Arc<crate::db::CacheDb>>,
+        loopback_peer: bool,
     ) -> Self {
         Self {
             conn_id,
@@ -447,12 +465,19 @@ impl RpcConnection {
             spare_until_tx: tokio::sync::watch::channel(None).0,
             fatal_tx: tokio::sync::watch::channel(None).0,
             durable,
+            loopback_peer,
         }
     }
 
     /// The push `device_id` this connection announced, if any
     /// ([`Self::announced_device`]).
+    /// Either kind — an app's or a wake stand-in's — names a delivery point.
     pub fn announced_device(&self) -> Option<String> {
+        self.announce().map(|a| a.device_id)
+    }
+
+    /// This connection's announce, with its kind ([`Self::announced_device`]).
+    pub fn announce(&self) -> Option<crate::push::Announce> {
         self.announced_device.lock().unwrap().clone()
     }
 
@@ -761,6 +786,10 @@ impl DispatchSink for RpcConnection {
 
     fn caller_peer_ip(&self) -> Option<std::net::IpAddr> {
         self.peer_addr.map(|a| a.ip())
+    }
+
+    fn caller_loopback_peer(&self) -> bool {
+        self.loopback_peer
     }
 
     fn lookup_idempotent(&self, key: [u8; 16]) -> BoxFuture<'_, IdempotencyHit> {
@@ -1131,7 +1160,7 @@ impl WsState {
     /// the per-token teardown ([`RpcConnection::token_id`]). It stays for the
     /// dozen tests that only ever cared which actor a Push went to.
     pub fn subscribe(&self, actor_id: [u8; 32]) -> (Arc<RpcConnection>, mpsc::Receiver<Bytes>) {
-        self.subscribe_with_session(actor_id, None, None)
+        self.subscribe_with_session(actor_id, None, None, false)
     }
 
     /// Subscribe a new connection for `actor_id`, remembering **which session**
@@ -1155,6 +1184,7 @@ impl WsState {
         actor_id: [u8; 32],
         token_id: Option<String>,
         bound_device_key: Option<[u8; 32]>,
+        loopback_peer: bool,
     ) -> (Arc<RpcConnection>, mpsc::Receiver<Bytes>) {
         let (ws_tx, ws_rx) = mpsc::channel::<Bytes>(WS_OUTBOUND_BOUND);
         let conn_id = {
@@ -1176,6 +1206,9 @@ impl WsState {
         // `bridges.request_enrollment`. The pre-identity throttles no longer
         // depend on this field for authenticated callers either — they key on
         // `actor_id` (`anonymous_rate_limit::check_conn`). 2026-08-24.
+        //
+        // The one peer fact this connection does keep is `loopback_peer`, a
+        // separate field the gate never reads (`RpcConnection::loopback_peer`).
         let conn = Arc::new(RpcConnection::new(
             conn_id,
             actor_id,
@@ -1186,6 +1219,7 @@ impl WsState {
             bound_device_key,
             None,
             self.durable.clone(),
+            loopback_peer,
         ));
         self.subs
             .lock()
@@ -1215,7 +1249,16 @@ impl WsState {
         // No durable tier: the placeholder actor would alias every anonymous
         // caller into one (actor, key) namespace.
         let conn = Arc::new(RpcConnection::new(
-            conn_id, [0u8; 32], ws_tx, true, None, None, None, peer_addr, None,
+            conn_id,
+            [0u8; 32],
+            ws_tx,
+            true,
+            None,
+            None,
+            None,
+            peer_addr,
+            None,
+            peer_addr.is_some_and(|a| a.ip().is_loopback()),
         ));
         (conn, ws_rx)
     }
@@ -1252,6 +1295,7 @@ impl WsState {
             None,
             None,
             None,
+            false,
         ));
         self.principals
             .lock()
@@ -1387,6 +1431,53 @@ impl WsState {
         Self::close_principal_sessions(account, &conns, "account authority revoked")
     }
 
+    /// Close every live principal session of `account` opened under the grant
+    /// family `family_id` with **4401** — door (c)'s per-family sweep, run
+    /// after the family's ending commits: the user's per-grant revoke,
+    /// `end_oauth_session` (`/oauth/revoke`, the bridge-class `end_session`)
+    /// and the reuse family-kill (`transport-connection.md` § *The principal
+    /// session* → *Revocation — three doors*, door (c)). A sibling family of
+    /// the same principal keeps its sessions: door (a) is the whole-principal
+    /// verb. Returns how many were signalled.
+    pub fn disconnect_grant_family(&self, account: &[u8; 32], family_id: &[u8]) -> usize {
+        let conns: Vec<_> = self
+            .principals
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|((a, _), _)| a == account)
+            .flat_map(|(_, v)| v.iter())
+            .filter(|c| {
+                c.principal.as_ref().and_then(|b| b.family_id.as_deref()) == Some(family_id)
+            })
+            .map(Arc::clone)
+            .collect();
+        Self::close_principal_sessions(account, &conns, "grant family ended")
+    }
+
+    /// Close **every** live principal session on the nest with **4401** —
+    /// door (c)'s forced arms: the session-secret rotation ends every family a
+    /// session was opened under (`reason` `session secret rotated`), and the
+    /// issuer-key rotation drops every key one was admitted under (`issuer
+    /// keys dropped`). Returns how many were signalled.
+    pub fn disconnect_all_principals(&self, reason: &'static str) -> usize {
+        let by_account: HashMap<[u8; 32], Vec<Arc<RpcConnection>>> = {
+            let principals = self.principals.lock().unwrap();
+            let mut by_account: HashMap<[u8; 32], Vec<Arc<RpcConnection>>> = HashMap::new();
+            for ((account, _), conns) in principals.iter() {
+                by_account
+                    .entry(*account)
+                    .or_default()
+                    .extend(conns.iter().map(Arc::clone));
+            }
+            by_account
+        };
+        by_account
+            .iter()
+            .map(|(account, conns)| Self::close_principal_sessions(account, conns, reason))
+            .sum()
+    }
+
     fn close_principal_sessions(
         account: &[u8; 32],
         conns: &[Arc<RpcConnection>],
@@ -1426,7 +1517,15 @@ impl WsState {
     /// Tag `actor_id`'s live connection `conn_id` with the push device it serves
     /// (`fauna.push.presence`), replacing any earlier announce. `false` when no
     /// such connection is registered — the caller's socket is already gone.
-    pub fn announce_device(&self, actor_id: &[u8; 32], conn_id: u64, device_id: &str) -> bool {
+    /// `stand_in` marks a wake stand-in's announce (the sync agent's), which
+    /// [`Self::device_presence`] keeps apart from an app's.
+    pub fn announce_device(
+        &self,
+        actor_id: &[u8; 32],
+        conn_id: u64,
+        device_id: &str,
+        stand_in: bool,
+    ) -> bool {
         let subs = self.subs.lock().unwrap();
         let Some(conn) = subs
             .get(actor_id)
@@ -1434,7 +1533,10 @@ impl WsState {
         else {
             return false;
         };
-        *conn.announced_device.lock().unwrap() = Some(device_id.to_owned());
+        *conn.announced_device.lock().unwrap() = Some(crate::push::Announce {
+            device_id: device_id.to_owned(),
+            stand_in,
+        });
         true
     }
 
@@ -1523,16 +1625,26 @@ impl WsState {
 
     /// Which of `actor_id`'s devices are present right now — the per-device
     /// push oracle (`apps/common.md` § Dispatch Logic): the device ids its live
-    /// connections announced, and whether any live connection announced none
-    /// (the compatibility rider's trigger). A snapshot, taken under one lock:
+    /// app connections announced, those its wake stand-ins announced, kept
+    /// apart, and whether any live connection announced none (the
+    /// compatibility rider's trigger — an announce of either kind clears it). A snapshot, taken under one lock:
     /// the dispatch decides on the moment of the event, never on a later one.
     pub fn device_presence(&self, actor_id: &[u8; 32]) -> crate::push::DevicePresence {
         let subs = self.subs.lock().unwrap();
         let mut presence = crate::push::DevicePresence::default();
         for conn in subs.get(actor_id).into_iter().flatten() {
-            match conn.announced_device() {
-                Some(device_id) => {
-                    presence.announced.insert(device_id);
+            match conn.announce() {
+                Some(crate::push::Announce {
+                    device_id,
+                    stand_in: false,
+                }) => {
+                    presence.app.insert(device_id);
+                }
+                Some(crate::push::Announce {
+                    device_id,
+                    stand_in: true,
+                }) => {
+                    presence.stand_in.insert(device_id);
                 }
                 None => presence.any_unannounced = true,
             }
@@ -1982,6 +2094,7 @@ fn encode_push_payload(
         PushEvent::BridgeAtprotoSessionsChanged(p) => enc!(p),
         PushEvent::AtprotoConsentRequested(p) => enc!(p),
         PushEvent::BridgeAtprotoPermissionSetRequested(p) => enc!(p),
+        PushEvent::BridgeAtprotoServiceAuthRequested(p) => enc!(p),
         PushEvent::BridgeAtprotoProjectionReady(p) => enc!(p),
         PushEvent::BridgeAtprotoIssuerKeyRotated(p) => enc!(p),
         PushEvent::BridgeOutboundReady(p) => enc!(p),

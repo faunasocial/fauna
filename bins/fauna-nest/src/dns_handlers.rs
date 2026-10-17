@@ -71,23 +71,19 @@ fn record_view(r: DnsRecord) -> DnsRecordView {
 }
 
 /// Assemble the published `_dmarc.<domain>` TXT body from the deployment-wide
-/// default policy + this domain's stored per-domain override
+/// policy + this domain's stored per-domain override
 /// (`mail_domains.dmarc_overrides`), per `docs/goal/behavior/dmarc-reporting.md`
-/// § Record shape. `primary_domain` fills the default `rua=` template — every
-/// domain's aggregate reports route to the single deployment-wide processor
-/// `dmarc-report@<primary>` (`mail-multidomain.md` § Per-domain DMARC), so the
-/// onboarding provisioner (`fauna-provisioning`) publishes the identical body
-/// via the same shared assembler.
-///
-/// The deployment-wide `mail.dmarc.*` catalog write-path isn't built yet, so the
-/// base is [`DmarcPublishPolicy::default`]; when the catalog lands, swap it for
-/// the catalog-derived base (the assembler is unchanged).
-fn dmarc_body_for(domain: &MailDomain, primary_domain: &str) -> String {
-    apply_overrides_json(
-        DmarcPublishPolicy::default(),
-        domain.dmarc_overrides_json.as_deref(),
-    )
-    .to_txt_body(primary_domain)
+/// § Record shape. `base` is the deployment-wide `mail.dmarc.*` catalog overlaid
+/// onto the shipped default (`DmarcPolicyOverrides::publish_base`, read once
+/// per matrix); the domain's own partial is overlaid onto that. `primary_domain`
+/// fills the default `rua=`/`ruf=` template — every domain's reports route to
+/// the single deployment-wide processor `dmarc-report@<primary>`
+/// (`mail-multidomain.md` § Per-domain DMARC). The onboarding provisioner
+/// (`fauna-provisioning`) publishes through the same shared assembler from the
+/// shipped default, which is what the catalog holds before any admin edit.
+fn dmarc_body_for(domain: &MailDomain, primary_domain: &str, base: &DmarcPublishPolicy) -> String {
+    apply_overrides_json(base.clone(), domain.dmarc_overrides_json.as_deref())
+        .to_txt_body(primary_domain)
 }
 
 /// Build the wire-shaped record matrix for one domain, sourcing every expected
@@ -96,9 +92,10 @@ fn build_domain_view(
     domain: &MailDomain,
     primary_domain: &str,
     dkim_selectors: Vec<DkimSelectorDns>,
+    dmarc_base: &DmarcPublishPolicy,
 ) -> DomainDns {
     let primary_mx_host = format!("mail.{primary_domain}");
-    let dmarc_body = dmarc_body_for(domain, primary_domain);
+    let dmarc_body = dmarc_body_for(domain, primary_domain, dmarc_base);
     let policy = MtaStsPolicy {
         version: "STSv1".to_string(),
         mode: MtaStsMode::from_stored(&domain.mta_sts_mode),
@@ -163,6 +160,14 @@ async fn assemble_domain_views(
         .await
         .map_err(internal)?;
 
+    // The deployment-wide DMARC catalog, read once for the whole matrix.
+    let dmarc_base = state
+        .db
+        .get_dmarc_policy()
+        .await
+        .map_err(internal)?
+        .publish_base();
+
     // A `mail.<x>` MX-host A/AAAA row must stay published for one extra domain
     // during a rename, so the client keeps it resolvable:
     //   - **pre-flip** → `mail.<new-primary>` (the new primary is still a secondary
@@ -204,7 +209,7 @@ async fn assemble_domain_views(
                 public_dns_value: s.public_dns_value,
             })
             .collect();
-        let mut view = build_domain_view(&d, &primary.domain_name, dkim);
+        let mut view = build_domain_view(&d, &primary.domain_name, dkim, &dmarc_base);
         // The nest-host A/AAAA/PTR rows are deployment-host config (not per-domain
         // mail records), so they attach to the *primary* domain's matrix — and
         // only when the host address has been persisted (the
@@ -259,6 +264,11 @@ async fn assemble_domain_views(
 /// order only adds the matching SAN once that record
 /// resolves, so without this row nothing would tell the admin to
 /// make it resolve and the name would serve the untrusted floor cert forever.
+///
+/// Once any actor has opted into subdomain hosting, or any hosted plugin claims
+/// a name, the builder also emits the wildcard `*.<primary>` A/AAAA row at the
+/// nest address (`dns-management.md` § Records covered): every
+/// `<handle>.<primary>` site and plugin name resolves through it.
 async fn append_host_records(
     state: &Arc<AppState>,
     primary_domain: &str,
@@ -267,6 +277,9 @@ async fn append_host_records(
     let Some(addr) = state.db.get_host_address().await.map_err(internal)? else {
         return Ok(());
     };
+    let plugin_labels = crate::plugin_runner::claimed_plugin_labels(&state.db)
+        .await
+        .map_err(internal)?;
     let input = HostDnsInput {
         primary_domain,
         nest_ipv4: &addr.nest_ipv4,
@@ -275,6 +288,13 @@ async fn append_host_records(
         mail_ipv6: addr.mail_ipv6.as_deref(),
         relay_enabled: crate::discovery_core::relay_sidecar_connected(state),
         pds_enabled: crate::bridge_atproto_handlers::atproto_pds_bridge_approved(state).await,
+        subdomain_sites: !state
+            .db
+            .list_subdomain_enabled()
+            .await
+            .map_err(internal)?
+            .is_empty(),
+        plugin_labels: &plugin_labels,
     };
     view.records
         .extend(build_host_dns_records(&input).into_iter().map(record_view));
@@ -643,6 +663,72 @@ mod tests {
         crate::test_support::fixture_state()
     }
 
+    /// The `_dmarc` row is assembled from the deployment-wide catalog: the
+    /// forensic opt-in (`mail.dmarc.ruf_publish`) adds `ruf=`/`fo=` to every
+    /// domain's expected record, and a domain's own partial still overlays it
+    /// (`dmarc-reporting.md` § Record shape, § Multi-domain deployments).
+    #[tokio::test]
+    async fn dmarc_row_reads_the_catalog_under_the_domain_override() {
+        use crate::db::mail_policy::DmarcPolicyOverrides;
+        use fauna_mail::dmarc_publish::{DmarcMode, DmarcOverrides};
+        let state = fixture_state().await;
+        for (domain, primary) in [("fauna.example", true), ("second.example", false)] {
+            state
+                .db
+                .add_mail_domain(domain, primary, "enforce", "expand_primary", None, None)
+                .await
+                .unwrap();
+        }
+        state
+            .db
+            .set_dmarc_policy_mode("second.example", DmarcMode::None)
+            .await
+            .unwrap();
+        let dmarc_of = |views: &[DomainDns], domain: &str| {
+            views
+                .iter()
+                .find(|v| v.domain == domain)
+                .unwrap()
+                .records
+                .iter()
+                .find(|r| r.name == format!("_dmarc.{domain}"))
+                .unwrap()
+                .expected
+                // The wire row frames the TXT body in quotes.
+                .trim_matches('"')
+                .to_string()
+        };
+
+        let views = assemble_domain_views(&state, None).await.unwrap();
+        assert!(!dmarc_of(&views, "fauna.example").contains("ruf="));
+
+        state
+            .db
+            .put_dmarc_policy(DmarcPolicyOverrides {
+                record: DmarcOverrides {
+                    ruf_publish: Some(true),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let views = assemble_domain_views(&state, None).await.unwrap();
+        assert_eq!(
+            dmarc_of(&views, "fauna.example"),
+            "v=DMARC1; p=reject; sp=reject; pct=100; adkim=s; aspf=s; \
+             rua=mailto:dmarc-report@fauna.example; \
+             ruf=mailto:dmarc-report@fauna.example; fo=1; ri=86400"
+        );
+        // The softened domain keeps its own policy and gains the opt-in.
+        assert_eq!(
+            dmarc_of(&views, "second.example"),
+            "v=DMARC1; p=none; sp=none; pct=100; adkim=s; aspf=s; \
+             rua=mailto:dmarc-report@fauna.example; \
+             ruf=mailto:dmarc-report@fauna.example; fo=1; ri=86400"
+        );
+    }
+
     /// The primary domain's matrix carries one `_atproto.<localpart>.<primary>`
     /// TXT per ACTIVE ATProto identity (derived at read; `did=<did>` value),
     /// none for pending mints, and none at all on a non-public domain.
@@ -838,6 +924,132 @@ mod tests {
              the reader decodes it (`fauna_core::hex32::decode` via \
              `resolve_dns_self_root`)"
         );
+    }
+
+    /// `tests/e2e-unified/fixtures/box-dns-names.json` lists the RRsets a box
+    /// publishes, by owner name relative to its primary domain; the kept-box
+    /// live test reads it to tell a box at a zone apex from the rest of that
+    /// zone (whose NS/SOA and other names it must never touch). The file and
+    /// this matrix agree both ways: every row the matrix emits — with every
+    /// optional row switched on — matches an entry, and every entry is
+    /// emitted. A new record name or type fails here until the file lists it.
+    #[tokio::test]
+    async fn box_dns_names_fixture_is_the_matrix() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/e2e-unified/fixtures/box-dns-names.json"
+        ))
+        .unwrap();
+        let entries: Vec<(&str, &str, Option<&str>, bool)> = fixture["rrsets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                (
+                    e["name"].as_str().unwrap(),
+                    e["type"].as_str().unwrap(),
+                    e["value_prefix"].as_str(),
+                    e["literal"].as_bool().unwrap_or(false),
+                )
+            })
+            .collect();
+
+        let apex = "fauna.example";
+        let state = fixture_state().await;
+        state
+            .db
+            .add_mail_domain(apex, true, "enforce", "expand_primary", None, None)
+            .await
+            .unwrap();
+        let addr = HostAddress {
+            nest_ipv4: "192.0.2.10".into(),
+            nest_ipv6: Some("2001:db8::10".into()),
+            mail_ipv4: "192.0.2.10".into(),
+            mail_ipv6: Some("2001:db8::10".into()),
+        };
+        state.db.set_host_address(&addr).await.unwrap();
+        let alice = [0x81u8; 32];
+        state
+            .db
+            .create_user_with_handle(&alice, "free", "alice", None)
+            .await
+            .unwrap();
+        state
+            .db
+            .upsert_atproto_identity_intent(&alice, "plc", "did:key:zDnaeUSER")
+            .await
+            .unwrap();
+        state
+            .db
+            .record_atproto_minted(&alice, "did:plc:abc123", None)
+            .await
+            .unwrap();
+
+        let mut rows = assemble_domain_views(&state, None).await.unwrap()[0]
+            .records
+            .clone();
+        // The rows this fixture state cannot switch on, from the builders the
+        // matrix calls: the relay/PDS hosts, the wildcard, the floor-MX TLSA,
+        // and the transient DNS-01 challenge.
+        rows.extend(
+            build_host_dns_records(&HostDnsInput {
+                primary_domain: apex,
+                nest_ipv4: &addr.nest_ipv4,
+                nest_ipv6: addr.nest_ipv6.as_deref(),
+                mail_ipv4: &addr.mail_ipv4,
+                mail_ipv6: addr.mail_ipv6.as_deref(),
+                relay_enabled: true,
+                pds_enabled: true,
+                subdomain_sites: true,
+                plugin_labels: &[],
+            })
+            .into_iter()
+            .map(record_view),
+        );
+        rows.push(record_view(build_mail_tlsa_record(apex, &[0u8; 32])));
+        rows.push(record_view(
+            fauna_mail::dns::per_domain::build_acme_challenge_txt_record(apex, "x"),
+        ));
+        // PTR lives in the address's reverse zone, never the domain's.
+        rows.retain(|r| r.record_type != "PTR");
+
+        // `"literal": true` compares verbatim: its `*` is the DNS wildcard
+        // label itself, not "any one label".
+        let labels_match = |shape: &str, literal: bool, name: &str| {
+            if literal {
+                return shape == name;
+            }
+            let (s, n): (Vec<_>, Vec<_>) = (shape.split('.').collect(), name.split('.').collect());
+            s.len() == n.len() && s.iter().zip(&n).all(|(s, n)| *s == "*" || s == n)
+        };
+        let mut used = vec![false; entries.len()];
+        for r in &rows {
+            let rel = if r.name == apex {
+                "@".to_string()
+            } else {
+                r.name
+                    .strip_suffix(&format!(".{apex}"))
+                    .unwrap_or_else(|| panic!("{} is not in the domain {apex}", r.name))
+                    .to_string()
+            };
+            let hit = entries.iter().position(|(name, ty, prefix, literal)| {
+                *ty == r.record_type
+                    && labels_match(name, *literal, &rel)
+                    && prefix.is_none_or(|p| r.expected.trim_start_matches('"').starts_with(p))
+            });
+            let Some(i) = hit else {
+                panic!(
+                    "the matrix emits {rel} {} {:?}, which box-dns-names.json does not list",
+                    r.record_type, r.expected
+                );
+            };
+            used[i] = true;
+        }
+        for (e, used) in entries.iter().zip(&used) {
+            assert!(
+                used,
+                "box-dns-names.json lists {e:?}, which the matrix never emits"
+            );
+        }
     }
 
     /// A non-public primary (a `.local` / LAN nest) emits no `_fauna` row: the
@@ -1125,7 +1337,11 @@ mod tests {
         // sealed blob; only the public_dns_value is surfaced here).
         state
             .db
-            .seat_dkim_selector_for_test("example.com", "ed25519", "v=DKIM1; k=ed25519; p=abc")
+            .seat_dkim_selector_for_test(
+                "example.com",
+                "202606-ed25519",
+                "v=DKIM1; k=ed25519; p=abc",
+            )
             .await;
 
         let req = ListRecordsRequest {
@@ -1146,20 +1362,26 @@ mod tests {
         let by_name = |suffix: &str| d.records.iter().find(|r| r.name.contains(suffix));
         // MX → mail.<primary>. — emitted as an FQDN (trailing dot) so providers
         // that treat a dotless target as zone-relative don't double-append the
-        // origin (regression; live example.com inbound-bounce fix).
+        // origin (regression; live nest inbound-bounce fix).
         let mx = d.records.iter().find(|r| r.record_type == "MX").unwrap();
         assert_eq!(mx.expected, "10 mail.example.com.");
         // DKIM uses the stored public_dns_value verbatim.
-        let dkim = by_name("ed25519._domainkey").unwrap();
-        assert_eq!(dkim.name, "ed25519._domainkey.example.com");
+        let dkim = by_name("202606-ed25519._domainkey").unwrap();
+        assert_eq!(dkim.name, "202606-ed25519._domainkey.example.com");
         assert_eq!(dkim.expected, "\"v=DKIM1; k=ed25519; p=abc\"");
-        // And the selector the nest minted when the domain was added is on the
-        // page beside it — a nest-held key lists exactly as a sealed one does.
-        let minted = by_name("default._domainkey").unwrap();
+        // And the two selectors the nest minted when the domain was added are
+        // on the page beside it — one record per algorithm, each its own row.
+        let rsa = by_name("default-rsa._domainkey").unwrap();
         assert!(
-            minted.expected.starts_with("\"v=DKIM1; k=ed25519; p="),
+            rsa.expected.starts_with("\"v=DKIM1; k=rsa; p="),
             "{}",
-            minted.expected
+            rsa.expected
+        );
+        let ed = by_name("default-ed25519._domainkey").unwrap();
+        assert!(
+            ed.expected.starts_with("\"v=DKIM1; k=ed25519; p="),
+            "{}",
+            ed.expected
         );
         // The other four mail records are present.
         assert!(by_name("_dmarc.example.com").is_some());
@@ -1821,6 +2043,62 @@ mod tests {
         );
     }
 
+    /// The wildcard `*.<apex>` row follows the deployment's subdomain sites:
+    /// absent while no actor has opted in, then one A row at the **nest** IP
+    /// (never the mail host) once one has — the record every
+    /// `<handle>.<apex>` site and its per-name HTTP-01 certificate depend on.
+    #[tokio::test]
+    async fn list_includes_wildcard_row_once_a_subdomain_site_exists() {
+        let state = fixture_state_with_relay(false).await;
+        let admin = [7u8; 32];
+        state.db.add_admin_actor(&admin).await.unwrap();
+        state
+            .db
+            .add_mail_domain("example.com", true, "enforce", "expand_primary", None, None)
+            .await
+            .unwrap();
+        let set_req = SetHostAddressRequest {
+            nest_ipv4: "203.0.113.7".into(),
+            nest_ipv6: None,
+            mail_ipv4: "198.51.100.9".into(),
+            mail_ipv6: None,
+            extra: Default::default(),
+        };
+        let set_payload = Bytes::from(encode_canonical(&set_req).unwrap().to_vec());
+        set_host_address_handler()(state.clone(), admin, set_payload)
+            .await
+            .expect("admin set ok");
+
+        let wildcard_rows = |state: Arc<AppState>| async move {
+            let req = ListRecordsRequest {
+                domain: None,
+                extra: Default::default(),
+            };
+            let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
+            let reply_bytes = list_records_handler()(state, admin, payload)
+                .await
+                .expect("admin ok");
+            let reply: ListRecordsReply = decode(&reply_bytes).unwrap();
+            reply.domains[0]
+                .records
+                .iter()
+                .filter(|r| r.name == "*.example.com")
+                .map(|r| (r.record_type.clone(), r.expected.clone()))
+                .collect::<Vec<_>>()
+        };
+
+        assert!(
+            wildcard_rows(state.clone()).await.is_empty(),
+            "no wildcard row before any subdomain site exists"
+        );
+        state.db.set_subdomain_enabled(&[0x42u8; 32]).await.unwrap();
+        assert_eq!(
+            wildcard_rows(state).await,
+            vec![("A".to_string(), "203.0.113.7".to_string())],
+            "wildcard → nest IP once an actor opts into a subdomain site"
+        );
+    }
+
     // ── pds.<primary> (ATProto PDS bridge) ───────────────────────────────────
 
     /// Drive the whole matrix flow for a box with an **approved** `atproto.pds`
@@ -1957,7 +2235,11 @@ mod tests {
             .unwrap();
         state
             .db
-            .seat_dkim_selector_for_test("example.com", "ed25519", "v=DKIM1; k=ed25519; p=abc")
+            .seat_dkim_selector_for_test(
+                "example.com",
+                "202606-ed25519",
+                "v=DKIM1; k=ed25519; p=abc",
+            )
             .await;
 
         let req = VerifyRecordsRequest {
@@ -1973,13 +2255,13 @@ mod tests {
         assert_eq!(reply.domains.len(), 1);
         let d = &reply.domains[0];
         assert_eq!(d.domain, "example.com");
-        // Full per-domain matrix: MX, SPF, 2×DKIM (the selector this test
-        // provisions and the one the nest minted when the domain was added),
-        // DMARC, MTA-STS, TLSRPT, CalDAV SRV, CardDAV SRV, `_fauna`
-        // identity-root TXT = 10. (The last is the deployment identity root —
-        // `append_fauna_self_txt`, emitted on every public local domain, so a
-        // secondary's matrix carries it too.)
-        assert_eq!(d.records.len(), 10);
+        // Full per-domain matrix: MX, SPF, 3×DKIM (the selector this test
+        // provisions and the RSA + Ed25519 pair the nest minted when the
+        // domain was added), DMARC, MTA-STS, TLSRPT, CalDAV SRV, CardDAV SRV,
+        // `_fauna` identity-root TXT = 11. (The last is the deployment
+        // identity root — `append_fauna_self_txt`, emitted on every public
+        // local domain, so a secondary's matrix carries it too.)
+        assert_eq!(d.records.len(), 11);
         // Null resolver → every verdict is "checking" with no observed values,
         // and the (name, record_type) merge keys mirror `list_records`.
         assert!(d.records.iter().all(|r| r.status == "checking"));
@@ -1989,7 +2271,7 @@ mod tests {
         assert!(
             d.records
                 .iter()
-                .any(|r| r.name == "ed25519._domainkey.example.com")
+                .any(|r| r.name == "202606-ed25519._domainkey.example.com")
         );
         // CalDAV + CardDAV autodiscovery SRVs are both part of the verified matrix.
         assert!(

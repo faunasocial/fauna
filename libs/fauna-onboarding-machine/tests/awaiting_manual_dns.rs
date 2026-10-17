@@ -358,6 +358,7 @@ async fn recheck_already_claimed_but_nest_needs_update_is_terminal() {
     }));
     fake.set_silent_challenge_response(SilentChallengeOutcome::NeedsUpdate {
         message: "update required".into(),
+        outdated: fauna_onboarding_machine::nest_api::OutdatedSide::Nest,
     });
     let m = seeded(fake.clone());
 
@@ -371,6 +372,45 @@ async fn recheck_already_claimed_but_nest_needs_update_is_terminal() {
     );
     match m.awaiting_manual_dns_snapshot().state {
         AwaitingDnsState::Error { cause } => assert!(cause.contains("nest outdated")),
+        other => panic!("expected terminal Error, got {other:?}"),
+    }
+}
+
+/// The other side of the same skew: the box's nest is too new for this app and
+/// refused its subprotocol (the 426, `version-compatibility.md` Dim 4). Terminal
+/// on both legs of the recheck, and the cause the person reads is the localized
+/// "your app is out of date" text — not "nest outdated", which names the wrong
+/// side to update.
+#[tokio::test]
+async fn recheck_against_a_nest_too_new_for_the_app_is_terminal_and_says_so() {
+    let too_old = "Your app is out of date";
+    // The probe leg: its fresh connection met the 426.
+    let fake = Arc::new(FakeNestApi::new());
+    fake.set_probe_setup_status_response(Err(ProbeError::AppOutdated {
+        reason: too_old.into(),
+    }));
+    let m = seeded(fake.clone());
+    m.recheck_manual_dns().await;
+    match m.awaiting_manual_dns_snapshot().state {
+        AwaitingDnsState::Error { cause } => assert_eq!(cause, too_old),
+        other => panic!("expected terminal Error, got {other:?} — a 426 must not keep polling"),
+    }
+    assert_eq!(fake.calls(), vec!["probe_setup_status".to_string()]);
+
+    // The challenge leg: the probe answered, the challenge met the 426.
+    let fake = Arc::new(FakeNestApi::new());
+    fake.set_probe_setup_status_response(Ok(SetupStatus {
+        claimed: true,
+        ..Default::default()
+    }));
+    fake.set_silent_challenge_response(SilentChallengeOutcome::NeedsUpdate {
+        message: too_old.into(),
+        outdated: fauna_onboarding_machine::nest_api::OutdatedSide::App,
+    });
+    let m = seeded(fake.clone());
+    m.recheck_manual_dns().await;
+    match m.awaiting_manual_dns_snapshot().state {
+        AwaitingDnsState::Error { cause } => assert_eq!(cause, too_old),
         other => panic!("expected terminal Error, got {other:?}"),
     }
 }

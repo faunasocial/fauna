@@ -67,6 +67,16 @@ pub const KIND_GROUP_GENERATION_WRAP: &str = "fauna.group.generation-wrap";
 /// (`fauna_core::group_generation::GroupUnkeyableRecord`). **Frozen.**
 pub const KIND_GROUP_GENERATION_UNKEYABLE: &str = "fauna.group.generation-unkeyable";
 
+/// Class-2 kind: an authority device's shred attestation (ruled 2026-10-13 — `recipient-set-scheme.md` § The recipient-set scheme →
+/// *Severance, per axis*, the shred clause), logical key =
+/// `"<generation-id-hex>/<shredder-device-id-hex>"`, one cell per
+/// (generation, shredder), authored ONLY by the shredder — rows verify under
+/// the cell's own device key and carry its cert, which a reader checks
+/// against the authority (`fauna_core::group_generation::GroupShredAttestation`).
+/// The one row a key drop counts; the mint row's `Shredded` is attribution
+/// only. **Frozen.**
+pub const KIND_GROUP_GENERATION_SHRED: &str = "fauna.group.generation-shred";
+
 /// Class-2 kind: an authority-device revocation, logical key =
 /// `"<revoked-device-hex>/<revoker-hex>"` — one cell per (revoked device,
 /// revoker), each revoker owning its own cell. How a group-plane reader
@@ -134,6 +144,14 @@ const GROUP_POLICIES: &[(&str, MergePolicy, GroupSealing)] = &[
         KIND_GROUP_GENERATION_UNKEYABLE,
         // One honest author per cell — the member — same rank and the same
         // total-join/strict-adoption split as the wrap kind.
+        MergePolicy::CrdtPerField,
+        GroupSealing::MachineryRoot,
+    ),
+    (
+        KIND_GROUP_GENERATION_SHRED,
+        // One honest author per cell — the shredder — rank (verifies-at-cell,
+        // bytes), decode-or-fail, strict adoption: the account shred kind's
+        // shape at this plane.
         MergePolicy::CrdtPerField,
         GroupSealing::MachineryRoot,
     ),

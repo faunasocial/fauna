@@ -815,7 +815,7 @@ def test_reap_drill_killed_pytest_leaves_no_orphans_win(tmp_path):
 # `--client macos` run (observed 2026-07-24: pid 29443, PPID 1, 52 minutes,
 # launch dir `/private/tmp/fauna-e2e-macos-agent-*`). The orphan then mass-
 # deleted the user's live files when tmp GC emptied its bound folder — 34
-# deletes propagated to example.com.
+# deletes propagated to the live nest.
 #
 # Two independent holes, one test each. Both are about the TEARDOWN contract,
 # so they drive the real driver's `teardown()` with a stand-in child; no app
@@ -1631,15 +1631,47 @@ def test_prebuild_hoists_apps_a_cross_app_fixture_launches(
 
     # Every declared fixture must exist, or the map is silently protecting
     # nothing — the inert-knob shape applied to a dict.
-    conftest_src = (
-        pathlib.Path(mod.__file__).parent / "conftest.py"
-    ).read_text()
+    fixture_src = "\n".join(_fixture_sources(mod))
     for fixture_name in mod._CROSS_APP_FIXTURE_APPS:
-        assert f"def {fixture_name}(" in conftest_src, (
+        assert f"def {fixture_name}(" in fixture_src, (
             f"_CROSS_APP_FIXTURE_APPS names {fixture_name!r}, which is not a "
-            "fixture in conftest.py — a renamed fixture takes its prebuild "
-            "hoist with it and the timeout comes back"
+            "fixture in conftest.py or a tests/ module — a renamed fixture "
+            "takes its prebuild hoist with it and the timeout comes back"
         )
+
+
+def test_prebuild_hoists_only_the_seat_of_the_phone_the_run_names(
+    monkeypatch, prebuild_memo_isolated
+):
+    """`alice_builder_seats` pairs iOS with macOS and android with tui: a run
+    parametrized `[android]` hoists tui, not macOS, and `[ios]` the reverse —
+    the dict value of `_CROSS_APP_FIXTURE_APPS` keys the seat on the phone."""
+    mod = prebuild_memo_isolated
+    built = []
+    monkeypatch.setattr(
+        mod, "_ensure_app_built", lambda name: built.append(f"app:{name}")
+    )
+    monkeypatch.setattr(mod, "get_available_apps", lambda: ["android", "ios"])
+    monkeypatch.setattr(mod, "sweep_apps", lambda: ["ios", "macos", "tui", "android"])
+    for phone, seat in (("android", "tui"), ("ios", "macos")):
+        built.clear()
+        mod._prebuild_binaries(
+            _fake_session(
+                _FakeItem(fixturenames=("alice_builder_seats",), params={"app": phone})
+            )
+        )
+        assert sorted(built) == sorted([f"app:{phone}", f"app:{seat}"])
+
+
+def _fixture_sources(mod) -> list[str]:
+    """Source of every module a hoisted fixture may live in: conftest.py and the
+    test modules (the hoist keys on the fixture NAME in an item's closure, which
+    module-level fixtures are part of)."""
+    root = pathlib.Path(mod.__file__).parent
+    return [
+        path.read_text()
+        for path in [root / "conftest.py", *sorted((root / "tests").glob("*.py"))]
+    ]
 
 
 def test_every_cross_app_hoist_names_an_app_its_fixture_literally_launches():
@@ -1679,14 +1711,22 @@ def test_every_cross_app_hoist_names_an_app_its_fixture_literally_launches():
     fixture built on a shared launcher is judged by the app it literally names,
     exactly as one calling `create_driver` itself — and a launcher called with
     a variable (`alice_second_device`) still reads as client-matched.
+
+    **A fixture may live in a test module, and may reach the literal through a
+    method.** The scan covers `tests/*.py` as well as conftest.py.
+    `delegation_seats` (`test_task_delegation.py`) hands out a `_Seats` whose
+    `launch(app, tag)` passes its parameter to `create_driver`; the fixture binds
+    `seats.launch_tui` to `seats.launch("tui", …)`. An attribute call counts only
+    when its argument is a string literal (`driver.launch(config)` is not a
+    launcher call), and the method's `self` is not a positional argument.
     """
     import ast
 
     import conftest as mod
 
-    src = pathlib.Path(mod.__file__).read_text()
     functions = [
-        node for node in ast.walk(ast.parse(src))
+        node for src in _fixture_sources(mod)
+        for node in ast.walk(ast.parse(src))
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     ]
 
@@ -1700,17 +1740,30 @@ def test_every_cross_app_hoist_names_an_app_its_fixture_literally_launches():
     # Launchers: functions handing `create_driver` one of their own parameters,
     # keyed to that parameter's position.
     launcher_param: dict[str, int] = {}
+    method_param: dict[str, int] = {}
     for node in functions:
         arg = _create_driver_arg(node)
         params = [a.arg for a in node.args.args]
         if isinstance(arg, ast.Name) and arg.id in params:
             launcher_param[node.name] = params.index(arg.id)
+            if params[:1] == ["self"]:
+                method_param[node.name] = params.index(arg.id) - 1
 
-    literal_by_fixture: dict[str, object] = {}
+    # A fixture may name SEVERAL literals (`alice_builder_seats`: macos for an
+    # iOS phone, tui for an android one); `None` stands for a non-literal arg.
+    literal_by_fixture: dict[str, set] = {}
     for node in functions:
         for call in ast.walk(node):
-            if not (isinstance(call, ast.Call)
-                    and isinstance(call.func, ast.Name) and call.args):
+            if not (isinstance(call, ast.Call) and call.args):
+                continue
+            if (isinstance(call.func, ast.Attribute)
+                    and call.func.attr in method_param
+                    and len(call.args) > method_param[call.func.attr]):
+                arg = call.args[method_param[call.func.attr]]
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    literal_by_fixture.setdefault(node.name, set()).add(arg.value)
+                continue
+            if not isinstance(call.func, ast.Name):
                 continue
             if call.func.id == "create_driver":
                 arg = call.args[0]
@@ -1719,13 +1772,23 @@ def test_every_cross_app_hoist_names_an_app_its_fixture_literally_launches():
                 arg = call.args[launcher_param[call.func.id]]
             else:
                 continue
-            literal_by_fixture[node.name] = (
+            literal_by_fixture.setdefault(node.name, set()).add(
                 arg.value if isinstance(arg, ast.Constant) else None)
 
+    def _declared_apps(declared):
+        return set(declared.values()) if isinstance(declared, dict) else {declared}
+
+    def _literals(name):
+        # A non-literal call beside a literal one is a generic launcher
+        # (`_Seats.launch(app, tag)`); only an all-non-literal fixture is
+        # client-matched (`None`).
+        found = literal_by_fixture.get(name, {None})
+        return (found - {None}) or {None}
+
     wrong = {
-        name: literal_by_fixture.get(name)
+        name: _literals(name)
         for name, declared in mod._CROSS_APP_FIXTURE_APPS.items()
-        if literal_by_fixture.get(name) != declared
+        if _literals(name) != _declared_apps(declared)
     }
     assert not wrong, (
         f"these _CROSS_APP_FIXTURE_APPS entries do not match the app their "

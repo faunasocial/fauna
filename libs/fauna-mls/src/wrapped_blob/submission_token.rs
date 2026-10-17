@@ -130,6 +130,26 @@ pub fn fresh_signed_token(
     .expect("sign submission token")
 }
 
+/// [`fresh_signed_token`] for the actor `signing_key` IS (its verifying key),
+/// valid until `expires_at` (epoch seconds) — the shape a consumer checking
+/// expiry against a real clock needs (the nest's enqueue-door submitter
+/// proof).
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn signed_token_until(
+    signing_key: &SigningKey,
+    credential_id: &str,
+    expires_at: u64,
+) -> SubmissionToken {
+    let actor_id = signing_key.verifying_key().to_bytes();
+    SubmissionToken {
+        issued_at: expires_at.saturating_sub(86_400),
+        expires_at,
+        ..fresh_signed_token(signing_key, &actor_id, credential_id)
+    }
+    .sign(signing_key)
+    .expect("sign submission token")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

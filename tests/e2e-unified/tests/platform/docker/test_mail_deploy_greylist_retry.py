@@ -1,6 +1,6 @@
 """tier_4: greylist-then-retry-delivered — the inbound perimeter ENABLED.
 
-The user hit this live (2026-06-04): an inbound reply to example.com was
+The user hit this live (2026-06-04): an inbound reply to the live nest was
 greylist-tempfailed (`smtp: greylist tempfail`) and the diagnosis was "the sending
 server will retry and it'll deliver." That retry-delivers claim had **zero** test
 coverage: every other docker mail test DISABLES greylist (`relax_spam_policy` sets

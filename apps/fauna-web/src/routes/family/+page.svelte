@@ -14,6 +14,8 @@
     familyTransferDecline,
     familyTransferCancel,
     familyDeviceMark,
+    featureAuthoredRowsForWard,
+    featureEditorOpenForWard,
     type FamilyStatus,
     type FamilyWardInfo,
     type FamilyIncomingTransferInfo,
@@ -22,6 +24,9 @@
   } from '$lib/rpc';
   import {
     ensureWasm,
+    offlineAffordance,
+    type AuthoredRow,
+    type PolicyEditorHandle,
     unknownSenderOptions,
     feedSourcesOptions,
     unknownPeerDmOptions,
@@ -37,6 +42,7 @@
     parseTimeOfDay,
     formatTimeOfDay,
     parseDailyMinutes,
+    validateScreenTime,
     ageBandLine,
   } from '$lib/wasm';
   import { setWardScreenTime } from '$lib/screenTime.svelte';
@@ -45,10 +51,14 @@
   import type { FamilyAgeBandInfo } from '$lib/rpc';
   import { toBytes, actorHex, actorIdFromHex } from '$lib/hex';
   import { approvalText } from '$lib/family-approvals';
+  import { approvalTimestamp } from '$lib/value-format';
   import { blockedPeerRows, type BlockedPeer } from '$lib/ward-asks';
   import { setWardAsksFromStatus } from '$lib/wardAsks.svelte';
   import { t } from '$lib/i18n/strings';
   import { IDS } from '$lib/generated/uiIds';
+  import { connectionStatus } from '$lib/store';
+  import { makeOfflineGate } from '$lib/offline-gate';
+  import FeaturePolicyEditor from '$lib/components/FeaturePolicyEditor.svelte';
 
   // The `family` page (family-safety.md § App surface) — role-dependent
   // sections off ONE `fauna.family.status` read: the guardian section (wards +
@@ -74,6 +84,16 @@
   // The ward currently loaded into the shared policy editor (null until a
   // selection; `refresh()` re-selects the previous ward, else the first one).
   let selectedWard = $state<FamilyWardInfo | null>(null);
+
+  // The guardian host of the shared `feature-policy-editor` (family-safety.md
+  // § App surface → *Feature limits — the guardian host*): the selected ward's
+  // rows (shared Rust's `AuthoredRow[]`, null until read) and the one open
+  // editor — which is one ward's, so it closes when the selection changes.
+  // The page paints; no feature document is read or composed here.
+  const offlineGate = makeOfflineGate(offlineAffordance, connectionStatus.subscribe);
+  let featureRows = $state<AuthoredRow[] | null>(null);
+  let featureEditor = $state<PolicyEditorHandle | null>(null);
+  let featureEditorFor = $state<string | null>(null);
 
   // The four reach knobs, as EDITOR state. The two selects hold the LOCALIZED
   // label, not the wire value: the e2e select/read contract on web goes through
@@ -254,7 +274,12 @@
 
   // ── Load ─────────────────────────────────────────────────────────────────
   function loadPolicyFromWard(w: FamilyWardInfo) {
+    if (!selectedWard || actorHex(selectedWard.actor_id) !== actorHex(w.actor_id)) {
+      closeFeatureEditor();
+      featureRows = null;
+    }
     selectedWard = w;
+    void loadFeatureRows(w);
     policyContactApproval = w.policy.contact_approval;
     policyUnknownSenderLabel = unknownSenderLabel(w.policy.unknown_sender_mail);
     policyFederationContact = w.policy.federation_contact;
@@ -287,6 +312,46 @@
         : String(st.daily_minutes);
     isConfirmingGraduate = false;
     transferInput = '';
+  }
+
+  /** The guardian host's rows for `w`. An older nest (or a read that fails)
+   *  leaves the rows absent — the section's label paints, no row does. */
+  async function loadFeatureRows(w: FamilyWardInfo) {
+    const s = secret();
+    if (!s) return;
+    const wardHex = actorHex(w.actor_id);
+    try {
+      const rows = await featureAuthoredRowsForWard(s, toBytes(w.actor_id));
+      // The selection may have moved on while the read was in flight.
+      if (selectedWard && actorHex(selectedWard.actor_id) === wardHex) featureRows = rows;
+    } catch {
+      /* no feature-limits read on this nest: the rows stay unpainted */
+    }
+  }
+
+  async function openFeatureEditor(feature: string) {
+    const s = secret();
+    if (!s || !selectedWard) return;
+    actionError = '';
+    try {
+      featureEditor = await featureEditorOpenForWard(s, toBytes(selectedWard.actor_id), feature);
+      featureEditorFor = feature;
+    } catch (e) {
+      actionError = t.features.editor_load_failed({
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
+  function closeFeatureEditor() {
+    featureEditor = null;
+    featureEditorFor = null;
+  }
+
+  /** A save or remove landed: the editor re-seeded itself, the row summary above
+   *  it did not — re-read the rows. */
+  async function reloadAfterFeatureWrite() {
+    if (selectedWard) await loadFeatureRows(selectedWard);
   }
 
   /** One `fauna.family.status` read fills BOTH sections, then the (not
@@ -353,6 +418,7 @@
         window_end: parseTimeOfDay(policyScreenWindowEnd),
         daily_minutes: parseDailyMinutes(policyScreenDailyMinutes),
       };
+      validateScreenTime(screenTime.window_start, screenTime.window_end, screenTime.daily_minutes);
       await familyPolicyUpdate(s, toBytes(selectedWard.actor_id), {
         contact_approval: policyContactApproval,
         unknown_sender_mail: unknownSenderWire(policyUnknownSenderLabel),
@@ -781,8 +847,46 @@
                follows for pillar 1). -->
           <p class="caveat">{t.family.policy_screen_caveat}</p>
 
-          <button class="btn primary" data-testid={IDS.FAMILY_POLICY_SAVE_BUTTON} onclick={savePolicy}
+          <button class="btn primary" data-testid={IDS.FAMILY_POLICY_SAVE_BUTTON}
+            use:offlineGate={{ kind: 'fauna.family.policy.update' }} onclick={savePolicy}
             >{t.family.policy_save_button}</button>
+
+          <!-- `family-policy-feature-limits-section` — the guardian host of the
+               shared feature-policy editor, for the SELECTED ward, directly after
+               the policy save button (family-safety.md § App surface → *Feature
+               limits — the guardian host*). Rows come from the shared
+               `fauna-client-features` guardian surface; the reach form above
+               never writes `features`. -->
+          <div class="feature-limits">
+            <h3 data-testid={IDS.FAMILY_POLICY_FEATURE_LIMITS_SECTION}>{t.features.guardian_section_title}</h3>
+            <p class="muted small">{t.features.guardian_section_desc}</p>
+            {#each featureRows ?? [] as row, i (row.feature)}
+              <div class="field-group" data-testid={IDS.FAMILY_POLICY_FEATURE_LIMITS_ROW} data-index={i}>
+                <div class="field">
+                  <span class="field-label" data-testid={IDS.FAMILY_POLICY_FEATURE_LIMITS_NAME}>{resolveLocalized(row.name)}</span>
+                  <span data-testid={IDS.FAMILY_POLICY_FEATURE_LIMITS_SUMMARY}>{resolveLocalized(row.summary)}</span>
+                  <button
+                    type="button"
+                    class="btn"
+                    data-testid={IDS.FAMILY_POLICY_FEATURE_LIMITS_EDIT_BUTTON}
+                    onclick={() => openFeatureEditor(row.feature)}
+                  >
+                    {t.features.admin_edit}
+                  </button>
+                </div>
+                {#if featureEditor && featureEditorFor === row.feature && $identity?.secretHex}
+                  <FeaturePolicyEditor
+                    secretHex={$identity.secretHex}
+                    editor={featureEditor}
+                    tier="guardian"
+                    onwritten={reloadAfterFeatureWrite}
+                    oncancel={closeFeatureEditor}
+                    onerror={(message) => (actionError = message)}
+                  />
+                {/if}
+              </div>
+            {/each}
+          </div>
 
           <!-- The guardian-enrolled-device marker (family-safety.md § Full
                visibility for young children, Slice F) — one row per device of
@@ -901,7 +1005,7 @@
         <ul class="list">
           {#each approvals as a, i (approvalKey(a))}
             <li class="row" data-testid={IDS.FAMILY_APPROVAL_ITEM} data-index={i}>
-              <span class="approval-text">{approvalText(a, approvalDisplayTextRaw)}</span>
+              <span class="approval-text">{approvalText(a, approvalDisplayTextRaw, approvalTimestamp)}</span>
               <span class="muted small">{a.supervised_handle}</span>
               <button
                 class="btn"
@@ -1039,5 +1143,8 @@
   .approval-text {
     flex: 1;
     min-width: 10rem;
+    /* A feed_source card carries the whole target (up to 2048 bytes) and a URL
+       has no break points: wrap it rather than overflow the row. */
+    overflow-wrap: anywhere;
   }
 </style>

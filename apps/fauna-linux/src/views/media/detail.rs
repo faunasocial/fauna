@@ -43,6 +43,9 @@ struct DetailCtx {
     machine: Arc<MediaMachine>,
     runtime: tokio::runtime::Handle,
     folder: String,
+    /// The item's `filter_value` — its set's row-addressed value, what the
+    /// delete hands the machine so it never tombstones a same-named own set.
+    filter_value: String,
     path: String,
     list: gtk::Box,
     status: gtk::Label,
@@ -214,6 +217,7 @@ pub fn open_item_detail(
         machine: Arc::clone(machine),
         runtime: runtime.clone(),
         folder: item.folder.clone(),
+        filter_value: item.filter_value.clone(),
         path: item.path.clone(),
         list,
         status,
@@ -365,7 +369,8 @@ fn load_versions(ctx: &Rc<DetailCtx>) {
     let (tx, rx) = async_channel::bounded(1);
     {
         let machine = Arc::clone(&ctx.machine);
-        let folder = ctx.folder.clone();
+        // The item's set value, as the delete: the list names its own row.
+        let folder = ctx.filter_value.clone();
         let path = ctx.path.clone();
         let include_pruned = ctx.show_pruned.get();
         ctx.runtime.spawn(async move {
@@ -705,7 +710,7 @@ fn open_delete_confirm(
             let (tx, rx) = async_channel::bounded(1);
             {
                 let machine = Arc::clone(&ctx.machine);
-                let folder = ctx.folder.clone();
+                let folder = ctx.filter_value.clone();
                 let path = ctx.path.clone();
                 ctx.runtime.spawn(async move {
                     // The shared gesture records the tombstone and refreshes.

@@ -23,6 +23,10 @@ export interface DeviceFolderRole {
 export interface DeviceSummary {
   device_id: string;
   label: string;
+  /** The device principal granted on this row (hex) — the key a device
+   *  sign-in is minted by, the Sessions page's roster join
+   *  (`ui/sessions.md` § State & data shape). `null` on an unenrolled row. */
+  principal?: string | null;
   capabilities: string;
   registered_at: number;
   last_seen_at: number;
@@ -57,6 +61,10 @@ export interface FolderSummary {
   cached_last_snapshot_at: number | null;
   include_paths: string[] | null;
   exclude_paths: string[] | null;
+  // A sealed list this device could not open: the matching `*_paths` is null as
+  // "not readable", not "no list"; the machine refuses a save over it.
+  include_paths_unreadable: boolean;
+  exclude_paths_unreadable: boolean;
   // Hex raw MLS group id when the set is shared cross-user (`Some` ⇒ shared, drives
   // the owner-side `folder-shared-badge`); null/absent ⇒ owner-only. Mirrors the
   // Rust `FolderSummary::mls_group_id` (docs/goal/ui/folders.md § Sharing).
@@ -86,6 +94,18 @@ export interface FolderSummary {
   // run it through `normalizeAudience(value, bound)`, which is fail-closed: nothing
   // unparseable ever resolves to "public".
   audience?: string | null;
+  // The owner's signed audience attestation the nest serves on a public row,
+  // transcribed verbatim and opaque to the SPA. ⚠ **Never inspect it here**: run
+  // the folder through `folderIsPublicUnverified` for the
+  // `folder-audience-unattested` verdict. Mirrors Rust
+  // `FolderSummary::audience_attestation` (encryption-at-rest.md § Readable
+  // classes → *The declassification is owner-ATTESTED*).
+  audience_attestation?: {
+    owner: number[];
+    folder_id: number;
+    counter: number;
+    sig: number[];
+  } | null;
   // Whether this folder's head is published as the actor's website — the flag the
   // `folder-website-toggle` reflects and flips. Mirrors Rust
   // `FolderSummary::website_enabled`. Orthogonal to `audience`, which decides who
@@ -101,6 +121,14 @@ export interface FolderSummary {
   // ⚠ **Never paint this raw** — run it through `normalizeResidency(value)`,
   // fail-closed to "full" (the nest sends an empty value for full).
   residency?: string | null;
+  // Whether the owner turned exclusive editing on (file-sync.md § Exclusive
+  // editing) — `folder-exclusive-editing-toggle` paints this, non-optimistically.
+  // Mirrors Rust `FolderSummary::exclusive_editing`; absent ⇒ off.
+  exclusive_editing?: boolean;
+  // Who holds the write lease right now, when exclusive editing is on (`null` ⇒
+  // not held). ⚠ A snapshot for rendering only, and NEVER painted raw: run the
+  // folder through `folderLeaseStatus` for the `folder-lease-status` line.
+  lease?: { device_id: string; expires_at: number } | null;
   // "owner" (your own set) | "member" (a set shared WITH you — B3). A member row
   // renders READ-ONLY: the "Shared by ‹…›" badge + the leave button, no config
   // controls, no local paths (the nest withholds the owner's). Absent ⇒ owner

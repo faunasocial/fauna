@@ -2,6 +2,9 @@ pub mod cert;
 pub mod domain;
 pub mod file_bytes;
 pub mod holder;
+pub mod paywall;
+#[cfg(feature = "payments")]
+pub mod paywall_doors;
 pub mod publish_routes;
 pub(crate) mod region;
 pub mod render;

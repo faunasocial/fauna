@@ -477,9 +477,7 @@ fn refresh(
 ) {
     let snap = manager.snapshot();
 
-    while let Some(child) = list_box.first_child() {
-        list_box.remove(&child);
-    }
+    crate::views::layout::clear_list_box_rows(list_box);
     for item in &snap.results {
         let timestamp = crate::client::format_epoch_us(item.timestamp * 1_000);
         let row = build_search_result_row(&item.badge, &item.snippet, &timestamp);

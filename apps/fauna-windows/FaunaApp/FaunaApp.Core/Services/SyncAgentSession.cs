@@ -94,6 +94,15 @@ internal sealed class SyncAgentSession : ISyncAgentSessionHandle, IDisposable
     /// </summary>
     public IFfiSyncAgentProvisioner Channel => _provisioner;
 
+#if P2P_SHARE
+    /// <summary>The concrete provisioner, for the one consumer that needs the exported object
+    /// rather than the control-channel interface: the peer-transfer plane
+    /// (<c>AgentReplicaAccess(provisioner)</c>, <see cref="SharePlaneModel"/>). The plane holds
+    /// its own Rust-side handle, so a later <see cref="Stop"/> disposing this wrapper cannot
+    /// pull it out from under a running driver.</summary>
+    internal FfiSyncAgentProvisioner Provisioner => _provisioner;
+#endif
+
     /// <summary>The narrow folder-binding seam over <see cref="Channel"/>, for the
     /// bindings control plane (which must not be handed the whole provisioner — it could
     /// stop the agent).

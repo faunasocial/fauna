@@ -108,8 +108,9 @@ pub struct SyncServiceState {
     /// up and signals an immediate off-cadence pull. Best-effort: a missing entry
     /// (set not resident) or a full/closed channel just drops the nudge, and the
     /// rescan tick is the backstop. Bounded capacity 1, so rapid saves coalesce
-    /// to a single pending pull.
-    pub wake_senders: Mutex<HashMap<String, mpsc::Sender<()>>>,
+    /// to a single pending pull. Several runs of one folder's engine may be
+    /// registered at once ([`EngineRegistry`]); the nudge goes to the newest.
+    pub wake_senders: Mutex<EngineRegistry<mpsc::Sender<()>>>,
     /// The same-account peer data plane's file halves on this host — the
     /// sibling registry every engine asks before the nest, and the door the
     /// peer leg serves a sibling's chunk want through ([`crate::peer_files`]).
@@ -156,8 +157,8 @@ pub struct SyncServiceState {
     /// reads `false`.
     pub public_audience: Mutex<HashMap<String, bool>>,
     /// Per-file-set **command** senders — the invoke-and-reply sibling of
-    /// [`Self::wake_senders`], same registration lifetime and `same_channel`
-    /// deregistration discipline. Carries
+    /// [`Self::wake_senders`], same registration lifetime and the same per-run
+    /// [`EngineRegistry`] (a command goes to the newest run). Carries
     /// [`EngineCommand`](fauna_sync_engine::always_resident::EngineCommand)
     /// (today: `ApplyHeldDeletes`, the user-confirmed propagation of a
     /// mass-delete-floor hold) to the resident engine that owns the folder; the
@@ -166,7 +167,7 @@ pub struct SyncServiceState {
     /// resident engine — the handler reports that instead of inventing an
     /// engine.
     pub engine_cmd_senders:
-        Mutex<HashMap<String, mpsc::Sender<fauna_sync_engine::always_resident::EngineCommand>>>,
+        Mutex<EngineRegistry<mpsc::Sender<fauna_sync_engine::always_resident::EngineCommand>>>,
     /// The custodian replica this process is hosting *right now*, published by
     /// [`crate::custodian::host_stint`] for the whole life of a stint and
     /// cleared in its tail — so an empty slot IS "this device is not hosting",
@@ -218,14 +219,25 @@ pub struct SyncServiceState {
     /// same capability-slot changes as [`Self::host_wake`]
     /// (`crate::custodian::recheck_now`).
     pub custodian_wake: tokio::sync::Notify,
+    /// Wakes the push arm's host ([`crate::push_arm::host`]) to re-read the
+    /// capability now — fired by the same capability-slot changes as
+    /// [`Self::host_wake`] (`crate::push_arm::recheck_now`).
+    pub push_arm_wake: tokio::sync::Notify,
     /// The re-seed job's state ([`fauna_ipc::sync::RequestMethod::ReseedCustodianStore`],
     /// `backup-destinations.md` § Re-seed → *Where the ceremony runs*). While it
     /// reads `Running` this process is the store's writer in a second role, so
     /// the custodian loop hosts no stint and a reclaim refuses: one writer at a
     /// time, the same rule [`Self::hosted_custodian`] keeps.
     pub reseed_job: Mutex<fauna_ipc::sync::CustodianReseedState>,
+    /// The recovery job's state ([`fauna_ipc::sync::RequestMethod::RecoverCustodianStore`],
+    /// `segment-backup-protocol.md` § Client-device custodian (pull) → *Restore*
+    /// → *Recovery from this device's own store*). The second ceremony over the
+    /// one store-job slot: [`Self::store_job_running`] reads both, so the
+    /// custodian loop, a reclaim and either press see one writer at a time.
+    /// Both handlers lock [`Self::reseed_job`] first, then this one.
+    pub recover_job: Mutex<fauna_ipc::sync::CustodianRecoverState>,
     /// Every set's content keys as this agent last resolved them from its
-    /// holder's custody (`crate::content_keys`; `on-demand-files.md` § Shared
+    /// holder's custody (`crate::content_keys`; `on-demand-files-shared-sets.md` § Shared
     /// sets on a capability host → *One mechanism*). `None` until the first
     /// resolve lands (and again once nothing is provisioned) — no set gets an
     /// engine meanwhile. In memory only: the keys are re-read at every edge and
@@ -241,6 +253,9 @@ pub struct SyncServiceState {
     /// Where the push arm posts, and what `ServiceStatusInfo::notification_sink`
     /// reports.
     pub notification_sink: Arc<dyn crate::push_arm::NotificationSink>,
+    /// What the push arm decided, frame by frame — kept across account
+    /// re-mounts, read by the test-only `GetPushArmTally`.
+    pub push_tally: Arc<crate::push_arm::ArmTally>,
     /// Whether this agent can serve an on-demand binding here, answered once at
     /// boot ([`probe_on_demand`]) — what `ServiceStatusInfo::on_demand_available`
     /// reports. Unset until the boot probe ran: the status reply stays a field
@@ -261,7 +276,7 @@ pub struct SyncServiceState {
         Arc<std::sync::Mutex<Option<fauna_sync_engine::account_runtime::AccountStoreHandle>>>,
     /// The account's folder-key custody (`fauna.state.folder-keys`) read
     /// through the mounted store — every engine build and the content-key
-    /// resolution read it (`on-demand-files.md` § Shared sets on a capability
+    /// resolution read it (`on-demand-files-shared-sets.md` § Shared sets on a capability
     /// host, decision 1′). With no store mounted a read answers "not running":
     /// custody unreadable, so every bound set builds keyless (fail closed).
     pub folder_keys: Arc<dyn fauna_client_folders::FolderKeyReader>,
@@ -286,6 +301,63 @@ pub fn probe_on_demand() -> Result<(), &'static str> {
     }
 }
 
+/// A per-folder registry of running engines' inbound senders, keyed by the
+/// folder's ref wire string — the shape of the relay seat's registry
+/// (`fauna_sync_engine::relay_seat::RelaySeat`), so both hold runs the same
+/// way. Several runs of one folder's engine can be registered at once, oldest
+/// first: a cancelled run may finish building — and register — after its
+/// replacement did (the account-change host rebuild drops the old host without
+/// joining it, and these registries outlive hosts), and only then notice it was
+/// cancelled. A lookup routes to the newest run; each run removes its own entry
+/// and nothing else, so the folder stays routable while any run of it is
+/// registered.
+pub struct EngineRegistry<T> {
+    runs: HashMap<String, Vec<(u64, T)>>,
+}
+
+impl<T> Default for EngineRegistry<T> {
+    fn default() -> Self {
+        Self {
+            runs: HashMap::new(),
+        }
+    }
+}
+
+impl<T> EngineRegistry<T> {
+    /// Register run `run`'s sender under `key`, as the newest run.
+    pub fn insert(&mut self, key: String, run: u64, tx: T) {
+        self.runs.entry(key).or_default().push((run, tx));
+    }
+
+    /// The newest registered run's sender for `key`: an older one is a
+    /// cancelled run on its way out.
+    pub fn get(&self, key: &str) -> Option<&T> {
+        self.runs.get(key)?.last().map(|(_, tx)| tx)
+    }
+
+    /// Whether any run of `key` is registered.
+    #[cfg(test)]
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.runs.contains_key(key)
+    }
+
+    /// Remove run `run`'s entry under `key` — never another run's.
+    pub fn remove(&mut self, key: &str, run: u64) {
+        if let Some(runs) = self.runs.get_mut(key) {
+            runs.retain(|(id, _)| *id != run);
+            if runs.is_empty() {
+                self.runs.remove(key);
+            }
+        }
+    }
+
+    /// Whether no run is registered at all.
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.runs.is_empty()
+    }
+}
+
 /// The published handle on a running custodian stint — what it is, and how to
 /// stop it (see [`SyncServiceState::hosted_custodian`]).
 #[derive(Clone)]
@@ -305,7 +377,19 @@ pub struct HostedCustodian {
 pub struct RetainedNestRpc {
     nest_url: String,
     actor_id: [u8; 32],
+    /// The capability's push device id, which the client announces: a
+    /// re-provision of the same actor under a new id rebuilds, so the
+    /// connection never goes on announcing the old one.
+    device_id: String,
     client: Arc<fauna_client::NestClient>,
+}
+
+#[cfg(test)]
+impl RetainedNestRpc {
+    /// The retained client, read without building one.
+    pub(crate) fn client_for_test(&self) -> &Arc<fauna_client::NestClient> {
+        &self.client
+    }
 }
 
 impl SyncServiceState {
@@ -360,21 +444,24 @@ impl SyncServiceState {
             renewal_wake: tokio::sync::Notify::new(),
             store_principal_actor: RwLock::new(None),
             nest_rpc: Mutex::new(None),
-            wake_senders: Mutex::new(HashMap::new()),
+            wake_senders: Mutex::new(EngineRegistry::default()),
             peer_files: crate::peer_files::PeerFiles::new(),
             deletes_held: Mutex::new(HashMap::new()),
             deletes_skipped_unreadable: Mutex::new(HashMap::new()),
             public_audience: Mutex::new(HashMap::new()),
-            engine_cmd_senders: Mutex::new(HashMap::new()),
+            engine_cmd_senders: Mutex::new(EngineRegistry::default()),
             hosted_custodian: Mutex::new(None),
             hosted_account: watch::channel(None).0,
             host_wake: tokio::sync::Notify::new(),
             custodian_wake: tokio::sync::Notify::new(),
+            push_arm_wake: tokio::sync::Notify::new(),
             reseed_job: Mutex::new(fauna_ipc::sync::CustodianReseedState::Idle),
+            recover_job: Mutex::new(fauna_ipc::sync::CustodianRecoverState::Idle),
             content_keys: RwLock::new(None),
             content_keys_wake: tokio::sync::Notify::new(),
             attached_apps: Arc::default(),
             notification_sink,
+            push_tally: Arc::default(),
             on_demand: std::sync::OnceLock::new(),
             on_demand_mount_errors: std::sync::Mutex::default(),
             folder_keys: Arc::new(fauna_account_seams::folder_keys::PlaneFolderKeys::new({
@@ -385,13 +472,37 @@ impl SyncServiceState {
         })
     }
 
+    /// Whether a store ceremony — the re-seed or the recovery — holds the one
+    /// store-job slot: this process is then the custodian store's writer in a
+    /// second role, so no stint is hosted and a reclaim refuses.
+    pub async fn store_job_running(&self) -> bool {
+        matches!(
+            *self.reseed_job.lock().await,
+            fauna_ipc::sync::CustodianReseedState::Running
+        ) || matches!(
+            *self.recover_job.lock().await,
+            fauna_ipc::sync::CustodianRecoverState::Running
+        )
+    }
+
     /// A connected control-plane client for the provisioned nest, built once and
     /// retained (see [`Self::nest_rpc`]).
     ///
     /// `Err` when no capability has been provisioned yet — the user has not signed
     /// in to the WinUI app this session, so there is no nest to ask.
+    ///
+    /// **This connection is the device's push wake stand-in** (`common.md` § Push
+    /// Notifications → *Transports*, ruled 2026-10-09): the client is built
+    /// announcing the capability's `device_id` with `stand_in: true` before it
+    /// first connects, so a retained capability connection never exists
+    /// unannounced — an unannounced one is the nest's compatibility-rider
+    /// trigger and would silence the user's `web-push`/`apns` rows. The announce
+    /// follows the credential, not the account-store mount: it lives exactly as
+    /// long as this retained client, which an un-provision and a refused renewal
+    /// drop ([`Self::invalidate_nest_rpc`]). The banner arm rides the same
+    /// client ([`crate::push_arm::host`]).
     pub async fn nest_rpc_client(&self) -> Result<Arc<fauna_client::NestClient>, String> {
-        let (nest_url, actor_id) = {
+        let (nest_url, actor_id, device_id) = {
             let cap = self.capability.read().await;
             let cap = cap
                 .as_ref()
@@ -399,13 +510,14 @@ impl SyncServiceState {
             let actor_id = cap
                 .actor_id_array()
                 .ok_or_else(|| "capability carries a malformed actor_id".to_string())?;
-            (cap.nest_url.clone(), actor_id)
+            (cap.nest_url.clone(), actor_id, cap.device_id.clone())
         };
 
         let mut slot = self.nest_rpc.lock().await;
         if let Some(retained) = slot.as_ref()
             && retained.nest_url == nest_url
             && retained.actor_id == actor_id
+            && retained.device_id == device_id
             && retained.client.supervisor_stop().is_none()
         {
             return Ok(Arc::clone(&retained.client));
@@ -419,6 +531,13 @@ impl SyncServiceState {
             actor_id,
         );
         let client = fauna_client::NestClient::with_auth(auth);
+        // Before `connect`, so the first connection already announces. Every
+        // platform alike: on one with no notification sink the arm posts nothing,
+        // and the stand-in announce still delivers the device's `ws-device` row
+        // and never suppresses its relay rows (§ Dispatch Logic, ruled 2026-10-03).
+        if !device_id.is_empty() {
+            client.set_push_presence_stand_in(device_id.clone()).await;
+        }
         client
             .connect()
             .await
@@ -427,13 +546,17 @@ impl SyncServiceState {
         *slot = Some(RetainedNestRpc {
             nest_url,
             actor_id,
+            device_id,
             client: Arc::clone(&client),
         });
         Ok(client)
     }
 
     /// Drop the retained client so the next call rebuilds + reconnects — for a
-    /// provision that changed what it must speak as. Dropping it stops its
+    /// provision that changed what it must speak as, an un-provision, and a
+    /// refused renewal (whose open socket, and its push announce, must end with
+    /// the credential — `sync-agent-credentials.md` § Credential model → *A
+    /// refused renewal is terminal*). Dropping it stops its
     /// supervisor (`NestClient`'s `Drop`); a failed *request* is no reason to call
     /// this (see [`Self::nest_rpc`]).
     pub async fn invalidate_nest_rpc(&self) {

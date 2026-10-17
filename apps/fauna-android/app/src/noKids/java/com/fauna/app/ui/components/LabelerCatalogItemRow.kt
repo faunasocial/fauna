@@ -34,6 +34,11 @@ import social.fauna.generated.Ids
  * screen's to call (FFI stays off the testable content, the
  * `BackupDestinationsSection.destinationLabel` shape); the default paints the
  * discriminator unchanged.
+ *
+ * [subscribeEnabled] is the shared gate's answer for this row
+ * (`LabelerCatalogMachine::subscribe_enabled` — false while the open inspect
+ * view is this labeler and failed verification), read by the screen; the row
+ * never re-derives it from `verified`.
  */
 @Composable
 fun LabelerCatalogItemRow(
@@ -45,6 +50,7 @@ fun LabelerCatalogItemRow(
     onUnsubscribe: (Int) -> Unit,
     modifier: Modifier = Modifier,
     kindBadge: (LabelerCatalogEntry) -> String = { it.artifactKind },
+    subscribeEnabled: Boolean = true,
 ) {
     Row(
         modifier = modifier
@@ -83,6 +89,7 @@ fun LabelerCatalogItemRow(
             if (!entry.subscribed) {
                 Button(
                     onClick = { onSubscribe(index) },
+                    enabled = subscribeEnabled,
                     modifier = Modifier.testTag(Ids.LABELER_CATALOG_ITEM_SUBSCRIBE_BUTTON),
                 ) {
                     Text(stringResource(R.string.labeler_catalog_subscribe))

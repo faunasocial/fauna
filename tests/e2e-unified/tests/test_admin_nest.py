@@ -200,3 +200,178 @@ def test_malformed_region_is_refused_client_side(admin_app):
         f"a refused code must not change the declaration (was {before!r}, "
         f"now {admin_app.admin.region_status_text().strip()!r})"
     )
+
+
+@pytest.mark.feature("admin-nest")
+def test_region_section_warns_when_the_authority_has_gone_quiet(admin_app, nest_instance):
+    """When the nest has stopped hearing from its region's authority, the region
+    section warns that the last rules received still apply (admin.md § N Nest →
+    Declared region: `-staleness` renders only when the nest reports its
+    authority channel unreached — the nest's judgement, never re-derived
+    client-side).
+
+    The state is unreachable without a seam: the nest calls a channel stale only
+    when the declared region's authority is ENROLLED and last answered more than
+    three days ago, and the compiled-in registry enrols nobody. The
+    `test-hooks` endpoint `/api/v1/test/region/authority-silent`
+    (`bins/fauna-nest/src/region_status_test_hook.rs`) enrols a synthetic
+    authority for the status read alone and records, through the production
+    refresh bookkeeping, a last answer past that bound followed by a failed
+    attempt now. The declaration itself is the admin's UI gesture.
+    """
+    from helpers.admin_wire import post_nest_hook
+
+    _require_nest_page(admin_app)
+    before_status = admin_app.admin.region_status_text().strip()
+    had_declaration = admin_app.admin.withdraw_region_present()
+
+    admin_app.admin.declare_region("NO")
+    try:
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline and "NO" not in admin_app.admin.region_status_text():
+            time.sleep(0.3)
+        assert "NO" in admin_app.admin.region_status_text(), (
+            f"declared region not reflected after save. error: {admin_app.error_text()!r}"
+        )
+        # The precondition is the real registry's: no authority, so no channel to
+        # go quiet, so no warning — whatever the refresh bookkeeping says.
+        assert not admin_app.admin.region_staleness_text().strip(), (
+            "an unenrolled region has no authority channel, so it cannot be stale: "
+            f"{admin_app.admin.region_staleness_text()!r}"
+        )
+        unenrolled_authority = admin_app.admin.region_authority_text().strip()
+
+        post_nest_hook(nest_instance, "region/authority-silent", {"region": "NO"})
+
+        # The section is re-read on the nav edge, so re-enter the page until the
+        # nest's verdict is painted.
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline and not admin_app.admin.region_staleness_text().strip():
+            admin_app.admin.navigate_nest()
+        warning = admin_app.admin.region_staleness_text().strip()
+        assert warning, (
+            "the nest reports its authority channel unreached, but the region "
+            f"section shows no warning. authority line: "
+            f"{admin_app.admin.region_authority_text()!r}. error: {admin_app.error_text()!r}"
+        )
+        # Same read, same paint: the authority line moved off "not enrolled" too,
+        # so the warning belongs to this enrolled channel and is not stray text.
+        assert admin_app.admin.region_authority_text().strip() != unenrolled_authority, (
+            f"the authority line still reads {unenrolled_authority!r} beside the warning"
+        )
+        # A warning, never an outage: the declaration stands.
+        assert "NO" in admin_app.admin.region_status_text(), (
+            f"the warning must not displace the declaration: "
+            f"{admin_app.admin.region_status_text()!r}"
+        )
+    finally:
+        post_nest_hook(nest_instance, "region/authority-silent/clear", {})
+        # Leave the shared session nest declaring what it declared before.
+        if had_declaration:
+            restored = before_status.split()[-1]
+            admin_app.admin.declare_region(restored)
+            deadline = time.monotonic() + 15.0
+            while time.monotonic() < deadline and restored not in admin_app.admin.region_status_text():
+                time.sleep(0.3)
+        elif admin_app.admin.withdraw_region_present():
+            admin_app.admin.withdraw_region()
+            deadline = time.monotonic() + 15.0
+            while time.monotonic() < deadline and admin_app.admin.withdraw_region_present():
+                time.sleep(0.3)
+
+
+@pytest.fixture
+def stoppable_nest(request, nest_mode, tmp_path_factory):
+    """A dedicated nest this test may stop mid-journey (``nest["stop"]()``), so
+    the app is left holding a page whose nest no longer answers. Never the
+    session nest — every later test rides that one. Stopping a nest the harness
+    itself started is the harness's own teardown, run early (process safety
+    concerns OTHER sessions' nests)."""
+    from conftest import _start_dedicated_nest
+
+    nest, cleanup = _start_dedicated_nest(request, nest_mode, tmp_path_factory, "stoppable")
+    stopped = []
+
+    def stop():
+        if not stopped:
+            stopped.append(True)
+            cleanup()
+
+    nest["stop"] = stop
+    try:
+        yield nest
+    finally:
+        stop()
+
+
+@pytest.fixture
+def stoppable_spa_url(static_dir, stoppable_nest):
+    """Function-scoped SPA proxy → ``stoppable_nest``. Mirrors ``crowded_spa_url``."""
+    from conftest import _serve_spa_proxy
+
+    url, server = _serve_spa_proxy(static_dir, stoppable_nest["url"])
+    yield url
+    server.shutdown()
+
+
+@pytest.fixture
+def stoppable_admin_app(request, app, stoppable_nest):
+    """``admin_app``, pointed at ``stoppable_nest`` (`_login_admin_as`)."""
+    from conftest import _login_admin_as
+
+    _login_admin_as(app, request, stoppable_nest,
+                    spa_url_fixture="stoppable_spa_url", fixture_name="stoppable_admin_app")
+    yield app
+
+
+_ROTATE_ARM = "admin-nest-seed-rotate-button"
+_ROTATE_CONFIRM = "admin-nest-seed-rotate-confirm-button"
+_ROTATE_REASON = "admin-nest-seed-rotate-roster-reason"
+_ROTATE_ROW_0 = "admin-nest-seed-rotate-roster-item-0"
+
+
+@pytest.mark.feature("admin-nest")
+def test_the_rotation_confirm_stays_disabled_while_the_roster_is_unresolved(
+        stoppable_admin_app, stoppable_nest):
+    """While the app cannot tell which admins will inherit the new identity, the
+    rotation's confirm stays visible but disabled, says why, and lists nobody
+    (`admin.md` § N. Nest — disabled, never absent, zero rows while
+    unresolved).
+
+    The roster is made unanswerable the way it is in the field: the nest stops
+    answering after the page loaded. Arming then asks a nest that is gone, and
+    whichever unresolved state the app lands in — still asking, or failed —
+    must render the same: a reason, no inheritor rows, a disabled confirm. An
+    empty list beside a live confirm would read "nobody inherits", the one
+    thing this screen must never say."""
+    app = stoppable_admin_app
+    _require_nest_page(app)
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline and app.driver.count(_ROTATE_ARM) == 0:
+        time.sleep(0.3)
+    assert app.driver.count(_ROTATE_ARM) > 0, (
+        f"the rotate section never rendered. error: {app.error_text()!r}"
+    )
+
+    stoppable_nest["stop"]()
+    app.driver.click(_ROTATE_ARM)
+
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline and app.driver.count(_ROTATE_REASON) == 0:
+        time.sleep(0.3)
+    assert app.driver.count(_ROTATE_REASON) > 0, (
+        "an unresolved roster must say why the confirm is withheld. "
+        f"{app.driver.diagnose(_ROTATE_CONFIRM, attrs=('enabled',))}"
+    )
+    assert app.driver.get_text(_ROTATE_REASON).strip(), "the withhold reason must carry words"
+    assert app.driver.count(_ROTATE_CONFIRM) > 0, (
+        "the confirm must stay visible while the roster is unresolved — never absent"
+    )
+    assert not app.driver.is_enabled(_ROTATE_CONFIRM), (
+        "the confirm must be disabled while the inheritors are unknown. "
+        f"reason: {app.driver.get_text(_ROTATE_REASON)!r}"
+    )
+    assert app.driver.count(_ROTATE_ROW_0) == 0, (
+        "an unresolved roster must list nobody, not an empty set that reads "
+        f"'nobody inherits': {app.driver.get_text(_ROTATE_ROW_0)!r}"
+    )

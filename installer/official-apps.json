@@ -122,7 +122,7 @@
           "label": "Google Play listing",
           "value": null,
           "status": "pending",
-          "pending": "No Play listing exists yet.",
+          "pending": "The app is in invitation-only internal testing on Google Play; its listing answers only to invited testers until the first public release.",
           "source": null,
           "how_to_check": "Until the listing is announced here, a Play entry calling itself Fauna is not the association's."
         },
@@ -131,7 +131,7 @@
           "label": "App signing certificate (SHA-256)",
           "value": null,
           "status": "pending",
-          "pending": "Google mints the app signing key at the first upload. Its certificate fingerprint is published here the day the listing goes live.",
+          "pending": "The first internal-testing release is out; this fingerprint is published once the certificate an installed copy actually carries has been read.",
           "source": null,
           "how_to_check": "Compare the installed app's signing certificate fingerprint (`apksigner verify --print-certs`, or a package-inspector app) with the value here."
         }

@@ -22,8 +22,8 @@ use crate::{AccountRegistry, SecretStore};
 use std::sync::Arc;
 
 /// The reserved store row whose presence makes `refuse_secret_writes_for_test`'s
-/// fault live: while it exists, [`AccountRegistry::write_secret_slot`] drops
-/// every identity-secret write to that store.
+/// fault live: while it exists, [`AccountRegistry::write_read_back_slot`] drops
+/// every identity-secret and pending-factory-reset write to that store.
 ///
 /// **Held IN the store, not beside it.** Not on the registry value — every app
 /// builds a fresh [`AccountRegistry`] view per operation, so a flag there would
@@ -40,8 +40,8 @@ use std::sync::Arc;
 /// registry read or erase names it; the caller lifts it when done.
 const REFUSE_SECRET_WRITES_KEY: &str = "fauna/e2e/refuse_secret_writes";
 
-/// Whether secret-slot writes to `store` are being refused
-/// ([`AccountRegistry::write_secret_slot`] drops them when so).
+/// Whether read-back-guarded writes to `store` are being refused
+/// ([`AccountRegistry::write_read_back_slot`] drops them when so).
 pub(crate) fn secret_writes_refused(store: &Arc<dyn SecretStore>) -> bool {
     store.get(REFUSE_SECRET_WRITES_KEY).is_some()
 }
@@ -443,6 +443,31 @@ mod tests {
         writing
             .add_account(&SECRET.repeat(32), None, None)
             .expect("lifting through a third object restores writes everywhere");
+    }
+
+    /// The factory-reset door: the pending-factory-reset record is the other
+    /// write whose caller reads it back before acting (the client refuses to
+    /// dispatch a reset whose claim code it could not keep —
+    /// `nest/common.md` § Client-state recoverability), so the same fault must
+    /// drop it, and lifting the fault must restore it.
+    #[test]
+    fn refused_secret_writes_drop_the_pending_factory_reset_record() {
+        let (r, actor) = registry_with_active_account();
+        call(&r, "refuse_secret_writes_for_test", r#"{"refuse":true}"#);
+        r.set_pending_factory_reset_json(&actor, r#"{"claim_code":"A"}"#);
+        assert_eq!(
+            r.pending_factory_reset_json(&actor),
+            None,
+            "a keystore refusing writes must keep no pending-reset record"
+        );
+
+        call(&r, "refuse_secret_writes_for_test", r#"{"refuse":false}"#);
+        r.set_pending_factory_reset_json(&actor, r#"{"claim_code":"A"}"#);
+        assert_eq!(
+            r.pending_factory_reset_json(&actor).as_deref(),
+            Some(r#"{"claim_code":"A"}"#),
+            "lifting the fault restores the record's write"
+        );
     }
 
     #[test]

@@ -179,7 +179,8 @@
                            Text="{loc:Localize Key=atproto_settings/depth_linked_title}" />
                 <controls:BridgeCard x:Name="LinkedBridgeCard"
                                      ActionClick="LinkedBridgeAction_Click"
-                                     SettingChanged="LinkedBridgeSetting_Changed" />
+                                     SettingChanged="LinkedBridgeSetting_Changed"
+                                     SourceAskClick="LinkedBridgeSourceAsk_Click" />
             </StackPanel>
 
             <!-- ── 3b. Hosted panel (at, or staged toward, a hosted level) ────
@@ -241,6 +242,9 @@
                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoExternalAppsEnable}"
                               Toggled="ExternalApps_Toggled"
                               Header="{loc:Localize Key=atproto_settings/external_apps_toggle}" />
+                <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                           TextWrapping="Wrap"
+                           Text="{loc:Localize Key=atproto_settings/external_apps_hint}" />
                 <Button x:Name="MintBtn"
                         AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoAppCredentialMint}"
                         Click="Mint_Click"
@@ -376,6 +380,14 @@
                         BorderThickness="1" CornerRadius="4" Padding="12"
                         BorderBrush="{ThemeResource SystemFillColorCriticalBrush}">
                 <StackPanel x:Name="DeleteConfirmLines" Spacing="4" />
+                <!-- The card's terminal opt-in (ui/atproto.md § User actions row 4):
+                     always present, never pre-ticked; greyed with the machine's reason
+                     beside it where the identity cannot be retired. -->
+                <CheckBox x:Name="DeleteRetireIdentity"
+                          AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoDeleteTombstone}"
+                          Click="DeleteRetireIdentity_Click"
+                          Content="{loc:Localize Key=atproto_settings/delete_retire_identity_label}" />
+                <TextBlock x:Name="DeleteRetireIdentityReason" Visibility="Collapsed" TextWrapping="Wrap" />
                 <StackPanel Orientation="Horizontal" Spacing="8">
                     <Button x:Name="DeleteConfirmBtn"
                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoDeleteConfirm}"

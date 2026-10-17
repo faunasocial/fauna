@@ -9,8 +9,9 @@
 //!   ([`SyncChangedPayload::scope_nudge`]) — never the folder, never content.
 //!   No `PushEvent` variant is added.
 //! - **The filter** is [`fauna_scope::event_reaches`]: the session holds
-//!   `fauna:events:subscribe` and the scope is one its `records` arm lets it
-//!   list. It is applied to the live reach ([`resolve_principal`]: the row's
+//!   `fauna:events:subscribe` and the scope is one its other arms let it
+//!   list — an `ext:<kind>` its `records` arm covers, or `state` under
+//!   `fauna:personalization:rw`. It is applied to the live reach ([`resolve_principal`]: the row's
 //!   granted scopes ∩ the token's, the account's authority and its
 //!   external-apps switch), read at the moment of delivery.
 //! - **WS-RPC push** — [`on_scope_changed`], called wherever a scope-tagged
@@ -98,7 +99,7 @@ async fn poll(
     let cursor = req.cursor.unwrap_or(0).max(0);
     let heads = state
         .db
-        .ext_scope_heads_since(&caller.account, cursor, POLL_PAGE_SCOPES)
+        .event_scope_heads_since(&caller.account, cursor, POLL_PAGE_SCOPES)
         .await
         .map_err(internal)?;
     // The page's coverage includes the scopes the filter drops: the cursor

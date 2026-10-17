@@ -30,6 +30,7 @@ import (
 
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/confinement"
 	"github.com/fxamacker/cbor/v2"
+	"lukechampine.com/blake3"
 	"nhooyr.io/websocket"
 
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/dagcbor"
@@ -2041,7 +2042,7 @@ func TestMethodWrappers(t *testing.T) {
 			Label:         SpamLabelSpam,
 			Source:        TrainingSourceImapJunkFlag,
 		}
-		outcome, err := PutSpamModel(ctx, caller, actor[:], []byte("resealed-model"), 0, insert, nil)
+		outcome, err := PutSpamModel(ctx, caller, actor[:], []byte("resealed-model"), 0, insert, nil, nil)
 		if err != nil {
 			t.Fatalf("PutSpamModel: %v", err)
 		}
@@ -2088,7 +2089,7 @@ func TestMethodWrappers(t *testing.T) {
 		// nest decodes absent ⇒ None ⇒ no history mutation).
 		caller := &recordingCaller{replyBody: putSpamModelReply{}}
 		actor := bytes32(0x92)
-		if _, err := PutSpamModel(ctx, caller, actor[:], []byte("m"), 0, nil, nil); err != nil {
+		if _, err := PutSpamModel(ctx, caller, actor[:], []byte("m"), 0, nil, nil, nil); err != nil {
 			t.Fatalf("PutSpamModel: %v", err)
 		}
 		var body map[string]cbor.RawMessage
@@ -2097,6 +2098,60 @@ func TestMethodWrappers(t *testing.T) {
 		}
 		if _, present := body["history_op"]; present {
 			t.Errorf("history_op key must be absent for a model-only write")
+		}
+		if _, present := body["expected_model"]; present {
+			t.Errorf("expected_model key must be absent without a precondition (last-write-wins)")
+		}
+	})
+
+	t.Run("PutSpamModel_EncodesTheExpectedModelPrecondition", func(t *testing.T) {
+		// The compare-and-swap precondition (mail-spam.md § Transactional
+		// update): the "no stored model" marker rides as a PRESENT empty
+		// byte string — never dropped, which would turn the write
+		// last-write-wins — and a stored model's precondition is the
+		// blake3-256 digest of the blob exactly as fetched (byte-identical
+		// to the Rust `spam_model_fingerprint`). A "stale_model" reply is
+		// a typed outcome.
+		actor := bytes32(0x97)
+		decode := func(t *testing.T, raw []byte) map[string]cbor.RawMessage {
+			t.Helper()
+			var body map[string]cbor.RawMessage
+			if err := cbor.Unmarshal(raw, &body); err != nil {
+				t.Fatalf("decode body: %v", err)
+			}
+			return body
+		}
+
+		marker := SpamModelPreconditionOf(nil)
+		caller := &recordingCaller{replyBody: putSpamModelReply{Outcome: "stale_model"}}
+		outcome, err := PutSpamModel(ctx, caller, actor[:], []byte("m"), 0, nil, nil, &marker)
+		if err != nil {
+			t.Fatalf("PutSpamModel: %v", err)
+		}
+		if outcome != PutOutcomeStaleModel {
+			t.Errorf("outcome: got %q, want stale_model", outcome)
+		}
+		raw, present := decode(t, caller.gotBody)["expected_model"]
+		if !present {
+			t.Fatalf("the no-stored-model marker must ride the wire, not be omitted")
+		}
+		var got []byte
+		if err := cbor.Unmarshal(raw, &got); err != nil || got == nil || len(got) != 0 {
+			t.Errorf("marker: got %x (err %v), want an empty byte string", got, err)
+		}
+
+		stored := []byte("stored-sealed-model")
+		pre := SpamModelPreconditionOf(stored)
+		caller = &recordingCaller{replyBody: putSpamModelReply{}}
+		if _, err := PutSpamModel(ctx, caller, actor[:], []byte("m"), 0, nil, nil, &pre); err != nil {
+			t.Fatalf("PutSpamModel: %v", err)
+		}
+		if err := cbor.Unmarshal(decode(t, caller.gotBody)["expected_model"], &got); err != nil {
+			t.Fatalf("decode expected_model: %v", err)
+		}
+		want := blake3.Sum256(stored)
+		if !bytes.Equal(got, want[:]) {
+			t.Errorf("digest: got %x, want %x", got, want)
 		}
 	})
 
@@ -3889,6 +3944,20 @@ func TestResolveRecipient(t *testing.T) {
 		caller := &recordingCaller{replyBody: map[string]any{"outcome": "teapot"}}
 		if _, err := ResolveRecipient(ctx, caller, "x", "example.com", "", ""); err == nil {
 			t.Fatalf("expected error for unknown outcome")
+		}
+	})
+
+	t.Run("processor_accepts_both_report_processors_only", func(t *testing.T) {
+		for _, p := range []string{ProcessorDmarcReport, ProcessorTlsrptInbound} {
+			caller := &recordingCaller{replyBody: map[string]any{"outcome": "processor", "processor": p}}
+			got, err := ResolveRecipient(ctx, caller, "x", "example.com", "", "")
+			if err != nil || got.Outcome != ResolveProcessor || got.Processor != p {
+				t.Fatalf("processor %q: got %+v, %v", p, got, err)
+			}
+		}
+		caller := &recordingCaller{replyBody: map[string]any{"outcome": "processor", "processor": "teapot"}}
+		if _, err := ResolveRecipient(ctx, caller, "x", "example.com", "", ""); err == nil {
+			t.Fatalf("expected error for unknown processor")
 		}
 	})
 }

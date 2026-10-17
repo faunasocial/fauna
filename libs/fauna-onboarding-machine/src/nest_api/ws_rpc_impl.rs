@@ -111,9 +111,11 @@ where
     }
 
     /// `fauna.setup.status` — claimed/unclaimed + the storage-mode pin (Phase C
-    /// consent screen). Any error is transient: the reqwest twin treated every
+    /// consent screen). Any error is transient — the reqwest twin treated every
     /// non-success status the same way, and a transport/decode fault is retryable
-    /// at the UI level.
+    /// at the UI level — save the nest refusing this app's subprotocol (its 4426
+    /// close ending the request): the app is too old, `ProbeError::AppOutdated`,
+    /// as the connect arm lands for the pre-upgrade 426.
     pub async fn probe_setup_status(&self) -> Result<SetupStatus, ProbeError> {
         let reply: fauna_protocol::discovery::SetupStatusReply = self
             .requester
@@ -122,8 +124,16 @@ where
                 fauna_protocol::discovery::SetupStatusRequest::default(),
             )
             .await
-            .map_err(|e| ProbeError::Transient {
-                reason: e.to_string(),
+            .map_err(|e| {
+                if e.is_subprotocol_mismatch() {
+                    ProbeError::AppOutdated {
+                        reason: e.to_string(),
+                    }
+                } else {
+                    ProbeError::Transient {
+                        reason: e.to_string(),
+                    }
+                }
             })?;
         Ok(SetupStatus {
             claimed: reply.claimed,
@@ -308,6 +318,7 @@ where
         Ok(InviteCodeVerification {
             invite_id: reply.invite_id,
             supervised_by: reply.supervised_by,
+            age_band: reply.age_band,
         })
     }
 
@@ -486,6 +497,37 @@ where
                 .collect(),
             predecessors_unreadable,
         })
+    }
+
+    /// The signed-out door's lock, driven over this one pre-identity connection
+    /// through the shared `fauna_client_recovery::lock_account_with_seed` — the
+    /// signature is the whole authorization, so no session is involved. The
+    /// secret is parsed here and dropped with the call.
+    pub async fn lock_account_with_seed(&self, secret_hex: &str) -> Result<i64, LockAccountError> {
+        let identity =
+            fauna_core::identity::ActorKeypair::from_secret_hex(secret_hex).map_err(|e| {
+                LockAccountError::Refused {
+                    reason: format!("identity secret: {e}"),
+                }
+            })?;
+        let client = fauna_client_recovery::RecoveryClient::new(&self.requester);
+        fauna_client_recovery::lock_account_with_seed(&client, &identity)
+            .await
+            .map(|locked| locked.locked_until)
+            .map_err(|e| {
+                use fauna_client_recovery::RecoveryError as E;
+                match e {
+                    E::Superseded { new_actor_id } => LockAccountError::Superseded {
+                        successor: fauna_core::format::hex_full(&new_actor_id),
+                    },
+                    E::Transport(_) | E::Malformed(_) => LockAccountError::Transient {
+                        reason: e.to_string(),
+                    },
+                    other => LockAccountError::Refused {
+                        reason: other.to_string(),
+                    },
+                }
+            })
     }
 
     /// `fauna.actor.by_handle` — the anonymous handle→actor lookup. An unknown

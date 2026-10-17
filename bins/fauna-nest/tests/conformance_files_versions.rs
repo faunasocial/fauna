@@ -830,3 +830,100 @@ async fn soft_pruned_versions_recovery_browse_and_undelete() {
     .expect_err("not currently pruned → not_found");
     assert_eq!(err.code, "fauna.files.not_found");
 }
+
+/// The snapshot restore's licence read (`backup-restore.md` § Security
+/// Properties → Integrity): past `purge_after` the GC purge stamps a
+/// soft-pruned version `superseded_at`, and from then on neither the default
+/// projection nor the recovery browse serves it — but `include_superseded`
+/// does, signed fields intact, because a snapshot taken while the row was the
+/// head still pins the bytes the purge released and the writer's statement is
+/// what licenses them. The flag is additive: without it the wire is unchanged.
+#[tokio::test]
+async fn include_superseded_serves_a_purged_version_with_its_signature() {
+    let (router, state) = router_and_state().await;
+    setup_set(&router, &state, actor(), "docs").await;
+    let seq1 = record(
+        &router,
+        &state,
+        &actor_kp(),
+        "docs",
+        &[0xB1; 32],
+        100,
+        "create",
+        None,
+    )
+    .await;
+    let _seq2 = record(
+        &router,
+        &state,
+        &actor_kp(),
+        "docs",
+        &[0xB2; 32],
+        200,
+        "modify",
+        None,
+    )
+    .await;
+
+    // Soft-prune v1, expire its window, and run the purge step — the terminal
+    // mark (`superseded_at`), after which a listing reads it as not a version.
+    assert!(state.db.soft_prune_version(seq1).await.unwrap());
+    state.db.set_version_purge_after(seq1, 0).await.unwrap();
+    assert_eq!(
+        state.db.purge_expired_soft_pruned_versions().await.unwrap(),
+        (1, 0)
+    );
+
+    let listing = |include_pruned: Option<bool>, include_superseded: Option<bool>| {
+        let router = &router;
+        let state = Arc::clone(&state);
+        async move {
+            let reply: FilesVersionsListReply = decode(
+                &dispatch(
+                    router,
+                    state,
+                    actor(),
+                    "fauna.files.versions.list",
+                    encode(&FilesVersionsListRequest {
+                        path_hash: ByteBuf::from(path_hash().to_vec()),
+                        folder: Some("docs".into()),
+                        include_pruned,
+                        include_superseded,
+                        ..Default::default()
+                    }),
+                )
+                .await
+                .expect("list ok"),
+            )
+            .unwrap();
+            reply
+        }
+    };
+
+    let default_list = listing(None, None).await;
+    assert_eq!(
+        default_list.versions.len(),
+        1,
+        "a purged row is not a version"
+    );
+    let browse = listing(Some(true), None).await;
+    assert_eq!(
+        browse.versions.len(),
+        1,
+        "the recovery browse lists soft-pruned rows, never purged ones"
+    );
+
+    let licence_read = listing(Some(true), Some(true)).await;
+    assert_eq!(licence_read.versions.len(), 2);
+    let purged = licence_read
+        .versions
+        .iter()
+        .find(|v| v.version_num == seq1)
+        .expect("the purged row rides the licence read");
+    assert_eq!(purged.manifest_hash.as_ref(), &[0xB1; 32]);
+    assert!(
+        purged.signature.is_some() && purged.signer_key.is_some(),
+        "the purged row is served with the writer's signature — the licence itself"
+    );
+    assert_eq!(purged.pruned, Some(true));
+}

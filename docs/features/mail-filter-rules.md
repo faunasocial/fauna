@@ -115,8 +115,8 @@ Stamped 2026-09-23 at 039e9619ca.
 | 7 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_the_form_cannot_show_is_listed_but_never_opens` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_forward_keeps_its_copy_mode_through_an_edit` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_forward_keeps_its_copy_mode_through_an_edit` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_mail_forwarding_settings.py::test_forward_all_mail_is_set_and_stopped_from_settings` | tui (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_mail_forwarding_settings.py::test_your_own_hourly_forwarding_limit_is_set_from_settings` | tui (linux): failed |
+| 9 | app | `tests/e2e-unified/tests/test_mail_forwarding_settings.py::test_forward_all_mail_is_set_and_stopped_from_settings` | web (linux): passed, linux (linux): failed, tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_mail_forwarding_settings.py::test_your_own_hourly_forwarding_limit_is_set_from_settings` | web (linux): passed, linux (linux): failed, tui (linux): failed |
 | 11 | app | (none) | — |
 | 12 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_delivery_time_filters_route_to_folders` | nest (linux): passed |
 | 13 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_delivery_time_filters_route_to_folders` | nest (linux): passed |

@@ -83,6 +83,11 @@ export interface SnapshotFileRow {
 
 export interface SnapshotDetail {
   snapshot_id: number;
+  /** The set the snapshot was taken of, as the reply named it — what the
+   *  per-file download licenses a plaintext entry by. */
+  folder: string;
+  /** The set's wire hash, hex; `null` when the reply carried none. */
+  folder_hash: string | null;
   files: SnapshotFileRow[];
 }
 

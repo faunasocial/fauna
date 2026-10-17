@@ -72,3 +72,23 @@ impl RpcRequester for TokenWsRpcClient {
         fixed_conn::request(&self.inner, kind, payload).await
     }
 }
+
+/// The keyed arm (`fauna_protocol::KeyedRpcRequester`): the envelope carries
+/// the caller's key, so an account runtime assembled over this one-shot
+/// session — a remove-account's nest half, signed in as the account it just
+/// removed (`fauna-wasm`'s `account_runtime::retire_removed_account`) — drives
+/// its outbox exactly as over the reconnecting client.
+impl fauna_protocol::KeyedRpcRequester for TokenWsRpcClient {
+    async fn request_keyed<Req, Reply>(
+        &self,
+        kind: &'static str,
+        idempotency_key: [u8; 16],
+        payload: Req,
+    ) -> Result<Reply, WsRpcError>
+    where
+        Req: Serialize,
+        Reply: DeserializeOwned,
+    {
+        fixed_conn::request_keyed(&self.inner, kind, idempotency_key, payload).await
+    }
+}

@@ -175,18 +175,9 @@ impl FfiWebClient {
             .map_err(|e| e.to_string())?)
     }
 
-    /// `fauna.web.publish.list` — the caller's published posts, each with the
-    /// tier gating it (if any). The `web-published-posts-list` rows.
-    ///
-    /// Superseded by [`Self::published_site`], which carries the same rows plus
-    /// the rendered-pages-down status; kept until the last app leg has moved.
-    pub async fn publish_list(&self) -> Result<Vec<FfiPublishedPost>, FfiError> {
-        Ok(self.published_site().await?.posts)
-    }
-
-    /// `fauna.web.publish.list`, whole — the rows and whether the caller's
-    /// rendered pages are down. One read; never call this and
-    /// [`Self::publish_list`] for the same paint.
+    /// `fauna.web.publish.list` — the caller's published posts (each with the
+    /// tier gating it, if any: the `web-published-posts-list` rows) and whether
+    /// the caller's rendered pages are down. One read per paint.
     pub async fn published_site(&self) -> Result<FfiPublishedSite, FfiError> {
         let site = self
             .client()

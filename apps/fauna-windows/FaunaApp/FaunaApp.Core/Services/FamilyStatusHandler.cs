@@ -22,6 +22,14 @@ namespace FaunaApp.Core.Services;
 /// </summary>
 internal static class FamilyStatusHandler
 {
+    /// <summary>Fold the ward's own asks off one status reply into
+    /// <see cref="WardAsksCache"/>, gated on <c>supervised_by</c>: a graduated account
+    /// has no guardian to be waiting on, so a stale ask must not keep painting
+    /// (family-safety.md § Child-initiated contact requests, rule (c)).</summary>
+    internal static void ApplyWardAsks(FfiFamilyStatus status) =>
+        WardAsksCache.SetFromStatus(
+            status.@supervisedBy is not null, status.@contactRequests, status.@feedRequests);
+
     internal static void ApplySupervision(FfiFamilyStatus status)
     {
         var supervision = status.@supervision;

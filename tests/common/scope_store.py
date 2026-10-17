@@ -46,6 +46,13 @@ class ScopeStore:
         actor = actor_id_hex.strip().lower()
         return [root / actor for root in self.scope_roots()]
 
+    def exists(self, path) -> bool:
+        """Whether ``path`` (one of :meth:`scope_dirs`, or a file under one)
+        exists. A host filesystem read for every store whose roots are host
+        paths; :class:`AndroidScopeStore` answers it on the device. Call this,
+        not ``path.exists()``, from any test that also runs on android."""
+        return Path(path).exists()
+
 
 class XdgScopeStore(ScopeStore):
     """tui/linux: a flat base directly under `XDG_CONFIG_HOME`
@@ -128,16 +135,39 @@ class WindowsScopeStore(ScopeStore):
         return [self._data_dir, self._store_root]
 
 
+class AndroidScopeStore(ScopeStore):
+    """android: the app's `filesDir` and its Room `databases/` dir, the two
+    roots `AccountStores.eraseAccount` / `eraseAllAccounts` sweep
+    (`apps/fauna-android/.../core/AccountStores.kt`; the shared
+    `accountStateEraseScope` names `<root>/<actor-hex>` under each).
+
+    Both are on-device, inside the app's private data directory, which no host
+    path reaches on any venue — so the roots are device paths RELATIVE to that
+    directory (`files`, `databases`), and :meth:`exists` asks the device
+    (`AndroidBridgeDriver.app_data_exists`, a `run-as` read from outside the
+    app). A host `Path.exists()` on one of these is always False and would
+    pass every "it is gone" assertion vacuously; use :meth:`exists`."""
+
+    client = "android"
+
+    def __init__(self, driver):
+        self._driver = driver
+
+    def scope_roots(self) -> list[Path]:
+        return [Path("files"), Path("databases")]
+
+    def exists(self, path) -> bool:
+        return self._driver.app_data_exists(Path(path).as_posix())
+
+
 def attach_scope_store(client: str, driver) -> ScopeStore:
     """Bind a :class:`ScopeStore` to the account-scoped directories an
     **already-launched** driver's app process resolved — the on-disk
     counterpart of `cred_store.py`'s `attach_cred_store`.
 
-    Raises for `web` (no filesystem at all — browser `localStorage`) and
-    `android` (the account-scoped directories are on-device, in the app's
-    own `filesDir`; no host-side path exists to read them back — unlike the
-    credential file, which the bridge's `GET /credentials` reads, no bridge
-    route lists a directory tree yet)."""
+    Raises for `web` (no filesystem at all — browser `localStorage`). android's
+    roots are on-device (:class:`AndroidScopeStore`): read them through
+    :meth:`ScopeStore.exists`, never a host ``Path.exists()``."""
     if client == "web":
         raise NotImplementedError(
             "web has no on-disk account-scoped directory at all — its state is "
@@ -145,11 +175,7 @@ def attach_scope_store(client: str, driver) -> ScopeStore:
             "(long-term-store.md § Implementation status today)"
         )
     if client == "android":
-        raise NotImplementedError(
-            "android's account-scoped directories are on-device, in the app's own "
-            "filesDir — no host-side path exists to read them back yet (the "
-            "bridge's GET /credentials reads the credential file only)"
-        )
+        return AndroidScopeStore(driver)
     if client == "tui":
         # `_resolved_store_root` is set (windows) or None (unix) by the driver's
         # own launch — never re-derived here.

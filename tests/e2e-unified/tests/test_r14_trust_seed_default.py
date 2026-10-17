@@ -135,7 +135,7 @@ def test_live_mode_with_a_declared_port_is_skipped_not_dialed(monkeypatch):
     )
     env = {}
     conftest._apply_r14_trust_env(
-        env, {"port": 443, "url": "https://example.com"}, _request([_Item()])
+        env, {"port": 443, "url": "https://example.net"}, _request([_Item()])
     )
     assert "FAUNA_E2E_TRUST_NEST_IDENTITY" not in env
     assert dialed == [], (
@@ -564,7 +564,13 @@ def test_every_driver_names_the_environment_its_next_relaunch_reads():
     from drivers.windows import WindowsBridgeDriver
 
     environment = {"FAUNA_E2E_TRUST_NEST_IDENTITY": LAUNCHED_SEED}
-    for cls in (TuiDriver, LinuxBridgeDriver, MacosInProcessDriver, IosInProcessDriver):
+    for cls in (
+        TuiDriver,
+        LinuxBridgeDriver,
+        MacosInProcessDriver,
+        IosInProcessDriver,
+        AndroidBridgeDriver,
+    ):
         driver = object.__new__(cls)
         driver._launch_config = {"environment": environment}
         assert driver.relaunch_environment() is environment, (
@@ -581,12 +587,6 @@ def test_every_driver_names_the_environment_its_next_relaunch_reads():
 
     assert object.__new__(WebBridgeDriver).relaunch_environment() is None, (
         "a browser page reads no environment"
-    )
-    android = object.__new__(AndroidBridgeDriver)
-    android._launch_config = {"environment": environment}
-    assert android.relaunch_environment() is None, (
-        "android cannot cold-relaunch (test_module_relaunch.py pins it), so it "
-        "has no relaunch a seed could ride"
     )
 
 

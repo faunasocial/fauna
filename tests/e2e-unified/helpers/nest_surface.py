@@ -337,33 +337,12 @@ class Verdict(NamedTuple):
 #: `_start_dedicated_nest` was the WHOLE change: each asks for `claim_domain` or
 #: for nothing, options every provider already honours, so no table below had to
 #: move to let them collect in a container. What stays does so for exactly two
-#: STRUCTURAL reasons, neither of them "not got to yet":
-#:
-#: * **It spawns a HOST BRIDGE** — `_dedicated_mail_nest_impl`'s four,
-#:   `_bench_mda_impl`'s two, `restartable_mda_nest`. The nest is the easy
-#:   half; the MTA/MDA beside it are class (5), and the docker shape of a mail
-#:   nest is the image's own s6 bridges enabled through the product's toggle
-#:   (`testing.md` § Default app and nest mode, ruling (3)) — arm 6's build, not
-#:   a routing edit.
-#: * **It asks for `handle_domain_seed` AND spawns a host bridge** —
-#:   `unclaimed_mail_nest_ui`. Only the second half is why it is here.
-#:
-#:   ⚠ This bullet used to read "it asks for `handle_domain_seed` … routing it
-#:   would convert a clean collection-time exclusion into a setup-time refusal:
-#:   strictly worse", and that reasoning was **wrong** — corrected 2026-09-02,
-#:   when seven other `handle_domain_seed` fixtures routed and none of them
-#:   produced a refusal. A setup-time refusal is what happens to an option the
-#:   CLASSIFIER cannot see; `FIXTURE_START_OPTIONS` is precisely the mechanism
-#:   that makes it visible, and the table below is what a routing arm edits in
-#:   the same commit. Routed *with* the declaration, an unhonourable option is a
-#:   collection-time class (4) naming the option — strictly BETTER than the
-#:   `nest_binary` closure it replaces, which is MIXED and reads as closable
-#:   work. The old wording described what would happen if you routed and forgot
-#:   the table, which is a mistake, not a property of the option.
-#:
-#:   What keeps this fixture here is the first bullet's reason: it spawns an
-#:   unapproved MTA on the host beside its nest, so its docker shape is the
-#:   image's own s6 bridges — arm 6's venue seam, not a routing edit.
+#: STRUCTURAL reasons, neither of them "not got to yet": it spawns a HOST
+#: BRIDGE beside its own binary, and the docker shape of a mail nest is the
+#: image's own s6 bridges (`testing.md` § Default app and nest mode, ruling (3)).
+#: Arm 6 routed four such venues through `_start_mail_venue`; what is left is
+#: triaged, one disposition per resident, in `LOCAL_NEST_FIXTURE_DISPOSITIONS`
+#: below.
 #:
 #: A name here is therefore a claim about the fixture's SHAPE, and the arm that
 #: removes it is named. Worth stating because the previous state of this list —
@@ -379,26 +358,69 @@ class Verdict(NamedTuple):
 #: what was invisible is that it *could have routed*. `test_nest_mode_axis.py::
 #: test_no_conftest_fixture_spawns_a_nest_behind_both_entry_points` now pins the
 #: direct-caller set with a recorded reason per entry.
-LOCAL_NEST_FIXTURES = frozenset({
-    "bench_mda_encrypted",
-    "bench_mda_plaintext",
-    "restartable_mda_nest",
-    # Sets the DAV toggles before spawning its own MDA, which binds its
-    # listener set once at boot — the same own-binaries shape as the fixture
-    # above, for the enablement witnesses that must not flip the session nest.
-    "dav_toggle_venue",
-    # The ONE mail venue that stays, for a NAMED reason rather than "not got to
-    # yet" — arm 6 routed the other four through `_start_mail_venue`:
-    #   `dedicated_caldav_admin_port_nest` is standalone-only PERMANENTLY, by
-    #     ratification — it calls `mda.respawn()`, and s6 owns the rebind in the
-    #     image (testing.md § Default app and nest mode, ruling (3)).
-    # (`dedicated_caldav_only_nest` was the last to leave: the CalDAV bring-up
-    # path it waited on is built — with mail off the image's MDA gates on
-    # `/data/caldav-enabled`, so the venue drives `set_caldav_enabled` at setup
-    # and converges on that flag and a CalDAV-only listener set.)
-    "dedicated_caldav_admin_port_nest",
-    "unclaimed_mail_nest_ui",
-})
+#: Every resident, with the disposition that keeps it here — the per-fixture twin
+#: of `test_nest_mode_axis.py::_NEST_BINARY_DISPOSITIONS`, with the same two
+#: meanings. **PREMISE**: routing would free no cell, because what the fixture
+#: hands its tests is the subject itself (a host process the test controls, the
+#: binary's own files, a release-build measurement) or a FACT class holds every
+#: consumer out of the mode anyway. **OPEN**: routable onto `_start_mail_venue`,
+#: simply not yet routed, with the missing piece named.
+#:
+#: The mode audit's `local_nest_fixture` grade is DERIVED from this map, never
+#: restated: `test_nest_mode_axis.py::
+#: test_the_local_nest_fixture_grade_follows_its_dispositions` holds it MIXED
+#: exactly while an OPEN entry stands, so routing the last one forces the
+#: re-grade to FACT in the same commit and a new OPEN resident forces it back.
+LOCAL_NEST_FIXTURE_DISPOSITIONS = {
+    "bench_mda_encrypted":
+        "PREMISE: the IMAP FETCH-latency benchmark's subject is a locally "
+        "compiled RELEASE nest (`bench_nest_binary`) beside a host bridge "
+        "rpath'd to the release FFI; a container round-trip is a different "
+        "measurement, not the same one in another mode",
+    "bench_mda_plaintext":
+        "PREMISE: the other arm of the same benchmark, same subject",
+    "restartable_mda_nest":
+        "PREMISE: its consumers are the binary's own state — the DR-restore "
+        "tests seed an approved-MDA row into `nest.db` with `sqlite3` (the "
+        "`test_smtp_sort.py` premise), and the DAV at-rest walk reads the "
+        "nest's on-disk segments through the test-hooks content surface, which "
+        "the `test_hooks` FACT holds out of every release image",
+    "restartable_mta_nest":
+        "OPEN: both witnesses stop or restart the nest while its MTA stays up "
+        "as a separate process. In the image the nest and the bridges are s6 "
+        "services of ONE container, and the provider's stop is the "
+        "container's, which takes the MTA with it; the submission witness is "
+        "routable once the docker venue can stop the nest service alone "
+        "(`s6-svc -d`) and start it in place. The signing witness would stay "
+        "out regardless: it pokes the test-hooks outbound route and reads the "
+        "in-process stub MX",
+    "certless_mta_nest":
+        "PREMISE: it arms the nest's test-only `tls-cert-withhold` seam "
+        "(test-hooks, compiled out of the image) BEFORE the MTA spawns, and in "
+        "the image s6 starts the MTA at container start, before any seam can "
+        "be armed",
+    "dav_toggle_venue":
+        "OPEN: deployment toggles set before the MDA's first `fetch_config` "
+        "are expressible in the image's own terms — its MDA run-script gates on "
+        "the `/data/*-enabled` flags the toggles write, which is how "
+        "`caldav_only` routed. Owes docker venue options for the "
+        "mail/caldav/carddav/webdav toggles and the `domainless` home-nest "
+        "shape, and its `rebind()` readers as per-test host-affordance readers "
+        "(s6 owns the rebind in the image, ruling (3)). And a FACTORY fixture: "
+        "its tests CALL it by name, so `kind_reach` walks into the host-bridge "
+        "spawn and grades every consumer `loopback_kind` — a routed factory "
+        "needs that reach to stop at the venue seam, or routing frees no cell",
+    "dedicated_caldav_admin_port_nest":
+        "PREMISE: it calls `mda.respawn()` for the admin-CalDAV-port rebind, "
+        "and s6 owns the rebind in the image — standalone-only permanently, by "
+        "ratification (testing.md § Default app and nest mode, ruling (3))",
+    "unclaimed_mail_nest_ui":
+        "PREMISE: it asks for `handle_domain_seed` on an UNCLAIMED nest, which "
+        "the `permanent_option` FACT holds out of docker whatever happens to "
+        "its bridge, so routing would free no cell",
+}
+
+LOCAL_NEST_FIXTURES = frozenset(LOCAL_NEST_FIXTURE_DISPOSITIONS)
 
 #: Fixture → the per-nest start options it asks a nest for, whether it asks
 #: `_make_nest` directly or the mode's provider through `_start_dedicated_nest`.
@@ -475,6 +497,8 @@ FIXTURE_START_OPTIONS = {
     "atproto_hosted_nest": frozenset({"claim_domain"}),
     "atproto_localhost_nest": frozenset(),
     "restartable_mda_nest": frozenset(),
+    "restartable_mta_nest": frozenset(),
+    "certless_mta_nest": frozenset(),
     "contribute_nest": frozenset(),
     "crowded_nest": frozenset(),
     "dav_toggle_venue": frozenset(),
@@ -512,7 +536,15 @@ FIXTURE_START_OPTIONS = {
     # viewer page at its own `/share/<token>` (`test_share_links_private.py`).
     "share_viewer_nest": frozenset({"static_dir"}),
     "spki_pinned_nest": frozenset({"dial_host", "serve_tls"}),
+    # Its publicly-trusted twin: the same LAN dial, plus a harness-CA leaf
+    # written into the nest's own ACME dir (`test_nest_identity_pin_webpki.py`).
+    "webpki_lan_nest": frozenset({"dial_host", "serve_tls"}),
     "stoppable_nest": frozenset(),
+    "stoppable_home_nest": frozenset(),
+    "family_succession_nest": frozenset(),
+    "member_nest": frozenset({"claim_domain"}),
+    "offers_nest": frozenset(),
+    "tiers_nest": frozenset(),
     "third_nest": frozenset(),
     "two_nodes": frozenset(),
     "unclaimed_mail_nest_ui": frozenset({"handle_domain_seed", "unclaimed"}),
@@ -535,15 +567,34 @@ FIXTURE_START_OPTIONS = {
     # touched would have produced exactly the ❌-against-working-product-code
     # the arm's ordering exists to prevent.
     "admin_auth_nest": frozenset(),
+    "domain_nest": frozenset(),
+    "factory_reset_confirm_nest": frozenset(),
+    "named_nest": frozenset({"claim_domain"}),
+    "ramp_nest": frozenset(),
+    "running_member_nest": frozenset(),
+    "served_headers_site_nest": frozenset({"claim_domain"}),
+    "spa_serving_nest": frozenset({"static_dir"}),
+    "front_page_nest": frozenset(),
+    "lifecycle_nest": frozenset(),
+    "log_nest": frozenset(),
+    "port_nest": frozenset(),
+    "posture_nest": frozenset({"claim_domain"}),
+    "redaction_nest": frozenset(),
+    "roster_nest": frozenset(),
+    "tls_reset_nest": frozenset({"serve_tls"}),
     "archive_nest": frozenset(),
     "box_recovery_nest": frozenset(),
     "bridges_nest": frozenset(),
     "degraded_nest": frozenset({"unclaimed"}),
     "deploy_gate_nest": frozenset(),
     "dr_nest": frozenset(),
+    "family_succession_nest": frozenset(),
+    "fronted_nest": frozenset(),
     "gated_nest": frozenset(),
     "grant_mint_nest": frozenset(),
     "head_nest": frozenset(),
+    "member_nest": frozenset(),
+    "offers_nest": frozenset(),
     "initiator_nest": frozenset(),
     "local_nest": frozenset(),
     "nest": frozenset(),
@@ -563,6 +614,8 @@ FIXTURE_START_OPTIONS = {
     "signal_nest": frozenset(),
     "skew_nest": frozenset(),
     "snap_nest": frozenset(),
+    "stoppable_home_nest": frozenset(),
+    "tiers_nest": frozenset(),
     "subs_consumer_nest": frozenset(),
     "subs_nest": frozenset(),
     "sync_register_nest": frozenset({"claim_domain"}),
@@ -571,12 +624,40 @@ FIXTURE_START_OPTIONS = {
     "two_report_nests": frozenset(),
     "two_trend_nests": frozenset(),
     "claim_target_nest": frozenset({"unclaimed"}),
+    # Module-local nests the derivation pin read as absent until the tree walk
+    # reached them; each keeps exactly the options its definition spells.
+    "rename_nest": frozenset(),
+    "reset_nest": frozenset(),
+    "reset_tls_nest": frozenset({"serve_tls"}),
+    "shutdown_nest": frozenset(),
+    # Module-local nests the derivation pin read as absent until the tree walk
+    # reached them; each keeps exactly the options its definition spells.
+    "bluesky_dm_nest": frozenset({"claim_domain", "extra_env"}),
+    "imported": frozenset(),
+    "never_hosted_app": frozenset({"claim_domain"}),
+    "nostr_reply_nest": frozenset({"extra_env"}),
+    "retry_nest": frozenset(),
+    "scratch_nest": frozenset(),
+    "two_admin_nest": frozenset(),
+    "two_nest_custody_rig": frozenset({"handle_domain_seed", "serve_tls"}),
+    "unclaimed_nest": frozenset({"handle_domain_seed", "serve_tls", "unclaimed"}),
     # `extra_env` from its `consent_nest_env` fixture, which a module overrides
     # with a `test-hooks` seam (`test_bridged_conversation_kinds.py`). Read as a
     # forward until 2026-10-06, when the pin learned a fixture's parameters are
     # other fixtures, never a caller's value.
     "consent_nest": frozenset({"claim_domain", "extra_env"}),
     "cors_seeded_nest": frozenset({"cors_origins"}),
+    # The Nostr page's nest witnesses (`tests/api/test_nostr_nest.py`): the
+    # home nest is claimed onto a domain (its NIP-05 names and advertised relay
+    # carry it); the dialing nest takes the `test-hooks` loopback-relay seam as
+    # `extra_env`; the signer nest is only ever dialed.
+    "nostr_home_nest": frozenset({"claim_domain"}),
+    "nostr_dialing_nest": frozenset({"extra_env"}),
+    "nostr_signer_nest": frozenset(),
+    # The inbound-to-feed witness (`tests/test_nostr_inbound_feed.py`): a nest
+    # whose default relays are the far relay and which may dial it on
+    # loopback — the `test-hooks` seams ride `extra_env`.
+    "nostr_inbound_nest": frozenset({"extra_env"}),
     "dav_unclaimed_nest": frozenset({"unclaimed"}),
     "onboarding_nest": frozenset({"unclaimed"}),
     "subdomain_nest": frozenset({"claim_domain"}),
@@ -624,6 +705,23 @@ FIXTURE_START_OPTIONS = {
     # blocker had to be measured rather than inferred from these two rows.
     "crash_nest": frozenset({"extra_env"}),
     "unclaimed_crash_nest": frozenset({"extra_env", "unclaimed"}),
+    # The same beacon, narrowed to the dispatcher, for a test that COUNTS the
+    # reads one journey draws (`test_nest_info_draw.py`).
+    "nest_info_beacon_nest": frozenset({"extra_env"}),
+    # `test_update_channel.py`: the update-channel seed is the image tag the
+    # artifact was installed with (`FAUNA_IMAGE_TAG`, catalogued in
+    # `_DOCKER_EXTRA_ENV`) — one nest per seed, a channel tag and a pinned one.
+    "test_channel_nest": frozenset({"extra_env"}),
+    "pinned_nest": frozenset({"extra_env"}),
+    # `test_version_mismatch_launch.py`: the dedicated nest the mid-session
+    # degraded-restart half stops (no option), and the `test-hooks` nest that
+    # requires the next major's subprotocol (a local `_make_nest`, by premise),
+    # plus the mid-session half of that one: an ordinary local nest, signed in
+    # to, whose `extra_env` the TEST sets before the in-place re-spawn — so it
+    # asks the start for nothing.
+    "signed_in_on_dedicated_nest": frozenset(),
+    "signed_in_on_too_new_capable_nest": frozenset(),
+    "too_new_nest": frozenset({"extra_env", "unclaimed"}),
 
     # The `handle_domain_seed` RESIDENTS — the first fixtures to route
     # *knowing they will never collect*, and the reason that is worth doing.
@@ -659,6 +757,7 @@ FIXTURE_START_OPTIONS = {
     "cross_nest_foreign": frozenset({"handle_domain_seed", "serve_tls"}),
     "cross_nest_foreign_ephemeral": frozenset({"handle_domain_seed",
                                                "serve_tls"}),
+    "report_origin_nest": frozenset({"handle_domain_seed", "serve_tls"}),
     "smoke_handled_nest": frozenset({"handle_domain_seed", "serve_tls"}),
     "empty_store_unclaimed_nest": frozenset({"handle_domain_seed", "serve_tls",
                                              "unclaimed"}),
@@ -682,6 +781,7 @@ FIXTURE_START_OPTIONS = {
     # swept — recorded from the AST derivation itself
     # (`test_the_fixture_start_options_table_matches_the_tree`).
     "admin_succession_nest": frozenset(),
+    "cert_nudge_nest": frozenset({"claim_domain", "serve_tls"}),
     "deletion_nest": frozenset(),
     "durable_nest": frozenset(),
     "index_nest": frozenset(),
@@ -1016,6 +1116,7 @@ OWN_IMAGE_TAG = "fauna-nest-test:local"
 #: asserts that redundancy instead of trusting it, and a second pin fails if any
 #: name in this set ever starts colliding.
 OWN_IMAGE_FIXTURES = frozenset({
+    "abuse_nest",
     "accepting_nest",
     "acme_stack",
     "auto_dkim_nest",
@@ -1036,17 +1137,24 @@ OWN_IMAGE_FIXTURES = frozenset({
     "domainless_stack",
     "env_claim_nest",
     "family_nest",
+    "forged_nest",
     "forwarder_ndr_nest",
+    "ip_bridge_stack",
     "lenient_nest",
+    "linked",
+    "linked_one_admin",
     "mail_serving_nest",
     "mounted_claim_nest",
     "mta_sts_nest",
     "ndr_sidecars",
     "nest_container",
     "outbound_nest",
+    "perimeter_nest",
     "real_clamd_nest",
     "relay_nest",
     "relay_net",
+    "relay_peers",
+    "rename_stack",
     "round_trip_nest",
     "scanners",
     "self_signed_floor_nest",
@@ -1058,6 +1166,7 @@ OWN_IMAGE_FIXTURES = frozenset({
     "spoofing_nest",
     "stub_mx",
     "topology",
+    "topology_one_admin",
     "two_boxes",
 })
 
@@ -1109,10 +1218,13 @@ BRIDGE_SPAWN_FIXTURES = frozenset({
     "mail_bridge_mta",
     "mail_bridge_mda",
     "disposable_mta_bridge",
+    "disposable_mta_bridge_factory",
     "disposable_mda_bridge",
     "mail_bridge_inbound_to_imap",
     "unclaimed_caldav_nest",
-    "autoenable_mda",       # module-local: tests/test_mail_auto_enable_first_setup.py
+    "autoenable_mda",      # module-local: tests/test_mail_auto_enable_first_setup.py
+    "lan_mda",             # module-local: tests/test_mail_policy_effects.py
+    "principal_mda",       # module-local: tests/api/test_folder_read_principal.py
 })
 
 #: Class (5)'s THIRD door: the fixtures that BUILD a self-enrolling bridge.
@@ -1381,11 +1493,14 @@ GLOBAL_ADMIN_FIXTURES = frozenset({
     "dedicated_mail_nest_handle_domain",
     "disposable_mda_bridge",
     "disposable_mta_bridge",
+    "disposable_mta_bridge_factory",
     "handled_nest",
     "mail_bridge_inbound_to_imap",
     "mail_bridge_mda",
     "mail_bridge_mta",
     "registration_posture_nest",
+    "report_origin_nest",
+    "two_nest_custody_rig",
     "unclaimed_caldav_nest",
 })
 
@@ -1510,6 +1625,7 @@ ACCOUNT_SCOPED_KINDS = frozenset({
     "fauna.admin.stats",
     "fauna.admin.status",
     "fauna.admin.tiers.list",
+    "fauna.admin.update_channel.get",
     "fauna.admin.users.create",
     "fauna.admin.users.delete",
     "fauna.admin.users.get",
@@ -1564,8 +1680,15 @@ ACCOUNT_SCOPED_KINDS = frozenset({
     "fauna.bridges.get_alias_policy",
     "fauna.bridges.get_caldav_port",
     "fauna.bridges.get_forward_all_to",
+    # An Admin-class read (R2): the deployment-wide DMARC catalog's state
+    # mutates nothing.
+    "fauna.bridges.get_dmarc_policy",
     "fauna.bridges.get_mail_config",
+    # User-class (R1): the caller's own mailbox + submission quotas.
+    "fauna.bridges.get_mail_quotas",
     "fauna.bridges.get_mail_serving_enabled",
+    "fauna.bridges.get_mail_switches",
+    "fauna.bridges.get_message_scan_result",
     "fauna.bridges.get_primary_domain_rename_status",
     # An Admin-class read (R2): the spam baseline's state mutates nothing.
     "fauna.bridges.get_spam_baseline_state",
@@ -1624,6 +1747,7 @@ ACCOUNT_SCOPED_KINDS = frozenset({
     "fauna.bridges.put_spam_model",
     "fauna.bridges.query_cards",
     "fauna.bridges.query_events",
+    "fauna.bridges.record_import_outcomes",
     "fauna.bridges.remove_follow",
     "fauna.bridges.reset_spam_model",
     "fauna.bridges.resolve_follow_request",
@@ -1638,6 +1762,7 @@ ACCOUNT_SCOPED_KINDS = frozenset({
     "fauna.bridges.set_baseline_contribution",
     "fauna.bridges.set_forward_all_to",
     "fauna.bridges.set_mail_serving_enabled",
+    "fauna.bridges.set_mail_switches",
     "fauna.bridges.set_settings",
     "fauna.bridges.start_export_session",
     "fauna.bridges.start_import_session",
@@ -1683,6 +1808,8 @@ GLOBAL_ADMIN_KINDS = frozenset({
     "fauna.admin.set_subhandles",
     "fauna.admin.tiers.create",
     "fauna.admin.tiers.update",
+    # Moves which builds the box's updater follows — deployment-wide.
+    "fauna.admin.update_channel.set",
     "fauna.admin.users.cancel_eviction",
     "fauna.admin.users.clear_handle",
     "fauna.admin.users.evict",
@@ -1692,6 +1819,7 @@ GLOBAL_ADMIN_KINDS = frozenset({
     "fauna.bridges.append",
     "fauna.bridges.approve_pending_bridge",
     "fauna.bridges.atproto.deliver_permission_set",
+    "fauna.bridges.atproto.deliver_service_auth",
     "fauna.bridges.atproto.end_session",
     "fauna.bridges.atproto.fetch_app_credential_verifiers",
     "fauna.bridges.atproto.fetch_identities",
@@ -1740,7 +1868,15 @@ GLOBAL_ADMIN_KINDS = frozenset({
     "fauna.bridges.force_rotate_dkim",
     "fauna.bridges.forward_message",
     "fauna.bridges.get_quota",
+    "fauna.bridges.get_dmarc_aggregate_report",
+    "fauna.bridges.get_dmarc_forensic_report",
+    "fauna.bridges.get_tlsrpt_inbound_report",
+    "fauna.bridges.ingest_dmarc_report",
     "fauna.bridges.ingest_inbound_mail",
+    "fauna.bridges.ingest_tlsrpt_report",
+    "fauna.bridges.list_dmarc_aggregate_reports",
+    "fauna.bridges.list_dmarc_forensic_reports",
+    "fauna.bridges.list_tlsrpt_inbound_reports",
     "fauna.bridges.list_mailboxes",
     "fauna.bridges.list_messages",
     "fauna.bridges.mark_outbound_bounced",
@@ -1750,6 +1886,10 @@ GLOBAL_ADMIN_KINDS = frozenset({
     "fauna.bridges.move",
     "fauna.bridges.outbound_warmup_reset",
     "fauna.bridges.place_inbound_invite",
+    # The deployment-wide DMARC catalog write (Admin) and the MTA's observation
+    # report (BridgeMta) — neither is a caller-scoped door.
+    "fauna.bridges.put_dmarc_policy",
+    "fauna.bridges.report_dmarc_observation",
     "fauna.bridges.provision_self_signed_cert",
     "fauna.bridges.provision_tls_cert_blob",
     "fauna.bridges.publish_spam_baseline",

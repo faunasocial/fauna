@@ -205,19 +205,19 @@ mod tests {
 
     #[test]
     fn extracts_sni_host() {
-        let rec = client_hello_with_sni("mail.example.com");
-        assert_eq!(parse_sni(&rec).as_deref(), Some("mail.example.com"));
+        let rec = client_hello_with_sni("mail.example.net");
+        assert_eq!(parse_sni(&rec).as_deref(), Some("mail.example.net"));
     }
 
     #[test]
     fn lowercases_sni() {
-        let rec = client_hello_with_sni("Mail.example.com");
-        assert_eq!(parse_sni(&rec).as_deref(), Some("mail.example.com"));
+        let rec = client_hello_with_sni("Mail.Example.Net");
+        assert_eq!(parse_sni(&rec).as_deref(), Some("mail.example.net"));
     }
 
     #[test]
     fn first_record_len_reports_full_record() {
-        let rec = client_hello_with_sni("example.com");
+        let rec = client_hello_with_sni("example.net");
         assert_eq!(first_record_len(&rec), Some(rec.len()));
     }
 
@@ -242,7 +242,7 @@ mod tests {
 
     #[test]
     fn truncated_buffers_never_panic() {
-        let rec = client_hello_with_sni("mail.example.com");
+        let rec = client_hello_with_sni("mail.example.net");
         for n in 0..rec.len() {
             // Any prefix must return Some/None, never panic.
             let _ = parse_sni(&rec[..n]);

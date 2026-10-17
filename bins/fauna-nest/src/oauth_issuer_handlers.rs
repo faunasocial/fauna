@@ -162,6 +162,14 @@ fn force_rotate_issuer_key_handler() -> RpcHandler {
             .map_err(|e| internal(format!("forced issuer key rotation task: {e}")))?
             .map_err(|e| internal(format!("force-rotate issuer key: {e}")))?;
 
+            // Door (c)'s issuer arm: every principal session was admitted under
+            // a key this call just dropped, and a live session is a token still
+            // honoured after the arm said no token signed by that key is —
+            // so every one closes 4401, after the rotation's own write
+            // (`transport-connection.md` § *The principal session* →
+            // *Revocation — three doors*).
+            state.ws.disconnect_all_principals("issuer keys dropped");
+
             // The nudge is part of the compromise response, not a convenience:
             // the dropped `kid`s have left the nest's served set, but a resource
             // server keeps honouring them until it re-reads, and this is what
@@ -403,6 +411,72 @@ mod tests {
              listing a connection whose refresh family this call just killed"
         );
         assert!(reply.rotated_at > 0, "the reply still dates the rotation");
+    }
+
+    /// Door (c)'s forced arms (`transport-connection.md` § *The principal
+    /// session* → *Revocation — three doors*): the session-secret rotation and
+    /// the issuer-key rotation each close **every** principal session on the
+    /// nest, 4401, across accounts — every one was opened under a family the
+    /// first ends and admitted under a key the second drops.
+    #[tokio::test]
+    async fn each_forced_arm_closes_every_principal_session() {
+        let seed = [9u8; 32];
+        let db = Arc::new(CacheDb::open_in_memory().expect("in-memory db"));
+        let public = ed25519_dalek::SigningKey::from_bytes(&seed)
+            .verifying_key()
+            .to_bytes();
+        db.set_nest_keypair(&seed, &public)
+            .await
+            .expect("seat the deployment keypair");
+        let admin = [1u8; 32];
+        db.create_user_with_handle(&admin, "free", "root", None)
+            .await
+            .expect("the admin has an account");
+        db.add_admin_actor(&admin[..]).await.expect("and the role");
+        let state = Arc::new(AppState {
+            nest_signing_key: Some(ed25519_dalek::SigningKey::from_bytes(&seed)),
+            ..AppState::for_test(db)
+        });
+        let open = |state: &AppState| {
+            [[2u8; 32], [3u8; 32]].map(|account| {
+                state
+                    .ws
+                    .subscribe_principal(crate::principal_handlers::PrincipalBinding {
+                        account,
+                        principal_id: b"p".to_vec(),
+                        token_scopes: vec![],
+                        family_id: Some(b"fam".to_vec()),
+                    })
+            })
+        };
+
+        let sessions = open(&state);
+        force_rotate_session_secret_handler()(
+            state.clone(),
+            admin,
+            fauna_protocol::encode_canonical(&ForceRotateSessionSecretRequest::default())
+                .expect("encode"),
+        )
+        .await
+        .expect("the session-secret arm succeeds");
+        assert!(
+            sessions.iter().all(|(c, _)| c.is_revoked()),
+            "the session-secret arm closes every principal session"
+        );
+
+        let sessions = open(&state);
+        force_rotate_issuer_key_handler()(
+            state.clone(),
+            admin,
+            fauna_protocol::encode_canonical(&ForceRotateIssuerKeyRequest::default())
+                .expect("encode"),
+        )
+        .await
+        .expect("the issuer-key arm succeeds");
+        assert!(
+            sessions.iter().all(|(c, _)| c.is_revoked()),
+            "the issuer-key arm closes every principal session"
+        );
     }
 
     /// A second rotation ends nothing and says `0`: `grants_ended` counts what

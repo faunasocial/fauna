@@ -10,7 +10,9 @@ export {
   supersededSuccessorOf,
   accountIndexRefusalOf,
   identityChangedOf,
+  identityForkOf,
   tokenExpiryOf,
+  lockedUntilOf,
 } from './launch-snapshot';
 export type { LaunchSnapshot, AccountIndexRefusal } from './launch-snapshot';
 
@@ -121,6 +123,10 @@ export interface LaunchMachine {
    *  (re-TOFU). A no-op in every phase but `IdentityChanged` — the pin is never
    *  forgotten outside this user action. */
   trustNestIdentity(): Promise<void>;
+  /** Whether the locked notice painted for `shownLockedUntilSecs` still stands
+   *  on the current snapshot — the shared `LaunchSnapshot::lock_notice_holds`
+   *  (`devices.md` § The locked state). `false` → route the snapshot afresh. */
+  lockNoticeHolds(shownLockedUntilSecs: number): boolean;
 }
 
 /**

@@ -1,6 +1,8 @@
 package com.fauna.app.ui.screen.settings
 
-import com.fauna.app.ui.util.ValueFormat
+import com.fauna.app.ui.navigation.exitAdminToPrimary
+import com.fauna.app.ui.util.resolveLocalized
+import com.fauna.app.ui.util.stringResourceFmt
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -13,7 +15,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
@@ -23,20 +24,46 @@ import androidx.navigation.NavController
 import com.fauna.app.BuildConfig
 import com.fauna.app.R
 import com.fauna.app.ui.viewmodel.AdminDashboardVM
+import com.fauna.ffi.FfiAdminDashboardSnapshot
 import social.fauna.generated.Ids
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AdminDashboardScreen(
     navController: NavController,
     vm: AdminDashboardVM = hiltViewModel()
 ) {
-    val stats by vm.stats.collectAsState()
+    val snapshot by vm.snapshot.collectAsState()
     val isLoading by vm.isLoading.collectAsState()
     val error by vm.errorMessage.collectAsState()
-    val context = LocalContext.current
 
     LaunchedEffect(Unit) { vm.loadStats() }
+
+    AdminDashboardContent(
+        snapshot = snapshot,
+        isLoading = isLoading,
+        error = error,
+        onBack = { navController.exitAdminToPrimary() },
+        onRefresh = { vm.loadStats() },
+        onNavigate = { route -> navController.navigate(route) },
+    )
+}
+
+/**
+ * The stateless dashboard: the admin page entries, then the shared card set
+ * ([snapshot]'s cards, in the fold's order) and the failed-read line. Split
+ * from [AdminDashboardScreen] so it renders without Hilt or the native FFI.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AdminDashboardContent(
+    snapshot: FfiAdminDashboardSnapshot?,
+    isLoading: Boolean,
+    error: String?,
+    onBack: () -> Unit,
+    onRefresh: () -> Unit,
+    onNavigate: (String) -> Unit,
+) {
+    val context = LocalContext.current
 
     Scaffold(
         topBar = {
@@ -44,21 +71,21 @@ fun AdminDashboardScreen(
                 title = { Text(stringResource(R.string.admin_dashboard_title), modifier = Modifier.testTag(Ids.ADMIN_DASHBOARD_HEADING)) },
                 navigationIcon = {
                     IconButton(
-                        onClick = { navController.popBackStack() },
+                        onClick = onBack,
                         modifier = Modifier.testTag(Ids.ADMIN_NAV_BACK),
                     ) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.common_back))
                     }
                 },
                 actions = {
-                    IconButton(onClick = { vm.loadStats() }) {
+                    IconButton(onClick = onRefresh) {
                         Icon(Icons.Default.Refresh, stringResource(R.string.common_refresh))
                     }
                 }
             )
         }
     ) { padding ->
-        if (isLoading && stats == null) {
+        if (isLoading && snapshot == null) {
             Box(modifier = Modifier.fillMaxSize().padding(padding),
                 contentAlignment = Alignment.Center) { CircularProgressIndicator() }
         } else {
@@ -74,7 +101,7 @@ fun AdminDashboardScreen(
                         headlineContent = { Text(stringResource(R.string.admin_users_page_title)) },
                         leadingContent = { Icon(Icons.Default.Person, contentDescription = null) },
                         trailingContent = { Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null) },
-                        modifier = Modifier.clickable { navController.navigate("settings/admin-users") }
+                        modifier = Modifier.testTag("${Ids.ADMIN_NAV_ROW}[admin-users]").clickable { onNavigate("settings/admin-users") }
                     )
                 }
 
@@ -86,7 +113,7 @@ fun AdminDashboardScreen(
                         headlineContent = { Text(stringResource(R.string.admin_settings_page_title)) },
                         leadingContent = { Icon(Icons.Default.Settings, contentDescription = null) },
                         trailingContent = { Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null) },
-                        modifier = Modifier.clickable { navController.navigate("settings/admin-settings") }
+                        modifier = Modifier.testTag("${Ids.ADMIN_NAV_ROW}[admin-settings]").clickable { onNavigate("settings/admin-settings") }
                     )
                 }
 
@@ -99,7 +126,7 @@ fun AdminDashboardScreen(
                         headlineContent = { Text(stringResource(R.string.admin_nest_page_title)) },
                         leadingContent = { Icon(Icons.Default.Tune, contentDescription = null) },
                         trailingContent = { Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null) },
-                        modifier = Modifier.clickable { navController.navigate("settings/admin-nest") }
+                        modifier = Modifier.testTag("${Ids.ADMIN_NAV_ROW}[admin-nest]").clickable { onNavigate("settings/admin-nest") }
                     )
                 }
 
@@ -114,7 +141,7 @@ fun AdminDashboardScreen(
                             headlineContent = { Text(stringResource(R.string.admin_mail_page_title)) },
                             leadingContent = { Icon(Icons.Default.Email, contentDescription = null) },
                             trailingContent = { Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null) },
-                            modifier = Modifier.clickable { navController.navigate("settings/admin-mail") }
+                            modifier = Modifier.testTag("${Ids.ADMIN_NAV_ROW}[admin-mail]").clickable { onNavigate("settings/admin-mail") }
                         )
                     }
                     // admin-calendar: the deployment-wide CalDAV-enable toggle (admin.md
@@ -125,7 +152,7 @@ fun AdminDashboardScreen(
                             headlineContent = { Text(stringResource(R.string.admin_calendar_page_title)) },
                             leadingContent = { Icon(Icons.Default.CalendarMonth, contentDescription = null) },
                             trailingContent = { Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null) },
-                            modifier = Modifier.clickable { navController.navigate("settings/admin-calendar") }
+                            modifier = Modifier.testTag("${Ids.ADMIN_NAV_ROW}[admin-calendar]").clickable { onNavigate("settings/admin-calendar") }
                         )
                     }
                     // admin-contacts: the deployment-wide CardDAV-enable toggle (admin.md
@@ -136,7 +163,7 @@ fun AdminDashboardScreen(
                             headlineContent = { Text(stringResource(R.string.admin_contacts_page_title)) },
                             leadingContent = { Icon(Icons.Default.Contacts, contentDescription = null) },
                             trailingContent = { Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null) },
-                            modifier = Modifier.clickable { navController.navigate("settings/admin-contacts") }
+                            modifier = Modifier.testTag("${Ids.ADMIN_NAV_ROW}[admin-contacts]").clickable { onNavigate("settings/admin-contacts") }
                         )
                     }
                     // admin-files: the deployment-wide WebDAV-enable toggle (admin.md
@@ -147,7 +174,7 @@ fun AdminDashboardScreen(
                             headlineContent = { Text(stringResource(R.string.admin_files_page_title)) },
                             leadingContent = { Icon(Icons.Default.Folder, contentDescription = null) },
                             trailingContent = { Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null) },
-                            modifier = Modifier.clickable { navController.navigate("settings/admin-files") }
+                            modifier = Modifier.testTag("${Ids.ADMIN_NAV_ROW}[admin-files]").clickable { onNavigate("settings/admin-files") }
                         )
                     }
                     Card(modifier = Modifier.fillMaxWidth()) {
@@ -155,7 +182,7 @@ fun AdminDashboardScreen(
                             headlineContent = { Text(stringResource(R.string.admin_aliases_page_title)) },
                             leadingContent = { Icon(Icons.Default.AlternateEmail, contentDescription = null) },
                             trailingContent = { Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null) },
-                            modifier = Modifier.clickable { navController.navigate("settings/admin-aliases") }
+                            modifier = Modifier.testTag("${Ids.ADMIN_NAV_ROW}[admin-aliases]").clickable { onNavigate("settings/admin-aliases") }
                         )
                     }
                     // admin-web: the nest-wide apex-actor designation (web-content-
@@ -166,7 +193,7 @@ fun AdminDashboardScreen(
                             headlineContent = { Text(stringResource(R.string.admin_web_page_title)) },
                             leadingContent = { Icon(Icons.Default.Public, contentDescription = null) },
                             trailingContent = { Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null) },
-                            modifier = Modifier.clickable { navController.navigate("settings/admin-web") }
+                            modifier = Modifier.testTag("${Ids.ADMIN_NAV_ROW}[admin-web]").clickable { onNavigate("settings/admin-web") }
                         )
                     }
                     Card(modifier = Modifier.fillMaxWidth()) {
@@ -174,7 +201,7 @@ fun AdminDashboardScreen(
                             headlineContent = { Text(stringResource(R.string.admin_bridges_pending_title)) },
                             leadingContent = { Icon(Icons.Default.Dns, contentDescription = null) },
                             trailingContent = { Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null) },
-                            modifier = Modifier.clickable { navController.navigate("settings/admin-bridges-pending") }
+                            modifier = Modifier.testTag("${Ids.ADMIN_NAV_ROW}[admin-bridges-pending]").clickable { onNavigate("settings/admin-bridges-pending") }
                         )
                     }
                     // admin-dns: the full DNS record matrix + managed-mode master
@@ -185,7 +212,7 @@ fun AdminDashboardScreen(
                             headlineContent = { Text(stringResource(R.string.admin_dns_title)) },
                             leadingContent = { Icon(Icons.Default.Language, contentDescription = null) },
                             trailingContent = { Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null) },
-                            modifier = Modifier.clickable { navController.navigate("settings/admin-dns") }
+                            modifier = Modifier.testTag("${Ids.ADMIN_NAV_ROW}[admin-dns]").clickable { onNavigate("settings/admin-dns") }
                         )
                     }
                 }
@@ -196,7 +223,7 @@ fun AdminDashboardScreen(
                         headlineContent = { Text(stringResource(R.string.admin_custody_hosting_title)) },
                         leadingContent = { Icon(Icons.Default.Storage, contentDescription = null) },
                         trailingContent = { Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null) },
-                        modifier = Modifier.clickable { navController.navigate("settings/admin-custody-hosting") }
+                        modifier = Modifier.testTag("${Ids.ADMIN_NAV_ROW}[admin-custody-hosting]").clickable { onNavigate("settings/admin-custody-hosting") }
                     )
                 }
                 // Admin Logs — the nest's fauna-log ring over fauna.admin.logs
@@ -207,88 +234,53 @@ fun AdminDashboardScreen(
                         headlineContent = { Text(stringResource(R.string.admin_logs_page_title)) },
                         leadingContent = { Icon(Icons.Default.Description, contentDescription = null) },
                         trailingContent = { Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null) },
-                        modifier = Modifier.clickable { navController.navigate("settings/admin-logs") }
+                        modifier = Modifier.testTag("${Ids.ADMIN_NAV_ROW}[admin-logs]").clickable { onNavigate("settings/admin-logs") }
                     )
                 }
 
-                stats?.let { s ->
-                    Text(stringResource(R.string.settings_admin_page_overview), style = MaterialTheme.typography.titleMedium)
-                    Row(modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        StatCard(Icons.Default.Person, stringResource(R.string.common_users), "${s.totalUsers}",
-                            Modifier.weight(1f))
-                        StatCard(Icons.Default.Wifi, stringResource(R.string.common_connected), "${s.wsConnections}",
-                            Modifier.weight(1f))
+                // The shared card set (admin.md § 1. Dashboard → *The card
+                // set*): the fold's cards in its order, each an indexed
+                // `admin-stat-card`. Android chooses no card of its own.
+                snapshot?.let { snap ->
+                    if (snap.stats.isNotEmpty()) {
+                        Text(stringResource(R.string.settings_admin_page_overview), style = MaterialTheme.typography.titleMedium)
                     }
-
-                    Card(modifier = Modifier.fillMaxWidth()) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Text(stringResource(R.string.common_storage), style = MaterialTheme.typography.titleSmall)
-                            Spacer(Modifier.height(8.dp))
-                            Row(modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween) {
-                                Column {
-                                    Text(stringResource(R.string.common_inbox), style = MaterialTheme.typography.labelMedium)
-                                    Text(ValueFormat.byteSize(context, s.totalInboxBytes))
-                                }
-                                Column {
-                                    Text(stringResource(R.string.common_files), style = MaterialTheme.typography.labelMedium)
-                                    Text(ValueFormat.byteSize(context, s.totalStorageBytes))
-                                }
-                                Column {
-                                    Text(stringResource(R.string.settings_admin_page_total), style = MaterialTheme.typography.labelMedium)
-                                    Text(ValueFormat.byteSize(context,
-                                        s.totalInboxBytes + s.totalStorageBytes))
-                                }
-                            }
-                        }
-                    }
-
-                    if (s.usersByTier.isNotEmpty()) {
-                        Card(modifier = Modifier.fillMaxWidth()) {
-                            Column(modifier = Modifier.padding(16.dp)) {
-                                Text(stringResource(R.string.common_users_by_tier), style = MaterialTheme.typography.titleSmall)
-                                Spacer(Modifier.height(8.dp))
-                                s.usersByTier.forEach { (tier, count) ->
-                                    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
-                                        horizontalArrangement = Arrangement.SpaceBetween) {
-                                        Text(tier.replaceFirstChar { it.uppercase() })
-                                        Text("$count")
-                                    }
-                                }
-                                if (s.suspendedUsers > 0) {
-                                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-                                    Row(modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween) {
-                                        Text(stringResource(R.string.admin_dashboard_suspended), color = MaterialTheme.colorScheme.error)
-                                        Text("${s.suspendedUsers}",
-                                            color = MaterialTheme.colorScheme.error)
-                                    }
-                                }
-                            }
-                        }
+                    snap.stats.forEach { card ->
+                        StatCard(
+                            label = resolveLocalized(context, card.label).orEmpty(),
+                            value = resolveLocalized(context, card.value).orEmpty(),
+                        )
                     }
                 }
 
-                error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                // A failed read drops only its own cards; its detail rides
+                // `error-message` (admin.md § Navigation model). The id leaves
+                // the tree when there is nothing to say.
+                if (!error.isNullOrEmpty()) {
+                    Text(
+                        stringResourceFmt(R.string.admin_dashboard_load_error, error),
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.testTag(Ids.ERROR_MESSAGE),
+                    )
+                }
             }
         }
     }
 }
 
 @Composable
-private fun StatCard(icon: ImageVector, label: String, value: String, modifier: Modifier) {
-    Card(modifier = modifier.testTag(Ids.ADMIN_STAT_CARD)) {
-        Column(modifier = Modifier.padding(16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(icon, contentDescription = null, modifier = Modifier.size(24.dp),
-                tint = MaterialTheme.colorScheme.primary)
-            Spacer(Modifier.height(4.dp))
-            Text(value, style = MaterialTheme.typography.headlineSmall,
-                modifier = Modifier.testTag(Ids.ADMIN_STAT_CARD_VALUE))
-            Text(label, style = MaterialTheme.typography.labelSmall,
+private fun StatCard(label: String, value: String) {
+    Card(modifier = Modifier.fillMaxWidth().testTag(Ids.ADMIN_STAT_CARD)) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(label, style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.testTag(Ids.ADMIN_STAT_CARD_LABEL))
+            Text(value, style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.testTag(Ids.ADMIN_STAT_CARD_VALUE))
         }
     }
 }

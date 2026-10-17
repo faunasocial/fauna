@@ -14,12 +14,10 @@
 use std::sync::Arc;
 
 use fauna_client::NestClient;
-use fauna_client_account::sessions_view::{
-    self, RosterDevice, SessionRowView, SessionsFoldInput, SessionsSnapshot,
-};
-use fauna_client_account::{SessionsClient, SessionsError};
+pub use fauna_client_account::SessionsAct;
+use fauna_client_account::sessions_view::{self, SessionsRoster, SessionsSnapshot};
+use fauna_client_account::{SessionsClient, SessionsPass};
 use fauna_client_recovery::ceremony::LOCKOUT_CONFIRM_WORD;
-use fauna_core::localized::LocalizedText;
 use fauna_devices_machine::DevicesMachine;
 use fauna_i18n::strings::sessions as t;
 use fauna_ui_ids as ids;
@@ -50,14 +48,6 @@ impl SessionsState {
     }
 }
 
-/// One act on the page.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SessionsAct {
-    Revoke(String),
-    RevokeOthers,
-    Lockout,
-}
-
 /// Everything the op reads, captured off `SettingsState` so it can cross a
 /// `tokio::spawn`.
 pub struct SessionsOp {
@@ -66,17 +56,6 @@ pub struct SessionsOp {
     store: Option<fauna_sync_engine::account_runtime::AccountStoreHandle>,
     local_device_id: Option<String>,
     act: Option<SessionsAct>,
-}
-
-/// What the op brings back.
-#[derive(Debug)]
-pub struct SessionsOutcome {
-    /// The re-folded rows, or `None` when the re-read failed — the previously
-    /// painted rows then stay (`ui/sessions.md` § Errors & edge cases).
-    rows: Option<Vec<SessionRowView>>,
-    error: Option<LocalizedText>,
-    /// The lock landed: the app leaves the shell for its launch surface.
-    pub locked: bool,
 }
 
 /// The op for a nav-edge hydrate (`act: None`) or an act; `None` pre-auth.
@@ -90,118 +69,51 @@ pub(super) fn op(state: &SettingsState, act: Option<SessionsAct>) -> Option<Sess
     })
 }
 
-/// Act (if asked), then re-read and fold. A lock that lands returns at once:
-/// the nest has just revoked every token, this app's included, so there is
-/// nothing left to list.
-pub(super) async fn run(op: SessionsOp) -> SessionsOutcome {
+/// The shared pass (`SessionsClient::pass`): act (if asked), then re-read and
+/// fold. What stays here is only how this app gathers the roster.
+pub(super) async fn run(op: SessionsOp) -> SessionsPass {
     let client = SessionsClient::new(Arc::clone(&op.nest), Arc::clone(&op.nest));
-    let mut error = None;
-    match op.act {
-        None => {}
-        Some(SessionsAct::Revoke(token_id)) => {
-            if let Err(e) = client.revoke(token_id).await {
-                error = Some(sessions_view::act_failed(e));
-            }
-        }
-        Some(SessionsAct::RevokeOthers) => match client.revoke_others().await {
-            Ok(_) => {}
-            Err(SessionsError::NoOwnSession) => {
-                error = Some(LocalizedText::key(sessions_view::keys::NO_OWN_SESSION));
-            }
-            Err(SessionsError::Rpc(e)) => error = Some(sessions_view::act_failed(e)),
-        },
-        Some(SessionsAct::Lockout) => match client.lockout().await {
-            Ok(_) => {
-                return SessionsOutcome {
-                    rows: None,
-                    error: None,
-                    locked: true,
-                };
-            }
-            Err(e) => error = Some(sessions_view::act_failed(e)),
-        },
-    }
+    let roster = roster(op.devices, op.store, op.local_device_id);
+    client
+        .pass(op.act, roster, || {
+            fauna_launch_machine::launch_clock::now_secs_or_zero().max(0) as u64
+        })
+        .await
+}
 
-    // The roster names device-minted sessions — rendered by the shared Devices
-    // machine, which owns the sealed-label render; this page never touches keys.
-    let roster: Vec<(String, RosterDevice)> = match &op.devices {
+/// The roster names device-minted sessions — rendered by the shared Devices
+/// machine, which owns the sealed-label render; this page never touches keys.
+/// This machine's row is the same read door as the Devices page's This-device
+/// marker (`devices.md` § This-device marker).
+async fn roster(
+    devices: Option<Arc<DevicesMachine>>,
+    store: Option<fauna_sync_engine::account_runtime::AccountStoreHandle>,
+    local_device_id: Option<String>,
+) -> SessionsRoster {
+    let rows = match &devices {
         Some(machine) => {
             machine.refresh().await;
-            machine
-                .snapshot()
-                .devices
-                .into_iter()
-                .filter_map(|d| {
-                    let principal = d.principal?;
-                    Some((
-                        d.device_id,
-                        RosterDevice {
-                            principal,
-                            name: d.label,
-                        },
-                    ))
-                })
-                .collect()
+            machine.snapshot().devices
         }
         None => Vec::new(),
     };
-    // This machine's enrolled principal — the same read door as the Devices
-    // page's This-device marker (`devices.md` § This-device marker).
-    let enrolled = match &op.store {
+    let enrolled = match &store {
         Some(store) => store.enrolled_device_row().await.ok().flatten(),
         None => None,
     };
     let this_row =
-        fauna_devices_machine::this_device_row(enrolled.as_deref(), op.local_device_id.as_deref());
-    let this_principal = this_row.and_then(|row| {
-        roster
-            .iter()
-            .find(|(device_id, _)| *device_id == row)
-            .map(|(_, d)| d.principal.clone())
-    });
-    let roster: Vec<RosterDevice> = roster.into_iter().map(|(_, d)| d).collect();
-
-    match client.list().await {
-        Ok(reply) => {
-            let own = client.own_token_ids().await;
-            let now = fauna_launch_machine::launch_clock::now_secs_or_zero().max(0) as u64;
-            let snapshot = sessions_view::fold(
-                &SessionsFoldInput {
-                    sessions: &reply.sessions,
-                    own_token_ids: &own,
-                    roster: &roster,
-                    this_device_principal: this_principal.as_deref(),
-                    now,
-                },
-                error,
-            );
-            SessionsOutcome {
-                rows: Some(snapshot.rows),
-                error: snapshot.error,
-                locked: false,
-            }
-        }
-        Err(e) => SessionsOutcome {
-            rows: None,
-            // An act's error outranks the re-read's: it is the one the user
-            // just asked about (e2e convention 11 — never drop it).
-            error: Some(error.unwrap_or_else(|| sessions_view::load_failed(e))),
-            locked: false,
-        },
-    }
+        fauna_devices_machine::this_device_row(enrolled.as_deref(), local_device_id.as_deref());
+    sessions_view::roster_from(
+        rows.into_iter()
+            .map(|d| (d.device_id, d.principal, d.label)),
+        this_row.as_deref(),
+    )
 }
 
-/// Fold an outcome onto the page. A failed re-read keeps the painted rows.
-pub(super) fn apply(state: &mut SessionsState, outcome: SessionsOutcome) {
+/// Fold a pass onto the page. A failed re-read keeps the painted rows.
+pub(super) fn apply(state: &mut SessionsState, pass: SessionsPass) {
     state.busy = false;
-    let rows = match outcome.rows {
-        Some(rows) => rows,
-        None => state.snapshot.take().map(|s| s.rows).unwrap_or_default(),
-    };
-    state.snapshot = Some(SessionsSnapshot {
-        rows,
-        error: outcome.error,
-    });
+    state.snapshot = Some(pass.onto(state.snapshot.take()));
 }
 
 /// This sub-page's error — read by `App::page_snapshot_error` (the `web` /
@@ -329,6 +241,8 @@ pub(super) fn sessions_elements(state: &SettingsState) -> Vec<Element> {
 mod tests {
     use super::*;
     use crate::settings::SubPage;
+    use fauna_client_account::sessions_view::SessionRowView;
+    use fauna_core::localized::LocalizedText;
 
     fn row(id: &str, own: bool) -> SessionRowView {
         SessionRowView {
@@ -429,7 +343,7 @@ mod tests {
         };
         apply(
             &mut state,
-            SessionsOutcome {
+            SessionsPass {
                 rows: None,
                 error: Some(sessions_view::load_failed("offline")),
                 locked: false,

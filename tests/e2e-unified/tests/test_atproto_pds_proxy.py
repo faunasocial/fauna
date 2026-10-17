@@ -1,4 +1,5 @@
-"""tier_3: F3 service proxying end-to-end — ``getTimeline`` through the nest.
+"""tier_3: F3 service proxying end-to-end — ``getTimeline`` through the nest,
+and the direct-message gate on the same proxy.
 
 The F3 proxy leg's definition of success (``docs/goal/behavior/
 atproto-pds-full.md`` § F3 detail, *Service proxying*): a session-authed raw
@@ -18,15 +19,24 @@ seam (the ``FAUNA_ATPROTO_PLC_DIRECTORY_URL`` precedent): mapped refs skip
 resolution + the SSRF guard (a loopback endpoint is what the guard exists to
 refuse), every other ref still runs the full guarded path — which the
 unmapped-ref case below proves stays genuine.
+
+The second test witnesses atproto outcome 48 (``docs/features/atproto.md``):
+an app password reaches direct messages only when it was made with
+direct-message access. Two credentials on one account differ only in
+``dm_allowed``; the same chat call is refused by D8 for one and forwarded
+for the other.
 """
 
 import base64
+import contextlib
 import json
 import os
 import subprocess
 import time
+from types import SimpleNamespace
 
 import pytest
+from nacl import pwhash
 
 from helpers.atproto_fakes import FakeAppView, FakePlcDirectory
 from helpers.xrpc_client import (
@@ -40,6 +50,9 @@ pytestmark = pytest.mark.tier_3
 USER_ROTATION_PUB = "did:key:zDnaembgSGUhZULN2Caob4HLJPaxBh92N7rtH21TErzqf8HQo"  # gitleaks:allow
 HANDLE_DOMAIN = "fauna.test"
 APPVIEW_REF = "did:web:api.bsky.app#bsky_appview"
+# The chat service's proxy audience — `authz.rs::CHAT_SERVICE_DID`, the
+# audience the D8 module treats as direct-message access whatever the method.
+CHAT_REF = "did:web:api.bsky.chat#bsky_chat"
 
 
 def _jwt_claims(token: str) -> dict:
@@ -49,10 +62,34 @@ def _jwt_claims(token: str) -> dict:
     return json.loads(base64.urlsafe_b64decode(parts[1] + pad))
 
 
-@pytest.mark.feature("atproto")
-def test_atproto_pds_service_proxy_end_to_end(nest_binary, atproto_bridge_e2e_binary, tmp_path_factory):
+def _second_credential() -> tuple[str, str]:
+    """A (secret, PHC verifier) pair distinct from the committed fixture's.
+
+    ``createSession`` takes the first credential whose verifier matches the
+    password, so two credentials on one account need two secrets. The PHC
+    string is libsodium's Argon2id at the production parameters
+    (m=65536,t=2,p=1) — the format the Go verifier parses.
+    """
+    secret = "9zzz-test-dm4f-qrst"
+    verifier = pwhash.argon2id.str(
+        secret.encode(), opslimit=2, memlimit=65536 * 1024,
+    ).decode()
+    assert verifier.startswith("$argon2id$v=19$m=65536,t=2,p=1$"), verifier
+    return secret, verifier
+
+
+@contextlib.contextmanager
+def _proxy_stack(nest_binary, atproto_bridge_e2e_binary, tmp_path_factory, *,
+                 credentials, appview, proxy_refs):
+    """nest + atproto.pds bridge + one ACTIVE hosted account ``alice`` holding
+    ``credentials`` (``credential_id, label, verifier, dm_allowed`` tuples).
+
+    Yields a namespace with ``xrpc_base`` and ``tail`` (the bridge log's last
+    4000 bytes, for failure messages). ``appview`` is the caller's fake, mapped
+    for every ref in ``proxy_refs``; the PLC directory fake is the stack's own.
+    """
     from clients.ws_rpc_admin_client import WsRpcAdminClient
-    from common.auth import register_handled_actor
+    from common.auth import open_registration, register_handled_actor
     from conftest import _make_nest, _repo_root
     from helpers.bridge_enrollment import approve_bridge
     from drivers.port_util import (
@@ -63,8 +100,6 @@ def test_atproto_pds_service_proxy_end_to_end(nest_binary, atproto_bridge_e2e_bi
         untrack_process,
     )
 
-    secret, verifier = _load_fixture()
-
     # The bridge binary is built by the `atproto_bridge_e2e_binary` fixture at
     # COLLECTION time — outside the per-test timeout budget; see
     # `_ensure_atproto_bridge_e2e_built`'s docstring in conftest.py for why an
@@ -72,22 +107,18 @@ def test_atproto_pds_service_proxy_end_to_end(nest_binary, atproto_bridge_e2e_bi
     # `Timeout (>900.0s)` under fleet contention. The fixture also picks the
     # right binary per platform, so the windows/unix branch is gone from here.
     # The e2e FLAVOR, not the production binary: the FAUNA_ATPROTO_* seams this
-    # test sets are compiled only into `-tags fauna_e2e_fixtures` (convention 15,
+    # stack sets are compiled only into `-tags fauna_e2e_fixtures` (convention 15,
     # e2e-automation-surface-gating.md → the Go bridges' leg); the shipped
-    # flavor ignores them, so against it this test could not even reach its
+    # flavor ignores them, so against it a test could not even reach its
     # fakes. The shipped flavor itself is exercised by test_atproto_bridge_enroll
     # (tier_3) and the nest image tests (tier_4).
     atproto_bin = atproto_bridge_e2e_binary
 
-    appview = FakeAppView(
-        timeline={"feed": [{"post": {"uri": "at://did:plc:fake/app.bsky.feed.post/1"}}],
-                  "cursor": ""},
-    )
     directory = FakePlcDirectory()
     nest, nest_cleanup = _make_nest(
         nest_binary, tmp_path_factory, "atproto-proxy-nest",
-        claim_domain=HANDLE_DOMAIN,    )
-    from common.auth import open_registration
+        claim_domain=HANDLE_DOMAIN,
+    )
     open_registration(nest)
     proc = None
     log_fh = None
@@ -107,7 +138,9 @@ def test_atproto_pds_service_proxy_end_to_end(nest_binary, atproto_bridge_e2e_bi
 
         env = os.environ.copy()
         env["FAUNA_ATPROTO_PLC_DIRECTORY_URL"] = directory.url
-        env["FAUNA_ATPROTO_PROXY_FIXTURES"] = json.dumps({APPVIEW_REF: appview.url})
+        env["FAUNA_ATPROTO_PROXY_FIXTURES"] = json.dumps(
+            {ref: appview.url for ref in proxy_refs}
+        )
 
         log_path = tmp / "bridge.log"
         log_fh = open(log_path, "wb")
@@ -165,7 +198,7 @@ def test_atproto_pds_service_proxy_end_to_end(nest_binary, atproto_bridge_e2e_bi
             pytest.fail("XRPC listener never came up:\n" + _tail())
 
         # ── alice: handled actor, atproto identity (gives the signer unseal a
-        # blob to provision-on-read), app credential, XRPC session. ──
+        # blob to provision-on-read), app credentials, ready for createSession. ──
         alice = register_handled_actor(
             nest["port"], handle="alice", domain=HANDLE_DOMAIN, base_url=nest["url"],
         )
@@ -187,12 +220,13 @@ def test_atproto_pds_service_proxy_end_to_end(nest_binary, atproto_bridge_e2e_bi
                     "history_backfill": False,
                 },
             )
-            reply = alice_ws.call(
-                "fauna.bridges.atproto.provision_app_credential",
-                {"credential_id": "ivory", "label": "Ivory", "verifier": verifier,
-                 "dm_allowed": False},
-            )
-            assert reply.get("ok") is True, reply
+            for credential_id, label, verifier, dm_allowed in credentials:
+                reply = alice_ws.call(
+                    "fauna.bridges.atproto.provision_app_credential",
+                    {"credential_id": credential_id, "label": label,
+                     "verifier": verifier, "dm_allowed": dm_allowed},
+                )
+                assert reply.get("ok") is True, reply
 
             # Since slice 4d, createSession requires an ACTIVE hosted identity
             # (`login_did` nil joins the uniform-401 set), so wait out the
@@ -213,60 +247,7 @@ def test_atproto_pds_service_proxy_end_to_end(nest_binary, atproto_bridge_e2e_bi
             else:
                 pytest.fail("hosted identity never became ACTIVE:\n" + _tail())
 
-        status, sess = _xrpc_post(
-            xrpc_base, "com.atproto.server.createSession",
-            {"identifier": "alice", "password": secret},
-        )
-        assert status == 200, f"createSession failed: {status} {sess}\n{_tail()}"
-        access = sess["accessJwt"]
-
-        # ── THE success criterion: a headerless getTimeline comes back with
-        # the AppView's timeline. ──
-        status, feed = _xrpc_get(
-            xrpc_base, "app.bsky.feed.getTimeline?limit=5", access,
-        )
-        assert status == 200, f"proxied getTimeline failed: {status} {feed}\n{_tail()}"
-        assert feed["feed"][0]["post"]["uri"].startswith("at://"), feed
-
-        # What crossed to the AppView: the forwarded query, and a service JWT
-        # minted for THIS method and audience — never the PDS access token.
-        reqs = appview.snapshot()
-        assert len(reqs) == 1, reqs
-        path, query, headers, _ = reqs[0]
-        assert path == "/xrpc/app.bsky.feed.getTimeline"
-        assert query == "limit=5"
-        authz = headers.get("Authorization", "")
-        assert authz.startswith("Bearer ") and access not in authz, (
-            "the caller's PDS access token must never reach the upstream", authz,
-        )
-        claims = _jwt_claims(authz.removeprefix("Bearer "))
-        assert claims["aud"] == APPVIEW_REF, claims
-        assert claims["lxm"] == "app.bsky.feed.getTimeline", claims
-        assert claims["iss"] == sess["did"], claims
-        assert claims["exp"] <= time.time() + 61, ("exp within the 60 s cap", claims)
-        assert claims["jti"], claims
-
-        # ── The guard is still live for every UNMAPPED ref: a did:web naming
-        # an IP literal is refused by the shared-Rust policy at resolution
-        # (DENY_NOT_PUBLIC_NAME), before anything is dialled. ──
-        status, err = _xrpc_get(
-            xrpc_base,
-            "app.bsky.feed.getTimeline",
-            access,
-            extra_headers={"atproto-proxy": "did:web:169.254.169.254#imds"},
-        )
-        assert status == 400, ("an unmapped IP-literal target must be refused", status, err)
-        assert len(appview.snapshot()) == 1, "the refused target must not be forwarded"
-
-        # ── The proxy plane is authenticated: no token, no forward. ──
-        status, err = _xrpc_get(xrpc_base, "app.bsky.feed.getTimeline")
-        assert status == 401 and err.get("error") == "AuthenticationRequired", (status, err)
-
-        # ── The closed world survives the fallback: an unknown non-app.bsky
-        # method without a header is still MethodNotImplemented. ──
-        status, err = _xrpc_get(xrpc_base, "com.example.custom.method", access)
-        assert status == 404, (status, err)
-        assert len(appview.snapshot()) == 1, appview.snapshot()
+        yield SimpleNamespace(xrpc_base=xrpc_base, tail=_tail)
     finally:
         if proc is not None:
             try:
@@ -281,6 +262,144 @@ def test_atproto_pds_service_proxy_end_to_end(nest_binary, atproto_bridge_e2e_bi
                 untrack_process(proc)
         if log_fh is not None:
             log_fh.close()
-        appview.close()
         directory.close()
         nest_cleanup()
+
+
+@pytest.mark.feature("atproto")
+def test_atproto_pds_service_proxy_end_to_end(nest_binary, atproto_bridge_e2e_binary, tmp_path_factory):
+    secret, verifier = _load_fixture()
+    appview = FakeAppView(
+        timeline={"feed": [{"post": {"uri": "at://did:plc:fake/app.bsky.feed.post/1"}}],
+                  "cursor": ""},
+    )
+    try:
+        with _proxy_stack(
+            nest_binary, atproto_bridge_e2e_binary, tmp_path_factory,
+            credentials=[("ivory", "Ivory", verifier, False)],
+            appview=appview, proxy_refs=[APPVIEW_REF],
+        ) as stack:
+            xrpc_base, _tail = stack.xrpc_base, stack.tail
+
+            status, sess = _xrpc_post(
+                xrpc_base, "com.atproto.server.createSession",
+                {"identifier": "alice", "password": secret},
+            )
+            assert status == 200, f"createSession failed: {status} {sess}\n{_tail()}"
+            access = sess["accessJwt"]
+
+            # ── THE success criterion: a headerless getTimeline comes back with
+            # the AppView's timeline. ──
+            status, feed = _xrpc_get(
+                xrpc_base, "app.bsky.feed.getTimeline?limit=5", access,
+            )
+            assert status == 200, f"proxied getTimeline failed: {status} {feed}\n{_tail()}"
+            assert feed["feed"][0]["post"]["uri"].startswith("at://"), feed
+
+            # What crossed to the AppView: the forwarded query, and a service JWT
+            # minted for THIS method and audience — never the PDS access token.
+            reqs = appview.snapshot()
+            assert len(reqs) == 1, reqs
+            path, query, headers, _ = reqs[0]
+            assert path == "/xrpc/app.bsky.feed.getTimeline"
+            assert query == "limit=5"
+            authz = headers.get("Authorization", "")
+            assert authz.startswith("Bearer ") and access not in authz, (
+                "the caller's PDS access token must never reach the upstream", authz,
+            )
+            claims = _jwt_claims(authz.removeprefix("Bearer "))
+            assert claims["aud"] == APPVIEW_REF, claims
+            assert claims["lxm"] == "app.bsky.feed.getTimeline", claims
+            assert claims["iss"] == sess["did"], claims
+            assert claims["exp"] <= time.time() + 61, ("exp within the 60 s cap", claims)
+            assert claims["jti"], claims
+
+            # ── The guard is still live for every UNMAPPED ref: a did:web naming
+            # an IP literal is refused by the shared-Rust policy at resolution
+            # (DENY_NOT_PUBLIC_NAME), before anything is dialled. ──
+            status, err = _xrpc_get(
+                xrpc_base,
+                "app.bsky.feed.getTimeline",
+                access,
+                extra_headers={"atproto-proxy": "did:web:169.254.169.254#imds"},
+            )
+            assert status == 400, ("an unmapped IP-literal target must be refused", status, err)
+            assert len(appview.snapshot()) == 1, "the refused target must not be forwarded"
+
+            # ── The proxy plane is authenticated: no token, no forward. ──
+            status, err = _xrpc_get(xrpc_base, "app.bsky.feed.getTimeline")
+            assert status == 401 and err.get("error") == "AuthenticationRequired", (status, err)
+
+            # ── The closed world survives the fallback: an unknown non-app.bsky
+            # method without a header is still MethodNotImplemented. ──
+            status, err = _xrpc_get(xrpc_base, "com.example.custom.method", access)
+            assert status == 404, (status, err)
+            assert len(appview.snapshot()) == 1, appview.snapshot()
+    finally:
+        appview.close()
+
+
+@pytest.mark.feature("atproto")
+def test_atproto_app_password_reaches_dms_only_with_dm_access(
+    nest_binary, atproto_bridge_e2e_binary, tmp_path_factory,
+):
+    """Outcome 48: the same chat call is refused for a password made without
+    direct-message access and forwarded for one made with it.
+
+    The two credentials differ only in ``dm_allowed``; the bridge mints
+    ``com.atproto.appPass`` for one and ``com.atproto.appPassPrivileged`` for
+    the other, and the D8 module (``authz.rs``) refuses the chat audience
+    without the privileged scope. The refusal happens before anything is
+    forwarded, so the fake chat service sees nothing from the unflagged session.
+    """
+    plain_secret, plain_verifier = _load_fixture()
+    dm_secret, dm_verifier = _second_credential()
+    chat = FakeAppView(routes={"chat.bsky.convo.listConvos": {"convos": [], "cursor": ""}})
+    try:
+        with _proxy_stack(
+            nest_binary, atproto_bridge_e2e_binary, tmp_path_factory,
+            credentials=[
+                ("plain", "Plain", plain_verifier, False),
+                ("dms", "With DMs", dm_verifier, True),
+            ],
+            appview=chat, proxy_refs=[CHAT_REF],
+        ) as stack:
+            xrpc_base, _tail = stack.xrpc_base, stack.tail
+            list_convos = "chat.bsky.convo.listConvos"
+            via_chat = {"atproto-proxy": CHAT_REF}
+
+            def _session(secret: str) -> dict:
+                status, sess = _xrpc_post(
+                    xrpc_base, "com.atproto.server.createSession",
+                    {"identifier": "alice", "password": secret},
+                )
+                assert status == 200, f"createSession failed: {status} {sess}\n{_tail()}"
+                return sess
+
+            # ── Without DM access: refused by D8, nothing forwarded. ──
+            plain = _session(plain_secret)
+            status, err = _xrpc_get(xrpc_base, list_convos, plain["accessJwt"],
+                                    extra_headers=via_chat)
+            assert status == 403 and err.get("error") == "InvalidToken", (status, err, _tail())
+            assert "direct-message access" in err.get("message", ""), err
+            assert chat.snapshot() == [], "a refused DM call must not reach the chat service"
+
+            # ── With DM access: the same call reaches the chat service, carrying
+            # a service JWT minted for the chat audience and this method. ──
+            dms = _session(dm_secret)
+            assert dms["did"] == plain["did"], "both credentials sign in as the one account"
+            status, body = _xrpc_get(xrpc_base, list_convos, dms["accessJwt"],
+                                     extra_headers=via_chat)
+            assert status == 200, f"DM-flagged listConvos failed: {status} {body}\n{_tail()}"
+            reqs = chat.snapshot()
+            assert len(reqs) == 1, reqs
+            path, _query, headers, _body = reqs[0]
+            assert path == f"/xrpc/{list_convos}", path
+            authz = headers.get("Authorization", "")
+            assert authz.startswith("Bearer ") and dms["accessJwt"] not in authz, authz
+            claims = _jwt_claims(authz.removeprefix("Bearer "))
+            assert claims["aud"] == CHAT_REF, claims
+            assert claims["lxm"] == list_convos, claims
+            assert claims["iss"] == dms["did"], claims
+    finally:
+        chat.close()

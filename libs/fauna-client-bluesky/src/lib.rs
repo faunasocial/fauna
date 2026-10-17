@@ -7,17 +7,17 @@
 //! Faithful transport migration of the two deleted HTTP twins
 //! (`GET /api/v1/bluesky/feed/thread/{uri}` + `GET /api/v1/bluesky/thread?post_id={hex}`)
 //! per `docs/goal/behavior/bridges.md` § Bluesky-native thread view and
-//! `docs/goal/architecture/api-layers.md` § Bluesky. The android + linux
-//! post-detail surfaces are the consumers (the `bluesky.*` auth/settings
+//! `docs/goal/architecture/api-layers.md` § Bluesky. The shared feed manager's
+//! thread page (`fauna_feed::FeedManager::open_thread`, every app's
+//! `feed-thread-page`) is the one consumer (the `bluesky.*` auth/settings
 //! twins fold into the unified `fauna.bridges.*`, so they get no client crate
 //! here).
 //!
 //! Pattern: same shape as the sibling per-feature client wrappers
 //! (`fauna-client-inbox`, `-search`, `-bridges`, `-conversations`) — a thin
 //! `pub struct BlueskyClient { nest: R }`, one async method per kind, no state
-//! machine. Generic over the WS-RPC transport (`R: RpcRequester`): native
-//! call sites pass `Arc<NestClient>` (linux directly; android via the
-//! `fauna-ffi` `FfiBlueskyClient` seam), a wasm SPA would pass its
+//! machine. Generic over the WS-RPC transport (`R: RpcRequester`): the
+//! feed manager passes its `Arc<NestClient>`, a wasm SPA would pass its
 //! `WsRpcClient`. The kind-composition logic is written once here and shared
 //! (priority #2).
 //!

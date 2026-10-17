@@ -67,7 +67,26 @@ pub struct CustodyHostingRow {
     /// Whether that last deposited receipt read degraded — `receipt_due`'s
     /// flip detector.
     pub last_receipt_degraded: bool,
+    /// Unix seconds of the owner nest's last authenticated refusal of this
+    /// row's custody handshake; `0` = not refused. The custodian-NEST serve
+    /// door refuses a marked row (ruling 4); a host rewrite clears it.
+    pub owner_refused_at: u64,
 }
+
+/// One custodied-fleet register row (`custody_hosting_fleet`): the owner a
+/// device belongs to and the root-signed `DeviceAuthorization` it presented at
+/// its last handshake, verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustodyFleetRow {
+    pub owner_actor_id: Vec<u8>,
+    pub witness: Vec<u8>,
+    pub admitted_at: i64,
+}
+
+/// The column list every hosting-row SELECT reads, in [`row_from_sql`]'s order.
+const HOSTING_ROW_COLUMNS: &str = "grant_id, owner_actor_id, witness, owner_nest_url, \
+    owner_devices, retained_bytes_cap, stopped, updated_at, held_bytes, last_receipt_at, \
+    last_receipt_degraded, owner_refused_at";
 
 impl CacheDb {
     /// Deposit (or rewrite) a hosting row. UPSERT on `(host, grant_id)`: the
@@ -119,7 +138,8 @@ impl CacheDb {
                 owner_devices = excluded.owner_devices,
                 retained_bytes_cap = excluded.retained_bytes_cap,
                 stopped = excluded.stopped,
-                updated_at = excluded.updated_at",
+                updated_at = excluded.updated_at,
+                owner_refused_at = 0",
             rusqlite::params![
                 host_actor_id,
                 grant_id,
@@ -145,14 +165,12 @@ impl CacheDb {
     ) -> Result<Vec<CustodyHostingRow>> {
         let host_actor_id = host_actor_id.to_vec();
         let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare(
-            "SELECT grant_id, owner_actor_id, witness, owner_nest_url, owner_devices,
-                    retained_bytes_cap, stopped, updated_at, held_bytes, last_receipt_at,
-                    last_receipt_degraded
-             FROM custody_hosting
-             WHERE host_actor_id = ?1
-             ORDER BY updated_at, grant_id",
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {HOSTING_ROW_COLUMNS}
+                 FROM custody_hosting
+                 WHERE host_actor_id = ?1
+                 ORDER BY updated_at, grant_id"
+        ))?;
         let rows = stmt.query_map(rusqlite::params![host_actor_id], row_from_sql)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -212,32 +230,12 @@ impl CacheDb {
     /// them, and counting them is how a pass report stays honest).
     pub async fn list_all_custody_hosting(&self) -> Result<Vec<(Vec<u8>, CustodyHostingRow)>> {
         let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare(
-            "SELECT host_actor_id, grant_id, owner_actor_id, witness, owner_nest_url,
-                    owner_devices, retained_bytes_cap, stopped, updated_at, held_bytes,
-                    last_receipt_at, last_receipt_degraded
-             FROM custody_hosting
-             ORDER BY host_actor_id, updated_at, grant_id",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            let host: Vec<u8> = row.get(0)?;
-            Ok((
-                host,
-                CustodyHostingRow {
-                    grant_id: row.get(1)?,
-                    owner_actor_id: row.get(2)?,
-                    witness: row.get(3)?,
-                    owner_nest_url: row.get(4)?,
-                    owner_devices: row.get(5)?,
-                    retained_bytes_cap: row.get::<_, i64>(6)? as u64,
-                    stopped: row.get(7)?,
-                    updated_at: row.get(8)?,
-                    held_bytes: row.get::<_, i64>(9)? as u64,
-                    last_receipt_at: row.get::<_, i64>(10)? as u64,
-                    last_receipt_degraded: row.get(11)?,
-                },
-            ))
-        })?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {HOSTING_ROW_COLUMNS}, host_actor_id
+                 FROM custody_hosting
+                 ORDER BY host_actor_id, updated_at, grant_id"
+        ))?;
+        let rows = stmt.query_map([], |row| Ok((row.get(12)?, row_from_sql(row)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -253,58 +251,16 @@ impl CacheDb {
         let grant_id = grant_id.to_vec();
         let conn = self.conn.lock().await;
         conn.query_row(
-            "SELECT grant_id, owner_actor_id, witness, owner_nest_url, owner_devices,
-                    retained_bytes_cap, stopped, updated_at, held_bytes, last_receipt_at,
-                    last_receipt_degraded
-             FROM custody_hosting
-             WHERE host_actor_id = ?1 AND grant_id = ?2",
+            &format!(
+                "SELECT {HOSTING_ROW_COLUMNS}
+                 FROM custody_hosting
+                 WHERE host_actor_id = ?1 AND grant_id = ?2"
+            ),
             rusqlite::params![host_actor_id, grant_id],
             row_from_sql,
         )
         .optional()
         .map_err(|e| anyhow!("get custody hosting row: {e}"))
-    }
-
-    /// Drop one hosting row (the admin remove door).
-    /// Returns whether a row existed. The derived held-bytes counter needs no
-    /// credit-back: dropping the row drops the figure.
-    pub async fn delete_custody_hosting(
-        &self,
-        host_actor_id: &[u8],
-        grant_id: &[u8],
-    ) -> Result<bool> {
-        let host_actor_id = host_actor_id.to_vec();
-        let grant_id = grant_id.to_vec();
-        let conn = self.conn.lock().await;
-        let n = conn
-            .execute(
-                "DELETE FROM custody_hosting WHERE host_actor_id = ?1 AND grant_id = ?2",
-                rusqlite::params![host_actor_id, grant_id],
-            )
-            .map_err(|e| anyhow!("delete custody hosting row: {e}"))?;
-        Ok(n > 0)
-    }
-
-    /// Remaining rows for one `(host, owner)` pair — the store-teardown gate:
-    /// the custodied store dir is shared by every grant of the pair, so it
-    /// falls only with the pair's LAST row.
-    pub async fn count_custody_hosting_for_host_owner(
-        &self,
-        host_actor_id: &[u8],
-        owner_actor_id: &[u8],
-    ) -> Result<usize> {
-        let host_actor_id = host_actor_id.to_vec();
-        let owner_actor_id = owner_actor_id.to_vec();
-        let conn = self.conn.lock().await;
-        let n: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM custody_hosting
-                 WHERE host_actor_id = ?1 AND owner_actor_id = ?2",
-                rusqlite::params![host_actor_id, owner_actor_id],
-                |row| row.get(0),
-            )
-            .map_err(|e| anyhow!("count custody hosting rows for host+owner: {e}"))?;
-        Ok(n.max(0) as usize)
     }
 
     /// The pump's metering write-back after a pass over one row. Touches ONLY
@@ -326,6 +282,30 @@ impl CacheDb {
             rusqlite::params![host_actor_id, grant_id, held_bytes as i64],
         )
         .map_err(|e| anyhow!("update custody hosting metering: {e}"))?;
+        Ok(())
+    }
+
+    /// The pump's record of the owner nest's verdict on this row's custody
+    /// handshake (ruling 5): `refused_at` = now (Unix seconds) on an
+    /// authenticated refusal, `0` on a successful handshake. Touches ONLY
+    /// `owner_refused_at`, and only when it changes; same no-resurrect rule as
+    /// the metering write.
+    pub async fn set_custody_hosting_owner_refused(
+        &self,
+        host_actor_id: &[u8],
+        grant_id: &[u8],
+        refused_at: u64,
+    ) -> Result<()> {
+        let host_actor_id = host_actor_id.to_vec();
+        let grant_id = grant_id.to_vec();
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "UPDATE custody_hosting
+             SET owner_refused_at = ?3
+             WHERE host_actor_id = ?1 AND grant_id = ?2 AND owner_refused_at != ?3",
+            rusqlite::params![host_actor_id, grant_id, refused_at as i64],
+        )
+        .map_err(|e| anyhow!("record custody hosting owner refusal: {e}"))?;
         Ok(())
     }
 
@@ -352,6 +332,144 @@ impl CacheDb {
         .map_err(|e| anyhow!("record custody hosting receipt: {e}"))?;
         Ok(())
     }
+
+    // ── The custodied-fleet register + the serve door's reads ───────────────
+    //
+    // `account-replica-posture.md` § Replica posture → *The custody grant +
+    // ceremony*, the custodian-NEST serve door bullet, rulings 3–4. The
+    // register is written ONLY by `fauna.auth.custodied_fleet_handshake` and
+    // dropped ONLY by the remove teardown; the door's predicate
+    // (`crate::custody_fleet`) reads both tables on every request.
+
+    /// Every hosting row this nest holds for `owner_actor_id`, across every
+    /// host, with its host — the serve door's per-request read (live-row
+    /// filter, exclusion union, scope union, newest-row pick). Ordered newest
+    /// `updated_at` first, so the first admitting row is the one the door
+    /// answers from (ruling 3: newest live row, never a union).
+    pub async fn list_custody_hosting_for_owner(
+        &self,
+        owner_actor_id: &[u8],
+    ) -> Result<Vec<(Vec<u8>, CustodyHostingRow)>> {
+        let owner_actor_id = owner_actor_id.to_vec();
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {HOSTING_ROW_COLUMNS}, host_actor_id
+             FROM custody_hosting
+             WHERE owner_actor_id = ?1
+             ORDER BY updated_at DESC, host_actor_id, grant_id"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![owner_actor_id], |row| {
+            Ok((row.get(12)?, row_from_sql(row)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Record (or rewrite) one device's register row — the custodied-fleet
+    /// handshake's write, after it verified the cert and found a live hosting
+    /// row. UPSERT on the device key: a device belongs to one account, and the
+    /// newest presented cert replaces the old one.
+    pub async fn put_custody_hosting_fleet(
+        &self,
+        device_key: &[u8; 32],
+        owner_actor_id: &[u8; 32],
+        witness: &[u8],
+    ) -> Result<()> {
+        if witness.is_empty() {
+            return Err(anyhow!("fleet witness must not be empty"));
+        }
+        let device_key = device_key.to_vec();
+        let owner_actor_id = owner_actor_id.to_vec();
+        let witness = witness.to_vec();
+        let now = now_epoch_secs();
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "INSERT INTO custody_hosting_fleet (device_key, owner_actor_id, witness, admitted_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(device_key) DO UPDATE SET
+                owner_actor_id = excluded.owner_actor_id,
+                witness = excluded.witness,
+                admitted_at = excluded.admitted_at",
+            rusqlite::params![device_key, owner_actor_id, witness, now],
+        )
+        .map_err(|e| anyhow!("put custody hosting fleet row: {e}"))?;
+        Ok(())
+    }
+
+    /// One device's register row, if it has handshaken here.
+    pub async fn get_custody_hosting_fleet(
+        &self,
+        device_key: &[u8; 32],
+    ) -> Result<Option<CustodyFleetRow>> {
+        use rusqlite::OptionalExtension;
+        let device_key = device_key.to_vec();
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            "SELECT owner_actor_id, witness, admitted_at FROM custody_hosting_fleet
+             WHERE device_key = ?1",
+            rusqlite::params![device_key],
+            |row| {
+                Ok(CustodyFleetRow {
+                    owner_actor_id: row.get(0)?,
+                    witness: row.get(1)?,
+                    admitted_at: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| anyhow!("get custody hosting fleet row: {e}"))
+    }
+
+    /// Drop one `(host, grant)` hosting row, and — in the SAME transaction,
+    /// when it was the last hosting row this nest holds for its owner under
+    /// any host — that owner's custodied-fleet register rows (ruling 3: the
+    /// register falls with the hosting it serves). Returns `(removed,
+    /// pair_rows_left)`, the second being the `(host, owner)` pair's remaining
+    /// row count, which gates the custodied store's teardown.
+    pub async fn delete_custody_hosting_and_fleet(
+        &self,
+        host_actor_id: &[u8],
+        grant_id: &[u8],
+        owner_actor_id: &[u8],
+    ) -> Result<(bool, usize)> {
+        let host_actor_id = host_actor_id.to_vec();
+        let grant_id = grant_id.to_vec();
+        let owner_actor_id = owner_actor_id.to_vec();
+        let mut conn = self.conn.lock().await;
+        let tx = conn
+            .transaction()
+            .map_err(|e| anyhow!("begin custody hosting teardown: {e}"))?;
+        let n = tx
+            .execute(
+                "DELETE FROM custody_hosting WHERE host_actor_id = ?1 AND grant_id = ?2",
+                rusqlite::params![host_actor_id, grant_id],
+            )
+            .map_err(|e| anyhow!("delete custody hosting row: {e}"))?;
+        let pair_left: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM custody_hosting
+                 WHERE host_actor_id = ?1 AND owner_actor_id = ?2",
+                rusqlite::params![host_actor_id, owner_actor_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| anyhow!("count custody hosting rows for host+owner: {e}"))?;
+        let owner_left: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM custody_hosting WHERE owner_actor_id = ?1",
+                rusqlite::params![owner_actor_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| anyhow!("count custody hosting rows for owner: {e}"))?;
+        if n > 0 && owner_left == 0 {
+            tx.execute(
+                "DELETE FROM custody_hosting_fleet WHERE owner_actor_id = ?1",
+                rusqlite::params![owner_actor_id],
+            )
+            .map_err(|e| anyhow!("drop custody hosting fleet rows: {e}"))?;
+        }
+        tx.commit()
+            .map_err(|e| anyhow!("commit custody hosting teardown: {e}"))?;
+        Ok((n > 0, pair_left.max(0) as usize))
+    }
 }
 
 fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<CustodyHostingRow> {
@@ -367,6 +485,7 @@ fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<CustodyHostingRow> 
         held_bytes: row.get::<_, i64>(8)? as u64,
         last_receipt_at: row.get::<_, i64>(9)? as u64,
         last_receipt_degraded: row.get(10)?,
+        owner_refused_at: row.get::<_, i64>(11)?.max(0) as u64,
     })
 }
 

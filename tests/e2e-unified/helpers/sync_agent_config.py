@@ -12,7 +12,7 @@ because the path is **not** flat:
   out 2026-08-25; `bins/fauna-sync-agent/src/config.rs::SyncPaths::base_dir`);
 * **per-actor scope** — on EVERY layout the agent re-scopes everything under
   `<base>/<actor-id-hex>/` the moment a capability is provisioned
-  (`service.rs::apply_actor_scope`; `on-demand-files.md` § Multi-account × File
+  (`service.rs::apply_actor_scope`; `on-demand-files-apple.md` § Multi-account × File
   Provider, consequence 3), so one account's state can never be read as another's.
   The `--data-dir` override (the windows launches) scopes too since 2026-09-26 —
   it only moves the base — so under e2e the config lands in the scoped subdir on
@@ -200,6 +200,41 @@ def describe_custodian_store(store_root: str | Path) -> str:
         return f"{root} does not exist"
     entries = sorted(str(p.relative_to(root)) for p in root.rglob("*"))
     return f"{root} contains {entries}"
+
+
+def visible_custodian_blobs(driver) -> tuple[bool, list[str], str]:
+    """The driver-aware seam for the disk half of a custodian-store witness:
+    ``(located, blob_names, diagnostic)``.
+
+    Hides WHERE the store lives from the test (convention 7's "platform check in
+    the helper, not the body"): on android it is inside the emulator's app
+    sandbox, listed over adb ``run-as``
+    (``drivers/android.py::custodian_store_blob_paths``); everywhere else it is a
+    local directory found through ``config_home`` / ``sync_agent_state_base``.
+    ``located`` is False when no store root exists yet (the "not hosting yet"
+    state); ``blob_names`` are stable strings so a before/after containment
+    check works on either side; ``diagnostic`` says what is actually on disk.
+    """
+    if driver.is_android():
+        names = driver.custodian_store_blob_paths()
+        roots = sorted({n.split("/blobs/")[0] for n in names})
+        if names:
+            return True, names, f"app-data store(s) {roots}"
+        return (
+            # No blob yet is not "no store": report the listing so a red says
+            # which of the two it is.
+            False,
+            [],
+            f"no blob under files/*/{CUSTODIAN_STORE_DIR}/blobs (app data holds "
+            f"{driver.app_data_listing('files', 4)})",
+        )
+    config_home = getattr(driver, "config_home", None)
+    base = getattr(driver, "sync_agent_state_base", None)
+    roots = custodian_store_roots(config_home, base)
+    blobs = [str(b) for root in roots for b in custodian_store_blobs(root)]
+    if not roots:
+        return False, [], describe_agent_state_base(config_home, base)
+    return True, blobs, "; ".join(describe_custodian_store(r) for r in roots)
 
 
 def describe_agent_state_base(

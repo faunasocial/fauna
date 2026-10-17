@@ -66,6 +66,57 @@ def _wait(predicate, timeout: float = 15.0, interval: float = 0.3) -> bool:
     return predicate()
 
 
+@pytest.fixture
+def fronted_nest(request, nest_mode, tmp_path_factory):
+    """A dedicated nest that reports itself fronted by the SNI router
+    (`setup.status.fronted_by_router`), the deployment shape whose serving port
+    is a fixed 443 and not the admin's to choose (`nest/common.md` § Serving
+    ports, Decision D).
+
+    The image's s6 run script sets `FAUNA_FRONTED_BY_ROUTER=1` itself
+    (`docker/s6/fauna-nest/run`) — entrypoint-internal wiring no human sets
+    (`installers/docker.md` § Environment Variables) — so a docker-mode nest is
+    already fronted and gets nothing extra. A standalone nest has no router, so
+    the harness plays the artifact's part with the same IPC env. The PROXY
+    header stays optional without the router's secret, so the test's direct
+    connection still serves. Dedicated, never the session nest: the round trip
+    below needs the session nest's direct listener, where the port IS a choice."""
+    from conftest import _start_dedicated_nest
+
+    options = {}
+    if nest_mode.is_standalone:
+        options["extra_env"] = {"FAUNA_FRONTED_BY_ROUTER": "1"}
+    nest, cleanup = _start_dedicated_nest(
+        request, nest_mode, tmp_path_factory, "fronted", **options,
+    )
+    try:
+        yield nest
+    finally:
+        cleanup()
+
+
+@pytest.fixture
+def fronted_spa_url(static_dir, fronted_nest):
+    """Function-scoped SPA proxy → ``fronted_nest`` (the session ``spa_url``
+    proxies only ``nest_instance``). Mirrors ``crowded_spa_url``."""
+    from conftest import _serve_spa_proxy
+
+    url, server = _serve_spa_proxy(static_dir, fronted_nest["url"])
+    yield url
+    server.shutdown()
+
+
+@pytest.fixture
+def fronted_admin_app(request, app, fronted_nest):
+    """``admin_app``, pointed at ``fronted_nest`` (`_login_admin_as` — only the
+    nest differs)."""
+    from conftest import _login_admin_as
+
+    _login_admin_as(app, request, fronted_nest,
+                    spa_url_fixture="fronted_spa_url", fixture_name="fronted_admin_app")
+    yield app
+
+
 def _serving_port(client) -> int:
     """Ground-truth `serving_port` from `fauna.setup.status` (read straight from
     the DB singleton, serde default 443) — the same read the field hydrates from
@@ -170,3 +221,38 @@ def test_serving_port_invalid_surfaces_error(admin_app, nest_instance):
             "an invalid port must not dispatch set_serving_port "
             f"(persisted port changed {before} → {_serving_port(client)})"
         )
+
+
+@pytest.mark.feature("admin-nest")
+def test_a_router_fronted_nest_shows_the_serving_port_read_only(fronted_admin_app, fronted_nest):
+    """On a deployment whose port is fixed, the serving port shows read-only and
+    says the deployment serves on 443 (`nest/common.md` § Serving ports — the
+    field renders read-only when the nest reports `fronted_by_router`).
+
+    Read-only is the input AND its save present but disabled — never hidden,
+    so the admin still reads the port; the field reads 443, the value
+    `setup.status.serving_port` reports behind the router."""
+    with _admin_client(fronted_nest) as client:
+        status = client.call("fauna.setup.status", {})
+    assert status.get("fronted_by_router") is True, (
+        f"premise: the dedicated nest must report itself router-fronted: {status!r}"
+    )
+
+    app = fronted_admin_app
+    app.admin.navigate_nest()
+    assert _wait(app.admin.serving_port_field_present), (
+        f"the serving-port field must still render behind the router. "
+        f"error: {app.error_text()!r}"
+    )
+    assert _wait(lambda: not app.driver.is_enabled("admin-nest-serving-port-input")), (
+        "the serving port must be read-only on a router-fronted nest. "
+        f"{app.driver.diagnose('admin-nest-serving-port-input', attrs=('enabled',))}"
+    )
+    assert not app.driver.is_enabled("admin-nest-serving-port-save-button"), (
+        "a read-only port offers no live save. "
+        f"{app.driver.diagnose('admin-nest-serving-port-save-button', attrs=('enabled',))}"
+    )
+    assert _wait(lambda: app.driver.get_text("admin-nest-serving-port-input") == "443"), (
+        "the field must say the deployment serves on 443; it reads "
+        f"{app.driver.get_text('admin-nest-serving-port-input')!r}"
+    )

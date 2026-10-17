@@ -51,6 +51,14 @@ def _headless_render_cmd_env(
     return cmd, env
 
 
+def _xdg_runtime_dir(xdg_base: str) -> str:
+    """The private `XDG_RUNTIME_DIR` a launch rooted at ``xdg_base`` gets. Pure.
+
+    One home for the derivation `build_launch_env` sets and
+    `LinuxBridgeDriver.sync_agent_socket` reads back."""
+    return os.path.join(xdg_base, "runtime")
+
+
 def build_launch_env(config: dict, port: int, tmp: str) -> dict:
     """The child environment for one isolated fauna-desktop launch.
 
@@ -77,6 +85,13 @@ def build_launch_env(config: dict, port: int, tmp: str) -> dict:
     """
     env = dict(os.environ)
     env.update(config.get("environment", {}))
+    # A `RUST_LOG` the human exported survives a launch config that sets its own,
+    # appended so both sets of directives apply — the same rule as tui's
+    # `build_launch_env` and the windows driver's inheritance.
+    inherited_log = os.environ.get("RUST_LOG")
+    configured_log = config.get("environment", {}).get("RUST_LOG")
+    if inherited_log and configured_log and inherited_log != configured_log:
+        env["RUST_LOG"] = f"{configured_log},{inherited_log}"
 
     # The resident engines' full-reconcile cadence (`always_resident::rescan_interval`,
     # the compile-gated `FAUNA_E2E_RESCAN_MS` seam). Production ticks at the 300 s
@@ -146,7 +161,7 @@ def build_launch_env(config: dict, port: int, tmp: str) -> dict:
     # one for the external-media handoff base; linux has no such caller
     # today, and adding one is out of this lift's scope — mechanical only,
     # no behaviour change).
-    xdg_runtime = os.path.join(xdg_base, "runtime")
+    xdg_runtime = _xdg_runtime_dir(xdg_base)
     os.makedirs(xdg_runtime, mode=0o700, exist_ok=True)
     env["XDG_RUNTIME_DIR"] = xdg_runtime
 
@@ -359,6 +374,18 @@ class LinuxBridgeDriver(HttpBridgeDriver):
             return True
         except subprocess.TimeoutExpired:
             return False
+
+    @property
+    def sync_agent_socket(self) -> str | None:
+        """The unix socket THIS launch's agent serves:
+        `$XDG_RUNTIME_DIR/fauna/sync-agent.sock` under the private runtime dir
+        `build_launch_env` made (`fauna_ipc::unix_transport::linux_socket_path`;
+        the app direct-spawns the agent under e2e, so it inherits that dir) —
+        `None` before launch. tui's twin is `drivers/tui.py`'s."""
+        base = getattr(self, "_resolved_xdg_base", None)
+        if not base:
+            return None
+        return os.path.join(_xdg_runtime_dir(base), "fauna", "sync-agent.sock")
 
     @property
     def config_home(self) -> str:
@@ -584,7 +611,7 @@ class LinuxBridgeDriver(HttpBridgeDriver):
         tail = "\n".join(text.splitlines()[-tail_lines:])
         return f"\n--- app.err (last {tail_lines} lines) ---\n{tail}"
 
-    def teardown(self) -> None:
+    def _stop_app(self) -> None:
         """Kill the app process, its private bus, and close its log files."""
         proc = getattr(self, "_app_proc", None)
         if proc is not None:
@@ -663,7 +690,7 @@ class LinuxBridgeDriver(HttpBridgeDriver):
         config = getattr(self, "_launch_config", None)
         if config is None:
             return False
-        self.teardown()
+        self._stop_app()
         try:
             self.launch(config)
             return True

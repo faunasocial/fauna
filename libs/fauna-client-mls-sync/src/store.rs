@@ -36,7 +36,7 @@ use async_trait::async_trait;
 use fauna_conversations::store::history::{ChannelHistorySlice, merge_history_slices};
 use fauna_core::MaybeSendSync;
 use fauna_core::crypto::BackupKey;
-use fauna_core::identity::ActorKeypair;
+use fauna_core::identity::{ActorId, ActorKeypair};
 use fauna_mls::error::MlsError;
 use fauna_mls::state_replica::{ProviderReplica, merge_provider_replicas};
 use fauna_protocol::mls_replica::{
@@ -55,6 +55,18 @@ pub const PATH_PROVIDER: &str = "provider";
 /// The replica path for one channel's history slice.
 pub fn history_path(channel_hex: &str) -> String {
     format!("history/{channel_hex}")
+}
+
+/// The replica path where a successor's device parks a **retired leaf** — the
+/// predecessor's `provider` snapshot the restore door found at this identity's
+/// own `provider` path after a succession, written there unchanged before
+/// anything can replace it (`succession-propagation.md` § Propagation → *Own
+/// device fleet*, *Where the retired leaf rests on a device with no local MLS
+/// store*, rule (1); the vocabulary entry is `devices.md` § Cross-device MLS
+/// group-state sync). `predecessor` is the identity whose leaf the snapshot
+/// seats. Sealed under the **owner's** `BackupKey`, like every path here.
+pub fn retired_provider_path(predecessor: &ActorId) -> String {
+    format!("retired/{}/provider", predecessor.to_hex())
 }
 
 /// Max merge-retry rounds in the `save_*_cas` methods before giving up. A
@@ -276,6 +288,11 @@ pub enum MlsReplicaClientError {
     /// retries — another of the user's devices kept winning the race. Surfaced
     /// so a pathological live-lock fails loudly rather than dropping the write.
     ConflictRetriesExhausted,
+    /// The nest served a `history/<hex>` slice whose own
+    /// `channel_id_hex` is another channel's — the sealed blobs bind no path,
+    /// so the home nest can swap them. Refused on load and on merge: adopting
+    /// it would union two conversations or re-home one. Permanent, not transient.
+    HistoryChannelMismatch { path: String, found: String },
     /// The `MlsEngine` refused the operation. In practice this is
     /// `MlsError::Retired` reaching a restore: the engine was quiesced by an
     /// account hand-over while a launch retry or a mid-session resync was still
@@ -306,6 +323,10 @@ impl core::fmt::Display for MlsReplicaClientError {
             Self::ConflictRetriesExhausted => {
                 write!(f, "mls replica save conflicted on every retry")
             }
+            Self::HistoryChannelMismatch { path, found } => write!(
+                f,
+                "mls replica blob served at {path} is a slice of channel {found}"
+            ),
         }
     }
 }
@@ -428,6 +449,55 @@ impl MlsReplicaClient {
         }
     }
 
+    // ── retired/<predecessor_hex>/provider (write-once park) ─────────
+
+    /// Fetch + unseal the retired leaf parked for `predecessor`, with its CAS
+    /// base — the parked arm of the sweep retry's resolver ("local store, else
+    /// parked"). `Ok((None, Absent))` when nothing was ever parked.
+    pub async fn load_retired_provider(
+        &self,
+        predecessor: &ActorId,
+    ) -> ClientResult<(Option<ProviderReplica>, ReplicaBase)> {
+        let sealed = self.get_blob(&retired_provider_path(predecessor)).await?;
+        let base = base_of(&sealed);
+        match sealed {
+            Some(bytes) => {
+                let plain: Zeroizing<Vec<u8>> =
+                    unseal_replica(&bytes, &self.key).map_err(MlsReplicaClientError::Seal)?;
+                let replica = ProviderReplica::from_bytes(&plain)
+                    .map_err(|e| MlsReplicaClientError::Codec(e.to_string()))?;
+                Ok((Some(replica), base))
+            }
+            None => Ok((None, base)),
+        }
+    }
+
+    /// Seal + put `replica` at `predecessor`'s retired path under the CAS
+    /// `base` — no merge, no retry. The caller's base is the whole contract:
+    /// [`ReplicaBase::Absent`] is the park (write-once), the base a
+    /// [`Self::load_retired_provider`] returned is the retry's write-back of the
+    /// ratcheted leaf. A [`PutOutcome::Conflict`] is returned, never retried:
+    /// for the park it means a snapshot is already parked — which must never be
+    /// overwritten (a partial retry may have ratcheted it, and re-parking the
+    /// stale `provider` over it would un-ratchet it); for the write-back it
+    /// means another device's retry moved the leaf first, and a ratchet is not
+    /// mergeable.
+    pub async fn put_retired_provider(
+        &self,
+        predecessor: &ActorId,
+        replica: &ProviderReplica,
+        base: ReplicaBase,
+    ) -> ClientResult<PutOutcome> {
+        let plain = Zeroizing::new(
+            replica
+                .to_bytes()
+                .map_err(|e| MlsReplicaClientError::Codec(e.to_string()))?,
+        );
+        let sealed = seal_replica(&plain, &self.key).map_err(MlsReplicaClientError::Seal)?;
+        self.put_blob(&retired_provider_path(predecessor), sealed, base)
+            .await
+    }
+
     // ── history/<hex> path (two-way commutative merge) ──────────────
 
     /// Fetch + unseal a channel's `history/<hex>` slice with its CAS base.
@@ -445,6 +515,14 @@ impl MlsReplicaClient {
                     unseal_replica(&bytes, &self.key).map_err(MlsReplicaClientError::Seal)?;
                 let slice = ChannelHistorySlice::from_bytes(&plain)
                     .map_err(|e| MlsReplicaClientError::Codec(e.to_string()))?;
+                // The sealed blob binds no path: a slice of another
+                // channel served here is the nest lying, never adopted.
+                if slice.channel_id_hex != channel_hex {
+                    return Err(MlsReplicaClientError::HistoryChannelMismatch {
+                        path,
+                        found: slice.channel_id_hex,
+                    });
+                }
                 Ok((Some(slice), base))
             }
             None => Ok((None, base)),
@@ -611,7 +689,12 @@ impl MlsReplicaClient {
             self.load_history_with_base(&current.channel_id_hex).await?;
         for _ in 0..MAX_CAS_RETRIES {
             if let Some(theirs) = &theirs_opt {
-                to_store = merge_history_slices(&to_store, theirs);
+                to_store = merge_history_slices(&to_store, theirs).map_err(|e| {
+                    MlsReplicaClientError::HistoryChannelMismatch {
+                        path: path.clone(),
+                        found: e.right,
+                    }
+                })?;
             }
             let plain = Zeroizing::new(to_store.to_bytes().map_err(MlsReplicaClientError::Codec)?);
             let sealed = seal_replica(&plain, &self.key).map_err(MlsReplicaClientError::Seal)?;
@@ -1122,11 +1205,15 @@ mod tests {
     }
 
     fn slice_with(messages: Vec<MessageSnapshot>, watermark: i64) -> ChannelHistorySlice {
+        slice_for(CH, messages, watermark)
+    }
+
+    fn slice_for(ch: &str, messages: Vec<MessageSnapshot>, watermark: i64) -> ChannelHistorySlice {
         let store = ThreadStore::new();
         let id = store.find_or_create(
             ThreadKey::Channel {
                 rail: Rail::FaunaMls,
-                channel_id_hex: CH.to_string(),
+                channel_id_hex: ch.to_string(),
             },
             vec![addr("me"), addr("peer")],
             ThreadFlavor::OneToOne,
@@ -1135,7 +1222,7 @@ mod tests {
         for m in messages {
             store.append_message(&id, m);
         }
-        store.snapshot_channel_slice(&id, CH, watermark).unwrap()
+        store.snapshot_channel_slice(&id, ch, watermark).unwrap()
     }
 
     #[test]
@@ -1221,5 +1308,58 @@ mod tests {
             "got {err}"
         );
         assert_eq!(*nest.puts.lock().unwrap(), 0, "no put reached the nest");
+    }
+
+    /// The sealed `__mls` blobs bind no path, so the home nest can
+    /// serve channel X's `history/<X>` blob at `history/<Y>`. Y's save must
+    /// refuse the swap — never union X into Y, never re-home Y — and a direct
+    /// load of Y must refuse the foreign slice instead of adopting it.
+    #[test]
+    fn history_slice_served_at_another_channels_path_is_refused() {
+        const OTHER: &str = "bb22bb22bb22bb22";
+        let nest = Arc::new(FakeMlsNest::default());
+        let c = client(nest.clone(), 10);
+        let x = slice_for(
+            CH,
+            vec![msg(&format!("conv:{CH}:1"), "X secret", false, 10)],
+            5,
+        );
+        block_on(c.save_history_cas(&x)).unwrap();
+        // The lying nest: X's sealed blob now answers at Y's path.
+        {
+            let mut map = nest.stored.lock().unwrap();
+            let blob = map.get(&history_path(CH)).cloned().unwrap();
+            map.insert(history_path(OTHER), blob);
+        }
+        let swapped = nest
+            .stored
+            .lock()
+            .unwrap()
+            .get(&history_path(OTHER))
+            .cloned();
+
+        assert!(
+            block_on(c.load_history_with_base(OTHER)).is_err(),
+            "a slice of another channel must not load under this path"
+        );
+        let y = slice_for(
+            OTHER,
+            vec![msg(&format!("conv:{OTHER}:1"), "Y own", true, 20)],
+            1,
+        );
+        let err = block_on(c.save_history_cas(&y)).expect_err("swap must be refused");
+        assert!(
+            matches!(err, MlsReplicaClientError::HistoryChannelMismatch { .. }),
+            "got {err}"
+        );
+        assert_eq!(
+            nest.stored
+                .lock()
+                .unwrap()
+                .get(&history_path(OTHER))
+                .cloned(),
+            swapped,
+            "Y's stored slice must be untouched by the refused save"
+        );
     }
 }

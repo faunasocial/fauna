@@ -103,3 +103,29 @@ def active_secret(driver):
     tab resolves to (a pinned tab resolves its own account instead)."""
     actor = active_actor(driver)
     return read_slot(driver, actor, "secret") if actor else None
+
+
+#: The root every account store's name sits under
+#: (`fauna_account_store::root::PLATFORM_ROOT`): each account's IndexedDB
+#: database and OPFS directory is `fauna-account-store/<actor>`.
+ACCOUNT_STORE_ROOT = "fauna-account-store"
+
+
+def account_store_names(driver) -> dict:
+    """Every account store this origin holds, by home: the IndexedDB databases
+    and the OPFS root's directories under the account-store root. The OPFS
+    directory is the database name folded to one path component, so both are
+    matched on the root prefix."""
+    return driver.eval_js(
+        "(async () => {"
+        " const dbs = (await indexedDB.databases()).map(d => d.name);"
+        " const dirs = [];"
+        " try {"
+        "  const root = await navigator.storage.getDirectory();"
+        "  for await (const name of root.keys()) dirs.push(name);"
+        " } catch (e) { dirs.push('opfs-unreadable: ' + e); }"
+        f" const ours = n => String(n).startsWith({json.dumps(ACCOUNT_STORE_ROOT)})"
+        " || String(n).startsWith('opfs-unreadable');"
+        " return { indexeddb: dbs.filter(ours).sort(), opfs: dirs.filter(ours).sort() };"
+        "})()"
+    )

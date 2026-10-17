@@ -57,7 +57,7 @@ class PhotoBackupWorker @AssistedInject constructor(
         // No device id yet (pre-onboarding), or WorkManager woke us in a fresh
         // background process before login — nothing this device can back up
         // this cycle; the OS retries on the next slice.
-        if (secureStorage.deviceId == null) return Result.success()
+        if (secureStorage.resolveDeviceId() == null) return Result.success()
 
         return try {
             // Idempotent by construction: the pass re-scans MediaStore and skips

@@ -82,6 +82,13 @@ public partial class WebSettingsViewModel : ObservableObject
     public ObservableCollection<PublishedPostRow> PublishedPosts { get; } = new();
     [ObservableProperty] private bool _hydrated;
 
+    /// <summary><c>web-settings-render-status</c> — true while (and only while) the
+    /// last <c>publish.list</c> answered <c>rendered_pages_down</c> (web-content-hosting.md
+    /// § Routing, render, serving → <i>A blanked site tells its author</i>). False
+    /// before the first read and against an older nest. Information only: it
+    /// disables nothing.</summary>
+    [ObservableProperty] private bool _renderedPagesDown;
+
     /// <summary>Whether the actor has a serving origin to build copy links on — the
     /// gate every copy affordance's <c>IsEnabled</c> reads (publishing with no origin
     /// is legal but unreachable, and the UI must say so rather than hand out a dead
@@ -118,9 +125,7 @@ public partial class WebSettingsViewModel : ObservableObject
             _domains = r.Domains;
             Project(r.SubdomainEnabled, r.SiteLink);
 
-            var posts = await _web.PublishList();
-            PublishedPosts.Clear();
-            foreach (var p in posts) PublishedPosts.Add(new PublishedPostRow(p));
+            ApplySite(await _web.PublishedSite());
             Hydrated = true;
         }
         catch (Exception ex)
@@ -217,13 +222,22 @@ public partial class WebSettingsViewModel : ObservableObject
         try
         {
             await _web.PublishUnset(row.PostId);
-            var posts = await _web.PublishList();
-            PublishedPosts.Clear();
-            foreach (var p in posts) PublishedPosts.Add(new PublishedPostRow(p));
+            ApplySite(await _web.PublishedSite());
         }
         catch (Exception ex)
         {
             Error = S.Format("web_publish/error_unpublish", ex.Message);
         }
+    }
+
+    /// <summary>Paint one <c>publish.list</c> read: the rows plus the
+    /// rendered-pages-down flag, from the SAME read so the status line can never
+    /// disagree with the list beside it. Every list read goes through here (the
+    /// takedown reload included), so a restoring render clears the line.</summary>
+    private void ApplySite(FfiPublishedSite site)
+    {
+        PublishedPosts.Clear();
+        foreach (var p in site.posts) PublishedPosts.Add(new PublishedPostRow(p));
+        RenderedPagesDown = site.renderedPagesDown;
     }
 }

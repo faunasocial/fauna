@@ -326,6 +326,12 @@ yet. Copy Fauna's data folder somewhere safe first: the list may be unreadable
 to this version and perfectly readable to another, and a copy keeps that chance
 open.
 
+Your conversations work the same way. If a newer copy of Fauna saved them on this
+device and you have gone back to an older one, the Conversations page says the
+app is too old to open them and that they are intact. Nothing on the device is
+changed: update the app and they come back. Everything else keeps working in the
+meantime.
+
 ## If a device is lost or stolen
 
 Act in this order, from any signed-in device (settings → devices/sessions):
@@ -806,6 +812,18 @@ nest's own address after the `@` instead: `alice@192.0.2.10`,
 account and your sealed backup are all still there; only the name that pointed
 at them stopped working, and this is the way in that doesn't need it. The part
 before the `@` is still your handle, exactly as before.
+
+**If your nest itself is gone** — not just its name, but the nest and
+everything on it — your account can still come back if a friend's nest was
+keeping a copy of it for you (you ask a friend to hold copies on the Devices
+page, and they choose to keep them on their nest). Paste the copied kit — the
+`fauna://recovery` link, because it names your account; the bare code alone
+does not work here — and in the account field enter your handle with your
+friend's nest address after the `@`, like `alice@friends-nest.example`. Their
+nest checks the kit and hands back your sealed secret, just as your own nest
+would have, and you carry on from there as on any new device. If you replaced
+your kit after your friend started holding the copy, use the newest one: their
+nest stops accepting the old one once it has caught up with the replacement.
 
 Two answers you may get instead, both plain-spoken rather than a generic
 failure:

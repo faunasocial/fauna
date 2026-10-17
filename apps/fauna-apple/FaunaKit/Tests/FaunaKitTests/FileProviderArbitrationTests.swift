@@ -7,7 +7,7 @@ import Testing
 
     /// Headless pins that the reconcile feeds apple's arbitration precedence
     /// into the shared-Rust presence plan (`FileProviderCoordinator.plan` —
-    /// `on-demand-files.md` § Apple File Provider binding): the bound refs are
+    /// `on-demand-files-apple.md` § Apple File Provider binding): the bound refs are
     /// the plan's *stronger* presence, so a bound set never gets a domain
     /// whatever its toggle, and the binding matches by ref, never by name. The
     /// rule itself (stronger-outranks-toggle) is pinned in Rust

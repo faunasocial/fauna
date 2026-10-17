@@ -26,14 +26,15 @@
 //! measured is reported with a non-positive height (or omitted); the tracker
 //! holds it rather than treating it as gone.
 //!
-//! Linux renders feed media as still images only (no playback surface), so
-//! `media_played_pm` is always `None` here: the media watch-complete gate can
-//! never fire on this client — only the dwell-derived non-media gate and the
-//! skip gate can (a video-capable client exercises the playback path).
+//! Playback progress comes from the inline player: a media row's
+//! `media_played_pm` is what `views::feed::take_played_pm`
+//! hands over for its post (the peak since the last sample), so a video played
+//! to the end derives the media `watch-complete`.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use gtk::glib;
@@ -87,6 +88,23 @@ pub fn wire(
     let probe = Rc::new(RefCell::new(Probe::new()));
     let ticking = Rc::new(Cell::new(false));
 
+    // The close path's drain (`drain_for_close`): the latest wiring is the
+    // live feed view, exactly as for the test clock below.
+    {
+        let probe = Rc::clone(&probe);
+        let manager = Arc::clone(manager);
+        let rt = rt.clone();
+        let error_label = error_label.clone();
+        LIVE_DRAIN.with(|d| {
+            *d.borrow_mut() = Some(Box::new(move || {
+                flush_all(&probe, &manager, &rt, &error_label)
+            }))
+        });
+    }
+
+    #[cfg(any(debug_assertions, feature = "e2e-agent"))]
+    test_clock::register(&probe, scrolled, list, manager, rt, error_label);
+
     // Extra sample on every scroll movement, so a card's leave-the-viewport
     // edge is caught at scroll time rather than up to one tick later.
     {
@@ -135,6 +153,59 @@ pub fn wire(
     });
 }
 
+thread_local! {
+    /// The most recently wired capture's drain — one wiring per auth, so the
+    /// latest is the live feed view. Main-thread only, like the probe.
+    static LIVE_DRAIN: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+}
+
+/// Exposures handed to [`emit`] whose `record_observation` has not finished.
+static EMITS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+fn emits_settled_notify() -> &'static tokio::sync::Notify {
+    static NOTIFY: OnceLock<tokio::sync::Notify> = OnceLock::new();
+    NOTIFY.get_or_init(tokio::sync::Notify::new)
+}
+
+/// The close path's first half (engagement-cues.md § At rest: put on batch
+/// **or on background/close**; tui's `flush_on_quit` is the twin): drain every
+/// exposure still in progress into the engine. The window closing is the card
+/// leaving the viewport, but the tick that would notice the unmap may never
+/// run again once the main loop winds down — so without this, a dwell still
+/// on screen at quit was never folded, and the flush that follows had nothing
+/// to put. Main thread only (a no-op elsewhere, where no capture is wired).
+pub fn drain_for_close() {
+    LIVE_DRAIN.with(|d| {
+        if let Some(drain) = d.borrow().as_ref() {
+            drain();
+        }
+    });
+}
+
+/// The close path's second half: resolves once every exposure [`emit`] has
+/// handed off is folded (its `record_observation` returned). A leave just
+/// before quit spawns its records on the runtime; flushing before they fold
+/// would put a rollup without them. The caller bounds the wait.
+pub async fn emits_settled() {
+    loop {
+        let notified = emits_settled_notify().notified();
+        if EMITS_IN_FLIGHT.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        notified.await;
+    }
+}
+
+/// Decrements [`EMITS_IN_FLIGHT`] however the emit task ends.
+struct EmitInFlight;
+
+impl Drop for EmitInFlight {
+    fn drop(&mut self) {
+        EMITS_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+        emits_settled_notify().notify_waiters();
+    }
+}
+
 /// One probe read: collect every row's geometry, hand it to the shared tracker,
 /// and emit whatever exposures it says have finished.
 fn sample(
@@ -167,17 +238,33 @@ fn sample(
         let is_media = posts
             .iter()
             .find(|p| p.post_id == post_id)
-            .map(|p| p.has_media)
+            .map(|p| p.plays_media)
             .unwrap_or(false);
+        // A row `render_posts` has just rebuilt has no allocation until the
+        // next frame's layout phase, yet `compute_bounds` still answers with
+        // its bare CSS border box at a stale origin (measured: every row at
+        // `top -428, height 5` mid-rebuild) — a fabricated reading that put
+        // the dwelled card "out of view" and ended its exposure early. Under
+        // load the layout phase lags the rebuild further, so more samples
+        // land in that gap. The allocation is the truth: an unallocated row
+        // is reported unmeasurable (height 0), which the tracker holds.
+        let height = if row.height() > 0 {
+            f64::from(bounds.height())
+        } else {
+            0.0
+        };
         rows.push(CueRow {
+            media_played_pm: if is_media {
+                crate::views::feed::take_played_pm(&post_id)
+            } else {
+                None
+            },
             post_id,
             top: f64::from(bounds.y()),
-            // A not-yet-allocated row reports its non-positive height as-is;
-            // deciding what that means is the tracker's job, not the probe's.
-            height: f64::from(bounds.height()),
+            // A not-yet-allocated row reports a non-positive height; deciding
+            // what that means is the tracker's job, not the probe's.
+            height,
             is_media,
-            // Still images only on linux — no playback surface to read.
-            media_played_pm: None,
         });
     }
 
@@ -230,9 +317,12 @@ fn emit(
     }
     let m = Arc::clone(manager);
     let error_label = error_label.clone();
+    EMITS_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
+    let in_flight = EmitInFlight;
     crate::async_helper::spawn_with_snapshot(
         rt,
         move || async move {
+            let _in_flight = in_flight;
             for obs in left {
                 if let Err(msg) = m.record_observation(obs).await {
                     return Some(msg);
@@ -246,4 +336,170 @@ fn emit(
             }
         },
     );
+}
+
+/// The engagement-cue test clock's linux doors (convention 14). The frozen
+/// clock itself is the shared tracker's (`fauna_feed::CueTracker`, § *The test
+/// clock*); this keeps a handle on the most recently wired capture — one per
+/// auth, so the latest wiring is the live feed view — for the four
+/// `feed_cue_clock_*` / `feed_cue_probe` agent arms in `main.rs`, tui's twins.
+///
+/// linux samples on a timer, not per draw, so two advances could otherwise
+/// fold into one sample's capped credit: [`test_clock::advance`] samples
+/// right after it moves the clock, and its ack is that sample's barrier. A
+/// scroll lands in the rows' geometry only at the next frame's layout, so the
+/// frozen probe and the pixel step ([`test_clock::scroll_by`]) answer after
+/// that frame, from a sample of their own.
+#[cfg(any(debug_assertions, feature = "e2e-agent"))]
+pub mod test_clock {
+    use super::*;
+
+    struct Live {
+        probe: Rc<RefCell<Probe>>,
+        resample: Rc<dyn Fn()>,
+        scrolled: gtk::ScrolledWindow,
+    }
+
+    /// A deferred command's answer — the arm acks inside it.
+    pub type Reply = Box<dyn FnOnce(Result<serde_json::Value, String>)>;
+
+    thread_local! {
+        static LIVE: RefCell<Option<Live>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn register(
+        probe: &Rc<RefCell<Probe>>,
+        scrolled: &gtk::ScrolledWindow,
+        list: &gtk::ListBox,
+        manager: &Arc<LinuxFeedManager>,
+        rt: &Handle,
+        error_label: &gtk::Label,
+    ) {
+        let resample = {
+            let probe = Rc::clone(probe);
+            let scrolled = scrolled.clone();
+            let list = list.clone();
+            let manager = Arc::clone(manager);
+            let rt = rt.clone();
+            let error_label = error_label.clone();
+            Rc::new(move || sample(&probe, &scrolled, &list, &manager, &rt, &error_label))
+        };
+        LIVE.with(|l| {
+            *l.borrow_mut() = Some(Live {
+                probe: Rc::clone(probe),
+                resample,
+                scrolled: scrolled.clone(),
+            })
+        });
+    }
+
+    fn with_live<T>(f: impl FnOnce(&Live) -> T) -> Result<T, String> {
+        LIVE.with(|l| {
+            l.borrow()
+                .as_ref()
+                .map(f)
+                .ok_or_else(|| "no feed cue capture is wired (pre-auth)".to_string())
+        })
+    }
+
+    /// Freeze both clocks at their current real readings. Idempotent.
+    pub fn freeze() -> Result<(), String> {
+        with_live(|live| {
+            let mut p = live.probe.borrow_mut();
+            let mono = p.mono_now_ms();
+            p.tracker.freeze_clock_for_test(mono, wall_now_ms());
+        })
+    }
+
+    /// Move both frozen clocks forward by `ms`, then sample at once (while the
+    /// list is mapped) so the step lands as exactly one sample's credit.
+    pub fn advance(ms: u64) -> Result<(), String> {
+        with_live(|live| {
+            live.probe.borrow_mut().tracker.advance_clock_for_test(ms)?;
+            if live.scrolled.is_mapped() {
+                (live.resample)();
+            }
+            Ok(())
+        })?
+    }
+
+    /// Back to the real clocks.
+    pub fn thaw() -> Result<(), String> {
+        with_live(|live| live.probe.borrow_mut().tracker.thaw_clock_for_test())
+    }
+
+    fn read(probe: &Rc<RefCell<Probe>>) -> serde_json::Value {
+        serde_json::to_value(probe.borrow().tracker.probe_for_test())
+            .unwrap_or(serde_json::Value::Null)
+    }
+
+    /// Run `f` once the next frame has laid the list out — a tick callback
+    /// fires before that frame's layout, and an idle queued from it runs after
+    /// the whole frame.
+    fn after_next_frame(scrolled: &gtk::ScrolledWindow, f: impl FnOnce() + 'static) {
+        let f = RefCell::new(Some(f));
+        scrolled.add_tick_callback(move |_, _| {
+            if let Some(f) = f.borrow_mut().take() {
+                glib::idle_add_local_once(f);
+            }
+            glib::ControlFlow::Break
+        });
+    }
+
+    /// The shared probe (`fauna_feed::CueProbe`), in the `ScrolledWindow`'s
+    /// pixel space. Frozen and on screen, it answers after the next frame from
+    /// a sample of its own — a frozen sample credits nothing, it only
+    /// measures — so it reads the list as laid out, not as the last tick saw it.
+    pub fn probe(reply: Reply) {
+        let live = with_live(|live| {
+            (
+                Rc::clone(&live.probe),
+                Rc::clone(&live.resample),
+                live.scrolled.clone(),
+            )
+        });
+        let (probe, resample, scrolled) = match live {
+            Ok(live) => live,
+            Err(e) => return reply(Err(e)),
+        };
+        if !probe.borrow().tracker.clock_frozen_for_test() || !scrolled.is_mapped() {
+            return reply(Ok(read(&probe)));
+        }
+        after_next_frame(&scrolled, move || {
+            resample();
+            reply(Ok(read(&probe)));
+        });
+    }
+
+    /// The journeys' pixel step: scroll the post list by `px` (the real
+    /// adjustment the user's scroll moves), then answer after the next frame
+    /// from a sample of its own, with the probe as THAT sample left it — a
+    /// later read could already show the feed's re-rank in answer to an
+    /// exposure the step ended. `moved: false` at the end of the list.
+    pub fn scroll_by(px: f64, reply: Reply) {
+        let live = with_live(|live| {
+            (
+                Rc::clone(&live.probe),
+                Rc::clone(&live.resample),
+                live.scrolled.clone(),
+            )
+        });
+        let (probe, resample, scrolled) = match live {
+            Ok(live) => live,
+            Err(e) => return reply(Err(e)),
+        };
+        if !scrolled.is_mapped() {
+            return reply(Err("the feed list is not on screen".to_string()));
+        }
+        let adj = scrolled.vadjustment();
+        let before = adj.value();
+        adj.set_value(before + px);
+        let moved = adj.value() != before;
+        after_next_frame(&scrolled, move || {
+            resample();
+            reply(Ok(
+                serde_json::json!({ "ok": true, "moved": moved, "probe": read(&probe) }),
+            ));
+        });
+    }
 }

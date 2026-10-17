@@ -22,12 +22,10 @@
 //!   per client. The grant's own lifecycle is the client-signed `GrantEvent`
 //!   log; the nest holds no owner key, so it never writes one.
 
+use crate::identity_op_grant::grant_blob_admits;
 use anyhow::{Result, bail};
 use fauna_bridge_nostr::nip46::{Nip46Method, Nip46Request, oracle_sign_event_kind_admitted};
-use fauna_core::identity_op::{
-    Custodian, GrantTupleRef, IdentityOpClass, RateWindow, grant_admits,
-};
-use fauna_mls::wrapped_blob::format::GrantBlob;
+use fauna_core::identity_op::{Custodian, IdentityOpClass, RateWindow};
 use rusqlite::{Connection, OptionalExtension, params};
 
 /// How many operation rows the custodian keeps per bound client (a hard
@@ -75,26 +73,6 @@ pub fn is_client_pubkey(s: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// Does the stored grant `blob` admit `class` at `now`: a decodable grant
-/// whose window is live and whose declared scope carries the class's
-/// `identity.op` tuple? An undecodable blob admits nothing.
-#[must_use]
-pub fn grant_blob_admits(blob: &[u8], class: IdentityOpClass, now: u64) -> bool {
-    let Ok(grant) = GrantBlob::from_canonical_bytes(blob) else {
-        return false;
-    };
-    // Both bounds, through the one window check every authorizing decode
-    // names (`state.rs`'s census).
-    i64::try_from(now).is_ok_and(|now| fauna_mls::wrapped_blob::grant_window_is_open(&grant, now))
-        && grant_admits(
-            grant.scope.iter().map(|t| GrantTupleRef {
-                class: t.class.as_str(),
-                kind: t.kind.as_deref(),
-            }),
-            class,
-        )
-}
-
 /// Does any of `blobs` admit a class THIS custodian performs? The bind
 /// handler's precondition: a principal cannot park a client key before the
 /// owner granted it anything here.
@@ -103,14 +81,7 @@ pub fn any_grant_admits_this_custodian<'a>(
     blobs: impl IntoIterator<Item = &'a [u8]>,
     now: u64,
 ) -> bool {
-    let classes: Vec<IdentityOpClass> = IdentityOpClass::ALL
-        .iter()
-        .copied()
-        .filter(|c| c.custodian() == CUSTODIAN)
-        .collect();
-    blobs
-        .into_iter()
-        .any(|b| classes.iter().any(|c| grant_blob_admits(b, *c, now)))
+    crate::identity_op_grant::any_grant_admits_custodian(blobs, CUSTODIAN, now)
 }
 
 /// Why [`bind`] refused.
@@ -328,7 +299,7 @@ mod tests {
     /// the compile-time half is `fauna_core::identity_op::DENY_LIST_PINNED`.
     #[test]
     fn a_grant_naming_a_sovereign_operation_admits_no_class() {
-        use fauna_core::identity_op::SovereignOp;
+        use fauna_core::identity_op::{GrantTupleRef, SovereignOp, grant_admits};
         for op in SovereignOp::ALL {
             assert!(IdentityOpClass::parse(op.name()).is_err());
             for class in IdentityOpClass::ALL {

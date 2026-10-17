@@ -693,6 +693,7 @@ public class ProfileViewModelTests
     {
         var rpc = new MockNestRpcClient();
         var vm = new ProfileViewModel(rpc, BobHex, isSelf: false);
+        await vm.RefreshBlockStateAsync();   // the open-time read arms the toggle
 
         await vm.ToggleBlockAsync();
 
@@ -722,11 +723,44 @@ public class ProfileViewModelTests
     {
         var rpc = new MockNestRpcClient { NextError = "boom" };
         var vm = new ProfileViewModel(rpc, BobHex, isSelf: false);
+        await vm.RefreshBlockStateAsync();   // failed read settles on the Block default
 
         await vm.ToggleBlockAsync();
 
         Assert.NotNull(vm.ErrorMessage);
         Assert.False(vm.IsBlocked);
+    }
+
+    [Fact]
+    public async Task ToggleBlockAsync_IsInertUntilTheOpenTimeReadLands()
+    {
+        // Re-opening an actor the viewer already blocks: a press before the read must
+        // issue nothing (it would re-send knocks_block), then the read arms the toggle.
+        var rpc = new MockNestRpcClient { NextContacts = new[] { BlockedEdge(Bob) } };
+        var vm = new ProfileViewModel(rpc, BobHex, isSelf: false);
+        Assert.False(vm.IsBlockKnown);
+
+        await vm.ToggleBlockAsync();
+
+        Assert.DoesNotContain("KnocksBlock", rpc.Calls);
+        Assert.DoesNotContain("KnocksUnblock", rpc.Calls);
+        Assert.False(vm.IsBlockKnown);
+
+        await vm.RefreshBlockStateAsync();
+
+        Assert.True(vm.IsBlockKnown);
+        Assert.True(vm.IsBlocked);
+    }
+
+    [Fact]
+    public async Task RefreshBlockStateAsync_ReadFailure_StillArmsTheToggle()
+    {
+        var rpc = new MockNestRpcClient { NextError = "boom" };
+        var vm = new ProfileViewModel(rpc, BobHex, isSelf: false);
+
+        await vm.RefreshBlockStateAsync();
+
+        Assert.True(vm.IsBlockKnown);
     }
 
     [Fact]
@@ -850,14 +884,22 @@ public class ProfileViewModelTests
     }
 
     [Fact]
-    public async Task RefreshHeaderAsync_FallsBackToActorIdWhenUnpublished()
+    public async Task RefreshHeaderAsync_FallsBackToTheCanonicalShortIdWhenUnpublished()
     {
+        // The shared resolver's public fallback (`peer_label`): no display name and no
+        // nickname → the canonical short id, with no secondary line. An id of twelve
+        // characters or fewer is its own short form; a 64-hex one is cut.
         var rpc = new MockNestRpcClient { NextProfile = null }; // unpublished
         var vm = new ProfileViewModel(rpc, "deadbeef");
-
         await vm.RefreshHeaderAsync();
-
         Assert.Equal("deadbeef", vm.HeaderName);
+        Assert.Equal("", vm.HeaderPublicName);
+
+        var longId = "ab".PadRight(64, 'c');
+        var vmLong = new ProfileViewModel(rpc, longId);
+        await vmLong.RefreshHeaderAsync();
+        Assert.Equal(uniffi.fauna_ffi.FaunaFfiMethods.ShortId(longId), vmLong.HeaderName);
+        Assert.Equal("", vmLong.HeaderPublicName);
     }
 
     [Fact]

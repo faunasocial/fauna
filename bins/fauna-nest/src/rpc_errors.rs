@@ -45,7 +45,11 @@ pub(crate) fn is_schema_shape_error(msg: &str) -> bool {
 /// the typed [`RpcError::nest_schema_mismatch`] (no SQL in `details`).
 fn classify(err: impl std::fmt::Display, code: &str, i18n: &str) -> RpcError {
     let s = err.to_string();
-    if is_schema_shape_error(&s) {
+    // The alternate form walks an `anyhow` error's whole cause chain (`outer:
+    // inner: …`); the plain form is the outermost `.context(..)` alone, which
+    // is how nearly every DB-layer failure arrives — and would hide the SQLite
+    // phrase beneath it. Every other `Display` ignores the flag.
+    if is_schema_shape_error(&format!("{err:#}")) {
         return RpcError::nest_schema_mismatch();
     }
     let mut e = RpcError::new(code, i18n);
@@ -201,19 +205,35 @@ pub(crate) fn permission_denied_ns(ns: &str, reason: impl std::fmt::Display) -> 
 /// with [`forbidden_ns`] instead, a distinct code family (see
 /// [`permission_denied_ns`]'s own doc) — this never merges the two, only the
 /// status-dispatch boilerplate around them. `posts_handlers` layers its own
-/// 501 arm on top before falling back here.
+/// 501 arm on top before falling back here. A typed code
+/// ([`crate::api_error::ApiError::refused`]) wins over the status:
+/// [`typed_refusal`].
 pub(crate) fn rpc_error_from_api_ns(
     ns: &str,
     api: crate::api_error::ApiError,
     forbidden: impl FnOnce(&str, String) -> RpcError,
 ) -> RpcError {
     use axum::http::StatusCode;
+    if let Some(code) = api.code {
+        return typed_refusal(code, api.message);
+    }
     match api.status {
         StatusCode::BAD_REQUEST => invalid_params_ns(ns, api.message),
         StatusCode::FORBIDDEN => forbidden(ns, api.message),
         StatusCode::NOT_FOUND => not_found_ns(ns, api.message),
         _ => internal(api.message),
     }
+}
+
+/// The typed-refusal seam: a door's own `fauna.{ns}.{family}` code, keyed
+/// `error.{ns}.{family}` (the code minus its `fauna.` prefix — the grammar
+/// every seam here spells), the reason in `details` (log-only). The app
+/// renders it through `RpcError::localized()`'s exact-code arm.
+pub(crate) fn typed_refusal(code: &'static str, reason: impl std::fmt::Display) -> RpcError {
+    let family = code.strip_prefix("fauna.").unwrap_or(code);
+    let mut e = RpcError::new(code, format!("error.{family}"));
+    e.details = Some(Box::new(Value::String(reason.to_string())));
+    e
 }
 
 /// The namespaced rate-limited seam: `fauna.{ns}.rate_limited`, no `details`
@@ -448,6 +468,26 @@ mod tests {
     use fauna_protocol::RpcErrorAction;
 
     #[test]
+    fn peer_relay_maps_an_old_peers_allowlist_refusal_to_peer_nest_outdated() {
+        // An older peer's federation allowlist refuses a kind it predates with
+        // `unauthenticated` before any handler runs; the relaying nest answers
+        // its user with the typed, localized update code instead.
+        let e = map_peer_relay_error(unauthenticated(), "the cross-nest send relay");
+        assert_eq!(e.code, "fauna.federation.peer_nest_outdated");
+        assert_eq!(e.message.key, "error.federation.peer_nest_outdated");
+        assert_eq!(e.action(), RpcErrorAction::NeedsUpdate);
+
+        // Every other typed refusal rides through untouched.
+        let denied = RpcError::new(
+            "fauna.conversations.permission_denied",
+            "error.conversations.permission_denied",
+        );
+        let e = map_peer_relay_error(denied, "the cross-nest send relay");
+        assert_eq!(e.code, "fauna.conversations.permission_denied");
+        assert_eq!(e.details, None);
+    }
+
+    #[test]
     fn schema_shape_errors_are_detected() {
         assert!(is_schema_shape_error("no such column: user_pref_v2"));
         assert!(is_schema_shape_error("no such table: outbound_mail_queue"));
@@ -474,6 +514,27 @@ mod tests {
         assert_ne!(e.action(), RpcErrorAction::Transient);
         // The column name never rides to the client (no server SQL phrase).
         assert_eq!(e.details, None);
+    }
+
+    #[test]
+    fn internal_sees_a_mismatch_beneath_an_anyhow_context() {
+        // The DB layer wraps almost every rusqlite error in `.context(..)`, and
+        // an `anyhow::Error`'s plain Display is the outermost context alone — so
+        // a classifier reading only that never saw the SQLite phrase beneath it.
+        let err = anyhow::Error::msg("table push_subscriptions has no column named key_auth")
+            .context("upsert push subscription");
+        let e = internal(err);
+        assert_eq!(e.code, RpcError::CODE_NEST_SCHEMA_MISMATCH);
+        assert_eq!(e.details, None);
+
+        // A wrapped failure that is not a mismatch keeps its prior details.
+        let err = anyhow::Error::msg("database is locked").context("upsert push subscription");
+        let e = internal(err);
+        assert_eq!(e.code, "fauna.protocol.internal");
+        assert_eq!(
+            e.details.as_deref(),
+            Some(&Value::String("upsert push subscription".into()))
+        );
     }
 
     #[test]
@@ -538,6 +599,28 @@ mod tests {
             e.details.as_deref(),
             Some(&Value::String("bad payload".into()))
         );
+    }
+
+    #[test]
+    fn a_typed_api_refusal_keeps_its_code_and_key() {
+        let api = crate::api_error::ApiError::refused(
+            RpcError::CODE_NOSTR_REPLIES_OFF,
+            "replies are switched off",
+        );
+        let e = rpc_error_from_api_ns("posts", api, permission_denied_ns);
+        assert_eq!(e.code, "fauna.nostr.replies_off");
+        assert_eq!(e.message.key, "error.nostr.replies_off");
+        assert_eq!(
+            e.details.as_deref(),
+            Some(&Value::String("replies are switched off".into()))
+        );
+    }
+
+    #[test]
+    fn an_untyped_bad_request_still_maps_to_invalid_params() {
+        let api = crate::api_error::ApiError::bad_request("bad payload");
+        let e = rpc_error_from_api_ns("posts", api, permission_denied_ns);
+        assert_eq!(e.code, "fauna.posts.invalid_params");
     }
 
     #[test]

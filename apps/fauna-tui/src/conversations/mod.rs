@@ -73,11 +73,18 @@ pub enum Action {
     Sort,
 
     // --- the compose sub-page ---
-    /// `recipient-picker-suggestion` click / the `conversations_accept_recipient`
-    /// command — commit the picker's current text (or a picked suggestion) as a
-    /// chip. The manager decides which picker is active and whether the text
+    /// Enter on `recipient-picker-input` — commit the picker's current text as
+    /// a chip (a suggestion click is [`Action::AcceptSuggestion`]). The manager decides which picker is active and whether the text
     /// parses (`accept_current_recipient_chip`).
     AcceptRecipientChip,
+    /// `recipient-picker-suggestion[index]` — accept that suggestion through the
+    /// Enter path run over its spelling (`manager.accept_suggestion`,
+    /// `conversations.md` § Where logic lives → *Recipient suggestions*).
+    /// Async → [`Op::AcceptSuggestion`].
+    AcceptSuggestion { index: u32 },
+    /// `recipient-picker-chip[index]`'s × — drop that chip from the active
+    /// picker (`manager.remove_recipient_chip`).
+    RemoveRecipientChip { index: u32 },
     /// `topic-toggle-button` — reveal/hide the `subject-input` on the active
     /// compose.
     ToggleTopic,
@@ -479,6 +486,8 @@ impl Action {
             | Action::CancelNewConversation
             | Action::Sort
             | Action::AcceptRecipientChip
+            | Action::AcceptSuggestion { .. }
+            | Action::RemoveRecipientChip { .. }
             | Action::ToggleTopic
             | Action::MarkdownWrap { .. }
             | Action::OpenAddParticipant
@@ -599,6 +608,14 @@ pub struct ConversationsState {
     /// non-conversations proceeds normally. Cleared only by the re-login that
     /// rebuilds this whole state.
     pub served_elsewhere: bool,
+    /// This account's `mls_state.db` was written by a newer build with a
+    /// breaking schema change this one predates (`MlsError::SchemaIncompatible`
+    /// at engine init — `version-compatibility.md` § Dimension 1, the `mls.db`
+    /// row). The store refused without a write, so the conversations are
+    /// intact and an update restores them; surfaced with top precedence by
+    /// [`sync_page_error`] exactly as [`Self::served_elsewhere`] is, and cleared
+    /// the same way — only by the re-login that rebuilds this whole state.
+    pub state_needs_newer_app: bool,
     /// The in-group succession witness this login registered, kept as its
     /// concrete type so its convention-6 report
     /// ([`fauna_client_recovery::witness::WitnessObservation`]) stays readable.
@@ -755,6 +772,7 @@ pub fn init(tx: &UnboundedSender<UiMessage>) -> ConversationsState {
         attach_path_draft: String::new(),
         real_session: None,
         served_elsewhere: false,
+        state_needs_newer_app: false,
         succession_witness: None,
         peer_anchor_harvest: Default::default(),
         index_launcher: None,
@@ -1115,6 +1133,13 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // (`accept_current_recipient_chip`), so a bare sync accept here would
         // silently no-op whenever Enter beat the keystroke-spawned resolve.
         Action::AcceptRecipientChip => Some(Op::AcceptRecipientChip { manager }),
+        // A suggestion click is the same Enter path, run over the clicked
+        // person's spelling — never a chip pushed unprobed.
+        Action::AcceptSuggestion { index } => Some(Op::AcceptSuggestion { manager, index }),
+        Action::RemoveRecipientChip { index } => {
+            manager.remove_recipient_chip(index);
+            None
+        }
         // Purely local — the body is already decrypted and in the snapshot; the
         // collapse was only a render decision, so revealing is one set insert.
         Action::RevealMuted { msg_id } => {
@@ -1640,6 +1665,11 @@ pub enum Op {
     AcceptRecipientChip {
         manager: Arc<ConversationsManager>,
     },
+    /// `manager.accept_suggestion(index)` — the probe, then the commit.
+    AcceptSuggestion {
+        manager: Arc<ConversationsManager>,
+        index: u32,
+    },
     /// Re-derive a compose's list-send view (`refresh_list_send`) — the opened
     /// thread's, or the new-thread compose's for `None`. The snapshot notify
     /// repaints; nothing to surface.
@@ -1827,6 +1857,11 @@ impl Op {
             Op::AcceptRecipientChip { manager } => {
                 manager.resolve_recipient().await;
                 manager.accept_current_recipient_chip();
+                manager.refresh_list_send(None).await;
+                Outcome::Done
+            }
+            Op::AcceptSuggestion { manager, index } => {
+                manager.accept_suggestion(index).await;
                 manager.refresh_list_send(None).await;
                 Outcome::Done
             }
@@ -2040,6 +2075,18 @@ pub fn sync_page_error(app: &mut App) {
         app.errors.insert(
             crate::pages::Page::Conversations,
             crate::wizard::key("conversations.errors.served_elsewhere"),
+        );
+        return;
+    }
+    // A conversations state saved by a newer build is the same kind of standing
+    // truth: no engine, so no session to stamp the manager truths, and the
+    // "update the app — your conversations are intact" sentence must never be
+    // masked or cleared by an unrelated fold
+    // (`ConversationsState::state_needs_newer_app`).
+    if app.conversations.state_needs_newer_app {
+        app.errors.insert(
+            crate::pages::Page::Conversations,
+            crate::wizard::key("conversations.errors.state_needs_newer_app"),
         );
         return;
     }
@@ -2342,12 +2389,13 @@ fn backup_audit_key(app: &App, snapshot: &ConversationsSnapshot) -> Option<(Stri
 /// only place the key is chosen is this function, and it acts on its own
 /// choice in the same breath, with no other logic between the two.
 ///
-/// Returns `observe_thread_activity`'s own return **directly** — never a
-/// separately-held local — so a future call site forwarding a *different*
-/// freshly-resolved actor there is reflected in what comes back, not only in
-/// what got written .
+/// The body is a single tail expression, so no separate local exists to
+/// diverge from what was forwarded. The return is `observe_thread_activity`'s
+/// own echo of its parameters, which cannot by itself prove *what* was
+/// forwarded; `backup_audit_observation_returns_the_sinks_own_pair_not_a_separate_local`
+/// witnesses that through `backup_audit::last_forwarded_actor` .
 /// `backup_audit_observation_keys_by_the_session_account_not_active` pins
-/// this against `backup_audit_key`'s independent resolution; the render loop
+/// the return against `backup_audit_key`'s independent resolution; the render loop
 /// itself (`elements`, below) still discards the return: `OBSERVED`
 /// (`backup_audit.rs`) remains a process-wide static with no production
 /// reader.
@@ -2537,11 +2585,14 @@ fn recipient_picker_elements(
     picker: Option<&RecipientPickerState>,
     bridges: &[fauna_conversations::snapshot::BridgeIdentitySnapshot],
 ) -> Vec<Element> {
+    // Enter commits the typed address as a chip (probe, then commit), as web's
+    // Enter and linux's `on_accept` do — never a bare advance past it.
     let mut out = vec![
-        Element::input(
+        Element::input_commit(
             ids::RECIPIENT_PICKER_INPUT,
             picker.map(|p| p.raw_input.clone()).unwrap_or_default(),
             Field::Conversations(ConversationsField::RecipientInput),
+            Gesture::Conversations(Action::AcceptRecipientChip),
         )
         .labelled(conversations::unified::RECIPIENT_PICKER_PLACEHOLDER),
     ];
@@ -2560,15 +2611,31 @@ fn recipient_picker_elements(
     // the user sees which network the nest resolved it to.
     let display = |address: &TypedAddress| address.display_with_bridges(bridges);
     if let Some(p) = picker {
-        for chip in &p.chips {
-            out.push(Element::label(ids::RECIPIENT_PICKER_CHIP, display(chip)));
+        // A chip activates to its × — the one gesture a committed chip has.
+        for (i, chip) in p.chips.iter().enumerate() {
+            out.push(Element::gesture_button(
+                ids::RECIPIENT_PICKER_CHIP,
+                format!("{} ×", display(chip)),
+                true,
+                Gesture::Conversations(Action::RemoveRecipientChip { index: i as u32 }),
+            ));
         }
-        for sug in &p.suggestions {
+        // Each row paints the finished label the manager derived, with the
+        // address beside it when the two differ (`conversations.md` § Where
+        // logic lives → *Recipient suggestions*), and accepts *that* person.
+        for (i, sug) in p.suggestions.iter().enumerate() {
+            let address = display(sug);
+            let text = match p.suggestion_displays.get(i) {
+                Some(label) if !label.is_empty() && *label != address => {
+                    format!("{label} · {address}")
+                }
+                _ => address,
+            };
             out.push(Element::gesture_button(
                 ids::RECIPIENT_PICKER_SUGGESTION,
-                display(sug),
+                text,
                 true,
-                Gesture::Conversations(Action::AcceptRecipientChip),
+                Gesture::Conversations(Action::AcceptSuggestion { index: i as u32 }),
             ));
         }
         // The status label carries its terminal-state name as a `state`
@@ -4673,15 +4740,13 @@ mod tests {
     /// account, so `active()` and the session account can never diverge
     /// there (`account-scoping.md` § Concurrent instances, :818-822).
     ///
-    /// **Residual limit closed :** this test alone
+    /// **Residual limit :** this test alone
     /// only proves the return matches `backup_audit_key`'s resolution — it
     /// cannot prove the forwarded call used that same binding rather than a
-    /// different value routed there separately. The sibling test
+    /// different value routed there separately (forward an `active()` local,
+    /// return the original `backup_audit_key` binding). The sibling test
     /// `backup_audit_observation_returns_the_sinks_own_pair_not_a_separate_local`
-    /// closes that: `backup_audit_observation` now returns
-    /// `observe_thread_activity`'s own return directly, so a two-line
-    /// mutation (a new local forwarded to `observe_thread_activity`, the
-    /// original binding left in the return) shows up there instead.
+    /// closes that by reading back the actor the sink was handed.
     #[test]
     fn backup_audit_observation_keys_by_the_session_account_not_active() {
         let app = conv_app(&[("Smtp", "alice@host.test", "Q4 budget")]);
@@ -4757,6 +4822,15 @@ mod tests {
             via_render_path, direct,
             "backup_audit_observation must return observe_thread_activity's \
              own return for the same call, not a separately-held local"
+        );
+        // The echo above is the sink's own parameters, so it cannot tell a
+        // forwarded `active()` local from the right binding. What the sink was
+        // actually handed can.
+        assert_eq!(
+            crate::backup_audit::last_forwarded_actor().as_deref(),
+            Some(expected_actor.as_str()),
+            "backup_audit_observation must forward the session account's actor \
+             to observe_thread_activity, not a freshly-resolved active() one"
         );
     }
 
@@ -9383,6 +9457,8 @@ mod tests {
             needs_media_metadata: false,
             needs_author: false,
             needs_attachment_bytes: false,
+            label_abi: 1,
+            newer_than_this_app: false,
             verified: true,
             list_name: None,
             list_entries: vec![],
@@ -9474,6 +9550,27 @@ mod tests {
                 .and_then(|d| d.labelers.clone()),
             Some(vec![]),
             "a greyed control stages nothing"
+        );
+    }
+
+    /// Enter on the recipient picker commits the typed address as a chip
+    /// (probe first, then commit — `Op::AcceptRecipientChip`), the same
+    /// gesture as web's Enter and linux's `on_accept`; it never just advances
+    /// focus past an uncommitted address.
+    #[test]
+    fn enter_on_the_recipient_picker_commits_a_chip() {
+        let mut app = conv_app(&[]);
+        apply_local(&mut app, Action::StartNewConversation);
+        let input = elements(&app)
+            .into_iter()
+            .find(|e| e.id == ids::RECIPIENT_PICKER_INPUT)
+            .expect("the composer paints the picker input");
+        assert!(
+            matches!(
+                input.gesture(),
+                Some(Gesture::Conversations(Action::AcceptRecipientChip))
+            ),
+            "Enter on the picker must fire AcceptRecipientChip"
         );
     }
 

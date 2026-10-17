@@ -141,7 +141,7 @@ func (h *mtaConfigHolder) ApplyConfig(snap wsrpc.ConfigSnapshot) {
 		"primary_domain", snap.PrimaryDomain,
 		"max_conn_per_min", snap.Spam.MaxConnPerMin,
 		"max_message_bytes", snap.Spam.MaxMessageBytes,
-		"dkim_domains", len(snap.DkimSelectors),
+		"dkim_selectors", len(snap.DkimSelectors),
 	)
 }
 

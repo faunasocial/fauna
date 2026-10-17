@@ -1737,7 +1737,7 @@ def test_mda_append_populates_dedup_index_so_a_later_import_skips(
 
         IMAP APPEND
           → mda/imap/append.go      dedupKeys := mailfauna.MailDedupKeys(body)   [shared Rust, UniFFI]
-          → wsrpc/methods.go:1639   cbor `dedup_key` on fauna.bridges.append
+          → wsrpc/methods.go        cbor `dedup_key` on fauna.bridges.append
           → bridge_imap_handlers.rs  insert_dedup_key(&target, …)          [recipient actor]
           → bridge_import_handlers.rs dedup_hit(actor, key, None) → true   [no envelope key on the item: agrees]
           → ImportMessageOutcome::Skipped{reason: "dedup"}
@@ -1746,7 +1746,7 @@ def test_mda_append_populates_dedup_index_so_a_later_import_skips(
     `normalize` trims, strips one `<>` pair and case-folds
     (`libs/fauna-mail/src/dedup_key.rs::normalize_message_id`), so the
     deliberately mixed-case `<B5-Dedup@Example.COM>` must fold to it. The Go
-    binding's golden vector (`internal/mailfauna/mailfauna_test.go:157`) pins
+    binding's golden vector (`internal/mailfauna/mailfauna_test.go::TestMailDedupKeyBinding`) pins
     the same transformation.
 
     Two controls make the skip attributable:

@@ -1,5 +1,5 @@
 //! A `Placeholder` row on a **resident** root is a pending download, never a
-//! delete (`docs/goal/behavior/on-demand-files.md` § Linux FUSE binding, the
+//! delete (`docs/goal/behavior/on-demand-files-linux.md` § Linux FUSE binding, the
 //! flips rule). An on-demand→always flip — the linux FUSE root unmounting, or a
 //! windows cfapi root unregistering — leaves the folder's cloud-only files as
 //! `Placeholder` rows with no bytes on the disk, and the on-demand fold already

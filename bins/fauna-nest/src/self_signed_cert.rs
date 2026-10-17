@@ -379,8 +379,25 @@ pub fn resynthesize_floor_for_domain(
 /// hot-reloads the refreshed PEM. The SPKI is unchanged (stable key), so no MUA
 /// re-prompt and no TLSA churn. Backs off without clobbering if ACME later swaps
 /// a real CA cert in (`cert_lifecycle_task`).
-pub async fn floor_renew_task(acme_dir: std::path::PathBuf, domain: Option<String>) {
+///
+/// **The lapse edge (`tls-certificates.md` § The two-layer model).** A CA-issued
+/// chain left on disk past its `notAfter` changes no file, so neither the cert
+/// watcher nor an issuance tells the sealed ports — yet from that instant they
+/// must serve the floor (`storage::read_served_tls_pem` substitutes it on every
+/// seal). So the task sleeps no later than the on-disk chain's `notAfter` and,
+/// on the tick that first finds it lapsed, bumps the relay's cert generation and
+/// pushes `config_changed` (`tls`) to every approved bridge, both of which
+/// re-fetch and are sealed the floor. `fanout` is `None` where no bridge or relay
+/// runs beside the nest (the desktop-served nest); a bridge that misses the push
+/// re-fetches on its own 12 h timer. The way back — a fresh trusted chain — is the
+/// issuance's own fan-out, not this task's.
+pub async fn floor_renew_task(
+    acme_dir: std::path::PathBuf,
+    domain: Option<String>,
+    fanout: Option<std::sync::Arc<AppState>>,
+) {
     let label = domain.as_deref().unwrap_or("no domain (IP/identity only)");
+    let mut was_lapsed = false;
     loop {
         match maybe_renew_floor(&acme_dir, domain.as_deref()) {
             Ok(true) => tracing::info!(
@@ -389,8 +406,46 @@ pub async fn floor_renew_task(acme_dir: std::path::PathBuf, domain: Option<Strin
             Ok(false) => {}
             Err(e) => tracing::debug!("floor renewal check for {label} skipped: {e}"),
         }
-        tokio::time::sleep(FLOOR_RENEW_CHECK_INTERVAL).await;
+        let lapsed = crate::acme::on_disk_trusted_chain_lapsed(&acme_dir);
+        if lapsed && !was_lapsed {
+            tracing::warn!(
+                "the on-disk trusted TLS chain for {label} has expired; the mail, calendar \
+                 and relay ports now serve the self-signed floor"
+            );
+            if let Some(state) = &fanout {
+                state
+                    .relay_cert_changed
+                    .send_modify(|generation| *generation += 1);
+                crate::bridge_routing_handlers::notify_bridges_config_changed(
+                    state,
+                    fauna_protocol::bridge_routing::config_change_reason::TLS,
+                )
+                .await;
+            }
+        }
+        was_lapsed = lapsed;
+        tokio::time::sleep(next_floor_check_in(&acme_dir, lapsed)).await;
     }
+}
+
+/// How long [`floor_renew_task`] sleeps: [`FLOOR_RENEW_CHECK_INTERVAL`], cut
+/// short to just past the on-disk chain's `notAfter` while a CA-issued chain is
+/// still valid, so the lapse edge fires when it happens rather than up to a
+/// whole interval later.
+fn next_floor_check_in(acme_dir: &std::path::Path, lapsed: bool) -> std::time::Duration {
+    let Ok(pem) = std::fs::read(acme_dir.join(crate::acme::CERT_FILENAME)) else {
+        return FLOOR_RENEW_CHECK_INTERVAL;
+    };
+    if lapsed || crate::acme::pem_is_self_signed(&pem) {
+        return FLOOR_RENEW_CHECK_INTERVAL;
+    }
+    let Ok(not_after) = leaf_not_after_unix(&pem) else {
+        return FLOOR_RENEW_CHECK_INTERVAL;
+    };
+    let now = fauna_core::data::Timestamp::now_secs_or_zero();
+    let until_lapse =
+        std::time::Duration::from_secs(not_after.saturating_sub(now).max(0) as u64 + 1);
+    until_lapse.min(FLOOR_RENEW_CHECK_INTERVAL)
 }
 
 /// `{role, bridge_id}` identity of a bridge a synthesized cert was (or was
@@ -759,6 +814,50 @@ mod tests {
         assert!(
             !floor_due_for_renewal(&cert_path(dir.path())).unwrap(),
             "a CA-issued cert is not the floor's to renew"
+        );
+    }
+
+    #[test]
+    fn floor_check_wakes_at_the_trusted_chain_lapse() {
+        // The lapse edge fires when the CA-issued chain crosses `notAfter`, not up
+        // to a whole check interval later; a floor (or no chain) keeps the interval.
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            next_floor_check_in(dir.path(), false),
+            FLOOR_RENEW_CHECK_INTERVAL
+        );
+
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let mut ca_params = rcgen::CertificateParams::new(vec![]).unwrap();
+        ca_params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "Test Root CA".to_string());
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+        let leaf_key = rcgen::KeyPair::generate().unwrap();
+        let mut leaf_params =
+            rcgen::CertificateParams::new(vec!["example.com".to_string()]).unwrap();
+        leaf_params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "example.com".to_string());
+        leaf_params.not_after = time::OffsetDateTime::now_utc() + time::Duration::hours(1);
+        let leaf = leaf_params.signed_by(&leaf_key, &ca_cert, &ca_key).unwrap();
+        std::fs::write(cert_path(dir.path()), leaf.pem()).unwrap();
+        let wake = next_floor_check_in(dir.path(), false);
+        assert!(
+            wake <= std::time::Duration::from_secs(3601)
+                && wake >= std::time::Duration::from_secs(3500),
+            "the check is cut short to the chain's notAfter (got {wake:?})"
+        );
+        assert_eq!(
+            next_floor_check_in(dir.path(), true),
+            FLOOR_RENEW_CHECK_INTERVAL,
+            "once lapsed the edge has fired; back to the interval"
+        );
+
+        write_self_signed_bootstrap(dir.path(), Some("example.com")).unwrap();
+        assert_eq!(
+            next_floor_check_in(dir.path(), false),
+            FLOOR_RENEW_CHECK_INTERVAL
         );
     }
 

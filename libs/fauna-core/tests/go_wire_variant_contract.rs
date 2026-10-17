@@ -69,15 +69,20 @@ const FIXTURE: &str = "bins/fauna-bridges/internal/wsrpc/testdata/go-wire-varian
 /// they are not two pieces of code — they are one macro invocation. Adding an
 /// enum variant makes the generated match non-exhaustive, and the only lever
 /// available to fix that compile error is adding the variant HERE, which
-/// necessarily extends the instance list too.
+/// necessarily extends the instance list too. A unit variant that is never on
+/// the wire — a `skip_serializing` unknown arm, which no Go `ToWire` arm can
+/// produce — goes after `never_on_wire:`: the match still names it, the fixture
+/// does not.
 macro_rules! variant_set {
-    ($ty:ident; $( $variant:ident $( { $($field:ident : $val:expr),* $(,)? } )? ),+ $(,)?) => {{
+    ($ty:ident; $( $variant:ident $( { $($field:ident : $val:expr),* $(,)? } )? ),+ $(,)?
+     $( ; never_on_wire: $( $skip:ident ),+ $(,)? )?) => {{
         let all: Vec<(&'static str, $ty)> = vec![
             $( (stringify!($variant), $ty::$variant $( { $($field: $val),* } )? ) ),+
         ];
         for (_, v) in &all {
             match v {
                 $( $ty::$variant $( { $($field: _),* } )? )|+ => {}
+                $( $( $ty::$skip )|+ => unreachable!(), )?
             }
         }
         all
@@ -176,7 +181,8 @@ fn clamav_variants() -> BTreeMap<String, String> {
         Infected { signature: String::new() },
         Error { detail: String::new() },
         BypassedOversize,
-        NotScanned,
+        NotScanned;
+        never_on_wire: Unknown,
     )
     .iter()
     .map(|(ident, v)| (ident.to_string(), serde_name(v)))

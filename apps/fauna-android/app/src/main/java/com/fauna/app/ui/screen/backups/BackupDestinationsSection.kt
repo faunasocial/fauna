@@ -8,6 +8,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.fauna.app.R
@@ -17,6 +18,7 @@ import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.ValueFormat
 import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.resolveLocalized
+import com.fauna.app.ui.util.resolveLocalizedNested
 import com.fauna.app.ui.viewmodel.BackupDestinationsVM
 import com.fauna.ffi.FfiBackupDestinationStatus
 import com.fauna.ffi.FfiBackupDestinationView
@@ -79,8 +81,38 @@ fun BackupDestinationsSection(
     val working by vm.working.collectAsState()
     val errorMessage by vm.errorMessage.collectAsState()
     val orphanedStoreBytes by vm.orphanedStoreBytes.collectAsState()
+    val reseedRunning by vm.reseedRunning.collectAsState()
+    val reseedResult by vm.reseedResult.collectAsState()
     val appMessages = LocalAppMessages.current
     val context = LocalContext.current
+
+    // How a restore ended, on the page's one `error-message` surface: a stop
+    // (nothing was made live) inside `backups.backup_reseed_failed`, and a
+    // whole restore whose re-enrollment failed inside its own sentence beside
+    // the result — the data IS back, so that one never replaces the verdict.
+    val reseedFailed = stringResource(R.string.backups_backup_reseed_failed)
+    val reseedReenrollFailed = stringResource(R.string.backups_backup_reseed_reenroll_failed)
+    LaunchedEffect(reseedResult) {
+        val result = reseedResult ?: return@LaunchedEffect
+        result.stopped?.let { appMessages.showError(reseedFailed.replace("{reason}", it)) }
+        result.reenrollError?.let { appMessages.showError(reseedReenrollFailed.replace("{reason}", it)) }
+    }
+    val reseedRunningText = stringResource(R.string.backups_backup_reseed_running)
+    // `backup-destination-reseed-result`: the running line while the ceremony
+    // runs, then the shared `result_lines` — each resolved NESTED, because a
+    // line's set name is itself a key. Absent before a run and after a stop.
+    val lastReseed = reseedResult
+    val reseedResultText = when {
+        reseedRunning -> reseedRunningText
+        lastReseed != null && lastReseed.stopped == null ->
+            lastReseed.resultLines.joinToString("\n") { resolveLocalizedNested(context, it) ?: "" }
+        else -> null
+    }
+    // Where the restore button paints — the shared `backupReseedRows` over the
+    // list and the orphaned verdict this VM already caches.
+    val reseedRows = remember(destinations, orphanedStoreBytes) {
+        vm.reseedRows(destinations, orphanedStoreBytes)
+    }
 
     // The shared FFI returns the EDIT_DIFFERENT_NEST_ERR sentinel for a
     // different-nest URL edit; localize it before showing (i18n stays in the view).
@@ -126,7 +158,7 @@ fun BackupDestinationsSection(
         },
         // `backup-destination-backlog-count` text via the shared backupBacklogLabel
         // (absent status ⇒ the shared 0 baseline). FFI lives here, off the testable Content.
-        backlogText = { status -> resolveLocalized(context, backupBacklogLabel(status?.backlogCount)) ?: "" },
+        backlogText = { status -> resolveLocalized(context, backupBacklogLabel(status?.backlogCount, status?.writerState)) ?: "" },
         // `backup-destination-last-audit-time` text: the audit twin of
         // `lastUploadText`, resolved exactly the same way, off this client's OWN
         // audit pass rather than the source nest's report (backups.md
@@ -230,6 +262,11 @@ fun BackupDestinationsSection(
                 .replace("{held}", resolveLocalized(context, display.held) ?: "")
         },
         onReclaimStore = vm::reclaimStore,
+        // ── Restore after losing the nest (backups.md) ──
+        reseedRows = reseedRows,
+        reseedRunning = reseedRunning,
+        reseedResultText = reseedResultText,
+        onReseed = vm::reseed,
     )
 }
 
@@ -263,10 +300,23 @@ fun BackupAuditAlerts(
     val auditRows by vm.auditRows.collectAsState()
     val context = LocalContext.current
 
+    val recoverConfirming by vm.recoverConfirming.collectAsState()
+    val recoverRunning by vm.recoverRunning.collectAsState()
+    val recoverResult by vm.recoverResult.collectAsState()
+
     val alerts = destinations.flatMap { dest ->
         val label = backupDestinationLabel(dest.displayName, dest.destinationNestUrl)
-        auditAlertReasons(auditRows[dest.destinationId]).map { reason ->
-            resolveLocalized(context, backupAuditAlertLabel(reason, label)) ?: ""
+        val row = auditRows[dest.destinationId]
+        // Whether a banner offers the recovery is the shared offered-rule's
+        // answer (`recoverOffered`) on both kinds: a nest, or this device's own
+        // custodian row. The confirm picks the leg by the row's kind.
+        auditAlertReasons(row).map { reason ->
+            AuditBanner(
+                text = resolveLocalized(context, backupAuditAlertLabel(reason, label)) ?: "",
+                destinationId = dest.destinationId,
+                offerRecover = reason is BackupAuditAlertReason.SourceRegressed &&
+                    row?.recoverOffered == true,
+            )
         }
     } + destinations.filter { dest ->
         // A client-device custodian reporting its OWN copy as failing — the
@@ -277,10 +327,33 @@ fun BackupAuditAlerts(
         backupSelfAuditIsAlerting(statuses[dest.destinationId]?.auditState)
     }.map { dest ->
         val label = backupDestinationLabel(dest.displayName, dest.destinationNestUrl)
-        resolveLocalized(context, backupAuditAlertLabel(BackupAuditAlertReason.SelfReported, label)) ?: ""
+        AuditBanner(
+            text = resolveLocalized(context, backupAuditAlertLabel(BackupAuditAlertReason.SelfReported, label)) ?: "",
+            destinationId = dest.destinationId,
+            offerRecover = false,
+        )
     }
 
-    BackupAuditAlertsContent(alerts)
+    val runningText = stringResource(R.string.backups_backup_recover_running)
+    val failedText = stringResource(R.string.backups_backup_recover_failed)
+    // `backup-audit-recover-result`: the running line while the run goes, then
+    // the shared face's resolved lines (verdict first), or the stop sentence.
+    val resultText = when {
+        recoverRunning -> runningText
+        else -> recoverResult?.let { r ->
+            r.failure?.let { failedText.replace("{reason}", it) } ?: r.lines.joinToString("\n")
+        }
+    }
+
+    BackupAuditAlertsContent(
+        alerts = alerts,
+        recoverConfirming = recoverConfirming != null,
+        recoverEnabled = !recoverRunning,
+        recoverResultText = resultText,
+        onRecover = vm::armRecover,
+        onRecoverConfirm = vm::confirmRecover,
+        onRecoverCancel = vm::cancelRecover,
+    )
 }
 
 /**
@@ -293,18 +366,92 @@ fun BackupAuditAlerts(
 internal fun auditAlertReasons(row: FfiDestinationAuditRow?): List<BackupAuditAlertReason> =
     row?.alertReasons ?: emptyList()
 
-/** Stateless render of the `backup-audit-alert` banners — see [BackupAuditAlerts]. */
+/**
+ * One `backup-audit-alert` banner: its sentence, the destination it names, and
+ * whether it carries `backup-audit-recover-button` — the shared offered-rule's
+ * answer resolved by the caller, never a kind or deadline check here.
+ */
+data class AuditBanner(
+    val text: String,
+    val destinationId: String,
+    val offerRecover: Boolean = false,
+)
+
+/**
+ * Stateless render of the `backup-audit-alert` banners — see [BackupAuditAlerts].
+ * A banner that offers the recovery carries `backup-audit-recover-button`
+ * scoped inside it; the confirm card and the result sit directly under the
+ * banners (`ui/backups.md` § Audit-alert surface, the fifth reason).
+ */
 @Composable
-fun BackupAuditAlertsContent(alerts: List<String>) {
+fun BackupAuditAlertsContent(
+    alerts: List<AuditBanner>,
+    recoverConfirming: Boolean = false,
+    recoverEnabled: Boolean = true,
+    recoverResultText: String? = null,
+    onRecover: (String) -> Unit = {},
+    onRecoverConfirm: () -> Unit = {},
+    onRecoverCancel: () -> Unit = {},
+) {
     alerts.forEach { alert ->
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 4.dp)
+                .semantics(mergeDescendants = true) {}
+                .testTag(Ids.BACKUP_AUDIT_ALERT),
+        ) {
+            Text(
+                text = alert.text,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            if (alert.offerRecover) {
+                OutlinedButton(
+                    onClick = { onRecover(alert.destinationId) },
+                    enabled = recoverEnabled,
+                    modifier = Modifier.testTag(Ids.BACKUP_AUDIT_RECOVER_BUTTON),
+                ) { Text(stringResource(R.string.backups_backup_audit_recover_button)) }
+            }
+        }
+    }
+    if (recoverConfirming) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 4.dp)
+                .testTag(Ids.BACKUP_AUDIT_RECOVER_CONFIRM_MODAL),
+        ) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    stringResource(R.string.backups_backup_recover_confirm_title),
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                Text(
+                    stringResource(R.string.backups_backup_recover_confirm_body),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = onRecoverConfirm,
+                        modifier = Modifier.testTag(Ids.BACKUP_AUDIT_RECOVER_CONFIRM_BUTTON),
+                    ) { Text(stringResource(R.string.backups_backup_recover_confirm_button)) }
+                    OutlinedButton(
+                        onClick = onRecoverCancel,
+                        modifier = Modifier.testTag(Ids.BACKUP_AUDIT_RECOVER_CANCEL_BUTTON),
+                    ) { Text(stringResource(R.string.backups_backup_recover_cancel_button)) }
+                }
+            }
+        }
+    }
+    recoverResultText?.let { text ->
         Text(
-            text = alert,
-            color = MaterialTheme.colorScheme.error,
+            text,
             style = MaterialTheme.typography.bodyMedium,
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 4.dp)
-                .testTag(Ids.BACKUP_AUDIT_ALERT),
+                .testTag(Ids.BACKUP_AUDIT_RECOVER_RESULT),
         )
     }
 }
@@ -409,10 +556,32 @@ fun BackupDestinationsContent(
     orphanedStoreText: (ULong) -> String = { "" },
     /** Free this device's whole sealed store — the confirmed reclaim. */
     onReclaimStore: () -> Unit = {},
+    // ── Restore after losing the nest (backups.md § Restore after losing the nest) ──
+    /**
+     * Where `backup-destination-reseed-button` paints: `null` for
+     * `backup-orphaned-store-row`, a `destination_id` for a destination row.
+     * Already decided by the shared `backupReseedRows` — never re-derived here.
+     */
+    reseedRows: List<String?> = emptyList(),
+    /** A restore is running: every restore button is disarmed until it ends. */
+    reseedRunning: Boolean = false,
+    /** `backup-destination-reseed-result` text, or `null` while it must be absent. */
+    reseedResultText: String? = null,
+    /** Run the confirmed restore. */
+    onReseed: () -> Unit = {},
 ) {
     var form by remember { mutableStateOf<FormMode>(FormMode.Closed) }
     var removing by remember { mutableStateOf<FfiBackupDestinationView?>(null) }
     var confirmingReclaim by remember { mutableStateOf(false) }
+    var confirmingReseed by remember { mutableStateOf(false) }
+    // One confirm at a time: arming the restore closes the reclaim's, as
+    // apple's `armReseed` does — the two act on the same store.
+    val armReseed = {
+        if (!reseedRunning) {
+            confirmingReclaim = false
+            confirmingReseed = true
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -511,6 +680,11 @@ fun BackupDestinationsContent(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Text(orphanedStoreText(held), style = MaterialTheme.typography.bodySmall)
+                    // The restore sits ahead of the reclaim: it is the gesture
+                    // that keeps the copy's value, the reclaim the one that ends it.
+                    if (null in reseedRows) {
+                        ReseedButton(enabled = !working && !reseedRunning, onClick = armReseed)
+                    }
                     Button(
                         onClick = { confirmingReclaim = true },
                         enabled = !working,
@@ -524,6 +698,25 @@ fun BackupDestinationsContent(
             ReclaimConfirm(
                 onConfirm = { onReclaimStore(); confirmingReclaim = false },
                 onCancel = { confirmingReclaim = false },
+            )
+        }
+
+        if (confirmingReseed) {
+            ReseedConfirm(
+                onConfirm = { confirmingReseed = false; onReseed() },
+                onCancel = { confirmingReseed = false },
+            )
+        }
+
+        // Present only after a run (and while one runs): one line per delivered
+        // set, verdict first, exactly as the shared `result_lines` gave them.
+        reseedResultText?.let { text ->
+            Text(
+                text,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(Ids.BACKUP_DESTINATION_RESEED_RESULT),
             )
         }
 
@@ -550,6 +743,9 @@ fun BackupDestinationsContent(
                     isClientDevice = isClientDevice,
                     onEdit = { form = FormMode.Edit(dest) },
                     onRemove = { removing = dest },
+                    offerReseed = dest.destinationId in reseedRows,
+                    reseedEnabled = !working && !reseedRunning,
+                    onReseed = armReseed,
                 )
             }
         }
@@ -663,6 +859,57 @@ private fun ReclaimConfirm(
 }
 
 /**
+ * `backup-destination-reseed-button` — indexed: the same element on the
+ * orphaned-store row and on this device's own custodian row. It only opens the
+ * confirm.
+ */
+@Composable
+private fun ReseedButton(enabled: Boolean, onClick: () -> Unit) {
+    OutlinedButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier.testTag(Ids.BACKUP_DESTINATION_RESEED_BUTTON),
+    ) { Text(stringResource(R.string.backups_backup_destination_reseed_button)) }
+}
+
+/**
+ * The restore-confirm inline reveal (`backup-destination-reseed-confirm-modal`).
+ *
+ * A **plain** confirm — no re-type (`backups.md` § Restore after losing the
+ * nest): the ceremony deletes nothing on either side, and it refuses a
+ * lived-in target by itself, so typed friction would overstate the risk. The
+ * cancel is pure local UI with no side effect.
+ */
+@Composable
+private fun ReseedConfirm(
+    onConfirm: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth().testTag(Ids.BACKUP_DESTINATION_RESEED_CONFIRM_MODAL)) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                stringResource(R.string.backups_backup_reseed_confirm_title),
+                style = MaterialTheme.typography.titleSmall,
+            )
+            Text(
+                stringResource(R.string.backups_backup_reseed_confirm_body),
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = onConfirm,
+                    modifier = Modifier.testTag(Ids.BACKUP_DESTINATION_RESEED_CONFIRM_BUTTON),
+                ) { Text(stringResource(R.string.backups_backup_reseed_confirm_button)) }
+                OutlinedButton(
+                    onClick = onCancel,
+                    modifier = Modifier.testTag(Ids.BACKUP_DESTINATION_RESEED_CANCEL_BUTTON),
+                ) { Text(stringResource(R.string.backups_backup_reseed_cancel_button)) }
+            }
+        }
+    }
+}
+
+/**
  * One `backup-destination-status-row`. The LIVE status maps onto the per-row IDs by
  * `destination_id` (backups.md § Per-destination status read): `last_upload_time` /
  * `backlog_count` render through [lastUploadText]/[backlogText] (the shared
@@ -687,6 +934,10 @@ private fun DestinationRow(
     isClientDevice: (FfiBackupDestinationView) -> Boolean,
     onEdit: () -> Unit,
     onRemove: () -> Unit,
+    /** This row names a copy this device holds (the shared `backupReseedRows`). */
+    offerReseed: Boolean = false,
+    reseedEnabled: Boolean = true,
+    onReseed: () -> Unit = {},
 ) {
     Card(modifier = Modifier.fillMaxWidth().testTag(Ids.BACKUP_DESTINATION_STATUS_ROW)) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -751,6 +1002,9 @@ private fun DestinationRow(
                     enabled = !working,
                     modifier = Modifier.testTag(Ids.BACKUP_DESTINATION_REMOVE_BUTTON),
                 ) { Text(stringResource(R.string.backups_backup_destination_remove_button)) }
+            }
+            if (offerReseed) {
+                ReseedButton(enabled = reseedEnabled, onClick = onReseed)
             }
         }
     }

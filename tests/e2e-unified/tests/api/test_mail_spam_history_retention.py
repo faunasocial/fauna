@@ -136,3 +136,48 @@ def test_training_history_kept_a_month_then_lessons_stay_but_cannot_be_undone(
         assert fresh not in listed, "control: an entry inside the window is still undoable"
         assert _model(db, actor_id) == undone, (
             "control: the undo's re-sealed model is what rests, stored verbatim")
+
+
+@pytest.mark.feature("admin-mail-policy")
+def test_training_history_kept_for_the_days_the_admin_sets(nest_instance, seal_helper_binary):
+    """The admin's `training_history_retention_days` decides the window: set to
+    3, an entry four days old is swept while one two days old stays — both of
+    which the default month would have kept."""
+    from conftest import MTA_FIXTURE_SPAM_POSTURE
+
+    db = nest_instance["db_path"]
+    user = _provision_msek_recipient(
+        nest_instance=nest_instance, seal_helper_binary=seal_helper_binary,
+        domain=None, local_part="spam-retention-admin", password="spam-retention-password-2",
+    )
+    actor_id = user.actor_id
+    tok = f"qzadm{secrets.token_hex(3)}wx"
+    _seed_spam_model(db_path=db, actor_id=actor_id, seal_helper_binary=seal_helper_binary,
+                     ngrams={tok: (5, 0)}, spam_messages=5, ham_messages=5)
+    older, younger = _seed_spam_training_history(
+        db_path=db, actor_id=actor_id, seal_helper_binary=seal_helper_binary, rows=[
+            {"message_id": secrets.token_bytes(32), "mailbox": "Junk", "subject": f"four days {tok}",
+             "label": "spam", "source": "imap_junk_flag", "delta": [tok]},
+            {"message_id": secrets.token_bytes(32), "mailbox": "Junk", "subject": f"two days {tok}",
+             "label": "spam", "source": "imap_junk_flag", "delta": [tok]},
+        ])
+    now_ms = int(time.time() * 1000)
+    _age_entry(db, older, now_ms - 4 * DAY_MS)
+    _age_entry(db, younger, now_ms - 2 * DAY_MS)
+
+    admin = nest_instance["admin"]
+    with WsRpcAdminClient(nest_instance["url"], actor_id=bytes(admin["signing_key"].verify_key),
+                          signing_key=bytes(admin["signing_key"])) as ws:
+        ws.call("fauna.bridges.put_spam_policy",
+                {**MTA_FIXTURE_SPAM_POSTURE, "training_history_retention_days": 3})
+        try:
+            _run_sweep(nest_instance["url"])
+        finally:
+            ws.call("fauna.bridges.put_spam_policy", dict(MTA_FIXTURE_SPAM_POSTURE))
+
+    with WsRpcAdminClient(nest_instance["url"], actor_id=actor_id,
+                          signing_key=bytes(user.recipient["signing_key"])) as ws:
+        listed = [e["history_id"] for e in
+                  ws.call("fauna.bridges.list_spam_training_history", {})["events"]]
+    assert older not in listed, "an entry older than the admin's 3 days must be swept"
+    assert younger in listed, "an entry inside the admin's 3 days must stay"

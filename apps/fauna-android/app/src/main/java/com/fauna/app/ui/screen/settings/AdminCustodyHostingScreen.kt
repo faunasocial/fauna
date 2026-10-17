@@ -1,5 +1,6 @@
 package com.fauna.app.ui.screen.settings
 
+import com.fauna.app.ui.navigation.exitAdminToPrimary
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -74,7 +75,7 @@ fun AdminCustodyHostingScreen(
         budgetText = { cap -> if (cap == 0L) budgetDefaultText else ValueFormat.byteSize(context, cap) },
         heldText = { held -> ValueFormat.byteSize(context, held) },
         shortId = { hex -> com.fauna.ffi.shortId(hex) },
-        onBack = { navController.popBackStack() },
+        onBack = { navController.exitAdminToPrimary() },
         onRemove = { host, grant -> vm.remove(host, grant, removedText, removedWithStoreText, missingText) },
     )
 }

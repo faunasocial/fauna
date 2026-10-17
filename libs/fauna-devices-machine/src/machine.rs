@@ -33,7 +33,7 @@ use crate::observer::DevicesObserver;
 use crate::p2p_participation::{OwnRowAnswer, is_own_row, p2p_participation_paint};
 use crate::snapshots::{
     ConflictSummary, DeviceSummary, DevicesSnapshot, FleetMemberSummary, FolderSummary,
-    FollowedFolderSummary, name_skipping_devices,
+    FollowedFolderSummary, fold_skipped_changes,
 };
 
 /// i18n key for a page read (`refresh()`) failure ("Failed to load devices: {message}").
@@ -80,6 +80,9 @@ const SET_WEBSITE_ERROR_KEY: &str = "devices.error_serve_website";
 /// / `folder-residency-confirm`) — the key tui already surfaces for the same
 /// failure, reused rather than twinned (priority #1).
 const SET_RESIDENCY_ERROR_KEY: &str = "devices.error_set_residency";
+/// i18n key for a `set_folder_exclusive_editing` failure
+/// (`folder-exclusive-editing-toggle`) — the key tui already surfaces.
+const SET_EXCLUSIVE_EDITING_ERROR_KEY: &str = "devices.error_set_exclusive_editing";
 /// i18n key for a `set_folder_place` failure (the place editor's checkboxes).
 const SET_PLACE_ERROR_KEY: &str = "devices.error_set_place";
 /// i18n key for a `use_other_version` (review-list re-point) failure.
@@ -91,26 +94,12 @@ const OTHER_VERSION_UNVERIFIED_KEY: &str = "devices.error_other_version_unverifi
 /// re-sealed — the file's version history performs that restore.
 const OTHER_VERSION_NEEDS_HISTORY_KEY: &str = "devices.error_other_version_needs_history";
 
-/// A minimal, client-provided query into the local MLS engine: whether this client
-/// has **actually joined** the MLS group of a shared folder (addressed by the raw
-/// `mls_group_id`, hex). The Devices page uses it as the load-bearing **join-filter**
-/// for B3 member-visible rows: the nest returns *rostered* members (it cannot observe
-/// a client-side MLS join), so a `role == "member"` row must be shown **only if** the
-/// client has joined the group — else a stranger's un-accepted knock would surface in
-/// the folders list unbidden (`docs/goal/ui/folders.md` § Sharing, lines 128/139).
-///
-/// `fauna-devices-machine` has no `fauna-mls` dependency, so the derivation
-/// `ChannelId::from_group_id(mls_group_id)` + `MlsEngine::has_group` lives in the
-/// client's impl (which holds the conversations-rail engine). Centralizing the filter
-/// **here** — instead of in each of the 6 client renders — is the anti-abuse
-/// control: a client that forgot the filter is
-/// exactly how the list-surface exposure arose (the list twin of the web
-/// gate-bypass).
-pub trait MlsQuery: Send + Sync {
-    /// Whether the local MLS engine holds the group for the shared set with this raw
-    /// hex `mls_group_id` — i.e. the client has joined it.
-    fn is_joined_shared_set(&self, mls_group_id_hex: &str) -> bool;
-}
+/// The client-provided MLS join-filter oracle — the load-bearing filter for B3
+/// member-visible rows. Owned by shared folder code
+/// ([`fauna_protocol::member_rows`], which the Media page runs too) and
+/// re-exported here so every app's `fauna_devices_machine::MlsQuery` import
+/// stands.
+pub use fauna_protocol::member_rows::MlsQuery;
 
 /// One **foreign** (cross-nest) shared set from the member's own `fauna.state.folder-keys`
 /// foreign-set row (`fauna_core::data::ForeignFolder`, written at accept time) — the
@@ -188,8 +177,8 @@ pub trait FollowedFoldersSource: fauna_core::MaybeSendSync {
 /// the `Removed` rows through `fleet_removal::write_removed`) — the devices page's
 /// remove-device action's *second* leg, beside `fauna.sync.devices.delete`
 /// (`docs/goal/behavior/devices.md` § Removing a Device;
-/// `docs/goal/architecture/account-data-taxonomy.md` § The generation
-/// machinery → *Fleet-scope reclamation*, clause (4)). Injected
+/// `docs/goal/architecture/fleet-scope-reclamation.md`
+/// § *Fleet-scope reclamation*, clause (4)). Injected
 /// post-construction like [`MlsQuery`] and for the same reason:
 /// `fauna-devices-machine` stays wasm-clean and does not depend on the
 /// account plane, so each native app's build glue wires the one shared impl
@@ -222,8 +211,8 @@ pub trait FleetRemoval: fauna_core::MaybeSendSync {
     /// deletion, and only with a non-empty `targets`. An error means nothing
     /// persisted: the page deletes nothing, since a removal it cannot promise
     /// to finish is the leak this seam exists to close
-    /// (`account-data-taxonomy.md` § The generation machinery → *Fleet-scope
-    /// reclamation*, clause (4), *The completion rule*).
+    /// (`fleet-scope-reclamation.md`
+    /// § *Fleet-scope reclamation*, clause (4), *The completion rule*).
     async fn stage_removal(
         &self,
         row_device_id: &str,
@@ -579,7 +568,9 @@ impl DevicesMachine {
         // a roster + config read (the `MediaMachine::render_sealed_paths` rule).
         // Keyed and resolved by the set's `name_hash` (`folder_hash`), never the
         // plaintext `folder`, which is the empty sentinel for every sealed set
-        // once the nest scrubs it (`LabelCustody::keys_for_row`).
+        // once the nest scrubs it (`LabelCustody::keys_for_row`). The hash, not
+        // the row, is sound here: the list carries the caller's own sets alone,
+        // whose hash names one row (`set-addressing.md` § Implementation status).
         let mut per_set: std::collections::HashMap<[u8; 32], FileDownloadKeys> =
             std::collections::HashMap::new();
         let mut out = Vec::with_capacity(rows.len());
@@ -778,6 +769,8 @@ impl DevicesMachine {
             return rows;
         }
         let custody = self.label_custody.lock().unwrap().clone();
+        // By the hash, as in `render_conflicts`: a place is on the caller's own
+        // set, whose hash names one row (`set-addressing.md` § Implementation status).
         let mut per_set: std::collections::HashMap<[u8; 32], FileDownloadKeys> =
             std::collections::HashMap::new();
         for row in &mut rows {
@@ -879,9 +872,11 @@ impl DevicesMachine {
         let mls_query = self.mls_query.lock().unwrap().clone();
         rows.into_iter()
             .filter(|r| {
-                mls_query
-                    .as_ref()
-                    .is_some_and(|q| q.is_joined_shared_set(&r.mls_group_id_hex))
+                fauna_protocol::member_rows::admits(
+                    mls_query.as_deref(),
+                    true,
+                    Some(&r.mls_group_id_hex),
+                )
             })
             .filter(|r| {
                 !same_nest
@@ -897,6 +892,8 @@ impl DevicesMachine {
                 cached_last_snapshot_at: None,
                 include_paths: None,
                 exclude_paths: None,
+                include_paths_unreadable: false,
+                exclude_paths_unreadable: false,
                 mls_group_id: Some(r.mls_group_id_hex),
                 role: Some("member".to_string()),
                 // The grant the set's HOME nest resolved, carried in the member's
@@ -1044,17 +1041,27 @@ impl DevicesMachine {
                     row.exclude_paths.as_deref(),
                     id,
                 );
-                row.into()
+                // A sealed list that rendered to nothing is "could not open",
+                // not "no list": the editor must not offer it as blank, and a
+                // save must not overwrite the seal it never read.
+                let include_unreadable =
+                    row.include_paths_sealed.is_some() && row.include_paths.is_none();
+                let exclude_unreadable =
+                    row.exclude_paths_sealed.is_some() && row.exclude_paths.is_none();
+                let mut summary: FolderSummary = row.into();
+                summary.include_paths_unreadable = include_unreadable;
+                summary.exclude_paths_unreadable = exclude_unreadable;
+                summary
             })
             .collect()
     }
 
     /// Render each folder row's **set name and retention policy** sealed-first,
-    /// by the row's `name_hash` — the list twin of [`Self::render_device_places`],
-    /// through the same seam (`render_set_name`) and the same per-set custody
-    /// cache keyed by the hash, never the plaintext `name`, which is the empty
-    /// sentinel once a sealed set rests NULL (`path-sealing.md` § the set-name
-    /// plane). [`DevicesNestApi::list_folders`] hands over the rows unrendered
+    /// under custody resolved by the row's **id** — the list twin of
+    /// [`Self::render_device_places`], through the same seam (`render_set_name`),
+    /// salted by the row's `name_hash`, never the plaintext `name`, which is the
+    /// empty sentinel once a sealed set rests NULL (`path-sealing.md` § the
+    /// set-name plane). [`DevicesNestApi::list_folders`] hands over the rows unrendered
     /// for exactly this reason: the adapter holds no custody, this machine does.
     ///
     /// A row whose name this reader cannot open is **dropped**, never shown as a
@@ -1069,17 +1076,18 @@ impl DevicesMachine {
             return rows;
         }
         let custody = self.label_custody.lock().unwrap().clone();
-        let mut per_set: std::collections::HashMap<[u8; 32], FileDownloadKeys> =
-            std::collections::HashMap::new();
         let mut kept = Vec::with_capacity(rows.len());
         for mut row in rows {
             let wire_hash = row.name_hash.as_ref().map(|b| &b[..]);
-            let set_key = fauna_core::label_custody::set_name_label_salt(wire_hash, &row.name);
-            if let std::collections::hash_map::Entry::Vacant(slot) = per_set.entry(set_key) {
-                let (keys, _) = custody.keys_for_hash(&set_key).await;
-                slot.insert(keys);
-            }
-            let keys = &per_set[&set_key];
+            // The row's own custody, by its identity — never by the name hash a
+            // same-named set shares: beside an own namesake the owner-first
+            // search answers the own set, and a joined member row's name never
+            // opened (`set-addressing.md` § The row form; the Media page's
+            // `render_sealed_folder_names` twin).
+            let (keys, _) = custody
+                .keys_for_ref(&fauna_core::folder_keys::FolderRef::Local(row.id))
+                .await;
+            let keys = &keys;
             let name = match fauna_core::label_custody::render_set_name(
                 keys,
                 row.name_sealed.as_ref().map(|b| &b[..]),
@@ -1109,15 +1117,11 @@ impl DevicesMachine {
         folders
             .into_iter()
             .filter(|fs| {
-                if fs.role.as_deref() != Some("member") {
-                    return true; // owner (or unspecified) rows always show
-                }
-                match (&mls_query, &fs.mls_group_id) {
-                    (Some(q), Some(gid)) => q.is_joined_shared_set(gid),
-                    // Fail-safe: no query wired, or a member row with no group id ⇒
-                    // drop it (never surface a rostered-but-un-joined knock).
-                    _ => false,
-                }
+                fauna_protocol::member_rows::admits(
+                    mls_query.as_deref(),
+                    fs.role.as_deref() == Some("member"),
+                    fs.mls_group_id.as_deref(),
+                )
             })
             .collect()
     }
@@ -1448,7 +1452,7 @@ impl DevicesMachine {
             s.website_address_enabled = website_address_enabled;
             match conflicts {
                 Ok(mut c) => {
-                    name_skipping_devices(&mut c, &s.devices);
+                    fold_skipped_changes(&mut c, &s.devices);
                     s.conflicts = c;
                 }
                 Err(e) => {
@@ -1783,6 +1787,22 @@ impl DevicesMachine {
         include_paths: Option<Vec<String>>,
         exclude_paths: Option<Vec<String>>,
     ) {
+        // Fail closed: a list this device could not open renders as "no list",
+        // so the editor hands back a blank that would overwrite the stored seal
+        // (`None` here would have meant "leave unchanged", but the shells always
+        // send both lists). Refuse the whole save; nothing is sent.
+        let unreadable = self.state.lock().unwrap().folders.iter().any(|fs| {
+            fs.name == name
+                && ((include_paths.is_some() && fs.include_paths_unreadable)
+                    || (exclude_paths.is_some() && fs.exclude_paths_unreadable))
+        });
+        if unreadable {
+            self.set_error(error_text(
+                SAVE_PATHS_ERROR_KEY,
+                "this device cannot open the stored list, so it was left unchanged",
+            ));
+            return;
+        }
         let (include_sealed, exclude_sealed) =
             self.seal_paths_for(&name, include_paths.as_deref(), exclude_paths.as_deref());
         match self
@@ -1891,6 +1911,19 @@ impl DevicesMachine {
         match self.nest_api.set_folder_residency(&name, &residency).await {
             Ok(()) => self.refresh().await,
             Err(e) => self.set_error(error_text(SET_RESIDENCY_ERROR_KEY, e.detail())),
+        }
+    }
+
+    /// Turn folder `name`'s exclusive editing on or off
+    /// (`folder-exclusive-editing-toggle`, owner row only), then refresh.
+    ///
+    /// **Non-optimistic**: the toggle repaints `FolderSummary.exclusive_editing`
+    /// from the refreshed snapshot, never from the tap. Keyless, its own
+    /// `folders.update` field; `file-sync.md` § Exclusive editing owns the lease.
+    pub async fn set_folder_exclusive_editing(&self, name: String, on: bool) {
+        match self.nest_api.set_folder_exclusive_editing(&name, on).await {
+            Ok(()) => self.refresh().await,
+            Err(e) => self.set_error(error_text(SET_EXCLUSIVE_EDITING_ERROR_KEY, e.detail())),
         }
     }
 

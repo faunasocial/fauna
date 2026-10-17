@@ -199,4 +199,15 @@ pub trait NestApi: Send + Sync + std::fmt::Debug {
         actor_id_hex: Option<&str>,
         handle: Option<&str>,
     ) -> Result<RestoredIdentity, RestoreSeedError>;
+
+    /// `fauna.account.lockout` — the signed-out door (`ui/sessions.md` § *The
+    /// signed-out door*): lock the account the identity secret names, over one
+    /// pre-identity connection. Returns `locked_until` (Unix seconds). The
+    /// secret is hex, the same convention as `restore_escrowed_seed`; it lives
+    /// for this call only — nothing is stored.
+    async fn lock_account_with_seed(
+        &self,
+        base_url: &str,
+        secret_hex: &str,
+    ) -> Result<i64, LockAccountError>;
 }

@@ -10,7 +10,7 @@ using Xunit;
 namespace FaunaApp.Tests;
 
 /// <summary>
-/// Deterministic unit tests for the local-folder binding VM (file-sync.md § On-Demand
+/// Deterministic unit tests for the local-folder binding VM (on-demand-files.md § On-Demand
 /// Files; ui.yaml § folders — binding is nested under a contextual set), over a
 /// <see cref="FakeLocationControlChannel"/> implementing the same
 /// <see cref="ILocationControlChannel"/> seam the real

@@ -70,6 +70,10 @@ pub enum NotifType {
     FamilyFeedSourceRequest,
     /// `family.feed_source_approved`.
     FamilyFeedSourceApproved,
+    /// `tip` — a tip on the reader's post was credited: a believed receipt
+    /// passed the trusted-receipt gate (`monetization.md` § Tips — a tip's
+    /// consequence is attribution, display and notification, never a grant).
+    Tip,
     /// A type this build does not name, kept verbatim so a decode never fails
     /// and a re-encode never replaces it. Never equal to a named variant:
     /// [`NotifType::from`] is the only constructor a reader uses, and it
@@ -100,6 +104,7 @@ impl NotifType {
             Self::FamilyContactRequest => "family.contact_request",
             Self::FamilyFeedSourceRequest => "family.feed_source_request",
             Self::FamilyFeedSourceApproved => "family.feed_source_approved",
+            Self::Tip => "tip",
             Self::Other(s) => s,
         }
     }
@@ -129,6 +134,7 @@ impl From<&str> for NotifType {
             "family.contact_request" => Self::FamilyContactRequest,
             "family.feed_source_request" => Self::FamilyFeedSourceRequest,
             "family.feed_source_approved" => Self::FamilyFeedSourceApproved,
+            "tip" => Self::Tip,
             other => Self::Other(other.to_string()),
         }
     }
@@ -172,7 +178,7 @@ mod tests {
 
     /// Every named variant, so a variant added without its two string arms
     /// fails here rather than silently riding [`NotifType::Other`].
-    const NAMED: [NotifType; 19] = [
+    const NAMED: [NotifType; 20] = [
         NotifType::Like,
         NotifType::Reply,
         NotifType::Repost,
@@ -192,6 +198,7 @@ mod tests {
         NotifType::FamilyContactRequest,
         NotifType::FamilyFeedSourceRequest,
         NotifType::FamilyFeedSourceApproved,
+        NotifType::Tip,
     ];
 
     #[test]
@@ -216,6 +223,7 @@ mod tests {
             NotifType::FamilyFeedSourceApproved.as_wire(),
             "family.feed_source_approved"
         );
+        assert_eq!(NotifType::Tip.as_wire(), "tip");
     }
 
     #[test]

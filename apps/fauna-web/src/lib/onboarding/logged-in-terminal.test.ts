@@ -35,6 +35,7 @@ Deno.test("the app is entered only once the restored predecessors have landed", 
       order.push("persist");
       return persist.promise;
     },
+    beginSession: () => order.push("begin"),
     handoffs: () => order.push("handoffs"),
     enterApp: () => order.push("enter"),
     onFailure: () => order.push("failure"),
@@ -45,7 +46,7 @@ Deno.test("the app is entered only once the restored predecessors have landed", 
   assertEquals(order, ["register", "persist"]);
   persist.resolve();
   await done;
-  assertEquals(order, ["register", "persist", "handoffs", "enter"]);
+  assertEquals(order, ["register", "persist", "begin", "handoffs", "enter"]);
 });
 
 Deno.test("a failed predecessor persist is reported and never strands the user", async () => {
@@ -54,6 +55,7 @@ Deno.test("a failed predecessor persist is reported and never strands the user",
   await runLoggedInTerminal({
     register: () => Promise.resolve(),
     persistRestoredPredecessors: () => Promise.reject(new Error("quota")),
+    beginSession: () => {},
     handoffs: () => {},
     enterApp: () => {
       entered = true;
@@ -72,11 +74,12 @@ Deno.test("a failed registry write still persists the predecessors and enters th
       order.push("persist");
       return Promise.resolve();
     },
+    beginSession: () => order.push("begin"),
     handoffs: () => order.push("handoffs"),
     enterApp: () => order.push("enter"),
     onFailure: (step) => order.push(`failure:${step}`),
   });
-  assertEquals(order, ["failure:register", "persist", "handoffs", "enter"]);
+  assertEquals(order, ["failure:register", "persist", "begin", "handoffs", "enter"]);
 });
 
 Deno.test("an added restore lands its predecessors between the add and the switch", async () => {
@@ -95,6 +98,7 @@ Deno.test("an added restore lands its predecessors between the add and the switc
       order.push("switch");
       return Promise.resolve();
     },
+    beginSession: () => order.push("begin"),
     handoffs: () => order.push("handoffs"),
     enterApp: () => order.push("enter"),
     onFailure: () => order.push("failure"),
@@ -104,7 +108,7 @@ Deno.test("an added restore lands its predecessors between the add and the switc
   assertEquals(order, ["add", "persist"]);
   persist.resolve();
   await done;
-  assertEquals(order, ["add", "persist", "switch", "handoffs", "enter"]);
+  assertEquals(order, ["add", "persist", "begin", "switch", "handoffs", "enter"]);
 });
 
 Deno.test("a failed add still lands the predecessors but switches to nothing", async () => {
@@ -119,9 +123,50 @@ Deno.test("a failed add still lands the predecessors but switches to nothing", a
       order.push("switch");
       return Promise.resolve();
     },
+    beginSession: () => order.push("begin"),
     handoffs: () => order.push("handoffs"),
     enterApp: () => order.push("enter"),
     onFailure: (step) => order.push(`failure:${step}`),
   });
-  assertEquals(order, ["failure:register", "persist", "handoffs", "enter"]);
+  assertEquals(order, ["failure:register", "persist", "begin", "handoffs", "enter"]);
+});
+
+// The session a claim starts runs over the account the claim created, never
+// over a client built before it: an identity committed ahead of its account
+// can have had its WS-RPC client stopped for good by the box it then claimed
+// (`not_registered`), and the hand-offs that follow dial through that client.
+Deno.test("the session begins after the registry write and before the hand-offs and entry", async () => {
+  const order: string[] = [];
+  await runLoggedInTerminal({
+    register: () => {
+      order.push("register");
+      return Promise.resolve();
+    },
+    persistRestoredPredecessors: () => {
+      order.push("persist");
+      return Promise.resolve();
+    },
+    beginSession: () => order.push("begin"),
+    handoffs: () => order.push("handoffs"),
+    enterApp: () => order.push("enter"),
+    onFailure: (step) => order.push(`failure:${step}`),
+  });
+  // After the persist too: the delivered handlers include the succession
+  // aftermath, which reads the predecessors the persist just landed.
+  assertEquals(order, ["register", "persist", "begin", "handoffs", "enter"]);
+});
+
+Deno.test("a failed session begin is reported and never strands the user", async () => {
+  const order: string[] = [];
+  await runLoggedInTerminal({
+    register: () => Promise.resolve(),
+    persistRestoredPredecessors: () => Promise.resolve(),
+    beginSession: () => {
+      throw new Error("retire");
+    },
+    handoffs: () => order.push("handoffs"),
+    enterApp: () => order.push("enter"),
+    onFailure: (step, e) => order.push(`failure:${step}: ${(e as Error).message}`),
+  });
+  assertEquals(order, ["failure:begin session: retire", "handoffs", "enter"]);
 });

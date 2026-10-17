@@ -44,6 +44,14 @@ use fauna_protocol::content_index::{
 
 use crate::index_builder::{IndexBuildError, IndexBuilder, RailEntry, SegmentRail};
 
+/// The most bytes one blob GET off the `__index` rail is read as — the nest's
+/// own blob-route body ceiling. Every blob the rail carries (a sealed segment,
+/// capped at [`MAX_SEGMENT_BYTES`] on the sealed length, or a manifest, which
+/// the writer sends through the same one-blob route) was accepted under it, so
+/// no honest reply is longer; a nest that answers with more is hostile or
+/// broken, and the client refuses before buffering it, ahead of any AEAD check.
+const MAX_RAIL_BLOB_BYTES: u64 = fauna_core::attachment_limits::INLINE_BLOB_BODY_LIMIT as u64;
+
 /// Publishes sealed index segments to the actor's nest over the `__index` rail.
 ///
 /// One per logged-in actor, shared by every kind's builder — the rail is
@@ -142,16 +150,22 @@ impl IndexRailPublisher {
     /// opaquely — so the caller opens them with its own key. Public because the
     /// local query handle reads segments through this same route.
     pub async fn fetch_blob(&self, blob_hash: &str) -> Result<Vec<u8>, IndexBuildError> {
-        let content = self.nest.auth().content_api();
-        content
-            .get(&paths::blob::by_hash(blob_hash))
-            .await
-            .map(|b| b.to_vec())
-            .map_err(|e| IndexBuildError::Publish {
-                path: format!("blob/{blob_hash}"),
-                reason: format!("blob get: {e}"),
-            })
+        fetch_blob_from(&self.nest.auth().content_api(), blob_hash).await
     }
+}
+
+async fn fetch_blob_from(
+    content: &dyn NestContentApi,
+    blob_hash: &str,
+) -> Result<Vec<u8>, IndexBuildError> {
+    content
+        .get_capped(&paths::blob::by_hash(blob_hash), &[], MAX_RAIL_BLOB_BYTES)
+        .await
+        .map(|b| b.to_vec())
+        .map_err(|e| IndexBuildError::Publish {
+            path: format!("blob/{blob_hash}"),
+            reason: format!("blob get: {e}"),
+        })
 }
 
 impl IndexRailPublisher {
@@ -975,6 +989,28 @@ mod tests {
     use super::*;
     use fauna_mls::wrapped_blob::{MlsSnapshotPlaintext, derive_index_segment_key};
     use serde_bytes::ByteBuf;
+
+    /// A nest chooses what a blob GET answers: one byte over the rail's
+    /// blob ceiling is a typed publish error, one at the ceiling still reads.
+    #[tokio::test]
+    async fn fetch_blob_refuses_a_reply_over_the_blob_ceiling() {
+        use fauna_nest_http::{FakeNestContentApi, Verb};
+        let fake = FakeNestContentApi::new();
+        let at = vec![0u8; MAX_RAIL_BLOB_BYTES as usize];
+        fake.set_ok(Verb::Get, &paths::blob::by_hash("at"), at.clone());
+        let mut over = at;
+        over.push(0);
+        fake.set_ok(Verb::Get, &paths::blob::by_hash("over"), over);
+
+        assert!(fetch_blob_from(&fake, "at").await.is_ok());
+        // A `match`, not `expect_err`: a failing run must not Debug-print the body.
+        let Err(IndexBuildError::Publish { path, reason }) = fetch_blob_from(&fake, "over").await
+        else {
+            panic!("over-cap reply must be a typed Publish error");
+        };
+        assert_eq!(path, "blob/over");
+        assert!(reason.contains("exceeded the size cap"), "{reason}");
+    }
 
     /// A minimal in-memory [`SegmentRail`], last-write-wins per path — enough
     /// for a resume to find what a flush published.

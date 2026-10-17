@@ -38,8 +38,14 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         guard let appState else { return }
         let eventsVM = appState.eventsVM
         let conversationsVM = appState.conversationsVM
+        // The Fauna Kids build has no Feed page, so no compose draft to flush.
+        #if FAUNA_KIDS
+        let hasFeedDrafts = false
+        #else
         let feedVM = appState.feedVM
-        guard eventsVM != nil || conversationsVM != nil || feedVM != nil else { return }
+        let hasFeedDrafts = feedVM != nil
+        #endif
+        guard eventsVM != nil || conversationsVM != nil || hasFeedDrafts else { return }
         var task: UIBackgroundTaskIdentifier = .invalid
         task = application.beginBackgroundTask(withName: "fauna.drafts.flush") {
             application.endBackgroundTask(task)
@@ -55,7 +61,9 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         Task {
             await eventsVM?.flushDraftsNow()
             await conversationsVM?.flushDraftsNow()
+            #if !FAUNA_KIDS
             await feedVM?.flushDraftsNow()
+            #endif
             if task != .invalid {
                 application.endBackgroundTask(task)
                 task = .invalid
@@ -176,7 +184,9 @@ public struct FaunaApp: App {
     /// `FeedListView` renders off. `FfiNestClient.feed_manager` builds a fresh
     /// manager per call, so a handler calling `api.feedManager` again would seed a
     /// throwaway the view never observes. Mirrors `FaunaMacApp`.
+    #if !FAUNA_KIDS
     @State private var feedVM = FeedVM()
+    #endif
     /// One shared `EventsVM` for the events page, held here (like `feedVM`) so a
     /// half-written event outlives leaving the page: a page-owned VM died with
     /// the page, and the next one's launch restore raced the dead one's pending
@@ -198,7 +208,9 @@ public struct FaunaApp: App {
     /// § Mechanism), held here — like `feedVM`/`conversationsVM` — so the
     /// `CriticalAlertsBanner` and the session-start sweep loop share the SAME
     /// instance across a `FaunaClient` rebuild. Mirrors `FaunaMacApp`.
+    #if !FAUNA_KIDS
     @State private var criticalAlertsHost = CriticalAlertsHost()
+    #endif
     @State private var client: FaunaClient?
     /// The shared `LaunchMachine` for this launch, held so the
     /// `launch_identity_changed` trust button can call `trustNestIdentity()` on the
@@ -338,12 +350,23 @@ public struct FaunaApp: App {
                 .environment(liveFaunaClient?.photoBackup)
                 #endif
                 .environment(conversationsVM)
+                #if !FAUNA_KIDS
                 .environment(feedVM)
+                #endif
                 .environment(eventsVM)
                 .environment(devicesVM)
                 .environment(profileEditVM)
+                #if !FAUNA_KIDS
                 .environment(criticalAlertsHost)
+                #endif
                 .modelContainer(liveModelContainer)
+                // The Fauna Kids build opens no outbound link: a tapped link in
+                // rendered text is refused here, the SwiftUI half of `OpenURL`'s
+                // kids condition (family-safety.md § The account age band, the
+                // kids-app bullet, item (4) — links render as inert text).
+                #if FAUNA_KIDS
+                .environment(\.openURL, OpenURLAction { _ in .discarded })
+                #endif
                 // A mid-session supersession, suspension or nest-identity change
                 // the connection supervisor stopped on → the launch surface
                 // (`escalateSessionEnding`; a supersession this device's own
@@ -400,7 +423,9 @@ public struct FaunaApp: App {
                     appDelegate.appState = appState
                     #endif
                     appState.conversationsVM = conversationsVM
+                    #if !FAUNA_KIDS
                     appState.feedVM = feedVM
+                    #endif
                     // Wire the admin-nest Factory Reset re-onboard hook. Set here
                     // (not threaded through the view tree) so the shared FaunaKit
                     // `AdminNestView` stays platform-agnostic — it just calls the
@@ -538,7 +563,9 @@ public struct FaunaApp: App {
                         // treats its own flush: a failed put leaves the rollup
                         // marked dirty, so the next session's debounce retries it,
                         // and there is no UI left to surface an error on.
+                        #if !FAUNA_KIDS
                         Task { await CueViewportObserver.flushForAppLifecycle() }
+                        #endif
                         client?.suspend()
                     default:
                         break
@@ -629,8 +656,12 @@ public struct FaunaApp: App {
         guard let material,
               let nodeUrl = material.nestUrl,
               let url = URL(string: nodeUrl),
-              let deviceId = material.deviceId else {
-            // No usable session to bet on — stay in the wizard and let the machine say
+              let deviceId = FaunaAccounts.sessionDeviceId(
+                  forActorId: material.actorId, keychain: keychain) else {
+            // No usable session to bet on (the device id is the shared get-or-create,
+            // `FaunaAccounts.sessionDeviceId` — it mints for an empty or non-sync slot,
+            // so a registered actor only lands here on a missing nest_url/bad URL or a
+            // failed install-secret read) — stay in the wizard and let the machine say
             // which page it opens on.
             //
             // Logged under `[admin-gate]` because this is the admin chain's ZEROTH
@@ -716,7 +747,9 @@ public struct FaunaApp: App {
             // Critical-alerts session-start + periodic re-sweep loop
             // (critical-alerts.md § Mechanism → *Who runs the detector* +
             // *How often*) — mirrors macOS's `completeAuthenticatedLaunch`.
+            #if !FAUNA_KIDS
             criticalAlertsHost.startSweepLoop(api: faunaClient.api)
+            #endif
         }
 
         #if os(iOS)
@@ -829,12 +862,14 @@ public struct FaunaApp: App {
     /// through the shared machine whether or not the page was already on screen.
     @MainActor
     private func showConnectedApps() {
+        #if !FAUNA_KIDS
         appState.isOnboarding = false
         appState.inAdmin = false
         appState.selectedTab = "more"
         appState.moreSelectedView = "settings"
         appState.selectedSettingsPage = .connectedApps
         appState.navGeneration += 1
+        #endif
     }
 
     /// Apply a consent route that arrived signed out, now the session is
@@ -1040,9 +1075,11 @@ public struct FaunaApp: App {
     ///   count through `ConversationsVM`'s observer.
     @MainActor
     private func installConversationsSessionSeams(_ faunaClient: FaunaClient) {
+        #if !FAUNA_KIDS
         if let session = conversationsVM.session {
             feedVM.installRoomPostKeys(session: session, conversationsManager: conversationsVM.manager)
         }
+        #endif
         #if os(iOS)
         let conversations = conversationsVM
         faunaClient.backgroundScheduler.configure(widgetRefresh: { await conversations.receivePass() })
@@ -1089,12 +1126,16 @@ public struct FaunaApp: App {
             // Hands-off TLS-cert auto-renew for managed/delegated domains (admin-dns,
             // tls-certificates.md § C.3) — secret now primed for the credentialed Dns
             // machine. Idempotent.
+            #if !FAUNA_KIDS
             DnsAutoRenewCadence.shared.start(api: faunaClient.api)
+            #endif
             // Author-side subscription reconcile (monetization.md § Pillar 1): heal
             // crash-staged subscriber removals + auto-approve queued follows (encrypted mode
             // enqueues them — the nest cannot mint the KeyBlob). Headless, best-effort; twin
             // of linux `subscriptions_author`.
+            #if !FAUNA_KIDS
             SubscriptionsAuthorCadence.shared.start(api: faunaClient.api)
+            #endif
             // Guardian Notify's flush cadence (family-safety.md § Guardian Notify) — its `content_notify`/enabled state is set
             // separately by `ContentPolicyStore.refresh`, but the due-check loop
             // itself needs the live api the same way the two cadences above do.
@@ -1125,7 +1166,7 @@ public struct FaunaApp: App {
         // twin.
         await MailEnableGlue.runPostAuthGlue(api: faunaClient.api, session: appState.session)
 
-        // File Provider auto-appear for the Files app (file-sync.md § On-Demand
+        // File Provider auto-appear for the Files app (on-demand-files-apple.md § On-Demand
         // Files → Apple File Provider binding): the same FaunaKit reconcile macOS
         // runs — domains for the user's own sets this device's place accepts in and
         // the sets shared with the account, behind the default-ON
@@ -1385,12 +1426,17 @@ public struct FaunaApp: App {
 
     @MainActor
     private func serializeState() -> [String: Any] {
+        #if FAUNA_KIDS
+        let feedManager: StateFeedManager? = nil
+        #else
+        let feedManager: StateFeedManager? = feedVM.manager
+        #endif
         var state = AppStateObservables.commonState(
             session: appState.session,
             isAdmin: appState.isAdmin,
             liveClient: appState.liveClient,
             conversationsSession: conversationsVM.session,
-            feedManager: feedVM.manager,
+            feedManager: feedManager,
             devicesMachine: devicesVM.machine,
             inboxMode: appState.inboxMode
         )
@@ -1532,6 +1578,7 @@ public struct FaunaApp: App {
         // macOS: it reads the LIVE app-level `feedVM` + its manager snapshot,
         // so one failing run distinguishes "field text never reached the VM" /
         // "manager nil" / "query committed but reload never happened".
+        #if !FAUNA_KIDS
         let feedSnap = feedVM.manager?.snapshot()
         data["feed"] = [
             "diag": [
@@ -1596,6 +1643,7 @@ public struct FaunaApp: App {
                 ] as [String: Any]
             }
         ] as [String: Any]
+        #endif
 
         // Sync — not yet populated on iOS
         data["sync"] = NSNull()
@@ -1690,6 +1738,20 @@ public struct FaunaApp: App {
                 case .refused(let reason):
                     testAgentFailure(reason)
                 }
+            case "read_marker_state":
+                // The read-state relaunch witness's durability barrier — this
+                // app's own account-store read marker for `channel_id_hex`
+                // (`conversation-read-state.md` § The read-marker record).
+                // Shared FaunaKit handler (macOS + iOS, one implementation);
+                // slot cleared FIRST and written only on success, exactly as
+                // `device_set_state` above (a refusal leaves it empty).
+                machineMethodResultBox.value = nil
+                switch await ReadMarkerStateTestCommand.apply(command, api: appState.liveClient?.api) {
+                case .report(let json):
+                    machineMethodResultBox.value = json
+                case .refused(let reason):
+                    testAgentFailure(reason)
+                }
             case "conversations_inject_inbound":
                 handleConversationsInjectInbound(command)
             case "conversations_evict_attachment":
@@ -1752,10 +1814,12 @@ public struct FaunaApp: App {
                 {
                     testAgentFailure(reason)
                 }
+            #if !FAUNA_KIDS
             case "feed_inject_posts":
                 FeedInjectPostsTestCommand.apply(command, feedVM: feedVM, client: appState.liveClient, session: appState.session)
             case "feed_inject_error":
                 FeedInjectErrorTestCommand.apply(command, feedVM: feedVM, client: appState.liveClient, session: appState.session)
+            #endif
             case "alert_sweep_wake", "reconnect_backoff":
                 // The loud surfaces' e2e seams (`fauna_e2e_agent::ALERT_SWEEP_WAKE`
                 // / `RECONNECT_BACKOFF`). Shared FaunaKit handler (macOS + iOS, one
@@ -1764,6 +1828,7 @@ public struct FaunaApp: App {
                 if let reason = E2eLoudSurfaces.apply(action, command, api: appState.liveClient?.api) {
                     testAgentFailure(reason)
                 }
+            #if !FAUNA_KIDS
             case "feed_hold_next_reload", "feed_release_held_reload":
                 // The feed manager's one-shot reload hold (`ui/feed.md` § The read
                 // model). Shared FaunaKit handler (macOS + iOS, one
@@ -1782,6 +1847,8 @@ public struct FaunaApp: App {
                 {
                     testAgentFailure(reason)
                 }
+            #endif
+            #if !FAUNA_KIDS
             case "atproto_delegation_advance_clock":
                 // The D10 lapse journey's fake render clock. Shared FaunaKit
                 // handler (macOS + iOS, one implementation) over the same Rust
@@ -1789,6 +1856,7 @@ public struct FaunaApp: App {
                 if let reason = await DelegationClockTestCommand.apply(command) {
                     testAgentFailure(reason)
                 }
+            #endif
             case "open_route":
                 // The `fauna://` in-app routes' e2e seam (`ios.md` § App Entry →
                 // *In-app routes*): feeds a URI to the same door `onOpenURL`
@@ -1859,8 +1927,10 @@ public struct FaunaApp: App {
                 case .refused(let reason):
                     testAgentFailure(reason)
                 }
+            #if !FAUNA_KIDS
             case "enable_caldav_mailbox":
                 await CaldavMailboxTestCommand.apply(command, client: appState.liveClient)
+            #endif
             case "serve_enable_folder":
                 // Shared FaunaKit handler (macOS + iOS, one implementation) over the
                 // same `FoldersAuthor::serve_set` seam linux drives. The production
@@ -2157,7 +2227,9 @@ public struct FaunaApp: App {
                     // the e2e session-patch path calls the full `start()`
                     // (unlike macOS's, which skips it), so this fires here too
                     // (critical-alerts.md § Mechanism; `test_session_start_alert_sweep.py`).
+                    #if !FAUNA_KIDS
                     criticalAlertsHost.startSweepLoop(api: faunaClient.api)
+                    #endif
                     // Guardian Notify's flush cadence (family-safety.md §
                     // Guardian Notify), same reasoning as the sweep loop
                     // above: the production `onLaunchAuthenticated` closure
@@ -2180,7 +2252,9 @@ public struct FaunaApp: App {
                     // `drain_auto_approvals` never runs and every subscriber-side
                     // assertion times out
                     // (`test_subscriptions.py::test_follow_auto_grants_in_encrypted_mode`).
+                    #if !FAUNA_KIDS
                     SubscriptionsAuthorCadence.shared.start(api: faunaClient.api)
+                    #endif
                     // Two e2e sub-modes (the e2e session-patch path never runs the
                     // production `activate(...)`, which keeps the deterministic mock
                     // conversation backends):
@@ -2404,6 +2478,7 @@ public struct FaunaApp: App {
                 AppMessages.error = "compose.file: not authenticated"
                 return
             }
+            #if !FAUNA_KIDS
             do {
                 try await feedVM.attachComposeFile(atPath: file)
                 logMessage(level: .debug, target: "fauna.testagent", message: "[TestAgent] compose.file: attached \(file)")
@@ -2411,6 +2486,7 @@ public struct FaunaApp: App {
                 logMessage(level: .debug, target: "fauna.testagent", message: "[TestAgent] compose.file failed: \(String(describing: error))")
                 AppMessages.error = "compose.file failed: \(error.localizedDescription)"
             }
+            #endif
         }
     }
 
@@ -2472,7 +2548,7 @@ public struct FaunaApp: App {
         await tearDownSessionForSwitch()
         Task { @MainActor in
             // FP teardown must COMPLETE before the incoming session starts
-            // (file-sync.md § Apple File Provider binding, multi-account: the
+            // (on-demand-files-apple.md § Apple File Provider binding, multi-account: the
             // capability store is single-slot, so a stale async revoke landing
             // after the new account's provision would wipe the fresh slot; and
             // the outgoing account's domains must not keep serving mid-switch).
@@ -2499,6 +2575,16 @@ public struct FaunaApp: App {
     @MainActor
     private func dropActorScopedState() {
         ActorScope.resetSharedState()
+        #if FAUNA_KIDS
+        ActorScope.dropAppOwnedState(
+            conversationsVM: conversationsVM,
+            eventsVM: eventsVM,
+            devicesVM: devicesVM,
+            screenTime: appState.screenTime,
+            modelContainer: &modelContainer,
+            appState: appState
+        )
+        #else
         ActorScope.dropAppOwnedState(
             criticalAlertsHost: criticalAlertsHost,
             conversationsVM: conversationsVM,
@@ -2509,6 +2595,7 @@ public struct FaunaApp: App {
             modelContainer: &modelContainer,
             appState: appState
         )
+        #endif
     }
 
     /// Drop everything the OUTGOING identity owns, keeping its credentials (a switch, not a

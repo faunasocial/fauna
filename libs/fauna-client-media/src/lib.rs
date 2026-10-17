@@ -31,11 +31,17 @@ use fauna_protocol::RpcRequester;
 use fauna_protocol::media::{
     MEDIA_LIST_CURSOR_V2, MEDIA_LIST_MAX_LIMIT, MediaItem, MediaListReply, MediaListRequest,
 };
+use fauna_protocol::media_ticket::{
+    KIND_MEDIA_PLAYBACK_TICKET, PlaybackTicketReply, PlaybackTicketRequest,
+};
 
 // Re-export so consumers reach `MediaItem` etc. through this crate (the surface
 // they consume) without depending on `fauna-protocol` directly. Mirrors
 // `fauna-client-sync`'s `pub use fauna_protocol::sync`.
 pub use fauna_protocol::media;
+// The MLS join-filter over member-visible folder rows, for the page machine
+// that reads this crate's folder rows (`fauna_protocol::member_rows`).
+pub use fauna_protocol::member_rows;
 
 /// Typed `fauna.media.*` call surface, generic over the WS-RPC transport
 /// (`R: RpcRequester`): native call sites pass `Arc<NestClient>`, the wasm SPA
@@ -111,6 +117,28 @@ impl<R: RpcRequester> MediaClient<R> {
             }
         }
         Ok(all)
+    }
+
+    /// `fauna.media.playback_ticket` — ticket one proxied media path for playback
+    /// (`render-model.md` § D6c → *Inline playback*, answer 4): the nest appends
+    /// `exp` and `sig` to `path` (`/api/v1/media/proxy?url=…`) so a player that
+    /// cannot carry a bearer header fetches it until `exp`. A path that is not
+    /// the nest's media-proxy form is refused with a typed `RpcError`. Its one
+    /// consumer is `FeedManager::playback_source`, so no app builds the
+    /// ticketed URL by hand.
+    pub async fn playback_ticket(
+        &self,
+        path: impl Into<String>,
+    ) -> Result<PlaybackTicketReply, R::Error> {
+        self.nest
+            .request(
+                KIND_MEDIA_PLAYBACK_TICKET,
+                PlaybackTicketRequest {
+                    path: path.into(),
+                    extra: Default::default(),
+                },
+            )
+            .await
     }
 }
 
@@ -201,6 +229,32 @@ pub struct MediaFolder {
     /// [`name_sealed`](Self::name_sealed) opens under and the key its custody
     /// resolves by once the plaintext is blank.
     pub name_hash: Option<Vec<u8>>,
+
+    /// Whether this row is a set shared **with** the caller
+    /// (`FolderSummary::role == "member"`) rather than one of its own — read
+    /// off the member-visible projection behind the MLS join-filter the page
+    /// machine runs (`media.md` § Layout & flow → *Where the offerable sets
+    /// come from*). `false` (the default) is an own row.
+    pub member: bool,
+
+    /// Whether the caller holds a `writer` grant on a [`member`](Self::member)
+    /// row (`FolderSummary::access == "writer"`); `false` is reader, the wire's
+    /// fail-safe default. Meaningless on an own row.
+    pub writer: bool,
+
+    /// The owner's handle on a member row (`FolderSummary::owner_handle`) —
+    /// the label's owner half, with [`owner_actor_id`](Self::owner_actor_id)
+    /// its fallback (`fauna_core::format::account_display_label`).
+    pub owner_handle: Option<String>,
+
+    /// The owner's hex actor id on a member row
+    /// (`FolderSummary::owner_actor_id`).
+    pub owner_actor_id: Option<String>,
+
+    /// The set's hex MLS group id (`FolderSummary::mls_group_id`) — what the
+    /// join-filter asks about a member row
+    /// (`fauna_protocol::member_rows::admits`).
+    pub mls_group_id: Option<String>,
 }
 
 impl MediaFolder {
@@ -209,13 +263,89 @@ impl MediaFolder {
     /// Media like any other — folders re-model open call #4, ratified
     /// 2026-08-13; the former web-type exclusion is retired with the mode);
     /// reserved `__*` sets are excluded on both planes.
-    ///
-    /// It is also the **upload-target** rule: every own folder records to the
-    /// one `sync_changes` head plane Media reads, so Media uploads into every
-    /// folder it browses (`media.md` § Layout & flow — the former sync-type-only
-    /// upload rule retired with the mode).
     pub fn is_browsable(&self) -> bool {
         !fauna_core::sync::is_reserved_folder_name(&self.name)
+    }
+
+    /// Whether an upload may land in this set (`media.md` § Encryption at rest
+    /// → *The filter and the upload target address the row*, (d)): every
+    /// browsable own set — each records to the one `sync_changes` head plane
+    /// Media reads — plus a shared set on which the caller is a `writer`. A
+    /// reader-member set stays a browse option and is refused with its reason
+    /// when chosen as the target, never a missing option.
+    pub fn is_upload_target(&self) -> bool {
+        self.is_browsable() && (!self.member || self.writer)
+    }
+
+    /// This row's `media-folder-filter` value (`media.md` § … *address the
+    /// row*, (a)): an own set's **name** — the nest keeps an owner's names
+    /// unique, so the name resolves to this row — and a shared set's
+    /// `FolderRef` wire string (`local:<id>`), handed back verbatim.
+    pub fn option_value(&self) -> String {
+        if self.member {
+            FolderRef::Local(self.id).to_wire()
+        } else {
+            self.name.clone()
+        }
+    }
+
+    /// This row's option label (`media.md` § … *address the row*, (b)): an own
+    /// set's name; a shared set's `<name> (<owner>)`, always — the owner string
+    /// the Folders page's "Shared by" badge shows
+    /// (`fauna_core::format::account_display_label`).
+    pub fn option_label(&self) -> String {
+        if !self.member {
+            return self.name.clone();
+        }
+        let owner = fauna_core::format::account_display_label(
+            self.owner_handle.as_deref(),
+            self.owner_actor_id.as_deref().unwrap_or_default(),
+        );
+        if owner.is_empty() {
+            self.name.clone()
+        } else {
+            format!("{} ({owner})", self.name)
+        }
+    }
+
+    fn option(&self) -> MediaFolderOption {
+        MediaFolderOption {
+            name: self.name.clone(),
+            folder_ref: Some(FolderRef::Local(self.id)),
+            value: self.option_value(),
+            label: self.option_label(),
+        }
+    }
+}
+
+/// A parsed `media-folder-filter` value (`media.md` § Encryption at rest → *The
+/// filter and the upload target address the row*, (a)): a value that parses as
+/// a `FolderRef` addresses that row; anything else is a set's name — the
+/// caller's own set of that name, else an item-only set of that name (the
+/// degrade for a producer that stamps no `folder_id`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FolderFilter {
+    /// A row, by identity.
+    Ref(FolderRef),
+    /// A set's name — the plaintext, which the item-only degrade matches on.
+    Name(String),
+}
+
+impl FolderFilter {
+    /// Parse an option value; never fails (a non-ref is a name).
+    pub fn parse(value: &str) -> Self {
+        match FolderRef::parse(value) {
+            Some(r) => Self::Ref(r),
+            None => Self::Name(value.to_string()),
+        }
+    }
+
+    /// The value as an app hands it back (`FolderRef::to_wire`, or the name).
+    pub fn value(&self) -> String {
+        match self {
+            Self::Ref(r) => r.to_wire(),
+            Self::Name(n) => n.clone(),
+        }
     }
 }
 
@@ -238,15 +368,21 @@ pub struct MediaSnapshot {
     pub known_folders: Vec<MediaFolder>,
 }
 
-/// One `media-folder-filter` option: the set's label plus its identity, when
-/// the control plane reported one ([`MediaSnapshot::folder_options`]).
+/// One `media-folder-filter` option: the set's value and label plus its
+/// identity, when one is known ([`MediaSnapshot::folder_options`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaFolderOption {
-    /// The set name — the filter key, same axis as [`MediaItem::folder`].
+    /// The set name, same axis as [`MediaItem::folder`].
     pub name: String,
     /// The set's identity (`FolderRef::Local` over the row's id), or `None`
-    /// for a set known only from its items.
+    /// for an item-only set whose items stamp none.
     pub folder_ref: Option<FolderRef>,
+    /// The filter value an app hands back to `set_filter` verbatim
+    /// ([`MediaFolder::option_value`]; an item-only set's name).
+    pub value: String,
+    /// The display label ([`MediaFolder::option_label`]; an item-only set's
+    /// name).
+    pub label: String,
 }
 
 /// The `media-sort-select` key (`media.md` § Layout & flow): sort the browse by
@@ -298,16 +434,25 @@ impl MediaSnapshot {
     /// crosses the FFI/wasm boundary cleanly. This is the one entry point a client
     /// calls to render the list; `media.md` § User actions runs both the filter
     /// and the sort in shared Rust.
+    ///
+    /// `folder` is a filter **value** ([`FolderFilter::parse`]), scoped by the
+    /// item's row (`media.md` § Encryption at rest → *The filter and the upload
+    /// target address the row*, (a)): a ref keeps the items stamping that
+    /// row's `folder_id`; a name that is one of the caller's own sets keeps
+    /// that row's items plus the same-named items stamping no `folder_id`; any
+    /// other name keeps the items of that name (the item-only degrade). A
+    /// same-named shared set's items are therefore never in an own set's view.
     pub fn view(
         &self,
         folder: Option<&str>,
         sort: MediaSortKey,
         descending: bool,
     ) -> Vec<MediaItem> {
+        let filter = folder.map(FolderFilter::parse);
         let mut out: Vec<MediaItem> = self
             .items
             .iter()
-            .filter(|it| folder.is_none_or(|f| it.folder == f))
+            .filter(|it| filter.as_ref().is_none_or(|f| self.in_scope(f, it)))
             .cloned()
             .collect();
         sort_items(&mut out, sort);
@@ -328,15 +473,107 @@ impl MediaSnapshot {
     /// the upload default, so it could never acquire the media that would have
     /// listed it (`media.md` § Layout & flow → *Where the offerable sets come
     /// from*).
+    ///
+    /// Names, deduplicated: an app that renders these hands a name to the
+    /// filter, which resolves it to the caller's own set of that name first —
+    /// so a shared set reaches a names-only app only when no own set shares its
+    /// name. The value/label pairs ([`folder_options`](Self::folder_options))
+    /// are what tell a same-named pair apart.
     pub fn folders(&self) -> Vec<String> {
-        self.folder_options()
-            .into_iter()
-            .map(|option| option.name)
-            .collect()
+        let mut out: Vec<String> = Vec::new();
+        for option in self.folder_options() {
+            if !out.contains(&option.name) {
+                out.push(option.name);
+            }
+        }
+        out
     }
 
-    /// [`folders`](Self::folders) with each set's **identity** beside its
-    /// label — same entries, same order. A control-plane row carries its
+    /// Whether `it` is in the scope `filter` names ([`Self::view`]).
+    fn in_scope(&self, filter: &FolderFilter, it: &MediaItem) -> bool {
+        match filter {
+            FolderFilter::Ref(FolderRef::Local(id)) => it.folder_id == Some(*id),
+            // A foreign set's items are never in this nest's aggregate.
+            FolderFilter::Ref(FolderRef::Foreign(_)) => false,
+            FolderFilter::Name(name) => match self.own_row(name) {
+                Some(own) => {
+                    it.folder_id == Some(own.id) || (it.folder_id.is_none() && it.folder == *name)
+                }
+                None => it.folder == *name,
+            },
+        }
+    }
+
+    /// The caller's **own** control-plane row named `name` — the row an own
+    /// set's name value resolves to. Never a shared row: a name names the
+    /// caller's set first, and a shared set is addressed by its ref.
+    pub fn own_row(&self, name: &str) -> Option<&MediaFolder> {
+        self.known_folders
+            .iter()
+            .find(|f| !f.member && f.name == name)
+    }
+
+    /// The control-plane row a filter value addresses: a ref's row, or the
+    /// caller's own row of that name. `None` for an item-only name or a row
+    /// the list does not carry.
+    pub fn row_for(&self, filter: &FolderFilter) -> Option<&MediaFolder> {
+        match filter {
+            FolderFilter::Ref(FolderRef::Local(id)) => {
+                self.known_folders.iter().find(|f| f.id == *id)
+            }
+            FolderFilter::Ref(FolderRef::Foreign(_)) => None,
+            FolderFilter::Name(name) => self.own_row(name),
+        }
+    }
+
+    /// The label of the option `value` names (`MediaPageSnapshot::filter_label`):
+    /// the row's label when the value addresses a listed row, else the set's
+    /// name — an item-only name as given, a ref the list does not carry by
+    /// the name its items render.
+    pub fn filter_label(&self, value: &str) -> String {
+        let filter = FolderFilter::parse(value);
+        if let Some(row) = self.row_for(&filter) {
+            return row.option_label();
+        }
+        match filter {
+            FolderFilter::Name(name) => name,
+            FolderFilter::Ref(r) => {
+                let id = match r {
+                    FolderRef::Local(id) => Some(id),
+                    FolderRef::Foreign(_) => None,
+                };
+                self.items
+                    .iter()
+                    .find(|it| id.is_some() && it.folder_id == id)
+                    .map(|it| it.folder.clone())
+                    .unwrap_or(value.to_string())
+            }
+        }
+    }
+
+    /// The filter value that scopes the browse to `it`'s own set
+    /// (`MediaItemSummary::filter_value`) — what a search deep-link or a
+    /// detail close hands `set_filter` instead of the item's name, so it lands
+    /// in the item's set and never in a same-named one. Agrees with
+    /// [`Self::view`] by construction: the item is always in its own value's
+    /// scope.
+    pub fn filter_value(&self, it: &MediaItem) -> String {
+        let Some(id) = it.folder_id else {
+            return it.folder.clone();
+        };
+        match self.known_folders.iter().find(|f| f.id == id) {
+            Some(row) => row.option_value(),
+            // A row the list does not carry (an unjoined shared set, say): its
+            // name is an item-only option — unless an own set holds the name,
+            // when only the row's ref scopes to it.
+            None if self.own_row(&it.folder).is_some() => FolderRef::Local(id).to_wire(),
+            None => it.folder.clone(),
+        }
+    }
+
+    /// One option per offered set, its **identity** beside its label —
+    /// [`folders`](Self::folders) is these names, deduplicated (a same-named
+    /// pair is two options and one name). A control-plane row carries its
     /// `FolderRef::Local(id)`; a set seen only in the items (a shared-with-me
     /// set the caller's own list does not carry) has none.
     ///
@@ -348,56 +585,69 @@ impl MediaSnapshot {
         self.offer(MediaFolder::is_browsable)
     }
 
-    /// The sets an upload may **target** — the `upload_selected` default and the
-    /// answer to "which set does this file land in": the browse options' names,
-    /// since every own folder is an upload target ([`MediaFolder::is_browsable`]).
+    /// The **values** of the sets an upload may target
+    /// ([`MediaFolder::is_upload_target`]: every own set, every shared set the
+    /// caller may write), then the item-only sets. An own set's value is its
+    /// name.
     pub fn upload_targets(&self) -> Vec<String> {
-        self.offer(MediaFolder::is_browsable)
+        self.offer(MediaFolder::is_upload_target)
             .into_iter()
-            .map(|option| option.name)
+            .map(|option| option.value)
             .collect()
     }
 
-    /// The shared shape of both option lists: the control-plane sets passing
-    /// `in_scope`, in nest order, then any set seen only in `items` (a
-    /// shared-with-me set the caller's own list does not carry) not already
-    /// named. With no control-plane list at all, the item-derived names are the
-    /// whole answer — the pre-fix behavior, so an unwired consumer degrades
-    /// rather than losing its options.
+    /// The `upload_selected` target in the all-media view (`media.md`
+    /// § Encryption at rest → *The filter and the upload target address the
+    /// row*, (d)): the **first own set** — never a shared one, since a file
+    /// lands in someone else's folder only when the user selected it. With no
+    /// control-plane list at all, the first item-derived set (the degrade an
+    /// unwired consumer always had).
+    pub fn default_upload_target(&self) -> Option<String> {
+        if self.known_folders.is_empty() {
+            return self
+                .offer(MediaFolder::is_upload_target)
+                .first()
+                .map(|o| o.value.clone());
+        }
+        self.known_folders
+            .iter()
+            .find(|f| !f.member && f.is_upload_target())
+            .map(MediaFolder::option_value)
+    }
+
+    /// The shared shape of both option lists: the control-plane rows passing
+    /// `in_scope`, in nest order — an own row and a same-named shared row are
+    /// two options — then the item-only sets: items whose `folder_id` names no
+    /// listed row and whose name names no own row, one option per name. With no
+    /// control-plane list at all, the item-derived names are the whole answer —
+    /// so an unwired consumer degrades rather than losing its options.
     fn offer(&self, in_scope: fn(&MediaFolder) -> bool) -> Vec<MediaFolderOption> {
         let mut out: Vec<MediaFolderOption> = self
             .known_folders
             .iter()
             .filter(|fs| in_scope(fs))
-            .map(|fs| MediaFolderOption {
-                name: fs.name.clone(),
-                folder_ref: Some(FolderRef::Local(fs.id)),
-            })
+            .map(MediaFolder::option)
             .collect();
-        let known_any = !self.known_folders.is_empty();
-        for name in self.item_folders() {
-            // An item-only set is out of scope by construction when the control
-            // plane knows it (it was filtered above); when the plane is silent
-            // we cannot classify it, and keeping it is the safe degrade.
-            let classified = known_any && self.known_folders.iter().any(|fs| fs.name == name);
-            if !classified && !out.iter().any(|option| option.name == name) {
-                out.push(MediaFolderOption {
-                    name,
-                    folder_ref: None,
-                });
-            }
-        }
-        out
-    }
-
-    /// The distinct folder names actually present in `items`, in the snapshot's
-    /// stable `(folder, path)` order (already grouped, so adjacent de-dup).
-    fn item_folders(&self) -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
         for it in &self.items {
-            if out.last().map(String::as_str) != Some(it.folder.as_str()) {
-                out.push(it.folder.clone());
+            let listed = it
+                .folder_id
+                .is_some_and(|id| self.known_folders.iter().any(|f| f.id == id));
+            // A same-named item of an unlisted row would read as the own set's
+            // option; a name the list knows only by an unstamped item is that
+            // row's (out of scope when it was filtered above).
+            let named = self
+                .known_folders
+                .iter()
+                .any(|f| f.name == it.folder && (!f.member || it.folder_id.is_none()));
+            if listed || named || out.iter().any(|o| o.value == it.folder) {
+                continue;
             }
+            out.push(MediaFolderOption {
+                name: it.folder.clone(),
+                folder_ref: it.folder_id.map(FolderRef::Local),
+                value: it.folder.clone(),
+                label: it.folder.clone(),
+            });
         }
         out
     }
@@ -541,10 +791,27 @@ mod tests {
                 next_cursor: None,
                 ..Default::default()
             }),
+            KIND_MEDIA_PLAYBACK_TICKET => fauna_protocol::encode_canonical(&PlaybackTicketReply {
+                path: "/api/v1/media/proxy?url=x&exp=1&sig=s".into(),
+                ..Default::default()
+            }),
             other => panic!("RecordingRequester: unhandled kind {other}"),
         }
         .expect("encode reply")
         .to_vec()
+    }
+
+    #[test]
+    fn playback_ticket_composes_kind_and_payload() {
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = MediaClient::new(rec.clone());
+        let path = "/api/v1/media/proxy?url=https%3A%2F%2Fcdn.example%2Fv.webm";
+        let got = block_on(client.playback_ticket(path)).expect("infallible mock");
+        assert_eq!(got.path, "/api/v1/media/proxy?url=x&exp=1&sig=s");
+        let (kind, payload) = rec.recorded();
+        assert_eq!(kind, KIND_MEDIA_PLAYBACK_TICKET);
+        let req: PlaybackTicketRequest = fauna_protocol::decode_strict(&payload).expect("decodes");
+        assert_eq!(req.path, path);
     }
 
     #[test]
@@ -811,6 +1078,170 @@ mod tests {
         }
     }
 
+    // ── the filter and the upload target address the row ───────────────────
+    // (`media.md` § Encryption at rest → *The filter and the upload target
+    // address the row*)
+
+    fn shared_with_id(id: i64, name: &str, owner_handle: &str, writer: bool) -> MediaFolder {
+        MediaFolder {
+            id,
+            name: name.into(),
+            member: true,
+            writer,
+            owner_handle: Some(owner_handle.into()),
+            owner_actor_id: Some("ab".repeat(32)),
+            ..Default::default()
+        }
+    }
+
+    fn item_in(folder: &str, folder_id: Option<i64>, path: &str) -> MediaItem {
+        MediaItem {
+            folder_id,
+            ..item(folder, path, 1, 1)
+        }
+    }
+
+    /// Own `photos` (7) beside a joined shared `photos` (9, owned by alice).
+    fn same_named_pair() -> MediaSnapshot {
+        MediaSnapshot {
+            items: vec![
+                item_in("photos", Some(7), "photos/own.jpg"),
+                item_in("photos", Some(9), "photos/theirs.jpg"),
+            ],
+            known_folders: vec![
+                known_with_id(7, "photos"),
+                shared_with_id(9, "photos", "alice", true),
+            ],
+        }
+    }
+
+    #[test]
+    fn a_same_named_pair_is_two_options_with_the_shared_one_labelled_by_owner() {
+        let options: Vec<(String, String)> = same_named_pair()
+            .folder_options()
+            .into_iter()
+            .map(|o| (o.value, o.label))
+            .collect();
+        assert_eq!(
+            options,
+            vec![
+                ("photos".to_string(), "photos".to_string()),
+                ("local:9".to_string(), "photos (alice)".to_string()),
+            ]
+        );
+        // The names-only list an un-lifted app renders keeps one entry.
+        assert_eq!(same_named_pair().folders(), vec!["photos".to_string()]);
+    }
+
+    #[test]
+    fn the_view_scopes_by_the_items_row() {
+        let snap = same_named_pair();
+        let paths = |f: Option<&str>| -> Vec<String> {
+            snap.view(f, MediaSortKey::Name, false)
+                .into_iter()
+                .map(|it| it.path)
+                .collect()
+        };
+        assert_eq!(paths(Some("photos")), vec!["photos/own.jpg".to_string()]);
+        assert_eq!(
+            paths(Some("local:9")),
+            vec!["photos/theirs.jpg".to_string()]
+        );
+        assert_eq!(paths(None).len(), 2, "all-media aggregates both");
+    }
+
+    #[test]
+    fn an_item_without_folder_id_follows_the_name() {
+        let mut snap = same_named_pair();
+        snap.items.push(item_in("photos", None, "photos/old.jpg"));
+        snap.items.push(item_in("legacy", None, "legacy/a.jpg"));
+        let paths = |f: &str| -> Vec<String> {
+            snap.view(Some(f), MediaSortKey::Name, false)
+                .into_iter()
+                .map(|it| it.path)
+                .collect()
+        };
+        assert_eq!(
+            paths("photos"),
+            vec!["photos/old.jpg".to_string(), "photos/own.jpg".to_string()],
+            "an unstamped item of the own set's name follows the own set"
+        );
+        assert_eq!(paths("legacy"), vec!["legacy/a.jpg".to_string()]);
+        assert!(snap.folders().contains(&"legacy".to_string()));
+    }
+
+    #[test]
+    fn an_item_whose_row_is_not_listed_is_an_item_only_option_by_name() {
+        // An unjoined shared set's items still render; its row is never
+        // offered (no owner label), only its name.
+        let snap = MediaSnapshot {
+            items: vec![item_in("knock", Some(42), "knock/a.jpg")],
+            known_folders: vec![known_with_id(7, "photos")],
+        };
+        let options = snap.folder_options();
+        assert_eq!(options.len(), 2);
+        assert_eq!(
+            (options[1].value.as_str(), options[1].label.as_str()),
+            ("knock", "knock")
+        );
+        assert_eq!(options[1].folder_ref, Some(FolderRef::Local(42)));
+        assert_eq!(snap.filter_value(&snap.items[0]), "knock");
+    }
+
+    #[test]
+    fn the_all_media_default_target_is_the_first_own_set_and_readers_are_not_targets() {
+        let snap = MediaSnapshot {
+            items: vec![],
+            known_folders: vec![
+                shared_with_id(9, "theirs", "alice", true),
+                shared_with_id(10, "read-only", "bob", false),
+                known_with_id(7, "mine"),
+            ],
+        };
+        assert_eq!(snap.default_upload_target().as_deref(), Some("mine"));
+        assert_eq!(
+            snap.upload_targets(),
+            vec!["local:9".to_string(), "mine".to_string()],
+            "a writer shared set is a target, a reader one is not"
+        );
+        // Only shared rows → no default: never land in someone else's folder
+        // unselected.
+        let shared_only = MediaSnapshot {
+            items: vec![],
+            known_folders: vec![shared_with_id(9, "theirs", "alice", true)],
+        };
+        assert_eq!(shared_only.default_upload_target(), None);
+    }
+
+    #[test]
+    fn filter_label_and_filter_value_follow_the_option() {
+        let snap = same_named_pair();
+        assert_eq!(snap.filter_label("photos"), "photos");
+        assert_eq!(snap.filter_label("local:9"), "photos (alice)");
+        let values: Vec<String> = snap.items.iter().map(|it| snap.filter_value(it)).collect();
+        assert_eq!(values, vec!["photos".to_string(), "local:9".to_string()]);
+        // Every item lies in its own value's scope.
+        for it in &snap.items {
+            let v = snap.filter_value(it);
+            assert!(
+                snap.view(Some(&v), MediaSortKey::Name, false).contains(it),
+                "{v}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_shared_label_falls_back_to_the_owners_short_id() {
+        let mut row = shared_with_id(9, "photos", "", true);
+        row.owner_handle = None;
+        let label = row.option_label();
+        assert!(
+            label.starts_with("photos (") && label.ends_with(')'),
+            "{label}"
+        );
+        assert_ne!(label, "photos ()");
+    }
+
     // ── the control-plane option list (media.md § Layout & flow) ────────────
     //
     // The property the whole fix exists for: a set the client KNOWS about is
@@ -878,7 +1309,7 @@ mod tests {
     fn a_set_seen_only_in_items_still_browses() {
         // Shared-with-me sets reach the snapshot through `fauna.media.list`
         // (the nest's readable-set scope) without appearing in the caller's
-        // own owner-scoped control-plane list. They must not disappear.
+        // control-plane list (an unjoined set). They must not disappear.
         let snap = MediaSnapshot {
             items: vec![item("shared-with-me", "s/1.jpg", 1, 1)],
             known_folders: vec![known("mine")],

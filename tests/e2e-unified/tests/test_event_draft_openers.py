@@ -144,17 +144,24 @@ def test_a_half_written_event_is_still_in_the_form_each_time_it_is_opened_again(
         )
 
 
-def test_a_day_cell_start_and_a_created_event_leave_the_next_form_blank(
+@pytest.mark.feature("drafts-survive")
+# Columns join as each lands its `event-form-discard` button AND passes every leg
+# here (tui leads, web joined 2026-10-11). linux joined 2026-10-12, once an
+# account switch closes the compose dialog the departing session left open
+# (`views/events/drafts.rs::retire_open_form` — the previous test's dialog used to
+# stand across this test's login and take its typing). android has the button,
+# awaiting an A2-lane emulator run; windows, macos and ios follow on their own
+# platforms.
+@pytest.mark.web
+@pytest.mark.linux
+def test_a_day_cell_start_a_created_and_a_discarded_event_leave_the_next_form_blank(
     app, request, nest_instance
 ):
-    """Outcome 12's day-cell and created-event halves. Deliberately NOT yet
-    tagged ``drafts-survive``: the outcome also promises that a DISCARDED event
-    leaves the next form blank (``events.md`` § Persistence: "A successful
-    create, or an explicit discard, clears the rail"), and no app has an
-    explicit discard for the event form — ui.yaml's ``event-form`` carries no
-    such element. A witness that asserts two of the sentence's three halves is
-    not a witness of the sentence, so this test joins the page with the discard
-    leg, once that control exists."""
+    """Outcome 12, all three halves (``events.md`` § Persistence: "A successful
+    create, or an explicit discard, clears the rail"): a day-cell start opens an
+    empty form at that day, the form after a created event is blank, and the form
+    after a discarded event (``event-form-discard``) is blank. tui and web so far;
+    the other columns join through their discard-control lift."""
     _fresh_account_with_calendar(app, request, nest_instance)
     ev = app.events
     driver = app.driver
@@ -193,8 +200,8 @@ def test_a_day_cell_start_and_a_created_event_leave_the_next_form_blank(
 
     # 3. Write that event on the day it was started from, and create it. The
     #    agenda (every event of the selected calendar) is where it is looked for.
-    driver.type_text("event-summary", created)
-    driver.type_text("event-dtend", f"{target}T11:00")
+    driver.clear_and_type("event-summary", created)
+    driver.clear_and_type("event-dtend", f"{target}T11:00")
     driver.click("create-event")
     ev.navigate()
     listed = _poll(ev.event_summaries, lambda s: any(created in x for x in s),
@@ -215,5 +222,25 @@ def test_a_day_cell_start_and_a_created_event_leave_the_next_form_blank(
     }
     assert all(v == "" for v in fields.values()), (
         f"once the event is created, the next new-event form must open blank, got "
+        f"{fields!r}; error={app.error_text()!r}"
+    )
+
+    # 5. A discarded event leaves the next form blank too: write a draft into the
+    #    form just opened, discard it (not a plain close, which keeps the draft —
+    #    outcome 11), and New Event has nothing to resume.
+    discarded = f"the event I wrote and threw away {tag}"
+    driver.type_text("event-summary", discarded)
+    typed = _poll(ev.compose_summary_text, lambda s: s == discarded)
+    assert typed == discarded, f"precondition: the summary must be in the form, got {typed!r}"
+    driver.click("event-form-discard")
+    _assert_form_closed(app, "discarding the event")
+    ev.open_compose()
+    fields = {
+        f: _field(driver, f)
+        for f in ("event-summary", "event-dtstart", "event-dtend",
+                  "event-form-description", "event-form-location")
+    }
+    assert all(v == "" for v in fields.values()), (
+        f"once the event is discarded, the next new-event form must open blank, got "
         f"{fields!r}; error={app.error_text()!r}"
     )

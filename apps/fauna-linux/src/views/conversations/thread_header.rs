@@ -37,6 +37,9 @@ pub struct ThreadHeader {
     rename_btn: gtk::Button,
     add_participant_btn: gtk::Button,
     room_class_label: gtk::Label,
+    /// `thread-room-notice` — the room's one standing notice, off the shared
+    /// `RoomNotice` (awaiting-key wins over moderation-unverified).
+    room_notice_label: gtk::Label,
     /// Holds `conversation-guardian-state` while the nest reports one for the
     /// room's peer — emptied, never hidden, so no stale marker lingers.
     guardian_slot: gtk::Box,
@@ -91,9 +94,7 @@ impl ThreadHeader {
         // true only for a bound FaunaMls group (`capabilities.rs`), so
         // `thread-rename-confirm` (tagged via `tag_response_button` on a
         // transient `adw::MessageDialog` with no persistent widget reference)
-        // never needs a different kind — so the ENTRY is what declares. Same
-        // idiom as `admin.rs::build_factory_reset_section`'s
-        // `ADMIN_FACTORY_RESET_BUTTON`.
+        // never needs a different kind — so the ENTRY is what declares.
         crate::offline_gate::declare_wire_kind(&rename_btn, "fauna.conversations.channel.send");
         top.append(&rename_btn);
 
@@ -106,6 +107,11 @@ impl ThreadHeader {
         room_class_label.add_css_class("dim-label");
         crate::testid::set_test_id(&room_class_label, ids::THREAD_ROOM_CLASS);
         top.append(&room_class_label);
+        let room_notice_label = gtk::Label::new(None);
+        room_notice_label.add_css_class("dim-label");
+        room_notice_label.set_visible(false);
+        crate::testid::set_test_id(&room_notice_label, ids::THREAD_ROOM_NOTICE);
+        top.append(&room_notice_label);
         let guardian_slot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         top.append(&guardian_slot);
 
@@ -177,6 +183,7 @@ impl ThreadHeader {
             rename_btn,
             add_participant_btn,
             room_class_label,
+            room_notice_label,
             guardian_slot,
             room_settings_btn,
             _on_rename: on_rename,
@@ -328,9 +335,7 @@ impl ThreadHeader {
     /// projected room, never computed here (`conversation-rooms.md` § The
     /// three classes: the class is a pure function of the member set,
     /// computed in shared Rust). Both leave the tree where the rail models no
-    /// room; where it does, the button is painted and merely greyed off
-    /// `can_set_policy` — a policy-less room greys it too, having no policy to
-    /// edit.
+    /// room; where it does, the button is painted and live for any member.
     fn apply_room(&self, detail: &ThreadDetail) {
         while let Some(child) = self.guardian_slot.first_child() {
             self.guardian_slot.remove(&child);
@@ -344,6 +349,20 @@ impl ThreadHeader {
                     room.class.attr_token(),
                 );
                 self.room_class_label.set_visible(true);
+                // The standing notice, iff the shared fact decides there is one.
+                // Never a mark on a bubble a parked record targets.
+                match room.notice() {
+                    Some(notice) => {
+                        self.room_notice_label.set_text(notice.label());
+                        crate::testid::set_test_attr(
+                            &self.room_notice_label,
+                            "state",
+                            notice.attr_token(),
+                        );
+                        self.room_notice_label.set_visible(true);
+                    }
+                    None => self.room_notice_label.set_visible(false),
+                }
                 // The family gate's marker in the detail, the row's twin — the
                 // thread below it stays fully readable (`family-safety.md`
                 // § The bridge-DM gate).
@@ -351,12 +370,15 @@ impl ThreadHeader {
                     self.guardian_slot
                         .append(&super::list::guardian_state_label(state));
                 }
+                // Painted and live for ANY member of a room: the walk-out
+                // lives inside the editor and is a plain member's verb. The
+                // greying moves inside, per control.
                 self.room_settings_btn.set_visible(true);
-                self.room_settings_btn
-                    .set_sensitive(detail.capabilities.can_set_policy);
+                self.room_settings_btn.set_sensitive(true);
             }
             None => {
                 self.room_class_label.set_visible(false);
+                self.room_notice_label.set_visible(false);
                 self.room_settings_btn.set_visible(false);
             }
         }
@@ -678,9 +700,9 @@ mod tests {
     }
 
     /// § Architectural rules 5: greyed, never hidden. A plain member sees the
-    /// editor's door and the add-participant affordance PAINTED and
-    /// insensitive — the roles table is applied in shared Rust, and this app
-    /// never re-derives it.
+    /// editor's door painted and live (its controls grey per control inside)
+    /// and the add-participant affordance PAINTED and insensitive — the roles
+    /// table is applied in shared Rust, and this app never re-derives it.
     #[test]
     fn a_plain_member_sees_the_room_affordances_greyed_not_hidden() {
         crate::testid::run_on_gtk_thread(|| {
@@ -692,9 +714,12 @@ mod tests {
                 crate::automation::find::find_in(&root, ids::THREAD_ROOM_SETTINGS_BUTTON)
                     .expect("thread-room-settings-button is painted whenever the thread is a room");
             assert!(settings.is_visible(), "painted, never hidden");
+            // The door is live for ANY member: the walk-out lives inside the
+            // editor and is a plain member's verb; the greying is per control
+            // inside it.
             assert!(
-                !settings.is_sensitive(),
-                "greyed: a member may not set policy"
+                settings.is_sensitive(),
+                "live: the editor holds the member's own walk-out"
             );
 
             let add = crate::automation::find::find_in(&root, ids::THREAD_ADD_PARTICIPANT_BUTTON)

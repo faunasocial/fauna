@@ -1,0 +1,269 @@
+name: Re-stage and verify an already-built nest image (no rebuild)
+
+# The recovery half of build-nest-image.yml, and like it ONE file for both of
+# the project's repositories (image-pipeline.md § Image tags & channels → *The
+# two pipelines on GitHub-hosted runners*): on the public repository
+# (faunasocial/fauna) it re-stages :test + :<version> signed (UAT entry —
+# the SAME build only: a :<version> naming another build is refused), verifies
+# at test.fauna.build and, on a green verify, runs the `promote` job, which
+# copies :latest; on the private development repository
+# it re-stages :dev and verifies at dev.fauna.build. Runners as in
+# build-nest-image.yml: GitHub-hosted on the public repository, always; the
+# organisation's self-hosted runner by default on the private one, GitHub-hosted
+# there when dispatched with `-f runner=hosted`, and a run elsewhere that asks
+# for `self-hosted` fails in its first step.
+#
+# It re-runs staging + verification for an image build-nest-image.yml ALREADY
+# built and pushed as :sha-<sha>, without rebuilding: to roll the staging box
+# to a previously-built sha, or to re-run the gate when the build succeeded but
+# the verify failed for a cause outside the candidate (staging box down, a
+# network flake, another push taking the staging box mid-soak).
+
+on:
+  # Manual dispatch only, by a maintainer on `main`, for one of the two cases
+  # above; nothing triggers it automatically, because every dispatch moves the
+  # stage tag and redeploys a staging box. On the public repository it is also
+  # the release's second step when the first build's verify could not run yet
+  # (the staging box was not up): this run verifies, and the reviewer promotes.
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Full 40-char commit sha of the built image (ghcr.io/faunasocial/nest:sha-<sha> must exist)"
+        required: true
+      runner:
+        description: "auto = the self-hosted runner on the private repository, GitHub-hosted on the public one; self-hosted = the organisation's self-hosted runner (private repository only — the public one refuses it); hosted = GitHub-hosted (spends the private repository's metered minutes)"
+        type: choice
+        options: [auto, self-hosted, hosted]
+        default: auto
+
+permissions:
+  contents: read
+
+concurrency:
+  # Shared with build-nest-image.yml: both move the stage tag, and racing a
+  # concurrent build's own staging would make the verify gate meaningless.
+  # Queue, never cancel — a pending run is a deliberate dispatch.
+  group: nest-image-${{ github.repository }}
+  cancel-in-progress: false
+  queue: max
+
+env:
+  IMAGE: ghcr.io/faunasocial/nest
+  SHA_TAG: sha-${{ inputs.sha }}
+  # The repository decides the stage tag and the box that verifies it — the
+  # same derivation as build-nest-image.yml.
+  STAGE_TAG: ${{ github.repository == 'faunasocial/fauna' && 'test' || 'dev' }}
+  VERIFY_HOST: ${{ github.repository == 'faunasocial/fauna' && 'test.fauna.build' || 'dev.fauna.build' }}
+  # The front door: a cloud token that can list it must never be used here.
+  REFUSE: fauna.social
+  # The leg this run's jobs are on — the same condition every `runs-on` below
+  # spells out (runs-on cannot read env), as in build-nest-image.yml.
+  RUNNER_LEG: ${{ (github.repository_owner == 'faunasocial' && github.event.repository.private && inputs.runner != 'hosted') && 'self-hosted' || 'hosted' }}
+
+jobs:
+  stage:
+    runs-on: ${{ (github.repository_owner == 'faunasocial' && github.event.repository.private && inputs.runner != 'hosted') && fromJSON('["self-hosted","linux","arm64","fauna"]') || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+      # the Sigstore keyless identity the public repository's UAT entry signs
+      # with; permissions are per job, so the private evaluation carries it
+      # too, and nothing there asks for a token
+      id-token: write
+    outputs:
+      build_id: ${{ steps.build_id.outputs.build_id }}
+    steps:
+      # The self-hosted runner is the private repository's: no other repository
+      # schedules a job on it (`runs-on` above), and a dispatch elsewhere that
+      # asks for it is refused rather than silently run somewhere else.
+      - name: The self-hosted leg is the private repository's alone
+        if: inputs.runner == 'self-hosted' && !(github.repository_owner == 'faunasocial' && github.event.repository.private)
+        run: |
+          echo "::error::runner=self-hosted is honoured only on the private repository; dispatch this repository's re-stage with runner=auto or runner=hosted"
+          exit 1
+
+      # The mirror re-stage reads the vetted table (which repositories to re-tag).
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+
+      # The mirror re-stage reads the vetted table through `uv run`.
+      - name: Install uv
+        run: |
+          bash scripts/install-uv.sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Log in to the registry
+        env:
+          TOKEN: ${{ github.token }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      # This workflow re-stages an artifact it did NOT build, so it reads the
+      # build id back off the artifact: the id comes from the exact image about
+      # to be re-staged, and the verify gate asserts the staging box reports
+      # it. An empty result means a build that predates the stamp; the gate
+      # then falls back to commit-only matching, loudly.
+      - name: Read the artifact's build id
+        id: build_id
+        run: |
+          docker pull "$IMAGE:$SHA_TAG"
+          build_id=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
+            "$IMAGE:$SHA_TAG" | sed -n 's/^FAUNA_BUILD_ID=//p' | head -1)
+          if [ -z "$build_id" ] || [ "$build_id" = "dev" ]; then
+            echo "::warning::$SHA_TAG carries no per-build FAUNA_BUILD_ID — verification falls back to commit-only matching, which cannot distinguish two builds of this commit"
+            build_id=""
+          fi
+          echo "build_id=$build_id" >> "$GITHUB_OUTPUT"
+
+      - name: Re-stage :sha-<sha> as the stage tag (registry-side copy, no rebuild)
+        if: github.repository != 'faunasocial/fauna'
+        run: |
+          docker buildx imagetools create \
+            -t "$IMAGE:$STAGE_TAG" \
+            "$IMAGE:$SHA_TAG"
+
+      # The mirrored sidecars re-stage with the nest image, so a staging box
+      # pulls the whole bundle at this sha. A sha built before the mirror step
+      # existed has no mirror tags: warn and skip rather than red — there is
+      # nothing to roll the sidecars back to. --allow-all-missing is sanctioned
+      # ONLY here, before this workflow's own verify job, whose scanner probe
+      # catches a genuine problem for this sha (release-integrity.md
+      # § Third-party container images part 4). The public repository's builds
+      # all carry their mirrors, so its re-stage below is strict.
+      - name: Re-stage the mirrored third-party images as the stage tag
+        if: github.repository != 'faunasocial/fauna'
+        run: ./scripts/mirror-third-party-images.sh "$STAGE_TAG" "$SHA_TAG" --allow-all-missing
+
+      # The version is the re-staged commit's, not the dispatching ref's.
+      - name: Extract version from the re-staged commit's Cargo.toml
+        if: github.repository == 'faunasocial/fauna'
+        env:
+          SHA: ${{ inputs.sha }}
+        run: |
+          case "$SHA" in
+            *[!0-9a-f]*|'') echo "::error::sha must be a full 40-char lowercase commit sha"; exit 1 ;;
+          esac
+          [ "${#SHA}" -eq 40 ] || { echo "::error::sha must be a full 40-char commit sha"; exit 1; }
+          git fetch --no-tags --depth=1 origin "$SHA"
+          version=$(git show "$SHA:Cargo.toml" | grep '^version' | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Install cosign
+        if: github.repository == 'faunasocial/fauna'
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+
+      # UAT entry, as in build-nest-image.yml: :test + :<version> from the one
+      # digest, every manifest signed before either tag moves. Re-staging the
+      # build that already holds :<version> is idempotent; a :<version> naming
+      # another build is refused (image-pipeline.md § Image tags & channels →
+      # *The UAT channel*, decision 3).
+      - name: UAT entry, signed — nest + mirrors to the stage tag + :<version>
+        if: github.repository == 'faunasocial/fauna'
+        run: ./scripts/release-nest-image.sh stage "$SHA_TAG" "$STAGE_TAG" "$VERSION"
+
+  verify:
+    needs: stage
+    runs-on: ${{ (github.repository_owner == 'faunasocial' && github.event.repository.private && inputs.runner != 'hosted') && fromJSON('["self-hosted","linux","arm64","fauna"]') || 'ubuntu-latest' }}
+    # The cloud token lives in this Environment (deployment branches `main`
+    # only), so no fork and no pull request ever reaches it.
+    environment: verify-nest
+    # Wide enough for the scanner probe's clamd boot on top of the soak.
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      # sweep asks the Actions API whether an admission's run has completed
+      actions: read
+      # the scanner probe pulls the staged mirrors
+      packages: read
+    env:
+      HETZNER_API_TOKEN: ${{ secrets.HETZNER_API_TOKEN }}
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+
+      # The scanner probe and the admission run under uv.
+      - name: Install uv
+        run: |
+          bash scripts/install-uv.sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Log in to the registry
+        env:
+          TOKEN: ${{ github.token }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      # Same gate as build-nest-image.yml's verify job: this workflow re-stages
+      # the mirrored sidecars, so it must equally have booted them before the
+      # pin may record this build. A sha from before the mirror step existed
+      # has no mirror tags, and the probe reds on that — the honest answer.
+      - name: Verify the mirrored scan-gate sidecars actually serve
+        run: |
+          uv run --no-project python scripts/bundle-scanner-probe.py \
+            --mirror-tag "$SHA_TAG" \
+            --timeout 600
+
+      # The per-run admission is the hosted leg's: a hosted runner's address is
+      # new every run, while the self-hosted runner leaves through the dev
+      # host's egress, which the box firewall already admits on the verify
+      # ports.
+      - name: Sweep admissions left by earlier runs
+        if: env.RUNNER_LEG == 'hosted'
+        run: uv run --no-project python scripts/box-firewall-admit.py sweep "$VERIFY_HOST" --refuse-if-lists "$REFUSE" --run-id "$GITHUB_RUN_ID"
+
+      - name: Admit this run
+        if: env.RUNNER_LEG == 'hosted'
+        run: uv run --no-project python scripts/box-firewall-admit.py admit "$VERIFY_HOST" --refuse-if-lists "$REFUSE" --run-id "$GITHUB_RUN_ID"
+
+      # --expect-build-id binds the gate to the artifact being re-staged rather
+      # than to its commit string; empty (a pre-stamp artifact) degrades to
+      # commit-only, warned about in the stage job.
+      - name: Verify the staged deploy serves this build
+        run: |
+          set -- "https://$VERIFY_HOST" --expect-commit ${{ inputs.sha }}
+          if [ -n "${{ needs.stage.outputs.build_id }}" ]; then
+            set -- "$@" --expect-build-id "${{ needs.stage.outputs.build_id }}"
+          fi
+          ./scripts/deploy-verify-serving.sh "$@" \
+            --soak 300 \
+            --mail-ports "$VERIFY_HOST:993,$VERIFY_HOST:465,$VERIFY_HOST:587"
+
+      - name: Revoke this run
+        if: always() && env.RUNNER_LEG == 'hosted'
+        run: uv run --no-project python scripts/box-firewall-admit.py revoke "$VERIFY_HOST" --refuse-if-lists "$REFUSE" --run-id "$GITHUB_RUN_ID"
+
+      - name: Nothing of this run is left open
+        if: always() && env.RUNNER_LEG == 'hosted'
+        run: uv run --no-project python scripts/box-firewall-admit.py held "$VERIFY_HOST" --refuse-if-lists "$REFUSE" --run-id "$GITHUB_RUN_ID"
+
+  # The release, exactly as in build-nest-image.yml: the verified digest copied
+  # to :latest, the mirrors with it, each one's stage-time signature verified
+  # first; public repository only, behind the `promote-nest` Environment's
+  # required reviewer.
+  promote:
+    needs: verify
+    if: ${{ github.repository == 'faunasocial/fauna' }}
+    runs-on: ubuntu-latest
+    environment: promote-nest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      # The dispatching ref's tooling (the promoted sha may predate it).
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+
+      # The mirror copy and the verification read the vetted table through `uv run`.
+      - name: Install uv
+        run: |
+          bash scripts/install-uv.sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+
+      - name: Log in to the registry
+        env:
+          TOKEN: ${{ github.token }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Promote, signature verified — nest + mirrors to :latest
+        run: ./scripts/release-nest-image.sh promote "$SHA_TAG"

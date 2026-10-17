@@ -30,7 +30,6 @@ public partial class AdminWebViewModel : ObservableObject
 {
     private readonly IFfiWebClient _web;
     private readonly Func<Task<IReadOnlyList<ApexActorOption>>> _loadActors;
-    private readonly string _domain;
 
     // Parallel id map for ApexOptions: null at index 0 (None / clear), the actor id at
     // each other index. SelectApexAsync dispatches set_apex_actor with this id.
@@ -53,19 +52,19 @@ public partial class AdminWebViewModel : ObservableObject
 
     internal AdminWebViewModel(
         IFfiWebClient web,
-        Func<Task<IReadOnlyList<ApexActorOption>>> loadActors,
-        string domain)
+        Func<Task<IReadOnlyList<ApexActorOption>>> loadActors)
     {
         _web = web;
         _loadActors = loadActors;
-        _domain = domain;
     }
 
     /// <summary>Hydrate from <c>get_apex_actor</c> (the transport already tolerates the
     /// post-login connect race for a single RPC — transport.md § Request lifecycle
     /// step 3, no app-level retry needed) + the injected actor list, then build the
     /// picker. The apex-info line uses the shared <c>fauna_core::web::apex_url</c>
-    /// projection.</summary>
+    /// projection over the nest's own <c>web_serving_domain</c>
+    /// (<see cref="IFfiWebClient.ServingDomain"/>, admin.md § 7) — never the cached sign-in
+    /// domain, which is a placeholder on a domainless nest.</summary>
     public async Task LoadAsync()
     {
         IsLoading = true;
@@ -77,7 +76,8 @@ public partial class AdminWebViewModel : ObservableObject
             try { actors = await _loadActors(); }
             catch (Exception) { actors = Array.Empty<ApexActorOption>(); }
             BuildPicker(current, actors);
-            ApexInfoText = S.Format("admin/web_page/apex_info", FaunaFfiMethods.WebApexUrl(_domain));
+            var servingDomain = await _web.ServingDomain();
+            ApexInfoText = S.Format("admin/web_page/apex_info", FaunaFfiMethods.WebApexUrl(servingDomain));
         }
         catch (Exception ex)
         {

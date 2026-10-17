@@ -31,7 +31,7 @@ import time
 
 import pytest
 
-pytestmark = [pytest.mark.tier_3, pytest.mark.windows, pytest.mark.linux, pytest.mark.web, pytest.mark.macos, pytest.mark.ios, pytest.mark.tui]
+pytestmark = [pytest.mark.tier_3, pytest.mark.windows, pytest.mark.linux, pytest.mark.web, pytest.mark.macos, pytest.mark.ios, pytest.mark.tui, pytest.mark.android]
 
 
 def _wait_compose_body(app, expected: str, timeout: float = 8.0) -> str:
@@ -97,7 +97,10 @@ def test_new_thread_cancel_discards_draft_and_dismisses(logged_in_app):
     app.conversations.navigate()
     app.driver.click("new-conversation-button")
     app.driver.wait_for("dm-text-field", timeout=10.0)
-    app.driver.type_text("dm-text-field", draft_body)
+    # Clear, not append: the new-thread draft persists across switching and
+    # relaunch by design, so the composer can open holding an earlier module's
+    # half-written body (the 2026-10-12 sweep read "## text" + this one).
+    app.driver.clear_and_type("dm-text-field", draft_body)
     assert _wait_compose_body(app, draft_body) == draft_body, (
         "precondition: the draft body must be in the composer before Cancel; "
         f"error={app.error_text()!r}"

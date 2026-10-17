@@ -17,6 +17,7 @@ import com.fauna.app.R
 import com.fauna.app.core.AccountStores
 import com.fauna.app.core.HexUtil
 import com.fauna.app.core.OnboardingHost
+import com.fauna.app.core.RecoverableBoxes
 import com.fauna.app.core.ShellLog
 import com.fauna.ffi.onboarding.OnboardingStep
 import com.fauna.ffi.shortNestId
@@ -52,17 +53,14 @@ class NestRecoveryVM @Inject constructor(
     fun selectBox(nestActorId: String) = host.machine.selectRecoveryBox(nestActorId)
 
     /**
-     * Reachable-nest read: with a stored nest URL, connect a short-lived
-     * [com.fauna.ffi.FfiNestClient] to it and read the custodied box list via
-     * [com.fauna.ffi.deploymentSeeds] — this device's own store joined with a
-     * cold read from that nest, in one shared call. When the nest cannot be
-     * reached (the total-box-loss case where the saved nest *is* the dead box)
-     * it reads the local store alone, so a dead stored nest never hides what
-     * this device holds. Best-effort — never surfaces a page error. No-ops when
+     * Reachable-nest read: with a stored nest URL, read the custodied box list
+     * through the shared [RecoverableBoxes.load] — this device's own store joined
+     * with a cold read from that nest, falling back to the local store alone when
+     * the nest cannot be reached (the total-box-loss case where the saved nest
+     * *is* the dead box). Best-effort — never surfaces a page error. No-ops when
      * there's no nest URL (the offline arm owns that case), no identity yet, or
      * the machine already holds a non-empty list (never clobber a list already
-     * on screen). `disconnect()`s afterward — this is a one-off probe, not the
-     * authenticated session `ApiClient` builds.
+     * on screen).
      */
     fun loadReachableBoxesIfNestUrl() {
         if (host.machine.recoveryBoxes().isNotEmpty()) return
@@ -76,33 +74,9 @@ class NestRecoveryVM @Inject constructor(
                 ShellLog.w("NestRecoveryVM", "loadReachableBoxesIfNestUrl: bad secret: ${e.message}")
                 return@launch
             }
-            val client = try {
-                com.fauna.ffi.FfiNestClient(nestUrl, ownerSecret)
-            } catch (e: Exception) {
-                ShellLog.w("NestRecoveryVM", "loadReachableBoxesIfNestUrl: client build failed: ${e.message}")
-                return@launch
-            }
-            val storeContainerDir = accountStores.accountStoreContainerDir()
-            try {
-                val boxes = try {
-                    client.connect()
-                    com.fauna.ffi.deploymentSeeds(client, ownerSecret, storeContainerDir)
-                } catch (e: Exception) {
-                    ShellLog.w(
-                        "NestRecoveryVM",
-                        "loadReachableBoxesIfNestUrl: nest read failed, reading this device's store alone: ${e.message}",
-                    )
-                    com.fauna.ffi.deploymentSeedsLocal(
-                        ownerSecret, "", storeContainerDir,
-                    )
-                }.map { it.nestActorId }
-                if (boxes.isNotEmpty() && host.machine.recoveryBoxes().isEmpty()) {
-                    host.machine.setRecoveryBoxes(boxes)
-                }
-            } catch (e: Exception) {
-                ShellLog.w("NestRecoveryVM", "loadReachableBoxesIfNestUrl failed (best-effort): ${e.message}")
-            } finally {
-                client.disconnect()
+            val boxes = RecoverableBoxes.load(nestUrl, ownerSecret, accountStores.accountStoreContainerDir())
+            if (boxes.isNotEmpty() && host.machine.recoveryBoxes().isEmpty()) {
+                host.machine.setRecoveryBoxes(boxes)
             }
         }
     }

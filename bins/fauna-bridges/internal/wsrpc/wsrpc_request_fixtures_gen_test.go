@@ -253,6 +253,16 @@ func requestFixtures() []requestFixture {
 		}},
 		{"request-fetch-mta-sts-policy.cbor", fetchMtaStsPolicyRequest{Domain: "remote.example"}},
 		{"request-fetch-tlsa.cbor", fetchTlsaRequest{MxHost: "mx1.remote.example"}},
+		{"request-report-dmarc-observation.cbor", reportDmarcObservationRequest{
+			ClientIP: "192.0.2.10",
+			Dmarc:    DmarcVerdict{Kind: "fail", Data: &DmarcVerdictFail{Policy: "reject"}},
+			Observation: DmarcObservation{
+				HeaderFromDomain: "remote.example", EnvelopeFromDomain: "bounce.remote.example",
+				DkimAligned: true, SpfAligned: true,
+				DkimResults: []DkimAuthResult{{Domain: "remote.example", Selector: "s1", Result: "pass"}},
+				SpfResult:   "pass",
+			},
+		}},
 		{"request-report-tls-attempt.cbor", reportTlsAttemptRequest{
 			RecipientDomain: "remote.example", MxHost: "mx1.remote.example",
 			ResultType:    strPtr("certificate-host-mismatch"),
@@ -336,7 +346,7 @@ var requestConformanceTypes = []any{
 	subscribeMailboxRequest{}, unsubscribeMailboxRequest{}, subscribeMailboxStateRequest{},
 	provisionCalendarRequest{}, listCalendarsRequest{}, putEventCiphertextRequest{},
 	deleteEventRequest{}, queryEventsRequest{}, syncCalendarSinceRequest{},
-	reportLogEventsRequest{},
+	reportLogEventsRequest{}, reportDmarcObservationRequest{},
 }
 
 // TestRegenerateRequestFixtures (gated on REGEN_WSRPC_FIXTURES) marshals every

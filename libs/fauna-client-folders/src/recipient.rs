@@ -84,6 +84,10 @@ pub struct FolderWelcomeJoin {
     /// recipient's foreign-set record once the join has ingested those keys
     /// ([`Self::set_name`] is `None` whenever the plaintext was scrubbed).
     pub set_name_seal: Option<fauna_core::label_custody::SealedSetName>,
+    /// The folder's home-nest residency stamp (`"metadata_only"` / `"full"`) —
+    /// seeds the recipient's foreign-set record at the join. `None` = not
+    /// stated, never *full*.
+    pub residency: Option<String>,
 }
 
 #[cfg(feature = "mls")]
@@ -113,6 +117,7 @@ impl FolderWelcomeJoin {
                 shared_by_handle: self.shared_by_handle,
                 shared_by_domain: self.shared_by_domain,
                 set_name_seal: self.set_name_seal,
+                residency: self.residency,
             },
         )
     }
@@ -216,6 +221,7 @@ where
         shared_by_handle: share.shared_by_handle,
         shared_by_domain: share.shared_by_domain,
         set_name_seal: share.set_name_seal,
+        residency: share.residency,
     })
     .await
     .map_err(AcceptShareError::Join)?;

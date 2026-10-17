@@ -204,6 +204,15 @@ impl ActorKeypair {
         &self.signing_key
     }
 
+    /// Sign `message` with this identity — the signing counterpart of
+    /// [`verify_detached`]: the 64 raw signature bytes, so a crate that builds a
+    /// domain-tagged message (the account lockout's) signs it without taking its
+    /// own `ed25519-dalek` dependency.
+    pub fn sign_detached(&self, message: &[u8]) -> [u8; 64] {
+        use ed25519_dalek::Signer;
+        self.signing_key.sign(message).to_bytes()
+    }
+
     /// Returns the verifying (public) key.
     pub fn verifying_key(&self) -> VerifyingKey {
         self.signing_key.verifying_key()

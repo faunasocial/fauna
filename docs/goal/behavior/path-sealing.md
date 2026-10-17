@@ -680,16 +680,15 @@ descriptor from its message entirely (neither plaintext nor hashed), per the des
 the descriptor from its message" line. Proven end to end, not just at the source level: a
 conformance test drives a real `web_files` rejection (a website set's `fauna.sync.changes.record` naming a server-side-executable path; the earlier `sync_ws` case left with that data plane) through the real `tracing` ring and the real
 `fauna.admin.logs` RPC handler, and asserts the admin's reply carries the redacted form only
-(`bins/fauna-nest/tests/conformance_log_redaction.rs`). **Discovered, not fixed:** the daemon's
-local merge-base cache (`bins/fauna-sync`'s `cache_get`/`cache_put` under `base:<relative_path>`
-keys) still names the plaintext path in a local cache **filename** on disk — not a log line or an
-error string, so out of S7's scope, but worth a future slice if that cache directory is ever
-admin-readable on a co-located deployment. **`libs/fauna-sync-engine` — the daemon's own engine
-crate, shared by both `bins/fauna-nest` and `bins/fauna-sync` — sat outside S7's original
-inventory** (its own T6 slice scrubbed only `bins/fauna-nest/src` and `bins/fauna-sync/src`) until
-finding brought its `tracing` field/format-string call sites into line the same way; its
-`anyhow!`/`.context()` error-string construction sites are a further, still-open residual of the
-same gap (tracked, not yet fixed).
+(`bins/fauna-nest/tests/conformance_log_redaction.rs`). **`libs/fauna-sync-engine` — the daemon's own engine
+crate, shared by both `bins/fauna-nest` and the sync agent — sat outside S7's original
+inventory** (its own T6 slice scrubbed only `bins/fauna-nest/src` and the daemon's `src`) until
+finding brought its `tracing` field/format-string call sites into line the same way. The
+custodian/account stores' remaining `.display()` sites (internal storage roots keyed by `actor_id_hex` or a fixed
+subdirectory name, never a user-chosen name) and their `{path}` error strings (a set-qualified held
+address: reserved name plus hashes) are **confirmed out of scope**: no nest-side production code
+instantiates these stores, so their lines reach only the sync agent's own per-user log, never the
+nest's `fauna.admin.logs` ring.
 
 **The keyless writer seams are CLOSED (S8 D2, 2026-08-01)** — all four, not the two the earlier
 list named (the caller audit found two more, the devices-machine review-list re-point and the
@@ -934,7 +933,7 @@ nothing for a stamp to re-derive from. The gesture that holds the lists at write
 writer that survives the flip. Seals and plaintext **move together** nest-side: a write of either
 list writes its seal, `None` included, so a keyless app's save *clears* the stale seal rather than
 leaving one that opens to the list it replaced; a seal-only update stamps in place, which is the
-shape the S8 backfill uses. The read seam (`render_include_paths`/`render_exclude_paths`, returning
+shape the S8 backfill uses. **The save fails closed on a list this device could not open:** the snapshot row carries `include_paths_unreadable`/`exclude_paths_unreadable` beside the `None` (a sealed list that rendered to the omit degrade — "could not open", not "no list"), and `set_folder_paths` refuses the whole save, sending nothing, when either list it is handed is flagged, so the blank an editor shows for an unreadable list can never overwrite the stored seal. The read seam (`render_include_paths`/`render_exclude_paths`, returning
 `None` for the ratified omit degrade) was wired at **three** consumers (two since the daemon's removal,
 2026-10-02). The `fauna-sync` daemon's
 `apply_folder_row` was first — the consumer whose *behaviour* the flip would otherwise break,
@@ -1105,7 +1104,7 @@ protocol's `SetAddressed` trait: since 2026-10-02 every set-addressed request th
 `fauna-client-sync`, `fauna-client-snapshots` and the sync engine send, plus `fauna.stats.get`,
 `fauna.files.versions.list` and `fauna.web.files.prune_sealed` — leaves the app with
 `set_name_hash(name)` beside the name (a reserved `__` set, and an optional-set read naming no
-set, stay unhashed). The mail bridge's WebDAV kinds
+set, stay unhashed; the row form the funnel also stamps, which wins over both, is [`set-addressing.md`](set-addressing.md) § The row form's). The mail bridge's WebDAV kinds
 (`fauna.bridges.{webdav_list_files,webdav_record_change,mint_bulk_byte_token}`, built in Go) carry
 it too: the MDA stamps `set_name_hash` through the `fauna-ffi` export `webdav_set_name_hash`,
 never a Go re-derivation, and the nest resolves the served set hash-first. The batch's one
@@ -1141,7 +1140,7 @@ carries the pair beside its name; a client-device custodian records it per set b
 holds no label for, and one riding beside a hash that is not its own is refused
 `invalid_params`) and writes by the row id it resolved — so a restore finds a target whose
 plaintext name is blank. Where the custodian's display name comes from once the listing
-carries none is `../architecture/segment-backup-protocol.md` § *Where a restored folder's name
+carries none is `../architecture/client-device-custodian.md` § *Where a restored folder's name
 comes from*. The seal is salted by the name, never a row id, so it opens on whichever
 nest the same owner restores to. The MDA's served-set listing (`WebdavServedSet`) carries each
 set's `name_hash`: the MDA serves a set whose hash matches the requested name's, and names a

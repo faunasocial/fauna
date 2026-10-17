@@ -129,8 +129,14 @@ enum Resolved {
 /// followed before the decision, so a link is judged by where it lands rather
 /// than by its own name, and `is_file()` on the resolved path then rejects a
 /// FIFO, a socket, a device and a directory alike. The caller opens the path
-/// this returns and no other — the path that is checked is the path that is
-/// opened.
+/// this returns and no other.
+///
+/// The bound: this checks a NAME, not an object. The caller re-opens by name,
+/// which re-resolves every component, so a component replaced between this
+/// check and that open (a final component swapped for a symlink) is followed.
+/// The sink is a boundary over content AT REST; what stops a concurrent write
+/// from planting such a link is the receiver's `--munge-links` (front-door.md
+/// § The box), not this function — relaxing the wrapper is not free.
 async fn contained_file(root: &Path, path: &Path) -> Option<PathBuf> {
     let real = tokio::fs::canonicalize(path).await.ok()?;
     if !real.starts_with(root) {
@@ -219,8 +225,10 @@ async fn serve_static(root: &Path, req: Request, miss: NotFound) -> Response {
         }
         Resolved::Miss => return static_miss(root, &path, miss).await,
     };
-    // Serving the RESOLVED path, never the request's: `ServeFile` opens the
-    // one file `resolve` cleared and does not re-interpret the URL.
+    // Serving the RESOLVED path, never the request's: `ServeFile` is built from
+    // the one path `resolve` cleared and does not re-interpret the URL. It
+    // opens that path by name, so the check/open gap `contained_file` states
+    // applies here too (covered by the receiver's `--munge-links`).
     match ServeFile::new(&file).try_call(req).await {
         Ok(r) => r.map(Body::new),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),

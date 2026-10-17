@@ -88,7 +88,7 @@ Stamped 2026-09-23 at 6605debcb9.
 27. [nest] No one else on your nest, not even the admin, can read or change your calendars — `docs/goal/behavior/caldav-server.md` § Architectural rules
    - `tests/e2e-unified/tests/test_caldav_nest_outcomes.py::test_no_one_else_on_the_nest_can_read_or_change_your_calendar`
 28. [app] On a nest with no domain, your mail settings show the address and port to enter in a calendar app — `docs/goal/behavior/caldav-server.md` § Network exposure
-    - (none)
+    - `tests/e2e-unified/tests/test_mail_settings_caldav_only.py::test_caldav_only_mail_settings_render_gate`
 
 ## Status
 
@@ -111,7 +111,7 @@ Stamped 2026-09-23 at 6605debcb9.
 | 2 | app | `tests/e2e-unified/tests/test_caldav_onboarding_variants.py::test_guard_real_domain_mail_caldav` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_caldav_live_nest.py::test_three_client_caldav_roundtrip` | — |
 | 3 | app | `tests/e2e-unified/tests/test_caldav_onboarding_derived_enablement.py::test_caldav_derived_enablement_by_address_type` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_caldav_onboarding_variants.py::test_caldav_onboarding_variant` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_caldav_onboarding_variants.py::test_caldav_onboarding_variant` | web (linux): passed, linux (linux): failed, windows (windows): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_caldav_autoschedule_mailbox_less.py::test_mailbox_less_attendee_gets_sealed_scheduling_through_real_mda` | linux (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_caldav_autoschedule_cross_nest.py::test_cross_nest_mailbox_less_attendee_gets_sealed_scheduling_through_real_mda` | linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_caldav_autoschedule_live_nest.py::test_live_caldav_autoschedule_fans_imip` | — |
@@ -126,12 +126,12 @@ Stamped 2026-09-23 at 6605debcb9.
 | 7 | nest | `tests/e2e-unified/tests/test_dav_content_at_rest_e2e.py::test_every_dav_record_at_rest_is_a_sealed_envelope_across_many_records` | nest (linux): passed, nest (windows): passed |
 | 7 | nest | `tests/e2e-unified/tests/test_dav_content_at_rest_e2e.py::test_snapshot_create_then_restore_round_trips_a_dav_body` | nest (linux): passed, nest (windows): passed |
 | 8 | app | `tests/e2e-unified/tests/test_caldav_mkcalendar_create.py::test_macos_style_mkcalendar_create_then_event_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_caldav_onboarding_variants.py::test_caldav_onboarding_variant` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 8 | app | `tests/e2e-unified/tests/test_caldav_onboarding_variants.py::test_caldav_onboarding_variant` | web (linux): passed, linux (linux): failed, windows (windows): passed, tui (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_caldav_mkcalendar_create.py::test_macos_style_mkcalendar_create_then_event_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 10 | app | `tests/e2e-unified/tests/test_caldav_discovery_sequence.py::test_apple_style_caldav_discovery_walk` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_caldav_onboarding_variants.py::test_caldav_onboarding_variant` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_caldav_onboarding_variants.py::test_caldav_onboarding_variant` | web (linux): passed, linux (linux): failed, windows (windows): passed, tui (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_caldav_client_seal_to_mua.py::test_a_reply_by_mail_shows_on_the_organizers_event_in_the_calendar_app` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_caldav_client_seal_to_mua.py::test_interested_shows_as_tentative_and_a_calendar_apps_tentative_stays_tentative` | linux (linux): failed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_caldav_client_seal_to_mua.py::test_interested_shows_as_tentative_and_a_calendar_apps_tentative_stays_tentative` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 14 | nest | `tests/e2e-unified/tests/platform/docker/test_caldav_sni_router.py::test_sni_router_splits_nest_and_mda_caldav` | — |
 | 15 | nest | `tests/e2e-unified/tests/platform/docker/test_caldav_sni_router.py::test_caldav_auth_event_carries_real_client_ip` | — |
 | 16 | nest | `tests/e2e-unified/tests/test_caldav_nest_outcomes.py::test_a_password_is_never_accepted_over_an_unencrypted_connection` | nest (linux): passed |
@@ -147,5 +147,5 @@ Stamped 2026-09-23 at 6605debcb9.
 | 25 | nest | `tests/e2e-unified/tests/test_caldav_nest_outcomes.py::test_moving_an_event_moves_it_and_a_failed_move_leaves_it` | nest (linux): passed |
 | 26 | nest | `tests/e2e-unified/tests/test_caldav_nest_outcomes.py::test_events_many_years_ahead_are_accepted` | nest (linux): passed |
 | 27 | nest | `tests/e2e-unified/tests/test_caldav_nest_outcomes.py::test_no_one_else_on_the_nest_can_read_or_change_your_calendar` | nest (linux): passed |
-| 28 | app | (none) | — |
+| 28 | app | `tests/e2e-unified/tests/test_mail_settings_caldav_only.py::test_caldav_only_mail_settings_render_gate` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 <!-- features-render:end -->

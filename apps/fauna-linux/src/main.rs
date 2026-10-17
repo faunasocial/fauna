@@ -22,11 +22,13 @@ mod conversations;
 mod critical_alerts;
 mod debounce;
 mod drafts_autosave;
+mod feature_editor;
 mod feed;
 mod i18n;
 mod instance_remote;
 mod launcher_badge;
 mod logs_view;
+mod loop_wake;
 mod mail_glue;
 mod main_loop_meter;
 mod media_loads;
@@ -44,6 +46,8 @@ mod packaging_identity_test;
 mod push;
 mod qr_widget;
 mod region;
+mod report;
+mod routes;
 mod rows;
 mod screen_lock;
 mod search;
@@ -97,7 +101,7 @@ use std::sync::atomic::Ordering;
 /// both cases are legal everywhere, which is why the case is *tested* rather
 /// than enforced by any tool. `packaging_identity_test.rs` pins every file that
 /// re-types this string, and the case itself.
-const APP_ID: &str = "social.fauna.fauna";
+const APP_ID: &str = fauna_core::platform_ids::LINUX_APP_ID;
 
 fn main() {
     // Handle --version before GTK init (GTK takes over argv).
@@ -149,12 +153,19 @@ fn main() {
     // add-account intent. The probe is display-only — arbitration stays at
     // `become_session_instance`'s acquire.
     let collided = launch_collision_detected();
-    let mut builder = adw::Application::builder().application_id(APP_ID);
+    // HANDLES_OPEN: a `fauna://` route the desktop entry's `%u` passes arrives
+    // on the `open` signal below — forwarded to the primary instance like any
+    // plain launch — instead of being refused as a file the app cannot open
+    // (`apps/linux.md` § System integration → *In-app routes*).
+    let mut flags = gio::ApplicationFlags::HANDLES_OPEN;
     if e2e_mode_enabled() || fauna_client_accounts::requested_bound_account().is_some() || collided
     {
-        builder = builder.flags(gio::ApplicationFlags::NON_UNIQUE);
+        flags |= gio::ApplicationFlags::NON_UNIQUE;
     }
-    let application = builder.build();
+    let application = adw::Application::builder()
+        .application_id(APP_ID)
+        .flags(flags)
+        .build();
 
     // Hold the application open across window teardown→rebuild transitions
     // (sign-out, onboarding↔main, launch→main), where the old window is
@@ -309,6 +320,17 @@ fn main() {
     });
 
     application.connect_activate(build_ui);
+    // A launch carrying `fauna://` routes: offer each to the one door (held
+    // until a signed-in window is up), then do what `activate` does — present
+    // the existing window or build the launch flow.
+    application.connect_open(|app, files, _hint| {
+        for file in files {
+            if let Some(route) = routes::parse(&file.uri()) {
+                routes::offer(route, Box::new(|| {}));
+            }
+        }
+        build_ui(app);
+    });
 
     // Ctrl+Q — force-quit regardless of close-to-tray setting.
     application.set_accels_for_action("app.quit", &["<Control>q"]);
@@ -752,7 +774,7 @@ fn build_ui(application: &adw::Application) {
             // then route per the four documented outcomes (Authenticated /
             // Unregistered / Transient / Unreachable) per
             // docs/goal/behavior/onboarding.md "App-launch routing".
-            launch_silent_challenge_flow(application, node_url, secret_hex);
+            launch_silent_challenge_flow(application, node_url, secret_hex, AgentWiring::ColdStart);
         },
     );
 }
@@ -851,8 +873,10 @@ fn stored_launch_route(credentials: Option<(String, String)>) -> LaunchRoute {
     })
 }
 
-/// How a surface [`present_launch_route`] builds reaches the e2e test agent.
-/// Inert for real users either way (the agent isn't wired).
+/// How a surface the launch routing builds — [`present_launch_route`]'s wizard
+/// rows and every surface the silent-challenge flow lands on — reaches the e2e
+/// test agent. Inert for real users either way (the agent isn't wired).
+#[derive(Clone, Copy)]
 enum AgentWiring {
     /// The process's first surface: start the drain over it.
     ColdStart,
@@ -863,8 +887,8 @@ enum AgentWiring {
 }
 
 /// Land the application on `route`'s surface. Case 1 is the caller's
-/// (`on_authenticated`): a cold start runs the silent-challenge flow, the
-/// account switch its in-session rebuild. Cases 0/2/3/4 are shared — the
+/// (`on_authenticated`): both run the silent-challenge flow, the account switch
+/// after swapping the instance holder. Cases 0/2/3/4 are shared — the
 /// deferred-DNS row enters the silent-challenge flow (which wires its own
 /// surfaces, as the launch-escalation handler already relies on), and the
 /// wizard rows build their wizard and hand it to the agent per `wiring`.
@@ -881,13 +905,13 @@ fn present_launch_route(
             // `LaunchMachine::start()` checks `account_index_refusal()`
             // unconditionally before it ever touches them, so the refusal
             // screen renders regardless of what is passed here.
-            launch_silent_challenge_flow(application, String::new(), String::new());
+            launch_silent_challenge_flow(application, String::new(), String::new(), wiring);
         }
         LaunchRoute::AwaitingDns { secret_hex } => {
             fauna_client_accounts::refuse_if_bound_from_onboarding(
                 "the awaiting-DNS onboarding resume",
             );
-            launch_silent_challenge_flow(application, String::new(), secret_hex);
+            launch_silent_challenge_flow(application, String::new(), secret_hex, wiring);
         }
         LaunchRoute::Authenticated {
             node_url,
@@ -929,14 +953,31 @@ fn present_launch_route(
     }
 }
 
-/// Hand a launch-routed wizard to the e2e agent per `wiring`, then show it.
-fn show_launch_wizard(
-    application: &adw::Application,
-    onboarding: views::onboarding::OnboardingResult,
-    wiring: AgentWiring,
-) {
-    match wiring {
-        AgentWiring::ColdStart => start_test_agent_if_enabled(
+/// A launch-routed surface, as the e2e agent sees it.
+enum AgentSurface<'a> {
+    /// The launch screen: only its error line (no wizard, no client yet).
+    LaunchScreen(&'a gtk::Label),
+    Wizard(&'a views::onboarding::OnboardingResult),
+    Main(&'a LaunchResult),
+}
+
+/// Hand a launch-routed surface to the e2e agent per `wiring`.
+fn hand_to_agent(application: &adw::Application, wiring: AgentWiring, surface: AgentSurface<'_>) {
+    match (wiring, surface) {
+        (AgentWiring::ColdStart, AgentSurface::LaunchScreen(error_label)) => {
+            start_test_agent_if_enabled(
+                application,
+                None,
+                None,
+                Some(error_label.clone()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        (AgentWiring::ColdStart, AgentSurface::Wizard(onboarding)) => start_test_agent_if_enabled(
             application,
             None,
             None,
@@ -947,15 +988,50 @@ fn show_launch_wizard(
             Some(onboarding.machine.clone()),
             None,
         ),
-        AgentWiring::Rebind => {
-            // Forget the torn-down authenticated shell, or the state protocol
-            // keeps reporting it (`retire_active_window`'s ⚠), and point the
-            // label + machine cells at the wizard the user now sees.
+        (AgentWiring::ColdStart, AgentSurface::Main(result)) => start_test_agent_if_enabled(
+            application,
+            Some(result.stack.clone()),
+            Some(Rc::clone(&result.state)),
+            Some(result.error_label.clone()),
+            Some(result.warning_label.clone()),
+            Some(result.info_label.clone()),
+            Some(Rc::clone(&result.client)),
+            None,
+            Some(Rc::clone(&result.open_profile)),
+        ),
+        // Forget the torn-down authenticated shell, or the state protocol
+        // keeps reporting it (`retire_active_window`'s ⚠) — and, on the launch
+        // screen, so the `Online` arm's `agent_shell_already_mounted` reads the
+        // shell the switch just destroyed as gone — then point the cells at the
+        // surface the user now sees.
+        (AgentWiring::Rebind, AgentSurface::LaunchScreen(error_label)) => {
+            retire_active_window();
+            set_active_error_label(error_label.clone());
+        }
+        (AgentWiring::Rebind, AgentSurface::Wizard(onboarding)) => {
             retire_active_window();
             set_active_error_label(onboarding.error_label.clone());
             set_active_onboarding_machine(onboarding.machine.clone());
         }
+        (AgentWiring::Rebind, AgentSurface::Main(result)) => rebind_active_window(
+            result.stack.clone(),
+            Rc::clone(&result.state),
+            result.error_label.clone(),
+            result.warning_label.clone(),
+            result.info_label.clone(),
+            Rc::clone(&result.client),
+            Rc::clone(&result.open_profile),
+        ),
     }
+}
+
+/// Hand a launch-routed wizard to the e2e agent per `wiring`, then show it.
+fn show_launch_wizard(
+    application: &adw::Application,
+    onboarding: views::onboarding::OnboardingResult,
+    wiring: AgentWiring,
+) {
+    hand_to_agent(application, wiring, AgentSurface::Wizard(&onboarding));
     show_window(&onboarding.window);
 }
 
@@ -1009,6 +1085,13 @@ fn register_sign_out_handler(application: &adw::Application) {
             // sign-out that skipped these would carry the outgoing identity's
             // threads and drafts into the next sign-in. One canonical list —
             // never hand-listed here (`actor_scope`).
+            //
+            // Sign-out is a leave door: the outgoing session's rails flush
+            // first, while the managers still hold the user's drafts and the
+            // session that carries the save is still live
+            // (`reserved-folders.md` § The leave-flush promise). Bounded: the
+            // stop below tears the transport down.
+            crate::blocking_flush::flush_leave_door(true);
             crate::conversations::manager().clear_for_identity_change();
             crate::conversations::manager().clear_observers();
             quiesce_for_teardown(&app);
@@ -1158,11 +1241,27 @@ fn register_launch_escalation_handler(application: &adw::Application) {
         automation::link::record_session_teardown();
         let app = app_for_identity.clone();
         glib::timeout_add_local_once(std::time::Duration::from_millis(100), move || {
-            // Read the session's nest + identity BEFORE teardown — the launch
-            // flow needs both, and the client we are about to drop is where
-            // they hang off.
-            let (node_url, secret_hex) = match settings::get_client() {
-                Some(c) => (c.node_url().to_string(), c.secret_hex().to_string()),
+            // The nest + identity the re-run launch signs in with: what a cold
+            // start would read ([`launch_credentials`] — the binding, else
+            // `active`), because the launch machine routes on the SAME read
+            // ([`launch_persistence`]). Taking the outgoing client's secret
+            // instead split the two whenever the account moved under this
+            // session: a sibling seat's succession re-points `active` (and a
+            // binding) to the successor (`account-scoping.md` § Concurrent
+            // instances → *The binding follows the account*, rider (1)), so the
+            // relaunch built its connection keypair from the retired secret and
+            // its bearer source from the successor's slots, and every upgrade
+            // met 403 while the seat still read as signed in to the retired id
+            // (measured 2026-10-11 on the plain first seat of the two-instance
+            // world). Read before teardown; the outgoing client is the fallback
+            // only when the registry resolves nothing.
+            let (node_url, secret_hex) = match launch_credentials()
+                .map(|(url, secret, _device)| (url, secret))
+                .or_else(|| {
+                    settings::get_client()
+                        .map(|c| (c.node_url().to_string(), c.secret_hex().to_string()))
+                }) {
+                Some(pair) => pair,
                 None => {
                     tracing::error!(
                         "[identity] identity-changed verdict with no live client — cannot \
@@ -1185,6 +1284,11 @@ fn register_launch_escalation_handler(application: &adw::Application) {
             // launch flow may land on a DIFFERENT successor identity — so a
             // skipped wipe would carry the outgoing identity's threads and
             // drafts into it.
+            //
+            // Deliberately NO leave flush here, unlike sign-out and the switch:
+            // the nest just refused this identity, so it is not one to keep
+            // writing to (the sync agent is un-provisioned on the way out for
+            // the same reason).
             crate::conversations::manager().clear_for_identity_change();
             crate::conversations::manager().clear_observers();
             quiesce_for_teardown(&app);
@@ -1210,7 +1314,12 @@ fn register_launch_escalation_handler(application: &adw::Application) {
                     // `IdentityChanged` with a live machine behind the re-trust button,
                     // or the terminal `Superseded` state on the identity-import screen
                     // — with one code path shared with a cold start.
-                    launch_silent_challenge_flow(&app, node_url, secret_hex);
+                    launch_silent_challenge_flow(
+                        &app,
+                        node_url,
+                        secret_hex,
+                        AgentWiring::ColdStart,
+                    );
                 },
             );
         });
@@ -1243,6 +1352,8 @@ fn register_factory_reset_handler(application: &adw::Application) {
             // The session's in-memory state still goes: the nest it described is
             // being replaced, so carrying it into the re-claim is the same
             // wrong-actor render as on any other teardown (`actor_scope`).
+            // No leave flush: the nest the drafts would be saved to has just
+            // been wiped, rails and all.
             quiesce_for_teardown(&app);
             crate::actor_scope::reset_actor_scoped_state(
                 fauna_client_account_runtime::StopReason::AccountSwitch,
@@ -1389,6 +1500,10 @@ fn register_switch_account_handler(application: &adw::Application) {
             // skipped this would render the outgoing account's threads,
             // drafts and selection to the incoming one — the same leak the
             // test-agent's actor-switch patch already guards against.
+            //
+            // A switch is a leave door for the outgoing account: flush its
+            // rails before anything above clears them, as sign-out does.
+            crate::blocking_flush::flush_leave_door(true);
             crate::conversations::manager().clear_for_identity_change();
             crate::conversations::manager().clear_observers();
             quiesce_for_teardown(&app);
@@ -1412,115 +1527,62 @@ fn register_switch_account_handler(application: &adw::Application) {
 
                     // 3. Rebuild the now-active account's launch surface through the SAME
                     //    routing a relaunch runs (`classify_launch`), over the target's own
-                    //    stored slots. A connectable account (Case 1) gets the in-session
-                    //    authenticated rebuild below; any other lands where a relaunch
-                    //    would — the append + pending-invite adoption's target has no
-                    //    nest_url yet, so it lands on its wizard at `invite_request`
-                    //    (`onboarding.md` § Multi-account), never on `launch_authenticated`
-                    //    against an empty URL.
+                    //    stored slots, so a switch lands every verdict where a relaunch
+                    //    would (`account-scoping.md` § Concurrent instances). The append +
+                    //    pending-invite adoption's target has no nest_url yet, so it lands
+                    //    on its wizard at `invite_request` (`onboarding.md` § Multi-account),
+                    //    never on `launch_authenticated` against an empty URL. A connectable
+                    //    account (Case 1) runs the cold start's own silent-challenge flow,
+                    //    whose `LaunchPhase` dispatch routes every verdict — a target with
+                    //    its own outstanding factory reset (`nest/common.md` § Client-state
+                    //    recoverability, CR-3) opens its pre-filled claim page, not the
+                    //    main window. ⚠ This Case-1 arm once drove `LaunchMachine::start()`
+                    //    itself and then built the main window whatever phase it reached.
+                    //
+                    //    Every surface is handed to the test agent with
+                    //    `AgentWiring::Rebind`: the first launch's 50 ms drain is still
+                    //    running, so its cells are re-pointed and no second drain starts.
                     // The same plain-`String` hand-off `launch_credentials` makes for the
                     // cold start's read of the same slot.
                     let route =
                         stored_launch_route(Some((node_url, secret_hex.as_str().to_string())));
-                    let rebuilds_async = matches!(route, LaunchRoute::Authenticated { .. });
                     let app_for_auth = app.clone();
-                    let pending_for_auth = pending.clone();
                     present_launch_route(
                         &app,
                         route,
                         AgentWiring::Rebind,
                         move |node_url, secret_hex| {
-                            let app = app_for_auth;
-                            let pending = pending_for_auth;
-                            //    Case 1: construct the LaunchMachine fresh and drive `start()` to Online
-                            //    before FaunaClient consumes it. The registry adapter reads the
-                            //    account we just made active.
-                            //
-                            //    **`start()` runs OFF the GTK main thread** (`run_on_tokio`);
-                            //    the rebuild is its continuation. It used to be a `block_on` on
-                            //    a runtime built and dropped *on this thread* — and this closure
-                            //    is a `glib::timeout_add_local_once`, i.e. the GTK main loop, on
-                            //    which the e2e agent's own 50 ms drain is another timeout source.
-                            //    Same shape, same reason, as the post-wizard launch in
-                            //    `views/onboarding/mod.rs`; the cold-launch path below has always
-                            //    driven `LaunchMachine::start` this way.
-                            //
-                            //    ⚠ **This did NOT fix row 23** — do not
-                            //    re-derive that. Row 23 named a stall here as its leading
-                            //    candidate for "the append never switches the live session".
-                            //    Measured 2026-08-16: the append never reaches this handler at
-                            //    all. `handle_wizard_done`'s append branch fails first, in
-                            //    `registry.add_account`, with `invalid secret: expected 32 bytes
-                            //    (64 hex chars), got 0` — an empty secret out of
-                            //    `client::load_credentials()` — and takes the `Err` arm that
-                            //    dismisses the wizard, in a hot loop. The switcher e2e journeys
-                            //    that DO drive this handler (list+switch+reveal-admin, the
-                            //    conversations-clearing switch, the state-dir scoping switch,
-                            //    the require-confirm gate) are all green with this shape.
-                            let machine = fauna_launch_machine::LaunchMachine::new(
-                                std::sync::Arc::new(fauna_launch_machine::NullObserver),
-                                std::sync::Arc::new(launch_persistence()),
-                            );
-                            let machine_for_start = std::sync::Arc::clone(&machine);
-                            crate::async_helper::run_on_tokio(
-                                async move { machine_for_start.start().await },
-                                move |()| {
-                                    // Swap the process holder to the incoming account
-                                    // BEFORE the rebuild, not at its `AuthSuccess`
-                                    // (which now answers `Reused`). The rebuild builds
-                                    // the Account page synchronously, and that page keys
-                                    // "the account this window serves" on the holder
-                                    // (`fauna_client_accounts::session_account`) — so a
-                                    // holder still naming the outgoing account rendered
-                                    // THAT row as the served one (non-activatable, the
-                                    // active indicator, no remove button) and the
-                                    // incoming account's row as a switch target. A
-                                    // second switch back then clicked a row that runs
-                                    // nothing. The outgoing account's scoped state is
-                                    // already closed (`reset_actor_scoped_state` above),
-                                    // so this is the swap `account-scoping.md`
-                                    // § Concurrent instances prescribes, at the earliest
-                                    // point it is safe. Bound-or-refuse is unchanged: a
-                                    // bound secondary switching off its binding is
-                                    // refused here exactly as `AuthSuccess` refused it.
-                                    if let Err(refusal) =
-                                        crate::account_scope::become_session_instance(&actor_id)
-                                    {
-                                        refusal.exit(&actor_id);
-                                    }
-                                    let result = launch_authenticated(
-                                        &app,
-                                        &node_url,
-                                        &secret_hex,
-                                        machine,
-                                        |_| {},
-                                    );
-
-                                    // 4. Re-point the test-command drain's cells at the new window
-                                    //    (e2e nav after a switch); inert for real users (registry
-                                    //    empty). Then present. We must NOT start a second drain
-                                    //    (start_test_agent_if_enabled) — the first launch's 50ms
-                                    //    poll loop is still running.
-                                    crate::rebind_active_window(
-                                        result.stack.clone(),
-                                        result.state.clone(),
-                                        result.error_label.clone(),
-                                        result.warning_label.clone(),
-                                        result.info_label.clone(),
-                                        std::rc::Rc::clone(&result.client),
-                                        std::rc::Rc::clone(&result.open_profile),
-                                    );
-                                    show_window(&result.window);
-                                    // Rebuild complete — allow the next switch.
-                                    pending.set(false);
-                                },
+                            // Swap the process holder to the incoming account BEFORE
+                            // the rebuild, not at its `AuthSuccess` (which then answers
+                            // `Reused`). The rebuilt Account page keys "the account
+                            // this window serves" on the holder
+                            // (`fauna_client_accounts::session_account`) — so a holder
+                            // still naming the outgoing account rendered THAT row as
+                            // the served one and the incoming account's row as a
+                            // switch target, and a second switch back clicked a row
+                            // that runs nothing. The outgoing account's scoped state is
+                            // already closed (`reset_actor_scoped_state` above), so this
+                            // is the swap `account-scoping.md` § Concurrent instances
+                            // prescribes, at the earliest point it is safe. A bound
+                            // secondary switching off its binding is refused here
+                            // exactly as `AuthSuccess` refuses it.
+                            if let Err(refusal) =
+                                crate::account_scope::become_session_instance(&actor_id)
+                            {
+                                refusal.exit(&actor_id);
+                            }
+                            launch_silent_challenge_flow(
+                                &app_for_auth,
+                                node_url,
+                                secret_hex,
+                                AgentWiring::Rebind,
                             );
                         },
                     );
-                    // Every other surface was built synchronously — allow the next switch.
-                    if !rebuilds_async {
-                        pending.set(false);
-                    }
+                    // The outgoing session is gone and a launch-routed surface is up
+                    // (none of them offers the switcher until it reaches the main
+                    // window) — allow the next switch.
+                    pending.set(false);
                 },
             );
         });
@@ -1540,8 +1602,8 @@ struct LaunchResult {
     warning_label: gtk::Label,
     info_label: gtk::Label,
     client: Rc<client::FaunaClient>,
-    /// See [`app::MainWindowResult::open_profile`] — carried out to the four
-    /// sites that hand a freshly built main window to the test-command drain.
+    /// See [`app::MainWindowResult::open_profile`] — carried out to the sites
+    /// that hand a freshly built main window to the test-command drain.
     open_profile: OpenProfileFn,
 }
 
@@ -1589,6 +1651,7 @@ fn launch_silent_challenge_flow(
     application: &adw::Application,
     node_url: String,
     secret_hex: String,
+    wiring: AgentWiring,
 ) {
     use std::cell::RefCell;
 
@@ -1622,6 +1685,7 @@ fn launch_silent_challenge_flow(
                     secret_hex.clone(),
                     view_holder.clone(),
                     machine_holder.clone(),
+                    wiring,
                 );
             }
         },
@@ -1650,18 +1714,7 @@ fn launch_silent_challenge_flow(
                 }
                 let onboarding =
                     views::onboarding::build_onboarding_window_with_seed(&app, &secret_hex);
-                start_test_agent_if_enabled(
-                    &app,
-                    None,
-                    None,
-                    Some(onboarding.error_label.clone()),
-                    None,
-                    None,
-                    None,
-                    Some(onboarding.machine.clone()),
-                    None,
-                );
-                show_window(&onboarding.window);
+                show_launch_wizard(&app, onboarding, wiring);
             }
         },
         // Recover: close launch, seed identity for recovery, open the wizard on
@@ -1688,18 +1741,28 @@ fn launch_silent_challenge_flow(
                     .machine
                     .seed_identity_for_recovery(secret_hex.clone());
                 onboarding.machine.set_recovery_boxes(boxes);
-                start_test_agent_if_enabled(
-                    &app,
-                    None,
-                    None,
-                    Some(onboarding.error_label.clone()),
-                    None,
-                    None,
-                    None,
-                    Some(onboarding.machine.clone()),
-                    None,
-                );
-                show_window(&onboarding.window);
+                show_launch_wizard(&app, onboarding, wiring);
+            }
+        },
+        // Retire a server (`launch-retire-button`): the `nest_retire` page in a
+        // window over this one (`nest-retirement.md` § Layout & flow). The saved
+        // nest's host is the attribution candidate; no session exists yet, so no
+        // live local-domain read.
+        {
+            let node_url = node_url.clone();
+            let view_holder = view_holder.clone();
+            move || {
+                let parent = view_holder.borrow().as_ref().map(|v| v.window.clone());
+                if let Some(parent) = parent {
+                    views::onboarding::nest_retire::open(
+                        &parent,
+                        views::onboarding::nest_retire::RetireOpen {
+                            entry: views::onboarding::nest_retire::RetireEntry::Launch,
+                            nest_url: Some(node_url.clone()).filter(|u| !u.is_empty()),
+                            local_domains: None,
+                        },
+                    );
+                }
             }
         },
         // Trust this nest (`nest-identity-changed-trust-button`): forget the TOFU
@@ -1741,6 +1804,7 @@ fn launch_silent_challenge_flow(
                             view_holder,
                             snapshot,
                             machine,
+                            wiring,
                         );
                     },
                 );
@@ -1779,27 +1843,67 @@ fn launch_silent_challenge_flow(
                 start_over_confirm_unless(&view_holder, crate::account_scope::start_over_blocked);
             }
         },
+        // The locked surface (`ui/sessions.md` leg 2): the stolen-identity
+        // ceremony with no session, and the notice's re-read on Back.
+        views::launch::LockedHooks {
+            on_stolen: Box::new({
+                let node_url = node_url.clone();
+                let secret_hex = secret_hex.clone();
+                let view_holder = view_holder.clone();
+                move |phrase: String| {
+                    let node_url = node_url.clone();
+                    let secret_hex = secret_hex.clone();
+                    let view_holder = view_holder.clone();
+                    crate::async_helper::run_on_tokio(
+                        // No engine: a locked app has no session, so the group
+                        // sweep is the successor's to finish from Settings.
+                        async move {
+                            client::do_succeed_identity(&secret_hex, &phrase, &node_url, None).await
+                        },
+                        move |outcome| {
+                            let settle = view_holder
+                                .borrow()
+                                .as_ref()
+                                .map(|v| v.settle_stolen.clone());
+                            settings::fold_locked_stolen(&outcome, |message| {
+                                if let Some(settle) = &settle {
+                                    settle(message);
+                                }
+                            });
+                        },
+                    );
+                }
+            }),
+            on_back: Box::new({
+                let app = application.clone();
+                let node_url = node_url.clone();
+                let secret_hex = secret_hex.clone();
+                let view_holder = view_holder.clone();
+                let machine_holder = machine_holder.clone();
+                move || {
+                    follow_lock_snapshot(
+                        &app,
+                        &node_url,
+                        &secret_hex,
+                        &view_holder,
+                        &machine_holder,
+                        wiring,
+                    );
+                }
+            }),
+        },
     );
 
-    if let Some(launch_error_label) = Some(view.error_label.clone()) {
-        // Mirror the launch screen's error label into the test agent so
-        // E2E can read its content, same convention as the onboarding
-        // wizard's error label. Test agent for the launch screen has
-        // no machine handle (the wizard isn't started yet) and no
-        // FaunaClient (silent challenge doesn't construct one until
-        // success).
-        start_test_agent_if_enabled(
-            application,
-            None,
-            None,
-            Some(launch_error_label),
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-    }
+    // Mirror the launch screen's error label into the test agent so E2E can
+    // read its content, same convention as the onboarding wizard's error
+    // label. The launch screen has no machine handle (the wizard isn't started
+    // yet) and no FaunaClient (silent challenge doesn't construct one until
+    // success).
+    hand_to_agent(
+        application,
+        wiring,
+        AgentSurface::LaunchScreen(&view.error_label),
+    );
 
     show_window(&view.window);
     *view_holder.borrow_mut() = Some(view);
@@ -1811,6 +1915,7 @@ fn launch_silent_challenge_flow(
         secret_hex,
         view_holder,
         machine_holder,
+        wiring,
     );
 }
 
@@ -2000,11 +2105,19 @@ fn run_silent_challenge_async(
     machine_holder: Rc<
         std::cell::RefCell<Option<std::sync::Arc<fauna_launch_machine::LaunchMachine>>>,
     >,
+    wiring: AgentWiring,
 ) {
     use std::sync::Arc;
 
+    // The machine's own changes wake the locked notice (`follow_lock_snapshot`):
+    // the one refresh at the unlock time is the machine's, scheduled on the
+    // runtime `start()` runs on — which is why that runtime is
+    // [`launch_runtime`], alive for the process, and never `run_on_tokio`'s
+    // per-call one (dropped the moment `start()` returns, taking the scheduled
+    // refresh with it).
+    let (wake_tx, wake_rx) = crate::async_helper::snapshot_wake_channel();
     let machine = fauna_launch_machine::LaunchMachine::new(
-        Arc::new(fauna_launch_machine::NullObserver),
+        Arc::new(LaunchWakeRelay(wake_tx)),
         // Route the launch machine through the multi-account registry: it reads
         // the ACTIVE account's slots; switching accounts is `set_active` + a
         // teardown/rebuild of this machine (Stage 1 switcher work).
@@ -2016,8 +2129,38 @@ fn run_silent_challenge_async(
     // refresh during the session via current_bearer / notify_401).
     let machine_for_callback = Arc::clone(&machine);
 
-    crate::async_helper::run_on_tokio(
-        async move {
+    {
+        // Ends once this launch window is gone (signed in, the wizard, a
+        // retry's fresh machine) — the notice it follows no longer exists.
+        let app = app.clone();
+        let node_url = node_url.clone();
+        let secret_hex = secret_hex.clone();
+        let view_holder = view_holder.clone();
+        let machine_holder = machine_holder.clone();
+        let machine = Arc::downgrade(&machine);
+        crate::async_helper::spawn_wake_loop(wake_rx, move || {
+            let current = machine_holder.borrow().as_ref().map(Arc::downgrade);
+            let ours = current.as_ref().is_some_and(|m| m.ptr_eq(&machine));
+            if view_holder.borrow().is_none() || (current.is_some() && !ours) {
+                return glib::ControlFlow::Break;
+            }
+            if ours {
+                follow_lock_snapshot(
+                    &app,
+                    &node_url,
+                    &secret_hex,
+                    &view_holder,
+                    &machine_holder,
+                    wiring,
+                );
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
+    crate::async_helper::spawn_with_snapshot(
+        &launch_runtime(),
+        move || async move {
             machine.start().await;
             machine.snapshot()
         },
@@ -2030,8 +2173,83 @@ fn run_silent_challenge_async(
                 view_holder,
                 snapshot,
                 machine_for_callback,
+                wiring,
             );
         },
+    );
+}
+
+/// The process-lifetime runtime the launch machine's `start()` runs on, so a
+/// task the machine schedules for later — the one refresh at a lock's unlock
+/// time (`devices.md` § The locked state) — outlives the call that scheduled it.
+fn launch_runtime() -> tokio::runtime::Handle {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RUNTIME
+        .get_or_init(|| {
+            // gtk-runtime-ok: a process-lifetime static — never `block_on`'d
+            // (work reaches it only through `spawn`) and never dropped.
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .thread_name("fauna-launch")
+                .enable_all()
+                .build()
+                .expect("launch runtime")
+        })
+        .handle()
+        .clone()
+}
+
+/// The launch machine's observer: one coalesced wake per change, consumed on
+/// the GTK thread (`async_helper::spawn_wake_loop`). Twin of tui's
+/// `SnapshotRelay`.
+struct LaunchWakeRelay(async_channel::Sender<()>);
+
+impl fauna_launch_machine::LaunchObserver for LaunchWakeRelay {
+    fn on_changed(&self) {
+        let _ = self.0.try_send(());
+    }
+}
+
+/// The locked notice follows the machine back out (`devices.md` § The locked
+/// state — "the refresh is the machine's own"): no app-side timer, and nothing
+/// here decides when a lock ends. Acts only while the NOTICE shows — the
+/// `identity_stolen_entry` step is left alone because the user is mid-ceremony
+/// there, and its Back re-reads the machine through this same function. Twin of
+/// tui's `locked::follow_snapshot`, over the shared
+/// `LaunchSnapshot::lock_notice_holds`.
+fn follow_lock_snapshot(
+    app: &adw::Application,
+    node_url: &str,
+    secret_hex: &str,
+    view_holder: &Rc<std::cell::RefCell<Option<views::launch::LaunchView>>>,
+    machine_holder: &Rc<
+        std::cell::RefCell<Option<std::sync::Arc<fauna_launch_machine::LaunchMachine>>>,
+    >,
+    wiring: AgentWiring,
+) {
+    let shown = match view_holder
+        .borrow()
+        .as_ref()
+        .map(|v| v.phase.borrow().clone())
+    {
+        Some(views::launch::LaunchPhase::AccountLocked { locked_until_secs }) => locked_until_secs,
+        _ => return,
+    };
+    let Some(machine) = machine_holder.borrow().clone() else {
+        return;
+    };
+    let snapshot = machine.snapshot();
+    if snapshot.lock_notice_holds(shown) {
+        return;
+    }
+    handle_launch_phase(
+        app.clone(),
+        node_url.to_string(),
+        secret_hex.to_string(),
+        view_holder.clone(),
+        snapshot,
+        machine,
+        wiring,
     );
 }
 
@@ -2069,6 +2287,7 @@ fn handle_launch_phase(
     view_holder: Rc<std::cell::RefCell<Option<views::launch::LaunchView>>>,
     snapshot: fauna_launch_machine::LaunchSnapshot,
     machine: std::sync::Arc<fauna_launch_machine::LaunchMachine>,
+    wiring: AgentWiring,
 ) {
     use fauna_launch_machine::{LaunchPersistence, LaunchPhase, LaunchWizardEntry};
 
@@ -2087,25 +2306,31 @@ fn handle_launch_phase(
                 // fire the user-X-clicks handler that calls app.quit().
                 v.window.destroy();
             }
+            // A test agent's session patch already built the authenticated shell
+            // while this challenge was in flight: that patch is the session the
+            // driver is now steering, so a second shell here would split the app
+            // in two (`agent_shell_already_mounted`'s ⚠). E2E only — false for a
+            // real user.
+            if agent_shell_already_mounted() {
+                tracing::info!(
+                    "[launch] Online: the test agent's session patch already mounted the \
+                     authenticated shell — keeping it, building no second one"
+                );
+                return;
+            }
             let result = launch_authenticated(&app, &node_url, &secret_hex, machine, |_| {});
-            start_test_agent_if_enabled(
-                &app,
-                Some(result.stack),
-                Some(result.state),
-                Some(result.error_label),
-                Some(result.warning_label),
-                Some(result.info_label),
-                Some(result.client),
-                None,
-                Some(result.open_profile),
-            );
-            // The only site an auto-started launch reaches: routing landed
-            // Online, so there is a session to be resident *for*. Every other
-            // `show_window` stays unconditional — the onboarding routes below
-            // must show even under `--autostart` (a signed-out auto-start has
-            // to be loud, not a silently dead agent), and the account-switch /
-            // relaunch sites happen in a session the user is already driving.
-            show_main_window_unless_autostart_hidden(&result.window);
+            hand_to_agent(&app, wiring, AgentSurface::Main(&result));
+            match wiring {
+                // The only site an auto-started launch reaches: routing landed
+                // Online, so there is a session to be resident *for*. Every
+                // other `show_window` stays unconditional — the onboarding
+                // routes below must show even under `--autostart` (a signed-out
+                // auto-start has to be loud, not a silently dead agent).
+                AgentWiring::ColdStart => show_main_window_unless_autostart_hidden(&result.window),
+                // An account switch happens in a session the user is already
+                // driving.
+                AgentWiring::Rebind => show_window(&result.window),
+            }
         }
         LaunchPhase::WizardAt {
             entry: LaunchWizardEntry::AwaitingManualDns,
@@ -2146,18 +2371,7 @@ fn handle_launch_phase(
             };
             let onboarding =
                 views::onboarding::build_onboarding_window_awaiting_dns(&app, &secret_hex, rec);
-            start_test_agent_if_enabled(
-                &app,
-                None,
-                None,
-                Some(onboarding.error_label.clone()),
-                None,
-                None,
-                None,
-                Some(onboarding.machine.clone()),
-                None,
-            );
-            show_window(&onboarding.window);
+            show_launch_wizard(&app, onboarding, wiring);
         }
         LaunchPhase::WizardAt {
             entry: LaunchWizardEntry::InviteRequest,
@@ -2177,18 +2391,7 @@ fn handle_launch_phase(
             onboarding
                 .machine
                 .navigate_to_invite_request_for_known_nest(node_url, cached_handle);
-            start_test_agent_if_enabled(
-                &app,
-                None,
-                None,
-                Some(onboarding.error_label.clone()),
-                None,
-                None,
-                None,
-                Some(onboarding.machine.clone()),
-                None,
-            );
-            show_window(&onboarding.window);
+            show_launch_wizard(&app, onboarding, wiring);
         }
         LaunchPhase::WizardAt {
             entry: LaunchWizardEntry::ClaimCode,
@@ -2211,18 +2414,7 @@ fn handle_launch_phase(
             onboarding
                 .machine
                 .navigate_to_claim_code_for_known_nest(node_url, cached_handle);
-            start_test_agent_if_enabled(
-                &app,
-                None,
-                None,
-                Some(onboarding.error_label.clone()),
-                None,
-                None,
-                None,
-                Some(onboarding.machine.clone()),
-                None,
-            );
-            show_window(&onboarding.window);
+            show_launch_wizard(&app, onboarding, wiring);
         }
         LaunchPhase::WizardAt {
             entry: LaunchWizardEntry::PendingFactoryReset,
@@ -2250,18 +2442,7 @@ fn handle_launch_phase(
                         rec.claim_code,
                     );
             }
-            start_test_agent_if_enabled(
-                &app,
-                None,
-                None,
-                Some(onboarding.error_label.clone()),
-                None,
-                None,
-                None,
-                Some(onboarding.machine.clone()),
-                None,
-            );
-            show_window(&onboarding.window);
+            show_launch_wizard(&app, onboarding, wiring);
         }
         // The saved account index is present and this build cannot use it
         // (`version-compatibility.md` § 5 item 9). Checked BEFORE every other
@@ -2303,6 +2484,19 @@ fn handle_launch_phase(
         // has verified it against the registration chain; presenting it as fact
         // would make this client trust the nest as an authorizer. It goes to the
         // log, where a fleet admin needs it, and not to the screen.
+        // The account is locked (`devices.md` § The locked state): the machine
+        // parks on `Offline { transient: false }` with the unlock time on the
+        // `locked_until_secs` side channel and runs the one refresh at that time
+        // itself. Checked BEFORE the generic `Offline` arms, which would paint a
+        // dead-end NeedsUpdate over it. The notice follows the machine out
+        // (`follow_lock_snapshot`). Twin of tui's `LaunchSurface::AccountLocked`.
+        LaunchPhase::Offline { .. } if snapshot.locked_until_secs.is_some() => {
+            let locked_until_secs = snapshot.locked_until_secs.expect("guarded by is_some");
+            tracing::warn!("[launch] this account is locked until {locked_until_secs}");
+            if let Some(v) = view_holder.borrow().as_ref() {
+                (v.set_phase)(views::launch::LaunchPhase::AccountLocked { locked_until_secs });
+            }
+        }
         LaunchPhase::Offline { .. } if snapshot.superseded_successor.is_some() => {
             let claimed = snapshot.superseded_successor.clone().unwrap_or_default();
             tracing::error!(
@@ -2366,18 +2560,7 @@ fn handle_launch_phase(
                     },
                 );
             }
-            start_test_agent_if_enabled(
-                &app,
-                None,
-                None,
-                Some(onboarding.error_label.clone()),
-                None,
-                None,
-                None,
-                Some(onboarding.machine.clone()),
-                None,
-            );
-            show_window(&onboarding.window);
+            show_launch_wizard(&app, onboarding, wiring);
         }
         // A nest this app signed in to before now refuses the identity
         // (`onboarding.md` § App-launch routing — the previously-signed-in
@@ -2436,6 +2619,28 @@ fn handle_launch_phase(
                         }
                     },
                 );
+            }
+        }
+        // Fork evidence (`box-recovery.md` § Client acceptance): the hard
+        // warning naming both heads, no re-trust. `identity_fork` is only a
+        // bool, so the heads come from the phase; a fork always carries a seen
+        // head (only the Withdrawn arm leaves it `None`), so the empty fallback
+        // is unreachable in practice and still never re-trustable.
+        LaunchPhase::IdentityChanged {
+            pinned_hex,
+            seen_hex,
+        } if snapshot.identity_fork => {
+            let seen_hex = seen_hex.unwrap_or_default();
+            tracing::error!(
+                "[launch-machine] nest identity FORK: accepted head {pinned_hex}, presented head {seen_hex}"
+            );
+            if let Some(v) = view_holder.borrow().as_ref() {
+                (v.set_phase)(views::launch::LaunchPhase::IdentityForked {
+                    warning: crate::i18n::strings::onboarding::launch::identity_fork_warning(
+                        &pinned_hex,
+                        &seen_hex,
+                    ),
+                });
             }
         }
         LaunchPhase::IdentityChanged { .. } => {
@@ -2509,6 +2714,7 @@ fn handle_launch_phase(
 /// ⚠ The post-wizard transition once built its own client, window and pump, and
 /// so skipped the silent sign-in — an account signed in through the wizard
 /// refused every send with `no_handle` until the app was relaunched.
+#[track_caller]
 fn launch_authenticated(
     application: &adw::Application,
     node_url: &str,
@@ -2516,6 +2722,12 @@ fn launch_authenticated(
     machine: std::sync::Arc<fauna_launch_machine::LaunchMachine>,
     first_setup: impl FnOnce(&Rc<client::FaunaClient>),
 ) -> LaunchResult {
+    // Which door built this shell: a session that ends up with two is a split
+    // app (`agent_shell_already_mounted`'s ⚠), and this line names both builders.
+    tracing::info!(
+        "[launch] building the authenticated shell (from {})",
+        std::panic::Location::caller()
+    );
     // The universal post-auth hook is the one place every authenticated launch
     // funnels through (first login, returning-user boot, account switch), so
     // registering here means the *first* successful login wires every later
@@ -2540,11 +2752,12 @@ fn launch_authenticated(
     ));
     settings::set_client(&fauna_client);
     fauna_client.authenticate();
-    // Refresh the server-data cache (handle/domain/tier) from the silent
-    // challenge in the background. Best-effort: failures log but don't surface
-    // to the UI — cached values stay visible until the refresh completes (or
-    // the user re-onboards).
-    fauna_client.silent_sign_in();
+    // Keep the server-data cache (handle/domain/tier) current from the session
+    // client's own mint — the launch machine's silent challenge already carried
+    // all three, so the sign-in pays no second challenge to learn them
+    // (`transport-connection.md` § The dial budget). Cached values stay visible
+    // until it lands.
+    fauna_client.follow_self_identity();
 
     // The launch's own glue that needs the authenticated client but must land
     // before the window exists (the wizard's first-setup provisioning).
@@ -2591,18 +2804,16 @@ fn launch_authenticated(
         // strong refs to the FaunaClient. The flag is one-shot to preserve
         // the user's saved CLOSE_TO_TRAY preference for normal closes.
         if tray::SIGNING_OUT.swap(false, Ordering::SeqCst) {
-            // Bounded: sign-out tears the client runtime down right after
-            // this handler; a detached flush would race it.
-            crate::feed::host::flush_cues_on_close(true);
-            crate::conversations::drafts::flush_now_blocking(true);
-            crate::feed::drafts::flush_now_blocking(true);
-            crate::views::events::drafts::flush_now_blocking(true);
+            // No flush here: the teardown that set the flag flushed before
+            // its first clear (`blocking_flush::flush_leave_door`). By now
+            // the managers are emptied and the session is gone, so a flush
+            // here could only upload an emptied draft.
             return glib::Propagation::Proceed;
         }
         if tray::should_hide_to_tray() {
             // Fire-and-forget: hiding to the tray keeps the process (and the
             // client runtime) alive, so the flush completes on its own.
-            crate::feed::host::flush_cues_on_close(false);
+            crate::blocking_flush::flush_leave_door(false);
             window.set_visible(false);
             glib::Propagation::Stop
         } else {
@@ -2617,10 +2828,7 @@ fn launch_authenticated(
             //
             // Bounded: `app.quit()` returns to a main loop that exits
             // immediately, so a detached flush would be killed mid-put.
-            crate::feed::host::flush_cues_on_close(true);
-            crate::conversations::drafts::flush_now_blocking(true);
-            crate::feed::drafts::flush_now_blocking(true);
-            crate::views::events::drafts::flush_now_blocking(true);
+            crate::blocking_flush::flush_leave_door(true);
             if let Some(app) = window.application() {
                 app.quit();
             }
@@ -2642,6 +2850,9 @@ fn launch_authenticated(
     // Sign-out flips this flag; the pump then breaks and drops its FaunaClient ref.
     let pump_shutdown = Rc::new(std::cell::Cell::new(false));
     settings::register_pump_shutdown(pump_shutdown.clone());
+    // The `fauna://` door's signed-in window: a route held across the launch
+    // flow applies now (`routes.rs`).
+    routes::signed_in(&result.window, pump_shutdown.clone());
 
     glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
         if pump_shutdown.get() {
@@ -2912,6 +3123,26 @@ fn retire_active_window() {
     });
 }
 
+/// Whether the test agent's cells already hold an authenticated shell — one a
+/// `set_state({session})` patch built (`handle_test_command`'s build branch)
+/// while the credentialed launch's silent challenge was still in flight. Always
+/// `false` for real users (the agent isn't wired, so no cells are registered).
+///
+/// ⚠ The credentialed launch screen starts the agent with no window, so a
+/// session patch that lands before the challenge settles builds the shell
+/// itself; when the challenge then reaches `Online`, building a SECOND shell
+/// for the same session splits the app in two: element reads target the
+/// active window, while the nav patch and the per-page data land on the other
+/// one. Measured as a relaunched admin's `admin-dns` page listing no domain
+/// (or no admin dashboard at all) although the DNS matrix loaded.
+fn agent_shell_already_mounted() -> bool {
+    ACTIVE_WINDOW_CELLS.with(|c| {
+        c.borrow()
+            .as_ref()
+            .is_some_and(|cells| cells.stack.borrow().is_some())
+    })
+}
+
 /// Release builds without `e2e-agent` compile no automation surface at all
 /// (testing.md convention 15) — every call site below stays unchanged, this
 /// is simply inert.
@@ -2964,38 +3195,54 @@ fn start_test_agent_if_enabled(
 
     // Mutable refs wrapped in Rc<RefCell<>> so the command handler can
     // swap them when transitioning from onboarding → main window.
-    let current_stack: Rc<RefCell<Option<gtk::Stack>>> = Rc::new(RefCell::new(stack));
-    let current_app_state: Rc<RefCell<Option<Rc<RefCell<app::AppState>>>>> =
-        Rc::new(RefCell::new(app_state));
-    let current_error_label: Rc<RefCell<Option<gtk::Label>>> = Rc::new(RefCell::new(error_label));
-    let current_warning_label: Rc<RefCell<Option<gtk::Label>>> =
-        Rc::new(RefCell::new(warning_label));
-    let current_info_label: Rc<RefCell<Option<gtk::Label>>> = Rc::new(RefCell::new(info_label));
-    let current_client: Rc<RefCell<Option<Rc<client::FaunaClient>>>> =
-        Rc::new(RefCell::new(fauna_client));
-    let current_onboarding_machine: Rc<
-        RefCell<Option<std::sync::Arc<fauna_onboarding_machine::OnboardingMachine>>>,
-    > = Rc::new(RefCell::new(onboarding_machine));
+    //
+    // ONE set of cells for the process: a later stage re-points the cells an
+    // earlier stage registered instead of minting its own. Each stage still
+    // gets its own drain and state link (below), but an earlier drain can hold
+    // a command it received before this stage's link was installed — and that
+    // command must act on the window that exists NOW. With per-stage cells it
+    // did not: a credentialed relaunch's launch-screen drain still read "no
+    // window" after `Online` had built the shell, so a session patch queued
+    // there built a SECOND shell, splitting the app in two
+    // (`agent_shell_already_mounted`'s ⚠).
+    let cells = ACTIVE_WINDOW_CELLS
+        .with(|c| c.borrow().clone())
+        .unwrap_or_else(|| ActiveWindowCells {
+            stack: Rc::new(RefCell::new(None)),
+            app_state: Rc::new(RefCell::new(None)),
+            error_label: Rc::new(RefCell::new(None)),
+            warning_label: Rc::new(RefCell::new(None)),
+            info_label: Rc::new(RefCell::new(None)),
+            client: Rc::new(RefCell::new(None)),
+            onboarding_machine: Rc::new(RefCell::new(None)),
+            open_profile: Rc::new(RefCell::new(None)),
+        });
+    *cells.stack.borrow_mut() = stack;
+    *cells.app_state.borrow_mut() = app_state;
+    *cells.error_label.borrow_mut() = error_label;
+    *cells.warning_label.borrow_mut() = warning_label;
+    *cells.info_label.borrow_mut() = info_label;
+    *cells.client.borrow_mut() = fauna_client;
+    *cells.onboarding_machine.borrow_mut() = onboarding_machine;
     // The active main window's profile-page opener (`app.rs`'s `open_profile`).
     // Travels with `current_stack`/`current_client` through all four
     // window-hand-over sites so a `{"view":"profile","actor_id":…}` nav can
     // rebuild the page for its target instead of silently showing SELF.
-    let current_open_profile: OpenProfileCell = Rc::new(RefCell::new(open_profile));
+    *cells.open_profile.borrow_mut() = open_profile;
+    let current_stack = cells.stack.clone();
+    let current_app_state = cells.app_state.clone();
+    let current_error_label = cells.error_label.clone();
+    let current_warning_label = cells.warning_label.clone();
+    let current_info_label = cells.info_label.clone();
+    let current_client = cells.client.clone();
+    let current_onboarding_machine = cells.onboarding_machine.clone();
+    let current_open_profile = cells.open_profile.clone();
 
-    // Register clones of the same cells so the real-onboarding transition
+    // Register the cells so the real-onboarding transition
     // (`launch_main_app_after_signin`, built outside this drain) can re-point
     // them via `rebind_active_window` — keeping state-protocol nav working
     // after real onboarding, not just the set_state-driven transition below.
-    register_active_window_cells(ActiveWindowCells {
-        stack: current_stack.clone(),
-        app_state: current_app_state.clone(),
-        error_label: current_error_label.clone(),
-        warning_label: current_warning_label.clone(),
-        info_label: current_info_label.clone(),
-        client: current_client.clone(),
-        onboarding_machine: current_onboarding_machine.clone(),
-        open_profile: current_open_profile.clone(),
-    });
+    register_active_window_cells(cells);
 
     let shared = Arc::new(Mutex::new(test_agent::SharedState::default()));
 
@@ -3307,7 +3554,19 @@ fn handle_test_command(
             // OnceLock-backed manager carries state across pytest's per-test
             // `driver.reset()` cycle and tests see threads from earlier
             // tests, breaking thread-count and key-merge assertions.
+            //
+            // A logout is the sign-out door: flush the outgoing session's rails
+            // before the clear empties them (`blocking_flush::flush_leave_door`).
+            crate::blocking_flush::flush_leave_door(true);
             crate::conversations::manager().clear_for_test();
+            // The dial budget is per process and survives this in-place reset, so a
+            // journey would spend the NEXT test's burst; a reset app is a new device
+            // (`transport-connection.md` § The dial budget). Gated like the rest of
+            // this arm: the harness builds the app in debug WITHOUT `e2e-agent`, so a
+            // feature-only gate compiled the clear out of every e2e run and a
+            // module's sign-ins spent the burst, pacing every later dial ~10 s.
+            #[cfg(any(debug_assertions, feature = "e2e-agent"))]
+            fauna_ws_substrate::dial_budget::clear_for_test();
             // A barrier probe token is scoped to ONE test — same lifetime and
             // same clear point as tui's `App::barrier_probe`.
             automation::link::clear_barrier_probe();
@@ -3370,6 +3629,49 @@ fn handle_test_command(
                         &id,
                     );
                 },
+            );
+            return;
+        }
+        // The `fauna://` route's e2e seam (`apps/linux.md` § System integration
+        // → *In-app routes*): the URI takes the same door the `open` leg takes,
+        // so a journey needs no relaunch inside PAR's 90-second window. The ack
+        // waits for the route's page work — the consent card is painted when
+        // the driver hears it; a held route (signed out) acks at once. An
+        // unparseable URI is a refusal: the `open` leg drops one silently, but
+        // a driver that sent one must hear about it.
+        "open_route" => {
+            let Some(route) = cmd
+                .payload
+                .get("uri")
+                .and_then(|v| v.as_str())
+                .and_then(routes::parse)
+            else {
+                report_refused_agent_command(shared, "open_route", "no parseable fauna:// uri");
+                ack_applied_command(
+                    shared,
+                    current_stack,
+                    current_app_state,
+                    current_error_label,
+                    &cmd.id,
+                );
+                return;
+            };
+            let shared = std::sync::Arc::clone(shared);
+            let current_stack = current_stack.clone();
+            let current_app_state = current_app_state.clone();
+            let current_error_label = current_error_label.clone();
+            let id = cmd.id.clone();
+            routes::offer(
+                route,
+                Box::new(move || {
+                    ack_applied_command(
+                        &shared,
+                        &current_stack,
+                        &current_app_state,
+                        &current_error_label,
+                        &id,
+                    );
+                }),
             );
             return;
         }
@@ -3452,7 +3754,9 @@ fn handle_test_command(
                     // outgoing actor's threads/posts into the incoming one.
                     // `clear_for_test` is e2e-only (absent from a release
                     // build), so it stays at this site; everything a production
-                    // actor change drops lives in `actor_scope`.
+                    // actor change drops lives in `actor_scope`. The outgoing
+                    // actor's rails flush first, as on the production switch.
+                    crate::blocking_flush::flush_leave_door(true);
                     crate::conversations::manager().clear_for_test();
                     crate::conversations::manager().clear_observers();
                     settings::trigger_pump_shutdown();
@@ -3534,10 +3838,15 @@ fn handle_test_command(
                     // WS handshake (`security.md` § Cross-connection binding) →
                     // `403 Forbidden`, retried forever, so every WS-RPC call HANGS
                     // and the UI reads "0 posts, error-message=''". A fresh
-                    // account is never `require_confirm_to_activate`, so plain
-                    // `set_active` is right here; the Stage-2 re-auth gate has no
-                    // meaning for a test-injected identity. Test-agent only, like
-                    // the whole handler.
+                    // account is never `require_confirm_to_activate`, but a RE-login
+                    // over a pinned client-local store (`preserve_state_across_relaunch`)
+                    // meets the account the first launch already enrolled, which can be
+                    // flagged — and plain `set_active` then refuses it, leaving the
+                    // rebuilt session on the wrong pointer. The Stage-2 re-auth gate
+                    // has no meaning for a test-injected identity (there is no user to
+                    // prompt), so this uses `set_active_confirmed`. Test-agent only,
+                    // like the whole handler, so the gate's audit surface is unchanged
+                    // for a real user.
                     //
                     // ⚠ Never gate this write on `actor_switch`. An actor switch
                     // reaches this line only in its RE-DISPATCH, after the shell
@@ -3551,9 +3860,9 @@ fn handle_test_command(
                         let registry = account_registry();
                         match registry.add_account(hex, Some(url), Some(device_id)) {
                             Ok(actor_id) => {
-                                if let Err(e) = registry.set_active(&actor_id) {
+                                if let Err(e) = registry.set_active_confirmed(&actor_id) {
                                     tracing::error!(
-                                        "[TestAgent] set_active({actor_id}) failed on the \
+                                        "[TestAgent] set_active_confirmed({actor_id}) failed on the \
                                          session patch: {e:#} — the rebuilt session will 403 \
                                          forever"
                                     );
@@ -3718,6 +4027,9 @@ fn handle_test_command(
                         show_window(&result.window);
                     }
                 } else if session.get("authenticated").and_then(|v| v.as_bool()) == Some(true) {
+                    tracing::info!(
+                        "[TestAgent] session patch: same-actor re-establish over the mounted shell"
+                    );
                     // Same-actor re-establish: the shell is already up (an
                     // actor SWITCH tears it down above, landing in the build
                     // branch instead) — but a re-establish is still meant to
@@ -3744,8 +4056,10 @@ fn handle_test_command(
                     if let Some(c) = current_client.borrow().as_ref() {
                         c.run_deployment_seed_custody_leg();
                         c.refresh_mail_epoch_schedule();
+                        c.publish_subscriber_encaps_key();
                         c.run_critical_alert_sweep_once();
                         c.load_muted_keywords();
+                        crate::report::load_hidden_content(c);
                     }
                 }
             }
@@ -4030,6 +4344,10 @@ fn handle_test_command(
                                 && let Some(ref client) = *current_client.borrow()
                             {
                                 client.fetch_features();
+                                // The node and MLS legs: one read per visit
+                                // (`status.md` § State & data shape).
+                                client.fetch_node_leg();
+                                client.fetch_key_package_count();
                             }
                         }
                     }
@@ -4059,6 +4377,8 @@ fn handle_test_command(
                         }
                         // The real sidebar's own door (`app.rs`), not a copy.
                         "contacts" => client.refresh_contacts_page(),
+                        // Per view, like the real nav edge (`app.rs`).
+                        "notifications" => client.fetch_notifications_for_view(),
                         "events" => client.fetch_calendars(),
                         // The Devices/Peers page refreshes off the shared
                         // `DevicesMachine` when it becomes visible (wired on
@@ -4126,6 +4446,13 @@ fn handle_test_command(
                 Some(other) => serde_json::to_string(other).unwrap_or_default(),
                 None => String::new(),
             };
+            // The `vps` base-URL override also feeds the `nest_retire` page, which
+            // is opened on surfaces with no onboarding machine to hold it (the
+            // launch retry surface, a live session) — record it where the page
+            // reads it, whether or not a machine takes the call below.
+            if name == "set_provider_base_urls" {
+                views::onboarding::nest_retire::remember_e2e_provider_base_urls(&json_arg);
+            }
             // Machine-free bridge methods (the nest-identity pin seed/read) touch
             // only process-global state and need no machine, so they MUST work
             // post-auth, where no onboarding machine is registered
@@ -4155,6 +4482,19 @@ fn handle_test_command(
                 fauna_client_accounts::RegistryMethodOutcome::NotMine => {
                     fauna_onboarding_machine::call_machine_free_method(name, &json_arg)
                 }
+            };
+            // `set_provider_base_urls` is honoured machine-less: the `nest_retire`
+            // page takes the `vps` entry from the record above, so with no
+            // onboarding machine registered (the launch retry surface, a live
+            // session) the call is fully served — an ack, not a drop.
+            let free = match free {
+                fauna_onboarding_machine::FreeMethodOutcome::NeedsMachine
+                    if name == "set_provider_base_urls"
+                        && current_onboarding_machine.borrow().is_none() =>
+                {
+                    fauna_onboarding_machine::FreeMethodOutcome::Handled(None)
+                }
+                other => other,
             };
             let result = match free {
                 fauna_onboarding_machine::FreeMethodOutcome::Handled(v) => v,
@@ -4241,16 +4581,56 @@ fn handle_test_command(
         // GTK thread for one local read, exactly as `call_machine_method`'s
         // async arm above does.
         "device_set_state" => {
-            let device_id_hex = cmd
+            // Convention 11's bad-payload clause: a missing or mistyped id is
+            // a loud refusal naming the field, never folded into `{"found":
+            // false}` (a typo'd key would read "the row is NOT there"). The
+            // result slot is cleared, never left as a stale neighbour's.
+            let Some(device_id_hex) = cmd
                 .payload
                 .get("device_id_hex")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+            else {
+                if let Ok(mut s) = shared.lock() {
+                    s.machine_method_result = None;
+                }
+                report_refused_agent_command(
+                    shared,
+                    "device_set_state",
+                    "needs a `device_id_hex` string",
+                );
+                return;
+            };
+            let handle = crate::account_runtime::handle();
+            let value = crate::async_helper::block_on_tokio(async move {
+                fauna_client_account_runtime::device_set_state_json(handle.as_ref(), &device_id_hex)
+                    .await
+            });
+            if let Ok(mut s) = shared.lock() {
+                s.machine_method_result = Some(value.to_string());
+            }
+        }
+        // e2e-only: linux twin of tui's `read_marker_state` arm — this app's own
+        // account store's read marker for `channel_id_hex`, the read-state
+        // relaunch witness's durability barrier
+        // (`docs/goal/behavior/conversation-read-state.md` § The read-marker
+        // record). The `device_set_state` reader shape above: async store I/O
+        // blocked on the GTK thread for one local read, the value riding
+        // `machine_method_result`.
+        "read_marker_state" => {
+            let channel_id_hex = cmd
+                .payload
+                .get("channel_id_hex")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
             let handle = crate::account_runtime::handle();
             let value = crate::async_helper::block_on_tokio(async move {
-                fauna_client_account_runtime::device_set_state_json(handle.as_ref(), &device_id_hex)
-                    .await
+                fauna_client_account_runtime::read_marker_state_json(
+                    handle.as_ref(),
+                    &channel_id_hex,
+                )
+                .await
             });
             if let Ok(mut s) = shared.lock() {
                 s.machine_method_result = Some(value.to_string());
@@ -4449,6 +4829,68 @@ fn handle_test_command(
                 "message",
                 arg("message", "feed load failed"),
             ));
+        }
+        // The engagement-cue capture's FROZEN test clock — convention 14's
+        // fake clock for every cue rule a loaded box breaks: a skip and a
+        // fast-scroll burst (upper bounds on time) and the long dwell (the
+        // per-sample credit cap refuses a stalled main loop as dwell). The
+        // clock is the shared tracker's (`fauna_feed::CueTracker`, § The test
+        // clock); `crate::feed::viewport::test_clock` holds the live capture.
+        // `advance` samples before it acks, so the ack is that step's barrier;
+        // the frozen probe and the pixel step (`feed_cue_scroll_by`, web's
+        // twin) ack after the next frame's layout, from a sample of their own.
+        // Twins of tui's arms of the same names; a refused advance is a loud
+        // `{"error"}` result, never a silent no-op (convention 11).
+        "feed_cue_probe" | "feed_cue_scroll_by" => {
+            use crate::feed::viewport::test_clock;
+            let shared = std::sync::Arc::clone(shared);
+            let current_stack = current_stack.clone();
+            let current_app_state = current_app_state.clone();
+            let current_error_label = current_error_label.clone();
+            let id = cmd.id.clone();
+            let reply: test_clock::Reply = Box::new(move |outcome| {
+                let value = outcome.unwrap_or_else(|e| serde_json::json!({ "error": e }));
+                if let Ok(mut s) = shared.lock() {
+                    s.machine_method_result = Some(value.to_string());
+                }
+                ack_applied_command(
+                    &shared,
+                    &current_stack,
+                    &current_app_state,
+                    &current_error_label,
+                    &id,
+                );
+            });
+            if cmd.action == "feed_cue_probe" {
+                test_clock::probe(reply);
+            } else {
+                let px = cmd
+                    .payload
+                    .get("px")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                test_clock::scroll_by(px, reply);
+            }
+            return;
+        }
+        "feed_cue_clock_freeze" | "feed_cue_clock_thaw" | "feed_cue_clock_advance" => {
+            use crate::feed::viewport::test_clock;
+            let outcome = match cmd.action.as_str() {
+                "feed_cue_clock_freeze" => {
+                    test_clock::freeze().map(|()| serde_json::json!({ "ok": true }))
+                }
+                "feed_cue_clock_thaw" => {
+                    test_clock::thaw().map(|()| serde_json::json!({ "ok": true }))
+                }
+                _ => {
+                    let ms = cmd.payload.get("ms").and_then(|v| v.as_u64()).unwrap_or(0);
+                    test_clock::advance(ms).map(|()| serde_json::json!({ "ok": true }))
+                }
+            };
+            let value = outcome.unwrap_or_else(|e| serde_json::json!({ "error": e }));
+            if let Ok(mut s) = shared.lock() {
+                s.machine_method_result = Some(value.to_string());
+            }
         }
         "feed_hold_next_reload" | "feed_release_held_reload" => {
             let Some(manager) = crate::feed::host::manager() else {
@@ -4868,6 +5310,25 @@ fn handle_test_command(
                 );
             }
         }
+        // Contract: `fauna_e2e_agent::AUTO_RENEW_WAKE` — end the current
+        // session's auto-renew wait so the production tick passes now; the
+        // caller's barrier is the tick's own `auto-renew pass:` log line, never
+        // this ack. The tui arm is the reference.
+        fauna_e2e_agent::AUTO_RENEW_WAKE => {
+            let woke = current_client
+                .borrow()
+                .as_ref()
+                .is_some_and(|client| client.wake_auto_renew());
+            if !woke {
+                // Convention 11: no session's tick is running, so the wake
+                // would be acked and read by nobody.
+                report_refused_agent_command(
+                    shared,
+                    fauna_e2e_agent::AUTO_RENEW_WAKE,
+                    "no authenticated session, so no auto-renew tick to wake",
+                );
+            }
+        }
         // Contract: `fauna_e2e_agent::RECONNECT_BACKOFF` — pace this session's
         // reconnect retries (never the `Unreachable` threshold), or restore
         // them with `{}`. The tui arm is the reference.
@@ -4958,6 +5419,29 @@ fn handle_test_command(
                     });
                 }
                 _ => tracing::info!("account_pump_now: no account store yet (pre-auth)"),
+            }
+        }
+        fauna_e2e_agent::CUSTODY_OWNER_RESEND_NOW => {
+            // The custody owner sends again, the linux twin of tui's arm: every
+            // granted ceremony re-posts its newest sent step through the shared
+            // body, recording nothing. No gesture re-sends, so this is `devices`
+            // outcome 15's trigger. Fire-and-forget — the barrier is the HOST's
+            // `custody_ceremony_ingest` counts, not this ack.
+            // `fauna_e2e_agent::CUSTODY_OWNER_RESEND_NOW` owns the contract.
+            //
+            // `spawn_owner_resend` `tokio::spawn`s, so it runs inside the
+            // client's runtime. No client yet (pre-auth) is a quiet no-op, as is
+            // no session or store inside the shared body.
+            match current_client.borrow().as_ref() {
+                Some(client) => {
+                    let secret = client.secret_bytes();
+                    let session = crate::conversations::conv_backend::active_session();
+                    let store = crate::account_runtime::handle();
+                    client.runtime_handle().spawn(async move {
+                        fauna_client_custody::spawn_owner_resend(secret, session, store);
+                    });
+                }
+                None => tracing::info!("custody_owner_resend_now: no client yet (pre-auth)"),
             }
         }
         // The barrier's self-test probe: queue UI work on the glib **idle**
@@ -5214,7 +5698,7 @@ fn handle_sync_inject_locations(cmd: &test_agent::RawCommand) {
         .filter_map(|f| {
             let path = f.get("path").and_then(|v| v.as_str())?;
             // `folder` omitted/None ⇒ unbound (empty); the host never
-            // manufactures a name (file-sync.md § Hosting multiple on-demand).
+            // manufactures a name (on-demand-files.md § Hosting multiple on-demand).
             let folder = f
                 .get("folder")
                 .and_then(|v| v.as_str())
@@ -5781,6 +6265,22 @@ fn settings_subpage_canonical(stack: &gtk::Stack) -> Option<String> {
     None
 }
 
+/// The `custody_ceremony_ingest` state value
+/// (`fauna_e2e_agent::CUSTODY_CEREMONY_INGEST_KEY`), extracted because a bare
+/// block in `json!` reads as an object literal — five atomic loads, no I/O,
+/// shaped by the shared builder tui and the UniFFI face use.
+#[cfg(any(debug_assertions, feature = "e2e-agent"))]
+fn custody_ceremony_ingest_json() -> serde_json::Value {
+    let c = fauna_client_conversations::custody_ceremony_ingest_counts();
+    fauna_e2e_agent::custody_ceremony_ingest_json(
+        c.seen,
+        c.moved,
+        c.duplicate,
+        c.refused,
+        c.uncaptured,
+    )
+}
+
 #[cfg(any(debug_assertions, feature = "e2e-agent"))]
 fn update_shared_state(
     shared: &std::sync::Arc<std::sync::Mutex<test_agent::SharedState>>,
@@ -5923,6 +6423,10 @@ fn update_shared_state(
                             // `unrepost`'s argument).
                             "reposted_post_id": p.reposted_post_id,
                             "viewer_repost_id": p.viewer_repost_id,
+                            // The quote carrier: an empty-commentary quote's
+                            // card text is only its folded embed, so a test
+                            // finds it by the post it quotes. tui's key.
+                            "quoted_post_id": p.quoted_post_id,
                             // Every link preview in the body with its state,
                             // in body order (`RenderDocument::link_previews` —
                             // render-model.md § D4). A card is absent while a
@@ -6261,6 +6765,11 @@ fn update_shared_state(
         "account_pump_cycles": fauna_client_account_runtime::account_pump_cycles_json(
             crate::account_runtime::handle().as_ref(),
         ),
+        // What the custody ceremony sink did with each received payload — the
+        // host-side barrier for the `custody_owner_resend_now` poke
+        // (`fauna_e2e_agent::CUSTODY_CEREMONY_INGEST_KEY`, which owns the
+        // contract). Five atomic loads, shared shape; zeros before any payload.
+        "custody_ceremony_ingest": custody_ceremony_ingest_json(),
         // The shared feed manager's reload counters — the `conv_receive_cycles`
         // twin for the feed's re-query funnel
         // (`fauna_e2e_agent::FEED_RELOADS_KEY`, which owns the contract).
@@ -6293,6 +6802,8 @@ fn update_shared_state(
         "raises_served": instance_remote::raises_served(),
         "settings": {
             "inbox_mode": settings::get_inbox_mode(),
+            // The token id behind each painted `session-card` (tui's twin key).
+            "session_token_ids": settings::sessions::painted_token_ids_json(),
         },
         "data": {
             "conversations": conversations_json,
@@ -6455,23 +6966,29 @@ mod launch_funnel_tests {
         assert!(
             body.contains("crate::launch_authenticated("),
             "the post-wizard launch must go through `launch_authenticated`, the one funnel \
-             that runs the silent sign-in"
+             that follows the session's identity"
         );
         for built_here in ["FaunaClient::new(", "build_main_window(", "ui_channel("] {
             assert!(
                 !body.contains(built_here),
                 "the post-wizard launch calls `{built_here}` itself again — a second launch \
-                 path is exactly how the silent sign-in was skipped"
+                 path is exactly how the identity follow was skipped"
             );
         }
     }
 
     #[test]
-    fn the_funnel_signs_in_silently_and_runs_first_setup_before_the_window() {
+    fn the_funnel_follows_the_session_identity_and_runs_first_setup_before_the_window() {
         let body = fn_body(include_str!("main.rs"), "fn launch_authenticated(");
         assert!(
-            body.contains(".silent_sign_in()"),
-            "`launch_authenticated` must run the silent sign-in that fills the account cache"
+            body.contains(".follow_self_identity()"),
+            "`launch_authenticated` must follow the session mint's identity that fills the \
+             account cache"
+        );
+        assert!(
+            !body.contains(".silent_sign_in()"),
+            "`launch_authenticated` runs a second challenge again — the session mint's reply \
+             already carries the identity (`transport-connection.md` § The dial budget)"
         );
         let first_setup = body
             .find("first_setup(&fauna_client)")

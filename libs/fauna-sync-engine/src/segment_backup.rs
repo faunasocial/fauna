@@ -71,29 +71,11 @@ pub const MAIL_RECEIVED_KIND: &str = "fauna.mail.received";
 /// in/out, tombstone). Also subscribed by [`spawn_push_pumps`].
 pub const SEGMENTS_CHANGED_KIND: &str = "fauna.segments.changed";
 
-/// The segment kinds the backup arm covers, for **every** runner — the
-/// nest's own worker (`bins/fauna-nest/src/segment_backup.rs`, which
-/// re-exports this) and the client-device custodian pull.
-///
-/// **One constant, deliberately.** The nest arm used to declare its own
-/// `["mail"]` "in lockstep by comment only", which was harmless while both
-/// sides independently swept their own list. It stopped being harmless when a
-/// client observing a fresh nest holder began yielding the **whole kind**: the
-/// nest's `backup-upload` lease is kind-agnostic, so any kind a client lists
-/// and the nest does not sweep would stop being backed up **silently**
-/// (the same treatment the destination mode
-/// filter got before it retired). Divergence is now unrepresentable rather than warned about.
-///
-/// Every actor-scoped kind (2026-09-29): each has every nest-side arm (the
-/// nest-local source serves it and its journal, the materialize verb
-/// reconstitutes it), and a client-device custodian's store keys every row by
-/// its set (`crate::custodian_store::held_path`), so kinds whose content
-/// families share one within-set grammar (`{scope_hex}/seg-NNNNNNNN.*`) rest
-/// side by side. `conv` is absent: it scopes on a channel, not the owner.
-/// Adding a kind here is not sufficient on its own — a runner whose body is
-/// kind-specific must grow an arm first, and `NestLocalSegmentSource` holds a
-/// **compile-time** pin that fails the build until it does.
-pub const BACKED_UP_KINDS: &[&str] = &["mail", "post", "calendar", "card"];
+/// The segment kinds the backup arm covers — lives in
+/// `fauna_protocol::segments` since 2026-10-10 (the lived-in recovery's leg,
+/// which filters on it, is wasm-clean shared Rust this crate cannot be a
+/// dependency of); re-exported here so every arm keeps its import path.
+pub use fauna_protocol::segments::BACKED_UP_KINDS;
 
 // ────────────────────────────────────────────────────────────────────
 // Bindings + report
@@ -698,11 +680,18 @@ impl FolderCorpusSource for SourceBinding {
             .ws_client
             .request(
                 SYNC_FILES_KIND,
-                SyncFilesRequest {
-                    folder: summary.name.clone(),
-                    name_hash: summary.name_hash.clone(),
-                    extra: Default::default(),
-                },
+                // The covered folder's row: the mirror holds it, so the nest
+                // resolves that row and never an own same-named set
+                // (`set-addressing.md` § The row form).
+                fauna_protocol::folders::addressed_at(
+                    SyncFilesRequest {
+                        folder: summary.name.clone(),
+                        name_hash: summary.name_hash.clone(),
+                        folder_id: None,
+                        extra: Default::default(),
+                    },
+                    Some(fauna_core::folder_keys::FolderRef::Local(folder_id)),
+                ),
             )
             .await
             .with_context(|| format!("{SYNC_FILES_KIND} (covered folder {folder_id})"))?;
@@ -927,73 +916,11 @@ pub fn is_placement_serve_kind(tag: &str) -> bool {
         .any(|kind| SegmentFamily::Placement.serve_kind(kind) == Some(tag))
 }
 
-/// The reserved folder name a segment `kind` backs up into, or `None` for a
-/// kind that has no cross-location backup surface.
-///
-/// **One derivation, now four consumers, so they cannot drift**: the nest's
-/// destination-capability predicate (`CacheDb::is_pure_backup_destination`), the
-/// federated backup-custody relay
-/// (`federation_handlers::resolve_backup_custody_set`, which get-or-creates this
-/// exact set for an authorized source nest), the nest coordinator's own pass,
-/// and — since the re-seed ceremony — the **client device** naming the set it
-/// records delivered custody into ([`crate::reseed`]). A mismatch between any two
-/// would let custody land in a set the capability gates do not recognise as a
-/// pure-backup destination, i.e. a destination that both serves and backs up.
-///
-/// It lives here, beside [`segment_rel_path`] and [`manifest_rel_path`], because
-/// this module is already the shared leaf set every backup arm reuses verbatim —
-/// and because a device arm cannot reach a nest binary's private module at all.
-///
-/// Mail, post, calendar and card use a fixed name scoped by `actor_id`; conv
-/// encodes the channel in the **name** (`__conv/<channel_hex>`) because one nest
-/// holds many channels. Note the scoping actor differs by consumer: on a
-/// *source* nest a conv set is scoped by `channel_id`, while a *destination*
-/// holds it under the enrolled member's own actor (that member's quota pays for
-/// it — `message-segment-store.md` § Cross-location backup protocol, conv v1).
-/// The name is the same on both, which is all this function owns.
-pub fn reserved_backup_set_name(kind: &str, scope_id: &[u8; 32]) -> Option<String> {
-    match kind {
-        "mail" => Some("__mail".to_string()),
-        "post" => Some("__post".to_string()),
-        "calendar" => Some("__calendar".to_string()),
-        "card" => Some("__card".to_string()),
-        "conv" => Some(format!("__conv/{}", hex::encode(scope_id))),
-        _ => None,
-    }
-}
-
-/// Read a segment-axis reserved backup set name back into the `(kind, scope)` it
-/// was derived from, or `None` if [`reserved_backup_set_name`] could not have
-/// produced it.
-///
-/// The **folder** axis ([`folder_backup_set_name`]'s `__folder/<nest>/<id>`) is
-/// deliberately not parsed here: that name embeds a *source nest id*, which a
-/// writer must never be trusted to name — the federated relay re-derives it from
-/// the handshake's verified `origin_nest_id`, and no owner-authed caller has an
-/// equivalent to be checked against.
-///
-/// Written as parse-then-re-derive rather than as a second list of prefixes, so
-/// the two can never disagree: whatever this returns, feeding it back through
-/// [`reserved_backup_set_name`] reproduces the input name exactly, and a kind
-/// added there without being added to [`BACKUP_SET_KINDS`] is simply not
-/// recognised here rather than silently mis-parsed.
-pub fn parse_reserved_backup_set_name(name: &str) -> Option<(&'static str, [u8; 32])> {
-    let (kind, scope) = match name.strip_prefix("__conv/") {
-        Some(scope_hex) => {
-            let mut scope = [0u8; 32];
-            hex::decode_to_slice(scope_hex, &mut scope).ok()?;
-            ("conv", scope)
-        }
-        None => {
-            let kind = BACKUP_SET_KINDS
-                .iter()
-                .copied()
-                .find(|k| *k != "conv" && name == format!("__{k}"))?;
-            (kind, [0u8; 32])
-        }
-    };
-    (reserved_backup_set_name(kind, &scope)?.as_str() == name).then_some((kind, scope))
-}
+/// The reserved set names — [`reserved_backup_set_name`] and its inverse
+/// [`parse_reserved_backup_set_name`] — live in `fauna_protocol::segments`
+/// since 2026-10-10, beside [`BACKUP_SET_KINDS`], for the same reason as
+/// [`BACKED_UP_KINDS`]; re-exported so every arm keeps its import path.
+pub use fauna_protocol::segments::{parse_reserved_backup_set_name, reserved_backup_set_name};
 
 /// This device's synced replica of a covered folder, read as the backup
 /// audit's covered-folder mirror plane population
@@ -1149,15 +1076,23 @@ pub async fn bound_replica_folder_index(
 /// production build exactly as the spawner's forward is — convention 15) — on
 /// unix the agent inherits the launch's isolated `HOME`/`XDG_CONFIG_HOME`, so
 /// the production derivation already agrees with it.
-pub fn local_agent_state_dir(actor_id_hex: &str) -> std::path::PathBuf {
+///
+/// `Err` (the shared no-home refusal) when the production base cannot resolve;
+/// the caller logs it and reads no replica — the declared absence.
+pub fn local_agent_state_dir(actor_id_hex: &str) -> anyhow::Result<std::path::PathBuf> {
     #[cfg(all(windows, any(test, debug_assertions, feature = "e2e-agent")))]
-    let base = std::env::var_os(fauna_client_sync::agent_spawner::AGENT_DATA_DIR_ENV)
+    let base = match std::env::var_os(fauna_client_sync::agent_spawner::AGENT_DATA_DIR_ENV)
         .filter(|d| !d.is_empty())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(crate::root::platform_state_base);
+    {
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => crate::root::platform_state_base()?,
+    };
     #[cfg(not(all(windows, any(test, debug_assertions, feature = "e2e-agent"))))]
-    let base = crate::root::platform_state_base();
-    crate::db::actor_state_dir_or_unresolved(&base, actor_id_hex)
+    let base = crate::root::platform_state_base()?;
+    Ok(crate::db::actor_state_dir_or_unresolved(
+        &base,
+        actor_id_hex,
+    ))
 }
 
 /// Canonical hash of a source's `segments` list, used to short-circuit
@@ -1634,8 +1569,8 @@ mod tests {
     fn the_local_agent_state_dir_is_the_actor_scope_under_the_platform_base() {
         let actor = "ab".repeat(32);
         assert_eq!(
-            local_agent_state_dir(&actor),
-            crate::root::platform_state_base().join(&actor)
+            local_agent_state_dir(&actor).unwrap(),
+            crate::root::platform_state_base().unwrap().join(&actor)
         );
     }
 

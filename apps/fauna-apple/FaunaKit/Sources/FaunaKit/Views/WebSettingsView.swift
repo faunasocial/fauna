@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import SwiftUI
 
 /// The user-facing **web-settings** page (`docs/goal/behavior/web-content-hosting.md`
@@ -370,3 +373,4 @@ public struct WebSettingsView: View {
 
 // `groupedSection` (`GroupedSection.swift`) is the shared eager-container
 // replacement for `Form`'s `Section` this file uses.
+#endif // !FAUNA_KIDS

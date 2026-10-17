@@ -45,6 +45,7 @@ Mark a patch ✅ landed-upstream when it can be dropped on the next bump.
 | 17 | QUOTA (RFC 9208): `SessionQuota` interface + `GETQUOTA`/`GETQUOTAROOT` parsers/dispatch + `* QUOTA`/`* QUOTAROOT` writers (`QuotaData`/`QuotaResourceData`) + advertise `QUOTA` + `QUOTA=RES-STORAGE`/`QUOTA=RES-MESSAGE` | `imapserver/quota.go`, `imapserver/session.go`, `imapserver/conn.go`, `imapserver/capability.go` | QUOTA (no PR yet) | forked |
 | 18 | Graceful `Server.Shutdown(ctx) (forced, pending)`: `* BYE` on new commands + prompt wake of idle/IDLE'ing conns + drain in-flight up to ctx, then force-close (RFC 9051 §7.1.5). `Conn.inFlight` flag + `Server.draining` + `errDraining` + `forceCloseConns`/`waitConnsDrained` helpers | `imapserver/server.go`, `imapserver/conn.go`, `imapserver/idle.go` | graceful-shutdown (no PR yet) | forked |
 | 19 | Per-server IDLE-timeout teardown (RFC 2177 §3): `handleIdle` sets the IDLE read deadline from the session's optional `IdleTimeout() time.Duration` (falling back to the 35-min framework default) and ends an inactive IDLE with `* BYE` + close on expiry, signalled via `errIdleServerTimeout` (handed straight back like `errDraining`, no tagged response). Makes the `imap.idle_timeout_seconds` policy knob wire-observable + hot-reloadable per connection | `imapserver/idle.go`, `imapserver/conn.go` | idle-timeout (no PR yet) | forked |
+| 20 | IDLE prepare-before-continuation: `handleIdle` calls the session's optional `PrepareIdle() error` BEFORE writing `+ idling`; an error refuses the IDLE with a tagged response and no continuation. Lets the MDA register its push subscription before the client can act on `+` (RFC 2177: the client may rely on updates from the moment it sees the continuation) | `imapserver/idle.go` | idle-prepare (no PR yet) | forked |
 
 The QRESYNC seams (rows 9–16) land the full **server-emit** half of RFC
 7162 §3.2: the bridge parses `(QRESYNC …)` SELECT params and forwards
@@ -96,6 +97,16 @@ returns `errIdleServerTimeout` — which `readCommand` hands straight back and t
 serve loop breaks on quietly, exactly like `errDraining`. The deadline value is
 read per-IDLE, so a hot-reloaded `imap.idle_timeout_seconds` (mail-policy-config)
 binds on the next connection without a bridge restart. No upstream PR yet.
+
+The IDLE-prepare seam closes an ordering window upstream leaves
+open. Upstream's `handleIdle` writes `+ idling` and only then starts
+`Session.Idle`, so a session that registers its change feed inside `Idle` (the
+MDA subscribes to the nest's mailbox-state pushes there) is not yet listening
+when the client, having seen `+`, makes a change in another session: that
+change's push is lost. The fork calls an optional `PrepareIdle() error`
+(discovered by type assertion, so upstream `Session`s are unaffected) before the
+continuation; a failure answers the IDLE with a tagged response instead of `+`.
+No upstream PR yet.
 
 ## Upstream security watch
 

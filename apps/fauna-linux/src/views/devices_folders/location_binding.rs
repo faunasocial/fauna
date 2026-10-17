@@ -15,7 +15,7 @@
 //! carries the cross-app `folder-location-*` test IDs (ui.yaml § folders
 //! `platform_elements: linux`), including the per-binding
 //! `folder-location-mode-toggle`: the switch between always-resident and the
-//! agent's FUSE on-demand root (`on-demand-files.md` § Linux FUSE binding).
+//! agent's FUSE on-demand root (`on-demand-files-linux.md` § Linux FUSE binding).
 //!
 //! The add flow is the cross-app typed-path shape: `folder-location-path-input` is
 //! the drivable source of truth, and the native `gtk::FileDialog` folder picker is
@@ -415,7 +415,7 @@ fn build_location_row(
     row.append(&top);
 
     // The per-binding on-demand switch (`on-demand-files.md` § On-Demand Files →
-    // *The choice is the user's*; § Linux FUSE binding). What it shows is the
+    // *The choice is the user's*; `on-demand-files-linux.md` § Linux FUSE binding). What it shows is the
     // shared rule's answer (`LocationBindingsModel::mode_toggle`): the agent's
     // mode for this binding, insensitive with the host's reason where the agent
     // cannot mount (no `fuse3`), and this location's own line when its mount
@@ -511,6 +511,22 @@ fn build_location_row(
             crate::sync_agent::apply_held_deletes(apply_folder.clone());
         });
         row.append(&apply_btn);
+    }
+
+    // Part of the folder is unreadable (`delete-propagation.md` § Unreadable is
+    // not absent): the engine withheld those deletes. A status line only — there
+    // is nothing to confirm, so an apply verb here would be the bug. Rendered
+    // only while the count stands; `0` paints nothing.
+    let unreadable = crate::sync_agent::deletes_skipped_unreadable_for(&mapping.folder);
+    if unreadable > 0 {
+        let unreadable_label = gtk::Label::builder()
+            .css_classes(["warning", "caption"])
+            .label(strings::folders::unreadable(&unreadable.to_string()))
+            .wrap(true)
+            .xalign(0.0)
+            .build();
+        set_test_id(&unreadable_label, ids::FOLDER_LOCATION_UNREADABLE);
+        row.append(&unreadable_label);
     }
 
     let path: PathBuf = mapping.path.clone();

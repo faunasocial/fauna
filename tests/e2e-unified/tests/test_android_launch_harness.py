@@ -261,3 +261,90 @@ def test_every_forwarded_name_reaches_the_process_environment(name):
     assert re.search(rf'intent\.getStringExtra\("{name}"\)', main) and re.search(
         rf'Os\.setenv\("{name}"', main
     ), f"MainActivity never re-exports {name} into the process environment"
+
+
+# ── 5. the admin DNS seams cross both Kotlin doors ──────────────────────────
+#
+# Not a launch-harness name: the admin DNS journeys launch through conftest's
+# app fixture, whose android `environment` the bridge's /session handler reads.
+# The two keys travel as a key list (`DNS_E2E_ENV_KEYS`), the region seams'
+# shape, so the pin reads the lists and the loops that carry them.
+
+_DNS_SEAMS = ("FAUNA_DNS_PROVIDER_FAKE", "FAUNA_DNS_RECHECK_SECS")
+_CONFTEST = Path(__file__).resolve().parents[1] / "conftest.py"
+
+
+def _kotlin_key_list(source, name):
+    match = re.search(rf"\b{name} = listOf\(([^)]*)\)", source)
+    assert match, f"no `{name} = listOf(...)` key list"
+    return set(re.findall(r'"([A-Z0-9_]+)"', match.group(1)))
+
+
+def test_the_android_app_launch_env_sets_the_dns_seams():
+    source = _CONFTEST.read_text(encoding="utf-8")
+    start = source.index('elif app_name == "android":')
+    block = source[start:source.index('config["environment"] = env', start)]
+    for name in _DNS_SEAMS:
+        assert re.search(rf'"{name}":\s*"', block), (
+            f"conftest's android launch env never sets {name} — the admin DNS "
+            "journeys would reach no fake provider / wait production's clock"
+        )
+
+
+def test_the_bridge_carries_the_dns_seams_onto_the_intent():
+    bridge = _BRIDGE_KT.read_text(encoding="utf-8")
+    assert _kotlin_key_list(bridge, "DNS_E2E_ENV_KEYS") >= set(_DNS_SEAMS)
+    assert re.search(r"DNS_E2E_ENV_KEYS\.associateWith \{ env\.optString\(it", bridge), (
+        "BridgeHttpServer's /session handler never reads the DNS seams out of `environment`"
+    )
+    assert re.search(r"dnsEnv: Map<String, String>", bridge) and re.search(
+        r"for \(\(key, value\) in dnsEnv\) intent\.putExtra\(key, value\)", bridge
+    ), "AppLauncher.launchApp never puts the DNS seams on the launch intent"
+
+
+def test_main_activity_reexports_the_dns_seams_into_the_process_env():
+    main = _MAIN_ACTIVITY_KT.read_text(encoding="utf-8")
+    assert _kotlin_key_list(main, "DNS_E2E_ENV_KEYS") >= set(_DNS_SEAMS)
+    assert re.search(
+        r"for \(key in DNS_E2E_ENV_KEYS\) \{\s*intent\.getStringExtra\(key\)\?\.let \{"
+        r"\s*try \{\s*android\.system\.Os\.setenv\(key, it, true\)",
+        main,
+    ), "MainActivity never re-exports the DNS seams through its Os.setenv door"
+
+
+# ── 6. the ACME directory seed crosses both Kotlin doors ────────────────────
+#
+# `e2e-automation-surface-gating.md` § The ACME directory seed: the seed is read
+# by `fauna_client_dns::e2e_acme_seam` via std::env, so on android it rides the
+# DNS seams' key list — the whole seed, all three variables meaningful on the
+# device (the name server is a reversed loopback port, *The name server's
+# reach*).
+
+_ACME_SEAMS = (
+    "FAUNA_E2E_ACME_DIRECTORY_URL",
+    "FAUNA_E2E_ACME_CA_PEM",
+    "FAUNA_E2E_ACME_NAMESERVER",
+)
+
+def test_the_bridge_and_main_activity_carry_the_acme_seed():
+    for path in (_BRIDGE_KT, _MAIN_ACTIVITY_KT):
+        keys = _kotlin_key_list(path.read_text(encoding="utf-8"), "DNS_E2E_ENV_KEYS")
+        assert keys >= set(_ACME_SEAMS), f"{path.name} drops part of the ACME seed"
+
+
+def test_the_android_launch_reverses_pebbles_directory_port():
+    # The device reaches pebble only as its own loopback through an `adb
+    # reverse`, which the driver opens for every port in `nest_ports`.
+    source = _CONFTEST.read_text(encoding="utf-8")
+    start = source.index('config["nest_ports"] = [')
+    block = source[start:source.index("]", start + len('config["nest_ports"] = ['))]
+    assert "directory_port(env)" in block, (
+        "conftest's android launch never hands pebble's directory port to the "
+        "driver's reverse list, so the app's ACME order dies with a bare "
+        "connection error"
+    )
+    assert "name_server_port(env)" in block, (
+        "conftest's android launch never hands the fake name server's port to the "
+        "driver's reverse list, so the propagation probe's TCP retry and the "
+        "managed mirror's UPDATE reach nothing"
+    )

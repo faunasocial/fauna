@@ -107,9 +107,13 @@ public static class ScreenTimeCache
             _lockMessage = null;
             return;
         }
-        var now = DateTime.Now;
+        // Derived from the SKEWED clock, never a fresh OS read, so the e2e
+        // fake clock moves the window verdict too, not only the budget one
+        // (the shared ScreenLockCore::local_minutes_from_midnight shape).
+        var nowSecs = NowSecsLocked();
+        var now = DateTimeOffset.FromUnixTimeSeconds(nowSecs).ToLocalTime();
         var nowLocalMinutes = (ushort)(now.Hour * 60 + now.Minute);
-        var used = _heartbeat.UsedTodayMinutes(NowSecsLocked());
+        var used = _heartbeat.UsedTodayMinutes(nowSecs);
         var text = FaunaFfiMethods.ScreenLockMessage(_policy, nowLocalMinutes, used, guardian);
         _lockMessage = text is null ? null : Strings.Resolve(text);
     }

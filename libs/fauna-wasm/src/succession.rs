@@ -27,14 +27,19 @@
 //! signature; and the successor's session is established **before** its engine
 //! is built, so an unreachable nest fails before any state is written.
 //!
-//! The one thing web does not inherit is the post-window sweep RETRY
-//! (`recovery-kit-sweep-retry-button`): that needs the *retired* identity's own
-//! MLS store, which on web rests in the nest replica behind bearers the
-//! succession just revoked. A web device that missed the window has no old
-//! engine to construct and answers with the member-side remedy — the same
-//! answer any device without the old store gives (`ui.yaml`'s own
-//! `recovery-kit-sweep-retry-button` note: the render gate is unfinished work,
-//! never "this device can retry").
+//! The post-window sweep RETRY (`recovery-kit-sweep-retry-button`, and the
+//! relaunch adoption's unbidden press) is here too, as
+//! [`retry_sweep_as_successor_web`]. It needs the *retired* identity's own MLS
+//! state, and on web that is not a local store but the snapshot **parked** in
+//! the successor's own replica plane at `retired/<predecessor_hex>/provider` —
+//! by the restore door's foreign-seat arm, or by this ceremony's own sweep
+//! ([`sweep_as_successor_web`]) — readable over the successor's live session
+//! and opened under its key (`succession-propagation.md` § Propagation → *Own
+//! device fleet*, *Where the retired leaf rests on a device with no local MLS
+//! store*). A web device with no predecessor seed, or nothing parked, answers
+//! with the member-side remedy — the same answer any device without the old
+//! state gives (`ui.yaml`'s own `recovery-kit-sweep-retry-button` note: the
+//! render gate is unfinished work, never "this device can retry").
 
 use std::sync::Arc;
 
@@ -113,20 +118,22 @@ impl StolenOutcomeJs {
     }
 }
 
-/// The live conversations session's engine plus the way to persist it.
+/// The live conversations session's engine plus the way to persist it — the
+/// retired identity's engine to the ceremony (the session running it is the
+/// old one's), the successor's to the retry (which runs after the switch).
 ///
 /// A struct rather than a bare `&MlsEngine` because web's "save" is not a method
 /// on the engine — it is a snapshot of the engine *and* the manager, sealed and
 /// uploaded through the session's own [`MlsStateSync`]. Keeping the pair
 /// together makes it impossible to sweep an engine this driver then cannot land.
-pub(crate) struct OldEngineHandle {
+pub(crate) struct LiveEngineHandle {
     pub engine: Arc<MlsEngine>,
     pub backend: Arc<FaunaMlsBackend>,
     pub manager: Arc<ConversationsManager>,
     pub sync: Arc<MlsStateSync>,
 }
 
-impl OldEngineHandle {
+impl LiveEngineHandle {
     /// The web twin of `old_engine.save_state()` — snapshot on this thread (the
     /// engine and manager state live here), then seal + upload.
     async fn save(&self) {
@@ -138,9 +145,7 @@ impl OldEngineHandle {
         if let Err(e) =
             fauna_client_mls_sync::orchestration::save_snapshot(&self.sync, &snapshot).await
         {
-            tracing::error!(
-                "[wasm/succession] persisting the succeeded engine after the sweep: {e}"
-            );
+            tracing::error!("[wasm/succession] persisting the live engine after the sweep: {e}");
         }
     }
 }
@@ -426,30 +431,56 @@ pub(crate) fn adopt_held_successor(predecessor: &str, verified_successor: &str) 
     true
 }
 
+/// Whether `successor_actor_hex` is owed a relaunch adoption's sweep — a
+/// **peek**, so the Settings page brings the conversations plane up (the
+/// driver sweeps over the live engine) only on the launch that owes one.
+pub(crate) fn succession_sweep_owed(successor_actor_hex: &str) -> bool {
+    session_storage()
+        .and_then(|store| {
+            store
+                .get_item(&sweep_owed_key(successor_actor_hex))
+                .ok()
+                .flatten()
+        })
+        .is_some()
+}
+
+/// What [`discharge_owed_sweep`] answers when a sweep was owed: the press's
+/// sentence for `error-message`, or `None` on a sweep that ran — whose outcome
+/// the sweep's own lines carry, re-read from the view parked beside it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OwedSweepDischargeJs {
+    pub message: Option<fauna_core::localized::LocalizedText>,
+}
+
 /// Discharge the sweep a relaunch adoption owes — the unbidden press of
 /// `recovery-kit-sweep-retry-button`, claimed once and seat-bound by the key.
-/// `None` when nothing was owed (every ordinary sign-in); otherwise the press's
-/// sentence, for `error-message` as a press's would go.
+/// `None` when nothing was owed (every ordinary sign-in).
 ///
-/// The answer is [`succession_sweep_retry`]'s — on web always `NoOldState`, for
-/// the reason that function gives — and what it parks is shared Rust's call
-/// (`SweepRetryAnswer::into_owed_status`): an arm that still owes work, so the
-/// retry button renders and the groups are never reported swept. Parked as the
-/// view the Settings page paints and as the e2e state, exactly as a ceremony's
-/// own report is.
-pub(crate) fn discharge_owed_sweep(
-    successor_actor_hex: &str,
-) -> Option<fauna_core::localized::LocalizedText> {
+/// The answer is [`retry_sweep_as_successor_web`]'s, the button's own driver,
+/// and what it parks is shared Rust's call
+/// (`SweepRetryAnswer::into_owed_status`): the fresh report on `Swept`, the
+/// owing `no-engine`/`failed` arm otherwise, so the retry button renders and
+/// the groups are never reported swept by an answer that swept nothing. Parked
+/// as the view the Settings page paints and as the e2e state, exactly as a
+/// ceremony's own report is.
+pub(crate) async fn discharge_owed_sweep(
+    client: InnerClient,
+    successor: &ActorKeypair,
+    live: Option<&LiveEngineHandle>,
+) -> Option<OwedSweepDischargeJs> {
+    let successor_actor_hex = successor.actor_id_hex();
     let store = session_storage()?;
-    let key = sweep_owed_key(successor_actor_hex);
+    let key = sweep_owed_key(&successor_actor_hex);
     store.get_item(&key).ok().flatten()?;
     let _ = store.remove_item(&key);
-    let answer = fauna_client_recovery::ceremony::SweepRetryAnswer::NoOldState;
-    let sentence = answer.message();
+    let answer = retry_sweep_as_successor_web(client, successor, live).await;
+    let message = answer.message();
     let parked = answer.into_owed_status();
     publish_sweep_state_for_e2e(&parked);
-    park_sweep_view(successor_actor_hex, &parked.render_view());
-    sentence
+    park_sweep_view(&successor_actor_hex, &parked.render_view());
+    Some(OwedSweepDischargeJs { message })
 }
 
 /// The `sessionStorage` key for [`park_sweep_view`] — one per successor, same
@@ -498,32 +529,30 @@ pub(crate) struct SweepCopyJs {
     /// The roster the sweep cannot vouch for, as its own line, or `None`.
     pub unattested: Option<fauna_core::localized::LocalizedText>,
     /// The shared `SweepView::owes_work` — what `recovery-kit-sweep-retry-button`
-    /// would gate on, once web builds it.
+    /// gates on.
     pub owes_work: bool,
 }
 
 /// The sweep's lines for `successor_actor_hex`, or `None` when no succession
 /// ran in this tab — the render source for the Settings page's sweep chrome.
 ///
-/// **`Rendered` is web's declaration, made here and nowhere else** (flipped
-/// 2026-08-27): the SPA paints
+/// **The degraded lines name the button because the SPA paints it:** the SPA paints
 /// `recovery-kit-sweep-retry-button` on every arm `owes_work` answers true for,
-/// so the degraded lines may name it. It renders even though **no** web device
-/// can run the sweep (the module doc's reason: the retired identity's MLS state
-/// rests in the nest replica behind bearers the succession revoked), because
+/// so the degraded lines may name it — including on a web device that cannot
+/// run the sweep (no predecessor seed here, or nothing parked), because
 /// `settings.md` § Recovery kit → *Finishing an unfinished group sweep* gates
 /// the render on unfinished work and explicitly **not** on whether this device
 /// can retry — a device that cannot answers in words instead of being silently
-/// button-less. [`succession_sweep_retry`] is that answer.
+/// button-less. [`succession_sweep_retry`] is the press.
 pub(crate) fn succession_sweep_copy(successor_actor_hex: &str) -> Option<SweepCopyJs> {
-    use fauna_client_recovery::ceremony::{SweepRetryAffordance, SweepView};
+    use fauna_client_recovery::ceremony::SweepView;
     let store = session_storage()?;
     let raw = store
         .get_item(&sweep_view_key(successor_actor_hex))
         .ok()
         .flatten()?;
     let view: SweepView = serde_json::from_str(&raw).ok()?;
-    let copy = view.copy(SweepRetryAffordance::Rendered);
+    let copy = view.copy();
     Some(SweepCopyJs {
         outcome: copy.outcome,
         unattested: copy.unattested,
@@ -531,28 +560,120 @@ pub(crate) fn succession_sweep_copy(successor_actor_hex: &str) -> Option<SweepCo
     })
 }
 
-/// `recovery-kit-sweep-retry-button`'s press, on web.
+/// `recovery-kit-sweep-retry-button`'s press, on web — [`retry_sweep_as_successor_web`],
+/// and the answer as the page paints it: the shared sentence
+/// (`SweepRetryAnswer::message`, the same projection every native driver
+/// answers through, so a device holding no retired state says the identical
+/// words on every app), or `None` on `Swept`, whose report replaces the parked
+/// view and renders through the sweep's own lines — as native's surfaces do.
+pub(crate) async fn succession_sweep_retry(
+    client: InnerClient,
+    successor: &ActorKeypair,
+    live: Option<&LiveEngineHandle>,
+) -> Option<fauna_core::localized::LocalizedText> {
+    use fauna_client_recovery::ceremony::SweepRetryAnswer;
+    match retry_sweep_as_successor_web(client, successor, live).await {
+        SweepRetryAnswer::Swept(report) => {
+            let status = SweepStatus::Ran(report);
+            publish_sweep_state_for_e2e(&status);
+            park_sweep_view(&successor.actor_id_hex(), &status.render_view());
+            None
+        }
+        other => other.message(),
+    }
+}
+
+/// Why a web retry with no live conversations engine refuses rather than
+/// building one — the `Failed` reason its sentence carries.
+const NO_LIVE_ENGINE: &str = "conversations are not running in this tab";
+
+/// Finish a sweep the ceremony left unfinished, in this browser — the twin of
+/// [`fauna_client_recovery::ceremony::retry_sweep_as_successor`] with only its
+/// **parked** arm (`succession-propagation.md` § Propagation → *Own device
+/// fleet*, *Where the retired leaf rests on a device with no local MLS store*,
+/// rule (2)). The button's press ([`succession_sweep_retry`]) and the relaunch
+/// adoption's unbidden one ([`discharge_owed_sweep`]) are both this; the four
+/// answers and their sentences are the shared ones.
 ///
-/// **The answer is the whole gesture here, and it is always the same one.** The
-/// retry needs the retired identity's own MLS state to author the old leaf's
-/// commit; on web that state was never on this device — it rests in the nest
-/// replica, behind bearers the succession revoked — so no browser can ever hold
-/// it, and `NoOldState` is not a *this-session* accident but web's permanent
-/// arm. Which is exactly why the sentence it resolves to had to stop naming the
-/// ceremony device (`settings.md` § Recovery kit → *Finishing an unfinished
-/// group sweep*, ratified 2026-08-27): on web that device is this one.
+/// * `client` — the successor's own live session: the parked snapshot rests
+///   under its path and opens under its `BackupKey`, and the sweep's posts ride
+///   it.
+/// * The retired identity — the direct predecessor and its seed — comes off
+///   this browser's account registry through the one shared walk
+///   (`ceremony::retry_predecessor`); no seed here, or nothing parked, is
+///   `NoOldState`. The engine is rebuilt in memory and the snapshot restored
+///   through `restore_into` (`ceremony::restore_parked_retired_leaf`, shared
+///   with native's fall-through); a snapshot that does not seat the
+///   predecessor's leaf is `Failed`, never a restore.
+/// * `live` — the running conversations engine, which the successor's half of
+///   the sweep joins in place. ⚠ **Never a fresh one on web**, unlike native's
+///   `None` arm: a native fresh engine opens the successor's own SQLite and
+///   carries its state, while a fresh in-memory one carries nothing, and
+///   publishing it would replace the successor's whole `provider` — every
+///   group joined since the succession — and write MLS state from a tab that
+///   does not hold the MLS-writing role. So `None` (another tab serves this
+///   account, or the plane could not come up) is `Failed`, safe to press
+///   again where conversations run.
 ///
-/// ⚠ **This is the shared answer, not a web-shaped one.** The wording comes
-/// from `SweepRetryAnswer::message`, the same projection the native driver
-/// answers through, so a native device holding no conversation history says the
-/// identical words — the condition is what the sentence turns on, never the
-/// platform. Nothing is posted and nothing is read: the store check precedes
-/// the chain walk in the native driver too, so answering here without a round
-/// trip is the same order, not a shortcut.
-pub(crate) fn succession_sweep_retry() -> fauna_core::localized::LocalizedText {
-    fauna_client_recovery::ceremony::SweepRetryAnswer::NoOldState
-        .message()
-        .expect("every non-sweeping retry answer carries a sentence")
+/// Persistence on `Swept` is the driver's, as native's: the successor's engine
+/// through the live sync's ordinary save, and the ratcheted retired engine back
+/// to its parked path at the base it was read at
+/// (`ceremony::write_back_parked_retired_leaf`), so a later retry over a
+/// partial sweep starts from the ratcheted leaf.
+async fn retry_sweep_as_successor_web(
+    client: InnerClient,
+    successor: &ActorKeypair,
+    live: Option<&LiveEngineHandle>,
+) -> fauna_client_recovery::ceremony::SweepRetryAnswer {
+    use fauna_client_recovery::ceremony::{self as ceremony, SweepRetryAnswer};
+    let Some((_, Some(old_secret))) =
+        ceremony::retry_predecessor(&account_registry(), &successor.actor_id_hex())
+    else {
+        return SweepRetryAnswer::NoOldState;
+    };
+    let retired = match ActorKeypair::from_secret_hex(old_secret.as_str()) {
+        Ok(keypair) => keypair,
+        Err(e) => return SweepRetryAnswer::Failed(format!("{e}")),
+    };
+    let replica = fauna_client_mls_sync::MlsReplicaClient::new(
+        Box::new(WsMlsReplicaTransport::new(client.clone())),
+        successor,
+    );
+    let (old_engine, base) = match ceremony::restore_parked_retired_leaf(&replica, retired).await {
+        Ok(Some(resolved)) => resolved,
+        Ok(None) => return SweepRetryAnswer::NoOldState,
+        Err(e) => return SweepRetryAnswer::Failed(e),
+    };
+    // After the retired state resolves, as native orders it: a device with
+    // nothing to sweep from says so whatever the plane's state.
+    let Some(live) = live else {
+        return SweepRetryAnswer::Failed(NO_LIVE_ENGINE.to_string());
+    };
+    let recovery = RecoveryClient::new(client);
+    let outcome = match fauna_client_recovery::retry_group_sweep(
+        &recovery,
+        &old_engine,
+        &live.engine,
+        successor,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(e) => return SweepRetryAnswer::Failed(format!("{e}")),
+    };
+    match outcome {
+        fauna_client_recovery::SweepRetryOutcome::Swept(report) => {
+            // Both engines moved — the retired one ratcheted past remove-old,
+            // the successor joined every group — so both land.
+            ceremony::write_back_parked_retired_leaf(&replica, &old_engine, base).await;
+            live.save().await;
+            SweepRetryAnswer::Swept(Box::new(report))
+        }
+        fauna_client_recovery::SweepRetryOutcome::NotLanded => SweepRetryAnswer::NotLanded,
+        fauna_client_recovery::SweepRetryOutcome::LandedForAnother { .. } => {
+            SweepRetryAnswer::LandedForAnother
+        }
+    }
 }
 
 /// The `sessionStorage` slot carrying the sweep's own account of what it did,
@@ -1024,7 +1145,7 @@ pub(crate) async fn sign_in(
 /// fresh one over the session just opened for it.
 async fn sweep_as_successor_web(
     dial_url: &str,
-    old: Option<&OldEngineHandle>,
+    old: Option<&LiveEngineHandle>,
     successor_secret_hex: &str,
     statement: &fauna_core::recovery::SignedIdentitySuccession,
 ) -> SweepStatus {
@@ -1070,6 +1191,14 @@ async fn sweep_as_successor_web(
             return SweepStatus::Ran(Box::new(report));
         }
     };
+    // The retired leaf, PARKED in the successor's plane — web's durable twin of
+    // native's retired SQLite, and the only copy a later retry can sweep from
+    // (`succession-propagation.md` § Propagation → *Own device fleet*, the
+    // retired-leaf sub-bullet, rule (1)). The restore door parks on its
+    // foreign-seat arm, but this device never meets that arm: the publish below
+    // puts the successor's OWN snapshot at `provider` before the switch, so a
+    // partial sweep's ratcheted leaf would otherwise die with this document.
+    park_ceremony_retired_leaf(&client, &successor_signer, &old.engine).await;
     let sync = MlsStateSync::new(
         Box::new(WsMlsReplicaTransport::new(client)),
         &successor_signer,
@@ -1096,6 +1225,34 @@ async fn sweep_as_successor_web(
     SweepStatus::Ran(Box::new(report))
 }
 
+/// Park the ceremony's retired engine at `retired/<old_hex>/provider` under the
+/// successor — [`sweep_as_successor_web`]'s instance of the restore door's
+/// park. Written at whatever base the path reads at rather than only into
+/// `Absent`: this engine is the live one that just authored the sweep, so it is
+/// the newest the retired leaf will ever be, and anything already there is
+/// older. Never fatal — the account has moved; a failed park leaves the retry
+/// answering `NoOldState`, logged.
+async fn park_ceremony_retired_leaf(
+    client: &TokenWsRpcClient,
+    successor: &ActorKeypair,
+    retired: &MlsEngine,
+) {
+    let replica = fauna_client_mls_sync::MlsReplicaClient::new(
+        Box::new(WsMlsReplicaTransport::new(client.clone())),
+        successor,
+    );
+    match replica
+        .load_retired_provider(&retired.identity_actor_id())
+        .await
+    {
+        Ok((_, base)) => {
+            fauna_client_recovery::ceremony::write_back_parked_retired_leaf(&replica, retired, base)
+                .await
+        }
+        Err(e) => tracing::error!("[wasm/succession] reading the retired leaf's parked path: {e}"),
+    }
+}
+
 /// Finish a succession whose submit reply never arrived — web's
 /// [`fauna_client_recovery::ceremony::finish_unconfirmed_succession`].
 ///
@@ -1112,7 +1269,7 @@ async fn sweep_as_successor_web(
 /// back into the account the undecidable arms name.
 async fn finish_unconfirmed_web(
     dial_url: &str,
-    old: Option<&OldEngineHandle>,
+    old: Option<&LiveEngineHandle>,
     old_actor_id: ActorId,
     successor_secret_hex: &str,
     persisted: bool,
@@ -1209,14 +1366,24 @@ async fn finish_unconfirmed_web(
 /// exactly where this ceremony is exercised: binding the row to a dial override
 /// would leave the successor pointing at a URL that stops existing when the test
 /// ends.
-pub(crate) async fn succeed_with_held_kit_web(
-    client: InnerClient,
+///
+/// Generic over the requester because the ceremony's kinds are all
+/// pre-identity (kit-signed): the signed-in Settings path hands it the
+/// session's own client, and the locked launch surface — which has no session
+/// at all — an anonymous one ([`succeed_stolen_identity_locked`];
+/// `devices.md` § The two panic buttons, point 5).
+pub(crate) async fn succeed_with_held_kit_web<R>(
+    client: R,
     secret_hex: &str,
     phrase: &str,
     nest_url: &str,
     dial_url: &str,
-    old: Option<&OldEngineHandle>,
-) -> Result<StolenOutcomeJs, String> {
+    old: Option<&LiveEngineHandle>,
+) -> Result<StolenOutcomeJs, String>
+where
+    R: RpcRequester,
+    R::Error: fauna_protocol::RpcErrorClass,
+{
     let identity = ActorKeypair::from_secret_hex(secret_hex)
         .map_err(|e| format!("reading this identity: {e}"))?;
     let old_actor_id = identity.actor_id();
@@ -1342,15 +1509,42 @@ pub(crate) async fn succeed_with_held_kit_web(
     // just produced and never re-derived later — the report is the membership
     // as it stood across the compromise window (`succession-aftermath.md`
     // § Propagation).
-    PendingCeremony::new(
+    //
+    // And before both, the departed fleet — off this tab's runtime while it
+    // still serves the succeeded identity, else off that identity's IndexedDB
+    // store at rest (`departed_fleet::record_departed_fleet`;
+    // `succession-aftermath.md` § Re-key scope → *Predecessor devices are
+    // departed devices*).
+    //
+    // ⚠ All three are registry mutators (each rewrites `fauna/index` or a slot
+    // read-modify-write), so they run together inside the cross-tab mutation
+    // lock like the seed persist above. The fleet READ is async and
+    // stays outside it: the lock's section is synchronous.
+    let departed_ids = fauna_account_plane::departed_fleet::read_departed_fleet(
+        crate::account_runtime::handle_for(&old_actor_id.to_hex()).as_ref(),
+        fauna_account_plane::deployment_seed_recovery::StoreRoot::platform(),
+        &identity,
+    )
+    .await;
+    let pending = PendingCeremony::new(
         &old_actor_id,
         &landed.sweep.review_roster(),
         landed.succeeded_at,
-    )
-    .park(&accounts, &landed.new_actor_id.to_hex());
-    if let Err(e) =
-        accounts.record_succession(&old_actor_id.to_hex(), &landed.new_actor_id.to_hex())
-    {
+    );
+    let old_hex = old_actor_id.to_hex();
+    let new_hex = landed.new_actor_id.to_hex();
+    let link = fauna_client_accounts::with_web_mutation_lock(move || {
+        let accounts = account_registry();
+        fauna_account_plane::departed_fleet::record_departed_ids(
+            &accounts,
+            old_actor_id,
+            departed_ids,
+        );
+        pending.park(&accounts, &new_hex);
+        accounts.record_succession(&old_hex, &new_hex)
+    })
+    .await;
+    if let Err(e) = link {
         tracing::error!(
             "[wasm/succession] recording the predecessor link — the aftermath passes will find \
              no predecessors until this is repaired: {e}"

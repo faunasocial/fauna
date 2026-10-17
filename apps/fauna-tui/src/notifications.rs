@@ -278,6 +278,7 @@ fn type_glyph(notif_type: &NotifType) -> &'static str {
         NotifType::Quote => "❝",
         NotifType::Follow => "＋",
         NotifType::Mention => "＠",
+        NotifType::Tip => "⚡",
         _ => "•",
     }
 }

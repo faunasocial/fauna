@@ -10,7 +10,7 @@ namespace FaunaApp.Core.ViewModels;
 
 /// <summary>
 /// The local-folder binding VM, nested under each folder on the Folders page
-/// (file-sync.md § On-Demand Files; ui.yaml § folders — the set is contextual, so there
+/// (on-demand-files.md § On-Demand Files; ui.yaml § folders — the set is contextual, so there
 /// is no free-text set name).
 ///
 /// <para><b>A renderer, not the control plane.</b> The optimistic model, the agent seam and

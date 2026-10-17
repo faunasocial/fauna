@@ -20,6 +20,7 @@
   import { bridgeApprovalMachine } from '$lib/rpc';
   import { ensureWasm, bridgeDisplayName } from '$lib/wasm';
   import { resolveLocalized } from '$lib/i18n/localized';
+  import { localTimestamp } from '$lib/value-format';
   import { onMount } from 'svelte';
   import { afterNavigate } from '$app/navigation';
   import MessageBanner from '$lib/components/MessageBanner.svelte';
@@ -117,12 +118,14 @@
     }
   }
 
+  // Audit timestamps in the shared fixed local form (value-formatting.md
+  // § Absolute local timestamp display), as on linux, windows and tui.
   function firstSeenText(v: PendingBridgeView): string {
-    return v.first_seen_at ? new Date(v.first_seen_at).toLocaleString() : '—';
+    return v.first_seen_at ? localTimestamp(v.first_seen_at) : '—';
   }
 
   function approvedAtText(v: ApprovedBridgeView): string {
-    return v.approved_at ? new Date(v.approved_at).toLocaleString() : '—';
+    return v.approved_at ? localTimestamp(v.approved_at) : '—';
   }
 
   function openRotateConfirm(pubkeyHex: string): void {
@@ -155,7 +158,7 @@
 
 <p class="muted small">{t.admin.bridges_pending.description}</p>
 
-<h2 class="section-heading">{t.admin.bridges_pending.pending_section}</h2>
+<h2 class="section-heading" data-testid={IDS.ADMIN_BRIDGES_PENDING_SECTION}>{t.admin.bridges_pending.pending_section}</h2>
 <div class="cards">
   {#if (snap?.pending.length ?? 0) === 0}
     <p class="muted small">{t.admin.bridges_pending.empty}</p>
@@ -204,7 +207,7 @@
   {/each}
 </div>
 
-<h2 class="section-heading">{t.admin.bridges_pending.approved_section}</h2>
+<h2 class="section-heading" data-testid={IDS.ADMIN_BRIDGES_APPROVED_SECTION}>{t.admin.bridges_pending.approved_section}</h2>
 <div class="cards">
   {#if (snap?.approved.length ?? 0) === 0}
     <p class="muted small">{t.admin.bridges_pending.approved_empty}</p>
@@ -237,7 +240,7 @@
         </button>
       </div>
       {#if rotatingPubkeyHex === v.pubkey_hex}
-        <div class="confirm-box">
+        <div class="confirm-box" data-testid={IDS.ADMIN_BRIDGES_ROTATE_CONFIRM}>
           <strong>{t.admin.bridges_rotate.title}</strong>
           <p class="muted small" data-testid={IDS.ADMIN_BRIDGES_ROTATE_WARNING_TEXT}>{t.admin.bridges_rotate.warning}</p>
           <div class="actions">

@@ -109,6 +109,161 @@ pub trait BlobFetcher: crate::MaybeSendSync {
         store_keys: &[ContentHash],
         relative_path: &str,
     ) -> Result<Vec<Vec<u8>>>;
+
+    /// [`Self::fetch_chunks`] for a file of `folder` — a **folder read**, the
+    /// one kind of read the nest may relay from a seat on a store miss
+    /// (`file-sync.md` § Relay serving, step (4)). A fetcher over the reader's
+    /// own nest overrides this to send the [`FolderHint`] under the session
+    /// bearer; every other fetcher (a peer, a fake, a foreign nest it holds no
+    /// session on) reads exactly as `fetch_chunks` does, which is the default.
+    ///
+    /// Reached through [`FolderHinted`], which a caller builds per download:
+    /// one fetcher serves many folders, so the folder travels with the read.
+    async fn fetch_folder_chunks(
+        &self,
+        store_keys: &[ContentHash],
+        relative_path: &str,
+        folder: &FolderHint,
+    ) -> Result<Vec<Vec<u8>>> {
+        let _ = folder;
+        self.fetch_chunks(store_keys, relative_path).await
+    }
+}
+
+/// The folder a by-manifest read is for — the relay hint of `GET
+/// /api/v1/chunks/{hash}` (`file-sync.md` § Relay serving, step (4); § Content
+/// residency, gate 3). Ignored by the nest on a store hit; on a miss, under a
+/// bearer that names the caller, it lets the nest ask the folder's announced
+/// seats instead of answering `404` — the only way a device that does not sync
+/// a metadata-only folder can open its files.
+///
+/// The hint goes out in **every form the reader holds**, as the sync engine's
+/// pull sends it: the address (`folder_hash`, hex of
+/// [`set_name_hash`](crate::path_crypto::set_name_hash)) is what finds a
+/// sealed set, whose name rests blank on the nest; the plaintext name rides
+/// beside it until the wire contraction retires it; and the **row** form
+/// (`folder_ref`, a [`FolderRef`](crate::folder_keys::FolderRef) wire string)
+/// is the one the nest prefers when present, because both name forms resolve
+/// the caller's own same-named set first — a member who owns a set named like
+/// the shared set it reads reaches the shared set only by its ref. A reader
+/// that knows its folder's ref sends it ([`Self::with_ref`]); one that holds
+/// only a name sends the two name forms. The parameter names are the nest's
+/// (`fauna_nest_http::paths::chunk_store::FOLDER_HINT_PARAM` /
+/// `FOLDER_HASH_HINT_PARAM` / `FOLDER_REF_HINT_PARAM`); this crate cannot
+/// depend on that one, so `fauna-client` pins the spellings equal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderHint {
+    name: String,
+    folder_ref: Option<crate::folder_keys::FolderRef>,
+}
+
+impl FolderHint {
+    /// The plaintext form's query parameter.
+    pub const NAME_PARAM: &'static str = "folder";
+    /// The address form's query parameter.
+    pub const HASH_PARAM: &'static str = "folder_hash";
+    /// The row form's query parameter.
+    pub const REF_PARAM: &'static str = "folder_ref";
+
+    /// The hint for the folder named `name` (the set name the reader holds).
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            folder_ref: None,
+        }
+    }
+
+    /// The same hint naming the folder's row too — `local:<id>` for a set
+    /// on the reader's own nest, `foreign:<channel>` for a cross-nest set read
+    /// on its home nest under a byte-plane token. `None` leaves the name forms
+    /// alone.
+    #[must_use]
+    pub fn with_ref(mut self, folder_ref: Option<crate::folder_keys::FolderRef>) -> Self {
+        self.folder_ref = folder_ref;
+        self
+    }
+
+    /// The folder's name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The folder's row, when the reader knows it.
+    pub fn folder_ref(&self) -> Option<crate::folder_keys::FolderRef> {
+        self.folder_ref
+    }
+
+    /// [`Self::query_pairs`] rendered as one URL query (no leading `?`), the
+    /// name percent-encoded — for a transport with no query builder (wasm).
+    pub fn query_string(&self) -> String {
+        self.query_pairs()
+            .iter()
+            .map(|(k, v)| format!("{k}={}", urlencoding::encode(v)))
+            .collect::<Vec<_>>()
+            .join("&")
+    }
+
+    /// The query pairs one hinted chunk GET carries: the two name forms, and
+    /// the row form when the reader knows it.
+    pub fn query_pairs(&self) -> Vec<(&'static str, String)> {
+        let mut pairs = vec![
+            (Self::NAME_PARAM, self.name.clone()),
+            (
+                Self::HASH_PARAM,
+                hex::encode(crate::path_crypto::set_name_hash(&self.name)),
+            ),
+        ];
+        if let Some(folder_ref) = self.folder_ref {
+            pairs.push((Self::REF_PARAM, folder_ref.to_wire()));
+        }
+        pairs
+    }
+}
+
+/// A [`BlobFetcher`] reading for one folder: every chunk batch goes through the
+/// inner fetcher's [`BlobFetcher::fetch_folder_chunks`] with the folder's
+/// [`FolderHint`]. Built per download over a shared fetcher (`file-sync.md`
+/// § Relay serving, step (4) — the folder travels with the read, never with the
+/// fetcher), and handed to any walk in this module unchanged.
+pub struct FolderHinted<'a> {
+    inner: &'a dyn BlobFetcher,
+    folder: FolderHint,
+}
+
+impl<'a> FolderHinted<'a> {
+    /// Read through `inner` for `folder`.
+    pub fn new(inner: &'a dyn BlobFetcher, folder: FolderHint) -> Self {
+        Self { inner, folder }
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl BlobFetcher for FolderHinted<'_> {
+    async fn fetch_manifest(&self, hash: &ContentHash) -> Result<Vec<u8>> {
+        self.inner.fetch_manifest(hash).await
+    }
+
+    async fn fetch_chunks(
+        &self,
+        store_keys: &[ContentHash],
+        relative_path: &str,
+    ) -> Result<Vec<Vec<u8>>> {
+        self.inner
+            .fetch_folder_chunks(store_keys, relative_path, &self.folder)
+            .await
+    }
+
+    async fn fetch_folder_chunks(
+        &self,
+        store_keys: &[ContentHash],
+        relative_path: &str,
+        folder: &FolderHint,
+    ) -> Result<Vec<Vec<u8>>> {
+        self.inner
+            .fetch_folder_chunks(store_keys, relative_path, folder)
+            .await
+    }
 }
 
 /// Error context a [`BlobFetcher`] attaches to a failed call that had already
@@ -465,6 +620,27 @@ pub struct FileDownloadKeys {
     /// the ones that must carry it — a reader of judged change rows sets it
     /// from the verdict's *signed as*, never from the served author.
     pub record_signer: RecordSigner,
+    /// Refuse a **plaintext** manifest (`stored_hashes = None`) instead of
+    /// passing it through — set by every owner-only reader whose manifest
+    /// ADDRESS comes from a party's unsigned word: the snapshot restore (the
+    /// home nest names each entry's manifest), the backup audit's ledger and
+    /// sampled-record opens and the recovery leg (a backup destination names
+    /// them) (`backup-restore.md` § Security Properties → Integrity owns the
+    /// rule).
+    ///
+    /// The address check proves only that the served bytes are the ones the
+    /// party listed, and that party can build a plaintext manifest and chunks
+    /// that hash consistently: the whole-file check compares against the
+    /// `file_hash` the same manifest carries. Only the seal authenticates —
+    /// a convergent `chunk_crypto` body opens under nothing but the owner's
+    /// root — so a reader that names no signed row must demand it. The sync engine's readers leave it `false`: their
+    /// addresses come from writer-signed rows, which is what licenses a
+    /// public-audience folder's plaintext there.
+    ///
+    /// Refused in [`fetch_manifest`] before any chunk is fetched, and again in
+    /// the chunk-open policy so no walk can reach a passthrough with it set;
+    /// the failure is [`PermanentApplyFailure::PLAINTEXT_REFUSED`](crate::apply_failure::PermanentApplyFailure::PLAINTEXT_REFUSED).
+    pub sealed_only: bool,
     /// Test/legacy configured root for an owner-only set (`None` in production).
     pub epoch_secret: Option<[u8; 32]>,
 }
@@ -478,6 +654,31 @@ impl FileDownloadKeys {
             backup_key: Some(backup_key.into()),
             ..Default::default()
         }
+    }
+
+    /// This reader with [`sealed_only`](Self::sealed_only) set: a plaintext
+    /// manifest is refused, never passed through.
+    #[must_use]
+    pub fn sealed_only(self) -> Self {
+        Self {
+            sealed_only: true,
+            ..self
+        }
+    }
+
+    /// Refuse `manifest` when this reader is [`sealed_only`](Self::sealed_only)
+    /// and the manifest is plaintext. PERMANENT: the same bytes refetch the
+    /// same shape.
+    fn check_sealed_only(&self, manifest: &ChunkManifest) -> Result<()> {
+        if self.sealed_only && manifest.stored_hashes.is_none() {
+            return Err(crate::apply_failure::permanent(
+                crate::apply_failure::PermanentApplyFailure::PLAINTEXT_REFUSED,
+                "plaintext manifest (no stored_hashes) refused by a sealed-only reader — \
+                 an owner-only copy is sealed, and nothing else authenticates bytes at an \
+                 address the serving party chose",
+            ));
+        }
+        Ok(())
     }
 
     /// The owner key, or `None` when this reader is bound to a shared file
@@ -917,6 +1118,18 @@ pub async fn fetch_manifest(
             format!("{e:#}"),
         )
     })?;
+    // The declared size must be the chunk list's: refused here, before any
+    // caller reports `total_size` (the engine's `FileStarted`) or sizes a
+    // buffer by it. PERMANENT — the same bytes refetch the same table.
+    manifest.check_sizes().map_err(|e| {
+        crate::apply_failure::permanent(
+            crate::apply_failure::PermanentApplyFailure::MANIFEST_SIZE_REFUSED,
+            format!("{e:#}"),
+        )
+    })?;
+    // Before the `is_sealed()` early return — that return is exactly the
+    // passthrough a sealed-only reader exists to refuse.
+    keys.check_sealed_only(&manifest)?;
     if !manifest.is_sealed() {
         return Ok(manifest);
     }
@@ -982,8 +1195,10 @@ fn open_sealed_manifest(
 /// § M2 At-rest blob keying):
 ///
 /// - `stored_hashes = None` ⇒ the stored bytes ARE the (possibly compressed)
-///   plaintext — **always, regardless of this reader's key state**
-///   (`ChunkManifest.stored_hashes`'s own contract). A keyed reader reading a
+///   plaintext — **regardless of this reader's key state**
+///   (`ChunkManifest.stored_hashes`'s own contract), save that a
+///   [`sealed_only`](FileDownloadKeys::sealed_only) reader refuses it outright
+///   (`PLAINTEXT_REFUSED`). A keyed reader reading a
 ///   plaintext manifest passes it through: that is what keeps plaintext
 ///   manifests (public-audience folders, a public-to-private flip, raw nest
 ///   writes) readable to a keyed reader, and what fixes the windows on-demand hydration host (keyed,
@@ -1052,6 +1267,9 @@ fn resolve_chunk_open_policy(
     content_key_version: Option<u64>,
 ) -> Result<ChunkOpenPolicy> {
     if manifest.stored_hashes.is_none() {
+        // [`fetch_manifest`] already refused it for a sealed-only reader; this
+        // keeps a caller that brought its own manifest from passing through.
+        keys.check_sealed_only(manifest)?;
         return Ok(ChunkOpenPolicy::Plaintext);
     }
     if let Some(roots) = keys.stamp_bound_roots(content_key_version)? {
@@ -1355,6 +1573,31 @@ pub async fn download_file_to_path_by_manifest(
     relative_path: &str,
     dest: &std::path::Path,
 ) -> Result<ContentHash> {
+    download_file_to_path_and_manifest(
+        fetcher,
+        keys,
+        manifest_hash,
+        content_key_version,
+        relative_path,
+        dest,
+    )
+    .await
+    .map(|(hash, _)| hash)
+}
+
+/// [`download_file_to_path_by_manifest`], also handing back the opened
+/// (plaintext-view) manifest the walk fetched — for a caller that records
+/// where the body's chunks lie (a serving seat's store-key index) without a
+/// second manifest fetch.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn download_file_to_path_and_manifest(
+    fetcher: &dyn BlobFetcher,
+    keys: &FileDownloadKeys,
+    manifest_hash: ContentHash,
+    content_key_version: Option<u64>,
+    relative_path: &str,
+    dest: &std::path::Path,
+) -> Result<(ContentHash, ChunkManifest)> {
     let walk = ManifestWalk::open(
         fetcher,
         keys,
@@ -1398,7 +1641,7 @@ pub async fn download_file_to_path_by_manifest(
     };
 
     match write_walk.await {
-        Ok(hash) => Ok(hash),
+        Ok(hash) => Ok((hash, walk.manifest)),
         Err(e) => {
             // Never leave a partial/corrupt file at dest.
             let _ = std::fs::remove_file(dest);
@@ -1426,6 +1669,26 @@ pub async fn download_file_bytes_by_manifest(
     content_key_version: Option<u64>,
     relative_path: &str,
 ) -> Result<Vec<u8>> {
+    download_file_bytes_and_manifest(
+        fetcher,
+        keys,
+        manifest_hash,
+        content_key_version,
+        relative_path,
+    )
+    .await
+    .map(|(bytes, _)| bytes)
+}
+
+/// [`download_file_bytes_by_manifest`], also handing back the opened
+/// (plaintext-view) manifest — see [`download_file_to_path_and_manifest`].
+pub async fn download_file_bytes_and_manifest(
+    fetcher: &dyn BlobFetcher,
+    keys: &FileDownloadKeys,
+    manifest_hash: ContentHash,
+    content_key_version: Option<u64>,
+    relative_path: &str,
+) -> Result<(Vec<u8>, ChunkManifest)> {
     if !crate::path_guard::is_safe_relative_path(relative_path) {
         anyhow::bail!("unsafe path rejected: {relative_path}");
     }
@@ -1445,7 +1708,7 @@ pub async fn download_file_bytes_by_manifest(
             hex::encode(actual.digest())
         );
     }
-    Ok(file_data)
+    Ok((file_data, manifest))
 }
 
 /// The file's total plaintext size by manifest — what a seeking reader
@@ -1606,14 +1869,29 @@ pub async fn download_followed_file(
 /// this walk's dependency graph that compiles to wasm32 unconditionally — see
 /// the module docs).
 ///
-/// Carries **no bearer**: both routes are open
-/// (`bins/fauna-nest/src/chunk_routes.rs` has no auth extractor) —
-/// confidentiality is cryptographic (the bytes are already sealed), and
-/// integrity rests on the content address each blob is fetched *by*, not on
-/// who asked.
+/// A plain read carries **no bearer**: both routes are open on a store hit
+/// (`bins/fauna-nest/src/chunk_routes.rs`) — confidentiality is cryptographic
+/// (the bytes are already sealed), and integrity rests on the content address
+/// each blob is fetched *by*, not on who asked. A **folder read**
+/// ([`BlobFetcher::fetch_folder_chunks`]) on a fetcher built
+/// [`with_session_bearer`](Self::with_session_bearer) adds the [`FolderHint`]
+/// and the session bearer, which is what lets the nest's store-miss arm name
+/// the caller and relay the chunk from a seat (`file-sync.md` § Relay serving,
+/// step (4)); without a bearer it reads as a plain read.
 #[cfg(all(target_arch = "wasm32", feature = "blob-fetch-wasm"))]
 pub struct WasmPublicChunkFetcher {
     nest_url: String,
+    bearer: Option<std::rc::Rc<dyn SessionBearer>>,
+}
+
+/// The browser session's bearer, as a [`WasmPublicChunkFetcher`] reads it for a
+/// hinted folder read. `fauna-core` sits below the WS-RPC client, so the
+/// session supplies it (`fauna-media-machine` over `WsRpcClient::bearer`).
+#[cfg(all(target_arch = "wasm32", feature = "blob-fetch-wasm"))]
+#[async_trait::async_trait(?Send)]
+pub trait SessionBearer {
+    /// A current bearer for the fetcher's nest.
+    async fn bearer(&self) -> Result<String>;
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "blob-fetch-wasm"))]
@@ -1623,21 +1901,53 @@ impl WasmPublicChunkFetcher {
     pub fn new(nest_url: impl Into<String>) -> Self {
         Self {
             nest_url: nest_url.into(),
+            bearer: None,
         }
     }
 
-    async fn get(&self, path: &str) -> Result<Vec<u8>> {
+    /// Send `bearer`'s session bearer, with the folder hint, on every folder
+    /// read — the reader of the session's own nest. A fetcher for a nest the
+    /// session holds no account on is never given one.
+    pub fn with_session_bearer(mut self, bearer: std::rc::Rc<dyn SessionBearer>) -> Self {
+        self.bearer = Some(bearer);
+        self
+    }
+
+    async fn get(&self, path: &str, max_bytes: u64) -> Result<Vec<u8>> {
+        self.get_as(path, None, max_bytes).await
+    }
+
+    /// GET `path` (query included), under `bearer` when one is given, refusing
+    /// a reply past `max_bytes`: the declared `Content-Length` is checked
+    /// before the body is read, and the body is then streamed under the cap by
+    /// [`read_body_capped`] so a length-less (chunked) reply is cut off too.
+    async fn get_as(&self, path: &str, bearer: Option<&str>, max_bytes: u64) -> Result<Vec<u8>> {
         let url = format!("{}{path}", self.nest_url);
-        let resp = gloo_net::http::Request::get(&url)
+        let mut req = gloo_net::http::Request::get(&url);
+        if let Some(token) = bearer {
+            req = req.header("authorization", &format!("Bearer {token}"));
+        }
+        let resp = req
             .send()
             .await
             .map_err(|e| anyhow::anyhow!("GET {path}: {e}"))?;
         let status = resp.status();
         if !(200..300).contains(&status) {
-            let message = resp.text().await.unwrap_or_default();
+            let message = if check_declared_body_len(
+                resp.headers().get("content-length").as_deref(),
+                ERROR_BODY_READ_CAP,
+            )
+            .is_ok()
+            {
+                resp.text().await.unwrap_or_default()
+            } else {
+                String::new()
+            };
             anyhow::bail!("GET {path} failed ({status}): {message}");
         }
-        resp.binary()
+        check_declared_body_len(resp.headers().get("content-length").as_deref(), max_bytes)
+            .map_err(|e| anyhow::anyhow!("GET {path}: {e}"))?;
+        read_body_capped(resp, max_bytes)
             .await
             .map_err(|e| anyhow::anyhow!("GET {path} read body: {e}"))
     }
@@ -1647,8 +1957,11 @@ impl WasmPublicChunkFetcher {
 #[async_trait::async_trait(?Send)]
 impl BlobFetcher for WasmPublicChunkFetcher {
     async fn fetch_manifest(&self, hash: &ContentHash) -> Result<Vec<u8>> {
-        self.get(&format!("/api/v1/manifests/{}", hex::encode(hash.digest())))
-            .await
+        self.get(
+            &format!("/api/v1/manifests/{}", hex::encode(hash.digest())),
+            crate::chunker::MAX_MANIFEST_BODY,
+        )
+        .await
     }
 
     async fn fetch_chunks(
@@ -1664,12 +1977,136 @@ impl BlobFetcher for WasmPublicChunkFetcher {
         let mut out = Vec::with_capacity(store_keys.len());
         for key in store_keys {
             let bytes = self
-                .get(&format!("/api/v1/chunks/{}", hex::encode(key.digest())))
+                .get(
+                    &format!("/api/v1/chunks/{}", hex::encode(key.digest())),
+                    crate::chunker::MAX_STORED_CHUNK_BODY,
+                )
                 .await
                 .map_err(|e| anyhow::anyhow!("downloading chunk for {relative_path}: {e}"))?;
             out.push(bytes);
         }
         Ok(out)
+    }
+
+    async fn fetch_folder_chunks(
+        &self,
+        store_keys: &[ContentHash],
+        relative_path: &str,
+        folder: &FolderHint,
+    ) -> Result<Vec<Vec<u8>>> {
+        // A hint without a bearer only turns the nest's miss into a `401`, so
+        // a fetcher with no session reads plainly.
+        let Some(source) = &self.bearer else {
+            return self.fetch_chunks(store_keys, relative_path).await;
+        };
+        let token = source
+            .bearer()
+            .await
+            .map_err(|e| anyhow::anyhow!("session bearer for {relative_path}: {e}"))?;
+        let query = folder.query_string();
+        let mut out = Vec::with_capacity(store_keys.len());
+        for key in store_keys {
+            let path = format!("/api/v1/chunks/{}?{query}", hex::encode(key.digest()));
+            let bytes = self
+                .get_as(&path, Some(&token), crate::chunker::MAX_STORED_CHUNK_BODY)
+                .await
+                .map_err(|e| anyhow::anyhow!("downloading chunk for {relative_path}: {e}"))?;
+            out.push(bytes);
+        }
+        Ok(out)
+    }
+}
+
+/// Append `chunk` to `buf`, refusing once the running total would pass
+/// `max_bytes` — the pure accumulate-and-bound step of [`read_body_capped`],
+/// kept target-independent so it is tested natively. `buf` is left untouched on
+/// refusal.
+pub fn extend_capped(buf: &mut Vec<u8>, chunk: &[u8], max_bytes: u64) -> Result<()> {
+    let total = (buf.len() as u64).saturating_add(chunk.len() as u64);
+    anyhow::ensure!(
+        total <= max_bytes,
+        "response exceeded the size cap (more than {max_bytes} bytes)"
+    );
+    buf.extend_from_slice(chunk);
+    Ok(())
+}
+
+/// Read a browser `fetch` reply's body under `max_bytes`, chunk by chunk from
+/// its `ReadableStream`, cancelling the stream and refusing as soon as the cap
+/// is passed — so a stranger's nest that omits `Content-Length` (chunked)
+/// cannot make the tab buffer the whole body first. Shared by every browser
+/// reader (`WasmPublicChunkFetcher`, `fauna-media-machine`'s `WasmBlobFetcher`).
+/// Drives the stream through `js_sys::Reflect` rather than naming `web-sys`
+/// reader types, so it adds no third-party manifest entry. A reply with no
+/// body stream falls back to the buffered read, length-checked after.
+#[cfg(all(target_arch = "wasm32", feature = "blob-fetch-wasm"))]
+pub async fn read_body_capped(resp: gloo_net::http::Response, max_bytes: u64) -> Result<Vec<u8>> {
+    use js_sys::{Function, Reflect, Uint8Array};
+    use wasm_bindgen::{JsCast, JsValue};
+    use wasm_bindgen_futures::JsFuture;
+
+    fn js_err(what: &str, e: JsValue) -> anyhow::Error {
+        anyhow::anyhow!("{what}: {e:?}")
+    }
+    fn method(target: &JsValue, name: &str) -> Result<Function> {
+        Reflect::get(target, &JsValue::from_str(name))
+            .map_err(|e| js_err(name, e))?
+            .dyn_into::<Function>()
+            .map_err(|_| anyhow::anyhow!("{name} is not a function"))
+    }
+
+    let Some(stream) = resp.body() else {
+        let body = resp.binary().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut out = Vec::new();
+        extend_capped(&mut out, &body, max_bytes)?;
+        return Ok(out);
+    };
+    let stream: JsValue = stream.into();
+    let reader = method(&stream, "getReader")?
+        .call0(&stream)
+        .map_err(|e| js_err("getReader", e))?;
+    let read = method(&reader, "read")?;
+    let mut out = Vec::new();
+    loop {
+        let step = JsFuture::from(js_sys::Promise::from(
+            read.call0(&reader).map_err(|e| js_err("read", e))?,
+        ))
+        .await
+        .map_err(|e| js_err("read", e))?;
+        let done = Reflect::get(&step, &JsValue::from_str("done"))
+            .map_err(|e| js_err("done", e))?
+            .as_bool()
+            .unwrap_or(true);
+        if done {
+            return Ok(out);
+        }
+        let value =
+            Reflect::get(&step, &JsValue::from_str("value")).map_err(|e| js_err("value", e))?;
+        let chunk = Uint8Array::new(&value).to_vec();
+        if let Err(e) = extend_capped(&mut out, &chunk, max_bytes) {
+            // Stop the transfer; a failed cancel changes nothing about the refusal.
+            if let Ok(cancel) = method(&reader, "cancel") {
+                let _ = cancel.call0(&reader);
+            }
+            return Err(e);
+        }
+    }
+}
+
+/// How much of a non-2xx body a browser reader will read as diagnostic text.
+pub const ERROR_BODY_READ_CAP: u64 = 4096;
+
+/// Refuse a reply whose declared `Content-Length` is past `max_bytes`, before
+/// any body byte is read. An absent or unparsable header passes (the caller
+/// still checks the length it read): this is the browser readers' early bound,
+/// where `fetch` offers no streaming cap. The native readers use
+/// `fauna_nest_http::capped` instead.
+pub fn check_declared_body_len(declared: Option<&str>, max_bytes: u64) -> Result<()> {
+    match declared.and_then(|v| v.trim().parse::<u64>().ok()) {
+        Some(len) if len > max_bytes => {
+            anyhow::bail!("response exceeded the size cap ({len} > {max_bytes} bytes)")
+        }
+        _ => Ok(()),
     }
 }
 
@@ -1681,6 +2118,32 @@ mod tests {
 
     use super::*;
     use crate::chunk::ChunkManifest;
+
+    /// The browser readers' early bound: a declared length past the cap
+    /// is refused before the body is read; at the cap, absent or garbled passes
+    /// (the post-read length check is the backstop).
+    #[test]
+    fn a_declared_length_past_the_cap_is_refused() {
+        assert!(check_declared_body_len(Some("1025"), 1024).is_err());
+        assert!(check_declared_body_len(Some("1024"), 1024).is_ok());
+        assert!(check_declared_body_len(None, 1024).is_ok());
+        assert!(check_declared_body_len(Some("junk"), 1024).is_ok());
+    }
+
+    /// The streaming readers' running bound: chunks accumulate up to the cap
+    /// and the first one past it is refused without being kept.
+    #[test]
+    fn a_chunked_body_is_refused_the_moment_it_passes_the_cap() {
+        let mut buf = Vec::new();
+        assert!(extend_capped(&mut buf, &[1; 600], 1024).is_ok());
+        assert!(extend_capped(&mut buf, &[2; 424], 1024).is_ok());
+        assert_eq!(buf.len(), 1024);
+        assert!(extend_capped(&mut buf, &[3], 1024).is_err());
+        assert_eq!(buf.len(), 1024, "a refused chunk is not kept");
+        let mut one = Vec::new();
+        assert!(extend_capped(&mut one, &[0; 2048], 1024).is_err());
+        assert!(one.is_empty());
+    }
 
     /// A blob store in a HashMap. The whole point of the seam: the walk is
     /// exercised end to end with no nest, no HTTP and no `SyncDb` — which is
@@ -2883,6 +3346,126 @@ mod tests {
         assert_eq!(got, body);
     }
 
+    /// A self-consistent plaintext file a hostile server could build: manifest
+    /// + one chunk, the manifest at a valid address (its own bytes' hash).
+    fn forged_plaintext_file(body: &[u8]) -> (FakeFetcher, ContentHash, ContentHash) {
+        let hash = ContentHash::of_raw(body);
+        let manifest = ChunkManifest {
+            file_hash: ContentHash::of_raw(body),
+            total_size: body.len() as u64,
+            chunk_hashes: vec![hash],
+            chunk_sizes: vec![body.len() as u64],
+            stored_hashes: None,
+            sealed_hashes: None,
+            min_reader: None,
+        };
+        let manifest_bytes = crate::encoding::canonical_encode(&manifest).unwrap();
+        let manifest_hash = ContentHash::of_raw(&manifest_bytes);
+        let mut fetcher = FakeFetcher::default();
+        fetcher.put(&manifest_hash, manifest_bytes);
+        fetcher.put(&hash, crate::compress::compress_chunk(body));
+        (fetcher, manifest_hash, hash)
+    }
+
+    /// A **sealed-only** owner reader refuses a plaintext manifest
+    /// at a valid address — on every walk, with the typed reason, before any
+    /// chunk is fetched — while the same reader without the setting (the
+    /// public-folder path) still reads it, and a sealed file still opens with
+    /// it set.
+    #[tokio::test]
+    async fn sealed_only_reader_refuses_a_plaintext_manifest_at_a_valid_address() {
+        let body = vec![b'f'; 8192];
+        let (fetcher, manifest_hash, _) = forged_plaintext_file(&body);
+        let sealed_only = FileDownloadKeys::owner(owner_key()).sealed_only();
+
+        let refused = |e: anyhow::Error| {
+            assert_eq!(
+                crate::apply_failure::permanent_reason(&e),
+                Some(crate::apply_failure::PermanentApplyFailure::PLAINTEXT_REFUSED.reason),
+                "expected the typed sealed-only refusal, got: {e:#}"
+            );
+        };
+        refused(
+            download_file_bytes_by_manifest(&fetcher, &sealed_only, manifest_hash, None, "f.bin")
+                .await
+                .expect_err("whole-buffer walk must refuse plaintext"),
+        );
+        refused(
+            download_file_range_by_manifest(
+                &fetcher,
+                &sealed_only,
+                manifest_hash,
+                None,
+                "f.bin",
+                0,
+                8,
+            )
+            .await
+            .expect_err("range walk must refuse plaintext"),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("f.bin");
+        refused(
+            download_file_to_path_by_manifest(
+                &fetcher,
+                &sealed_only,
+                manifest_hash,
+                None,
+                "f.bin",
+                &dest,
+            )
+            .await
+            .expect_err("to-path walk must refuse plaintext"),
+        );
+        assert!(!dest.exists(), "nothing lands for a refused manifest");
+        assert!(
+            fetcher.fetched().is_empty(),
+            "refused at the manifest, before any chunk fetch"
+        );
+
+        // A caller that brought its own manifest is refused by the policy too.
+        let manifest = fetch_manifest(
+            &fetcher,
+            &FileDownloadKeys::owner(owner_key()),
+            &manifest_hash,
+            None,
+        )
+        .await
+        .unwrap();
+        refused(
+            fetch_decoded_chunks(&fetcher, &sealed_only, &manifest, "f.bin", None)
+                .await
+                .expect_err("chunk-open policy must refuse plaintext"),
+        );
+
+        // Without the setting, the public-folder path is unchanged.
+        let got = download_file_bytes_by_manifest(
+            &fetcher,
+            &FileDownloadKeys::owner(owner_key()),
+            manifest_hash,
+            None,
+            "f.bin",
+        )
+        .await
+        .expect("a reader without sealed_only still reads plaintext");
+        assert_eq!(got, body);
+
+        // And a sealed file still opens with it set.
+        let key = owner_key();
+        let (sealed_fetcher, sealed_hash, expected) =
+            seal_file(&key.convergent_chunk_root(), &[b"sealed ", b"body"]);
+        let got = download_file_bytes_by_manifest(
+            &sealed_fetcher,
+            &FileDownloadKeys::owner(key).sealed_only(),
+            sealed_hash,
+            None,
+            "s.bin",
+        )
+        .await
+        .expect("a sealed-only reader opens a sealed file");
+        assert_eq!(got, expected);
+    }
+
     /// **The public follower's exact read shape** — a reader holding *no key
     /// material at all* opens a plaintext manifest
     /// (`docs/goal/behavior/folders.md` § Publicly-synced follow: manifests +
@@ -3041,6 +3624,49 @@ mod tests {
         .await
         .expect_err("a size table that does not match the chunks is refused");
         assert!(format!("{err:#}").contains("size table"), "{err:#}");
+    }
+
+    /// A sealed manifest whose `total_size` contradicts its size table is
+    /// refused at `fetch_manifest` with the typed permanent code — before the
+    /// hashes are opened and before any caller reports the false size; honest
+    /// sealed manifests (empty, one chunk, several) still open.
+    #[tokio::test]
+    async fn a_lying_total_size_is_refused_at_fetch_manifest() {
+        let key = owner_key();
+        let root = key.convergent_chunk_root();
+        for chunks in [
+            &[][..],
+            &[&[7u8; 10][..]][..],
+            &[&[1u8; 100][..], &[2u8; 300][..]][..],
+        ] {
+            let (fetcher, manifest_hash, _) = seal_file(&root, chunks);
+            let opened = fetch_manifest(
+                &fetcher,
+                &FileDownloadKeys::owner(owner_key()),
+                &manifest_hash,
+                None,
+            )
+            .await
+            .expect("an honest sealed manifest opens");
+            assert_eq!(opened.chunk_sizes.len(), chunks.len());
+        }
+
+        let (fetcher, manifest_hash, _) = seal_file(&root, &[&[1u8; 100], &[2u8; 300]]);
+        let mut lie: ChunkManifest =
+            crate::encoding::canonical_decode(&fetcher.get(&manifest_hash).unwrap()).unwrap();
+        lie.total_size = u64::MAX;
+        let lie_bytes = crate::encoding::canonical_encode(&lie).unwrap();
+        let lie_hash = ContentHash::of_raw(&lie_bytes);
+        let mut fetcher = fetcher;
+        fetcher.put(&lie_hash, lie_bytes);
+        let err = fetch_manifest(&fetcher, &FileDownloadKeys::owner(key), &lie_hash, None)
+            .await
+            .expect_err("a total_size its chunks do not sum to is refused");
+        assert_eq!(
+            crate::apply_failure::permanent_reason(&err),
+            Some(crate::apply_failure::PermanentApplyFailure::MANIFEST_SIZE_REFUSED.reason),
+            "{err:#}"
+        );
     }
 
     // ── Part (D): an unstamped record of a bound set, selected by its stamp ──

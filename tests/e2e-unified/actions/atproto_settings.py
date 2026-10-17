@@ -71,6 +71,15 @@ class AtprotoSettingsActions:
             time.sleep(0.3)
         return self.credential_count() == expected
 
+    def is_credential_revealable(self, index: int = 0) -> bool:
+        """Whether row `index` offers its secret on THIS seat. The reveal
+        control renders only for a credential whose secret this device can read
+        back (the machine's `revealable`) or has already revealed this session —
+        a row listed without it is a credential whose secret this seat does not
+        hold."""
+        scope = f"atproto-app-credential-item[{index}]"
+        return not self.driver.is_absent("atproto-app-credential-reveal", scope=scope)
+
     def reveal_credential_secret(self, index: int = 0, timeout: float = 8.0) -> str:
         """Reveal (or read an already-revealed) secret on row `index`.
 
@@ -205,6 +214,34 @@ class AtprotoSettingsActions:
         """The composed effect lines, rendered verbatim from the machine's
         `pending_transition.lines`."""
         return self.driver.get_text("atproto-depth-confirm-card")
+
+    def history_backfill_label(self) -> str:
+        """The history opt-in's label (`atproto-history-backfill`, on a minting
+        card) — it names the nest's count of posts a backfill would publish."""
+        return self.driver.get_text("atproto-history-backfill")
+
+    def history_backfill_checked(self) -> bool:
+        """The history opt-in's own checked state (the `checked` attr every
+        app publishes on a checkbox)."""
+        return (self.driver.get_attr("atproto-history-backfill", "checked") or "") == "true"
+
+    def set_history_backfill(self, on: bool, timeout: float = 8.0) -> bool:
+        """Drive the minting card's history opt-in to `on`, idempotently, and
+        return whether the checkbox reached it. Off is the default — the
+        forward-only rule (`atproto-pds-bridge.md` § Projection & backfill)."""
+        self.driver.wait_for("atproto-history-backfill", timeout=timeout)
+        if self.history_backfill_checked() != on:
+            self.driver.click("atproto-history-backfill")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.history_backfill_checked() == on:
+                return True
+            time.sleep(0.25)
+        return self.history_backfill_checked() == on
+
+    def did_method_state(self, method: str) -> str:
+        """`on` | `off` — a DID-method radio's own selection (`state` attr)."""
+        return self.driver.get_attr(f"atproto-did-method-{method}", "state") or ""
 
     def confirm_transition(self) -> None:
         self.driver.click("atproto-depth-confirm")

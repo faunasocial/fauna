@@ -240,6 +240,7 @@ async fn parse_multipart_upload(request: Request) -> Result<(Bytes, UploadSideca
                 message: format!(
                     "upload exceeds {BLOB_BODY_LIMIT}-byte inline-blob cap; use /api/v1/chunks for larger uploads"
                 ),
+                code: None,
             });
         }
         match name.as_str() {

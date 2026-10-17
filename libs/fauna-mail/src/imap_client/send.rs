@@ -251,6 +251,31 @@ impl<R: RpcRequester> MailImportClient<R> {
             .await?;
         Ok(reply.session)
     }
+
+    /// `fauna.bridges.record_import_outcomes` — report the messages of one
+    /// source mailbox this client decided about without sending (too large
+    /// for the user's limit, or unreadable at the source); the nest folds
+    /// them into the session's counters and cursor.
+    pub async fn record_outcomes(
+        &self,
+        session_id: impl Into<String>,
+        mailbox: impl Into<String>,
+        uid_validity: u32,
+        outcomes: Vec<fauna_protocol::bridge_routing::ClientImportOutcome>,
+    ) -> Result<fauna_protocol::bridge_routing::RecordImportOutcomesReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.bridges.record_import_outcomes",
+                fauna_protocol::bridge_routing::RecordImportOutcomesRequest {
+                    session_id: session_id.into(),
+                    mailbox: mailbox.into(),
+                    uid_validity,
+                    outcomes,
+                    extra: Default::default(),
+                },
+            )
+            .await
+    }
 }
 
 #[cfg(test)]

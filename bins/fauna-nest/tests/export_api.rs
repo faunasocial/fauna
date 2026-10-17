@@ -3889,6 +3889,113 @@ async fn export_refuses_a_locked_out_account() {
     );
 }
 
+/// Register an actor and mint it an eviction export token — the one credential
+/// `auth::check_bearer_session` never sees, so the door's own use-time
+/// re-checks are the only standing gate on it.
+async fn actor_with_eviction_token(
+    state: &Arc<fauna_nest::routes::AppState>,
+    handle: &str,
+) -> ([u8; 32], String) {
+    let kp = ActorKeypair::generate();
+    let actor_id = kp.actor_id();
+    state
+        .db
+        .create_user(&actor_id.0, "free", handle)
+        .await
+        .unwrap();
+    let token = format!("eviction-token-{handle}");
+    state
+        .db
+        .create_eviction_token(&token, &actor_id.0, 1 << 40)
+        .await
+        .unwrap();
+    (actor_id.0, token)
+}
+
+/// The suspended-account re-check on the **eviction-token** path. The ladder's
+/// warning→suspended step and `suspend_user_now` burn no eviction token, so
+/// the door's `check_actor_active` is the only thing between a suspended
+/// account's token and a full-account export (`admin.md` § What the eviction
+/// export token is for). The session-bearer pin above no longer reaches it:
+/// the bearer validator refuses a suspended bearer first.
+#[tokio::test]
+async fn an_eviction_token_export_refuses_a_suspended_account() {
+    let (base, state) = start_server().await;
+    let (actor_id, token) = actor_with_eviction_token(&state, "evict-suspended").await;
+    assert_eq!(
+        export_status(&base, &token).await,
+        200,
+        "precondition: the eviction token exports before the suspension"
+    );
+
+    state
+        .db
+        .suspend_user_now(&actor_id, "suspended by admin", "other")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        export_status(&base, &token).await,
+        403,
+        "a suspended account's surviving eviction token must not pull the whole account"
+    );
+}
+
+/// The lockout re-check on the **eviction-token** path: `set_locked_until`
+/// burns no eviction token, so `get_locked_until` at the door is the only gate.
+#[tokio::test]
+async fn an_eviction_token_export_refuses_a_locked_out_account() {
+    let (base, state) = start_server().await;
+    let (actor_id, token) = actor_with_eviction_token(&state, "evict-locked").await;
+    assert_eq!(
+        export_status(&base, &token).await,
+        200,
+        "precondition: the eviction token exports before the lockout"
+    );
+
+    let until = fauna_core::data::Timestamp::now_secs() + 3600;
+    state
+        .db
+        .set_locked_until(&actor_id, Some(until))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        export_status(&base, &token).await,
+        403,
+        "a locked-out account's surviving eviction token must not pull the whole account"
+    );
+}
+
+/// A **locked-out admin's** session bearer passes the bearer validator by
+/// design (admins resolve before the lockout read), so it reaches the door and
+/// is refused only by the door's own lockout check — `check_actor_active`
+/// tests suspension alone.
+#[tokio::test]
+async fn export_refuses_a_locked_out_admin_bearer() {
+    let (base, state) = start_server().await;
+    let (actor_id, token) = actor_with_bearer(&state, "locked-admin-export").await;
+    state.db.add_admin_actor(&actor_id).await.unwrap();
+    assert_eq!(
+        export_status(&base, &token).await,
+        200,
+        "precondition: the admin's bearer exports before the lockout"
+    );
+
+    let until = fauna_core::data::Timestamp::now_secs() + 3600;
+    state
+        .db
+        .set_locked_until(&actor_id, Some(until))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        export_status(&base, &token).await,
+        403,
+        "a locked-out admin's bearer passes the validator by design; the door's own lockout check must refuse it"
+    );
+}
+
 /// the whole-account download is never silent — every archive
 /// export rings the owner as an `ArchiveExported` security notice (the generic
 /// `security.notice` row, so it renders on all 7 apps with no per-app work).
@@ -4013,14 +4120,31 @@ async fn an_admins_minted_invite_codes_never_ride_their_audit_rows() {
     .await
     .expect("delete ok");
 
+    // Both credentials the export door accepts: the admin's session bearer,
+    // and the eviction export token — the one that outlives their removal.
+    state
+        .db
+        .create_eviction_token("the-minting-admins-eviction-token", &admin.0, 1 << 40)
+        .await
+        .unwrap();
     let entries = read_archive(&export_zip(&base, &token).await);
-    for (name, bytes) in &entries {
-        let text = String::from_utf8_lossy(bytes);
-        for code in &codes {
-            assert!(
-                !text.contains(code.as_str()),
-                "{name} carries the live invite code {code}"
-            );
+    let eviction_entries =
+        read_archive(&export_zip(&base, "the-minting-admins-eviction-token").await);
+    for (credential, archive) in [("session", &entries), ("eviction", &eviction_entries)] {
+        assert!(
+            archive
+                .iter()
+                .any(|(n, _)| n == "export/tables/audit_log.ndjson"),
+            "precondition: the {credential} archive carries audit_log"
+        );
+        for (name, bytes) in archive {
+            let text = String::from_utf8_lossy(bytes);
+            for code in &codes {
+                assert!(
+                    !text.contains(code.as_str()),
+                    "{name} in the {credential} archive carries the live invite code {code}"
+                );
+            }
         }
     }
 

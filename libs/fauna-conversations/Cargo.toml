@@ -203,6 +203,10 @@ name = "manager_integration_tests"
 required-features = ["test-helpers"]
 
 [[test]]
+name = "recipient_suggestions_tests"
+required-features = ["test-helpers"]
+
+[[test]]
 name = "smtp_backend_tests"
 
 [[test]]

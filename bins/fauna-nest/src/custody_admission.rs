@@ -109,6 +109,55 @@ pub(crate) async fn custody_admits_scope(
     ))
 }
 
+/// **Custody admission for the owner's RECOVERY MATERIAL** — the
+/// `fauna.recovery.escrow.pull` door (`identity-succession.md` § Seed escrow
+/// → *The custodian copy*, ruling 1).
+///
+/// The same live-row re-check as [`custody_admits_scope`] (the row re-derived
+/// on every request, both window bounds, the holder named, the owner the
+/// row's index), but the coverage question has no scope string to ask: the
+/// recovery material is of the account, not of a scope, so ONLY the `Account`
+/// form covers it — an explicit list, however wide, does not. The refusal is
+/// the custody doors' one `permission_denied`, so a refused custodian learns
+/// what a stranger learns.
+pub(crate) async fn admit_recovery_material_for_custody(
+    state: &AppState,
+    holder: &[u8; 32],
+    owner: &[u8; 32],
+) -> Result<(), RpcError> {
+    use fauna_core::custody_grant::CustodyScopeSet;
+
+    let now = crate::db::now_epoch_secs();
+    for blob in state
+        .db
+        .fetch_capability_grants_for_holder(holder, now)
+        .await
+        .map_err(|e| {
+            crate::rpc_errors::internal_ns("recovery", format!("custody grant lookup: {e}"))
+        })?
+    {
+        let Ok(grant) = fauna_mls::wrapped_blob::GrantBlob::from_canonical_bytes(&blob) else {
+            continue; // an unreadable row authorizes nothing
+        };
+        if !fauna_mls::wrapped_blob::grant_window_is_open(&grant, now) {
+            continue; // outside its validity window; see custody_admits_scope
+        }
+        if grant.index.0.as_slice() != owner.as_slice() {
+            continue;
+        }
+        if matches!(
+            fauna_mls::wrapped_blob::custody_scope_set_from_tuples(&grant.scope),
+            Some(CustodyScopeSet::Account)
+        ) {
+            return Ok(());
+        }
+    }
+    Err(crate::rpc_errors::permission_denied_ns(
+        "recovery",
+        "no live account custody grant names this owner",
+    ))
+}
+
 /// **Custody admission for a CONTENT scope — the nest-door half of the
 /// coverage-enumeration ruling** (`account-data-plane.md` § The custody grant +
 /// ceremony → *Coverage enumeration*; row 148).

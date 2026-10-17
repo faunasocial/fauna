@@ -13,8 +13,10 @@ def create_driver(app_name: str) -> PlatformDriver:
     reached in-process parity (no AutomationMode → no host reboots, no
     machine-wide serialization).
     """
-    # The feature catalog attributes an outcome to every app whose driver the test
-    # launched (feature-catalog.md § The marker). This factory is the one door all
+    # The feature catalog attributes an unparametrized test's outcome to every app
+    # whose driver it launched, and an app-parametrized one's to the apps its
+    # parametrization names (`feature_ledger.attributed_apps`, feature-catalog.md
+    # § The marker). This factory is the one door all
     # ~146 driver constructions come through, so noting it here means no test — and
     # no multi-seat fixture — has to remember. `feature_ledger` is stdlib-only and
     # imports nothing from `drivers`, so this cannot cycle.

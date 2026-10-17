@@ -33,21 +33,12 @@ pub struct AdminHandles {
     /// (`docs/goal/ui/README.md` § Navigation model): sub-page position is shell
     /// state, not session state, so it never survives leaving the shell.
     pub sub_stack: gtk::Stack,
-    // --- Dashboard sub-page (existing) ---
-    pub stats_users_row: adw::ActionRow,
-    pub stats_storage_row: adw::ActionRow,
-    pub stats_inbox_row: adw::ActionRow,
-    pub stats_sessions_row: adw::ActionRow,
-    // Hidden per-card E2E value markers (`admin-stat-card-value`).
-    pub stats_users_value: gtk::Label,
-    pub stats_storage_value: gtk::Label,
-    pub stats_inbox_value: gtk::Label,
-    pub stats_sessions_value: gtk::Label,
-    pub dashboard_users_group: adw::PreferencesGroup,
-    pub server_version_row: adw::ActionRow,
-    pub server_version_value: gtk::Label,
-    pub server_uptime_row: adw::ActionRow,
-    pub server_workers_row: adw::ActionRow,
+    // --- Dashboard sub-page: the shared snapshot's cards + its page error ---
+    pub dashboard_stats_group: adw::PreferencesGroup,
+    /// The card rows currently in the group, so a re-read removes exactly them
+    /// (the group's first child is its header, not a row).
+    pub dashboard_card_rows: Rc<RefCell<Vec<adw::ActionRow>>>,
+    pub dashboard_error: gtk::Label,
     // --- Users hub (`admin-users`, five sections — admin.md § Users) ---
     // Section "Users": the user list + per-row tier picker.
     pub users_list_box: gtk::ListBox,
@@ -71,6 +62,10 @@ pub struct AdminHandles {
     // Section "Invite": mint-a-code form + codes list + copy button.
     pub invite_codes_list: gtk::ListBox,
     pub create_invite_btn: gtk::Button,
+    /// Admit-section guardian picker (`admin-users-admit-guardian-select`): the
+    /// guardian the directly admitted account is supervised by, default "None".
+    /// Repopulated alongside the mint-form picker (`refresh_guardian_pickers`).
+    pub admit_guardian_select: GuardianSelect,
     /// Mint-form guardian picker (`admin-users-invite-guardian-select`): the
     /// guardian the redeemed account is supervised by, default "None"
     /// (`family-safety.md` § App surface → Admission surfaces). Repopulated on
@@ -83,6 +78,10 @@ pub struct AdminHandles {
     pub minted_code: Rc<RefCell<String>>,
     // Section "Pending requests": folded-in invite-request rows.
     pub invite_requests_list: gtk::ListBox,
+    /// Section 6 "Pending admin actions" (`admin.md` § Pending admin actions): the
+    /// standing co-admin approve / veto surface, repainted by
+    /// [`update_admin_pending_actions`].
+    pub pending_actions: super::admin_pending_actions::PendingActionsSection,
     /// The last `fauna.admin.invite_requests.list` reply. Cached so the pending
     /// rows can be re-rendered when the **users** list lands out of order — each
     /// row's `invite-request-row-guardian-select` draws its options from
@@ -128,6 +127,10 @@ pub struct AdminHandles {
     /// Tier-definition rows (`admin-settings-tier-item`, indexed), rendered from
     /// `fauna.admin.tiers.list` (admin.md § 3 — policy, distinct from admission).
     pub settings_tiers_list: gtk::ListBox,
+    /// The add-a-tier form's inputs (`admin-settings-tier-add-name-input` +
+    /// the five `admin-settings-tier-cap-*` entries scoped under
+    /// `admin-settings-tier-add-section`); cleared on `AdminTierAdded`.
+    pub tier_add_form: TierAddForm,
     /// Membership designation rows (`admin-settings-membership-item`, indexed;
     /// monetization.md § Pillar 4) — a link editor between the admin's own
     /// subscription tiers and this page's quota tiers, one row per subscription
@@ -199,6 +202,15 @@ pub struct AdminHandles {
     /// absent, which also retires the previous region's feature-policy
     /// document nest-side.
     pub region_withdraw: gtk::Button,
+    /// Web-app origin (`admin-nest-web-app-origin-*`,
+    /// `fauna.admin.web_app_origin.{get,set}`) — every sentence and the
+    /// `can_set` verdict are the shared `admin_web_app_origin_view` fold;
+    /// `set_nest_web_app_origin` paints exactly what it hands back.
+    pub web_origin_bundled: gtk::CheckButton,
+    pub web_origin_central: gtk::CheckButton,
+    pub web_origin_status: gtk::Label,
+    pub web_origin_scope: gtk::Label,
+    pub web_origin_save: gtk::Button,
     /// Host-OS-maintenance widgets (`installers/vps.md` § Host OS Maintenance § 4),
     /// hydrated by `set_nest_os_maintenance` from `fauna.setup.status` `os_*`:
     /// the always-present localized status line (`nest-os-maintenance-status`,
@@ -338,6 +350,11 @@ pub struct AdminHandles {
     /// `admin-nest-takedown-status` — the dispatch's own verdict, present only
     /// once an attempt has been made.
     pub takedown_status: gtk::Label,
+    /// The admin-nest page's `error-message` label — where a refused factory
+    /// reset says why (`nest/common.md` § Client-state recoverability: a reset
+    /// whose claim code cannot be kept is refused, and the app says so), beside
+    /// the page's own serving-port and region validation lines.
+    pub nest_error: gtk::Label,
     // --- Custody-hosting registry (`admin-custody-hosting`) — the nest-wide
     // held-for-others registry (account-data-plane.md § Two-sided bounds, reference: `apps/fauna-tui/src/admin/custody_hosting.rs`). ---
     /// `admin-custody-hosting-row` cards (indexed), rebuilt on every
@@ -587,7 +604,7 @@ fn build_error_label() -> gtk::Label {
 /// error. The uniform error-surfacing primitive for the admin mail sub-pages
 /// (mirrors `settings/mail.rs`): the page renders its snapshot's `error` onto
 /// its `error-message` element on every update.
-fn render_page_error(label: &gtk::Label, error: Option<&str>) {
+pub fn render_page_error(label: &gtk::Label, error: Option<&str>) {
     match error {
         Some(msg) if !msg.is_empty() => {
             label.set_text(msg);
@@ -619,6 +636,7 @@ pub fn is_users_hub_context(context: &str) -> bool {
         || context.starts_with("fauna.admin.invite_codes.")
         || context.starts_with("fauna.admin.invite_requests.")
         || context.starts_with("fauna.admin.admins.")
+        || context.starts_with("fauna.admin.pending_actions.")
         || context == "fauna.admin.set_registration_mode"
         || context == "fauna.admin.set_age_verification_required"
 }
@@ -679,7 +697,7 @@ pub fn build_admin_view(client: &Rc<FaunaClient>) -> (gtk::Box, gtk::Box, AdminH
     nav_back.set_margin_bottom(8);
 
     // --- Dashboard sub-page ---
-    let (dashboard_page, dashboard_handles) = build_dashboard_page();
+    let (dashboard_page, dashboard_handles) = build_dashboard_page(client);
     stack.add_titled(&dashboard_page, Some("dashboard"), admin::dashboard::TITLE);
 
     // --- Users hub sub-page (`admin-users`): the consolidated five-section
@@ -693,7 +711,8 @@ pub fn build_admin_view(client: &Rc<FaunaClient>) -> (gtk::Box, gtk::Box, AdminH
     // invite-code section moved to the Users hub's Invite section (2026-05-29);
     // storage-mode + Factory Reset moved to the Nest page (admin.md § Admin IA
     // redesign). Child name stays `settings` (historical `admin-settings-` IDs). ---
-    let (settings_page, settings_tiers_list, membership_tiers_list) = build_settings_page();
+    let (settings_page, settings_tiers_list, membership_tiers_list, tier_add_form) =
+        build_settings_page(client);
     stack.add_titled(
         &settings_page,
         Some("settings"),
@@ -948,24 +967,29 @@ pub fn build_admin_view(client: &Rc<FaunaClient>) -> (gtk::Box, gtk::Box, AdminH
             false,
         ),
     ];
-    let admin_sidebar = crate::views::nav_rail::build_nav_rail(&nav_back, &admin_nav, &stack);
+    // Row ids are `admin-nav-row[<page key>]`; three child names differ from
+    // their ui.yaml page keys, the rest are their own keys.
+    let admin_sidebar = crate::views::nav_rail::build_nav_rail(
+        &nav_back,
+        &admin_nav,
+        &stack,
+        ids::ADMIN_NAV_ROW,
+        |child| {
+            Some(match child {
+                "dashboard" => "admin-dashboard",
+                "users" => "admin-users",
+                "settings" => "admin-settings",
+                other => admin_nav.iter().map(|e| e.0).find(|n| *n == other)?,
+            })
+        },
+    );
 
     let handles = AdminHandles {
         nav_back,
         sub_stack: stack.clone(),
-        stats_users_row: dashboard_handles.stats_users_row,
-        stats_storage_row: dashboard_handles.stats_storage_row,
-        stats_inbox_row: dashboard_handles.stats_inbox_row,
-        stats_sessions_row: dashboard_handles.stats_sessions_row,
-        stats_users_value: dashboard_handles.stats_users_value,
-        stats_storage_value: dashboard_handles.stats_storage_value,
-        stats_inbox_value: dashboard_handles.stats_inbox_value,
-        stats_sessions_value: dashboard_handles.stats_sessions_value,
-        dashboard_users_group: dashboard_handles.users_group,
-        server_version_row: dashboard_handles.server_version_row,
-        server_version_value: dashboard_handles.server_version_value,
-        server_uptime_row: dashboard_handles.server_uptime_row,
-        server_workers_row: dashboard_handles.server_workers_row,
+        dashboard_stats_group: dashboard_handles.stats_group,
+        dashboard_card_rows: Rc::new(RefCell::new(Vec::new())),
+        dashboard_error: dashboard_handles.error,
         users_list_box: hub.users_list_box,
         users_page_count: hub.users_page_count,
         users_offset: hub.users_offset,
@@ -975,10 +999,12 @@ pub fn build_admin_view(client: &Rc<FaunaClient>) -> (gtk::Box, gtk::Box, AdminH
         users_pagination: hub.users_pagination,
         invite_codes_list: hub.invite_codes_list,
         create_invite_btn: hub.create_invite_btn,
+        admit_guardian_select: hub.admit_guardian_select,
         invite_guardian_select: hub.invite_guardian_select,
         invite_copy_btn: hub.invite_copy_btn,
         minted_code: hub.minted_code,
         invite_requests_list: hub.invite_requests_list,
+        pending_actions: hub.pending_actions,
         last_invite_requests: Rc::new(RefCell::new(None)),
         tier_names: hub.tier_names,
         users_action_error: hub.users_action_error,
@@ -989,6 +1015,7 @@ pub fn build_admin_view(client: &Rc<FaunaClient>) -> (gtk::Box, gtk::Box, AdminH
         registration_age_verification_toggle: hub.registration_age_verification_toggle,
         registration_age_verification_persisted: hub.registration_age_verification_persisted,
         settings_tiers_list,
+        tier_add_form,
         membership_tiers_list,
         own_membership_tier_names: Rc::new(RefCell::new(Vec::new())),
         last_membership_tiers: Rc::new(RefCell::new(None)),
@@ -1003,6 +1030,11 @@ pub fn build_admin_view(client: &Rc<FaunaClient>) -> (gtk::Box, gtk::Box, AdminH
         region_staleness: nest.region_staleness,
         region_entry: nest.region_entry,
         region_withdraw: nest.region_withdraw,
+        web_origin_bundled: nest.web_origin_bundled,
+        web_origin_central: nest.web_origin_central,
+        web_origin_status: nest.web_origin_status,
+        web_origin_scope: nest.web_origin_scope,
+        web_origin_save: nest.web_origin_save,
         os_maintenance_status: nest.os_maintenance_status,
         os_updates_count: nest.os_updates_count,
         os_restart_now_button: nest.os_restart_now_button,
@@ -1014,6 +1046,7 @@ pub fn build_admin_view(client: &Rc<FaunaClient>) -> (gtk::Box, gtk::Box, AdminH
         seed_rotate_confirm: nest.seed_rotate_confirm,
         oauth: nest.oauth,
         takedown_status: nest.takedown_status,
+        nest_error: nest.error_label,
         custody_hosting_list,
         custody_hosting_header,
         custody_hosting_error,
@@ -1076,10 +1109,12 @@ struct UsersHubHandles {
     users_pagination: gtk::Label,
     invite_codes_list: gtk::ListBox,
     create_invite_btn: gtk::Button,
+    admit_guardian_select: GuardianSelect,
     invite_guardian_select: GuardianSelect,
     invite_copy_btn: gtk::Button,
     minted_code: Rc<RefCell<String>>,
     invite_requests_list: gtk::ListBox,
+    pending_actions: super::admin_pending_actions::PendingActionsSection,
     tier_names: Rc<RefCell<Vec<String>>>,
     users_action_error: gtk::Label,
     registration_readonly_label: gtk::Label,
@@ -1691,6 +1726,17 @@ fn build_users_hub(client: &Rc<FaunaClient>) -> UsersHubHandles {
     );
     admit_section.append(&admit_tier_select);
 
+    // Guardian for a supervised admission (`family-safety.md` § App surface →
+    // Admission surfaces); defaults to "None", populated by
+    // `refresh_guardian_pickers`. No age band here — that id is unapproved.
+    let admit_guardian_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let admit_guardian_caption = gtk::Label::new(Some(admin::users_page::GUARDIAN_LABEL));
+    admit_guardian_caption.set_halign(gtk::Align::Start);
+    admit_guardian_row.append(&admit_guardian_caption);
+    let admit_guardian_select = GuardianSelect::new(ids::ADMIN_USERS_ADMIT_GUARDIAN_SELECT);
+    admit_guardian_row.append(admit_guardian_select.widget());
+    admit_section.append(&admit_guardian_row);
+
     let admit_button = gtk::Button::with_label(admin::users_page::ADMIT_BUTTON);
     admit_button.add_css_class("suggested-action");
     admit_button.set_halign(gtk::Align::End);
@@ -1712,6 +1758,7 @@ fn build_users_hub(client: &Rc<FaunaClient>) -> UsersHubHandles {
         let actor_entry = admit_actor_input.clone();
         let handle_entry = admit_handle_input.clone();
         let tier_dd = admit_tier_select.clone();
+        let guardian_dd = admit_guardian_select.clone();
         let error_label = users_action_error.clone();
         admit_button.connect_clicked(move |_| {
             let raw = actor_entry.text();
@@ -1735,7 +1782,9 @@ fn build_users_hub(client: &Rc<FaunaClient>) -> UsersHubHandles {
             };
             let tier = dropdown_tier(&tier_dd).unwrap_or_else(|| DEFAULT_TIERS[0].to_string());
             render_page_error(&error_label, None);
-            client_ref.admit_user(actor, tier, handle);
+            // A guardian on a handle-less admit is refused by the nest and
+            // surfaces through `admin-users-action-error` — no local rule.
+            client_ref.admit_user(actor, tier, handle, guardian_dd.selected());
         });
     }
 
@@ -1985,6 +2034,10 @@ fn build_users_hub(client: &Rc<FaunaClient>) -> UsersHubHandles {
 
     scroll_body.append(&users_section);
 
+    // ── Section 6: Pending admin actions (below the user list, as on tui) ───
+    let pending_actions = super::admin_pending_actions::build();
+    scroll_body.append(&pending_actions.section);
+
     let scrolled = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
         .vscrollbar_policy(gtk::PolicyType::Automatic)
@@ -2009,10 +2062,12 @@ fn build_users_hub(client: &Rc<FaunaClient>) -> UsersHubHandles {
         users_pagination,
         invite_codes_list,
         create_invite_btn: create_btn,
+        admit_guardian_select,
         invite_guardian_select,
         invite_copy_btn: copy_btn,
         minted_code,
         invite_requests_list,
+        pending_actions,
         tier_names,
         users_action_error,
         registration_readonly_label,
@@ -2185,10 +2240,24 @@ fn render_invite_requests(
     render_page_error(&handles.users_action_error, None);
     clear_list_box(&handles.invite_requests_list);
     let users = handles.picker_users.borrow();
-    for req in &reply.invite_requests {
+    // The section lists PENDING requests (`admin.md` § 2 → Section 1): a decided
+    // row leaves it, as on tui (`is_pending()`), web (`onlyPending`) and android.
+    for req in reply.invite_requests.iter().filter(|r| r.is_pending()) {
         let row = build_invite_request_row(req, &handles.tier_names, users.as_deref(), client);
         handles.invite_requests_list.append(&row);
     }
+}
+
+/// Repaint the Pending admin actions section from a fresh
+/// `fauna.admin.pending_actions.list` read. A successful render clears any prior
+/// Users-section action error.
+pub fn update_admin_pending_actions(
+    handles: &AdminHandles,
+    reply: &fauna_client_admin::admin::AdminPendingActionsListReply,
+    client: &Rc<FaunaClient>,
+) {
+    render_page_error(&handles.users_action_error, None);
+    super::admin_pending_actions::render(&handles.pending_actions, &reply.actions, client);
 }
 
 /// Refill both guardian pickers (`family-safety.md` § App surface → Admission
@@ -2201,6 +2270,9 @@ fn render_invite_requests(
 pub fn refresh_guardian_pickers(handles: &AdminHandles, client: &Rc<FaunaClient>) {
     handles
         .invite_guardian_select
+        .populate(handles.picker_users.borrow().as_deref());
+    handles
+        .admit_guardian_select
         .populate(handles.picker_users.borrow().as_deref());
     let cached = handles.last_invite_requests.borrow().clone();
     if let Some(reply) = cached {
@@ -2592,6 +2664,44 @@ pub fn set_nest_region(handles: &AdminHandles, view: &fauna_client_admin::AdminR
     handles.region_withdraw.set_visible(view.can_withdraw);
 }
 
+/// Paint the web-app origin section from `fauna.admin.web_app_origin.get`'s
+/// reply (or `.set`'s own reply — the save repaints with no second read), via
+/// the shared `fauna_client_admin::AdminWebAppOriginView` fold (tui's
+/// `admin/nest.rs`, the reference leg — this file words nothing). The radios are
+/// live only while `can_set`; a `None` selection leaves neither marked rather
+/// than state a choice the nest does not hold.
+pub fn set_nest_web_app_origin(
+    handles: &AdminHandles,
+    view: &fauna_client_admin::AdminWebAppOriginView,
+) {
+    use fauna_client_admin::WebAppOrigin;
+    let lookup = crate::i18n::strings::lookup;
+    handles.web_origin_bundled.set_sensitive(view.can_set);
+    handles.web_origin_central.set_sensitive(view.can_set);
+    match view.selected {
+        Some(WebAppOrigin::Bundled) => handles.web_origin_bundled.set_active(true),
+        Some(WebAppOrigin::Central) => handles.web_origin_central.set_active(true),
+        None => {
+            handles.web_origin_bundled.set_active(false);
+            handles.web_origin_central.set_active(false);
+        }
+    }
+    handles
+        .web_origin_central
+        .set_label(Some(&view.central_label.resolve(lookup)));
+    handles
+        .web_origin_status
+        .set_text(&view.status.resolve(lookup));
+    handles
+        .web_origin_scope
+        .set_text(&view.scope.resolve(lookup));
+    handles.web_origin_scope.set_visible(true);
+    handles.web_origin_save.set_sensitive(
+        view.can_set
+            && (handles.web_origin_bundled.is_active() || handles.web_origin_central.is_active()),
+    );
+}
+
 /// Render the host-OS-maintenance indicator from `fauna.setup.status`'s `os_*`
 /// fields (installers/vps.md § Host OS Maintenance § 4). The status line maps
 /// through the shared `fauna_core::format::os_maintenance_status_label` (the same
@@ -2637,34 +2747,13 @@ pub fn show_minted_invite_code(
 // Dashboard sub-page (existing logic, extracted)
 // ---------------------------------------------------------------------------
 
-struct DashboardHandles {
-    stats_users_row: adw::ActionRow,
-    stats_storage_row: adw::ActionRow,
-    stats_inbox_row: adw::ActionRow,
-    stats_sessions_row: adw::ActionRow,
-    // Hidden per-card E2E value markers (`admin-stat-card-value`), updated on
-    // data load — see `attach_stat_markers`.
-    stats_users_value: gtk::Label,
-    stats_storage_value: gtk::Label,
-    stats_inbox_value: gtk::Label,
-    stats_sessions_value: gtk::Label,
-    users_group: adw::PreferencesGroup,
-    server_version_row: adw::ActionRow,
-    server_version_value: gtk::Label,
-    server_uptime_row: adw::ActionRow,
-    server_workers_row: adw::ActionRow,
-}
-
 /// Attach hidden per-card E2E markers to a dashboard stat-card row:
-/// `admin-stat-card-label` (the card's title text) + `admin-stat-card-value`
-/// (empty until the data-load path fills it). Returns the value marker so the
-/// loader can update it. One label+value pair PER card lets the shared
-/// `dashboard_card_value(title)` e2e accessor match a card by its title and read
-/// that card's value — the same contract every other app implements (e.g.
-/// web's per-card `admin-stat-card-label`/`-value` divs in
-/// apps/fauna-web/src/routes/admin/+page.svelte). The value marker starts empty
-/// (not "—") so a test that polls for a non-empty value waits for the async
-/// fetch rather than parsing the placeholder.
+/// `admin-stat-card-label` (the card's title text) + `admin-stat-card-value`.
+/// Returns the value marker so the caller can fill it. One label+value pair PER
+/// card lets the shared `dashboard_card_value(title)` e2e accessor match a card
+/// by its title and read that card's value — the same contract every other app
+/// implements (e.g. web's per-card `admin-stat-card-label`/`-value` divs in
+/// apps/fauna-web/src/routes/admin/+page.svelte).
 fn attach_stat_markers(row: &adw::ActionRow, title: &str) -> gtk::Label {
     let label_marker = gtk::Label::new(Some(title));
     label_marker.set_height_request(1);
@@ -2679,10 +2768,15 @@ fn attach_stat_markers(row: &adw::ActionRow, title: &str) -> gtk::Label {
     value_marker
 }
 
-fn build_dashboard_page() -> (adw::PreferencesPage, DashboardHandles) {
+struct DashboardHandles {
+    stats_group: adw::PreferencesGroup,
+    error: gtk::Label,
+}
+
+fn build_dashboard_page(client: &Rc<FaunaClient>) -> (adw::PreferencesPage, DashboardHandles) {
     let page = adw::PreferencesPage::new();
 
-    // --- Nest Statistics group ---
+    // --- Nest Statistics group: the shared snapshot's cards, rebuilt per read ---
     let stats_group = adw::PreferencesGroup::new();
     stats_group.set_title(admin::view::NEST_STATISTICS);
     let dashboard_heading = gtk::Label::new(Some(admin::view::NEST_STATISTICS));
@@ -2690,101 +2784,22 @@ fn build_dashboard_page() -> (adw::PreferencesPage, DashboardHandles) {
     dashboard_heading.set_overflow(gtk::Overflow::Hidden);
     crate::testid::set_test_id(&dashboard_heading, ids::ADMIN_DASHBOARD_HEADING);
     stats_group.set_header_suffix(Some(&dashboard_heading));
-
-    let stats_users_row = adw::ActionRow::builder()
-        .title(admin::view::REGISTERED_USERS)
-        .subtitle("—")
-        .build();
-    crate::testid::set_test_id(&stats_users_row, ids::ADMIN_STAT_CARD);
-    stats_group.add(&stats_users_row);
-
-    let stats_storage_row = adw::ActionRow::builder()
-        .title(admin::view::TOTAL_STORAGE_USED)
-        .subtitle("—")
-        .build();
-    crate::testid::set_test_id(&stats_storage_row, ids::ADMIN_STAT_CARD);
-    stats_group.add(&stats_storage_row);
-
-    let stats_inbox_row = adw::ActionRow::builder()
-        .title(admin::view::TOTAL_INBOX_MESSAGES)
-        .subtitle("—")
-        .build();
-    crate::testid::set_test_id(&stats_inbox_row, ids::ADMIN_STAT_CARD);
-    stats_group.add(&stats_inbox_row);
-
-    let stats_sessions_row = adw::ActionRow::builder()
-        .title(admin::view::ACTIVE_SESSIONS)
-        .subtitle("—")
-        .build();
-    crate::testid::set_test_id(&stats_sessions_row, ids::ADMIN_STAT_CARD);
-    stats_group.add(&stats_sessions_row);
-
     page.add(&stats_group);
 
-    // Per-card hidden E2E markers (label = title, value = data-on-load). One
-    // pair per card so `dashboard_card_value(title)` can match each card.
-    let stats_users_value = attach_stat_markers(&stats_users_row, admin::view::REGISTERED_USERS);
-    let stats_storage_value =
-        attach_stat_markers(&stats_storage_row, admin::view::TOTAL_STORAGE_USED);
-    let stats_inbox_value =
-        attach_stat_markers(&stats_inbox_row, admin::view::TOTAL_INBOX_MESSAGES);
-    let stats_sessions_value =
-        attach_stat_markers(&stats_sessions_row, admin::view::ACTIVE_SESSIONS);
+    let error = build_error_label();
+    let error_group = adw::PreferencesGroup::new();
+    error_group.add(&error);
+    page.add(&error_group);
 
-    // --- Recent Users group ---
-    let users_group = adw::PreferencesGroup::new();
-    users_group.set_title(admin::view::RECENT_USERS);
-    users_group.set_description(Some(admin::view::RECENT_USERS_DESC));
+    // The snapshot re-reads on every entry to the dashboard (no client cache),
+    // the twin of tui's `subpage_load_op` — a map fires each time the stack
+    // seats this page.
+    {
+        let client = Rc::clone(client);
+        page.connect_map(move |_| client.fetch_admin_dashboard());
+    }
 
-    let placeholder_row = adw::ActionRow::builder()
-        .title(admin::view::NO_USERS_LOADED)
-        .build();
-    users_group.add(&placeholder_row);
-
-    page.add(&users_group);
-
-    // --- Server Status group ---
-    let status_group = adw::PreferencesGroup::new();
-    status_group.set_title(admin::view::SERVER_STATUS);
-
-    let server_version_row = adw::ActionRow::builder()
-        .title(admin::dashboard::VERSION)
-        .subtitle("—")
-        .build();
-    let server_version_value = attach_stat_markers(&server_version_row, admin::dashboard::VERSION);
-    status_group.add(&server_version_row);
-
-    let server_uptime_row = adw::ActionRow::builder()
-        .title(admin::view::UPTIME)
-        .subtitle("—")
-        .build();
-    status_group.add(&server_uptime_row);
-
-    let server_workers_row = adw::ActionRow::builder()
-        .title(admin::view::WORKERS)
-        .subtitle("—")
-        .build();
-    status_group.add(&server_workers_row);
-
-    page.add(&status_group);
-
-    let handles = DashboardHandles {
-        stats_users_row,
-        stats_storage_row,
-        stats_inbox_row,
-        stats_sessions_row,
-        stats_users_value,
-        stats_storage_value,
-        stats_inbox_value,
-        stats_sessions_value,
-        users_group,
-        server_version_row,
-        server_version_value,
-        server_uptime_row,
-        server_workers_row,
-    };
-
-    (page, handles)
+    (page, DashboardHandles { stats_group, error })
 }
 
 // ---------------------------------------------------------------------------
@@ -2799,7 +2814,119 @@ fn build_dashboard_page() -> (adw::PreferencesPage, DashboardHandles) {
 // list box for the update path.
 // ---------------------------------------------------------------------------
 
-fn build_settings_page() -> (gtk::Box, gtk::ListBox, gtk::ListBox) {
+/// The add-a-tier form's inputs, kept so a successful create can clear them.
+#[derive(Clone)]
+pub struct TierAddForm {
+    name: gtk::Entry,
+    /// `[inbox, storage, devices, blob_size, feeds]` — the wire order of
+    /// `fauna_client_admin::tier_create_request`.
+    caps: [gtk::Entry; 5],
+}
+
+/// Clear the add-a-tier form (after `fauna.admin.tiers.create` succeeded).
+pub fn clear_tier_add_form(handles: &AdminHandles) {
+    handles.tier_add_form.name.set_text("");
+    for cap in &handles.tier_add_form.caps {
+        cap.set_text("");
+    }
+}
+
+/// The add-a-tier form (`admin-settings-tier-add-section`, admin.md § 3 →
+/// *Defining a new tier*), a sibling of the tier rows so it shows on a fresh box
+/// with no tiers. The section id rides the form's container (the e2e scopes the
+/// five `admin-settings-tier-cap-*` entries under it, exactly as under a row).
+/// Empty name / bad cap are refused locally through the shared
+/// `fauna_client_admin::tier_create_request`, worded on the banner; the form
+/// clears only once the nest accepts the create.
+fn build_tier_add_form(client: &Rc<FaunaClient>) -> (gtk::Box, TierAddForm) {
+    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    vbox.set_margin_top(8);
+    vbox.set_margin_bottom(8);
+    vbox.set_margin_start(20);
+    vbox.set_margin_end(20);
+    crate::testid::set_test_id(&vbox, ids::ADMIN_SETTINGS_TIER_ADD_SECTION);
+
+    let heading = gtk::Label::new(Some(admin::settings_page::ADD_TIER_SECTION));
+    heading.add_css_class("heading");
+    heading.set_halign(gtk::Align::Start);
+    vbox.append(&heading);
+
+    let name_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let name_label = gtk::Label::new(Some(admin::settings_page::ADD_TIER_NAME));
+    name_label.add_css_class("dim-label");
+    name_label.set_halign(gtk::Align::Start);
+    name_label.set_width_chars(16);
+    name_label.set_xalign(0.0);
+    name_row.append(&name_label);
+    let name = gtk::Entry::builder().hexpand(true).build();
+    crate::testid::set_test_id(&name, ids::ADMIN_SETTINGS_TIER_ADD_NAME_INPUT);
+    name_row.append(&name);
+    vbox.append(&name_row);
+
+    let blank = |label: &str, test_id: &str| {
+        let entry = build_cap_entry(&vbox, label, test_id, 0);
+        entry.set_text("");
+        entry
+    };
+    let caps = [
+        blank(
+            admin::settings_page::CAP_INBOX_BYTES,
+            "admin-settings-tier-cap-inbox",
+        ),
+        blank(
+            admin::settings_page::CAP_STORAGE_BYTES,
+            "admin-settings-tier-cap-storage",
+        ),
+        blank(
+            admin::settings_page::CAP_DEVICES,
+            "admin-settings-tier-cap-devices",
+        ),
+        blank(
+            admin::settings_page::CAP_BLOB_SIZE,
+            "admin-settings-tier-cap-blob-size",
+        ),
+        blank(
+            admin::settings_page::CAP_FEEDS,
+            "admin-settings-tier-cap-feeds",
+        ),
+    ];
+
+    let add = gtk::Button::with_label(admin::settings_page::ADD_TIER);
+    add.set_halign(gtk::Align::Start);
+    crate::testid::set_test_id(&add, ids::ADMIN_SETTINGS_TIER_ADD_BUTTON);
+    // tui's `admin::Action::AddTier`.
+    crate::offline_gate::declare_wire_kind(&add, "fauna.admin.tiers.create");
+    {
+        let client = Rc::clone(client);
+        let name = name.clone();
+        let caps = caps.clone();
+        add.connect_clicked(move |_| {
+            let texts = caps.each_ref().map(|c| c.text());
+            let drafts = texts.each_ref().map(|t| t.as_str());
+            match fauna_client_admin::tier_create_request(&name.text(), drafts) {
+                Ok(req) => client.add_admin_tier(req),
+                Err(refusal) => client.report_localized_error(
+                    match refusal {
+                        fauna_client_admin::TierCreateRefusal::EmptyName => {
+                            admin::settings_page::ADD_TIER_ERROR_EMPTY_NAME
+                        }
+                        fauna_client_admin::TierCreateRefusal::InvalidCap => {
+                            admin::settings_page::ADD_TIER_ERROR_INVALID_CAP
+                        }
+                    }
+                    .to_string(),
+                ),
+            }
+        });
+    }
+    vbox.append(&add);
+
+    (vbox, TierAddForm { name, caps })
+}
+
+fn build_settings_page(
+    client: &Rc<FaunaClient>,
+) -> (gtk::Box, gtk::ListBox, gtk::ListBox, TierAddForm) {
     let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
 
     let heading = gtk::Label::new(Some(admin::settings_page::TITLE));
@@ -2828,6 +2955,8 @@ fn build_settings_page() -> (gtk::Box, gtk::ListBox, gtk::ListBox) {
         .build();
     settings_tiers_list.set_placeholder(Some(&tiers_placeholder));
     tiers_section.append(&settings_tiers_list);
+    let (tier_add_box, tier_add_form) = build_tier_add_form(client);
+    tiers_section.append(&tier_add_box);
     outer.append(&tiers_section);
 
     // ── Membership designations (`admin-settings-membership-section` + items,
@@ -2855,7 +2984,66 @@ fn build_settings_page() -> (gtk::Box, gtk::ListBox, gtk::ListBox) {
     // Per-page `error-message` (cross-app rule #2: every page carries one).
     outer.append(&build_error_label());
 
-    (outer, settings_tiers_list, membership_tiers_list)
+    (
+        outer,
+        settings_tiers_list,
+        membership_tiers_list,
+        tier_add_form,
+    )
+}
+
+/// The admin "Retire this server" section (`admin-nest-retire-section` /
+/// `admin-nest-retire-button`): opens the `nest_retire` page in a window over
+/// the live session (`views/onboarding/nest_retire.rs`). The page itself is
+/// pre-auth by design — it talks to the person's cloud provider, never to the
+/// nest — so the button needs no wire kind and stays live offline; the admin
+/// entry only adds the inputs a session can supply (the nest's active local
+/// domains, the account's held DNS credentials).
+fn build_retire_section(client: &Rc<FaunaClient>) -> gtk::Box {
+    let section = build_section(
+        ids::ADMIN_NEST_RETIRE_SECTION,
+        admin::nest_page::RETIRE_TITLE,
+    );
+
+    let row = adw::ActionRow::builder()
+        .title(admin::nest_page::RETIRE_TITLE)
+        .subtitle(admin::nest_page::RETIRE_DESC)
+        .build();
+
+    let retire_btn = gtk::Button::builder()
+        .label(admin::nest_page::RETIRE_BUTTON)
+        .valign(gtk::Align::Center)
+        .css_classes(["destructive-action"])
+        .build();
+    crate::testid::set_test_id(&retire_btn, ids::ADMIN_NEST_RETIRE_BUTTON);
+    {
+        let client = Rc::clone(client);
+        retire_btn.connect_clicked(move |btn| {
+            let Some(parent) = btn.root().and_downcast::<gtk::Window>() else {
+                return;
+            };
+            super::onboarding::nest_retire::open(
+                &parent,
+                super::onboarding::nest_retire::RetireOpen {
+                    entry: super::onboarding::nest_retire::RetireEntry::Admin,
+                    nest_url: Some(client.node_url().to_string()).filter(|u| !u.is_empty()),
+                    local_domains: Some(client.local_domains_machine()),
+                },
+            );
+        });
+    }
+    row.add_suffix(&retire_btn);
+
+    let list = gtk::ListBox::new();
+    list.set_selection_mode(gtk::SelectionMode::None);
+    list.add_css_class("boxed-list");
+    list.set_margin_start(8);
+    list.set_margin_end(8);
+    list.set_margin_bottom(8);
+    list.append(&row);
+    section.append(&list);
+
+    section
 }
 
 /// The admin "Danger zone" — a destructive "Factory reset this nest" button
@@ -2888,16 +3076,12 @@ fn build_factory_reset_section() -> gtk::Box {
         .css_classes(["destructive-action"])
         .build();
     crate::testid::set_test_id(&reset_btn, ids::ADMIN_FACTORY_RESET_BUTTON);
-    // The click only opens the confirm dialog, but the ceremony behind it can
-    // end in exactly one kind, so the ENTRY is what declares — offering a
-    // ceremony that must dead-end at its confirm is worse than withholding it.
-    // (tui declares on `ConfirmFactoryReset` because there the confirm IS the
-    // element in the list; linux's confirm lives in a transient dialog.)
-    crate::offline_gate::declare_wire_kind(&reset_btn, "fauna.admin.factory_reset");
-
+    // Arming the confirm is LOCAL: the opener declares no wire kind and stays
+    // live offline. The gated call is the reset itself, so the kind is declared
+    // on the CONFIRM button inside the dialog (`with_wire_kind` below) — the
+    // shape every app shares, asserted by
+    // `test_offline_gate.py::test_the_admin_plane_desensitizes_with_no_nest`.
     reset_btn.connect_clicked(|btn| {
-        // No wire kind here — it is declared on the ENTRY button above, per the
-        // comment there.
         crate::confirm_dialog::present_confirm(
             btn,
             crate::confirm_dialog::ConfirmSpec::new(
@@ -2910,6 +3094,7 @@ fn build_factory_reset_section() -> gtk::Box {
                 admin::settings_page::FACTORY_RESET_CANCEL,
             )
             .with_confirm_id(ids::ADMIN_FACTORY_RESET_CONFIRM_BUTTON)
+            .with_wire_kind("fauna.admin.factory_reset")
             .with_cancel_id(ids::ADMIN_FACTORY_RESET_CANCEL_BUTTON),
             || {
                 if let Some(client) = crate::settings::get_client() {
@@ -3015,6 +3200,13 @@ struct NestPage {
     region_staleness: gtk::Label,
     region_entry: gtk::Entry,
     region_withdraw: gtk::Button,
+    /// Web-app origin (`admin-nest-web-app-origin-*`) — see [`AdminHandles`]'s
+    /// fields of the same name.
+    web_origin_bundled: gtk::CheckButton,
+    web_origin_central: gtk::CheckButton,
+    web_origin_status: gtk::Label,
+    web_origin_scope: gtk::Label,
+    web_origin_save: gtk::Button,
     /// Host-OS-maintenance status line / count badge / restart-now button
     /// (set by `set_nest_os_maintenance` from `fauna.setup.status` `os_*`).
     os_maintenance_status: gtk::Label,
@@ -3032,6 +3224,8 @@ struct NestPage {
     oauth: Rc<OauthSectionCtx>,
     /// Legal takedown (`admin-nest-takedown-*`) — see [`AdminHandles::takedown_status`].
     takedown_status: gtk::Label,
+    /// The page's `error-message` — see [`AdminHandles::nest_error`].
+    error_label: gtk::Label,
 }
 
 /// Build one service row: a title label, a status badge `gtk::Label` carrying
@@ -3086,6 +3280,115 @@ fn build_service_row(
     row.append(&desc_label);
 
     (row, toggle, status)
+}
+
+thread_local! {
+    /// The Feature limits section and the box [`paint_feature_limits`] owns.
+    static FEATURE_LIMITS_SECTION: RefCell<Option<(gtk::Box, gtk::Box)>> =
+        const { RefCell::new(None) };
+}
+
+/// Feature limits (`admin-nest-feature-limits-*`): one row per gated feature
+/// the nest carries — its name, the admin's AUTHORED document in words, and the
+/// edit button that opens the shared `feature-policy-editor` right under that
+/// row. Hidden until the authored read answers (the section anchor registers on
+/// real data, the `feature-limits-section` contract).
+fn build_feature_limits_section() -> gtk::Box {
+    use crate::i18n::strings::features as f;
+
+    let section = build_section("admin-nest-feature-limits-section", f::ADMIN_SECTION_TITLE);
+    section.set_visible(false);
+
+    let desc = gtk::Label::new(Some(f::ADMIN_SECTION_DESC));
+    desc.set_halign(gtk::Align::Start);
+    desc.set_xalign(0.0);
+    desc.set_wrap(true);
+    desc.add_css_class("dim-label");
+    desc.set_margin_start(12);
+    desc.set_margin_end(12);
+    section.append(&desc);
+
+    // The one box `paint_feature_limits` clears and rebuilds.
+    let rows_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    rows_box.set_margin_start(12);
+    rows_box.set_margin_end(12);
+    section.append(&rows_box);
+
+    FEATURE_LIMITS_SECTION.with_borrow_mut(|slot| *slot = Some((section.clone(), rows_box)));
+    section
+}
+
+/// Repaint the Feature limits section from `crate::feature_editor`'s admin-host
+/// state. **Paints; decides nothing** — every word is `fauna_client_features`'
+/// (`AuthoredSurface::rows`, the editor's view-model), and the editor's tier
+/// picks the write kind. A failed read gets its worded reason, never an empty
+/// list that would read as "this nest gates nothing".
+pub fn paint_feature_limits() {
+    use crate::feature_editor::{Host, build_editor, open, with_state};
+    use crate::i18n::strings::features as f;
+
+    let Some((section, rows_box)) = FEATURE_LIMITS_SECTION.with_borrow(|s| s.clone()) else {
+        return;
+    };
+    let Some((rows, failed, editing)) = with_state(Host::Admin, |s| {
+        let rows = s.surface.as_ref().map(|surface| surface.rows());
+        let editing = s.editor.as_ref().map(|e| e.feature_key().to_string());
+        Some((rows, s.read_failed.clone(), editing))
+    }) else {
+        return;
+    };
+    // Not read yet: stay hidden.
+    if rows.is_none() && failed.is_none() {
+        return;
+    }
+    while let Some(child) = rows_box.first_child() {
+        rows_box.remove(&child);
+    }
+    section.set_visible(true);
+    if let Some(reason) = failed {
+        let label = gtk::Label::new(Some(&reason));
+        label.set_halign(gtk::Align::Start);
+        label.set_wrap(true);
+        rows_box.append(&label);
+        return;
+    }
+    let lookup = crate::i18n::strings::lookup;
+    for row in rows.unwrap_or_default() {
+        let row_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        row_box.set_margin_top(6);
+        row_box.set_margin_bottom(6);
+        crate::testid::set_test_id(&row_box, ids::ADMIN_NEST_FEATURE_LIMITS_ROW);
+
+        let name = gtk::Label::new(Some(&row.name.resolve(lookup)));
+        name.set_halign(gtk::Align::Start);
+        name.add_css_class("heading");
+        crate::testid::set_test_id(&name, ids::ADMIN_NEST_FEATURE_LIMITS_NAME);
+        row_box.append(&name);
+
+        let summary = gtk::Label::new(Some(&row.summary.resolve(lookup)));
+        summary.set_halign(gtk::Align::Start);
+        summary.set_wrap(true);
+        crate::testid::set_test_id(&summary, ids::ADMIN_NEST_FEATURE_LIMITS_SUMMARY);
+        row_box.append(&summary);
+
+        let edit = gtk::Button::with_label(f::ADMIN_EDIT);
+        edit.set_halign(gtk::Align::Start);
+        crate::testid::set_test_id(&edit, ids::ADMIN_NEST_FEATURE_LIMITS_EDIT_BUTTON);
+        let feature = row.feature.clone();
+        edit.connect_clicked(move |_| {
+            open(Host::Admin, &feature);
+            // The button is rebuilt by the repaint: do it off its own handler.
+            gtk::glib::idle_add_local_once(paint_feature_limits);
+        });
+        row_box.append(&edit);
+
+        if editing.as_deref() == Some(row.feature.as_str())
+            && let Some(editor) = build_editor(Host::Admin, Rc::new(paint_feature_limits))
+        {
+            row_box.append(&editor);
+        }
+        rows_box.append(&row_box);
+    }
 }
 
 /// Build the `admin-nest` sub-page: a heading + the admin pairing toggle
@@ -3452,6 +3755,129 @@ fn build_nest_page(client: &Rc<FaunaClient>) -> NestPage {
         nat_refresh();
     }
 
+    // ── Web-app origin (fauna.admin.web_app_origin.{get,set}) ────────────────
+    // What this nest's own address answers: the app it ships, or a redirect to
+    // the central origin (`admin.md` § N Nest → *Web-app origin*), directly
+    // after NAT mode and mirroring its radio shape. Paint only: every sentence
+    // and the `can_set` verdict are the shared `admin_web_app_origin_view` fold
+    // (tui's `admin/nest.rs`, the reference leg). Until the read lands nothing
+    // is settable and neither radio is marked — pre-marking bundled would state
+    // a choice the nest may not hold. The radios are a local selection; the
+    // save commits it and repaints from the set's own reply.
+    let web_origin_section = build_section(
+        "admin-nest-web-app-origin-section",
+        admin::nest_page::WEB_APP_ORIGIN_LABEL,
+    );
+
+    let web_origin_desc = gtk::Label::new(Some(admin::nest_page::WEB_APP_ORIGIN_DESC));
+    web_origin_desc.set_halign(gtk::Align::Start);
+    web_origin_desc.set_xalign(0.0);
+    web_origin_desc.set_wrap(true);
+    web_origin_desc.add_css_class("dim-label");
+    web_origin_desc.set_margin_start(12);
+    web_origin_desc.set_margin_end(12);
+    web_origin_section.append(&web_origin_desc);
+
+    let web_origin_bundled = gtk::CheckButton::with_label(admin::nest_page::WEB_APP_ORIGIN_BUNDLED);
+    web_origin_bundled.set_margin_start(12);
+    web_origin_bundled.set_margin_top(4);
+    web_origin_bundled.set_sensitive(false);
+    crate::testid::set_test_id(
+        &web_origin_bundled,
+        ids::ADMIN_NEST_WEB_APP_ORIGIN_BUNDLED_RADIO,
+    );
+    web_origin_section.append(&web_origin_bundled);
+
+    let web_origin_central = gtk::CheckButton::with_label(
+        &fauna_client_admin::AdminWebAppOriginView::default()
+            .central_label
+            .resolve(crate::i18n::strings::lookup),
+    );
+    web_origin_central.set_group(Some(&web_origin_bundled));
+    web_origin_central.set_margin_start(12);
+    web_origin_central.set_margin_top(4);
+    web_origin_central.set_sensitive(false);
+    crate::testid::set_test_id(
+        &web_origin_central,
+        ids::ADMIN_NEST_WEB_APP_ORIGIN_CENTRAL_RADIO,
+    );
+    web_origin_section.append(&web_origin_central);
+
+    let web_origin_action_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    web_origin_action_row.set_margin_start(12);
+    web_origin_action_row.set_margin_end(12);
+    web_origin_action_row.set_margin_top(4);
+
+    let web_origin_status = gtk::Label::new(Some(admin::nest_page::WEB_APP_ORIGIN_LOADING));
+    web_origin_status.set_halign(gtk::Align::Start);
+    web_origin_status.set_xalign(0.0);
+    web_origin_status.set_wrap(true);
+    web_origin_status.set_hexpand(true);
+    web_origin_status.add_css_class("dim-label");
+    crate::testid::set_test_id(&web_origin_status, ids::ADMIN_NEST_WEB_APP_ORIGIN_STATUS);
+    web_origin_action_row.append(&web_origin_status);
+
+    let web_origin_save = gtk::Button::builder()
+        .label(admin::nest_page::WEB_APP_ORIGIN_SAVE)
+        .valign(gtk::Align::Center)
+        .halign(gtk::Align::End)
+        .css_classes(["suggested-action"])
+        .build();
+    web_origin_save.set_sensitive(false);
+    crate::testid::set_test_id(&web_origin_save, ids::ADMIN_NEST_WEB_APP_ORIGIN_SAVE_BUTTON);
+    crate::offline_gate::declare_wire_kind(&web_origin_save, "fauna.admin.web_app_origin.set");
+    web_origin_action_row.append(&web_origin_save);
+    web_origin_section.append(&web_origin_action_row);
+
+    // The scope sentence — shown once the fold supplies it.
+    let web_origin_scope = gtk::Label::new(None);
+    web_origin_scope.set_halign(gtk::Align::Start);
+    web_origin_scope.set_xalign(0.0);
+    web_origin_scope.set_wrap(true);
+    web_origin_scope.add_css_class("dim-label");
+    web_origin_scope.set_margin_start(12);
+    web_origin_scope.set_margin_end(12);
+    web_origin_scope.set_visible(false);
+    web_origin_section.append(&web_origin_scope);
+
+    outer.append(&web_origin_section);
+
+    // Picking a radio is local: it only arms the save.
+    for radio in [&web_origin_bundled, &web_origin_central] {
+        let save = web_origin_save.clone();
+        let bundled = web_origin_bundled.clone();
+        let central = web_origin_central.clone();
+        radio.connect_toggled(move |_| {
+            save.set_sensitive(
+                (bundled.is_active() || central.is_active()) && bundled.is_sensitive(),
+            );
+        });
+    }
+
+    // Save → `fauna.admin.web_app_origin.set` with the marked radio's mode.
+    {
+        let client = Rc::clone(client);
+        let bundled = web_origin_bundled.clone();
+        let central = web_origin_central.clone();
+        web_origin_save.connect_clicked(move |_| {
+            use fauna_client_admin::WebAppOrigin;
+            if central.is_active() {
+                client.set_web_app_origin(WebAppOrigin::Central);
+            } else if bundled.is_active() {
+                client.set_web_app_origin(WebAppOrigin::Bundled);
+            }
+        });
+    }
+
+    // The nav-edge read: the choice can change from another session, so every
+    // page show re-reads it.
+    {
+        let client = Rc::clone(client);
+        outer.connect_map(move |_| {
+            client.fetch_nest_web_app_origin();
+        });
+    }
+
     // ── Declared region (fauna.admin.region.{get,set}) ───────────────────────
     // The deployment's legal situs — the region tier's one human choice
     // (region-blocking.md § Region determination; dynamic-features.md § The
@@ -3554,6 +3980,21 @@ fn build_nest_page(client: &Rc<FaunaClient>) -> NestPage {
     region_section.append(&region_withdraw);
 
     outer.append(&region_section);
+
+    // ── Feature limits (fauna.features.policy.{get,update}) ──────────────────
+    // The admin tier's authoring host (`admin.md` § N Nest → Feature limits),
+    // directly after the declared region: two tiers of one plane side by side.
+    // Paint only — see [`paint_feature_limits`].
+    {
+        let section = build_feature_limits_section();
+        outer.append(&section);
+        // The nav-edge read: the admin document can change from another
+        // session, so every page show re-reads it.
+        let client = Rc::clone(client);
+        outer.connect_map(move |_| {
+            client.fetch_feature_limits(crate::feature_editor::Host::Admin);
+        });
+    }
 
     // ── Deployment identity — the rotation ceremony (`box-recovery.md` §
     // Deployment-seed rotation), driven by the shared
@@ -3933,6 +4374,37 @@ fn build_nest_page(client: &Rc<FaunaClient>) -> NestPage {
 
     outer.append(&takedown_section);
 
+    // The user-reports queue (`admin-nest-reports-section`, moderation.md
+    // § User-initiated reporting → *Where it lands*), directly after the
+    // console whose inbox it is. *Open takedown* pre-fills that console with
+    // the reported subject and NO citation — the arm stays disabled until the
+    // admin types one — so it needs the console's own widgets.
+    let reports_prefill: Rc<dyn Fn(&fauna_client_moderation::TakedownForm)> = {
+        let content_id = takedown_content_id_entry.clone();
+        let post_radio = takedown_type_post_radio.clone();
+        let conversation_radio = takedown_type_conversation_radio.clone();
+        let reference = takedown_reference_entry.clone();
+        let restore = takedown_restore_checkbox.clone();
+        let confirm_box = takedown_confirm_box.clone();
+        let status = takedown_status.clone();
+        Rc::new(move |form| {
+            content_id.set_text(&form.content_id);
+            match form.content_type {
+                fauna_client_moderation::TakedownContentType::Post => post_radio.set_active(true),
+                fauna_client_moderation::TakedownContentType::Conversation => {
+                    conversation_radio.set_active(true)
+                }
+            }
+            // A fresh draft: no citation, take-down not restore, and any armed
+            // confirm disarmed — it named different content.
+            reference.set_text("");
+            restore.set_active(false);
+            confirm_box.set_visible(false);
+            status.set_visible(false);
+        })
+    };
+    outer.append(&build_reports_section(client, reports_prefill));
+
     // The armed confirm's captured form — `None` while un-armed. Mirrors
     // tui's `AdminState::takedown_confirm`: captured at arm time and never
     // re-derived while armed, so a field the admin keeps typing after arming
@@ -4052,6 +4524,11 @@ fn build_nest_page(client: &Rc<FaunaClient>) -> NestPage {
         });
     }
 
+    // ── Retire this server (`nest-retirement.md` § Layout & flow) ────────────
+    // Beside Factory reset and worded sharply apart from it: reset wipes a box
+    // the admin keeps, retire destroys the box.
+    outer.append(&build_retire_section(client));
+
     // ── Danger zone — Factory reset (`fauna.admin.factory_reset`) ────────────
     // Moved off Settings (admin.md § Admin IA redesign): a nest-wide concern.
     outer.append(&build_factory_reset_section());
@@ -4130,6 +4607,11 @@ fn build_nest_page(client: &Rc<FaunaClient>) -> NestPage {
         region_staleness,
         region_entry,
         region_withdraw,
+        web_origin_bundled,
+        web_origin_central,
+        web_origin_status,
+        web_origin_scope,
+        web_origin_save,
         os_maintenance_status,
         os_updates_count,
         os_restart_now_button,
@@ -4141,6 +4623,7 @@ fn build_nest_page(client: &Rc<FaunaClient>) -> NestPage {
         seed_rotate_confirm,
         oauth,
         takedown_status,
+        error_label,
     }
 }
 
@@ -4603,6 +5086,189 @@ pub fn set_oauth_done(handles: &AdminHandles, status: String, keys: OauthKeysRea
 /// draft type (`moderation.md` § Legal takedown → Invocation surface) — the
 /// single read point both the live-refresh handlers and the arm click share,
 /// so they cannot disagree about what "the form" currently holds.
+/// The reports queue (`admin-nest-reports-section` — `moderation.md`
+/// § User-initiated reporting → *Where it lands*), beside the takedown console
+/// whose inbox it is. Paint only: every word is the shared `queue_row_view`
+/// fold (`crate::report::queue_row_text`), and a row's three verbs are exactly
+/// the levers the goal doc names — a door to the console
+/// (`admin-nest-report-open-takedown-button`, posts and messages only, per
+/// `can_open_takedown`) and two records (`-acted-button`, `-dismiss-button`).
+/// Rows paint flat and indexed, the Moderation-page convention, so the e2e
+/// counts and clicks them by index. The queue is read each time the page
+/// arrives (the section maps), and its `loaded` bit keeps a read still in
+/// flight from claiming "No open reports".
+fn build_reports_section(
+    client: &Rc<FaunaClient>,
+    prefill: Rc<dyn Fn(&fauna_client_moderation::TakedownForm)>,
+) -> gtk::Box {
+    struct Queue {
+        rows: gtk::Box,
+        loading: gtk::Label,
+        empty: gtk::Label,
+        status: gtk::Label,
+        client: Rc<FaunaClient>,
+        prefill: Rc<dyn Fn(&fauna_client_moderation::TakedownForm)>,
+    }
+
+    fn reload(queue: &Rc<Queue>) {
+        let nest = std::sync::Arc::clone(queue.client.nest_rpc());
+        let queue = Rc::clone(queue);
+        crate::async_helper::spawn_with_snapshot(
+            &queue.client.runtime_handle(),
+            move || crate::report::read_queue(nest),
+            move |read| paint(&queue, read, None),
+        );
+    }
+
+    fn paint(
+        queue: &Rc<Queue>,
+        read: Result<Vec<fauna_protocol::moderation::AbuseReportQueueEntry>, String>,
+        status: Option<String>,
+    ) {
+        use fauna_protocol::moderation::AbuseReportOutcome;
+        let entries = match read {
+            Ok(entries) => entries,
+            Err(e) => {
+                // A refused read never paints "No open reports".
+                queue.loading.set_visible(false);
+                crate::report::show_error(Some(&e));
+                return;
+            }
+        };
+        queue.loading.set_visible(false);
+        queue.empty.set_visible(entries.is_empty());
+        while let Some(child) = queue.rows.first_child() {
+            queue.rows.remove(&child);
+        }
+        for entry in &entries {
+            let view = fauna_client_moderation::report::queue_row_view(entry);
+            let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
+            row.set_margin_start(12);
+            row.set_margin_end(12);
+            row.set_margin_top(8);
+
+            let text = gtk::Label::new(Some(&crate::report::queue_row_text(entry)));
+            text.set_halign(gtk::Align::Start);
+            text.set_xalign(0.0);
+            text.set_wrap(true);
+            crate::testid::set_test_id(&text, ids::ADMIN_NEST_REPORT_ITEM);
+            crate::testid::set_test_attr(&text, "subject", &view.subject_id);
+            crate::testid::set_test_attr(&text, "kind", &view.subject_kind);
+            row.append(&text);
+
+            let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            if view.can_open_takedown {
+                let open = gtk::Button::with_label(admin::nest_page::REPORTS_OPEN_TAKEDOWN);
+                crate::testid::set_test_id(&open, ids::ADMIN_NEST_REPORT_OPEN_TAKEDOWN_BUTTON);
+                let subject = entry.subject.clone();
+                let weak = Rc::downgrade(queue);
+                open.connect_clicked(move |_| {
+                    let Some(queue) = weak.upgrade() else {
+                        return;
+                    };
+                    if let Some(form) = fauna_client_moderation::report::takedown_prefill(&subject)
+                    {
+                        (queue.prefill)(&form);
+                    }
+                });
+                buttons.append(&open);
+            }
+            for (id, label, outcome) in [
+                (
+                    ids::ADMIN_NEST_REPORT_ACTED_BUTTON,
+                    admin::nest_page::REPORTS_ACTED,
+                    AbuseReportOutcome::Acted,
+                ),
+                (
+                    ids::ADMIN_NEST_REPORT_DISMISS_BUTTON,
+                    admin::nest_page::REPORTS_DISMISS,
+                    AbuseReportOutcome::Dismissed,
+                ),
+            ] {
+                let button = gtk::Button::with_label(label);
+                crate::testid::set_test_id(&button, id);
+                crate::offline_gate::declare_wire_kind(
+                    &button,
+                    "fauna.moderation.abuse_report.resolve",
+                );
+                let weak = Rc::downgrade(queue);
+                let report_id = entry.report_id.clone();
+                button.connect_clicked(move |b| {
+                    let Some(queue) = weak.upgrade() else {
+                        return;
+                    };
+                    b.set_sensitive(false);
+                    let nest = std::sync::Arc::clone(queue.client.nest_rpc());
+                    let report_id = report_id.clone();
+                    crate::async_helper::spawn_with_snapshot(
+                        &queue.client.runtime_handle(),
+                        move || crate::report::resolve_and_read(nest, report_id, outcome),
+                        move |(verdict, read)| paint(&queue, read, Some(verdict)),
+                    );
+                });
+                buttons.append(&button);
+            }
+            row.append(&buttons);
+            queue.rows.append(&row);
+        }
+        match status {
+            Some(line) => {
+                queue.status.set_text(&line);
+                queue.status.set_visible(true);
+            }
+            None => queue.status.set_visible(false),
+        }
+    }
+
+    let section = build_section(
+        ids::ADMIN_NEST_REPORTS_SECTION,
+        admin::nest_page::REPORTS_LABEL,
+    );
+    let desc = gtk::Label::new(Some(admin::nest_page::REPORTS_DESC));
+    desc.set_halign(gtk::Align::Start);
+    desc.set_xalign(0.0);
+    desc.set_wrap(true);
+    desc.add_css_class("dim-label");
+    desc.set_margin_start(12);
+    desc.set_margin_end(12);
+    section.append(&desc);
+
+    let loading = gtk::Label::new(Some(admin::nest_page::REPORTS_LOADING));
+    loading.set_halign(gtk::Align::Start);
+    loading.set_margin_start(12);
+    section.append(&loading);
+    let empty = gtk::Label::new(Some(admin::nest_page::REPORTS_EMPTY));
+    empty.set_halign(gtk::Align::Start);
+    empty.set_margin_start(12);
+    empty.set_visible(false);
+    section.append(&empty);
+
+    let rows = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    section.append(&rows);
+
+    let status = gtk::Label::new(None);
+    status.set_halign(gtk::Align::Start);
+    status.set_xalign(0.0);
+    status.set_wrap(true);
+    status.set_margin_start(12);
+    status.set_visible(false);
+    section.append(&status);
+
+    let queue = Rc::new(Queue {
+        rows,
+        loading,
+        empty,
+        status,
+        client: Rc::clone(client),
+        prefill,
+    });
+    {
+        let queue = Rc::clone(&queue);
+        section.connect_map(move |_| reload(&queue));
+    }
+    section
+}
+
 fn current_takedown_form(
     content_id: &gtk::Entry,
     conversation_radio: &gtk::CheckButton,
@@ -4841,8 +5507,9 @@ pub fn update_admin_logs(
 /// email-domains section's structure.
 /// One section subheading inside the bridges page ("Pending approval" /
 /// "Approved bridges") separating the two rosters.
-fn bridges_section_label(text: &str) -> gtk::Label {
+fn bridges_section_label(text: &str, id: &str) -> gtk::Label {
     let label = gtk::Label::new(Some(text));
+    crate::testid::set_test_id(&label, id);
     label.add_css_class("heading");
     label.set_halign(gtk::Align::Start);
     label.set_margin_start(12);
@@ -4889,6 +5556,7 @@ fn build_bridges_pending_page() -> (gtk::Box, gtk::ListBox, gtk::ListBox, gtk::L
 
     content.append(&bridges_section_label(
         admin::bridges_pending::PENDING_SECTION,
+        ids::ADMIN_BRIDGES_PENDING_SECTION,
     ));
     let pending_placeholder = adw::StatusPage::builder()
         .title(admin::bridges_pending::EMPTY)
@@ -4900,6 +5568,7 @@ fn build_bridges_pending_page() -> (gtk::Box, gtk::ListBox, gtk::ListBox, gtk::L
 
     content.append(&bridges_section_label(
         admin::bridges_pending::APPROVED_SECTION,
+        ids::ADMIN_BRIDGES_APPROVED_SECTION,
     ));
     let approved_placeholder = adw::StatusPage::builder()
         .title(admin::bridges_pending::APPROVED_EMPTY)
@@ -5411,20 +6080,25 @@ fn render_custody_hosting_list(
         }
     }
 
+    clear_list_box(&h.list);
+    // A read that landed without an answer (it failed) is the same unknown as
+    // pre-hydrate: the error rides `error-message`, the header stays hidden.
+    let Some(rows) = snapshot.rows.as_ref() else {
+        h.header.set_visible(false);
+        return;
+    };
     h.header.set_visible(true);
-    if snapshot.rows.is_empty() {
+    if rows.is_empty() {
         h.header.set_text(admin::custody_hosting::EMPTY);
         crate::testid::set_test_id(&h.header, ids::ADMIN_CUSTODY_HOSTING_EMPTY);
     } else {
-        h.header.set_text(&admin::custody_hosting::count(
-            &snapshot.rows.len().to_string(),
-        ));
+        h.header
+            .set_text(&admin::custody_hosting::count(&rows.len().to_string()));
         crate::testid::set_test_id(&h.header, ids::ADMIN_CUSTODY_HOSTING_COUNT);
     }
 
-    clear_list_box(&h.list);
     let armed_pair = h.confirm_state.borrow().clone();
-    for row in &snapshot.rows {
+    for row in rows {
         let armed = armed_pair
             .as_ref()
             .is_some_and(|(host, grant)| host == &row.host_actor_id && grant == &row.grant_id);
@@ -5810,6 +6484,13 @@ pub struct RenameUi {
     /// submit/promote map the selected name → its id for `StartPrimaryRename`.
     /// Repopulated alongside the picker each render.
     pub targets: RenameTargets,
+    /// The rename whose Abort was revealed to its confirm step (tui's
+    /// `dns_rename_aborting`). The banner is rebuilt each render, so the armed
+    /// state lives here and the rebuilt banner re-reveals the confirm for the
+    /// same rename id; a different (or no) rename shows the plain Abort.
+    pub abort_armed: Rc<RefCell<Option<Vec<u8>>>>,
+    /// The same carried reveal state for Complete now's confirm step.
+    pub complete_armed: Rc<RefCell<Option<Vec<u8>>>>,
 }
 
 /// Build the `admin-dns` sub-page: a heading + the add-domain form + a boxed
@@ -5831,6 +6512,32 @@ pub struct RenameUi {
 /// `ToggleButton`, and the guard that suppresses spurious dispatches when
 /// `render_admin_dns` syncs the toggle's reflective state.
 #[allow(clippy::type_complexity)]
+/// The open `admin-dns` page's background re-check (`dns-management.md`
+/// § Manual + live verification — the slow cadence): every
+/// `fauna_client_dns::record_recheck_secs()` the shared
+/// `DnsManagementMachine::background_recheck` runs, but only while `page` is on
+/// screen (`is_mapped` — a `gtk::Stack` maps only its visible child). The first
+/// fire is a full period out: opening the page already verifies once. The cadence
+/// and the tick are the shared crate's; this owns only the timer's gate — tui's
+/// `admin::dns_recheck_op`. The timer ends with the page.
+fn arm_dns_background_recheck(page: &gtk::Box, client: &Rc<FaunaClient>) {
+    let page = page.downgrade();
+    let client = Rc::clone(client);
+    gtk::glib::timeout_add_local(
+        std::time::Duration::from_secs(fauna_client_dns::record_recheck_secs()),
+        move || {
+            let Some(page) = page.upgrade() else {
+                return gtk::glib::ControlFlow::Break;
+            };
+            if page.is_mapped() {
+                client.dns_background_recheck();
+            }
+            gtk::glib::ControlFlow::Continue
+        },
+    );
+}
+
+#[allow(clippy::type_complexity)]
 fn build_dns_page(
     client: &Rc<FaunaClient>,
 ) -> (
@@ -5846,6 +6553,7 @@ fn build_dns_page(
     Rc<std::cell::Cell<bool>>,
 ) {
     let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    arm_dns_background_recheck(&outer, client);
 
     let heading = gtk::Label::new(Some(admin::dns::TITLE));
     heading.add_css_class("title-2");
@@ -5892,6 +6600,7 @@ fn build_dns_page(
     manage_all.set_margin_end(12);
     manage_all.set_margin_bottom(8);
     crate::testid::set_test_id(&manage_all, ids::ADMIN_DNS_MANAGE_ALL_TOGGLE);
+    crate::testid::set_test_attr(&manage_all, "state", "off");
     let manage_all_guard = Rc::new(std::cell::Cell::new(false));
     {
         let client = Rc::clone(client);
@@ -5928,7 +6637,12 @@ fn build_dns_page(
     crate::testid::set_test_id(&refresh_btn, ids::ADMIN_DNS_REFRESH_BUTTON);
     {
         let client = Rc::clone(client);
-        refresh_btn.connect_clicked(move |_| client.fetch_dns_records());
+        // Re-reads the domain rows too, so a change made outside this page (a
+        // succession clearing a catch-all) shows without a reload.
+        refresh_btn.connect_clicked(move |_| {
+            client.fetch_local_domains();
+            client.fetch_dns_records();
+        });
     }
     creds_header.append(&refresh_btn);
     creds_section.append(&creds_header);
@@ -6114,6 +6828,8 @@ fn build_rename_ui(client: &Rc<FaunaClient>) -> RenameUi {
         select,
         grace_input,
         targets,
+        abort_armed: Rc::new(RefCell::new(None)),
+        complete_armed: Rc::new(RefCell::new(None)),
     }
 }
 
@@ -6124,11 +6840,12 @@ fn build_rename_ui(client: &Rc<FaunaClient>) -> RenameUi {
 /// cost); Extend pushes the grace window out by N days. Every action is gated on
 /// the view's `can_*` flags — the nest owns state advancement + validation, so a
 /// refusal surfaces via the page error-message. Rebuilt each render, so the
-/// transient reveal state resets after the resulting snapshot re-render.
+/// Abort and Complete reveal state is carried in `RenameUi` across the re-render.
 ///
 /// [`PrimaryDomainRenameView`]: fauna_client_mail_settings::PrimaryDomainRenameView
 fn build_rename_banner(
     view: &fauna_client_mail_settings::PrimaryDomainRenameView,
+    ui: &RenameUi,
     client: &Rc<FaunaClient>,
 ) -> gtk::Box {
     let banner = gtk::Box::builder()
@@ -6186,7 +6903,9 @@ fn build_rename_banner(
         crate::testid::set_test_id(&complete_btn, ids::ADMIN_DNS_RENAME_COMPLETE_BUTTON);
         let confirm_btn = gtk::Button::with_label(admin::dns::rename::COMPLETE_CONFIRM);
         confirm_btn.add_css_class("suggested-action");
-        confirm_btn.set_visible(false);
+        let armed = ui.complete_armed.borrow().as_deref() == Some(view.rename_id.as_slice());
+        complete_btn.set_visible(!armed);
+        confirm_btn.set_visible(armed);
         crate::testid::set_test_id(&confirm_btn, ids::ADMIN_DNS_RENAME_COMPLETE_CONFIRM_BUTTON);
         // The reveal-only `complete_btn` arms this; the confirm is the dispatch
         // (tui's `admin::Action::ConfirmDnsRenameComplete`).
@@ -6198,12 +6917,15 @@ fn build_rename_banner(
         let warn = gtk::Label::new(Some(admin::dns::rename::COMPLETE_FORCE_WARNING));
         warn.add_css_class("warning");
         warn.set_wrap(true);
-        warn.set_visible(false);
+        warn.set_visible(armed && view.can_force_complete);
         {
             let confirm_btn = confirm_btn.clone();
             let warn = warn.clone();
             let force = view.can_force_complete;
+            let complete_armed = Rc::clone(&ui.complete_armed);
+            let rename_id = view.rename_id.clone();
             complete_btn.connect_clicked(move |btn| {
+                *complete_armed.borrow_mut() = Some(rename_id.clone());
                 btn.set_visible(false);
                 confirm_btn.set_visible(true);
                 if force {
@@ -6261,7 +6983,9 @@ fn build_rename_banner(
         crate::testid::set_test_id(&abort_btn, ids::ADMIN_DNS_RENAME_ABORT_BUTTON);
         let confirm_btn = gtk::Button::with_label(admin::dns::rename::ABORT_CONFIRM);
         confirm_btn.add_css_class("destructive-action");
-        confirm_btn.set_visible(false);
+        let armed = ui.abort_armed.borrow().as_deref() == Some(view.rename_id.as_slice());
+        abort_btn.set_visible(!armed);
+        confirm_btn.set_visible(armed);
         crate::testid::set_test_id(&confirm_btn, ids::ADMIN_DNS_RENAME_ABORT_CONFIRM_BUTTON);
         // The reveal-only `abort_btn` arms this; the confirm is the dispatch
         // (tui's `admin::Action::ConfirmDnsRenameAbort`).
@@ -6272,12 +6996,15 @@ fn build_rename_banner(
         let warn = gtk::Label::new(Some(admin::dns::rename::ABORT_POSTFLIP_WARNING));
         warn.add_css_class("warning");
         warn.set_wrap(true);
-        warn.set_visible(false);
+        warn.set_visible(armed && !view.is_pre_flip);
         {
             let confirm_btn = confirm_btn.clone();
             let warn = warn.clone();
             let post_flip = !view.is_pre_flip;
+            let abort_armed = Rc::clone(&ui.abort_armed);
+            let rename_id = view.rename_id.clone();
             abort_btn.connect_clicked(move |btn| {
+                *abort_armed.borrow_mut() = Some(rename_id.clone());
                 btn.set_visible(false);
                 confirm_btn.set_visible(true);
                 if post_flip {
@@ -6826,6 +7553,7 @@ pub fn render_admin_dns(handles: &AdminHandles, client: &Rc<FaunaClient>) {
                     &handles.dns_rename,
                     d.catch_all_actor_id.as_deref(),
                     d.catch_all_cleared_by_succession_at,
+                    Some(d.dmarc_policy),
                     &d.role_address_overrides,
                     &actors,
                     view,
@@ -6862,6 +7590,7 @@ pub fn render_admin_dns(handles: &AdminHandles, client: &Rc<FaunaClient>) {
                         false,
                         None,
                         &handles.dns_rename,
+                        None,
                         None,
                         None,
                         &[],
@@ -6913,7 +7642,7 @@ pub fn render_admin_dns(handles: &AdminHandles, client: &Rc<FaunaClient>) {
         handles
             .dns_rename
             .banner
-            .append(&build_rename_banner(r, client));
+            .append(&build_rename_banner(r, &handles.dns_rename, client));
     }
 
     // Held DNS-provider credentials (managed-mode "Fauna controls DNS" store).
@@ -6956,6 +7685,13 @@ pub fn render_admin_dns(handles: &AdminHandles, client: &Rc<FaunaClient>) {
     handles.dns_manage_all_guard.set(true);
     handles.dns_manage_all_toggle.set_active(all_managed);
     handles.dns_manage_all_guard.set(false);
+    // The checked-state mirror (`state` = `on`/`off`), off this same projection —
+    // a click's own optimistic flip of the button is not the reading.
+    crate::testid::set_test_attr(
+        &handles.dns_manage_all_toggle,
+        "state",
+        if all_managed { "on" } else { "off" },
+    );
     // (The former `admin-services` DNS toggle — a second reflective view of this
     // same master-switch state — was removed with the Services page, 2026-06-04;
     // `admin-dns-manage-all-toggle` above is now the sole control.)
@@ -6991,6 +7727,7 @@ fn build_domain_section(
     rename_ui: &RenameUi,
     catch_all_actor_id: Option<&[u8]>,
     catch_all_cleared_by_succession_at: Option<i64>,
+    dmarc_policy: Option<fauna_client_mail_settings::local_domains::DomainDmarcPolicy>,
     role_overrides: &[fauna_client_mail_settings::local_domains::RoleAddressOverrideView],
     actors: &[(Vec<u8>, String)],
     view: Option<&fauna_client_dns::DomainView>,
@@ -7217,6 +7954,60 @@ fn build_domain_section(
     }
     catch_all_row.append(&picker);
     section.append(&catch_all_row);
+
+    // The domain's published DMARC policy (`admin-dns-domain-dmarc-policy-select`;
+    // dmarc-reporting.md § Multi-domain deployments) — a raw-value picker over the
+    // shared catalog: the RFC 7489 tag is the select's value (the driver
+    // contract), the localized option text only paints. `reject`, the default,
+    // clears the override. Absent on the DNS-fallback rows (no local-domains
+    // snapshot yet). tui's `admin::Action::SelectDnsDmarcPolicy`.
+    if let Some(current) = dmarc_policy {
+        use fauna_client_mail_settings::local_domains::{DomainDmarcPolicy, dmarc_policy_options};
+        let dmarc_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        dmarc_row.set_margin_start(12);
+        dmarc_row.set_margin_end(12);
+        dmarc_row.set_margin_bottom(4);
+
+        let dmarc_label = gtk::Label::new(Some(admin::dns::DMARC_POLICY_LABEL));
+        dmarc_label.add_css_class("dim-label");
+        dmarc_label.set_halign(gtk::Align::Start);
+        dmarc_row.append(&dmarc_label);
+
+        let values: Vec<String> = dmarc_policy_options()
+            .into_iter()
+            .map(|o| o.value)
+            .collect();
+        let dmarc_dd = crate::wire_kind_dropdown::WireKindDropdown::build(
+            values,
+            ids::ADMIN_DNS_DOMAIN_DMARC_POLICY_SELECT,
+            |tag| match DomainDmarcPolicy::from_tag(tag) {
+                Some(p) => p.label().resolve(crate::i18n::strings::lookup),
+                None => tag.to_string(),
+            },
+        );
+        dmarc_dd.dd.add_css_class("flat");
+        // Initial selection BEFORE the handler connects, so it never dispatches.
+        dmarc_dd.select_kind(current.as_tag());
+        crate::offline_gate::declare_wire_kind(
+            &dmarc_dd.dd,
+            "fauna.bridges.update_local_domain_config",
+        );
+        {
+            let client = Rc::clone(client);
+            let domain = domain.to_string();
+            // Catalog order == `DomainDmarcPolicy::ORDER`, so the index maps to the
+            // policy without capturing the dropdown (no widget reference cycle).
+            dmarc_dd.dd.connect_selected_notify(move |d| {
+                if let Some(p) = DomainDmarcPolicy::ORDER.get(d.selected() as usize).copied()
+                    && p != current
+                {
+                    client.set_dmarc_policy(domain.clone(), p);
+                }
+            });
+        }
+        dmarc_row.append(&dmarc_dd.dd);
+        section.append(&dmarc_row);
+    }
 
     // Present only when a SUCCESSION (not an admin) last cleared this domain's
     // catch-all — tells the admin why the picker above reads "none"
@@ -7727,7 +8518,10 @@ fn build_dns_record_card(record: &fauna_client_dns::DnsRecordRow) -> gtk::Box {
     {
         let value = record.expected.clone();
         copy_btn.connect_clicked(move |btn| {
-            btn.clipboard().set_text(&value);
+            crate::clipboard::copy_text(&value);
+            // The copy-button contract a test reads (`clipboard::copy_and_confirm`'s
+            // `copied` attr): no driver reads the OS clipboard.
+            crate::testid::set_test_attr_text(btn, "copied", &value);
         });
     }
     actions.append(&copy_btn);
@@ -7812,82 +8606,34 @@ fn build_credential_item(
     row
 }
 
-/// Update the nest statistics rows from a JSON stats response.
-pub fn update_admin_stats(handles: &AdminHandles, stats: &serde_json::Value) {
-    // Each card's value is written to BOTH the visible row subtitle and the
-    // hidden `admin-stat-card-value` E2E marker, so the test reads the same
-    // value the user sees (and only once the data has actually loaded).
-    let set = |row: &adw::ActionRow, marker: &gtk::Label, value: &str| {
-        row.set_subtitle(value);
-        marker.set_text(value);
-    };
-
-    // Keys are the nest's `/admin/api/stats` response shape (see
-    // bins/fauna-nest/src/admin.rs::stats and web's admin +page.svelte, the
-    // canonical consumer): `total_users`, `total_storage_bytes`,
-    // `total_inbox_bytes`, `ws_connections` — read by exactly those names.
-    let u64_field = |keys: &[&str]| -> Option<u64> {
-        keys.iter()
-            .find_map(|k| stats.get(*k).and_then(|v| v.as_u64()))
-    };
-
-    if let Some(users) = u64_field(&["total_users"]) {
-        set(
-            &handles.stats_users_row,
-            &handles.stats_users_value,
-            &users.to_string(),
-        );
-    }
-
-    if let Some(storage) = u64_field(&["total_storage_bytes"]) {
-        set(
-            &handles.stats_storage_row,
-            &handles.stats_storage_value,
-            &crate::i18n::byte_size(storage),
-        );
-    }
-
-    // The nest exposes inbox SIZE (`total_inbox_bytes`), not a message count;
-    // this card's title is "Total Inbox Messages", so reading bytes here would
-    // be a label/data mismatch. Leave it reading a message-count key (stays
-    // blank until the nest exposes one) rather than show bytes under a
-    // "messages" label. Not E2E-gated; see NEXT for the label-vs-data follow-up.
-    if let Some(inbox) = u64_field(&["total_inbox_messages", "inbox_count"]) {
-        set(
-            &handles.stats_inbox_row,
-            &handles.stats_inbox_value,
-            &inbox.to_string(),
-        );
-    }
-
-    if let Some(sessions) = u64_field(&["ws_connections"]) {
-        set(
-            &handles.stats_sessions_row,
-            &handles.stats_sessions_value,
-            &sessions.to_string(),
-        );
-    }
-}
-
-/// Update the dashboard recent-users group from a typed users page (read-only;
-/// no tier picker — that lives on the Users hub).
-pub fn update_dashboard_users(
+/// Render the shared dashboard snapshot (`AdminClient::dashboard_snapshot`,
+/// `admin.md` § 1 → *The card set*): one indexed `admin-stat-card` row per card
+/// in the snapshot's own order, nothing else. The first failed read's detail
+/// shows on the page's `error-message` through `admin.dashboard.load_error`,
+/// and the cards the other reads produced still paint.
+pub fn update_admin_dashboard(
     handles: &AdminHandles,
-    reply: &fauna_client_admin::admin::AdminUsersListReply,
+    snapshot: &fauna_client_admin::AdminDashboardSnapshot,
 ) {
-    super::layout::clear_preferences_group_rows(&handles.dashboard_users_group);
-    if reply.users.is_empty() {
-        let empty_row = adw::ActionRow::builder()
-            .title(admin::view::NO_REGISTERED_USERS)
+    for stale in handles.dashboard_card_rows.borrow_mut().drain(..) {
+        handles.dashboard_stats_group.remove(&stale);
+    }
+    for card in &snapshot.stats {
+        let label = card.label.resolve(crate::i18n::strings::lookup);
+        let value = card.value.resolve(crate::i18n::strings::lookup);
+        let row = adw::ActionRow::builder()
+            .title(label.as_str())
+            .subtitle(value.as_str())
             .build();
-        handles.dashboard_users_group.add(&empty_row);
-        return;
+        crate::testid::set_test_id(&row, ids::ADMIN_STAT_CARD);
+        // Each value is written to BOTH the visible subtitle and the hidden
+        // `admin-stat-card-value` E2E marker, so the test reads what the user sees.
+        attach_stat_markers(&row, &label).set_text(&value);
+        handles.dashboard_stats_group.add(&row);
+        handles.dashboard_card_rows.borrow_mut().push(row);
     }
-    for user in reply.users.iter().take(10) {
-        handles
-            .dashboard_users_group
-            .add(&build_dashboard_user_row(user));
-    }
+    let error = snapshot.error.as_deref().map(admin::dashboard::load_error);
+    render_page_error(&handles.dashboard_error, error.as_deref());
 }
 
 /// Update the Users section from a typed users page, wiring each row's
@@ -8055,40 +8801,12 @@ pub fn update_invite_codes(
     handles.create_invite_btn.set_sensitive(true);
 }
 
-/// Update the server status rows from a JSON status response.
-pub fn update_admin_status(handles: &AdminHandles, status: &serde_json::Value) {
-    if let Some(version) = status.get("version").and_then(|v| v.as_str()) {
-        handles.server_version_row.set_subtitle(version);
-        handles.server_version_value.set_text(version);
-    }
-
-    if let Some(uptime) = status.get("uptime").and_then(|v| v.as_u64()) {
-        handles
-            .server_uptime_row
-            .set_subtitle(&crate::i18n::duration_secs(uptime));
-    } else if let Some(uptime) = status.get("uptime").and_then(|v| v.as_str()) {
-        handles.server_uptime_row.set_subtitle(uptime);
-    }
-
-    if let Some(workers) = status.get("workers").and_then(|v| v.as_str()) {
-        handles.server_workers_row.set_subtitle(workers);
-    } else if let Some(workers) = status.get("worker_count").and_then(|v| v.as_u64()) {
-        handles
-            .server_workers_row
-            .set_subtitle(&format!("{} active", workers));
-    } else if let Some(status_str) = status.get("worker_status").and_then(|v| v.as_str()) {
-        handles.server_workers_row.set_subtitle(status_str);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 fn clear_list_box(list_box: &gtk::ListBox) {
-    while let Some(child) = list_box.first_child() {
-        list_box.remove(&child);
-    }
+    crate::views::layout::clear_list_box_rows(list_box);
 }
 
 fn clear_box(b: &gtk::Box) {
@@ -8111,39 +8829,6 @@ fn user_row_title(user: &fauna_client_admin::admin::AdminUser) -> String {
     } else {
         user.label.clone()
     }
-}
-
-/// A read-only dashboard recent-user row (no tier picker).
-///
-/// Deliberately carries NO `user-row` / `user-actor-id` test id: ui.yaml scopes
-/// those to the `admin-users` page only (the Users hub), not `admin-dashboard`,
-/// so the dashboard's recent-users group is not an automation target. That
-/// scoping is the whole reason; it stands on its own.
-///
-/// ⚠ The second reason this comment used to give — "GTK keeps every
-/// `adw::ViewStack` page mounted, and the agent walks the whole window tree
-/// (unlike AT-SPI / the other apps, which only expose the visible view), so
-/// tagging these rows would double-count `user-row`" — is **retired, and was
-/// wrong in both halves.** This shell is a `gtk::Stack`, not an
-/// `adw::ViewStack` (the app constructs none), and the agent does not walk the
-/// whole tree: `automation::find::is_showing` prunes every page a stack is not
-/// currently on, mid-transition included. A tagged dashboard row would be pruned along with the dashboard. Do
-/// not reason from "the agent sees everything" anywhere in this app.
-fn build_dashboard_user_row(user: &fauna_client_admin::admin::AdminUser) -> adw::ActionRow {
-    // Handle is the prominent title; the actor id appears once, short, in the
-    // subtitle next to the tier. The former full-hex suffix label rendered the
-    // 64-char id a third time (title/subtitle/suffix) and dominated the row — it
-    // carried no test id (dashboard rows are not an automation target), so it is
-    // pure clutter and is dropped. "Handle is more important than the actor id."
-    adw::ActionRow::builder()
-        .title(user_row_title(user))
-        .subtitle(format!(
-            "{} · {}",
-            user.tier,
-            short_actor_id(user.actor_id.as_ref())
-        ))
-        .subtitle_selectable(true)
-        .build()
 }
 
 /// A Users-section user row from a typed [`AdminUser`], carrying `user-row` /
@@ -8434,6 +9119,10 @@ mod tests {
             "fauna.admin.invite_requests.list",
             "fauna.admin.invite_requests.approve",
             "fauna.admin.invite_requests.deny",
+            // The standing Pending admin actions section's list / approve / cancel.
+            "fauna.admin.pending_actions.list",
+            "fauna.admin.pending_actions.approve",
+            "fauna.admin.pending_actions.cancel",
             // The Registration section's one save — mode + ceiling, then the
             // age require-knob when it changed.
             "fauna.admin.set_registration_mode",

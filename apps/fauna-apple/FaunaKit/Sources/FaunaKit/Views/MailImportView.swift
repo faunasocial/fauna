@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import SwiftUI
 
 /// The user-facing **mail-import** wizard page (`docs/goal/behavior/
@@ -550,11 +553,23 @@ public struct MailImportView: View {
             messages: String(messages))
     }
 
+    /// The shared elapsed time / time left of this session
+    /// (`mailbox-migration.md` § Wizard steps steps 5–6), at the device's clock.
+    private func timing(_ snap: MailImportSnapshot) -> TransferTiming {
+        MailTransferText.timing(
+            startedAt: snap.startedAt, lastProgressAt: snap.lastProgressAt,
+            running: snap.sessionState == .running,
+            processed: UInt64(snap.importedCount) + UInt64(snap.skippedCount) + UInt64(snap.erroredCount),
+            total: UInt64(snap.totalCount))
+    }
+
     private var progressSummary: String {
         guard let snap = vm.snapshot else { return "" }
-        return L.mailImport.progressSummaryFmt(
-            imported: String(snap.importedCount), total: String(snap.totalCount),
-            skipped: String(snap.skippedCount), errored: String(snap.erroredCount))
+        return MailTransferText.importProgress(
+            summary: L.mailImport.progressSummaryFmt(
+                imported: String(snap.importedCount), total: String(snap.totalCount),
+                skipped: String(snap.skippedCount), errored: String(snap.erroredCount)),
+            timing: timing(snap))
     }
 
     private var progressFraction: Double {
@@ -564,12 +579,12 @@ public struct MailImportView: View {
 
     private var doneSummary: String {
         guard let snap = vm.snapshot else { return "" }
-        return L.mailImport.doneSummaryFmt(
-            imported: String(snap.importedCount),
-            skipped: String(snap.skippedCount),
-            errored: String(snap.erroredCount))
+        return MailTransferText.importDone(
+            imported: UInt64(snap.importedCount), skipped: UInt64(snap.skippedCount),
+            errored: UInt64(snap.erroredCount), timing: timing(snap))
     }
 }
 
 // `groupedSection` (`GroupedSection.swift`) is the shared eager-container
 // replacement for `Form`'s `Section` this file's wizard steps use.
+#endif // !FAUNA_KIDS

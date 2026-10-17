@@ -127,7 +127,29 @@ def _bare_visible_helper_names(actions_root: Path) -> frozenset[str]:
                 rest = body
             if len(rest) == 1 and isinstance(rest[0], ast.Return) and rest[0].value is not None and _is_visible_call(rest[0].value):
                 names.add(node.name)
+            elif _is_poll_loop_visible_helper(node):
+                names.add(node.name)
     return frozenset(names)
+
+
+def _is_poll_loop_visible_helper(fn: ast.FunctionDef) -> bool:
+    """A poll-loop helper — `while …: if self.driver.is_visible(id): return True`
+    (or the `for` spelling): a loop that reads `is_visible` and returns the
+    constant `True` from inside itself. It is the bare shape with a retry
+    around it, so it carries the same windows `!IsOffscreen` trap. A loop that
+    returns anything else (text, a handle) is a value read, not a presence
+    predicate, and is not swept in."""
+    for loop in ast.walk(fn):
+        if not isinstance(loop, (ast.While, ast.For)):
+            continue
+        reads_visible = any(_is_visible_call(n) for n in ast.walk(loop))
+        returns_true = any(
+            isinstance(n, ast.Return) and isinstance(n.value, ast.Constant) and n.value.value is True
+            for n in ast.walk(loop)
+        )
+        if reads_visible and returns_true:
+            return True
+    return False
 
 
 def _is_call_to_name(node: ast.AST, names: frozenset[str]) -> bool:

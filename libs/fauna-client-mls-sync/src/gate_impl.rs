@@ -33,6 +33,7 @@
 //! resumes each channel from the `MlsStateSync` processed-seq cursor (the restored
 //! `history/<ch>` watermark), not `0`.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
@@ -41,6 +42,7 @@ use fauna_conversations::backend::{BackendError, ChannelCursor, CommitGate, Conv
 use fauna_conversations::backends::fauna_mls::{
     FaunaMlsBackend, poll_inbound_conv, poll_inbound_folder,
 };
+use fauna_core::identity::ActorId;
 use fauna_mls::engine::MlsEngine;
 use fauna_mls::types::ChannelId;
 
@@ -267,17 +269,36 @@ impl CommitGate for FaunaCommitGate {
     async fn gated_remove_member(
         &self,
         channel: ChannelId,
-        leaf: u32,
-    ) -> Result<i64, BackendError> {
-        self.sync
+        actor: ActorId,
+    ) -> Result<Option<i64>, BackendError> {
+        let absent = AtomicBool::new(false);
+        let outcome = self
+            .sync
             .send_commit_gated(&self.engine, &self.send, &self.catch_up, &channel, || {
+                // The leaf is resolved from the actor on EVERY attempt, like
+                // `gated_set_room_policy`'s rebuild: a leaf index is meaningful
+                // only against the tree it was read from, and the catch-up that
+                // precedes a retry can fold a commit that removed the target and
+                // an add that refilled its blank leaf (MLS seats an add in the
+                // leftmost blank) — a captured index would then evict the newcomer.
+                let Some(leaf) = self.engine.find_leaf_by_identity(&channel, &actor) else {
+                    absent.store(true, Ordering::SeqCst);
+                    return Err(fauna_mls::error::MlsError::NotSeated(
+                        "the removal target left the group during the rebase".into(),
+                    ));
+                };
                 self.engine
                     .remove_member_staged(&channel, leaf)
                     .map(|commit| (commit, ()))
             })
-            .await
-            .map(|(seq, ())| seq)
-            .map_err(gate_error)
+            .await;
+        match outcome {
+            Ok((seq, ())) => Ok(Some(seq)),
+            // Gone after the catch-up: nothing staged, nothing sent — the remove
+            // is already done, not a different eviction.
+            Err(CommitGateError::Engine(_)) if absent.load(Ordering::SeqCst) => Ok(None),
+            Err(e) => Err(gate_error(e)),
+        }
     }
 
     async fn gated_set_room_policy(
@@ -691,15 +712,15 @@ mod tests {
     #[test]
     fn gated_remove_member_evicts_peer() {
         let w = gate_world();
-        let bob_leaf = w
-            .alice
-            .find_leaf_by_identity(&w.channel, &w.bob.identity_actor_id())
-            .expect("bob is a member");
         let epoch_before = w.alice.current_epoch(&w.channel).unwrap();
 
-        let seq = block_on(w.gate.gated_remove_member(w.channel, bob_leaf)).unwrap();
+        let seq = block_on(
+            w.gate
+                .gated_remove_member(w.channel, w.bob.identity_actor_id()),
+        )
+        .unwrap();
 
-        assert_eq!(seq, 1);
+        assert_eq!(seq, Some(1));
         assert_eq!(
             w.alice.current_epoch(&w.channel).unwrap(),
             epoch_before + 1,
@@ -1094,11 +1115,13 @@ mod tests {
         );
         let epoch_before = alice.current_epoch(&channel).unwrap();
 
-        let carol_leaf = alice
-            .find_leaf_by_identity(&channel, &carol.identity_actor_id())
-            .expect("carol is a member");
-        let seq = block_on(device.gate.gated_remove_member(channel, carol_leaf))
-            .expect("rebases through the folder catch-up instead of exhausting retries");
+        let seq = block_on(
+            device
+                .gate
+                .gated_remove_member(channel, carol.identity_actor_id()),
+        )
+        .expect("rebases through the folder catch-up instead of exhausting retries")
+        .expect("carol was still seated, so a commit was sent");
 
         assert!(seq > injected_seq, "accepted after the foreign commit");
         assert_eq!(
@@ -1117,6 +1140,80 @@ mod tests {
             injected_seq,
             "the loop advanced its cursor with the folder catch-up's returned seq"
         );
+    }
+
+    /// A gated remove can only ever evict the member it names. Alice's first
+    /// gate-send goes stale because Bob's commits landed first: one removes the
+    /// target (Carol) and the next adds a newcomer (Dave), which MLS seats in
+    /// Carol's now-blank leaf. The catch-up folds both, so the retry's tree holds
+    /// Dave at the index Carol held when the remove was requested. Resolving the
+    /// leaf once would evict Dave; resolving it by actor on every attempt finds
+    /// Carol already gone and sends nothing (`None`), leaving Dave seated.
+    #[test]
+    fn gated_remove_retry_never_evicts_the_newcomer_who_refilled_the_leaf() {
+        let events: EventLog = Default::default();
+        let conv_nest = Arc::new(FakeConvNest::with_events(events.clone()));
+        let replica = MemReplica {
+            events: events.clone(),
+            ..Default::default()
+        };
+        let alice = Arc::new(MlsEngine::new_in_memory(keypair(1)).unwrap());
+        let bob = Arc::new(MlsEngine::new_in_memory(keypair(2)).unwrap());
+        let carol = Arc::new(MlsEngine::new_in_memory(keypair(3)).unwrap());
+        let dave = Arc::new(MlsEngine::new_in_memory(keypair(4)).unwrap());
+        let bob_kp = bob.generate_key_packages(1).unwrap();
+        let carol_kp = carol.generate_key_packages(1).unwrap();
+        let kps: Vec<_> = bob_kp.into_iter().chain(carol_kp).collect();
+        let (channel, welcome) = alice.create_group(&kps).unwrap();
+        bob.join_from_welcome(welcome).unwrap();
+
+        let device = assemble_device_for(&alice, 1, "alice", &conv_nest, &replica, channel, true);
+        let carol_actor = carol.identity_actor_id();
+        let dave_actor = dave.identity_actor_id();
+        let carol_leaf = alice
+            .find_leaf_by_identity(&channel, &carol_actor)
+            .expect("carol is a member");
+
+        // Bob removes Carol, then adds Dave into her blank leaf — both land on
+        // the log before Alice's gate-send, so it is stale.
+        let remove = bob.remove_member_staged(&channel, carol_leaf).unwrap();
+        bob.merge_pending_commit(&channel).unwrap();
+        let hex = channel.to_string();
+        conv_nest.inject(&hex, ChannelEnvelope::Commit(remove).to_bytes().unwrap());
+        let dave_kp = dave.generate_key_packages_bytes(1).unwrap().remove(0);
+        let (add, _welcome) = bob
+            .add_member_staged_from_bytes(&channel, &dave_kp)
+            .unwrap();
+        bob.merge_pending_commit(&channel).unwrap();
+        let injected_seq = conv_nest.inject(&hex, ChannelEnvelope::Commit(add).to_bytes().unwrap());
+        assert_eq!(
+            bob.find_leaf_by_identity(&channel, &dave_actor),
+            Some(carol_leaf),
+            "fixture: the newcomer refilled the vacated leaf"
+        );
+
+        let sent = block_on(device.gate.gated_remove_member(channel, carol_actor))
+            .expect("the catch-up succeeds and the target is already gone");
+
+        assert_eq!(
+            sent, None,
+            "the target was gone after the catch-up: no commit sent"
+        );
+        assert!(
+            alice.find_leaf_by_identity(&channel, &dave_actor).is_some(),
+            "the newcomer who refilled the leaf is still seated"
+        );
+        assert!(
+            alice
+                .find_leaf_by_identity(&channel, &carol_actor)
+                .is_none()
+        );
+        assert_eq!(
+            conv_nest.commits_on(&channel),
+            2,
+            "only Bob's two commits are on the log — Alice sent none"
+        );
+        assert_eq!(device.sync.processed_seq(&channel), injected_seq);
     }
 
     /// The
@@ -1179,11 +1276,12 @@ mod tests {
         );
         let epoch_before = alice.current_epoch(&channel).unwrap();
 
-        let carol_leaf = alice
-            .find_leaf_by_identity(&channel, &carol.identity_actor_id())
-            .expect("carol is a member");
-        let err = block_on(device.gate.gated_remove_member(channel, carol_leaf))
-            .expect_err("the catch-up must fail rather than rebase past an unincorporated commit");
+        let err = block_on(
+            device
+                .gate
+                .gated_remove_member(channel, carol.identity_actor_id()),
+        )
+        .expect_err("the catch-up must fail rather than rebase past an unincorporated commit");
 
         // THE invariant (Rule 2): the rebase baseline never reaches the commit
         // the engine could not incorporate. This is the assertion that goes red

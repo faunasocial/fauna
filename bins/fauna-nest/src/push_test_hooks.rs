@@ -253,8 +253,9 @@ async fn handle_dispatches(State(state): State<Arc<AppState>>) -> impl IntoRespo
     .into_response()
 }
 
+/// The `?actor_id=<hex>` the per-actor reads below take.
 #[derive(Deserialize)]
-pub struct SubscriptionsQuery {
+pub struct ActorQuery {
     pub actor_id: String,
 }
 
@@ -266,7 +267,7 @@ pub struct SubscriptionsQuery {
 /// Consumer: `tests/e2e-unified/tests/test_push_settings.py`.
 async fn handle_subscriptions(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(q): axum::extract::Query<SubscriptionsQuery>,
+    axum::extract::Query(q): axum::extract::Query<ActorQuery>,
 ) -> impl IntoResponse {
     let actor_id = match fauna_core::hex32::decode(&q.actor_id) {
         Ok(arr) => arr,
@@ -283,10 +284,40 @@ async fn handle_subscriptions(
     }
 }
 
+/// `GET /api/v1/test/push/presence?actor_id=<hex>` — which of the actor's
+/// devices are present right now, as the dispatch would decide it this instant
+/// ([`crate::ws::WsState::device_presence`]): `{"announced": [device_id…],
+/// "app": [device_id…], "stand_in": [device_id…], "any_unannounced": bool}` —
+/// `announced` is every announced device of either kind, `app` and
+/// `stand_in` the two kinds apart. A client announces asynchronously on every
+/// (re)connect, so this is the causal barrier a witness waits on before it
+/// triggers a push it expects a `ws-device` row to deliver. Consumer:
+/// `tests/e2e-unified/tests/platform/windows/test_agent_push_arm_end_to_end.py`.
+async fn handle_presence(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(q): axum::extract::Query<ActorQuery>,
+) -> impl IntoResponse {
+    let actor_id = match fauna_core::hex32::decode(&q.actor_id) {
+        Ok(arr) => arr,
+        Err(_) => return ApiError::bad_request("invalid actor_id hex").into_response(),
+    };
+    let presence = state.ws.device_presence(&actor_id);
+    let announced: std::collections::BTreeSet<&String> =
+        presence.app.iter().chain(&presence.stand_in).collect();
+    Json(json!({
+        "announced": announced,
+        "app": presence.app,
+        "stand_in": presence.stand_in,
+        "any_unannounced": presence.any_unannounced,
+    }))
+    .into_response()
+}
+
 /// Mount the `/api/v1/test/push/*` routes.
 pub fn routes() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
         .route("/api/v1/test/push/subscriptions", get(handle_subscriptions))
+        .route("/api/v1/test/push/presence", get(handle_presence))
         .route("/api/v1/test/push/dispatches", get(handle_dispatches))
         .route("/api/v1/test/push/notify", post(handle_notify))
         .route("/api/v1/test/push/knock", post(handle_knock))

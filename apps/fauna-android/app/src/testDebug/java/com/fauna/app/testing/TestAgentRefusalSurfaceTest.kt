@@ -273,6 +273,28 @@ class TestAgentRefusalSurfaceTest {
         }
     }
 
+    /**
+     * The engagement-cue test clock's five commands (`test_engagement_cues.py`'s
+     * skip and flick-through witnesses) have their own arm: before the host is
+     * wired each refuses naming itself and the missing collaborator — a
+     * refused freeze must never read as a frozen clock.
+     */
+    @Test
+    fun theCueClockCommandsAreRecognisedAndRefuseBeforeTheHostIsWired() {
+        for (action in listOf(
+            "feed_cue_clock_freeze", "feed_cue_clock_thaw", "feed_cue_clock_advance",
+            "feed_cue_probe", "feed_cue_scroll_by",
+        )) {
+            val appState = AppState()
+            dispatch(action, command(action), appState)
+            val refusal = errorFromStateProtocol(appState)
+            assertNotNull("$action must refuse loudly before the host is wired", refusal)
+            assertTrue("$action fell through to the catch-all: $refusal", !refusal!!.contains("no arm"))
+            assertTrue("$action's refusal must name it and the host: $refusal",
+                refusal.contains(action) && refusal.contains("FeedManagerHost"))
+        }
+    }
+
     /** `feed_inject_error`'s payload defaults — the `feed.error_load` carrier
      *  tui, web and linux fall back to — and an explicit pair passing through. */
     @Test
@@ -577,5 +599,55 @@ class TestAgentRefusalSurfaceTest {
                 "the mutation that would make the guard reject everything: $shown",
             shown == null || !shown.contains("peer_actor_id_hex"),
         )
+    }
+
+    // ── `device_set_state`: a missing or non-string `device_id_hex` is refused
+    // by field name (convention 11's bad-payload clause), never answered as a
+    // not-found report. ───────────────────────────────────────────────────────
+
+    @Test
+    fun aDeviceSetStateWithoutAStringDeviceIdIsRefusedNamingTheField() {
+        for (cmd in listOf(
+            command("device_set_state"),
+            command("device_set_state", "device_id_hex" to 7),
+        )) {
+            val appState = AppState()
+            dispatch("device_set_state", cmd, appState)
+            val shown = errorFromStateProtocol(appState)
+            assertNotNull("$cmd must be refused, not answered not-found", shown)
+            assertTrue("the refusal must name the field: $shown", shown!!.contains("device_id_hex"))
+        }
+    }
+
+    // ── `custodian_pull_run_now`: android hosts its replica in-app, so the pass
+    // takes no clock offset (ios's twin refuses it by name too). ──────────────
+
+    @Test
+    fun aCustodianPullWithAClockOffsetIsRefusedByName() {
+        val appState = AppState()
+
+        dispatch(
+            "custodian_pull_run_now",
+            command("custodian_pull_run_now", "now_offset_secs" to 86_400),
+            appState,
+        )
+
+        val shown = errorFromStateProtocol(appState)
+        assertNotNull("a shifted clock must be refused, not silently ignored", shown)
+        assertTrue(
+            "the refusal must name the command and the unhonoured offset: $shown",
+            shown!!.contains("custodian_pull_run_now") && shown.contains("now_offset_secs=86400"),
+        )
+    }
+
+    @Test
+    fun aCustodianPullWithNoWiredSessionIsRefusedNotDropped() {
+        val appState = AppState()
+
+        dispatch("custodian_pull_run_now", command("custodian_pull_run_now"), appState)
+
+        val shown = errorFromStateProtocol(appState)
+        assertNotNull("an unwired agent must refuse, not answer an empty report", shown)
+        assertTrue(shown!!.contains("custodian_pull_run_now"))
     }
 }

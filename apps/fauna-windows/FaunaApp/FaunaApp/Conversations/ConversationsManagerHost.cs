@@ -128,6 +128,9 @@ internal static class ConversationsManagerHost
         // above, and the same reset semantics (a fresh manager at an actor change
         // gets a fresh observer that reconciles the badge to the incoming identity).
         m.AddObserver(new UnreadBadgeObserver(m));
+        // The private contact overlay's change signal (contacts.md § The private
+        // overlay): the name surfaces re-read when the projection's revision moves.
+        m.AddObserver(new ContactOverlayChangeObserver(m));
         return m;
     });
 

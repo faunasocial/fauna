@@ -437,8 +437,36 @@ async fn the_custodian_nest_pulls_with_no_host_device_and_revoke_severs() {
     );
     bearer.disconnect().await;
 
+    // ── A successful handshake clears a standing refusal mark (ruling 5):
+    //    an old mark planted under a live grant is gone after one pass. ────
+    let refused_at = |state: Arc<AppState>| async move {
+        state
+            .db
+            .get_custody_hosting(&host().actor_id().0, &GRANT_ID)
+            .await
+            .unwrap()
+            .expect("the hosting row stands")
+            .owner_refused_at
+    };
+    host_state
+        .db
+        .set_custody_hosting_owner_refused(&host().actor_id().0, &GRANT_ID, 1_000)
+        .await
+        .unwrap();
+    let report = worker
+        .run_once()
+        .await
+        .expect("pump pass over a marked row");
+    assert_eq!(report.owner_refused, 0, "{report:?}");
+    assert_eq!(
+        refused_at(Arc::clone(&host_state)).await,
+        0,
+        "the owner's nest admitted the handshake — the mark clears"
+    );
+
     // ── Revoke severs: the next pass's fresh handshake takes its honest
-    //    refusal at connect, and the store gains nothing. ──────────────────
+    //    refusal at connect, the row is MARKED (the serve door refuses it
+    //    from here), and the store gains nothing. ───────────────────────────
     CapabilitiesClient::new(Arc::clone(&owner_nest))
         .revoke(GRANT_ID)
         .await
@@ -449,4 +477,362 @@ async fn the_custodian_nest_pulls_with_no_host_device_and_revoke_severs() {
         report.failed, 1,
         "the refused handshake is a failed row, honestly reported: {report:?}"
     );
+    assert_eq!(
+        report.owner_refused, 1,
+        "the refusal is the owner nest's authenticated not_registered: {report:?}"
+    );
+    assert!(
+        refused_at(Arc::clone(&host_state)).await > 0,
+        "the authenticated refusal marks the row"
+    );
+}
+
+/// A fleet device's handshake at the custodian nest's serve door, alone —
+/// `Err` carries the nest's code.
+async fn fleet_handshake(base: &str, device: &SigningKey) -> Result<String, String> {
+    let cert = {
+        let cert = fauna_core::data::DeviceAuthorization {
+            actor_id: owner().actor_id(),
+            device_key: device.verifying_key().to_bytes(),
+            capabilities: vec![fauna_core::data::Capability::RenewBearer],
+            created_at: Timestamp(1_000),
+            expires_at: None,
+        };
+        let (bytes, env) = fauna_core::encoding::sign_envelope(&owner(), &cert).unwrap();
+        fauna_core::encoding::EmbedAsBytes::from_signed(bytes, env)
+    };
+    fauna_anon_client::mint_bearer_over_custodied_fleet_handshake(
+        base,
+        owner().actor_id().0,
+        device,
+        &cert,
+    )
+    .await
+    .map(|minted| minted.token)
+    .map_err(|e| match e {
+        fauna_anon_client::AnonClientError::Rpc(rpc) => rpc.code,
+        other => format!("{other}"),
+    })
+}
+
+/// **A stopped row takes the same handshake, verdict only** (ruling 5's
+/// *stopped rows* paragraph): a row the host STOPPED is still dialed each
+/// pass for the owner nest's verdict — a success clears a standing mark, an
+/// authenticated refusal sets one, so the owner's revoke reaches the serve
+/// door within one pump interval — yet nothing is pulled and the pair store is
+/// never even created. Red with the stopped skip back ahead of `connect`: the
+/// mark neither clears nor sets, and the door keeps admitting the revoked
+/// owner's fleet.
+#[tokio::test]
+async fn a_stopped_row_is_dialed_for_the_owners_verdict_only() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .try_init();
+    let (owner_base, owner_state, _owner_tmp) = start_owner_nest().await;
+    let (host_base, host_state, host_tmp) = start_custodian_nest().await;
+    owner_state
+        .db
+        .create_user_with_handle(&owner().actor_id().0, "free", "owner", None)
+        .await
+        .unwrap();
+    let owner_nest = connected_client(&owner_base, owner()).await;
+    mint_custody_row(&owner_nest).await;
+
+    host_state
+        .db
+        .create_user_with_handle(&host().actor_id().0, "free", "host", None)
+        .await
+        .unwrap();
+    let host_client = connected_client(&host_base, host()).await;
+    let reply = CustodyHostingClient::new(Arc::clone(&host_client))
+        .register(&HostingDeposit {
+            grant_id: GRANT_ID.to_vec(),
+            owner: owner().actor_id().0,
+            witness: fauna_core::encoding::canonical_encode(&nest_witness())
+                .unwrap()
+                .to_vec(),
+            owner_nest_url: owner_base.clone(),
+            owner_devices: Vec::new(),
+            retained_bytes_cap: 8 * 1024 * 1024 * 1024,
+            stopped: true,
+        })
+        .await
+        .expect("hosting register RPC");
+    assert!(reply.ok, "the stopped hosting row deposited");
+    host_client.disconnect().await;
+
+    let refused_at = |state: Arc<AppState>| async move {
+        state
+            .db
+            .get_custody_hosting(&host().actor_id().0, &GRANT_ID)
+            .await
+            .unwrap()
+            .expect("the hosting row stands")
+            .owner_refused_at
+    };
+    let custodied_dir = host_tmp
+        .path()
+        .join("custody-hosting")
+        .join(hex::encode(host().actor_id().0))
+        .join(owner().actor_id_hex());
+
+    // ── (i) Live grant, a standing mark: the verdict dial clears it, and
+    //    nothing is pulled — the pair store is not even created. ───────────
+    host_state
+        .db
+        .set_custody_hosting_owner_refused(&host().actor_id().0, &GRANT_ID, 1_000)
+        .await
+        .unwrap();
+    let worker = CustodyHostingWorker::new(Arc::clone(&host_state), Duration::MAX);
+    let report = worker
+        .run_once()
+        .await
+        .expect("pump pass over a stopped row");
+    assert_eq!(report.stopped, 1, "{report:?}");
+    assert_eq!(
+        report.pulled, 0,
+        "a stopped row's pull is paused: {report:?}"
+    );
+    assert_eq!(report.owner_refused, 0, "{report:?}");
+    assert_eq!(
+        report.failed, 0,
+        "a verdict dial is not a failed pull: {report:?}"
+    );
+    assert_eq!(
+        report.receipts_deposited, 0,
+        "no receipt for a paused copy: {report:?}"
+    );
+    assert_eq!(
+        refused_at(Arc::clone(&host_state)).await,
+        0,
+        "the owner's nest admitted the stopped row's handshake — the mark clears"
+    );
+    assert!(
+        !custodied_dir.exists(),
+        "a stopped row never opens (and so never creates) a pair store"
+    );
+    let device = SigningKey::from_bytes(&[0xD5; 32]);
+    assert!(
+        fleet_handshake(&host_base, &device).await.is_ok(),
+        "a stopped, unrefused row serves its owner's fleet (ruling 4)"
+    );
+
+    // ── (ii) Revoke: the stopped row's next verdict dial takes the
+    //    authenticated refusal and MARKS the row — counted, never failed. ──
+    CapabilitiesClient::new(Arc::clone(&owner_nest))
+        .revoke(GRANT_ID)
+        .await
+        .expect("revoke RPC");
+    let report = worker.run_once().await.expect("pump pass after revoke");
+    assert_eq!(report.stopped, 1, "{report:?}");
+    assert_eq!(report.owner_refused, 1, "{report:?}");
+    assert_eq!(report.failed, 0, "{report:?}");
+    assert_eq!(report.pulled, 0, "{report:?}");
+    assert!(
+        refused_at(Arc::clone(&host_state)).await > 0,
+        "the owner's revoke reaches a stopped row within one pass"
+    );
+
+    // ── (iii) …and so the serve door refuses the owner's fleet. ────────────
+    assert_eq!(
+        fleet_handshake(&host_base, &device).await,
+        Err("fauna.auth.not_registered".into()),
+        "a stopped row the owner revoked is no longer served"
+    );
+    assert!(!custodied_dir.exists(), "still no pair store");
+}
+
+/// **The admission bound on the nest-hosted form**: the
+/// hosting row's `retained_bytes_cap` is BELOW one segment pair, so the pump's
+/// pull completes (the owner's plane is reachable) and adopts none of the
+/// owner's mail segments. Pins what the device-form pump test cannot: the
+/// worker hands `pull_from_owner_nest` the row's cap. Mutate: pass `None` there
+/// (the 8 GiB default) and the pair adopts.
+#[tokio::test]
+async fn a_hosted_custody_with_a_cap_below_one_pair_adopts_no_segment() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .try_init();
+    let (owner_base, owner_state, _owner_tmp) = start_owner_nest().await;
+    let (host_base, host_state, _host_tmp) = start_custodian_nest().await;
+
+    owner_state
+        .db
+        .create_user_with_handle(&owner().actor_id().0, "free", "owner", None)
+        .await
+        .unwrap();
+    let owner_nest = connected_client(&owner_base, owner()).await;
+
+    // One sealed mail record, finalized so the pair is adoptable.
+    fauna_nest::segments::mail::append_record(
+        &owner_state.mail_segments,
+        &owner_state.db,
+        &owner().actor_id().0,
+        &fauna_mls::wrapped_blob::SealedRecordBytes::carried_at_rest_unchecked(
+            b"sealed mail the cap leaves no room to hold".to_vec(),
+        ),
+        &fauna_mls::wrapped_blob::SealedRecordBytes::carried_at_rest_unchecked(
+            b"sealed-index-hint".to_vec(),
+        ),
+        fauna_mail::segments::MailFloorMetadata {
+            format_version: fauna_mail::segments::MAIL_FLOOR_FORMAT_VERSION,
+            received_at: 1_715_000_000_000,
+            timestamp: 1_715_000_000,
+            sender_domain: "example.com".to_string(),
+            spam_disposition: "accept".to_string(),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("append one sealed mail record on the owner's scope");
+    owner_state
+        .mail_segments
+        .finalize_open(&owner().actor_id().0)
+        .await
+        .expect("finalize the open mail segment");
+
+    mint_custody_row(&owner_nest).await;
+
+    host_state
+        .db
+        .create_user_with_handle(&host().actor_id().0, "free", "host", None)
+        .await
+        .unwrap();
+    let host_client = connected_client(&host_base, host()).await;
+    let reply = CustodyHostingClient::new(Arc::clone(&host_client))
+        .register(&HostingDeposit {
+            grant_id: GRANT_ID.to_vec(),
+            owner: owner().actor_id().0,
+            witness: fauna_core::encoding::canonical_encode(&nest_witness())
+                .unwrap()
+                .to_vec(),
+            owner_nest_url: owner_base.clone(),
+            owner_devices: Vec::new(),
+            // Below any one pair (a `.dat` plus its `.meta`).
+            retained_bytes_cap: 64,
+            stopped: false,
+        })
+        .await
+        .expect("hosting register RPC");
+    assert!(reply.ok, "the hosting row deposited");
+    host_client.disconnect().await;
+
+    let worker = CustodyHostingWorker::new(Arc::clone(&host_state), Duration::MAX);
+    let report = worker.run_once().await.expect("pump pass");
+    assert_eq!(report.pulled, 1, "the pull itself completed: {report:?}");
+    assert_eq!(
+        report.adopted_segments, 0,
+        "the cap leaves no room for a pair: {report:?}"
+    );
+}
+
+/// The T15 ingest brake on the nest pump: a hosted custody the brake
+/// has closed — at the floor, or after [`METERING_FAILURES_BRAKE`] consecutive
+/// metering failures — pulls NOTHING on the next pass, yet the pass's budget
+/// arm still runs and, metering cleanly, releases the brake so the pass after
+/// pulls again. Same mechanism as the device legs (one `IngestBrake`). The
+/// failure leg faults the pump's meter (`custody_hosting_meter_fault`), so it
+/// is red with the budget arm's `record_metering_failure()` removed.
+#[tokio::test]
+async fn a_braked_hosted_custody_pulls_nothing_until_the_meter_clears() {
+    use fauna_sync_engine::custody_leg::METERING_FAILURES_BRAKE;
+
+    let (owner_base, owner_state, _owner_tmp) = start_owner_nest().await;
+    let (host_base, host_state, _host_tmp) = start_custodian_nest().await;
+    owner_state
+        .db
+        .create_user_with_handle(&owner().actor_id().0, "free", "owner", None)
+        .await
+        .unwrap();
+    let owner_nest = connected_client(&owner_base, owner()).await;
+    mint_custody_row(&owner_nest).await;
+
+    host_state
+        .db
+        .create_user_with_handle(&host().actor_id().0, "free", "host", None)
+        .await
+        .unwrap();
+    let host_client = connected_client(&host_base, host()).await;
+    let reply = CustodyHostingClient::new(Arc::clone(&host_client))
+        .register(&HostingDeposit {
+            grant_id: GRANT_ID.to_vec(),
+            owner: owner().actor_id().0,
+            witness: fauna_core::encoding::canonical_encode(&nest_witness())
+                .unwrap()
+                .to_vec(),
+            owner_nest_url: owner_base.clone(),
+            owner_devices: Vec::new(),
+            retained_bytes_cap: 8 * 1024 * 1024 * 1024,
+            stopped: false,
+        })
+        .await
+        .expect("hosting register RPC");
+    assert!(reply.ok, "the hosting row deposited");
+    host_client.disconnect().await;
+
+    let worker = CustodyHostingWorker::new(Arc::clone(&host_state), Duration::MAX);
+    let brake = host_state
+        .custody_hosting_brakes
+        .for_custody(&host().actor_id().0, &GRANT_ID);
+
+    // Baseline: an open brake pulls.
+    let open = worker.run_once().await.expect("pump pass");
+    assert_eq!(open.pulled, 1, "un-braked: the pull runs: {open:?}");
+    assert_eq!(open.braked, 0, "{open:?}");
+
+    // At the floor: the next pass pulls nothing; its budget arm meters the
+    // (really under-cap) store and releases the brake.
+    brake.record_metered(true);
+    let floor = worker.run_once().await.expect("pump pass at floor");
+    assert_eq!(
+        floor.braked, 1,
+        "at floor: the custody stops pulling: {floor:?}"
+    );
+    assert_eq!(floor.pulled, 0, "nothing pulled while braked: {floor:?}");
+    assert_eq!(floor.failed, 0, "{floor:?}");
+    let released = worker.run_once().await.expect("pump pass after release");
+    assert_eq!(
+        released.braked, 0,
+        "the budget arm released the brake: {released:?}"
+    );
+    assert_eq!(released.pulled, 1, "pulls resume: {released:?}");
+
+    // Persistent metering failure, through the REAL budget arm: the
+    // pump's meter is faulted, so each pass's own `Err` arm writes the brake.
+    // One failure is weather — the passes before the threshold still pull;
+    // then the next pass is braked.
+    let fault = &host_state.custody_hosting_meter_fault;
+    fault.store(true, std::sync::atomic::Ordering::SeqCst);
+    for i in 1..=METERING_FAILURES_BRAKE {
+        let weather = worker.run_once().await.expect("pump pass, meter faulted");
+        assert_eq!(
+            weather.metering_failed, 1,
+            "failure #{i} is reported: {weather:?}"
+        );
+        assert_eq!(weather.braked, 0, "failure #{i} is weather: {weather:?}");
+        assert_eq!(weather.pulled, 1, "still pulling after #{i}: {weather:?}");
+    }
+    let dark = worker.run_once().await.expect("pump pass, meter dark");
+    assert_eq!(dark.braked, 1, "meter dark: ingest is closed: {dark:?}");
+    assert_eq!(dark.pulled, 0, "{dark:?}");
+    assert_eq!(dark.metering_failed, 1, "still failing: {dark:?}");
+
+    // The meter clears: one pass meters clean (still braked going in) and
+    // releases the brake; the pass after pulls.
+    fault.store(false, std::sync::atomic::Ordering::SeqCst);
+    let clean = worker.run_once().await.expect("pump pass, meter back");
+    assert_eq!(clean.metering_failed, 0, "{clean:?}");
+    assert_eq!(
+        clean.braked, 1,
+        "braked going into the clean pass: {clean:?}"
+    );
+    let resumed = worker
+        .run_once()
+        .await
+        .expect("pump pass after clean meter");
+    assert_eq!(
+        resumed.braked, 0,
+        "a clean meter reopens ingest: {resumed:?}"
+    );
+    assert_eq!(resumed.pulled, 1, "pulls resume: {resumed:?}");
 }

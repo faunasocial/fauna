@@ -40,6 +40,7 @@ from common.auth import (
     sync_register,
     user_create_folder,
 )
+from helpers.set_names import set_name_hash
 
 # One home for the second-boundary wait and its justification: `snapshots`
 # carries `UNIQUE(folder_id, created_at)` at second granularity, so two
@@ -128,7 +129,9 @@ def test_diff_reports_added_removed_and_modified(nest_instance):
         )
 
     assert diff["snapshot_a"] == snap_a["id"] and diff["snapshot_b"] == snap_b["id"], diff
-    assert diff["folder"] == folder, diff
+    # A sealed set rests no plaintext name, so the reply names it by its hash
+    # (`path-sealing.md` § the set-name plane).
+    assert bytes(diff["folder_hash"]) == set_name_hash(folder), diff
 
     added = diff["added"]
     removed = diff["removed"]

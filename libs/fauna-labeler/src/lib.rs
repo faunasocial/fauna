@@ -89,6 +89,14 @@ pub const LABELER_HOST_MAX_MEMORY_BYTES: u64 = 64 * 1024 * 1024;
 /// latency while leaving ample headroom for a single-item labeling pass.
 pub const LABELER_HOST_MAX_CPU_MICROSECONDS: u64 = 1_000_000;
 
+/// The tighter CPU ceiling at an **interactive** position — a subscribed
+/// labeler scoring the posts of a feed window at the subscriber's own app
+/// (`content-moderation-and-ranking.md` § Tier-3 → *Where it runs*, invariant
+/// (d)). A 50-post window then costs at most seconds per labeler even for a
+/// pathological module; [`PreparedLabeler::prepare_for_feed`] applies it on top
+/// of the host clamp.
+pub const LABELER_FEED_MAX_CPU_MICROSECONDS: u64 = 100_000;
+
 /// Per-attachment ceiling on the bytes a host hands a module that declared
 /// `needs_attachment_bytes` (`content-moderation-and-ranking.md` § Tier-3 →
 /// *The attachment facet*). An attachment over it rides the facet with its
@@ -731,39 +739,135 @@ pub fn run_published_labeler_bare(
     post_input_bare: &[u8],
     attachments: &[LabelerAttachmentInput],
 ) -> Result<Vec<Label>> {
-    let metadata: AlgorithmLabeler = fauna_core::encoding::canonical_decode(metadata_blob)
-        .map_err(|e| anyhow::anyhow!("labeler metadata decode: {e}"))?;
-    verify_labeler_metadata_for(&metadata, wasm_bytes, expected_id)
-        .map_err(|e| anyhow::anyhow!("labeler verify: {e}"))?;
-    // The output stamp, read before the module is compiled and so before its
-    // positional BARE output can be decoded (the ladder's "read before the
-    // strict decode, or the refusal reads as corruption").
-    if metadata.output_schema.label_abi > LABEL_ABI_CURRENT {
-        return Err(LabelerAbiNewer {
-            declared: metadata.output_schema.label_abi,
-            supported: LABEL_ABI_CURRENT,
-        }
-        .into());
+    PreparedLabeler::prepare(metadata_blob, wasm_bytes, expected_id)?
+        .run(post_input_bare, attachments)
+}
+
+/// A published `wasm` labeler made ready to run over many items — the shared
+/// boundary split once (`content-moderation-and-ranking.md` § Tier-3 → *Where
+/// it runs*, invariant (a)). [`Self::prepare`] runs every guard: decode the
+/// signed metadata, re-verify it against the module bytes and the factor's own
+/// id, refuse a newer output revision, clamp the declared limits, compile.
+/// [`Self::run`] then runs `label()` per item on the compiled module, taking
+/// neither the metadata nor the bytes — so no position looping one labeler
+/// over many items can skip a guard, and none pays for them per item.
+pub struct PreparedLabeler {
+    metadata: AlgorithmLabeler,
+    runtime: LabelerRuntime,
+    module: LoadedLabeler,
+    cpu_limit_microseconds: u64,
+}
+
+impl PreparedLabeler {
+    /// Prepare under the host ceilings — a background position (the
+    /// capability holder's drain, a community room's home nest).
+    ///
+    /// # Errors
+    ///
+    /// The metadata does not decode or verify for `expected_id`, it declares
+    /// a newer output revision ([`LabelerAbiNewer`], downcastable), or the
+    /// module does not compile.
+    pub fn prepare(metadata_blob: &[u8], wasm_bytes: &[u8], expected_id: &ActorId) -> Result<Self> {
+        Self::prepare_within(
+            metadata_blob,
+            wasm_bytes,
+            expected_id,
+            LABELER_HOST_MAX_CPU_MICROSECONDS,
+        )
     }
-    let (max_memory_bytes, max_cpu_microseconds) = clamp_labeler_limits(
-        metadata.resource_limits.max_memory_bytes,
-        metadata.resource_limits.max_cpu_microseconds,
-    );
-    let runtime = LabelerRuntime::new(max_memory_bytes, max_cpu_microseconds)
-        .context("labeler runtime init")?;
-    let module = runtime
-        .load_module(wasm_bytes)
-        .context("labeler module compile")?;
-    let input_bare = if metadata.input_schema.needs_attachment_bytes {
-        let mut bytes = post_input_bare.to_vec();
-        bytes.extend(encode_attachment_facet(attachments)?);
-        std::borrow::Cow::Owned(bytes)
-    } else {
-        std::borrow::Cow::Borrowed(post_input_bare)
-    };
-    runtime
-        .execute_labels(&module, &input_bare)
-        .context("labeler execute")
+
+    /// Prepare for an interactive feed window: [`Self::prepare`], the CPU
+    /// budget clamped further to [`LABELER_FEED_MAX_CPU_MICROSECONDS`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::prepare`].
+    pub fn prepare_for_feed(
+        metadata_blob: &[u8],
+        wasm_bytes: &[u8],
+        expected_id: &ActorId,
+    ) -> Result<Self> {
+        Self::prepare_within(
+            metadata_blob,
+            wasm_bytes,
+            expected_id,
+            LABELER_FEED_MAX_CPU_MICROSECONDS,
+        )
+    }
+
+    fn prepare_within(
+        metadata_blob: &[u8],
+        wasm_bytes: &[u8],
+        expected_id: &ActorId,
+        cpu_ceiling_microseconds: u64,
+    ) -> Result<Self> {
+        let metadata: AlgorithmLabeler = fauna_core::encoding::canonical_decode(metadata_blob)
+            .map_err(|e| anyhow::anyhow!("labeler metadata decode: {e}"))?;
+        verify_labeler_metadata_for(&metadata, wasm_bytes, expected_id)
+            .map_err(|e| anyhow::anyhow!("labeler verify: {e}"))?;
+        // The output stamp, read before the module is compiled and so before its
+        // positional BARE output can be decoded (the ladder's "read before the
+        // strict decode, or the refusal reads as corruption").
+        if metadata.output_schema.label_abi > LABEL_ABI_CURRENT {
+            return Err(LabelerAbiNewer {
+                declared: metadata.output_schema.label_abi,
+                supported: LABEL_ABI_CURRENT,
+            }
+            .into());
+        }
+        let (max_memory_bytes, max_cpu_microseconds) = clamp_labeler_limits(
+            metadata.resource_limits.max_memory_bytes,
+            metadata.resource_limits.max_cpu_microseconds,
+        );
+        let cpu_limit_microseconds = max_cpu_microseconds.min(cpu_ceiling_microseconds);
+        let runtime = LabelerRuntime::new(max_memory_bytes, cpu_limit_microseconds)
+            .context("labeler runtime init")?;
+        let module = runtime
+            .load_module(wasm_bytes)
+            .context("labeler module compile")?;
+        Ok(Self {
+            metadata,
+            runtime,
+            module,
+            cpu_limit_microseconds,
+        })
+    }
+
+    /// The verified metadata — its `version` keys a per-version memo.
+    pub fn metadata(&self) -> &AlgorithmLabeler {
+        &self.metadata
+    }
+
+    /// The CPU budget each run gets, after every clamp (microseconds).
+    pub fn cpu_limit_microseconds(&self) -> u64 {
+        self.cpu_limit_microseconds
+    }
+
+    /// Run `label()` over one item's BARE-encoded **post-shaped** input, the
+    /// attachment facet appended for a module that declared
+    /// `needs_attachment_bytes` (so the caller never has to know the shape).
+    /// Each run gets a fresh instance, memory and fuel budget.
+    ///
+    /// # Errors
+    ///
+    /// The module traps, runs out of fuel or memory, or emits output that is
+    /// not a BARE `Vec<Label>`.
+    pub fn run(
+        &self,
+        post_input_bare: &[u8],
+        attachments: &[LabelerAttachmentInput],
+    ) -> Result<Vec<Label>> {
+        let input_bare = if self.metadata.input_schema.needs_attachment_bytes {
+            let mut bytes = post_input_bare.to_vec();
+            bytes.extend(encode_attachment_facet(attachments)?);
+            std::borrow::Cow::Owned(bytes)
+        } else {
+            std::borrow::Cow::Borrowed(post_input_bare)
+        };
+        self.runtime
+            .execute_labels(&self.module, &input_bare)
+            .context("labeler execute")
+    }
 }
 
 #[cfg(test)]

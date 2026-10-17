@@ -29,6 +29,23 @@ pub struct MultipartBlob {
     pub bytes: Vec<u8>,
 }
 
+impl MultipartBlob {
+    /// The blob's content address as the nest computes it on ingest —
+    /// lowercase-hex `blake3` over the `bytes` part. A client compares the
+    /// nest's upload reply against this rather than trusting the echo
+    /// (`security.md` § sign-over-cid).
+    pub fn content_hash_hex(&self) -> String {
+        bytes_content_hash_hex(&self.bytes)
+    }
+}
+
+/// [`MultipartBlob::content_hash_hex`] over a bare byte slice — the entry the
+/// web SPA reaches through wasm, where the sealed bytes are not always wrapped
+/// in a [`MultipartBlob`].
+pub fn bytes_content_hash_hex(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
+}
+
 impl UploadPayload {
     /// Flatten into the parts a client POSTs: the primary blob, plus the
     /// thumbnail blob when `process_media` derived one.

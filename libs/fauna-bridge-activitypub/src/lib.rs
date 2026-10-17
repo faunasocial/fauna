@@ -6,6 +6,7 @@
 pub mod db;
 pub mod http_signatures;
 pub mod identity;
+pub mod oracle;
 pub mod translate;
 pub mod types;
 pub mod webfinger;

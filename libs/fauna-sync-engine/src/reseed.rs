@@ -113,7 +113,7 @@ use fauna_client_backup::reseed::{
 };
 use fauna_core::crypto::{NestBackupKey, OwnerSealKey};
 use fauna_core::data::ContentHash;
-use fauna_core::file_download::{FileDownloadKeys, download_file_bytes_by_manifest};
+use fauna_core::file_download::FileDownloadKeys;
 use fauna_protocol::RpcRequester;
 use fauna_protocol::sync::{SyncChangeRecordReply, SyncChangeRecordRequest};
 use fauna_protocol::sync_writer_sig::SignedChange;
@@ -125,24 +125,12 @@ use crate::segment_backup::{
 };
 use fauna_core::data::parse_folder_backup_set_name;
 
-/// The target nest's **bulk-byte** plane, as this leg needs it.
-///
-/// A trait rather than a bare [`crate::nest_client::SyncClient`] for the same
-/// reason the pull takes an [`RpcRequester`]: the leg's interesting behavior is
-/// *what* it pushes and *in what order*, and that must be assertable without a
-/// nest. The production implementation is [`SyncClientSink`], immediately below
-/// the trait it implements — deliberately close enough that no reader has to hunt
-/// for the real thing.
-#[async_trait::async_trait]
-pub trait BlobPushSink: Send + Sync {
-    /// `POST /chunks/check` — of these store keys, which does the target NOT
-    /// already hold? Dedup is the whole reason a re-push after a tear is cheap.
-    async fn missing_chunks(&self, store_keys: &[ContentHash]) -> Result<Vec<ContentHash>>;
-    /// `POST /chunks` — one chunk body, addressed by its store key.
-    async fn put_chunk(&self, store_key: &ContentHash, body: &[u8]) -> Result<()>;
-    /// `POST /manifests` — the canonical-encoded [`fauna_core::chunk::ChunkManifest`].
-    async fn put_manifest(&self, manifest_bytes: &[u8]) -> Result<()>;
-}
+/// The target nest's **bulk-byte** plane — the seam lives in
+/// [`fauna_client_backup::recover_leg`] since 2026-10-10, beside the lived-in
+/// recovery's leg that went wasm-clean; re-exported here so every leg keeps
+/// its import path. The production implementation over this crate's pooled
+/// transfer client is [`SyncClientSink`], immediately below.
+pub use fauna_client_backup::recover_leg::BlobPushSink;
 
 /// [`BlobPushSink`] over the real byte plane.
 pub struct SyncClientSink<'a> {
@@ -698,40 +686,21 @@ impl<'a, P: BlobPushSink, R: RpcRequester> ReseedDelivery<'a, P, R> {
     }
 }
 
-/// Bytes first: dedup-check, upload what is missing, then the manifest — the
-/// one push both legs that land custody on a nest share ([`ReseedDelivery`]
-/// and [`RecoveryDelivery`]).
-///
-/// The manifest lands **after** its chunks so the target never holds a
-/// manifest naming bytes it does not have — the same rule the custodian
-/// store's own `put` follows locally.
+/// Bytes first, then the manifest — the shared
+/// [`fauna_client_backup::recover_leg::push_sealed`], read back as a
+/// [`ReseedReport`] for the two legs here that count in those terms
+/// ([`ReseedDelivery`] and the nest-held pull-back).
 pub(crate) async fn push_sealed<P: BlobPushSink>(
     sink: &P,
     sealed: &SealedBlob,
 ) -> Result<ReseedReport> {
-    let mut report = ReseedReport::default();
-    let keys: Vec<ContentHash> = sealed.chunks.iter().map(|(k, _)| *k).collect();
-    let missing = sink
-        .missing_chunks(&keys)
-        .await
-        .context("chunk dedup check")?;
-    report.chunks_deduped = keys.len().saturating_sub(missing.len());
-
-    for (key, body) in &sealed.chunks {
-        if !missing.contains(key) {
-            continue;
-        }
-        sink.put_chunk(key, body)
-            .await
-            .with_context(|| format!("uploading chunk {}", hex::encode(key.digest())))?;
-        report.chunks_uploaded += 1;
-    }
-
-    sink.put_manifest(&sealed.manifest_bytes)
-        .await
-        .context("uploading manifest")?;
-    report.manifests_uploaded = 1;
-    Ok(report)
+    let pushed = fauna_client_backup::recover_leg::push_sealed(sink, sealed).await?;
+    Ok(ReseedReport {
+        chunks_uploaded: pushed.chunks_uploaded,
+        chunks_deduped: pushed.chunks_deduped,
+        manifests_uploaded: 1,
+        ..ReseedReport::default()
+    })
 }
 
 /// Custody second — the client-authed reserved-set arm, shared by both legs.
@@ -776,440 +745,190 @@ pub(crate) async fn record_custody<R: RpcRequester>(
 // The lived-in recovery's delivery leg — destination → regressed source
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// The device's own record of an **accepted source regression** — the notice's
-/// record the audit loop keeps (`backup-restore.md` § Background Tasks →
-/// *Implementation status (audit loop)*, the accepted-regression bullet), which
-/// the recovery's post-recovery duties clear on a whole reply.
-///
-/// A seam, because the record lives in the audit's client-local store and the
-/// leg must not know how a shell keeps it: [`AuditStoreRegressionRecord`] is
-/// the implementation over that store.
-#[async_trait::async_trait]
-pub trait AcceptedRegressionRecord: Send + Sync {
-    /// Clear the record this device holds for `kind`'s set at the destination
-    /// the recovery drew from. Called once, only after a whole `recover` reply.
-    async fn clear(&self, kind: &str) -> Result<()>;
-}
+/// The lived-in recovery's delivery leg and its seams — [`RecoveryDelivery`],
+/// its two ends, the accepted-regression record, the walk — live in
+/// [`fauna_client_backup::recover_leg`] since 2026-10-10, so web runs the same
+/// leg (`segment-backup-protocol.md` § Client-device custodian (pull) →
+/// *Restore* → *Recovery into the lived-in nest that regressed*: "web-capable
+/// like the pull-back"). What stays here is what only a native host has: the
+/// store end ([`RecoveryStore`], [`CustodianStoreRegressionRecord`]) and the
+/// `Send` leg the driver runs natively ([`NativeRecoveryLeg`]).
+pub use fauna_client_backup::recover_leg::{
+    AcceptedRegressionRecord, AuditStoreRegressionRecord, DestGeneration,
+    NoAcceptedRegressionRecord, NoCustodyRecorder, RecoveryDelivery, RecoveryDestination,
+    RecoveryReport, RecoverySource, parse_manifest_hex, segment_set_order,
+};
 
-/// The [`AcceptedRegressionRecord`] over the audit's own client-local store
-/// (`fauna_client_backup::audit::AuditStateStore`): clears the entries this
-/// device holds for the recovered kind's reserved set at the destination the
-/// recovery drew from — the content ledger's and the journal's alike.
-pub struct AuditStoreRegressionRecord<'a> {
-    pub store: &'a dyn fauna_client_backup::audit::AuditStateStore,
-    /// The destination the recovery drew from, as the audit records name it.
-    pub destination_id: &'a str,
+/// The [`AcceptedRegressionRecord`] of a **client-device custodian's own
+/// store** (`segment-backup-protocol.md` § Client-device custodian (pull) →
+/// *Restore* → *Recovery from this device's own store*, question (4)): the
+/// store's `AuditRecord::source_regressions` is that row's record — the shell
+/// folds it into the row each audit pass — so the duty clears the recovered
+/// kind's entries there, the content ledger's and the journal's alike, keyed
+/// as the pull keys them (the ledger's held path).
+pub struct CustodianStoreRegressionRecord<'a> {
+    pub store: &'a CustodianStore,
     /// The owner scope whose reserved sets were recovered.
     pub scope_id: [u8; 32],
 }
 
 #[async_trait::async_trait]
-impl AcceptedRegressionRecord for AuditStoreRegressionRecord<'_> {
+impl AcceptedRegressionRecord for CustodianStoreRegressionRecord<'_> {
     async fn clear(&self, kind: &str) -> Result<()> {
         let set = reserved_backup_set_name(kind, &self.scope_id)
             .ok_or_else(|| anyhow::anyhow!("kind has no backup surface: {kind}"))?;
-        fauna_client_backup::audit::clear_accepted_regressions(
-            self.store,
-            self.destination_id,
-            &set,
-        )
-        .map(|_| ())
-        .map_err(|e| anyhow::anyhow!("the audit store: {e}"))
-    }
-}
-
-/// The [`AcceptedRegressionRecord`] of a device that keeps none — a recovery
-/// driven where no audit store exists.
-pub struct NoAcceptedRegressionRecord;
-
-#[async_trait::async_trait]
-impl AcceptedRegressionRecord for NoAcceptedRegressionRecord {
-    async fn clear(&self, _kind: &str) -> Result<()> {
-        Ok(())
-    }
-}
-
-/// The destination end of the recovery leg: the owner's own connection to it.
-pub struct RecoveryDestination<'a, D: RpcRequester> {
-    /// `fauna.backup.custody.list` + `fauna.backup.generation.list`, walked to
-    /// completion ([`fauna_client_backup::audit::read_full_custody`] /
-    /// [`fauna_client_backup::audit::read_full_generations`]).
-    pub seam: &'a dyn fauna_client_backup::trust::BackupNestSeam,
-    /// The destination's open, hash-verified byte routes.
-    pub bytes: &'a dyn fauna_core::file_download::BlobFetcher,
-    /// The client-authed reserved-set arm at the destination — the
-    /// post-recovery tombstones.
-    pub records: &'a D,
-    /// Hex device id, registered write-capable on the **destination**.
-    pub device_id: String,
-}
-
-/// The source end of the recovery leg: the owner's own connection to the
-/// regressed nest.
-pub struct RecoverySource<'a, P: BlobPushSink, R: RpcRequester> {
-    pub bytes: &'a P,
-    /// `fauna.segments.list` (the skip), `fauna.sync.changes.record` (the
-    /// landing) and `fauna.backup.custody.recover` (the verb).
-    pub nest: &'a R,
-    /// Hex device id, registered write-capable on the **source**.
-    pub device_id: String,
-}
-
-/// What one recovery run did.
-#[derive(Debug, Default)]
-pub struct RecoveryReport {
-    /// Every `(path, manifest hash)` generation landed on the source, in the
-    /// order landed.
-    pub delivered: Vec<(String, String)>,
-    /// Segment generations not landed because the source already holds that
-    /// half byte-identical — the economy; the verb reads the source's own copy.
-    pub skipped: Vec<String>,
-    /// The verb's reply.
-    pub recovered: fauna_protocol::backup::CustodyRecoverReply,
-    /// Destination paths tombstoned after the whole reply — the recovered
-    /// segment paths the destination's live ledger does not name.
-    pub tombstoned_at_destination: Vec<String>,
-    pub chunks_uploaded: usize,
-    pub chunks_deduped: usize,
-}
-
-/// One custody generation at the destination.
-pub(crate) struct DestGeneration {
-    pub(crate) path: String,
-    pub(crate) manifest_hash: ContentHash,
-    /// Retained generations land first (oldest supersede first), the live one
-    /// last, so the source's own live row at each path is the destination's.
-    pub(crate) order: (bool, i64),
-}
-
-/// The order a reserved segment set's generations land on a nest in — the one
-/// walk both legs that move a destination's copy share ([`RecoveryDelivery`]
-/// and [`crate::reseed_pull::NestPullBack`]): each family of `kind` in
-/// [`SegmentFamily::PASS_ORDER`], its segments by id with the `.dat` before the
-/// `.meta` (generations of one path oldest first), then every family's
-/// `manifest.<kind>` mirror **last** — a mirror naming a segment whose bytes
-/// have not landed is the ordering that makes a torn delivery look whole.
-///
-/// A generation whose path is neither a segment half nor a mirror of `kind` is
-/// not part of the corpus and is left out.
-pub(crate) fn segment_set_order<'g>(
-    kind: &str,
-    scope_hex: &str,
-    generations: &'g [DestGeneration],
-) -> Vec<&'g DestGeneration> {
-    let mut ordered: Vec<&DestGeneration> = Vec::new();
-    for family in SegmentFamily::PASS_ORDER {
-        if family.serve_kind(kind).is_none() {
-            continue;
-        }
-        let mut segs: Vec<(u32, u8, (bool, i64), &DestGeneration)> = generations
-            .iter()
-            .filter_map(|g| {
-                family.parse(scope_hex, &g.path).map(|(id, half)| {
-                    let half = match half {
-                        SegmentHalf::Dat => 0,
-                        SegmentHalf::Meta => 1,
-                    };
-                    (id, half, g.order, g)
-                })
-            })
-            .collect();
-        segs.sort_by_key(|(id, half, order, _)| (*id, *half, *order));
-        ordered.extend(segs.into_iter().map(|(_, _, _, g)| g));
-    }
-    for family in SegmentFamily::PASS_ORDER {
-        if family.serve_kind(kind).is_none() {
-            continue;
-        }
-        let path = family.mirror_path(scope_hex, kind);
-        let mut gens: Vec<&DestGeneration> =
-            generations.iter().filter(|g| g.path == path).collect();
-        gens.sort_by_key(|g| g.order);
-        ordered.extend(gens);
-    }
-    ordered
-}
-
-/// **The recovery's delivery leg** (`segment-backup-protocol.md` § Client-device
-/// custodian (pull) → *Restore* → *Recovery into the lived-in nest that
-/// regressed*, part (1)): land every generation the destination holds for a
-/// kind's reserved set — live and retained, both families — on the regressed
-/// source, then call `fauna.backup.custody.recover` there, then the
-/// post-recovery duties.
-///
-/// The first leg to move a destination's copy onto a nest; the nest-held
-/// pull-back ([`crate::reseed_pull`]) lands in the same walk
-/// ([`segment_set_order`]), as-is. What the destination holds is the source's own
-/// nest-posture ciphertext under the `NestBackupKey` root the source holds a
-/// grant for, so the leg opens each generation under that root and re-seals it
-/// through the deterministic [`seal_blob`] — landing byte-identical custody,
-/// same store keys and manifest hash — over the owner-session byte plane and
-/// the client-authed reserved-set arm, **under the path it had at the
-/// destination**. No key material moves and nothing new is authorized; it runs
-/// in the app, web included, and touches no custodian store.
-///
-/// A path recorded twice on the source supersedes, and the source's own window
-/// retains the displaced generation, so the verb reads every generation the
-/// leg landed. Order: the content family's segments, the journal's, then every
-/// mirror generation last — a mirror naming a segment whose bytes have not
-/// landed is the ordering that makes a torn delivery look whole. Resumable by
-/// content addressing: every tear leaves an ordinary, GC-safe set.
-pub struct RecoveryDelivery<'a, P: BlobPushSink, R: RpcRequester, D: RpcRequester> {
-    destination: RecoveryDestination<'a, D>,
-    source: RecoverySource<'a, P, R>,
-    scope_id: [u8; 32],
-    keys: FileDownloadKeys,
-    nest_root: [u8; 32],
-    regression: &'a dyn AcceptedRegressionRecord,
-}
-
-impl<'a, P: BlobPushSink, R: RpcRequester, D: RpcRequester> RecoveryDelivery<'a, P, R, D> {
-    pub fn new(
-        destination: RecoveryDestination<'a, D>,
-        source: RecoverySource<'a, P, R>,
-        scope_id: [u8; 32],
-        nest_key: &NestBackupKey,
-        regression: &'a dyn AcceptedRegressionRecord,
-    ) -> Self {
-        Self {
-            destination,
-            source,
-            scope_id,
-            keys: FileDownloadKeys::owner(OwnerSealKey::SourceNest(nest_key.clone())),
-            nest_root: nest_key.convergent_chunk_root(),
-            regression,
-        }
-    }
-
-    /// Recover one backed-up kind: land, recover, then the duties.
-    pub async fn run_kind(&self, kind: &str) -> Result<RecoveryReport> {
-        let set = reserved_backup_set_name(kind, &self.scope_id)
-            .ok_or_else(|| anyhow::anyhow!("kind has no backup surface: {kind}"))?;
-        let mut report = self.deliver(kind, &set).await?;
-
-        report.recovered = self
-            .source
-            .nest
-            .request(
-                "fauna.backup.custody.recover",
-                fauna_protocol::backup::CustodyRecoverRequest {
-                    set_name: set.clone(),
-                    extra: Default::default(),
-                },
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))
-            .with_context(|| format!("recovery: the source's recover of {set}"))?;
-
-        // ── Post-recovery duties — only after a whole reply ──────────────
-        self.regression
-            .clear(kind)
-            .await
-            .context("recovery: clearing the accepted-regression record")?;
-        report.tombstoned_at_destination = self.retire_unnamed(kind, &set).await?;
-        Ok(report)
-    }
-
-    /// Every generation of the set at the destination, landed on the source.
-    async fn deliver(&self, kind: &str, set: &str) -> Result<RecoveryReport> {
         let scope_hex = hex::encode(self.scope_id);
-        let live = fauna_client_backup::audit::read_full_custody(self.destination.seam)
-            .await
-            .map_err(|e| anyhow::anyhow!("recovery: the destination's custody list: {e}"))?;
-        let (_grace, retained) =
-            fauna_client_backup::audit::read_full_generations(self.destination.seam)
-                .await
-                .map_err(|e| anyhow::anyhow!("recovery: the destination's generation list: {e}"))?;
-        let generations: Vec<DestGeneration> = live
-            .into_iter()
-            .filter(|i| i.folder_name == set)
-            .filter_map(|i| {
-                Some(DestGeneration {
-                    path: i.path?,
-                    manifest_hash: parse_manifest_hex(&i.manifest_hash)?,
-                    order: (true, i.updated_at),
-                })
-            })
-            .chain(
-                retained
-                    .into_iter()
-                    .filter(|g| g.folder_name == set)
-                    .filter_map(|g| {
-                        Some(DestGeneration {
-                            path: g.path?,
-                            manifest_hash: parse_manifest_hex(&g.manifest_hash)?,
-                            order: (false, g.superseded_at),
-                        })
-                    }),
-            )
-            .collect();
-
-        // Segments of each family in pass order, then every mirror last.
-        let held = self.source_segments(kind, &scope_hex).await;
-        let mut report = RecoveryReport::default();
-        for g in segment_set_order(kind, &scope_hex, &generations) {
-            let plain = download_file_bytes_by_manifest(
-                self.destination.bytes,
-                &self.keys,
-                g.manifest_hash,
-                None,
-                &g.path,
-            )
-            .await
-            .with_context(|| format!("recovery: opening {} at the destination", g.path))?;
-            if source_holds(&held, &scope_hex, &g.path, &plain) {
-                report.skipped.push(g.path.clone());
-                continue;
-            }
-            let sealed = seal_blob(&plain, Some((self.nest_root, None)))
-                .with_context(|| format!("recovery: sealing {}", g.path))?;
-            let pushed = push_sealed(self.source.bytes, &sealed)
-                .await
-                .with_context(|| format!("recovery: landing {}'s bytes", g.path))?;
-            report.chunks_uploaded += pushed.chunks_uploaded;
-            report.chunks_deduped += pushed.chunks_deduped;
-            record_custody(
-                self.source.nest,
-                set,
-                &self.source.device_id,
-                &g.path,
-                &sealed,
-                plain.len() as u64,
-            )
-            .await
-            .with_context(|| format!("recovery: recording {} on the source", g.path))?;
-            report
-                .delivered
-                .push((g.path.clone(), hex::encode(sealed.manifest_hash.digest())));
-        }
-        Ok(report)
-    }
-
-    /// The source's own live segments of each family of `kind`, as its
-    /// `fauna.segments.list` reports them — the skip's evidence. A family the
-    /// source will not list is simply not skipped: the skip is an economy.
-    async fn source_segments(
-        &self,
-        kind: &str,
-        scope_hex: &str,
-    ) -> Vec<(SegmentFamily, fauna_protocol::segments::SegmentRef)> {
-        let mut out = Vec::new();
-        for family in SegmentFamily::PASS_ORDER {
-            let Some(tag) = family.serve_kind(kind) else {
-                continue;
-            };
-            let reply: Result<fauna_protocol::segments::SegmentsListReply, _> = self
-                .source
-                .nest
-                .request(
-                    "fauna.segments.list",
-                    fauna_protocol::segments::SegmentsListRequest {
-                        kind: tag.to_string(),
-                        actor_id: scope_hex.to_string(),
-                        extra: Default::default(),
-                    },
-                )
-                .await;
-            if let Ok(reply) = reply {
-                out.extend(reply.segments.into_iter().map(|s| (family, s)));
-            }
-        }
-        out
-    }
-
-    /// Tombstone at the destination the segment paths its live ledger does not
-    /// name, for both families — so the copy stops charging for what the source
-    /// now holds under new ids, and re-uploads by its next pass. Through the
-    /// same reserved-set arm, so each tombstone is retained `T` and reversible
-    /// by `generation.restore`.
-    async fn retire_unnamed(&self, kind: &str, set: &str) -> Result<Vec<String>> {
-        let scope_hex = hex::encode(self.scope_id);
-        let live = fauna_client_backup::audit::read_full_custody(self.destination.seam)
-            .await
-            .map_err(|e| anyhow::anyhow!("recovery: re-reading the destination's custody: {e}"))?;
-        let live: Vec<_> = live.into_iter().filter(|i| i.folder_name == set).collect();
-        let mut retired = Vec::new();
         for family in SegmentFamily::PASS_ORDER {
             if family.serve_kind(kind).is_none() {
                 continue;
             }
-            let mirror_path = family.mirror_path(&scope_hex, kind);
-            let Some(ledger) = live
-                .iter()
-                .find(|i| i.path.as_deref() == Some(mirror_path.as_str()))
-            else {
-                continue;
-            };
-            let hash = parse_manifest_hex(&ledger.manifest_hash)
-                .ok_or_else(|| anyhow::anyhow!("recovery: the destination's ledger hash"))?;
-            let bytes = download_file_bytes_by_manifest(
-                self.destination.bytes,
-                &self.keys,
-                hash,
-                None,
-                &mirror_path,
-            )
+            self.store
+                .clear_source_regression(&held_path(&set, &family.mirror_path(&scope_hex, kind)))
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+/// The **store end** of the recovery leg: this device's own custodian store,
+/// read where it lives (`segment-backup-protocol.md` § Client-device custodian
+/// (pull) → *Restore* → *Recovery from this device's own store*).
+///
+/// What differs from the nest end ([`RecoveryDestination`]) is only where the
+/// copy is read and where the post-recovery tombstones land: the generations
+/// are the store's held rows of the set, live and retained alike; each is
+/// opened under the **client-only** `BackupKey` the store rests under (the
+/// re-seed leg's two-key seal — [`RecoveryDelivery`] re-seals it under the
+/// `NestBackupKey` root as for the nest end); and the duty tombstones in the
+/// store the set's live segment paths the source's own live listing no longer
+/// names. The caller is the store's one writer for the run (the re-seed's
+/// one-writer rule: the agent's store-job slot, the phone's pass guard).
+pub struct RecoveryStore<'a> {
+    store: &'a CustodianStore,
+    keys: FileDownloadKeys,
+    /// Unix seconds the duty's tombstones are stamped with — the local grace
+    /// clock they age out on.
+    now: i64,
+}
+
+impl<'a> RecoveryStore<'a> {
+    /// `local` is the store's own seal key — client-only, used here solely to
+    /// open, as [`ReseedDelivery::new`] takes it.
+    pub fn new(store: &'a CustodianStore, local: OwnerSealKey, now: i64) -> Self {
+        Self {
+            store,
+            keys: FileDownloadKeys::owner(local),
+            now,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl fauna_client_backup::recover_leg::HeldCopy for RecoveryStore<'_> {
+    /// Every generation the store holds of `set`: tombstones hold no bytes and
+    /// are left out; a path's live row orders after its retained ones.
+    async fn generations(&self, set: &str) -> Result<Vec<DestGeneration>> {
+        let rows = self.store.held().await?;
+        Ok(rows
+            .iter()
+            .filter(|r| !r.deleted)
+            .filter_map(|r| {
+                let live =
+                    CustodianStore::live_at(&rows, &r.path).is_some_and(|l| std::ptr::eq(l, r));
+                Some(DestGeneration {
+                    path: path_in_set(set, &r.path)?.to_string(),
+                    manifest_hash: parse_manifest_hex(&r.manifest_hash)?,
+                    order: (live, r.stored_at),
+                })
+            })
+            .collect())
+    }
+
+    async fn read(&self, set: &str, g: &DestGeneration) -> Result<Vec<u8>> {
+        self.store
+            .open_generation(&held_path(set, &g.path), g.manifest_hash, &self.keys)
             .await
-            .context("recovery: opening the destination's live ledger")?;
-            let ledger = crate::segment_backup::LiveManifestMirror::from_bytes(&bytes)
-                .context("recovery: decoding the destination's live ledger")?;
-            let named: std::collections::HashSet<u32> =
-                ledger.live.iter().map(|s| s.segment_id).collect();
-            for item in &live {
-                let Some(path) = item.path.as_deref() else {
+    }
+
+    /// Tombstone, in the store, every live segment path of `kind`'s families in
+    /// `set` whose id `named` (the source's live listing per family) does not
+    /// carry.
+    async fn retire_unnamed(
+        &self,
+        kind: &str,
+        set: &str,
+        scope_hex: &str,
+        named: &[(SegmentFamily, std::collections::HashSet<u32>)],
+    ) -> Result<Vec<String>> {
+        let rows = self.store.held().await?;
+        let mut live: Vec<&str> = rows
+            .iter()
+            .filter(|r| {
+                CustodianStore::live_at(&rows, &r.path).is_some_and(|l| std::ptr::eq(l, *r))
+            })
+            .filter_map(|r| path_in_set(set, &r.path))
+            .collect();
+        live.sort_unstable();
+        live.dedup();
+        let mut retired = Vec::new();
+        for (family, ids) in named {
+            if family.serve_kind(kind).is_none() {
+                continue;
+            }
+            for path in &live {
+                let Some((id, _half)) = family.parse(scope_hex, path) else {
                     continue;
                 };
-                let Some((id, _half)) = family.parse(&scope_hex, path) else {
-                    continue;
-                };
-                if named.contains(&id) {
+                if ids.contains(&id) {
                     continue;
                 }
-                let _: SyncChangeRecordReply = self
-                    .destination
-                    .records
-                    .request(
-                        "fauna.sync.changes.record",
-                        fauna_protocol::folders::addressed(SyncChangeRecordRequest {
-                            folder: set.to_string(),
-                            device_id: self.destination.device_id.clone(),
-                            path: path.to_string(),
-                            manifest_hash: None,
-                            size_bytes: 0,
-                            change_type: "delete".to_string(),
-                            ..Default::default()
-                        }),
-                    )
+                self.store
+                    .put_tombstone(&held_path(set, path), self.now)
                     .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))
-                    .with_context(|| format!("recovery: retiring {path} at the destination"))?;
-                retired.push(path.to_string());
+                    .with_context(|| format!("recovery: retiring {path} in this device's store"))?;
+                retired.push((*path).to_string());
             }
         }
         Ok(retired)
     }
 }
 
-pub(crate) fn parse_manifest_hex(hex_text: &str) -> Option<ContentHash> {
-    let mut digest = [0u8; 32];
-    hex::decode_to_slice(hex_text, &mut digest).ok()?;
-    Some(ContentHash::from_digest_raw(digest))
+/// The lived-in recovery's leg as the shared driver
+/// (`fauna_client_backup::recover::run_recovery`) runs it **natively** — over
+/// [`fauna_client::NestClient`] and its self-healing record arm, whose futures
+/// are `Send` (the [`ReseedDeliveryLeg`] impl below says why that matters), so
+/// the run can go on a spawned task. A newtype because the leg's generic body
+/// cannot promise `Send` for an arbitrary transport, and the seam is the
+/// driver's; on wasm `fauna_client_backup` impls the seam for any transport
+/// itself.
+///
+/// `D` is the destination's record arm: [`NestRecords`] for the nest end,
+/// [`NoCustodyRecorder`] for the store end.
+pub struct NativeRecoveryLeg<
+    'a,
+    P: BlobPushSink,
+    D: fauna_client_backup::recover_leg::CustodyRecorder,
+>(pub RecoveryDelivery<'a, P, fauna_client::NestClient, NestRecords<'a>, D>);
+
+/// The self-healing reserved-set arm over a native connection.
+pub type NestRecords<'a> = fauna_client_sync::SyncClient<&'a fauna_client::NestClient>;
+
+#[async_trait::async_trait]
+impl<P: BlobPushSink> fauna_client_backup::recover::RecoveryLeg
+    for NativeRecoveryLeg<'_, P, NestRecords<'_>>
+{
+    async fn recover_set(&self, set_name: &str) -> fauna_client_backup::recover::LegAnswer {
+        self.0.recover_set(set_name).await
+    }
 }
 
-/// Does the source already hold this segment half byte-identical?
-fn source_holds(
-    held: &[(SegmentFamily, fauna_protocol::segments::SegmentRef)],
-    scope_hex: &str,
-    path: &str,
-    plain: &[u8],
-) -> bool {
-    let got = hex::encode(blake3::hash(plain).as_bytes());
-    held.iter()
-        .any(|(family, seg)| match family.parse(scope_hex, path) {
-            Some((id, SegmentHalf::Dat)) => id == seg.segment_id && seg.blake3_hex == got,
-            Some((id, SegmentHalf::Meta)) => id == seg.segment_id && seg.meta_blake3_hex == got,
-            None => false,
-        })
+#[async_trait::async_trait]
+impl<P: BlobPushSink> fauna_client_backup::recover::RecoveryLeg
+    for NativeRecoveryLeg<'_, P, NoCustodyRecorder>
+{
+    async fn recover_set(&self, set_name: &str) -> fauna_client_backup::recover::LegAnswer {
+        self.0.recover_set(set_name).await
+    }
 }
 
 impl<P: BlobPushSink, R: RpcRequester> ReseedDelivery<'_, P, R> {
@@ -2760,5 +2479,591 @@ mod tests {
         let rig = Rig::new();
         let corpus = rig.delivery().deliver_corpus().await.unwrap();
         assert!(corpus.sets.is_empty());
+    }
+
+    // ── the recovery's store end (`segment-backup-protocol.md` § Client-device
+    //    custodian (pull) → *Restore* → *Recovery from this device's own store*)
+
+    mod recovery_store_end {
+        use super::*;
+        use fauna_protocol::backup::{
+            CustodyItem, CustodyListReply, CustodyRecoverReply, GenerationItem, GenerationListReply,
+        };
+        use fauna_protocol::segments::{SegmentRef, SegmentsListReply, SegmentsListRequest};
+        use std::collections::HashMap;
+
+        /// A fake's error: a transport fault, never a typed refusal.
+        #[derive(Debug)]
+        struct FakeErr(String);
+
+        impl std::fmt::Display for FakeErr {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
+
+        impl fauna_protocol::RpcErrorClass for FakeErr {
+            fn is_rejection(&self) -> bool {
+                false
+            }
+        }
+
+        fn wire<T: serde::Serialize, U: serde::de::DeserializeOwned>(
+            v: &T,
+        ) -> std::result::Result<U, FakeErr> {
+            serde_json::to_vec(v)
+                .and_then(|raw| serde_json::from_slice(&raw))
+                .map_err(|e| FakeErr(e.to_string()))
+        }
+
+        /// The regressed source: its live listing per serve tag (one before the
+        /// verb, one after — the verb re-files the lost records under new
+        /// ids), its record arm, and the verb.
+        #[derive(Default)]
+        struct Source {
+            before: HashMap<String, Vec<SegmentRef>>,
+            after: HashMap<String, Vec<SegmentRef>>,
+            /// The post-verb listing fails: the duty must retire nothing.
+            listing_fails_after: bool,
+            recovered: Mutex<bool>,
+            records: Mutex<Vec<SyncChangeRecordRequest>>,
+        }
+
+        impl RpcRequester for Source {
+            type Error = FakeErr;
+
+            async fn request<Req, Reply>(
+                &self,
+                kind: &'static str,
+                payload: Req,
+            ) -> std::result::Result<Reply, FakeErr>
+            where
+                Req: serde::Serialize,
+                Reply: serde::de::DeserializeOwned,
+            {
+                match kind {
+                    "fauna.segments.list" => {
+                        let req: SegmentsListRequest = wire(&payload)?;
+                        let after = *self.recovered.lock().unwrap();
+                        if after && self.listing_fails_after {
+                            return Err(FakeErr("the source dropped the connection".into()));
+                        }
+                        let map = if after { &self.after } else { &self.before };
+                        wire(&SegmentsListReply {
+                            segments: map.get(&req.kind).cloned().unwrap_or_default(),
+                            next_segment_id: 0,
+                            extra: Default::default(),
+                        })
+                    }
+                    "fauna.sync.changes.record" => {
+                        self.records.lock().unwrap().push(wire(&payload)?);
+                        wire(&SyncChangeRecordReply {
+                            seq: 0,
+                            extra: Default::default(),
+                        })
+                    }
+                    "fauna.backup.custody.recover" => {
+                        *self.recovered.lock().unwrap() = true;
+                        wire(&CustodyRecoverReply {
+                            recovered: 1,
+                            ..Default::default()
+                        })
+                    }
+                    other => Err(FakeErr(format!("the leg asked the source for {other}"))),
+                }
+            }
+        }
+
+        /// A nest destination holding the same corpus the store holds, as the
+        /// source's own coordinator would have pushed it: live custody, the
+        /// retained window, and the bytes its open routes serve.
+        #[derive(Default)]
+        struct Destination {
+            live: Mutex<Vec<CustodyItem>>,
+            retained: Mutex<Vec<GenerationItem>>,
+            blobs: Mutex<HashMap<ContentHash, Vec<u8>>>,
+        }
+
+        impl Destination {
+            fn hold(&self, sealed: &SealedBlob) {
+                let mut blobs = self.blobs.lock().unwrap();
+                blobs.insert(sealed.manifest_hash, sealed.manifest_bytes.clone());
+                for (key, chunk) in &sealed.chunks {
+                    blobs.insert(*key, chunk.clone());
+                }
+            }
+
+            fn live(&self, path: &str, plain: &[u8], at: i64) {
+                let sealed = as_the_nest_would_seal(plain);
+                self.hold(&sealed);
+                self.live.lock().unwrap().push(CustodyItem {
+                    folder_name: "__mail".into(),
+                    path: Some(path.into()),
+                    path_hash: "00".repeat(32),
+                    manifest_hash: hex_of(&sealed.manifest_hash),
+                    updated_at: at,
+                    ..Default::default()
+                });
+            }
+
+            /// A live row whose copy the destination built itself, in
+            /// **plaintext** — self-consistent at the address it lists, and
+            /// sealed under nothing.
+            fn live_plaintext(&self, path: &str, plain: &[u8], at: i64) {
+                let forged = seal_blob(plain, None).unwrap();
+                self.hold(&forged);
+                self.live.lock().unwrap().push(CustodyItem {
+                    folder_name: "__mail".into(),
+                    path: Some(path.into()),
+                    path_hash: "00".repeat(32),
+                    manifest_hash: hex_of(&forged.manifest_hash),
+                    updated_at: at,
+                    ..Default::default()
+                });
+            }
+
+            fn retained(&self, path: &str, plain: &[u8], superseded_at: i64) {
+                let sealed = as_the_nest_would_seal(plain);
+                self.hold(&sealed);
+                self.retained.lock().unwrap().push(GenerationItem {
+                    folder_name: "__mail".into(),
+                    path: Some(path.into()),
+                    path_hash: "00".repeat(32),
+                    manifest_hash: hex_of(&sealed.manifest_hash),
+                    superseded_at,
+                    ..Default::default()
+                });
+            }
+        }
+
+        struct DestLink(Arc<Destination>);
+
+        impl RpcRequester for DestLink {
+            type Error = FakeErr;
+
+            async fn request<Req, Reply>(
+                &self,
+                kind: &'static str,
+                _payload: Req,
+            ) -> std::result::Result<Reply, FakeErr>
+            where
+                Req: serde::Serialize,
+                Reply: serde::de::DeserializeOwned,
+            {
+                match kind {
+                    "fauna.backup.custody.list" => wire(&CustodyListReply {
+                        items: self.0.live.lock().unwrap().clone(),
+                        ..Default::default()
+                    }),
+                    "fauna.backup.generation.list" => wire(&GenerationListReply {
+                        generations: self.0.retained.lock().unwrap().clone(),
+                        ..Default::default()
+                    }),
+                    "fauna.sync.changes.record" => wire(&SyncChangeRecordReply {
+                        seq: 0,
+                        extra: Default::default(),
+                    }),
+                    other => Err(FakeErr(format!(
+                        "the leg asked the destination for {other}"
+                    ))),
+                }
+            }
+        }
+
+        fauna_client_backup::impl_backup_nest_seam!(struct DestSeam<DestLink>);
+
+        struct DestBytes(Arc<Destination>);
+
+        #[async_trait::async_trait]
+        impl fauna_core::file_download::BlobFetcher for DestBytes {
+            async fn fetch_manifest(&self, hash: &ContentHash) -> Result<Vec<u8>> {
+                self.0
+                    .blobs
+                    .lock()
+                    .unwrap()
+                    .get(hash)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("404"))
+            }
+
+            async fn fetch_chunks(
+                &self,
+                keys: &[ContentHash],
+                _path: &str,
+            ) -> Result<Vec<Vec<u8>>> {
+                let blobs = self.0.blobs.lock().unwrap();
+                keys.iter()
+                    .map(|k| blobs.get(k).cloned().ok_or_else(|| anyhow::anyhow!("404")))
+                    .collect()
+            }
+        }
+
+        /// The source's self-healing record arm, as the production leg builds it.
+        type SourceRecords<'a> = fauna_client_sync::SyncClient<&'a Source>;
+
+        /// What the store end of the leg borrows: the store, and the source's
+        /// record arm.
+        struct StoreEnd<'a> {
+            store: RecoveryStore<'a>,
+            records: SourceRecords<'a>,
+            rig: &'a Rig,
+            source: &'a Source,
+        }
+
+        fn store_end<'a>(rig: &'a Rig, source: &'a Source) -> StoreEnd<'a> {
+            StoreEnd {
+                store: RecoveryStore::new(&rig.store, OwnerSealKey::Client(local_key()), 900),
+                records: fauna_client_sync::SyncClient::new(source),
+                rig,
+                source,
+            }
+        }
+
+        impl<'a> StoreEnd<'a> {
+            fn leg<'b>(
+                &'b self,
+                regression: &'b dyn AcceptedRegressionRecord,
+            ) -> RecoveryDelivery<'b, FakeSink, Source, SourceRecords<'a>, NoCustodyRecorder>
+            {
+                RecoveryDelivery::from_store(
+                    &self.store,
+                    RecoverySource {
+                        bytes: &self.rig.sink,
+                        nest: self.source,
+                        records: &self.records,
+                        device_id: DEVICE.into(),
+                    },
+                    SCOPE,
+                    &nest_key(),
+                    regression,
+                )
+            }
+        }
+
+        fn listed(id: u32, dat: &[u8], meta: &[u8]) -> SegmentRef {
+            SegmentRef {
+                segment_id: id,
+                blake3_hex: hex::encode(blake3::hash(dat).as_bytes()),
+                meta_blake3_hex: hex::encode(blake3::hash(meta).as_bytes()),
+                ..Default::default()
+            }
+        }
+
+        /// The corpus both ends hold: segment 1 whole, segment 2 whose id the
+        /// source reused (a retained lost generation beside the live one), the
+        /// journal's segment 1, and both ledgers. Returns the lost generation's
+        /// plaintext.
+        async fn hold_corpus(rig: &Rig, dest: Option<&Destination>) -> Vec<u8> {
+            let lost2 = body(0x21, 3_000);
+            let rows: [(String, Vec<u8>, i64); 9] = [
+                (seg(1), body(0x11, 4_000), 100),
+                (meta(1), body(0x12, 300), 101),
+                (seg(2), lost2.clone(), 102),
+                (meta(2), body(0x23, 200), 103),
+                (seg(2), body(0x22, 2_500), 200),
+                (jseg(1), body(0x31, 800), 104),
+                (jmeta(1), body(0x32, 90), 105),
+                (mirror(), body(0x41, 120), 106),
+                (jmirror(), body(0x42, 60), 107),
+            ];
+            for (path, plain, at) in &rows {
+                rig.hold(path, plain, *at).await;
+            }
+            if let Some(dest) = dest {
+                dest.retained(&seg(2), &lost2, 200);
+                for (path, plain, at) in rows.iter().filter(|(_, _, at)| *at != 102) {
+                    dest.live(path, plain, *at);
+                }
+            }
+            lost2
+        }
+
+        /// **Both ends land the same corpus the same way** — the store end
+        /// differs only in where the copy is read: every generation, the
+        /// retained lost one before the reused id's live one, in the shared
+        /// order, re-sealed byte-identical to the nest end's landing (the same
+        /// paths, the same manifest hashes, in the same sequence).
+        #[tokio::test]
+        async fn the_store_end_lands_what_the_nest_end_lands_in_the_shared_order() {
+            let rig = Rig::new();
+            let dest = Arc::new(Destination::default());
+            let lost2 = hold_corpus(&rig, Some(&dest)).await;
+
+            let from_store_source = Source::default();
+            let from_store = store_end(&rig, &from_store_source)
+                .leg(&NoAcceptedRegressionRecord)
+                .deliver("mail", "__mail")
+                .await
+                .unwrap();
+
+            let other = Rig::new();
+            let from_nest_source = Source::default();
+            let seam = DestSeam {
+                client: fauna_client_backup::BackupClient::new(DestLink(Arc::clone(&dest))),
+            };
+            let link = DestLink(Arc::clone(&dest));
+            let dest_records = fauna_client_sync::SyncClient::new(&link);
+            let source_records = fauna_client_sync::SyncClient::new(&from_nest_source);
+            let bytes = DestBytes(Arc::clone(&dest));
+            let from_nest = RecoveryDelivery::new(
+                RecoveryDestination {
+                    seam: &seam,
+                    bytes: &bytes,
+                    records: &dest_records,
+                    device_id: DEVICE.into(),
+                },
+                RecoverySource {
+                    bytes: &other.sink,
+                    nest: &from_nest_source,
+                    records: &source_records,
+                    device_id: DEVICE.into(),
+                },
+                SCOPE,
+                &nest_key(),
+                &NoAcceptedRegressionRecord,
+            )
+            .deliver("mail", "__mail")
+            .await
+            .unwrap();
+
+            assert_eq!(from_store.delivered, from_nest.delivered);
+            let paths: Vec<String> = from_store
+                .delivered
+                .iter()
+                .map(|(p, _)| p.clone())
+                .collect();
+            assert_eq!(
+                paths,
+                [
+                    seg(1),
+                    meta(1),
+                    seg(2),
+                    seg(2),
+                    meta(2),
+                    jseg(1),
+                    jmeta(1),
+                    mirror(),
+                    jmirror()
+                ]
+            );
+            assert_eq!(
+                from_store.delivered[2].1,
+                hex_of(&as_the_nest_would_seal(&lost2).manifest_hash),
+                "the retained lost generation lands first, under the nest root"
+            );
+            assert_eq!(
+                from_store_source.records.lock().unwrap().len(),
+                9,
+                "every landed generation is recorded on the source"
+            );
+        }
+
+        /// Deliver over the nest end from `dest` into a fresh source; returns
+        /// the outcome, the source's records and the bytes landed on it.
+        async fn deliver_from(dest: &Arc<Destination>) -> (Result<RecoveryReport>, usize, usize) {
+            let target = Rig::new();
+            let source = Source::default();
+            let seam = DestSeam {
+                client: fauna_client_backup::BackupClient::new(DestLink(Arc::clone(dest))),
+            };
+            let link = DestLink(Arc::clone(dest));
+            let dest_records = fauna_client_sync::SyncClient::new(&link);
+            let source_records = fauna_client_sync::SyncClient::new(&source);
+            let bytes = DestBytes(Arc::clone(dest));
+            let outcome = RecoveryDelivery::new(
+                RecoveryDestination {
+                    seam: &seam,
+                    bytes: &bytes,
+                    records: &dest_records,
+                    device_id: DEVICE.into(),
+                },
+                RecoverySource {
+                    bytes: &target.sink,
+                    nest: &source,
+                    records: &source_records,
+                    device_id: DEVICE.into(),
+                },
+                SCOPE,
+                &nest_key(),
+                &NoAcceptedRegressionRecord,
+            )
+            .deliver("mail", "__mail")
+            .await;
+            let records = source.records.lock().unwrap().len();
+            let landed = target.sink.chunks.lock().unwrap().len()
+                + target.sink.manifests.lock().unwrap().len();
+            (outcome, records, landed)
+        }
+
+        fn assert_plaintext_refused(outcome: &Result<RecoveryReport>) {
+            let Err(err) = outcome else {
+                panic!("a plaintext copy must be refused");
+            };
+            assert_eq!(
+                fauna_core::apply_failure::permanent_reason(err),
+                Some(fauna_core::apply_failure::PermanentApplyFailure::PLAINTEXT_REFUSED.reason),
+                "expected the typed sealed-only refusal, got: {err:#}"
+            );
+        }
+
+        /// The leg reseals what it opens under the owner's
+        /// `nest_root`, so a destination serving a self-built **plaintext**
+        /// record at the address it lists would be laundered into an owner
+        /// seal on the source. The nest end is a sealed-only reader: the
+        /// record is refused, loudly, and nothing lands.
+        #[tokio::test]
+        async fn the_nest_end_refuses_a_plaintext_record_and_lands_nothing() {
+            let dest = Arc::new(Destination::default());
+            dest.live_plaintext(&seg(1), &body(0x11, 4_000), 100);
+            dest.live(&mirror(), &body(0x41, 120), 106);
+            let (outcome, records, landed) = deliver_from(&dest).await;
+            assert_plaintext_refused(&outcome);
+            assert_eq!((records, landed), (0, 0), "nothing lands on the source");
+        }
+
+        /// The same for the set's ledger: a plaintext `manifest.<kind>` the
+        /// destination built is refused, never resealed onto the source.
+        #[tokio::test]
+        async fn the_nest_end_refuses_a_plaintext_ledger_and_lands_nothing() {
+            let dest = Arc::new(Destination::default());
+            dest.live_plaintext(&mirror(), &body(0x41, 120), 106);
+            let (outcome, records, landed) = deliver_from(&dest).await;
+            assert_plaintext_refused(&outcome);
+            assert_eq!((records, landed), (0, 0), "nothing lands on the source");
+        }
+
+        /// **The skip:** a half the source already holds byte-identical (its
+        /// own `fauna.segments.list`) is not landed — the verb reads the
+        /// source's own copy.
+        #[tokio::test]
+        async fn the_store_end_skips_what_the_source_already_holds() {
+            let rig = Rig::new();
+            hold_corpus(&rig, None).await;
+            let tag = SegmentFamily::Content
+                .serve_kind("mail")
+                .unwrap()
+                .to_string();
+            let source = Source {
+                before: HashMap::from([(
+                    tag,
+                    vec![listed(1, &body(0x11, 4_000), &body(0x12, 300))],
+                )]),
+                ..Default::default()
+            };
+            let report = store_end(&rig, &source)
+                .leg(&NoAcceptedRegressionRecord)
+                .deliver("mail", "__mail")
+                .await
+                .unwrap();
+            assert_eq!(report.skipped, [seg(1), meta(1)]);
+            assert!(
+                !report
+                    .delivered
+                    .iter()
+                    .any(|(p, _)| *p == seg(1) || *p == meta(1)),
+                "a held half is never landed"
+            );
+        }
+
+        /// **The duties are store-backed:** after the whole reply the store's
+        /// entries for the recovered kind clear — both families', nothing of
+        /// another kind's — and the set's live segment paths the source's own
+        /// post-verb listing does not name are tombstoned in the store, the
+        /// ledgers and the named paths left live.
+        #[tokio::test]
+        async fn the_duties_tombstone_exactly_the_unnamed_live_paths_and_clear_the_entries() {
+            let rig = Rig::new();
+            hold_corpus(&rig, None).await;
+            let content = SegmentFamily::Content
+                .serve_kind("mail")
+                .unwrap()
+                .to_string();
+            let journal = SegmentFamily::Placement
+                .serve_kind("mail")
+                .unwrap()
+                .to_string();
+            let source = Source {
+                after: HashMap::from([
+                    (content, vec![listed(1, b"x", b"y"), listed(7, b"z", b"w")]),
+                    (journal, vec![listed(1, b"x", b"y")]),
+                ]),
+                ..Default::default()
+            };
+            let post_ledger = held_path(
+                "__post",
+                &SegmentFamily::Content.mirror_path(&hex::encode(SCOPE), "post"),
+            );
+            for ledger in [
+                mail_held(&mirror()),
+                mail_held(&jmirror()),
+                post_ledger.clone(),
+            ] {
+                rig.store
+                    .record_source_regression(&ledger, 9, 0, 50)
+                    .await
+                    .unwrap();
+            }
+
+            let record = CustodianStoreRegressionRecord {
+                store: &rig.store,
+                scope_id: SCOPE,
+            };
+            let report = store_end(&rig, &source)
+                .leg(&record)
+                .run_kind("mail")
+                .await
+                .unwrap();
+
+            assert_eq!(report.tombstoned_at_destination, [seg(2), meta(2)]);
+            let rows = rig.store.held().await.unwrap();
+            for gone in [seg(2), meta(2)] {
+                assert!(CustodianStore::live_at(&rows, &mail_held(&gone)).is_none());
+            }
+            for kept in [seg(1), meta(1), jseg(1), jmeta(1), mirror(), jmirror()] {
+                assert!(
+                    CustodianStore::live_at(&rows, &mail_held(&kept)).is_some(),
+                    "{kept} stays live"
+                );
+            }
+            let standing: Vec<String> = rig
+                .store
+                .audit_record()
+                .await
+                .source_regressions
+                .into_keys()
+                .collect();
+            assert_eq!(
+                standing,
+                [post_ledger],
+                "only the recovered kind's entries clear"
+            );
+        }
+
+        /// **A listing the duty cannot read retires nothing** — a family read
+        /// as empty would tombstone the whole held copy of it.
+        #[tokio::test]
+        async fn a_source_listing_that_fails_after_the_verb_retires_nothing() {
+            let rig = Rig::new();
+            hold_corpus(&rig, None).await;
+            let source = Source {
+                listing_fails_after: true,
+                ..Default::default()
+            };
+            let record = CustodianStoreRegressionRecord {
+                store: &rig.store,
+                scope_id: SCOPE,
+            };
+            assert!(
+                store_end(&rig, &source)
+                    .leg(&record)
+                    .run_kind("mail")
+                    .await
+                    .is_err()
+            );
+            let rows = rig.store.held().await.unwrap();
+            for kept in [seg(1), meta(1), seg(2), meta(2), jseg(1), jmeta(1)] {
+                assert!(CustodianStore::live_at(&rows, &mail_held(&kept)).is_some());
+            }
+        }
     }
 }

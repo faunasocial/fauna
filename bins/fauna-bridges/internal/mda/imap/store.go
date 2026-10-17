@@ -342,7 +342,12 @@ func (s *Session) fireJunkTrainSignals(
 // row in ONE atomic `put_spam_model`. The mutated model carries forward
 // across UIDs so a multi-message \Junk move trains cumulatively; a failed
 // event skips (best-effort, the model stays at the last successful
-// write).
+// write). Every put names the stored model it was computed from (the
+// compare-and-swap precondition, mail-spam.md § Transactional update): a
+// put another writer's put overtook ("stale_model") wrote nothing, so the
+// event re-fetches the model now stored and re-applies itself to it, at
+// most wsrpc.SpamModelStaleRetries times — a concurrent lesson (another
+// MUA, the app) is never overwritten.
 func (s *Session) trainJunkAgentSide(
 	ctx context.Context,
 	client wsrpc.Caller,
@@ -390,6 +395,10 @@ func (s *Session) trainJunkAgentSide(
 		modelBytes = opened
 	}
 	defer func() { zeroize(modelBytes) }()
+	// The stored model the next put is computed from: the fetched blob, then
+	// each accepted write's own re-sealed model, or a re-fetch's after a
+	// "stale_model".
+	expected := wsrpc.SpamModelPreconditionOf(sealedModel)
 	isSpam := label == wsrpc.SpamLabelSpam
 	for _, uid := range uids {
 		meta, err := wsrpc.FetchMessageMetadata(ctx, client, actorID, mailbox, []uint32{uid})
@@ -428,10 +437,6 @@ func (s *Session) trainJunkAgentSide(
 			}
 			continue
 		}
-		// The full message is the training text (the shared canonical
-		// tokenizer is identical at every position — mail-spam.md
-		// § "byte-identical scores").
-		mutation := mailfauna.ApplySpamTraining(modelBytes, string(pt), isSpam)
 		// The audit row's subject, RFC-2047-decoded; a parse failure
 		// degrades to the empty subject (the row still renders its
 		// mailbox). Sealed even when empty — the ciphertext is never
@@ -441,86 +446,152 @@ func (s *Session) trainJunkAgentSide(
 		if parsed, perr := mailfauna.ParseRFC5322(pt); perr == nil {
 			subject = parsed.Subject
 		}
-		zeroize(pt)
-		resealedModel, errM := sealToRecipient(mutation.NewModelBytes, mlsPubkey, mlkemEk)
-		sealedSubject, errS := sealToRecipient([]byte(subject), mlsPubkey, mlkemEk)
-		sealedDelta, errD := sealToRecipient(mutation.DeltaJson, mlsPubkey, mlkemEk)
-		// The plaintext forward-delta n-grams are fully consumed by the seal
-		// above; wipe them here so they don't linger to GC on any exit path
-		// . The
-		// decrypted body copies into immutable Go strings the runtime won't let
-		// us zeroize — `string(pt)` into the ApplySpamTraining FFI and the parsed
-		// `subject` — an accepted FFI-string limitation (the []byte `pt` itself
-		// was already zeroized above; NewModelBytes is wiped per exit path below,
-		// or carried forward + wiped on the next iteration).
-		zeroize(mutation.DeltaJson)
-		if errM != nil || errS != nil || errD != nil {
-			if s.logger != nil {
-				s.logger.Warn("imap: \\Junk train: re-seal failed — event skipped",
-					"uid", uid, "model_err", errM, "subject_err", errS, "delta_err", errD)
-			}
-			zeroize(mutation.NewModelBytes)
-			continue
-		}
-		// Piece (b4): opted-in + a holder enrolled ⇒ attach a fresh
-		// holder copy sealed from the SAME post-mutation plaintext (the
-		// re-seal-on-every-write rule, mail-spam.md § Encrypted-mode
-		// interaction). A seal failure is non-fatal — it just means this
-		// write leaves the previously-stored copy (if any) stale for the
-		// next publish, never drops the contributor or the model write
-		// itself (freshness ground 5).
-		var holderCopy *wsrpc.SpamModelHolderCopy
-		if contributeBaseline && holderSealTarget != nil {
-			copyBytes, errC := sealSpamModelCopy(mutation.NewModelBytes, actorID,
-				holderSealTarget.X25519Pubkey, holderSealTarget.MLKemEk)
-			if errC != nil {
+	attempts:
+		for attempt := 0; ; attempt++ {
+			// The full message is the training text (the shared canonical
+			// tokenizer is identical at every position — mail-spam.md
+			// § "byte-identical scores").
+			mutation := mailfauna.ApplySpamTraining(modelBytes, string(pt), isSpam)
+			resealedModel, errM := sealToRecipient(mutation.NewModelBytes, mlsPubkey, mlkemEk)
+			sealedSubject, errS := sealToRecipient([]byte(subject), mlsPubkey, mlkemEk)
+			sealedDelta, errD := sealToRecipient(mutation.DeltaJson, mlsPubkey, mlkemEk)
+			// The plaintext forward-delta n-grams are fully consumed by the seal
+			// above; wipe them here so they don't linger to GC on any exit path
+			// . The
+			// decrypted body copies into immutable Go strings the runtime won't let
+			// us zeroize — `string(pt)` into the ApplySpamTraining FFI and the parsed
+			// `subject` — an accepted FFI-string limitation (the []byte `pt` itself
+			// is zeroized once the event's attempts end; NewModelBytes is wiped per
+			// exit path below, or carried forward + wiped on the next iteration).
+			zeroize(mutation.DeltaJson)
+			if errM != nil || errS != nil || errD != nil {
 				if s.logger != nil {
-					s.logger.Warn("imap: \\Junk train: holder-copy seal failed — attaching none this write",
-						"uid", uid, "err", errC)
+					s.logger.Warn("imap: \\Junk train: re-seal failed — event skipped",
+						"uid", uid, "model_err", errM, "subject_err", errS, "delta_err", errD)
 				}
-			} else {
-				holderCopy = &wsrpc.SpamModelHolderCopy{
-					HolderPubkey: holderSealTarget.X25519Pubkey,
-					SealedCopy:   copyBytes,
+				zeroize(mutation.NewModelBytes)
+				break attempts
+			}
+			// Piece (b4): opted-in + a holder enrolled ⇒ attach a fresh
+			// holder copy sealed from the SAME post-mutation plaintext (the
+			// re-seal-on-every-write rule, mail-spam.md § Encrypted-mode
+			// interaction). A seal failure is non-fatal — it just means this
+			// write leaves the previously-stored copy (if any) stale for the
+			// next publish, never drops the contributor or the model write
+			// itself (freshness ground 5).
+			var holderCopy *wsrpc.SpamModelHolderCopy
+			if contributeBaseline && holderSealTarget != nil {
+				copyBytes, errC := sealSpamModelCopy(mutation.NewModelBytes, actorID,
+					holderSealTarget.X25519Pubkey, holderSealTarget.MLKemEk)
+				if errC != nil {
+					if s.logger != nil {
+						s.logger.Warn("imap: \\Junk train: holder-copy seal failed — attaching none this write",
+							"uid", uid, "err", errC)
+					}
+				} else {
+					holderCopy = &wsrpc.SpamModelHolderCopy{
+						HolderPubkey: holderSealTarget.X25519Pubkey,
+						SealedCopy:   copyBytes,
+					}
 				}
 			}
-		}
-		// SampleCount 0: advisory display-only and the mutation carries no
-		// count; the nest never trusts it against the opaque blob anyway.
-		outcome, err := wsrpc.PutSpamModel(ctx, client, actorID, resealedModel, 0,
-			&wsrpc.SpamHistoryInsert{
-				MessageID:     meta[0].MessageID,
-				Mailbox:       mailbox,
-				SealedSubject: sealedSubject,
-				SealedDelta:   sealedDelta,
-				Label:         label,
-				Source:        source,
-			}, holderCopy)
-		if err != nil {
-			if s.logger != nil {
-				s.logger.Warn("imap: \\Junk train: put_spam_model failed — event skipped",
-					"uid", uid, "err", err)
+			// SampleCount 0: advisory display-only and the mutation carries no
+			// count; the nest never trusts it against the opaque blob anyway.
+			outcome, err := wsrpc.PutSpamModel(ctx, client, actorID, resealedModel, 0,
+				&wsrpc.SpamHistoryInsert{
+					MessageID:     meta[0].MessageID,
+					Mailbox:       mailbox,
+					SealedSubject: sealedSubject,
+					SealedDelta:   sealedDelta,
+					Label:         label,
+					Source:        source,
+				}, holderCopy, &expected)
+			if err != nil {
+				if s.logger != nil {
+					s.logger.Warn("imap: \\Junk train: put_spam_model failed — event skipped",
+						"uid", uid, "err", err)
+				}
+				zeroize(mutation.NewModelBytes)
+				break attempts
 			}
-			zeroize(mutation.NewModelBytes)
-			continue
-		}
-		if outcome == wsrpc.PutOutcomeDuplicateSignal {
-			// The one-lesson rule (mail-spam.md § 3): the nest kept the
-			// stored model byte-identical to the last accepted write, so this
-			// mutation must not carry into the next UID either — the batch
-			// keeps training from the last ACCEPTED model.
-			if s.logger != nil {
-				s.logger.Info("imap: \\Junk train: duplicate of the newest lesson — collapsed",
-					"uid", uid)
+			switch outcome {
+			case wsrpc.PutOutcomeDuplicateSignal:
+				// The one-lesson rule (mail-spam.md § 3): the nest kept the
+				// stored model byte-identical to the last accepted write, so this
+				// mutation must not carry into the next UID either — the batch
+				// keeps training from the last ACCEPTED model.
+				if s.logger != nil {
+					s.logger.Info("imap: \\Junk train: duplicate of the newest lesson — collapsed",
+						"uid", uid)
+				}
+				zeroize(mutation.NewModelBytes)
+				break attempts
+			case wsrpc.PutOutcomeStaleModel:
+				// Another writer's put landed after the model this one was
+				// computed from: nothing was written. Re-fetch and re-apply.
+				zeroize(mutation.NewModelBytes)
+				if attempt >= wsrpc.SpamModelStaleRetries {
+					if s.logger != nil {
+						s.logger.Warn("imap: \\Junk train: the stored model kept changing — event skipped",
+							"uid", uid, "retries", attempt)
+					}
+					break attempts
+				}
+				fresh, freshExpected, freshContribute, freshHolder, ok :=
+					s.refetchJunkTrainModel(ctx, client, opener, actorID, uid)
+				if !ok {
+					break attempts
+				}
+				zeroize(modelBytes)
+				modelBytes, expected = fresh, freshExpected
+				contributeBaseline, holderSealTarget = freshContribute, freshHolder
+				continue attempts
 			}
-			zeroize(mutation.NewModelBytes)
-			continue
+			// Carry the mutated model into the next event so a batch trains
+			// cumulatively; wipe the superseded plaintext first. The model just
+			// written is the stored one the next put is computed from.
+			zeroize(modelBytes)
+			modelBytes = mutation.NewModelBytes
+			expected = wsrpc.SpamModelPreconditionOf(resealedModel)
+			break attempts
 		}
-		// Carry the mutated model into the next event so a batch trains
-		// cumulatively; wipe the superseded plaintext first.
-		zeroize(modelBytes)
-		modelBytes = mutation.NewModelBytes
+		zeroize(pt)
 	}
+}
+
+// refetchJunkTrainModel re-reads the actor's model after a "stale_model"
+// put (mail-spam.md § Transactional update): the opened stored model (nil
+// ⇒ none stored, or only the cold-start seed ⇒ train from an empty model),
+// the precondition naming it, and the fetch's fresh piece-(b4) write
+// signal. ok=false ⇒ the fetch or the open failed, logged — the event is
+// skipped (best-effort).
+func (s *Session) refetchJunkTrainModel(
+	ctx context.Context,
+	client wsrpc.Caller,
+	opener mailfauna.RecordOpener,
+	actorID []byte,
+	uid uint32,
+) (modelBytes []byte, expected wsrpc.SpamModelPrecondition, contributeBaseline bool, holderSealTarget *wsrpc.HolderSealTarget, ok bool) {
+	fetched, storedSealed, _, contributeBaseline, holderSealTarget, err := wsrpc.FetchSpamModel(ctx, client, actorID)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("imap: \\Junk train: fetch_spam_model retry failed — event skipped",
+				"uid", uid, "err", err)
+		}
+		return nil, expected, false, nil, false
+	}
+	if !storedSealed || len(fetched) == 0 {
+		return nil, wsrpc.SpamModelPreconditionOf(nil), contributeBaseline, holderSealTarget, true
+	}
+	opened, err := opener.Open(fetched)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("imap: \\Junk train: sealed model unwrap failed on retry — event skipped",
+				"uid", uid, "err", err)
+		}
+		return nil, expected, false, nil, false
+	}
+	return opened, wsrpc.SpamModelPreconditionOf(fetched), contributeBaseline, holderSealTarget, true
 }
 
 // formatUIDSetString renders a UID list as an IMAP set string ("1:3,5,7")

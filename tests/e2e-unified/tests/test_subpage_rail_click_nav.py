@@ -12,12 +12,19 @@ the test drives each click path end to end from the primary view, the way a
 human does, through the real ``am-i-admin`` gate that reveals ``admin-tab``.
 
 tier_3: a real nest and a real app, nothing stubbed. tui is the lead app; the
-other six gain the ids in trickle-down rows and join this file's markers then.
+other apps gain the ids in trickle-down rows and join this file's markers then
+(android, web and linux have).
 """
 
 import pytest
 
-pytestmark = [pytest.mark.tier_3, pytest.mark.tui]
+pytestmark = [
+    pytest.mark.tier_3,
+    pytest.mark.tui,
+    pytest.mark.android,
+    pytest.mark.web,
+    pytest.mark.linux,
+]
 
 
 @pytest.mark.parametrize(

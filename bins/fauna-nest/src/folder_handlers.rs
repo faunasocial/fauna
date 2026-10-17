@@ -46,7 +46,7 @@ use fauna_protocol::{RpcError, decode_strict as decode};
 use serde_bytes::ByteBuf;
 
 use crate::db::{ConflictCandidateRow, ResolveWinner};
-use crate::routes::{AppState, parse_32_bytes as parse_device_id};
+use crate::routes::{AppState, SetGate, parse_32_bytes as parse_device_id, resolve_set};
 use crate::rpc_router::{RpcHandler, RpcKindMeta, RpcRouterBuilder};
 
 /// Error namespace for the `fauna.folders.*` kinds.
@@ -64,12 +64,6 @@ fn coded(ns: &str, code: &str, detail: impl std::fmt::Display) -> RpcError {
 
 fn internal(ns: &str, err: impl std::fmt::Display) -> RpcError {
     crate::rpc_errors::internal_ns(ns, err)
-}
-
-/// Parse a wire `name_hash` into a fixed 32-byte array — see
-/// `crate::routes::parse_name_hash`.
-fn parse_name_hash(ns: &str, name_hash: &Option<ByteBuf>) -> Result<Option<[u8; 32]>, RpcError> {
-    crate::routes::parse_name_hash(name_hash, |msg| coded(ns, "invalid_request", msg))
 }
 
 /// Resolve the connection actor's `CallerClass` and check the kind's allowlist
@@ -389,14 +383,25 @@ pub(crate) fn residency_of(fs: &crate::db::FolderRow) -> &'static str {
 /// The *effective* residency an update handler's request would leave in
 /// place — this request's own `residency` flip if present, else the
 /// persisted column (phase 5). The pairwise serving refusals read this in
-/// both directions off both fields (`residency` here, `audience` inline at
-/// its own single call site) so a serve-ON and a residency-flip cannot ride
-/// one request in either order.
+/// both directions off both fields (`residency` here, [`effective_public`]
+/// for the audience) so a serve-ON and a residency-flip cannot ride one
+/// request in either order.
 fn effective_metadata_only(requested_residency: Option<&str>, fs: &crate::db::FolderRow) -> bool {
     match requested_residency {
         Some("metadata_only") => true,
         Some(_) => false, // this same request flips it back to full
         None => fs.nest_content_residency.as_deref() == Some("metadata_only"),
+    }
+}
+
+/// The *effective* audience half of the same read: whether this request's own
+/// `audience` flip (if present) or else the persisted state leaves the folder
+/// `public`.
+fn effective_public(requested_audience: Option<&str>, fs: &crate::db::FolderRow) -> bool {
+    match requested_audience {
+        Some("public") => true,
+        Some(_) => false, // this same request flips it away from public
+        None => fs.is_public_audience(),
     }
 }
 
@@ -464,13 +469,25 @@ fn channel_of(fs: &crate::db::FolderRow) -> Option<[u8; 32]> {
         .map(|g| fauna_mls::types::ChannelId::from_group_id(g).0)
 }
 
-/// A bound set's content-key floor out of a batch read (`None` when unbound or
-/// no floor is established).
-fn content_key_floor_of(
-    floors: &std::collections::HashMap<[u8; 32], i64>,
+/// A bound set's envelope row out of a batch read (`None` when unbound or no
+/// envelope is published).
+fn content_key_echo_of(
+    echoes: &std::collections::HashMap<[u8; 32], crate::db::sync_storage::ContentKeyEcho>,
     fs: &crate::db::FolderRow,
-) -> Option<u64> {
-    channel_of(fs).and_then(|channel| content_key_floor_to_wire(floors.get(&channel).copied()))
+) -> Option<crate::db::sync_storage::ContentKeyEcho> {
+    channel_of(fs).and_then(|channel| echoes.get(&channel).copied())
+}
+
+/// The two list fields an envelope row lends — the content-key floor and the
+/// envelope digest — on both arms alike.
+fn echo_fields(
+    echo: Option<crate::db::sync_storage::ContentKeyEcho>,
+) -> (Option<u64>, Option<ByteBuf>) {
+    let floor = content_key_floor_to_wire(echo.map(|e| e.floor));
+    let digest = echo
+        .and_then(|e| e.digest)
+        .map(|d| ByteBuf::from(d.to_vec()));
+    (floor, digest)
 }
 
 /// The wire form of a stored content-key floor — the ONE conversion for every
@@ -486,8 +503,9 @@ pub(crate) fn content_key_floor_to_wire(floor: Option<i64>) -> Option<u64> {
 fn owner_summary(
     fs: crate::db::FolderRow,
     lease: Option<fauna_protocol::folders::FolderLeaseState>,
-    content_key_floor: Option<u64>,
+    echo: Option<crate::db::sync_storage::ContentKeyEcho>,
 ) -> FolderSummary {
+    let (content_key_floor, envelope_digest) = echo_fields(echo);
     let nest_place = nest_place_of(&fs);
     let version_retention = version_retention_of(&fs);
     let audience = audience_of(&fs).to_string();
@@ -561,6 +579,10 @@ fn owner_summary(
         // the owner's reconcile can see when it differs (custody (f)); it selects
         // nothing client-side (c).
         set_nonce: fs.set_nonce.map(ByteBuf::from),
+        // Rides BOTH arms, as the floor does (ruling (7)(b)(ii) rule (6)(a)):
+        // only ever a reason to fetch — the owner's own reconcile reads its
+        // custody, never this.
+        envelope_digest,
     }
 }
 
@@ -583,8 +605,9 @@ fn member_summary(
     owner_handle: Option<String>,
     access: Option<String>,
     lease: Option<fauna_protocol::folders::FolderLeaseState>,
-    content_key_floor: Option<u64>,
+    echo: Option<crate::db::sync_storage::ContentKeyEcho>,
 ) -> FolderSummary {
+    let (content_key_floor, envelope_digest) = echo_fields(echo);
     let nest_place = nest_place_of(&fs);
     // The audience is the set's IDENTITY, not an owner-side control — a member
     // of a declassified folder must know their uploads rest world-readable
@@ -698,6 +721,11 @@ fn member_summary(
         // Both arms echo it (custody (f)); a member's verifying copy arrives in
         // the owner-sealed content-key envelope (h), never from here.
         set_nonce: fs.set_nonce.map(ByteBuf::from),
+        // NOT withheld: the digest of an envelope this member may already
+        // fetch discloses nothing new, and it is what carries a re-publish
+        // that advanced no epoch to the member (ruling (7)(b)(ii) rule (6)(a)).
+        // Only ever a reason to fetch, like the nonce echo above.
+        envelope_digest,
     }
 }
 
@@ -747,18 +775,19 @@ async fn list_core(
         .live_upload_leases_for(&owner_ids)
         .await
         .map_err(|e| internal(FS, e))?;
-    // The same one-read rule for the bound sets' content-key floors.
+    // The same one-read rule for the bound sets' envelope rows (the
+    // content-key floor and the envelope digest).
     let owner_channels: Vec<[u8; 32]> = owned.iter().filter_map(channel_of).collect();
-    let owner_floors = db
-        .content_key_floors_for(&owner_channels)
+    let owner_echoes = db
+        .content_key_echoes_for(&owner_channels)
         .await
         .map_err(|e| internal(FS, e))?;
     let mut folders: Vec<FolderSummary> = owned
         .into_iter()
         .map(|fs| {
             let lease = lease_state_of(&owner_leases, fs.id, actor_id);
-            let floor = content_key_floor_of(&owner_floors, &fs);
-            owner_summary(fs, lease, floor)
+            let echo = content_key_echo_of(&owner_echoes, &fs);
+            owner_summary(fs, lease, echo)
         })
         .collect();
 
@@ -817,20 +846,20 @@ async fn list_core(
             .iter()
             .filter_map(|(fs, ..)| channel_of(fs))
             .collect();
-        let member_floors = db
-            .content_key_floors_for(&member_channels)
+        let member_echoes = db
+            .content_key_echoes_for(&member_channels)
             .await
             .map_err(|e| internal(FS, e))?;
         for (fs, owner, owner_handle, access) in member_rows {
             let lease = lease_state_of(&member_leases, fs.id, actor_id);
-            let floor = content_key_floor_of(&member_floors, &fs);
+            let echo = content_key_echo_of(&member_echoes, &fs);
             folders.push(member_summary(
                 fs,
                 &owner,
                 owner_handle,
                 access,
                 lease,
-                floor,
+                echo,
             ));
         }
     }
@@ -885,18 +914,7 @@ fn update_handler() -> RpcHandler {
             // (which is empty on a hash-addressed request). A missing set errors
             // here instead of falling through to the update's `updated == false`
             // path; same observable `not_found`, detected earlier.
-            let name_hash = parse_name_hash(FS, &req.name_hash)?;
-            let fs = match name_hash {
-                Some(h) => {
-                    state
-                        .db
-                        .get_folder_for_actor_by_name_hash(&h, &actor_id)
-                        .await
-                }
-                None => state.db.get_folder_for_actor(&req.name, &actor_id).await,
-            }
-            .map_err(|e| internal(FS, e))?
-            .ok_or_else(|| coded(FS, "not_found", "folder not found"))?;
+            let fs = resolve_set(&state.db, FS, &req, SetGate::Owner, &actor_id).await?;
 
             // The reserved (`__`) namespace belongs to the nest: NO field of a
             // reserved set is a client's to set (`reserved-folders.md` § The
@@ -939,12 +957,7 @@ fn update_handler() -> RpcHandler {
                 // audience (this request's flip if present, else the persisted
                 // state) decides, so serve-ON + declassify cannot ride one
                 // request in either order.
-                let effective_public = match req.audience.as_deref() {
-                    Some("public") => true,
-                    Some(_) => false, // this same request flips it back
-                    None => fs.is_public_audience(),
-                };
-                if effective_public {
+                if effective_public(req.audience.as_deref(), &fs) {
                     return Err(coded(
                         FS,
                         "invalid_request",
@@ -961,9 +974,8 @@ fn update_handler() -> RpcHandler {
                 // reads bytes off the nest store, which deliberately holds
                 // none. Effective state, like the audience above.
                 if effective_metadata_only(req.residency.as_deref(), &fs) {
-                    return Err(coded(
-                        FS,
-                        "invalid_request",
+                    return Err(crate::rpc_errors::typed_refusal(
+                        RpcError::CODE_FOLDERS_METADATA_ONLY_CANNOT_SERVE,
                         "a metadata-only folder cannot be served over WebDAV; its content \
                          does not rest on the nest — set residency back to full first",
                     ));
@@ -1001,6 +1013,20 @@ fn update_handler() -> RpcHandler {
                                     "invalid_request",
                                     "a paywalled folder cannot be made public; clear the \
                                      paywall first",
+                                ));
+                            }
+                            // …and while metadata-only (the fifth refusal,
+                            // `file-sync.md` § Content residency): a public
+                            // folder's followers read its content from the
+                            // nest, which a metadata-only folder keeps none
+                            // of. Effective residency — this request's flip
+                            // if present, else persisted.
+                            if effective_metadata_only(req.residency.as_deref(), &fs) {
+                                return Err(crate::rpc_errors::typed_refusal(
+                                    RpcError::CODE_FOLDERS_METADATA_ONLY_CANNOT_GO_PUBLIC,
+                                    "a metadata-only folder cannot be made public; its \
+                                     content does not rest on the nest — set residency back \
+                                     to full first",
                                 ));
                             }
                             Some(Some("public"))
@@ -1069,57 +1095,36 @@ fn update_handler() -> RpcHandler {
                             // residency cannot ride one request in either
                             // order.
                             if req.website_enabled.unwrap_or(fs.website_enabled) {
-                                return Err(coded(
-                                    FS,
-                                    "invalid_request",
+                                return Err(crate::rpc_errors::typed_refusal(
+                                    RpcError::CODE_FOLDERS_RESIDENCY_BLOCKED_BY_WEBSITE,
                                     "a website-serving folder cannot go metadata-only; turn \
                                      off website serving first",
                                 ));
                             }
                             if req.webdav_enabled.unwrap_or(fs.webdav_enabled) {
-                                return Err(coded(
-                                    FS,
-                                    "invalid_request",
+                                return Err(crate::rpc_errors::typed_refusal(
+                                    RpcError::CODE_FOLDERS_RESIDENCY_BLOCKED_BY_WEBDAV,
                                     "a WebDAV-served folder cannot go metadata-only; turn off \
                                      WebDAV serving first",
                                 ));
                             }
                             if fs.web_paywall_tier.is_some() {
-                                return Err(coded(
-                                    FS,
-                                    "invalid_request",
+                                return Err(crate::rpc_errors::typed_refusal(
+                                    RpcError::CODE_FOLDERS_RESIDENCY_BLOCKED_BY_PAYWALL,
                                     "a paywalled folder cannot go metadata-only; clear the \
                                      paywall first",
                                 ));
                             }
-                            // The interim cross-nest refusal, this direction
-                            // (`file-sync.md` § Relay serving → *Until that
-                            // leg is built, the pair is refused*;
-                            // `welcome_deliver_core` holds the other): a
-                            // member on another nest can fetch nothing by
-                            // relay yet, so the flip is refused while the
-                            // folder's channel holds a foreign-member row.
-                            // Only the FLIP — a folder already metadata-only
-                            // is an existing pair and is left as it is.
-                            if fs.nest_content_residency.as_deref() != Some("metadata_only")
-                                && let Some(group_id) = fs.mls_group_id.as_deref()
-                            {
-                                let channel =
-                                    fauna_mls::types::ChannelId::from_group_id(group_id).0;
-                                let foreign_members = state
-                                    .db
-                                    .list_foreign_channel_members(&channel)
-                                    .await
-                                    .map_err(|e| internal(FS, e))?;
-                                if !foreign_members.is_empty() {
-                                    return Err(coded(
-                                        FS,
-                                        "invalid_request",
-                                        "a folder with a member on another nest cannot go \
-                                         metadata-only yet: that member could not reach its \
-                                         content; remove them first",
-                                    ));
-                                }
+                            // …and never on a public-audience folder (the
+                            // fifth refusal; the audience arm holds the
+                            // other direction). Effective audience.
+                            if effective_public(req.audience.as_deref(), &fs) {
+                                return Err(crate::rpc_errors::typed_refusal(
+                                    RpcError::CODE_FOLDERS_RESIDENCY_BLOCKED_BY_PUBLIC,
+                                    "a public folder cannot go metadata-only; its followers \
+                                     read its content from the nest — make the folder \
+                                     private or shared first",
+                                ));
                             }
                             Some(Some("metadata_only"))
                         }
@@ -1181,9 +1186,8 @@ fn update_handler() -> RpcHandler {
                 // moves second onto a metadata-only folder. Effective state,
                 // as everywhere in this handler.
                 if effective_metadata_only(req.residency.as_deref(), &fs) {
-                    return Err(coded(
-                        FS,
-                        "invalid_request",
+                    return Err(crate::rpc_errors::typed_refusal(
+                        RpcError::CODE_FOLDERS_METADATA_ONLY_CANNOT_SERVE,
                         "a metadata-only folder cannot serve a website; its content does \
                          not rest on the nest — set residency back to full first",
                     ));
@@ -1479,8 +1483,10 @@ fn update_handler() -> RpcHandler {
             // way `update_folder_for_user` decides the owed-render mark, so the
             // backfill and the mark can never disagree about what a serving
             // transition IS (the retired `mode` leg once moved this gate while
-            // a watch on `website_enabled`/`audience` alone missed it; asking the one predicate keeps
-            // any future column covered).
+            // a watch on `website_enabled`/`audience` alone missed it). Both sides call the free fn
+            // over raw columns, which shares its body with the row method, so
+            // a column the class grows is a compile error here, not a silent
+            // gap.
             let served_before = fs.serves_plaintext_web_files();
             let served_after = crate::db::serves_plaintext_web_files(
                 req.website_enabled.unwrap_or(fs.website_enabled),
@@ -1589,18 +1595,7 @@ fn served_rows_adopt_handler() -> RpcHandler {
                 ));
             }
             // Owner-only: the set resolves from the connection actor's own sets.
-            let name_hash = parse_name_hash(FS, &req.name_hash)?;
-            let fs = match name_hash {
-                Some(h) => {
-                    state
-                        .db
-                        .get_folder_for_actor_by_name_hash(&h, &actor_id)
-                        .await
-                }
-                None => state.db.get_folder_for_actor(&req.name, &actor_id).await,
-            }
-            .map_err(|e| internal(FS, e))?
-            .ok_or_else(|| coded(FS, "not_found", "folder not found"))?;
+            let fs = resolve_set(&state.db, FS, &req, SetGate::Owner, &actor_id).await?;
             let set_nonce = crate::change_signature::stored_set_nonce(&fs)
                 .map_err(|refusal| refusal.into_rpc(FS))?;
             let pseudo = fauna_core::label_custody::webdav_pseudo_device_id(&actor_id);
@@ -1719,18 +1714,7 @@ fn set_web_paywall_handler() -> RpcHandler {
             // S5b: resolve hash-first, once, unconditionally — the mutation
             // below keys off `fs.name`, never `req.name` (empty on a
             // hash-addressed request).
-            let name_hash = parse_name_hash(FS, &req.name_hash)?;
-            let fs = match name_hash {
-                Some(h) => {
-                    state
-                        .db
-                        .get_folder_for_actor_by_name_hash(&h, &actor_id)
-                        .await
-                }
-                None => state.db.get_folder_for_actor(&req.name, &actor_id).await,
-            }
-            .map_err(|e| internal(FS, e))?
-            .ok_or_else(|| coded(FS, "not_found", "folder not found"))?;
+            let fs = resolve_set(&state.db, FS, &req, SetGate::Owner, &actor_id).await?;
 
             if let Some(ref tier) = req.tier {
                 // Phase 5: a paywalled site serves bytes off the nest store,
@@ -1739,9 +1723,8 @@ fn set_web_paywall_handler() -> RpcHandler {
                 // § Content residency). Checked FIRST: it names the deepest
                 // structural problem.
                 if fs.nest_content_residency.as_deref() == Some("metadata_only") {
-                    return Err(coded(
-                        FS,
-                        "invalid_request",
+                    return Err(crate::rpc_errors::typed_refusal(
+                        RpcError::CODE_FOLDERS_METADATA_ONLY_CANNOT_SERVE,
                         "a metadata-only folder cannot be paywalled; its content does not \
                          rest on the nest — set residency back to full first",
                     ));
@@ -1848,18 +1831,7 @@ fn delete_handler() -> RpcHandler {
             // Resolve + ownership check (the op lock needs the id). S5b:
             // hash-first, then `folder.name` (never `req.name`) addresses the
             // delete below.
-            let name_hash = parse_name_hash(FS, &req.name_hash)?;
-            let folder = match name_hash {
-                Some(h) => {
-                    state
-                        .db
-                        .get_folder_for_actor_by_name_hash(&h, &actor_id)
-                        .await
-                }
-                None => state.db.get_folder_for_actor(&req.name, &actor_id).await,
-            }
-            .map_err(|e| internal(FS, e))?
-            .ok_or_else(|| coded(FS, "not_found", "folder not found"))?;
+            let folder = resolve_set(&state.db, FS, &req, SetGate::Owner, &actor_id).await?;
 
             // The reserved (`__`) namespace is the nest's own rails (`__mls`,
             // `__drafts`, `__mail`, …): deleting one clears the
@@ -1940,18 +1912,7 @@ fn devices_handler() -> RpcHandler {
             require_permission(&state, FS, &actor_id, KIND_FOLDERS_DEVICES).await?;
             let req: FolderDevicesRequest = decode(&payload).map_err(malformed)?;
 
-            let name_hash = parse_name_hash(FS, &req.name_hash)?;
-            let folder = match name_hash {
-                Some(h) => {
-                    state
-                        .db
-                        .get_folder_for_actor_by_name_hash(&h, &actor_id)
-                        .await
-                }
-                None => state.db.get_folder_for_actor(&req.name, &actor_id).await,
-            }
-            .map_err(|e| internal(FS, e))?
-            .ok_or_else(|| coded(FS, "not_found", "folder not found"))?;
+            let folder = resolve_set(&state.db, FS, &req, SetGate::Owner, &actor_id).await?;
 
             let devices = state
                 .db
@@ -1983,18 +1944,7 @@ fn members_list_handler() -> RpcHandler {
             require_permission(&state, FS, &actor_id, KIND_FOLDERS_MEMBERS_LIST).await?;
             let req: MembersListRequest = decode(&payload).map_err(malformed)?;
 
-            let name_hash = parse_name_hash(FS, &req.name_hash)?;
-            let folder = match name_hash {
-                Some(h) => {
-                    state
-                        .db
-                        .get_folder_for_actor_by_name_hash(&h, &actor_id)
-                        .await
-                }
-                None => state.db.get_folder_for_actor(&req.name, &actor_id).await,
-            }
-            .map_err(|e| internal(FS, e))?
-            .ok_or_else(|| coded(FS, "not_found", "folder not found"))?;
+            let folder = resolve_set(&state.db, FS, &req, SetGate::Owner, &actor_id).await?;
 
             let members = state
                 .db
@@ -2037,12 +1987,7 @@ async fn actor_members_list_core(
 ) -> Result<fauna_protocol::folders::ActorMembersListReply, RpcError> {
     // Member-aware resolve: owner OR roster member; non-member/absent → None,
     // folding to `not_found` (the ST-RES-1 name-existence oracle stays closed).
-    let name_hash = parse_name_hash(FS, &req.name_hash)?;
-    let fs =
-        crate::folder_authz::resolve_readable_folder(db, &req.name, name_hash.as_ref(), caller)
-            .await
-            .map_err(|e| internal(FS, e))?
-            .ok_or_else(|| coded(FS, "not_found", "folder not found"))?;
+    let fs = resolve_set(db, FS, req, SetGate::Reader, caller).await?;
     let channel_id = derive_channel_id(&fs)?; // `not_shared` for an owner-only set
     let owner = <[u8; 32]>::try_from(fs.actor_id.as_slice())
         .map_err(|_| coded(FS, "internal", "folder owner id is not 32 bytes"))?;
@@ -2207,13 +2152,7 @@ async fn set_access_core(
     }
 
     // Owner-scoped lookup folds non-owner/absent to one `not_found` (ST-RES-1).
-    let name_hash = parse_name_hash(FS, &req.name_hash)?;
-    let fs = match name_hash {
-        Some(h) => db.get_folder_for_actor_by_name_hash(&h, owner).await,
-        None => db.get_folder_for_actor(&req.name, owner).await,
-    }
-    .map_err(|e| internal(FS, e))?
-    .ok_or_else(|| coded(FS, "not_found", "folder not found"))?;
+    let fs = resolve_set(db, FS, req, SetGate::Owner, owner).await?;
     let channel_id = derive_channel_id(&fs)?; // `not_shared` for an unbound set
     require_channel_claimant(db, &channel_id, owner).await?;
 
@@ -2338,18 +2277,7 @@ fn members_remove_handler() -> RpcHandler {
 
             // Owner-scoped, hash-first (S5b): a set the caller does not own
             // folds into the same `not_found` as an absent one.
-            let name_hash = parse_name_hash(FS, &req.name_hash)?;
-            let folder = match name_hash {
-                Some(h) => {
-                    state
-                        .db
-                        .get_folder_for_actor_by_name_hash(&h, &actor_id)
-                        .await
-                }
-                None => state.db.get_folder_for_actor(&req.name, &actor_id).await,
-            }
-            .map_err(|e| internal(FS, e))?
-            .ok_or_else(|| coded(FS, "not_found", "folder not found"))?;
+            let folder = resolve_set(&state.db, FS, &req, SetGate::Owner, &actor_id).await?;
 
             let removed = state
                 .db
@@ -2385,18 +2313,7 @@ fn places_set_handler() -> RpcHandler {
             let device_id = parse_device_id(&req.device_id)
                 .ok_or_else(|| coded(FS, "invalid_request", "invalid device_id hex"))?;
 
-            let name_hash = parse_name_hash(FS, &req.name_hash)?;
-            let folder = match name_hash {
-                Some(h) => {
-                    state
-                        .db
-                        .get_folder_for_actor_by_name_hash(&h, &actor_id)
-                        .await
-                }
-                None => state.db.get_folder_for_actor(&req.name, &actor_id).await,
-            }
-            .map_err(|e| internal(FS, e))?
-            .ok_or_else(|| coded(FS, "not_found", "folder not found"))?;
+            let folder = resolve_set(&state.db, FS, &req, SetGate::Owner, &actor_id).await?;
 
             state
                 .db
@@ -2430,16 +2347,7 @@ fn lease_acquire_handler() -> RpcHandler {
             // (multi-writer Phase 1; one of the exactly-three widened kinds,
             // file-sync.md § Multi-writer shared sets). Absent/not-writable folds
             // to one `not_found`, closing the name-existence oracle (ST-RES-1).
-            let name_hash = parse_name_hash(FS, &req.name_hash)?;
-            let folder = crate::folder_authz::resolve_writable_folder(
-                &state.db,
-                &req.name,
-                name_hash.as_ref(),
-                &actor_id,
-            )
-            .await
-            .map_err(|e| internal(FS, e))?
-            .ok_or_else(|| coded(FS, "not_found", "folder not found"))?;
+            let folder = resolve_set(&state.db, FS, &req, SetGate::Writer, &actor_id).await?;
             let device_id = parse_device_id(&req.device_id)
                 .ok_or_else(|| coded(FS, "invalid_request", "invalid device_id"))?;
 
@@ -2470,16 +2378,7 @@ fn lease_release_handler() -> RpcHandler {
             // Lease release = a write op → owner OR `writer`-granted member
             // (multi-writer Phase 1); folds to `not_found` (ST-RES-1, as for
             // lease.acquire).
-            let name_hash = parse_name_hash(FS, &req.name_hash)?;
-            let folder = crate::folder_authz::resolve_writable_folder(
-                &state.db,
-                &req.name,
-                name_hash.as_ref(),
-                &actor_id,
-            )
-            .await
-            .map_err(|e| internal(FS, e))?
-            .ok_or_else(|| coded(FS, "not_found", "folder not found"))?;
+            let folder = resolve_set(&state.db, FS, &req, SetGate::Writer, &actor_id).await?;
 
             // release is HOLDER-SCOPED, and the holder is the
             // authenticated ACTOR plus its device. `device_id` (required —
@@ -2520,16 +2419,7 @@ fn conflict_report_handler() -> RpcHandler {
             // Conflict report = a write op → owner OR `writer`-granted member
             // (multi-writer Phase 1; the third of the exactly-three widened
             // kinds, file-sync.md § Multi-writer shared sets). ST-RES-1 fold.
-            let name_hash = parse_name_hash(SYNC, &req.name_hash)?;
-            let folder = crate::folder_authz::resolve_writable_folder(
-                &state.db,
-                &req.folder,
-                name_hash.as_ref(),
-                &actor_id,
-            )
-            .await
-            .map_err(|e| internal(SYNC, e))?
-            .ok_or_else(|| coded(SYNC, "not_found", "folder not found"))?;
+            let folder = resolve_set(&state.db, SYNC, &req, SetGate::Writer, &actor_id).await?;
             let device_bytes = hex::decode(&req.device_id)
                 .map_err(|_| coded(SYNC, "invalid_request", "invalid device_id hex"))?;
 
@@ -3197,13 +3087,7 @@ async fn share_core(
     //
     // S5b: hash-first once — `existing.name` (not `req.name`, empty on a
     // hash-addressed request) is what the bind + reply below use.
-    let name_hash = parse_name_hash(FS, &req.name_hash)?;
-    let existing = match name_hash {
-        Some(h) => db.get_folder_for_actor_by_name_hash(&h, owner).await,
-        None => db.get_folder_for_actor(&req.name, owner).await,
-    }
-    .map_err(|e| internal(FS, e))?
-    .ok_or_else(|| coded(FS, "not_found", "folder not found"))?;
+    let existing = resolve_set(db, FS, req, SetGate::Owner, owner).await?;
 
     // **(the security review):** a bound set never
     // moves to a different MLS group. The roster (`actor_channels`) and the read
@@ -3377,13 +3261,7 @@ async fn content_key_put_core(
     req: &fauna_protocol::folders::ContentKeyPutRequest,
 ) -> Result<fauna_protocol::folders::ContentKeyPutReply, RpcError> {
     // Owner-scoped lookup folds non-owner/absent to one `not_found` (ST-RES-1).
-    let name_hash = parse_name_hash(FS, &req.name_hash)?;
-    let fs = match name_hash {
-        Some(h) => db.get_folder_for_actor_by_name_hash(&h, owner).await,
-        None => db.get_folder_for_actor(&req.name, owner).await,
-    }
-    .map_err(|e| internal(FS, e))?
-    .ok_or_else(|| coded(FS, "not_found", "folder not found"))?;
+    let fs = resolve_set(db, FS, req, SetGate::Owner, owner).await?;
     let channel_id = derive_channel_id(&fs)?;
     // The envelope slot is keyed solely by `channel_id`, with no per-row publisher,
     // so owning *some* set bound to the group is not enough: the
@@ -3423,12 +3301,7 @@ async fn content_key_get_core(
     // folding to `not_found` (the ST-RES-1 name-existence oracle stays closed).
     // `nest_url` (cross-nest relay) addresses by `channel_id`, never reaches
     // this same-nest core, so `name_hash` is same-nest-read-only here too.
-    let name_hash = parse_name_hash(FS, &req.name_hash)?;
-    let fs =
-        crate::folder_authz::resolve_readable_folder(db, &req.name, name_hash.as_ref(), caller)
-            .await
-            .map_err(|e| internal(FS, e))?
-            .ok_or_else(|| coded(FS, "not_found", "folder not found"))?;
+    let fs = resolve_set(db, FS, req, SetGate::Reader, caller).await?;
     let channel_id = derive_channel_id(&fs)?;
 
     let (epoch, sealed) = db
@@ -3722,13 +3595,7 @@ async fn members_evict_core(
         .map_err(|_| coded(FS, "invalid_request", "member must be 32-byte hex"))?;
 
     // Owner-scoped lookup folds non-owner/absent to one `not_found` (ST-RES-1).
-    let name_hash = parse_name_hash(FS, &req.name_hash)?;
-    let fs = match name_hash {
-        Some(h) => db.get_folder_for_actor_by_name_hash(&h, owner).await,
-        None => db.get_folder_for_actor(&req.name, owner).await,
-    }
-    .map_err(|e| internal(FS, e))?
-    .ok_or_else(|| coded(FS, "not_found", "folder not found"))?;
+    let fs = resolve_set(db, FS, req, SetGate::Owner, owner).await?;
     // `not_shared` for an owner-only (unbound) set — there is no roster to evict from.
     let channel_id = derive_channel_id(&fs)?;
     // Only the channel's first-binder claimant may evict from its roster — so a
@@ -5769,6 +5636,69 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.code.contains("not_found"), "got {}", err.code);
+    }
+
+    /// `writer-signed-change-records.md` ruling (7)(b)(ii) rule (6)(a): the
+    /// member's list row echoes the digest of the envelope as stored, so a
+    /// re-put with different bytes at the same epoch — a serve flip's
+    /// re-publish, which moves no epoch and no nonce — moves the echo, and a
+    /// re-put of the same bytes leaves it. The owner's row echoes it too, as
+    /// the floor rides both arms.
+    #[tokio::test]
+    async fn a_re_put_with_new_bytes_moves_the_envelope_digest_echo_and_the_same_bytes_leave_it() {
+        let db = crate::db::CacheDb::open_in_memory().unwrap();
+        let owner = [0xa1u8; 32];
+        let member = [0xb2u8; 32];
+        share_and_add_member(&db, "shared", &owner, &member).await;
+        let put = |sealed: &'static str| ContentKeyPutRequest {
+            name: "shared".into(),
+            epoch: 3,
+            sealed: sealed.into(),
+            current_version: 1,
+            ..Default::default()
+        };
+        let echo = |actor: [u8; 32]| {
+            let db = &db;
+            async move {
+                list_core(db, &actor, true)
+                    .await
+                    .unwrap()
+                    .folders
+                    .into_iter()
+                    .find(|f| f.name == "shared")
+                    .expect("the set's row")
+                    .envelope_digest
+            }
+        };
+        assert_eq!(echo(member).await, None, "no envelope yet: no echo");
+
+        content_key_put_core(&db, &owner, &put("abab"))
+            .await
+            .unwrap();
+        let first = echo(member)
+            .await
+            .expect("the member's row echoes the digest");
+        assert_eq!(
+            first.as_slice(),
+            fauna_protocol::folder_envelope_sig::digest(&[0xab, 0xab]),
+            "blake3 over the blob as stored"
+        );
+        assert_eq!(echo(owner).await, Some(first.clone()), "both arms");
+
+        content_key_put_core(&db, &owner, &put("abab"))
+            .await
+            .unwrap();
+        assert_eq!(
+            echo(member).await,
+            Some(first.clone()),
+            "the same bytes leave it"
+        );
+
+        content_key_put_core(&db, &owner, &put("cdcd"))
+            .await
+            .unwrap();
+        let moved = echo(member).await.expect("still echoed");
+        assert_ne!(moved, first, "new bytes at the same epoch move it");
     }
 
     /// The actor-roster member-list read (`fauna.folders.members.list_actors`) —

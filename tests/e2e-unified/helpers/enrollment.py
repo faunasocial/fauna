@@ -122,7 +122,9 @@ def register_device(nest_url: str, user: dict, label: str) -> str:
     return device_id
 
 
-def register_granted_device(nest_url: str, user: dict, label: str) -> tuple[str, str]:
+def register_granted_device(
+    nest_url: str, user: dict, label: str, *, principal_seed: bytes | None = None
+) -> tuple[str, str]:
     """Register one more device row on ``user``'s account and grant it a
     principal: a fresh Ed25519 key, the actor's root-signed enrollment grant
     over it (``fauna.sync.device_grant.register``, the grant from the real
@@ -134,15 +136,34 @@ def register_granted_device(nest_url: str, user: dict, label: str) -> tuple[str,
     ``devices.md`` § Custody facet piece 1) and it is no verified fleet member
     (so removing it is refused as unverifiable — § Errors & edge cases).
     Fixture setup, never the action under test (e2e point 8(b)).
+
+    ``principal_seed`` (32 bytes) fixes the device key, for a caller that signs
+    in AS the device afterwards (:func:`device_sign_in`); fresh when omitted.
     """
+    device_id = register_device(nest_url, user, label)
+    return device_id, grant_device_principal(
+        nest_url, user, device_id, principal_seed=principal_seed
+    )
+
+
+def grant_device_principal(
+    nest_url: str, user: dict, device_id: str, *, principal_seed: bytes | None = None
+) -> str:
+    """Grant ``device_id`` (an existing row of ``user``'s) a principal — the
+    grant half of :func:`register_granted_device`. On a row that already
+    carries one, the new key REPLACES it and the displaced key is not
+    tombstoned (``sync_handlers.rs`` § ``fauna.sync.device_grant.register``):
+    a sign-in the old key already made stays live while the roster now names
+    the new key — how a test plants a sign-in by "a device key not in your
+    device list" (``ui/sessions.md`` § Errors & edge cases). Returns the
+    principal (hex)."""
     import os
 
     from nacl.signing import SigningKey
 
     from fauna_ffi import build_device_grant
 
-    device_id = register_device(nest_url, user, label)
-    principal = bytes(SigningKey(os.urandom(32)).verify_key)
+    principal = bytes(SigningKey(principal_seed or os.urandom(32)).verify_key)
     authorization = build_device_grant(bytes(user["signing_key"]), principal)
     actor = bytes.fromhex(user["actor_id_hex"])
     with WsRpcAdminClient(nest_url, actor, bytes(user["signing_key"])) as client:
@@ -150,7 +171,42 @@ def register_granted_device(nest_url: str, user: dict, label: str) -> tuple[str,
             "fauna.sync.device_grant.register",
             {"device_id": device_id, "authorization": authorization},
         )
-    return device_id, principal.hex()
+    return principal.hex()
+
+
+def device_sign_in(nest_url: str, actor_id: bytes, device_key) -> dict:
+    """``fauna.auth.device_handshake`` — a sign-in made by a granted device's
+    own key (a ``nacl.signing.SigningKey``), the way an enrolled app's account
+    runtime makes it. Returns the nest's reply (``token``, ``token_id``, …);
+    the session it mints is listed with ``minted_by_device`` = the key.
+    Lifted out of ``tests/api/test_sign_in_ending_and_lockout.py`` when the
+    Sessions page journey needed device-minted sign-ins too."""
+    import secrets
+    import time
+
+    from clients.ws_rpc_anon_client import WsRpcAnonClient
+    from common.nest_identity import read_nest_identity
+    from common.sig_domain import device_handshake_signed_message
+
+    device_pub = bytes(device_key.verify_key)
+    with WsRpcAnonClient(nest_url) as anon:
+        nest_id = read_nest_identity(anon)
+        timestamp = int(time.time() * 1000)
+        nonce = secrets.token_bytes(32)
+        signature = device_key.sign(
+            device_handshake_signed_message(actor_id, device_pub, timestamp, nest_id, nonce)
+        ).signature
+        return anon.call(
+            "fauna.auth.device_handshake",
+            {
+                "actor_id": actor_id.hex(),
+                "device_key": device_pub.hex(),
+                "timestamp": timestamp,
+                "signature": signature.hex(),
+                "client_nonce": nonce,
+                "nest_id": nest_id.hex(),
+            },
+        )
 
 
 def sign_in(app, request, nest_instance, user, *, device_id: str | None = None) -> None:

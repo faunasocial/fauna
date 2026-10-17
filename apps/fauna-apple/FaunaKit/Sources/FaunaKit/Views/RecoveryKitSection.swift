@@ -258,7 +258,7 @@ public struct RecoveryKitSection: View {
     /// projection's alone.
     @ViewBuilder private var sweepChrome: some View {
         if let view = vm.sweepView {
-            let copy = sweepCopy(view: view, rendersRetry: true)
+            let copy = sweepCopy(view: view)
             if let outcome = copy.outcome {
                 automationText(Ids.recoveryKitSweepStatus, renderLocalizedText(outcome))
                     .font(.caption)
@@ -545,8 +545,8 @@ public struct RecoveryKitSection: View {
     }
 
     /// The let-go of a dead generation, beside the four actions
-    /// (`settings.md` § Recovery kit, the fifth act; `account-data-taxonomy.md`
-    /// § The generation machinery → *Fleet-scope reclamation*, clause (3)(j)):
+    /// (`settings.md` § Recovery kit, the fifth act; `fleet-scope-reclamation.md`
+    /// § *Fleet-scope reclamation*, clause (3)(j)):
     /// the line, its type-to-confirm field and its button — all three ONLY
     /// while the runtime's dead read answers non-empty, the veto's shape. The
     /// line's copy is the shared projection's; the button arms on the confirm

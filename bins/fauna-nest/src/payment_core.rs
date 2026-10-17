@@ -205,13 +205,14 @@ async fn mint_claim(
         let code = crate::admin::generate_invite_code();
         match state
             .db
-            .insert_payment_claim(
+            .insert_payment_claim_with_return_ref(
                 &code,
                 payee,
                 &entitlement.tier,
                 &entitlement.provider,
                 &entitlement.external_ref,
                 valid_until,
+                entitlement.return_ref.as_deref(),
             )
             .await
         {
@@ -473,7 +474,6 @@ pub async fn apply_refund(
     };
 
     let mut acted = false;
-    let now = now_epoch_secs();
 
     // A claim minted for this payment: void it if unredeemed; if already
     // redeemed, fall through to void the redeemer's entitlement.
@@ -484,43 +484,132 @@ pub async fn apply_refund(
         .await
         .map_err(internal)?
     {
-        if state
-            .db
-            .void_payment_claim(&claim.code)
-            .await
-            .map_err(internal)?
-        {
-            acted = true;
-        } else if let Some(redeemer) = claim.redeemed_by.as_deref()
-            && let Ok(arr) = <[u8; 32]>::try_from(redeemer)
-        {
-            voided_buyer = Some(arr);
+        let (claim_acted, redeemer) = void_claim_row(state, &claim).await?;
+        acted |= claim_acted;
+        if redeemer.is_some() {
+            voided_buyer = redeemer;
         }
     }
 
     if let Some(buyer) = voided_buyer {
-        // Void the active window (sets valid_until = now → un-entitles at the
-        // gates immediately; the roster row survives for the author's client
-        // to prune) and drop any pending payment marker.
-        if state
-            .db
-            .set_subscriber_valid_until(author_id, &buyer, tier_name, Some(now))
-            .await
-            .map_err(internal)?
-        {
-            acted = true;
-        }
-        if state
-            .db
-            .clear_request_payment_entitlement(author_id, &buyer, tier_name)
-            .await
-            .map_err(internal)?
-        {
-            acted = true;
-        }
+        acted |= void_entitlement_window(state, author_id, &buyer, tier_name).await?;
     }
 
     Ok(acted)
+}
+
+/// The claim arm a refund and an author's void ([`void_claim`]) share: stamp
+/// `voided_at` on the claim. An unredeemed claim is voided outright; a
+/// redeemed one is voided too — the bound code is also the visitor's web
+/// credential, which honours only `voided_at` (monetization.md § Pillar 2 →
+/// *Visitor entitlement doors* ruling (1)) — and its redeemer is returned so
+/// the caller voids their entitlement window as well. Returns whether a stamp
+/// landed, and the redeemer when the claim was a redeemed one.
+async fn void_claim_row(
+    state: &Arc<AppState>,
+    claim: &crate::db::PaymentClaimRow,
+) -> Result<(bool, Option<[u8; 32]>), GrantError> {
+    if state
+        .db
+        .void_payment_claim(&claim.code)
+        .await
+        .map_err(internal)?
+    {
+        return Ok((true, None));
+    }
+    if let Some(redeemer) = claim.redeemed_by.as_deref()
+        && let Ok(arr) = <[u8; 32]>::try_from(redeemer)
+    {
+        let stamped = state
+            .db
+            .void_redeemed_payment_claim(&claim.code)
+            .await
+            .map_err(internal)?;
+        return Ok((stamped, Some(arr)));
+    }
+    Ok((false, None))
+}
+
+/// Void `buyer`'s paid window on `author_id`'s tier: `valid_until = now`
+/// un-entitles at the gates immediately (the roster row survives for the
+/// author's client to prune) and any pending payment marker is dropped, so
+/// the author's client never approves a voided payment later. Returns whether
+/// anything changed.
+async fn void_entitlement_window(
+    state: &Arc<AppState>,
+    author_id: &[u8; 32],
+    buyer: &[u8; 32],
+    tier_name: &str,
+) -> Result<bool, GrantError> {
+    let windowed = state
+        .db
+        .set_subscriber_valid_until(author_id, buyer, tier_name, Some(now_epoch_secs()))
+        .await
+        .map_err(internal)?;
+    let unmarked = state
+        .db
+        .clear_request_payment_entitlement(author_id, buyer, tier_name)
+        .await
+        .map_err(internal)?;
+    Ok(windowed || unmarked)
+}
+
+/// Why an author's claim void failed.
+#[derive(Debug)]
+pub enum VoidError {
+    /// No such code, or a code `author` did not mint — the two answer alike,
+    /// so another author's codes are never acknowledged.
+    NotFound,
+    Grant(GrantError),
+}
+
+/// The author withdraws one of their own claim codes
+/// (`fauna.payments.claims.void`; monetization.md § Pillar 3 → *Buyer↔actor
+/// binding (Q4)*). The refund path's claim arm without the provider event: an
+/// unredeemed code is voided (refused thereafter at `claims.redeem` and the
+/// web redeem door); a redeemed one is voided and its redeemer's window on
+/// the claim's tier is voided as [`apply_refund`] voids it — like a refund,
+/// that window is the redeemer's entitlement to the tier whatever granted it.
+///
+/// Idempotent: a code already voided (by an earlier void or by a refund)
+/// changes nothing and answers its existing stamp, so a repeat can never
+/// reach an entitlement the redeemer gained afresh after the first void.
+/// Returns the claim's `voided_at` (epoch seconds).
+pub async fn void_claim(
+    state: &Arc<AppState>,
+    author_id: &[u8; 32],
+    code: &str,
+) -> Result<i64, VoidError> {
+    let read = || async {
+        state
+            .db
+            .get_payment_claim(code)
+            .await
+            .map_err(|e| VoidError::Grant(internal(e)))?
+            .filter(|c| c.author_id.as_slice() == author_id.as_slice())
+            .ok_or(VoidError::NotFound)
+    };
+    let mut claim = read().await?;
+    // Two passes: a redemption landing between the read and the void stamp
+    // makes the first pass's unredeemed-arm stamp miss, and the re-read then
+    // carries the redeemer the redeemed arm needs.
+    for _ in 0..2 {
+        if let Some(at) = claim.voided_at {
+            return Ok(at);
+        }
+        let (_, redeemer) = void_claim_row(state, &claim)
+            .await
+            .map_err(VoidError::Grant)?;
+        if let Some(buyer) = redeemer {
+            void_entitlement_window(state, author_id, &buyer, &claim.tier_name)
+                .await
+                .map_err(VoidError::Grant)?;
+        }
+        claim = read().await?;
+    }
+    claim
+        .voided_at
+        .ok_or_else(|| VoidError::Grant(internal("claim void did not land")))
 }
 
 /// Why a claim redemption failed.
@@ -613,6 +702,7 @@ pub async fn redeem_claim(
         tier: claim.tier_name.clone(),
         valid_until_secs: claim.valid_until.map(|s| s.max(0) as u64),
         external_ref: claim.external_ref.clone(),
+        return_ref: None,
     };
     let queued = match apply_payment(state, &entitlement)
         .await
@@ -636,6 +726,139 @@ pub async fn redeem_claim(
     })
 }
 
+// ── Claim → resource entitlement (the web paywall's redeem door) ──
+
+/// The tier facts the claim-entitlement decision reads.
+#[derive(Debug, Clone, Copy)]
+pub struct TierFacts<'a> {
+    pub name: &'a str,
+    pub rank: i64,
+    /// `unlocks_post` is set (a per-post pay-to-unlock tier).
+    pub designated: bool,
+    pub hidden: bool,
+}
+
+/// Does a claim for tier `claim` entitle a resource gated to tier `resource`?
+///
+/// The cascade predicate the grant-time fan-out applies to actors
+/// ([`crate::db::CacheDb::enqueue_unlock_fanout`]), evaluated against the
+/// claim's tier instead of a `subscribers` row (`monetization.md` § Pillar 2
+/// → *Visitor entitlement doors* ruling (4), § Per-post pay-to-unlock rules
+/// (a)–(e)): the same tier always; otherwise the target must sit at or below
+/// the claim's rank, a designated claim reaches only undesignated targets
+/// (rule (a) — one cheap post never unlocks every sold post), and a hidden
+/// target is never reached (rule (e)). Rules (b)–(d) govern the fan-out's
+/// delivery (perpetual enrolment, the creation-time door, readability
+/// suppression) and have no stateless counterpart: the claim's own window is
+/// the door's `valid_until` check.
+pub fn claim_tier_entitles(claim: TierFacts<'_>, resource: TierFacts<'_>) -> bool {
+    if claim.name == resource.name {
+        return true;
+    }
+    if resource.hidden || resource.rank > claim.rank {
+        return false;
+    }
+    !(claim.designated && resource.designated)
+}
+
+/// [`claim_tier_entitles`] over `owner`'s live tier rows. A tier that no
+/// longer exists entitles nothing and is entitled by nothing (fail closed).
+pub async fn claim_entitles(
+    db: &crate::db::CacheDb,
+    owner: &[u8; 32],
+    claim_tier: &str,
+    resource_tier: &str,
+) -> anyhow::Result<bool> {
+    let (Some(claim), Some(resource)) = (
+        db.get_subscription_tier(owner, claim_tier).await?,
+        db.get_subscription_tier(owner, resource_tier).await?,
+    ) else {
+        return Ok(false);
+    };
+    Ok(claim_tier_entitles(
+        tier_facts(&claim),
+        tier_facts(&resource),
+    ))
+}
+
+fn tier_facts(t: &crate::db::SubscriptionTierRow) -> TierFacts<'_> {
+    TierFacts {
+        name: &t.name,
+        rank: t.rank,
+        designated: t.unlocks_post.is_some(),
+        hidden: t.hidden,
+    }
+}
+
+#[cfg(test)]
+mod claim_entitlement_tests {
+    use super::*;
+
+    fn tier(name: &str, rank: i64) -> TierFacts<'_> {
+        TierFacts {
+            name,
+            rank,
+            designated: false,
+            hidden: false,
+        }
+    }
+
+    #[test]
+    fn the_same_tier_always_entitles() {
+        let sold = TierFacts {
+            designated: true,
+            ..tier("post-1", 5)
+        };
+        assert!(claim_tier_entitles(sold, sold));
+    }
+
+    #[test]
+    fn an_undesignated_claim_reaches_every_tier_at_or_below_its_rank() {
+        assert!(claim_tier_entitles(tier("gold", 3), tier("silver", 2)));
+        assert!(claim_tier_entitles(tier("gold", 3), tier("peer", 3)));
+        assert!(!claim_tier_entitles(tier("silver", 2), tier("gold", 3)));
+        // A sold post at a rank the subscription covers is included free.
+        let sold = TierFacts {
+            designated: true,
+            ..tier("post-1", 1)
+        };
+        assert!(claim_tier_entitles(tier("gold", 3), sold));
+    }
+
+    #[test]
+    fn rule_a_designated_to_designated_is_the_only_blocked_edge() {
+        let cheap = TierFacts {
+            designated: true,
+            ..tier("post-cheap", 5)
+        };
+        let other = TierFacts {
+            designated: true,
+            ..tier("post-other", 1)
+        };
+        assert!(!claim_tier_entitles(cheap, other));
+    }
+
+    #[test]
+    fn a_designated_claim_reaches_undesignated_tiers_below_it() {
+        // A buyer of a sold post becomes a follower (the rank-0 cascade).
+        let sold = TierFacts {
+            designated: true,
+            ..tier("post-1", 1)
+        };
+        assert!(claim_tier_entitles(sold, tier("followers", 0)));
+        assert!(!claim_tier_entitles(sold, tier("gold", 3)));
+    }
+
+    #[test]
+    fn rule_e_a_hidden_tier_is_never_reached() {
+        let hidden = TierFacts {
+            hidden: true,
+            ..tier("only-me", 0)
+        };
+        assert!(!claim_tier_entitles(tier("gold", 3), hidden));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -652,6 +875,70 @@ mod tests {
     /// this path: if the ceremony's void did not land where `redeem_claim`
     /// looks, a seed thief's pre-ceremony mint would still buy access to the
     /// successor's tiers and every existing pin would stay green.
+    #[tokio::test]
+    async fn a_refund_voids_an_already_redeemed_claim_so_its_code_stops_opening_the_web() {
+        // The claim code is also the visitor's web credential, which honours
+        // only `voided_at` (monetization.md § Pillar 2 → *Visitor entitlement
+        // doors* ruling (1)) — so a refund after binding must stamp it too,
+        // not only void the redeemer's subscriber window.
+        let db = std::sync::Arc::new(CacheDb::open_in_memory().unwrap());
+        let author: [u8; 32] = [0xA1; 32];
+        let buyer: [u8; 32] = [0xB2; 32];
+        db.insert_payment_claim("CODE-BOUND", &author, "gold", "fake", "pay_r", None)
+            .await
+            .unwrap();
+        assert!(db.redeem_payment_claim("CODE-BOUND", &buyer).await.unwrap());
+        let state = std::sync::Arc::new(crate::routes::AppState::for_test(db.clone()));
+        let refund = PaymentEntitlement {
+            provider: "fake".into(),
+            payee: fauna_core::identity::ActorId(author),
+            buyer: Buyer::Unbound,
+            tier: "gold".into(),
+            valid_until_secs: None,
+            external_ref: "pay_r".into(),
+            return_ref: None,
+        };
+        assert!(apply_refund(&state, &refund).await.unwrap());
+        let claim = db.get_payment_claim("CODE-BOUND").await.unwrap().unwrap();
+        assert!(claim.voided_at.is_some(), "a refunded bound code is voided");
+        assert!(claim.redeemed_at.is_some(), "the binding stays on record");
+    }
+
+    #[tokio::test]
+    async fn a_webhook_minted_claim_is_found_by_its_return_ref_on_its_own_site_only() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let author: [u8; 32] = [0xA1; 32];
+        let other: [u8; 32] = [0xC3; 32];
+        db.insert_payment_claim_with_return_ref(
+            "CODE-RET",
+            &author,
+            "gold",
+            "stripe",
+            "evt_1",
+            None,
+            Some("cs_1"),
+        )
+        .await
+        .unwrap();
+        let hit = db
+            .find_payment_claim_by_return_ref(&author, "stripe", "cs_1")
+            .await
+            .unwrap();
+        assert_eq!(hit.map(|c| c.code).as_deref(), Some("CODE-RET"));
+        for (who, provider, r) in [
+            (&other, "stripe", "cs_1"),
+            (&author, "fake", "cs_1"),
+            (&author, "stripe", "cs_2"),
+        ] {
+            assert!(
+                db.find_payment_claim_by_return_ref(who, provider, r)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_claim_minted_before_the_ceremony_no_longer_redeems_after_it() {
         let db = std::sync::Arc::new(CacheDb::open_in_memory().unwrap());
@@ -760,6 +1047,7 @@ mod tests {
             tier: tier.to_string(),
             valid_until_secs: None,
             external_ref: format!("ref-{tier}"),
+            return_ref: None,
         };
 
         // The offered tier enqueues, as it always has.
@@ -801,6 +1089,7 @@ mod tests {
         let unbound = |tier: &str| PaymentEntitlement {
             buyer: Buyer::Unbound,
             external_ref: format!("unbound-{tier}"),
+            return_ref: None,
             ..paid(tier)
         };
         assert!(

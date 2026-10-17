@@ -36,7 +36,7 @@ pytest tests/e2e-unified/tests/ --client macos       # cross-app e2e (see tests/
 - `FaunaKit/` — the shared Swift layer: nearly all views and view-models live here
 - `Fauna-macOS/`, `Fauna-iOS/` — the thin per-platform shells
 - `FaunaFFISwift/` — UniFFI bindings wrapper for the Rust core
-- `Fauna-NSE/` — notification service extension (the legacy `Fauna-FinderSync` is deleted; Finder/Files integration is the File Provider extension — `docs/goal/behavior/file-sync.md` § On-Demand Files → Apple File Provider binding)
+- `Fauna-NSE/` — notification service extension (the legacy `Fauna-FinderSync` is deleted; Finder/Files integration is the File Provider extension — `docs/goal/behavior/on-demand-files-apple.md` § On-Demand Files → Apple File Provider binding)
 - `Fauna-watchOS/` — watch companion (early)
 
 UI element IDs come from `tests/e2e-unified/ui.yaml`

@@ -65,6 +65,12 @@ public sealed partial class DevicesPage : Page
     /// none is known yet (<see cref="LoadThisDeviceRowAsync"/>).</summary>
     private string? _thisDeviceRow;
 
+    /// <summary>The fleet id of the member card armed for removal, or <c>null</c>.
+    /// Keyed by id, never by position: a refresh that inserts a card earlier in
+    /// the list must not retarget the confirm onto a different device
+    /// (devices.md § Members without a matching entry).</summary>
+    private string? _armedMemberId;
+
     public DevicesPage()
     {
         this.InitializeComponent();
@@ -88,6 +94,7 @@ public sealed partial class DevicesPage : Page
     {
         _listening?.Dispose();
         _listening = null;
+        if (_rpc is not null) _rpc.StoreChanged -= OnStoreChanged;
         base.OnNavigatedFrom(e);
     }
 
@@ -127,6 +134,59 @@ public sealed partial class DevicesPage : Page
         await LoadEnrollmentNoticeAsync();
         await LoadKeylessPostureAsync();
         await LoadCustodyAsync();
+
+        // The shared store-change notice (account-runtime.md § A runtime's own
+        // pump is a source of the notice too): this page listens while it is the
+        // OPEN one, and re-reads its store-backed halves on each notice.
+        _rpc.StoreChanged -= OnStoreChanged;
+        _rpc.StoreChanged += OnStoreChanged;
+    }
+
+    // A re-read is in flight / another notice landed during it (coalesced into
+    // one more pass — the notice is a level, not an event).
+    private bool _storeResyncing;
+    private bool _storeResyncAgain;
+
+    /// <summary>The store-change re-read of the open page: the machine's refresh
+    /// (its observer repaints the roster), the this-device row, the standing
+    /// enrollment notice, the keyless-posture marks and the custody facet's FOLD —
+    /// never its ceremony drive. Level-safe: a failed read keeps the painted rows,
+    /// the custody cards repaint only when the fold differs (so a typed budget
+    /// draft survives an answer the cards already paint), and a gesture's error
+    /// (<see cref="DevicesCustodyFacet.Error"/>) is left alone.</summary>
+    private async void OnStoreChanged()
+    {
+        if (_rpc is null || _machine is null) return;
+        if (_storeResyncing)
+        {
+            _storeResyncAgain = true;
+            return;
+        }
+        _storeResyncing = true;
+        try
+        {
+            do
+            {
+                _storeResyncAgain = false;
+                try
+                {
+                    await _machine.Refresh();
+                }
+                catch (Exception ex)
+                {
+                    ShellLog.Warn("DevicesPage", $"[store-change] refresh failed: {ex.GetType().Name}: {ex.Message}");
+                }
+                await LoadThisDeviceRowAsync();
+                await LoadEnrollmentNoticeAsync();
+                await LoadKeylessPostureAsync();
+                if (await _custody.ReloadAsync(_rpc)) RenderCustody();
+            }
+            while (_storeResyncAgain);
+        }
+        finally
+        {
+            _storeResyncing = false;
+        }
     }
 
     /// <summary>Re-read piece 1's keyless-posture marks for the roster's
@@ -159,7 +219,7 @@ public sealed partial class DevicesPage : Page
         if (_rpc is null) return;
         try
         {
-            _thisDeviceRow = await _rpc.ThisDeviceRowAsync(_account?.DeviceId);
+            _thisDeviceRow = await _rpc.ThisDeviceRowAsync(_account?.ResolveDeviceId());
         }
         catch (Exception ex)
         {
@@ -422,7 +482,8 @@ public sealed partial class DevicesPage : Page
         if (_machine is not null)
         {
             var snap = _machine.Snapshot();
-            RenderDevices(snap.devices, snap.ownP2pParticipation);
+            RenderDevices(snap.devices, snap.ownP2pParticipation, snap.ownFingerprint);
+            RenderMembers(snap.members);
             machineError = snap.error is { } err ? S.Resolve(err) : null;
         }
         else if (_custody.Error is null)
@@ -475,8 +536,20 @@ public sealed partial class DevicesPage : Page
     /// type.</summary>
     private record DeviceRow(
         string Name, string Status, int Index, bool GuardianMarked, bool ThisMarked,
-        IReadOnlyList<string> FolderRoleBadges, DeviceParticipationPaint Participation, bool Keyless)
+        IReadOnlyList<string> FolderRoleBadges, DeviceParticipationPaint Participation, bool Keyless,
+        string? OwnFingerprint)
     {
+        /// <summary>The card's UIA Name: the label, or a fallback when it renders
+        /// empty (a sealless register, or a seal this reader cannot open —
+        /// `render_devices` keeps such a row). WinUI prunes a Name-less panel from
+        /// the UIA content view, which drops the card from FlaUI's count and from
+        /// a screen reader. The visible <c>device-name</c> text stays the raw label.</summary>
+        public string AccessibleName
+            => string.IsNullOrEmpty(Name) ? S.Get("devices/unnamed_device") : Name;
+        public string OwnFingerprintText
+            => OwnFingerprint is null ? "" : S.Format("devices/own_fingerprint", OwnFingerprint);
+        public Visibility OwnFingerprintVisibility
+            => ThisMarked && OwnFingerprint is not null ? Visibility.Visible : Visibility.Collapsed;
         public Visibility GuardianBadgeVisibility
             => GuardianMarked ? Visibility.Visible : Visibility.Collapsed;
         public Visibility ThisMarkVisibility
@@ -488,7 +561,8 @@ public sealed partial class DevicesPage : Page
         public bool ParticipationActionable => Participation.Actionable;
     }
 
-    private void RenderDevices(IReadOnlyList<DeviceSummary> devices, bool? ownParticipation)
+    private void RenderDevices(
+        IReadOnlyList<DeviceSummary> devices, bool? ownParticipation, string? ownFingerprint)
     {
         var thisRow = _thisDeviceRow;
         var rows = devices
@@ -515,11 +589,68 @@ public sealed partial class DevicesPage : Page
                             fs.originates, fs.accepts, fs.appliesDeletes)))
                         .ToList(),
                     DeviceParticipationPaint.For(d, own, ownParticipation),
-                    _custody.IsKeyless(d.@principal));
+                    _custody.IsKeyless(d.@principal),
+                    ownFingerprint);
             })
             .ToList();
         DevicesList.ItemsSource = rows;
         NoDevicesText.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>One <c>device-member-card</c>. The fingerprint is the machine's own
+    /// render (never a local formatter); <c>{when}</c> goes through the shared
+    /// <c>FormatUnixLocalMs</c> door. <see cref="Armed"/> swaps the remove button
+    /// for the confirm/cancel pair on this card only.</summary>
+    private sealed record MemberRow(string DeviceId, string FingerprintText, string EnrolledAtText, bool Armed)
+    {
+        public Visibility RemoveVisibility => Armed ? Visibility.Collapsed : Visibility.Visible;
+        public Visibility ConfirmVisibility => Armed ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void RenderMembers(IReadOnlyList<FleetMemberSummary> members)
+    {
+        // A card that left the list (removed, or the roster caught up) takes its
+        // arm with it, so a later reappearance never arrives pre-armed.
+        if (_armedMemberId is not null && !members.Any(m => m.@deviceId == _armedMemberId))
+            _armedMemberId = null;
+        var rows = members
+            .Select(m => new MemberRow(
+                m.@deviceId,
+                S.Format("devices/member_fingerprint", m.@fingerprint),
+                S.Format("devices/member_enrolled_at",
+                    uniffi.fauna_ffi.FaunaFfiMethods.FormatUnixLocalMs(m.@enrolledAtMs)),
+                m.@deviceId == _armedMemberId))
+            .ToList();
+        MembersList.ItemsSource = rows;
+        MembersSection.Visibility = rows.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private void MemberRemove_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: MemberRow row }) return;
+        _armedMemberId = row.DeviceId;
+        RenderPage();
+    }
+
+    private void MemberRemoveCancel_Click(object sender, RoutedEventArgs e)
+    {
+        _armedMemberId = null;
+        RenderPage();
+    }
+
+    private async void MemberRemoveConfirm_Click(object sender, RoutedEventArgs e)
+    {
+        if (_machine is null || sender is not Button { Tag: MemberRow row })
+        {
+            ShellLog.Warn("DevicesPage", $"[member-remove] click dropped: machine={_machine is not null}");
+            return;
+        }
+        // Disarm on dispatch; the machine refreshes (observer tick) and drops the
+        // card, or paints a refusal on error-message and leaves it to retry.
+        _armedMemberId = null;
+        RenderPage();
+        await _machine.RemoveMemberById(row.DeviceId);
+        RenderPage();
     }
 
     private async void RemoveDevice_Click(object sender, RoutedEventArgs e)

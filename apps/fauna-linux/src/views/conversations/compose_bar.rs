@@ -46,6 +46,12 @@ pub struct ComposeBar {
     topic_btn: gtk::ToggleButton,
     attach_btn: gtk::Button,
     send_btn: gtk::Button,
+    /// The list-send notes (`mail-mass-mailing.md` § Composing a list
+    /// message): shown only while the compose's one mail recipient is one of
+    /// the account's own lists. Shared Rust derives every text; this paints.
+    list_send_warning: gtk::Label,
+    list_quota_warning: gtk::Label,
+    list_send_progress: gtk::Label,
     refreshing: Rc<RefCell<bool>>,
     on_body_change: StringCb,
     on_subject_change: StringCb,
@@ -195,6 +201,24 @@ impl ComposeBar {
         crate::testid::set_test_id(&send_btn, ids::DM_SEND_BUTTON);
         bottom.append(&send_btn);
 
+        // List-send notes, above the action row: each label is present only
+        // while its `ListSendView` field is `Some` (ui.yaml `dm-compose-form`
+        // `optional_elements`).
+        let list_note = |id: &str| {
+            let l = gtk::Label::builder()
+                .visible(false)
+                .wrap(true)
+                .xalign(0.0)
+                .css_classes(["dim-label"])
+                .build();
+            crate::testid::set_test_id(&l, id);
+            root.append(&l);
+            l
+        };
+        let list_send_warning = list_note(ids::DM_COMPOSE_LIST_SEND_WARNING);
+        let list_quota_warning = list_note(ids::DM_COMPOSE_LIST_QUOTA_WARNING);
+        let list_send_progress = list_note(ids::DM_COMPOSE_LIST_SEND_PROGRESS);
+
         root.append(&bottom);
 
         let refreshing = Rc::new(RefCell::new(false));
@@ -331,6 +355,9 @@ impl ComposeBar {
             topic_btn,
             attach_btn,
             send_btn,
+            list_send_warning,
+            list_quota_warning,
+            list_send_progress,
             refreshing,
             on_body_change,
             on_subject_change,
@@ -359,6 +386,12 @@ impl ComposeBar {
         // What the reply banner says — the shared `ConversationsManager::reply_preview`
         // (the answered message's sender + plain-text excerpt), never derived here.
         reply_preview: Option<&fauna_conversations::ReplyPreview>,
+        // The new-thread composer's answer to "does this send found a
+        // community room" (the home-nest toggle is on and the prospective class
+        // is community): that send is the `room.create` ceremony, never a
+        // queued channel append, so it needs a nest and the gate must say so.
+        // Always `false` for the reply bar.
+        founds_room: bool,
     ) {
         *self.refreshing.borrow_mut() = true;
 
@@ -461,11 +494,27 @@ impl ComposeBar {
         // declaration" gap as `add_participant_btn` in `thread_header.rs`, not
         // fixed here (needs an `offline_gate.rs` change, out of this sweep's
         // scope).
-        if let Some(rail) = rail
+        if founds_room {
+            crate::offline_gate::declare_wire_kind(
+                &self.send_btn,
+                "fauna.conversations.room.create",
+            );
+        } else if let Some(rail) = rail
             && let Some(kind) = rail.send_wire_kind()
         {
             crate::offline_gate::declare_wire_kind(&self.send_btn, kind);
         }
+
+        let list_send = compose.list_send.as_ref();
+        paint_list_note(&self.list_send_warning, list_send.map(|v| &v.send_warning));
+        paint_list_note(
+            &self.list_quota_warning,
+            list_send.and_then(|v| v.quota_warning.as_ref()),
+        );
+        paint_list_note(
+            &self.list_send_progress,
+            list_send.and_then(|v| v.progress.as_ref()),
+        );
 
         *self.refreshing.borrow_mut() = false;
     }
@@ -508,6 +557,17 @@ impl ComposeBar {
 /// A removable chip on the reply "To" line: pill with the address label
 /// (`dm-reply-recipient-chip`) + a × button (`dm-reply-recipient-remove`).
 /// Test ids sit on the inner Label/Button per the windows AT-SPI lesson.
+/// Show `text` resolved through the app's i18n, or hide the label when `None`.
+fn paint_list_note(label: &gtk::Label, text: Option<&fauna_core::localized::LocalizedText>) {
+    match text {
+        Some(t) => {
+            label.set_text(&t.resolve(crate::i18n::strings::lookup));
+            label.set_visible(true);
+        }
+        None => label.set_visible(false),
+    }
+}
+
 fn build_reply_recipient_chip(addr: &TypedAddress, on_remove: RemoveRecipientCb) -> gtk::Box {
     let chip = gtk::Box::new(gtk::Orientation::Horizontal, 2);
     chip.add_css_class("pill");

@@ -264,14 +264,21 @@ def bridge_set_settings(port: int, actor: dict, bridge_id: str, settings: dict) 
 
 
 def bridge_add_follow(
-    port: int, actor: dict, bridge_id: str, id: str, petname: Optional[str] = None
+    port: int,
+    actor: dict,
+    bridge_id: str,
+    id: str,
+    petname: Optional[str] = None,
+    extra: Optional[dict] = None,
 ) -> dict:
     """``fauna.bridges.add_follow`` — follow a remote account through a bridge.
 
     ``id`` is the provider's own account identifier (ActivityPub: the remote
-    actor URI). The follow is the local user's opt-in act: for ActivityPub it
-    both delivers a signed ``Follow`` to the remote inbox and opens the inbound
-    relationship gate for that actor's notes.
+    actor URI; Nostr: an ``npub1…`` or 64 hex). The follow is the local user's
+    opt-in act: for ActivityPub it both delivers a signed ``Follow`` to the
+    remote inbox and opens the inbound relationship gate for that actor's
+    notes. ``extra`` is the provider's own follow detail (Nostr:
+    ``{"relay_hints": [<relay URL>, …]}``, the relays the follow is read from).
     """
     # `petname`/`extra` are sent explicitly (as nulls when unset) rather than
     # omitted — the request type carries them as plain `Option` fields, so an
@@ -280,10 +287,23 @@ def bridge_add_follow(
         "bridge_id": bridge_id,
         "id": id,
         "petname": petname,
-        "extra": None,
+        "extra": extra,
     }
     client = _client_for(_base_url(port), actor)
     return client.call("fauna.bridges.add_follow", payload)
+
+
+def bridge_remove_follow(port: int, actor: dict, bridge_id: str, follow_id: str) -> dict:
+    """``fauna.bridges.remove_follow`` — stop following a remote account.
+
+    ``follow_id`` is the id ``bridge_list_follows`` lists (ActivityPub: the
+    remote actor URI). For ActivityPub the provider also delivers a signed
+    ``Undo{Follow}`` to the remote inbox.
+    """
+    client = _client_for(_base_url(port), actor)
+    return client.call(
+        "fauna.bridges.remove_follow", {"bridge_id": bridge_id, "follow_id": follow_id}
+    )
 
 
 def bridge_list_follows(port: int, actor: dict, bridge_id: str) -> list[dict]:
@@ -764,6 +784,29 @@ def personalization_model_fetch(port: int, actor: dict, factor: str) -> dict:
     restart never races the client's seal-and-put."""
     client = _client_for(_base_url(port), actor)
     return client.call("fauna.personalization.model.fetch", {"factor": factor})
+
+
+def personalization_model_put(
+    port: int, actor: dict, factor: str, sealed_blob: bytes, sample_count: int
+) -> None:
+    """``fauna.personalization.model.put`` — overwrite the caller's model row
+    for ``factor`` with ``sealed_blob``, stored verbatim (the nest cannot open
+    it). Tests use it to stage an environment fault the app must survive — a
+    blob that will not open — or to put back a row they snapshotted; a user's
+    own training always goes through the app (e2e convention 8)."""
+    client = _client_for(_base_url(port), actor)
+    client.call(
+        "fauna.personalization.model.put",
+        {"factor": factor, "sealed_blob": sealed_blob, "sample_count": sample_count},
+    )
+
+
+def personalization_model_delete(port: int, actor: dict, factor: str) -> None:
+    """``fauna.personalization.model.delete`` — drop the caller's model row for
+    ``factor`` (absent afterwards, which every client reads as a fresh model).
+    Cleanup for a row a test staged with :func:`personalization_model_put`."""
+    client = _client_for(_base_url(port), actor)
+    client.call("fauna.personalization.model.delete", {"factor": factor})
 
 
 def feed_factors_get(port: int, actor: dict) -> list[dict]:

@@ -10,7 +10,7 @@ import FileProviderUI
 /// windows shell-submenu leaf set, `FileProviderAction`), and each action is a
 /// pure trampoline: build the `fauna://` deep link and open the app — no UI of
 /// its own beyond the system sheet the OS shows while `prepare` runs
-/// (`file-sync.md` § On-Demand Files → Apple File Provider binding, *context
+/// (`on-demand-files-apple.md` § On-Demand Files → Apple File Provider binding, *context
 /// actions*). Links only the FFI-free `FaunaDeepLink` module by design: a
 /// FaunaKit dependency would ship the Rust xcframework inside a menu action.
 final class ActionViewController: FPUIActionExtensionViewController {

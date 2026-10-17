@@ -100,6 +100,14 @@ impl LabelerCatalogMachine {
         serde_json::to_string(&self.0.snapshot()).unwrap_or_default()
     }
 
+    /// Whether the catalog row at `index` paints its subscribe button enabled
+    /// — the shared `LabelerCatalogMachine::subscribe_enabled`, never a
+    /// `verified` check mirrored in the SPA.
+    #[wasm_bindgen(js_name = subscribeEnabled)]
+    pub fn subscribe_enabled(&self, index: u32) -> bool {
+        self.0.subscribe_enabled(index)
+    }
+
     /// Re-read the full catalog (`fauna.labelers.list`). Resolves when done
     /// (read `snapshotJson` for the result / `error`).
     #[wasm_bindgen(js_name = refresh)]

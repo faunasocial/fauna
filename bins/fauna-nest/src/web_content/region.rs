@@ -373,6 +373,8 @@ mod tests {
                 tier: "gold".into(),
                 price_hint: None,
                 payment_url: None,
+                path: "post/the-slug.html".into(),
+                redeem_url: None,
             }),
         }
     }

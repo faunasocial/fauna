@@ -199,7 +199,7 @@ impl NestHarness {
                 },
             )
             .await;
-        let _: FolderCreateReply = h
+        let created: FolderCreateReply = h
             .dispatch(
                 "fauna.folders.create",
                 &FolderCreateRequest {
@@ -209,6 +209,11 @@ impl NestHarness {
                 },
             )
             .await;
+        // The version verbs name this row, so the binding's ref must be it.
+        assert_eq!(
+            fauna_core::folder_keys::FolderRef::Local(created.id),
+            FOLDER_REF
+        );
 
         h
     }
@@ -280,9 +285,16 @@ async fn list_file_versions_against_a_real_nest_returns_recorded_versions() {
     let seq2 = h.record([0xa2; 32], 200, "modify", None).await;
 
     let sync = h.sync();
-    let info = list_file_versions(&sync, ABS_PATH, FOLDER, REL, &ReaderSeat::default())
-        .await
-        .expect("list versions against a real nest");
+    let info = list_file_versions(
+        &sync,
+        ABS_PATH,
+        FOLDER,
+        FOLDER_REF,
+        REL,
+        &ReaderSeat::default(),
+    )
+    .await
+    .expect("list versions against a real nest");
 
     assert_eq!(info.path, ABS_PATH, "the display path is echoed verbatim");
     assert_eq!(info.folder, FOLDER);
@@ -318,11 +330,18 @@ async fn restore_end_to_end_against_a_real_nest() {
 
     let sync = h.sync();
     assert_eq!(
-        list_file_versions(&sync, ABS_PATH, FOLDER, REL, &ReaderSeat::default())
-            .await
-            .unwrap()
-            .versions
-            .len(),
+        list_file_versions(
+            &sync,
+            ABS_PATH,
+            FOLDER,
+            FOLDER_REF,
+            REL,
+            &ReaderSeat::default()
+        )
+        .await
+        .unwrap()
+        .versions
+        .len(),
         2,
         "the file has ≥2 versions before restore — the precondition TRACK T made reachable"
     );
@@ -334,6 +353,7 @@ async fn restore_end_to_end_against_a_real_nest() {
     let restored = restore_file_version(
         &sync,
         FOLDER,
+        FOLDER_REF,
         &h.device_id,
         REL,
         seq1,
@@ -357,9 +377,16 @@ async fn restore_end_to_end_against_a_real_nest() {
     );
 
     // ── Assert: the restore is a NEW head AND a new listable version. ──
-    let after = list_file_versions(&sync, ABS_PATH, FOLDER, REL, &ReaderSeat::default())
-        .await
-        .unwrap();
+    let after = list_file_versions(
+        &sync,
+        ABS_PATH,
+        FOLDER,
+        FOLDER_REF,
+        REL,
+        &ReaderSeat::default(),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         after.versions.len(),
         3,
@@ -389,7 +416,7 @@ async fn restore_end_to_end_against_a_real_nest() {
     // Catch-up skips a device's own changes, so recording alone would leave THIS
     // machine showing the pre-restore content (§ Restore).
     let tmp = tempfile::tempdir().expect("tempdir");
-    let paths = SyncPaths::new(Some(tmp.path().to_path_buf()));
+    let paths = SyncPaths::at(tmp.path().to_path_buf());
     let (shutdown_tx, _srx) = tokio::sync::watch::channel(false);
     let (event_tx, _erx) = tokio::sync::broadcast::channel(64);
     let state = SyncServiceState::new(SyncConfig::default(), shutdown_tx, event_tx, paths.clone());

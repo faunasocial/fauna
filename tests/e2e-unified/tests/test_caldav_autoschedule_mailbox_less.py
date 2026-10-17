@@ -141,7 +141,7 @@ def test_mailbox_less_attendee_gets_sealed_scheduling_through_real_mda(
     app.mail_settings.navigate()
     assert app.mail_settings.is_page_visible(), "mail-settings page must be reachable"
     app.mail_settings.enable_mail_plain(_PASSWORD)
-    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=15.0), (
+    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=app.mail_settings.ENABLE_SETTLE_S), (
         f"enabling mail must mint the default credential; "
         f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
     )
@@ -303,8 +303,18 @@ def _wait_event_summary(events_actions, summary: str, *, timeout: float) -> list
 # path — which is what makes this a witness for the column and not a
 # harness-shaped stand-in. Her seat is a twin PAGE (own BrowserContext), the
 # `alice_second_web_device` idiom.
+#
+# android-marked 2026-10-14, TEST level, on all three
+# journeys that start from carol's seat (this one and the two
+# inbound-authorization journeys below). android's venue has one emulator, so
+# carol takes the session android app and the organizer a tui desktop seat
+# (`caldav_mailbox_less_attendee_app`'s docstring): the witness still renders on
+# android, the column credited. Its mint arm is `TestAgent.kt`'s
+# `enable_caldav_mailbox`, over the shared `MailSettingsMachine`.
+@pytest.mark.android
 def test_mailbox_less_attendee_materializes_invite_on_events_page(
-    app, dedicated_caldav_only_nest, caldav_mailbox_less_attendee_app, request
+    app, dedicated_caldav_only_nest, caldav_mailbox_less_attendee_app,
+    caldav_mailbox_less_organizer_app, request,
 ):
     """Slice C — the GUI **materialize** proof, end-to-end on a **CalDAV-only nest**.
     A mailbox-less Fauna attendee RECEIVES a server-side auto-schedule invite over
@@ -333,8 +343,8 @@ def test_mailbox_less_attendee_materializes_invite_on_events_page(
     `emailDisabledNestLocalToSealedRail`.)
     """
     _invite_carol_onto_her_events_page(
-        app, dedicated_caldav_only_nest, caldav_mailbox_less_attendee_app, request,
-        nonce_prefix="mblgui",
+        caldav_mailbox_less_organizer_app, dedicated_caldav_only_nest,
+        caldav_mailbox_less_attendee_app, request, nonce_prefix="mblgui",
     )
 
 
@@ -352,7 +362,7 @@ class _Invite(NamedTuple):
     dtend: str
 
 
-def _ready_carol_for_invites(app, handle, carol_seat, request) -> str:
+def _ready_carol_for_invites(organizer_app, handle, carol_seat, request) -> str:
     """Steps 1–4 of the Slice C journey — everything before an invite is sent:
     the claimed admin of the CalDAV-only nest enables CalDAV (returning the
     admin's organizer address), carol's engine has published key packages, her
@@ -365,8 +375,10 @@ def _ready_carol_for_invites(app, handle, carol_seat, request) -> str:
     #       a KNOWN password (no mail — the deployment is email-disabled): mints the
     #       shared MSEK + the `default` credential the raw CalDAV client AUTHs with
     #       + the canonical admin alias. ──
-    login_as_nest_admin(app, nest, dedicated_node_url(app, handle, request))
-    _mint_caldav_mailbox(app.driver, password=_PASSWORD)
+    login_as_nest_admin(
+        organizer_app, nest, dedicated_node_url(organizer_app, handle, request)
+    )
+    _mint_caldav_mailbox(organizer_app.driver, password=_PASSWORD)
     organizer_addr = alias_admin_to_address(nest, domain)  # admin@fauna.test
 
     # ── 2. carol's real engine published her key packages at login (private half
@@ -403,7 +415,7 @@ def _ready_carol_for_invites(app, handle, carol_seat, request) -> str:
 
 
 def _invite_carol_onto_her_events_page(
-    app, handle, carol_seat, request, *, nonce_prefix: str
+    organizer_app, handle, carol_seat, request, *, nonce_prefix: str
 ) -> _Invite:
     """Steps 1–6 of the Slice C journey, shared by every test that starts from
     an invite already on carol's Events page: the claimed admin of the
@@ -414,7 +426,7 @@ def _invite_carol_onto_her_events_page(
     domain = handle.domain  # fauna.test
     carol_app, carol = carol_seat
     attendee_addr = f"carol@{domain}"
-    organizer_addr = _ready_carol_for_invites(app, handle, carol_seat, request)
+    organizer_addr = _ready_carol_for_invites(organizer_app, handle, carol_seat, request)
 
     # ── 5. The stock CalDAV organizer connects over the MDA's self-signed HTTPS
     #       listener, lazy-provisions Personal, and PUTs an event inviting carol →
@@ -538,11 +550,17 @@ def _refusal_logged(driver, reason: str) -> bool:
 # same journey through the native sink, whose refusal line lands in the app's
 # own log (`app_stderr_text`).
 @pytest.mark.feature("calendar-and-events")
-@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.macos
+@pytest.mark.ios
 @pytest.mark.tui
+@pytest.mark.windows
+@pytest.mark.web
+@pytest.mark.android
 @pytest.mark.real_conversations
 def test_a_co_attendees_forged_cancel_leaves_the_invite_on_the_events_page(
-    app, dedicated_caldav_only_nest, caldav_mailbox_less_attendee_app, request
+    app, dedicated_caldav_only_nest, caldav_mailbox_less_attendee_app,
+    caldav_mailbox_less_organizer_app, request,
 ):
     """Only an event's organizer can cancel it on your calendar
     (caldav-server.md § Who may mutate an existing event over the inbound rail).
@@ -565,7 +583,8 @@ def test_a_co_attendees_forged_cancel_leaves_the_invite_on_the_events_page(
     attendee_addr = f"carol@{domain}"
 
     invite = _invite_carol_onto_her_events_page(
-        app, handle, caldav_mailbox_less_attendee_app, request, nonce_prefix="mblforge",
+        caldav_mailbox_less_organizer_app, handle, caldav_mailbox_less_attendee_app, request,
+        nonce_prefix="mblforge",
     )
 
     # ── 7. mallory: another account on carol's nest, and one carol has accepted
@@ -641,11 +660,17 @@ def test_a_co_attendees_forged_cancel_leaves_the_invite_on_the_events_page(
 # tui-marked beside web: the same journey through the native resolver
 # (`fauna-client-conversations`), from a real app seat.
 @pytest.mark.feature("calendar-and-events")
-@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.macos
+@pytest.mark.ios
 @pytest.mark.tui
+@pytest.mark.windows
+@pytest.mark.web
+@pytest.mark.android
 @pytest.mark.real_conversations
 def test_a_succeeded_organizers_cancel_removes_the_invite_from_the_events_page(
-    app, dedicated_caldav_only_nest, caldav_mailbox_less_attendee_app, request
+    app, dedicated_caldav_only_nest, caldav_mailbox_less_attendee_app,
+    caldav_mailbox_less_organizer_app, request,
 ):
     """An organizer who has taken their account back can still cancel
     (caldav-server.md § Who may mutate an existing event over the inbound rail
@@ -668,7 +693,9 @@ def test_a_succeeded_organizers_cancel_removes_the_invite_from_the_events_page(
     carol_app, carol = caldav_mailbox_less_attendee_app
     attendee_addr = f"carol@{domain}"
 
-    _ready_carol_for_invites(app, handle, caldav_mailbox_less_attendee_app, request)
+    _ready_carol_for_invites(
+        caldav_mailbox_less_organizer_app, handle, caldav_mailbox_less_attendee_app, request
+    )
 
     # ── 5. dana: a Fauna account carol has accepted as a contact (a Welcome from
     #       a non-contact is held to carol's inbox mode, like mallory's in the
@@ -769,29 +796,37 @@ def test_a_succeeded_organizers_cancel_removes_the_invite_from_the_events_page(
 #
 # A test of its own rather than three more asserts on the sibling, because the
 # two have different app sets: the refusal happens on every app (shared Rust),
-# while the LIST is rendered by tui today and trickles down to the other six
-# trickles down to the other six. Folding these asserts into the web-marked sibling
-# would either red web for a feature it is not owed yet or hide them behind an
-# in-test conditional — an invisible skip, which e2e convention 7 exists to
-# forbid. So the column set is declared in the markers, where the ratchet can
-# see it, and grows as each app lands its render.
+# while the LIST was rendered by tui first and trickles down to the other six. Folding these asserts into the sibling would either
+# red an app for a feature it is not owed yet or hide them behind an in-test
+# conditional — an invisible skip, which e2e convention 7 exists to forbid. So
+# the column set is declared in the markers, where the ratchet can see it, and
+# grows as each app lands its render.
 @pytest.mark.feature("calendar-and-events")
 @pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.web
 @pytest.mark.real_conversations
 def test_a_refused_cancel_is_listed_on_the_events_page(
-    app, dedicated_caldav_only_nest, caldav_mailbox_less_attendee_app, request
+    app, dedicated_caldav_only_nest, caldav_mailbox_less_attendee_app,
+    caldav_mailbox_less_organizer_app, request,
 ):
     """The refused change is REPORTED to carol, not just refused.
 
     Same forgery as the sibling: mallory, a co-attendee holding the UID and the
     organizer's address, sends a CANCEL byte-identical to the organizer's over
-    the real sealed rail. Her client refuses it — and her Events page lists what
-    was tried, to which event, by whom, and why. She dismisses it; it stays
-    dismissed across a re-entry, because the dismissal is recorded in her sealed
-    config rather than in the view.
+    the real sealed rail. Her client refuses it — and her Events page, which
+    STAYS OPEN the whole time, lists what was tried, to which event, by whom,
+    and why: the refusal is her runtime's own background write to the account
+    store, a source of the store-change notice (`account-runtime.md`
+    § Multi-instance concurrency → *A runtime's own pump is a source of the
+    notice too*, part 2), so the open page repaints with no re-entry. She
+    dismisses it; it stays dismissed across a re-entry, because the dismissal
+    is recorded in her sealed config rather than in the view.
 
     RED before this slice: the refusal was logged and dropped, so the user never
-    learned that someone had tried to cancel their meeting.
+    learned that someone had tried to cancel their meeting. RED again before
+    2026-10-11 once the waiter stopped re-entering the page: every app painted
+    the row only on the next page entry.
     """
     handle = dedicated_caldav_only_nest
     nest = handle.nest
@@ -800,7 +835,8 @@ def test_a_refused_cancel_is_listed_on_the_events_page(
     attendee_addr = f"carol@{domain}"
 
     invite = _invite_carol_onto_her_events_page(
-        app, handle, caldav_mailbox_less_attendee_app, request, nonce_prefix="mblsurf",
+        caldav_mailbox_less_organizer_app, handle, caldav_mailbox_less_attendee_app, request,
+        nonce_prefix="mblsurf",
     )
     assert carol_app.events.refused_change_count() == 0, (
         "nothing has been refused yet, so the list must be absent entirely — the "
@@ -864,5 +900,5 @@ def test_a_refused_cancel_is_listed_on_the_events_page(
 def _dismissed(carol_app) -> bool:
     """Re-enter the Events page and answer whether the list is empty — the page
     loads the rows with its calendar hydration, so re-entry is the refresh."""
-    carol_app.events.navigate()
+    carol_app.events.reenter()
     return carol_app.events.refused_change_count() == 0

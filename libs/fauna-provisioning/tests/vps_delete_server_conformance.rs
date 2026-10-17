@@ -366,6 +366,37 @@ async fn ovh_delete_server_404_is_idempotent_ok() {
 }
 
 #[tokio::test]
+async fn ovh_delete_of_an_account_wide_row_reaches_its_own_project() {
+    // A row listed with no project chosen carries `<project>/<instance>`
+    // (the retire view's account-wide list); its delete goes to that project.
+    let mock = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/1.0/auth/time"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("1700000000"))
+        .mount(&mock)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/1.0/cloud/project/proj-2/instance/inst-b"))
+        .and(header_exists("X-Ovh-Signature"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&mock)
+        .await;
+
+    let ovh = Ovh::with_base_url(
+        "app-key".into(),
+        "app-secret".into(),
+        "consumer-key".into(),
+        mock.uri(),
+    );
+    let client = reqwest::Client::new();
+    let result = ovh
+        .delete_server(&client, &instance("proj-2/inst-b", "198.51.100.8"))
+        .await;
+    assert!(result.is_ok(), "expected delete_server OK, got {result:?}");
+}
+
+#[tokio::test]
 async fn ovh_delete_server_401_maps_to_provider_error() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))

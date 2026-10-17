@@ -1171,7 +1171,7 @@ class TestFullJourneyInstalledApp:
             f"error={app.error_text()!r}"
         )
 
-        # A new file in a synced folder is adopted and uploaded — file-sync.md
+        # A new file in a synced folder is adopted and uploaded — on-demand-files.md
         # § On-Demand Files: "New files are adopted." No setting suppresses it.
         (watched / "hello.txt").write_text(f"journey bytes {secrets.token_hex(8)}")
 

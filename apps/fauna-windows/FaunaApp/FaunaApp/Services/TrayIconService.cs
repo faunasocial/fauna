@@ -377,19 +377,18 @@ public static class TrayIconService
     /// </summary>
     internal static void QuitApplication()
     {
-        // Both draft rails are nest-backed (draft-persistence v2): the live
-        // manager holds the latest compose body (live-forwarded on every edit),
+        // Every draft rail is nest-backed (draft-persistence v2): the live
+        // managers hold the latest compose input (live-forwarded on every edit),
         // so flush before exit so a quit-within-the-debounce-window doesn't lose
         // it (apps/windows.md § App Lifecycle, principle 2 — "no close path
-        // leaves unsaved state"). Bounded so a dead connection can't hang the
-        // quit; SaveNowAsync is ConfigureAwait(false) throughout, so .Wait can't
-        // deadlock the UI thread. Best-effort.
-        try { FaunaApp.App.ConvDrafts?.SaveNowAsync().Wait(1500); } catch { }
-        try { FaunaApp.App.FeedDrafts?.FlushIfPendingAsync().Wait(1500); } catch { }
-        try { FaunaApp.App.EventDrafts?.FlushIfPendingAsync().Wait(1500); } catch { }
+        // leaves unsaved state"; the shared leave-flush body, App.FlushDraftRailsAsync).
+        // Bounded so a dead connection can't hang the quit; every rail's save is
+        // ConfigureAwait(false) throughout, so .Wait can't deadlock the UI thread.
+        // Best-effort.
+        try { FaunaApp.App.FlushDraftRailsAsync().Wait(1500); } catch { }
         // Force a put of any unsaved engagement-cue rollup (engagement-cues.md
         // § At rest; task-6 of the personalization-port plan) — same best-effort,
-        // swallow-on-failure shape as the two flushes above: a failed flush just
+        // swallow-on-failure shape as the draft flush above: a failed flush just
         // leaves the rollup dirty for the next session's debounced put, and
         // there's no UI left at quit time to surface an error to.
         // FeedManagerHost is the layer-below-both seam (see its own doc

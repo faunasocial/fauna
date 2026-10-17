@@ -34,7 +34,7 @@ from helpers.mail_aliases import add_exact_alias
 
 # tui leads (the lead app); the other six apps join by adding their marker once
 # their run is green.
-pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.macos, pytest.mark.ios]
+pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.linux, pytest.mark.macos, pytest.mark.ios, pytest.mark.web, pytest.mark.windows]
 
 _UI_S = 20.0
 
@@ -440,13 +440,18 @@ def test_your_own_spam_threshold_sorts_your_mail(
 # ── outcome 11 ─────────────────────────────────────────────────────────────
 
 # The apps whose second seat of one identity the harness can launch
-# (`conftest.py::_alice_extra_seat`) — and so the apps this journey can run on.
-_SECOND_SEAT_APPS = frozenset({"tui", "linux", "macos", "windows"})
+# (`conftest.py::_alice_extra_seat`, and web's twin page
+# `conftest.py::_alice_web_twin_seat`) — and so the apps this journey can run on.
+_SECOND_SEAT_APPS = frozenset({"tui", "linux", "macos", "windows", "web"})
 # The apps whose open spam page re-reads on `StaleSurfaces::mail_spam`.
-_PUSH_REREAD_APPS = frozenset({"tui"})
+_PUSH_REREAD_APPS = frozenset({"tui", "linux", "web", "android", "windows"})
 
 
 @pytest.mark.feature("spam")
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.windows
+@pytest.mark.real_conversations
 def test_an_undo_or_reset_on_one_device_updates_the_history_open_on_another(
     dedicated_actor_app, nest_instance, request, seal_helper_binary
 ):
@@ -459,7 +464,7 @@ def test_an_undo_or_reset_on_one_device_updates_the_history_open_on_another(
     it reads after that arrives by the push. A dedicated actor, because the
     reset leaves its filter empty."""
     from actions.mail_spam import MailSpamActions
-    from conftest import _alice_extra_seat, _seed_spam_training_history
+    from conftest import _alice_extra_seat, _alice_web_twin_seat, _seed_spam_training_history
 
     app, actor = dedicated_actor_app
     name = app_name(app.driver)
@@ -467,7 +472,7 @@ def test_an_undo_or_reset_on_one_device_updates_the_history_open_on_another(
         skip_unbuilt(
             app.driver,
             surface="a second seat of one identity in the e2e harness",
-            detail="conftest.py::_alice_extra_seat launches tui, linux, macos and windows seats only",
+            detail="conftest.py::_alice_extra_seat launches tui, linux, macos and windows seats, and web opens a twin page; android has no second-seat harness",
             tracked="",
         )
     if name not in _PUSH_REREAD_APPS:
@@ -501,9 +506,14 @@ def test_an_undo_or_reset_on_one_device_updates_the_history_open_on_another(
         f"(error: {spam_a.error_text()!r})"
     )
 
-    seat = _alice_extra_seat(
-        name, request, actor, nest_instance, screenshot_tag="spam-second-device",
-    )
+    if name == "web":
+        seat = _alice_web_twin_seat(
+            app.driver, request, actor, screenshot_tag="spam-second-device",
+        )
+    else:
+        seat = _alice_extra_seat(
+            name, request, actor, nest_instance, screenshot_tag="spam-second-device",
+        )
     _device_b, driver_b = next(seat)
     try:
         spam_b = MailSpamActions(driver_b)

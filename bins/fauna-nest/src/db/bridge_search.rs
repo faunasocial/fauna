@@ -119,12 +119,20 @@ pub fn set_policy(
 /// indexing back ON — a privacy regression caused by the act of recovering from
 /// a key theft, and one no per-table succession verdict can reach, because the
 /// phantom vote comes from the `users` row rather than from this table.
+/// ⚠ **A BRIDGE SERVICE ACTOR IS NOT A VOTER EITHER.** Approval gives it an
+/// audit-only `users` row, but `fauna.bridges.set_settings` is User-class only,
+/// so it can never hold a policy row: counted, it casts a permanent ON default
+/// vote and a single user's toggle-off never purges. Only human actors (a
+/// `users` row with no `bridge_service_users` enrollment, whatever its status —
+/// a revoked bridge keeps its row) are in the denominator.
 pub fn effective_policy(conn: &Connection, bridge_id: &str) -> Result<Option<u32>> {
     let total_actors: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM users u
               WHERE NOT EXISTS (
-                    SELECT 1 FROM actor_successions s WHERE s.old_actor_id = u.actor_id)",
+                    SELECT 1 FROM actor_successions s WHERE s.old_actor_id = u.actor_id)
+                AND NOT EXISTS (
+                    SELECT 1 FROM bridge_service_users b WHERE b.ed25519_pubkey = u.actor_id)",
             [],
             |r| r.get(0),
         )
@@ -339,6 +347,48 @@ mod tests {
         )
         .unwrap();
         assert_eq!(effective_policy(&conn, "nostr").unwrap(), None);
+    }
+
+    /// ⚠ **AN APPROVED BRIDGE IS NOT A VOTER.** An approved bridge service actor
+    /// gets an audit-only `users` row (`bridge_service_users::approve`) but its
+    /// class never reaches `fauna.bridges.set_settings` (User-class only), so it
+    /// can never hold a policy row — counted as an actor it casts a permanent
+    /// ON default vote and a single user's opt-out never purges. Pinned for every
+    /// enrollment status: a revoked bridge keeps its `users` row too.
+    #[test]
+    fn a_bridge_service_actor_does_not_vote_in_the_union() {
+        for status in ["approved", "revoked"] {
+            let conn = setup(1);
+            let bridge_pk = vec![0xB7u8; 32];
+            conn.execute(
+                "INSERT INTO users (actor_id, tier, created_at) VALUES (?1, 'free', 0)",
+                rusqlite::params![&bridge_pk],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO bridge_service_users \
+                     (ed25519_pubkey, role, bridge_id, status, created_at) \
+                 VALUES (?1, 'mda', 'mail', ?2, 0)",
+                rusqlite::params![&bridge_pk, status],
+            )
+            .unwrap();
+            set_policy(
+                &conn,
+                &hex::encode(vec![0u8; 32]),
+                "nostr",
+                SearchPolicy {
+                    show_in_search: false,
+                    post_limit: 10,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                effective_policy(&conn, "nostr").unwrap(),
+                None,
+                "the sole human's opt-out must silence the corpus on a nest \
+                 running a {status} bridge"
+            );
+        }
     }
 
     /// ⚠ **A RECOVERY CEREMONY MUST NOT SWITCH THE CORPUS BACK ON.** The live

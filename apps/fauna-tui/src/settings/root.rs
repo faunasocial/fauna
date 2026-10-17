@@ -1050,6 +1050,7 @@ mod tests {
     fn with_own_limits() -> SettingsState {
         let caps = vec![
             capability::SUBSCRIPTIONS.to_string(),
+            capability::ZAPS.to_string(),
             capability::P2P_SHARE.to_string(),
         ];
         let items: Vec<FeatureStatusItem> =

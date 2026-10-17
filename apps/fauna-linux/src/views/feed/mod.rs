@@ -1,8 +1,11 @@
 mod feed_list;
 pub mod post_detail;
 mod post_list;
+mod video_thumbnail;
 
 pub use post_list::PostListHandles;
+// The cue probe (`feed::viewport`) reads the inline player's progress.
+pub(crate) use video_thumbnail::{played_position_us, take_played_pm};
 // Shared by the document walker's quoted-post embed (`views::document`) as well
 // as the feed post list/detail — the muted "unverified source" badge builder.
 pub use post_list::{build_delegated_origin_badge, build_unverified_badge};
@@ -21,10 +24,6 @@ use fauna_feed::{BridgeFeedView, FeedSummaryView};
 /// Handles for the feed view returned to `app.rs`.
 #[allow(dead_code)]
 pub struct FeedViewHandles {
-    /// The post-list pane's content stack — `app.rs` shows the Bluesky thread
-    /// view inside it (`BlueskyThreadLoaded`); everything else is self-managed
-    /// by the observer loop.
-    pub content_stack: gtk::Stack,
     /// The NavigationSplitView itself.
     pub split: adw::NavigationSplitView,
     /// Opens the Feed post-detail pane for a post named only by id — the
@@ -66,7 +65,6 @@ pub fn build_feed_view(client: &Rc<FaunaClient>) -> (adw::NavigationSplitView, F
     let feeds_list = feed_list_handles.feeds_list.clone();
     let bridge_list = feed_list_handles.bridge_list.clone();
     let subscribe_btn = feed_list_handles.subscribe_btn.clone();
-    let content_stack = post_list_handles.content_stack.clone();
     // Built from a BORROW of `post_list_handles` (not yet moved into the
     // observer loop below) — the deep-link door search wires into its
     // `search-result-item` activation.
@@ -165,7 +163,7 @@ pub fn build_feed_view(client: &Rc<FaunaClient>) -> (adw::NavigationSplitView, F
         let bridge_cache: Rc<RefCell<Vec<BridgeFeedView>>> = Rc::new(RefCell::new(Vec::new()));
         let rx = observer::attach(&manager);
         let content_stack_loop = post_list_handles.content_stack.clone();
-        let render = move || {
+        let render = Rc::new(move || {
             refresh(
                 &manager_loop,
                 &post_list_handles,
@@ -177,13 +175,43 @@ pub fn build_feed_view(client: &Rc<FaunaClient>) -> (adw::NavigationSplitView, F
                 &feeds_cache,
                 &bridge_cache,
             );
-        };
+        });
         // Initial render so the empty state shows before the first mutation.
         render();
+        // A change to the reporter-side hide list (a report just filed, or the
+        // list landing after sign-in) is a render source outside the manager's
+        // snapshot: repaint the cards through the same path.
+        let repaint_rx = crate::report::subscribe_repaint();
+        // Both loops below also retire on an actor change: this view's window
+        // outlives `destroy()` (the tree never finalizes, so `root()` stays
+        // set), and a render after the switch would paint the outgoing actor's
+        // cards under the incoming actor's content policy — and count them into
+        // its Guardian Notify report (`family-safety.md` § Guardian Notify).
+        let built_for = crate::actor_scope::current_generation();
+        {
+            let render = Rc::clone(&render);
+            let content_stack_loop = content_stack_loop.clone();
+            let mut was_rooted = false;
+            crate::async_helper::spawn_wake_loop(repaint_rx, move || {
+                if !crate::actor_scope::poll_still_current(built_for) {
+                    return glib::ControlFlow::Break;
+                }
+                if content_stack_loop.root().is_some() {
+                    was_rooted = true;
+                } else if was_rooted {
+                    return glib::ControlFlow::Break;
+                }
+                render();
+                glib::ControlFlow::Continue
+            });
+        }
         let mut was_rooted = false;
         crate::async_helper::spawn_wake_loop(rx, move || {
             // Self-terminate once this view's window is torn down, so a
             // re-auth's fresh observer loop doesn't race a dead one.
+            if !crate::actor_scope::poll_still_current(built_for) {
+                return glib::ControlFlow::Break;
+            }
             if content_stack_loop.root().is_some() {
                 was_rooted = true;
             } else if was_rooted {
@@ -216,7 +244,6 @@ pub fn build_feed_view(client: &Rc<FaunaClient>) -> (adw::NavigationSplitView, F
     }
 
     let handles = FeedViewHandles {
-        content_stack,
         split: split.clone(),
         open_post_detail,
     };

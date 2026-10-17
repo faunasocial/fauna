@@ -1152,6 +1152,104 @@ pub fn decrypt_backup_chunk(key: &BackupKey, ciphertext: &[u8]) -> Result<Vec<u8
         })
 }
 
+/// The app-side account replica's **local seal key** — what the store's opened
+/// state values rest under on disk (`account-replica-posture.md` § Local at-rest
+/// posture, the key-material-kinds paragraph).
+///
+/// Derived from the account's [`BackupKey`] under its own domain-separation
+/// context, so it is held wherever that key is held — the platform credential
+/// store (the seed, or the slot's `backup-key` carriage on a seedless host) —
+/// and rests nowhere beside the data. A derivation, not a mint: a keychain lost
+/// and restored from the recovery phrase re-derives the same key, so the
+/// replica stays readable, and an identity succession (a new actor) opens a new
+/// store dir under a new key anyway.
+#[derive(Clone)]
+pub struct ReplicaSealKey(Zeroizing<[u8; 32]>);
+
+/// The fixed message the seal check hashes: a store records
+/// `keyed_hash(key, REPLICA_SEAL_CHECK_MSG)` so an opener can tell the right
+/// key from the wrong one before reading a single row.
+const REPLICA_SEAL_CHECK_MSG: &[u8] = b"fauna account-store replica seal check v1";
+
+impl ReplicaSealKey {
+    /// The seal key for the account whose `BackupKey` is `backup`.
+    pub fn derive(backup: &BackupKey) -> ReplicaSealKey {
+        ReplicaSealKey(Zeroizing::new(blake3::derive_key(
+            "fauna account-store replica seal key 2026-10-10",
+            backup.as_bytes(),
+        )))
+    }
+
+    /// A key from raw bytes (tests).
+    pub fn from_bytes(bytes: [u8; 32]) -> ReplicaSealKey {
+        ReplicaSealKey(Zeroizing::new(bytes))
+    }
+
+    /// The key-check value a sealed store records — public by design: it
+    /// identifies the key without revealing it.
+    pub fn check_value(&self) -> [u8; 32] {
+        *blake3::keyed_hash(&self.0, REPLICA_SEAL_CHECK_MSG).as_bytes()
+    }
+
+    /// Seal one stored value, bound to `aad` (the row's identity, so a sealed
+    /// value moved to another row fails to open). Same frame as
+    /// [`encrypt_backup_chunk`]: `version || nonce || ciphertext+tag`.
+    pub fn seal(&self, aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
+        use chacha20poly1305::aead::Payload;
+        let cipher = ChaCha20Poly1305::new_from_slice(&*self.0)
+            .expect("32-byte key is always valid for ChaCha20-Poly1305");
+        let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let ciphertext = cipher
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: plaintext,
+                    aad,
+                },
+            )
+            .map_err(|e| anyhow::anyhow!("replica value seal failed: {e}"))?;
+        let mut out = Vec::with_capacity(1 + NONCE_LEN + ciphertext.len());
+        out.push(VERSION);
+        out.extend_from_slice(&nonce);
+        out.extend_from_slice(&ciphertext);
+        Ok(out)
+    }
+
+    /// Open a value [`Self::seal`] produced under the same `aad`.
+    pub fn open(&self, aad: &[u8], sealed: &[u8]) -> Result<Vec<u8>> {
+        use chacha20poly1305::aead::Payload;
+        const MIN_LEN: usize = 1 + NONCE_LEN + 16;
+        if sealed.len() < MIN_LEN {
+            bail!(
+                "sealed replica value too short: {} bytes (minimum {MIN_LEN})",
+                sealed.len()
+            );
+        }
+        if sealed[0] != VERSION {
+            bail!(
+                "unsupported sealed replica value version: 0x{:02x}",
+                sealed[0]
+            );
+        }
+        let nonce_bytes: [u8; NONCE_LEN] = sealed[1..1 + NONCE_LEN]
+            .try_into()
+            .expect("slice length is guaranteed by MIN_LEN check");
+        let cipher = ChaCha20Poly1305::new_from_slice(&*self.0)
+            .expect("32-byte key is always valid for ChaCha20-Poly1305");
+        cipher
+            .decrypt(
+                &chacha20poly1305::Nonce::from(nonce_bytes),
+                Payload {
+                    msg: &sealed[1 + NONCE_LEN..],
+                    aad,
+                },
+            )
+            .map_err(|e| {
+                anyhow::anyhow!("sealed replica value does not open (wrong key or moved row): {e}")
+            })
+    }
+}
+
 /// The compress-then-encrypt pipeline every backup-shaped seal (MLS replicas,
 /// personalization models/cue rollups, drafts) hand-copies: `compress_chunk`
 /// (infallible) → [`encrypt_backup_chunk`]. `encrypt_err` builds the caller's

@@ -27,6 +27,8 @@ from pathlib import Path
 
 import pytest
 
+from helpers.fuse_mount import mount_type
+
 # Content sync crosses two processes and a nest round-trip; the engine is
 # watcher-driven but the upload adds latency. Bounded always, unbounded never
 # (`testing.md` § point 9).
@@ -165,7 +167,7 @@ def mountable_location(request, tmp_path: Path, name: str) -> Path:
     On linux the on-demand root is a FUSE mount over the bound directory, and a
     confined ``fusermount3`` (Ubuntu's AppArmor profile) admits a mount point
     only under the user's home, ``/mnt``, ``/media``, ``/run/user/<uid>`` or
-    ``/tmp`` (on-demand-files.md § Linux FUSE binding, the lifecycle rule). The
+    ``/tmp`` (on-demand-files-linux.md § Linux FUSE binding, the lifecycle rule). The
     dev machines point ``TMPDIR`` at a larger volume outside that set, so
     ``tmp_path`` is exactly the location whose mount is refused — hence a
     directory under ``/tmp`` itself, whatever ``TMPDIR`` says (the agent's own
@@ -193,19 +195,7 @@ def on_demand_mount_stands(location: Path) -> bool:
     right now — read from the kernel's own mount table, so it is the answer
     every other process on the box gets, not the app's or the agent's claim.
     ``fuse.fauna`` is the root's filesystem type (``subtype=fauna``)."""
-    try:
-        table = Path("/proc/self/mountinfo").read_text()
-    except OSError:
-        return False
-    target = str(location)
-    for line in table.splitlines():
-        left, _, right = line.partition(" - ")
-        fields = left.split()
-        # mountinfo escapes a space in the mount point as `\040`.
-        if len(fields) > 4 and fields[4].replace("\\040", " ") == target:
-            if right.split()[:1] == ["fuse.fauna"]:
-                return True
-    return False
+    return mount_type(location) == "fuse.fauna"
 
 
 def bind_location_under_set(app, set_name: str, location: Path, *, seat: str) -> int:
@@ -217,13 +207,8 @@ def bind_location_under_set(app, set_name: str, location: Path, *, seat: str) ->
     """
     b = app.backups
     b.navigate_folders()
-    idx = b.find_and_expand_folder(set_name)
-    # `expand_folder` TOGGLES the ExpanderRow, so calling it on a row this test
-    # already expanded (the owner's, from the share gesture) closes it and the
-    # nested binding form disappears. Re-open when that happened, so this helper
-    # works from either prior state.
-    if not app.driver.is_visible("folder-location-path-input"):
-        b.expand_folder(idx)
+    # The row may already be open (the owner's, from the share gesture).
+    idx = b.open_folder(set_name)
     app.driver.type_text("folder-location-path-input", str(location))
     app.driver.click("folder-location-add-button")
 

@@ -26,11 +26,12 @@ use std::time::Duration;
 use fauna_mail::segments::placement::MailPlacementRecord;
 use fauna_protocol::bridge_routing::{
     BridgeImportCompletePush, BridgeImportErrorPush, BridgeImportProgressPush,
-    FailImportSessionRequest, ImportMailboxCursor, ImportMessageBatchReply,
-    ImportMessageBatchRequest, ImportMessageItem, ImportMessageOutcome, ImportMessageReply,
-    ImportMessageRequest, ImportSessionActionReply, ImportSessionActionRequest, ImportSessionInfo,
-    ListImportSessionsReply, ListImportSessionsRequest, MailboxStateEvent, StartImportSessionReply,
-    StartImportSessionRequest,
+    ClientImportOutcomeKind, FailImportSessionRequest, IMPORT_SKIP_QUOTA_EXCEEDED,
+    ImportMailboxCursor, ImportMessageBatchReply, ImportMessageBatchRequest, ImportMessageItem,
+    ImportMessageOutcome, ImportMessageReply, ImportMessageRequest, ImportSessionActionReply,
+    ImportSessionActionRequest, ImportSessionInfo, ListImportSessionsReply,
+    ListImportSessionsRequest, MailboxStateEvent, RecordImportOutcomesReply,
+    RecordImportOutcomesRequest, StartImportSessionReply, StartImportSessionRequest,
 };
 use fauna_protocol::decode_strict as decode;
 
@@ -42,7 +43,9 @@ use crate::bridge_routing_handlers::{
     encode_reply, internal, malformed, not_found, require_class, seal_recipient_blob,
 };
 use crate::db::bridge_routing::{InboundMailFields, RecipientSealKey};
-use crate::db::mail_import::{CreateImportSessionOutcome, ImportSessionRow};
+use crate::db::mail_import::{
+    CreateImportSessionOutcome, ImportFold, ImportSessionRow, ImportState, import_counter_to_sql,
+};
 use crate::email_handlers::invalid_params;
 use crate::rpc_router::{RpcKindMeta, RpcRouterBuilder};
 use fauna_mls::wrapped_blob::SealedRecordBytes;
@@ -313,7 +316,7 @@ async fn import_one(
         .is_err()
     {
         return Ok(ImportMessageOutcome::Skipped {
-            reason: "quota_exceeded".into(),
+            reason: fauna_protocol::bridge_routing::IMPORT_SKIP_QUOTA_EXCEEDED.into(),
         });
     }
 
@@ -451,6 +454,9 @@ async fn run_import(
     skip_dedup: bool,
     revised_total_count: Option<u64>,
 ) -> Result<(Vec<ImportMessageOutcome>, ImportSessionRow), fauna_protocol::RpcError> {
+    if let Some(total) = revised_total_count {
+        check_counter("total_count", total)?;
+    }
     let session = state
         .db
         .get_import_session(actor, session_id)
@@ -503,38 +509,70 @@ async fn run_import(
             max_raw_message_bytes,
         )
         .await?;
-        let (imported, skipped, errored) = match &outcome {
-            ImportMessageOutcome::Imported { .. } => (1, 0, 0),
-            ImportMessageOutcome::Skipped { .. } => (0, 1, 0),
+        let fold = match &outcome {
+            ImportMessageOutcome::Imported { .. } => ImportFold::Imported,
+            ImportMessageOutcome::Skipped { reason } if reason == IMPORT_SKIP_QUOTA_EXCEEDED => {
+                ImportFold::QuotaRefused
+            }
+            ImportMessageOutcome::Skipped { .. } => ImportFold::Skipped,
             // The nest never builds `Unknown`; counted as errored if it ever did.
-            ImportMessageOutcome::Errored { .. } | ImportMessageOutcome::Unknown => (0, 0, 1),
+            ImportMessageOutcome::Errored { .. } | ImportMessageOutcome::Unknown => {
+                ImportFold::Errored
+            }
         };
         // Advance the resume cursor even for skipped/errored messages — the
-        // client has *processed* this source UID; resume must not refetch it.
-        latest = state
+        // client has *processed* this source UID; resume must not refetch it —
+        // except past one the full mailbox turned away, which a resume must
+        // offer again (`fold_mailbox`).
+        latest = match state
             .db
             .record_import_progress(
                 actor,
                 session_id,
-                imported,
-                skipped,
-                errored,
-                Some((
-                    item.mailbox.as_str(),
-                    item.source_uid,
-                    item.source_uid_validity,
-                )),
+                &item.mailbox,
+                item.source_uid_validity,
+                &[(item.source_uid, fold)],
                 revised_total.take(),
             )
             .await
             .map_err(internal)?
-            .ok_or_else(|| internal("import session row vanished mid-batch"))?;
+        {
+            Some(row) => row,
+            None => return Err(fold_refused(state, actor, session_id).await),
+        };
         outcomes.push(outcome);
     }
     // One progress push per wire call (§ Per-message flow step 5 — "after
     // each batch"), to the importer's own connected clients.
     notify_import_progress(state, actor, &latest);
     Ok((outcomes, latest))
+}
+
+/// The store answered `None` to a progress fold: the session is gone, or it
+/// finished (cancel / complete / fail) between the handler's state read and
+/// the fold — the store's own UPDATE refuses a finished row. Re-read to map it
+/// to the typed error the pre-read guard gives for the same state.
+async fn fold_refused(
+    state: &std::sync::Arc<crate::routes::AppState>,
+    actor: &[u8; 32],
+    session_id: &str,
+) -> fauna_protocol::RpcError {
+    match state.db.get_import_session(actor, session_id).await {
+        Err(e) => internal(e),
+        Ok(None) => not_found(format!("import session '{session_id}' not found")),
+        Ok(Some(row)) => invalid_params(&format!(
+            "import session '{session_id}' is {}, not running",
+            row.state
+        )),
+    }
+}
+
+/// A client-supplied counter the `INTEGER` column cannot hold is malformed
+/// (the export handlers' posture), refused before any work is done.
+fn check_counter(name: &str, value: u64) -> Result<(), fauna_protocol::RpcError> {
+    import_counter_to_sql(name, value)
+        .map(|_| ())
+        .map_err(|_| malformed(format!("{name} {value} exceeds i64::MAX")))
 }
 
 // ── Handlers ─────────────────────────────────────────────────────────
@@ -547,6 +585,7 @@ fn start_import_session_handler() -> crate::rpc_router::RpcHandler {
             if req.source_descriptor.is_empty() {
                 return Err(malformed("source_descriptor must not be empty"));
             }
+            check_counter("total_count", req.total_count)?;
             require_local_mail_serving(&state, &actor_id).await?;
             let session_id = uuid::Uuid::new_v4().to_string();
             match state
@@ -657,6 +696,84 @@ fn import_message_batch_handler() -> crate::rpc_router::RpcHandler {
     })
 }
 
+/// `fauna.bridges.record_import_outcomes` — fold the messages the client
+/// decided about without sending (`mailbox-migration.md` § Per-message flow
+/// step 1's size-limit skip, § Failure handling's per-message source failure)
+/// into the session's counters, and move the mailbox's cursor past them so a
+/// resumed walk does not count them again.
+///
+/// Nothing is stored and nothing is opened: the call carries UIDs and reasons
+/// only, which is why it needs no mail-serving gate — the same counters a
+/// sent message's outcome moves, by a path that never touches mail.
+fn record_import_outcomes_handler() -> crate::rpc_router::RpcHandler {
+    Box::new(|state, actor_id, payload| {
+        Box::pin(async move {
+            require_class(&state, &actor_id, "fauna.bridges.record_import_outcomes").await?;
+            let req: RecordImportOutcomesRequest = decode(&payload).map_err(malformed)?;
+            if req.outcomes.is_empty() {
+                return Err(malformed("outcomes must not be empty"));
+            }
+            if req.outcomes.len() > MAX_BATCH_MESSAGES {
+                return Err(malformed(format!(
+                    "{} outcomes exceed the {MAX_BATCH_MESSAGES}-message cap",
+                    req.outcomes.len()
+                )));
+            }
+            let session = state
+                .db
+                .get_import_session(&actor_id, &req.session_id)
+                .await
+                .map_err(internal)?
+                .ok_or_else(|| {
+                    not_found(format!("import session '{}' not found", req.session_id))
+                })?;
+            if session.state != "running" {
+                return Err(invalid_params(&format!(
+                    "import session '{}' is {}, not running",
+                    req.session_id, session.state
+                )));
+            }
+            let folds: Vec<(u32, ImportFold)> = req
+                .outcomes
+                .iter()
+                .map(|o| {
+                    let fold = match o.kind {
+                        ClientImportOutcomeKind::TooLarge { .. } => ImportFold::Skipped,
+                        _ => ImportFold::Errored,
+                    };
+                    (o.uid, fold)
+                })
+                .collect();
+            // The same fold as a sent message's outcome, so this path cannot
+            // carry the cursor past a message the full mailbox turned away
+            // either (`fold_mailbox`).
+            let row = match state
+                .db
+                .record_import_progress(
+                    &actor_id,
+                    &req.session_id,
+                    &req.mailbox,
+                    req.uid_validity,
+                    &folds,
+                    None,
+                )
+                .await
+                .map_err(internal)?
+            {
+                Some(row) => row,
+                None => return Err(fold_refused(&state, &actor_id, &req.session_id).await),
+            };
+            notify_import_progress(&state, &actor_id, &row);
+            encode_reply(&RecordImportOutcomesReply {
+                imported_count: row.imported_count,
+                skipped_count: row.skipped_count,
+                errored_count: row.errored_count,
+                extra: Default::default(),
+            })
+        })
+    })
+}
+
 fn list_import_sessions_handler() -> crate::rpc_router::RpcHandler {
     Box::new(|state, actor_id, payload| {
         Box::pin(async move {
@@ -678,8 +795,8 @@ fn list_import_sessions_handler() -> crate::rpc_router::RpcHandler {
 /// state + allowed sources (`mail-export.md:132` state machine, mirrored).
 fn session_transition_handler(
     kind: &'static str,
-    new_state: &'static str,
-    allowed_from: &'static [&'static str],
+    new_state: ImportState,
+    allowed_from: &'static [ImportState],
 ) -> crate::rpc_router::RpcHandler {
     Box::new(move |state, actor_id, payload| {
         Box::pin(async move {
@@ -694,7 +811,7 @@ fn session_transition_handler(
                 None,
             )
             .await?;
-            if new_state == "completed" {
+            if new_state == ImportState::Completed {
                 state.ws.notify_push(
                     &actor_id,
                     fauna_protocol::PushEvent::BridgeImportComplete(BridgeImportCompletePush {
@@ -724,8 +841,8 @@ fn fail_import_session_handler() -> crate::rpc_router::RpcHandler {
                 &state,
                 &actor_id,
                 &req.session_id,
-                "errored",
-                &["running", "paused"],
+                ImportState::Errored,
+                &[ImportState::Running, ImportState::Paused],
                 Some(&req.reason),
             )
             .await?;
@@ -750,8 +867,8 @@ async fn transition_or_typed_err(
     state: &std::sync::Arc<crate::routes::AppState>,
     actor: &[u8; 32],
     session_id: &str,
-    new_state: &str,
-    allowed_from: &[&str],
+    new_state: ImportState,
+    allowed_from: &[ImportState],
     error_reason: Option<&str>,
 ) -> Result<ImportSessionRow, fauna_protocol::RpcError> {
     if let Some(row) = state
@@ -779,10 +896,11 @@ async fn transition_or_typed_err(
         // reconnect-with-resume) asserts the handler is naturally idempotent
         // — state converges, and the reply must say so instead of reporting
         // a wrong-state error for a call that already got what it asked for.
-        Some(row) if row.state == new_state => Ok(row),
+        Some(row) if row.state == new_state.as_str() => Ok(row),
         Some(row) => Err(invalid_params(&format!(
-            "import session '{session_id}' is {}; cannot move to {new_state}",
-            row.state
+            "import session '{session_id}' is {}; cannot move to {}",
+            row.state,
+            new_state.as_str()
         ))),
     }
 }
@@ -882,6 +1000,16 @@ pub fn register_bridge_import_handlers(b: &mut RpcRouterBuilder) {
             handler: import_message_batch_handler(),
         },
     );
+    // A progress accumulator, so forbid-replay on the first of
+    // `import_message`'s grounds: a replay counts the same skips twice.
+    b.add(
+        "fauna.bridges.record_import_outcomes",
+        RpcKindMeta {
+            forbid_replay: true,
+            default_deadline: routing,
+            handler: record_import_outcomes_handler(),
+        },
+    );
     b.add(
         "fauna.bridges.list_import_sessions",
         RpcKindMeta {
@@ -904,8 +1032,8 @@ pub fn register_bridge_import_handlers(b: &mut RpcRouterBuilder) {
             default_deadline: fetch,
             handler: session_transition_handler(
                 "fauna.bridges.pause_import_session",
-                "paused",
-                &["running"],
+                ImportState::Paused,
+                &[ImportState::Running],
             ),
         },
     );
@@ -916,8 +1044,8 @@ pub fn register_bridge_import_handlers(b: &mut RpcRouterBuilder) {
             default_deadline: fetch,
             handler: session_transition_handler(
                 "fauna.bridges.resume_import_session",
-                "running",
-                &["paused"],
+                ImportState::Running,
+                &[ImportState::Paused],
             ),
         },
     );
@@ -928,8 +1056,8 @@ pub fn register_bridge_import_handlers(b: &mut RpcRouterBuilder) {
             default_deadline: fetch,
             handler: session_transition_handler(
                 "fauna.bridges.cancel_import_session",
-                "cancelled",
-                &["running", "paused"],
+                ImportState::Cancelled,
+                &[ImportState::Running, ImportState::Paused],
             ),
         },
     );
@@ -940,8 +1068,8 @@ pub fn register_bridge_import_handlers(b: &mut RpcRouterBuilder) {
             default_deadline: fetch,
             handler: session_transition_handler(
                 "fauna.bridges.finalize_import_session",
-                "completed",
-                &["running"],
+                ImportState::Completed,
+                &[ImportState::Running],
             ),
         },
     );
@@ -1084,6 +1212,215 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(mb.uid_next >= 2, "uid_next bumped by the placement");
+    }
+
+    async fn record_outcomes(
+        state: &Arc<AppState>,
+        session_id: &str,
+        outcomes: Vec<fauna_protocol::bridge_routing::ClientImportOutcome>,
+    ) -> Result<RecordImportOutcomesReply, fauna_protocol::RpcError> {
+        let req = RecordImportOutcomesRequest {
+            session_id: session_id.into(),
+            mailbox: "INBOX".into(),
+            uid_validity: 9,
+            outcomes,
+            extra: Default::default(),
+        };
+        let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
+        let bytes = record_import_outcomes_handler()(state.clone(), USER, payload).await?;
+        Ok(fauna_cbor::decode_strict(&bytes).unwrap())
+    }
+
+    /// The messages the client decided about without sending them land in the
+    /// session's own counters — a too-large one is a skip, an unreadable one
+    /// a failure (`mailbox-migration.md` § Progress lives nest-side's
+    /// `skipped_count`, § Per-message flow step 1) — and move the cursor past
+    /// them, but never back behind a message already imported.
+    #[tokio::test]
+    async fn client_decided_outcomes_fold_into_the_counters_and_the_cursor() {
+        use fauna_protocol::bridge_routing::ClientImportOutcome;
+        let state = fixture_state().await;
+        let sid = start_session(&state, "gmail:imap.gmail.com:alice").await;
+        import_single(
+            &state,
+            &sid,
+            item("INBOX", b"Subject: a\r\n\r\nx", 30, "k1"),
+            false,
+        )
+        .await
+        .unwrap();
+
+        let reply = record_outcomes(
+            &state,
+            &sid,
+            vec![
+                ClientImportOutcome {
+                    uid: 12,
+                    kind: ClientImportOutcomeKind::TooLarge { size: 80 << 20 },
+                    extra: Default::default(),
+                },
+                ClientImportOutcome {
+                    uid: 14,
+                    kind: ClientImportOutcomeKind::SourceUnreadable {
+                        reason: "NO [UNAVAILABLE] try later".into(),
+                    },
+                    extra: Default::default(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (
+                reply.imported_count,
+                reply.skipped_count,
+                reply.errored_count
+            ),
+            (1, 1, 1)
+        );
+        let row = state
+            .db
+            .get_import_session(&USER, &sid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.cursors.get("INBOX"),
+            Some(&(30, 9)),
+            "never walked back"
+        );
+
+        record_outcomes(
+            &state,
+            &sid,
+            vec![ClientImportOutcome {
+                uid: 41,
+                kind: ClientImportOutcomeKind::TooLarge { size: 1 },
+                extra: Default::default(),
+            }],
+        )
+        .await
+        .unwrap();
+        let row = state
+            .db
+            .get_import_session(&USER, &sid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.cursors.get("INBOX"),
+            Some(&(41, 9)),
+            "moved past the skip"
+        );
+        assert_eq!(row.skipped_count, 2);
+    }
+
+    /// A message the full mailbox turned away holds the row's cursor short of
+    /// it on both paths that move a cursor — the rest of its batch, and a
+    /// too-large report above it — so a resume that reads only the row (one
+    /// after a restart) offers it again (`mailbox-migration.md` § Failure
+    /// handling). Once there is room it lands, moves out of `skipped_count`,
+    /// and the cursor moves on.
+    #[tokio::test]
+    async fn a_quota_refusal_holds_the_rows_cursor_until_the_message_lands() {
+        use fauna_protocol::bridge_routing::ClientImportOutcome;
+        let state = fixture_state().await;
+        let room_for = |count: u32| crate::db::mail_policy::ImapPolicyOverrides {
+            message_count_default: Some(count),
+            ..Default::default()
+        };
+        state.db.put_imap_policy(room_for(1)).await.unwrap();
+        let sid = start_session(&state, "src").await;
+        let fits = item("INBOX", b"Subject: a\r\n\r\nx", 10, "k10");
+        let turned_away = item("INBOX", b"Subject: b\r\n\r\ny", 11, "k11");
+        import_single(&state, &sid, fits, false).await.unwrap();
+        let refused = import_single(&state, &sid, turned_away.clone(), false)
+            .await
+            .unwrap();
+        assert!(matches!(
+            &refused.outcome,
+            ImportMessageOutcome::Skipped { reason } if reason == IMPORT_SKIP_QUOTA_EXCEEDED
+        ));
+        record_outcomes(
+            &state,
+            &sid,
+            vec![ClientImportOutcome {
+                uid: 12,
+                kind: ClientImportOutcomeKind::TooLarge { size: 1 << 30 },
+                extra: Default::default(),
+            }],
+        )
+        .await
+        .unwrap();
+        let row = state
+            .db
+            .get_import_session(&USER, &sid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.cursors.get("INBOX"),
+            Some(&(10, 9)),
+            "held short of the refused message"
+        );
+        assert_eq!((row.imported_count, row.skipped_count), (1, 2));
+
+        state.db.put_imap_policy(room_for(10)).await.unwrap();
+        let landed = import_single(&state, &sid, turned_away, false)
+            .await
+            .unwrap();
+        assert!(matches!(
+            landed.outcome,
+            ImportMessageOutcome::Imported { .. }
+        ));
+        let row = state
+            .db
+            .get_import_session(&USER, &sid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.cursors.get("INBOX"), Some(&(12, 9)), "the hold lifted");
+        assert_eq!(
+            (row.imported_count, row.skipped_count),
+            (2, 1),
+            "the turned-away message counted once, as what it became"
+        );
+    }
+
+    /// Like a sent message, a recorded outcome needs a running session, and an
+    /// empty call is malformed rather than a silent no-op.
+    #[tokio::test]
+    async fn client_decided_outcomes_need_a_running_session() {
+        use fauna_protocol::bridge_routing::ClientImportOutcome;
+        let state = fixture_state().await;
+        let sid = start_session(&state, "gmail:imap.gmail.com:alice").await;
+        assert!(record_outcomes(&state, &sid, vec![]).await.is_err());
+        let payload = Bytes::from(
+            encode_canonical(&ImportSessionActionRequest {
+                session_id: sid.clone(),
+            })
+            .unwrap()
+            .to_vec(),
+        );
+        session_transition_handler(
+            "fauna.bridges.pause_import_session",
+            ImportState::Paused,
+            &[ImportState::Running],
+        )(state.clone(), USER, payload)
+        .await
+        .unwrap();
+        let err = record_outcomes(
+            &state,
+            &sid,
+            vec![ClientImportOutcome {
+                uid: 1,
+                kind: ClientImportOutcomeKind::TooLarge { size: 1 },
+                extra: Default::default(),
+            }],
+        )
+        .await
+        .unwrap_err();
+        assert!(err.code.ends_with("invalid_params"), "{}", err.code);
     }
 
     /// Hazard pin for `import_message`'s `forbid_replay: true` (2026-08-01),
@@ -1468,11 +1805,11 @@ mod tests {
             session_id: sid.clone(),
         };
         let payload = Bytes::from(encode_canonical(&pause).unwrap().to_vec());
-        session_transition_handler("fauna.bridges.pause_import_session", "paused", &["running"])(
-            state.clone(),
-            USER,
-            payload,
-        )
+        session_transition_handler(
+            "fauna.bridges.pause_import_session",
+            ImportState::Paused,
+            &[ImportState::Running],
+        )(state.clone(), USER, payload)
         .await
         .expect("pause ok");
 
@@ -1535,8 +1872,8 @@ mod tests {
         let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
         let bytes = session_transition_handler(
             "fauna.bridges.finalize_import_session",
-            "completed",
-            &["running"],
+            ImportState::Completed,
+            &[ImportState::Running],
         )(state.clone(), USER, payload)
         .await
         .expect("finalize ok");
@@ -1587,8 +1924,8 @@ mod tests {
         async fn transition(
             state: &Arc<AppState>,
             kind: &'static str,
-            new_state: &'static str,
-            allowed_from: &'static [&'static str],
+            new_state: ImportState,
+            allowed_from: &'static [ImportState],
             sid: &str,
         ) -> Result<String, fauna_protocol::RpcError> {
             let req = ImportSessionActionRequest {
@@ -1611,8 +1948,8 @@ mod tests {
         let after_first = transition(
             &state,
             "fauna.bridges.pause_import_session",
-            "paused",
-            &["running"],
+            ImportState::Paused,
+            &[ImportState::Running],
             &sid,
         )
         .await
@@ -1625,8 +1962,8 @@ mod tests {
         let after_replay = transition(
             &state,
             "fauna.bridges.pause_import_session",
-            "paused",
-            &["running"],
+            ImportState::Paused,
+            &[ImportState::Running],
             &sid,
         )
         .await
@@ -1640,8 +1977,8 @@ mod tests {
         transition(
             &state,
             "fauna.bridges.cancel_import_session",
-            "cancelled",
-            &["running", "paused"],
+            ImportState::Cancelled,
+            &[ImportState::Running, ImportState::Paused],
             &sid2,
         )
         .await
@@ -1649,8 +1986,8 @@ mod tests {
         let err = transition(
             &state,
             "fauna.bridges.finalize_import_session",
-            "completed",
-            &["running"],
+            ImportState::Completed,
+            &[ImportState::Running],
             &sid2,
         )
         .await

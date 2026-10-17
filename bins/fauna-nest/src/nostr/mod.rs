@@ -9,6 +9,7 @@ pub mod content_handlers;
 pub mod db;
 pub mod federation;
 pub mod inbound_lifecycle;
+pub mod inbound_test_hook;
 pub mod interact;
 pub mod key_crypto;
 pub mod nip05;

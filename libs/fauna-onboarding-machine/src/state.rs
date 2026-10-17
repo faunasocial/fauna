@@ -31,6 +31,11 @@ pub enum OnboardingStep {
     /// lands on `HandleEntry`, uniform with an import. Distinct from
     /// [`BoxRecoveryEntry`], which names the total-box-loss NEST recovery.
     RecoveryEntry,
+    /// The signed-out lock door (`ui/sessions.md` § Layout & flow → *The
+    /// signed-out door*), reached from `identity_choice` via
+    /// `emergency-lockout-entry-button`. Pre-identity and **persists nothing**:
+    /// a lock returns to `IdentityChoice`, a refusal stays here.
+    EmergencyLockoutEntry,
     HandleEntry,
     DnsConfig,
     VpsConfig,
@@ -287,7 +292,7 @@ pub struct VpsConfigState {
     /// `None` = "not chosen — use the handle's real-domain default"
     /// (`OnboardingMachine::provision_mail_mode_enabled`); `Some(true)` = mail box
     /// (scanner sidecars + mail ports, needs `mem_gb ≥ 2`), `Some(false)` =
-    /// social-only box (lean nest+watchtower compose, the 1 GB tier). Feeds
+    /// social-only box (lean nest+updater compose, the 1 GB tier). Feeds
     /// `CloudInitParams::enable_mail` via `run_provisioning_inner`.
     /// `docs/goal/behavior/onboarding.md` §5.
     #[serde(default)]
@@ -832,13 +837,12 @@ impl State {
     }
 
     /// Computes the domain part of the handle (`example.com` from
-    /// `alice@example.com`). Returns `None` if the handle is malformed.
-    pub(crate) fn handle_domain(&self) -> Option<&str> {
-        let at = self.handle.find('@')?;
-        if at == 0 || at == self.handle.len() - 1 {
-            return None;
-        }
-        Some(&self.handle[at + 1..])
+    /// `alice@example.com`). Returns `None` if the handle is malformed —
+    /// including a second `@` (`a@b@c`), which a URL parser would dial as host
+    /// `c` while the wizard displayed `b@c`. Delegates to the one
+    /// canonical handle parser via `machine::parse_handle_domain`.
+    pub(crate) fn handle_domain(&self) -> Option<String> {
+        crate::machine::parse_handle_domain(&self.handle)
     }
 }
 
@@ -850,7 +854,16 @@ mod tests {
     fn handle_domain_extracts_after_at() {
         let mut s = State::new();
         s.handle = "alice@example.com".into();
-        assert_eq!(s.handle_domain(), Some("example.com"));
+        assert_eq!(s.handle_domain().as_deref(), Some("example.com"));
+    }
+
+    #[test]
+    fn handle_domain_none_for_second_at() {
+        // `a@b@c` used to yield `b@c`: displayed as one nest, dialled
+        // as host `c`.
+        let mut s = State::new();
+        s.handle = "a@b@c".into();
+        assert_eq!(s.handle_domain(), None);
     }
 
     #[test]

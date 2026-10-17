@@ -113,6 +113,13 @@ pub struct NestSection {
     pub static_dir: Option<String>,
     #[serde(default)]
     pub cors_origins: Vec<String>,
+    /// The image tag this nest was installed with — `FAUNA_IMAGE_TAG`, the
+    /// update-channel **seed** (`nest/update-channel.md` § The channel as nest
+    /// state), read only while no admin has chosen a channel. Artifact-set,
+    /// never a file key: `serde(skip)` keeps it out of the TOML, and `main.rs`
+    /// fills it from the environment, the `FAUNA_MODE` shape.
+    #[serde(skip)]
+    pub image_tag: Option<String>,
 }
 
 /// Struct-update base for the ~10 test/`desktop_serve` fixtures that build a
@@ -147,6 +154,7 @@ impl Default for NestSection {
             blob_dir: None,
             static_dir: None,
             cors_origins: vec![],
+            image_tag: None,
         }
     }
 }

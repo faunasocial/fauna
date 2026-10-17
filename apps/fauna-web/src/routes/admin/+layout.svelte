@@ -68,21 +68,23 @@
   // (apple `Core/AdminPage.swift` label switch; windows `AdminShellPage.xaml`;
   // android admin nav) so all 7 apps render the same text off the same keys
   // (priority #1/#3). No web-only keys are minted — every key already exists.
+  // `key` is the ui.yaml page key the row opens: the row's id is
+  // `admin-nav-row[<key>]` (ui.yaml `navigation.sub_page_nav_rows`).
   const navLinks = [
-    { href: '/app/admin', label: t.admin.dashboard.title },
-    { href: '/app/admin/users', label: t.admin.users_page.title },
-    { href: '/app/admin/aliases', label: t.admin.aliases },
-    { href: '/app/admin/settings', label: t.admin.settings_page.title },
-    { href: '/app/admin/nest', label: t.admin.nest_page.title },
-    { href: '/app/admin/dns', label: t.admin.dns.title },
-    { href: '/app/admin/custody-hosting', label: t.admin.custody_hosting.title },
-    { href: '/app/admin/mail', label: t.admin.mail_page.title },
-    { href: '/app/admin/calendar', label: t.admin.calendar_page.title },
-    { href: '/app/admin/contacts', label: t.admin.contacts_page.title },
-    { href: '/app/admin/files', label: t.admin.files_page.title },
-    { href: '/app/admin/web', label: t.admin.web_page.title },
-    { href: '/app/admin/bridges-pending', label: t.admin.bridges_pending.title },
-    { href: '/app/admin/logs', label: t.admin.logs_page.title },
+    { href: '/app/admin', key: 'admin-dashboard', label: t.admin.dashboard.title },
+    { href: '/app/admin/users', key: 'admin-users', label: t.admin.users_page.title },
+    { href: '/app/admin/aliases', key: 'admin-aliases', label: t.admin.aliases },
+    { href: '/app/admin/settings', key: 'admin-settings', label: t.admin.settings_page.title },
+    { href: '/app/admin/nest', key: 'admin-nest', label: t.admin.nest_page.title },
+    { href: '/app/admin/dns', key: 'admin-dns', label: t.admin.dns.title },
+    { href: '/app/admin/custody-hosting', key: 'admin-custody-hosting', label: t.admin.custody_hosting.title },
+    { href: '/app/admin/mail', key: 'admin-mail', label: t.admin.mail_page.title },
+    { href: '/app/admin/calendar', key: 'admin-calendar', label: t.admin.calendar_page.title },
+    { href: '/app/admin/contacts', key: 'admin-contacts', label: t.admin.contacts_page.title },
+    { href: '/app/admin/files', key: 'admin-files', label: t.admin.files_page.title },
+    { href: '/app/admin/web', key: 'admin-web', label: t.admin.web_page.title },
+    { href: '/app/admin/bridges-pending', key: 'admin-bridges-pending', label: t.admin.bridges_pending.title },
+    { href: '/app/admin/logs', key: 'admin-logs', label: t.admin.logs_page.title },
   ];
 
   function isActive(path: string, href: string): boolean {
@@ -120,7 +122,7 @@
           href={link.href}
           class="tab"
           class:active={isActive($page.url.pathname, link.href)}
-          data-testid="admin-nav-{link.href.split('/').pop()}"
+          data-testid={`${IDS.ADMIN_NAV_ROW}[${link.key}]`}
         >{link.label}</a>
       {/each}
     </div>

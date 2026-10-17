@@ -382,5 +382,35 @@
             <TextBlock Opacity="0.7" FontSize="12" TextWrapping="Wrap"
                        Text="{loc:Localize Key=mail_settings/serve_here_subtitle}" />
         </StackPanel>
+
+        <!-- ── Forwarding (visible when mail is enabled; mail-forwarding.md § Per-account
+             "forward all" / § Per-account forward rate-limit). Two save-on-Enter inputs,
+             the mail-spam-threshold-override-input shape: no save button, the shared
+             draft parser checks first (a refusal names its reason on error-message and
+             sends nothing), and each field repaints from the value the nest kept.
+             Lifts apps/fauna-linux/src/settings/mail.rs (hydrate_forwarding /
+             commit_forward_*). -->
+        <StackPanel x:Name="ForwardingGroup" Spacing="8" Visibility="Collapsed">
+            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                       Text="{loc:Localize Key=mail_settings/forwarding_title}" />
+            <StackPanel Spacing="2">
+                <TextBox x:Name="ForwardAllToInput"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsForwardAllToInput}"
+                         Header="{loc:Localize Key=mail_settings/forward_all_to_label}"
+                         HorizontalAlignment="Left" Width="320"
+                         KeyDown="ForwardAllToInput_KeyDown" />
+                <TextBlock Opacity="0.7" FontSize="12" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=mail_settings/forward_all_to_subtitle}" />
+            </StackPanel>
+            <StackPanel Spacing="2">
+                <TextBox x:Name="ForwardPerHourInput"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsForwardPerHourInput}"
+                         Header="{loc:Localize Key=mail_settings/forward_per_hour_label}"
+                         HorizontalAlignment="Left" Width="200"
+                         KeyDown="ForwardPerHourInput_KeyDown" />
+                <TextBlock x:Name="ForwardPerHourHint"
+                           Opacity="0.7" FontSize="12" TextWrapping="Wrap" />
+            </StackPanel>
+        </StackPanel>
     </StackPanel>
 </UserControl>

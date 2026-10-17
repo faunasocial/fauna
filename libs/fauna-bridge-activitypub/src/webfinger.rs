@@ -54,6 +54,56 @@ pub fn parse_acct_uri(resource: &str) -> Result<(String, String)> {
     Ok((user.to_string(), domain.to_string()))
 }
 
+/// A Fediverse handle as people write it — `@user@host`, the two-`@` form —
+/// split into `(user, host)`, the host lowercased. `None` for anything else: a
+/// bare `user@host` is an email address to every app's address probe, so the
+/// leading `@` is what marks the string as a Fediverse account
+/// (`fauna_conversations::address::try_parse_typed_address`).
+#[must_use]
+pub fn parse_fediverse_handle(s: &str) -> Option<(String, String)> {
+    let (user, host) = s.trim().strip_prefix('@')?.split_once('@')?;
+    let user_ok = !user.is_empty()
+        && !user
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '@' | '/' | ':' | '?' | '#' | '%'));
+    let labels_ok = host.contains('.')
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        });
+    (user_ok && labels_ok).then(|| (user.to_string(), host.to_ascii_lowercase()))
+}
+
+/// The WebFinger query that asks `host` which actor `acct:user@host` is
+/// (RFC 7033 § 4).
+#[must_use]
+pub fn acct_query_url(user: &str, host: &str) -> String {
+    let mut url = url::Url::parse(&format!("https://{host}/.well-known/webfinger"))
+        .unwrap_or_else(|_| url::Url::parse("https://invalid.invalid/").expect("static URL"));
+    url.query_pairs_mut()
+        .append_pair("resource", &format!("acct:{user}@{host}"));
+    url.to_string()
+}
+
+/// The actor URI a WebFinger answer names: the href of its `self` link typed
+/// as an ActivityStreams document. `None` when it names none.
+#[must_use]
+pub fn self_actor_href(resp: &WebFingerResponse) -> Option<&str> {
+    resp.links
+        .iter()
+        .filter(|l| l.rel == "self")
+        .find(|l| {
+            l.r#type.as_deref().is_some_and(|t| {
+                t == "application/activity+json"
+                    || (t.starts_with("application/ld+json")
+                        && t.contains("https://www.w3.org/ns/activitystreams"))
+            })
+        })
+        .and_then(|l| l.href.as_deref())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,5 +157,72 @@ mod tests {
     fn parse_webfinger_resource_invalid() {
         assert!(parse_acct_uri("invalid").is_err());
         assert!(parse_acct_uri("acct:nodomain").is_err());
+    }
+
+    /// Only the two-`@` spelling is a Fediverse handle; a bare `user@host` is
+    /// an email address, and a host must be a dotted DNS name.
+    #[test]
+    fn a_fediverse_handle_is_the_two_at_form() {
+        assert_eq!(
+            parse_fediverse_handle(" @Bob@Social.Example "),
+            Some(("Bob".to_string(), "social.example".to_string()))
+        );
+        for not_one in [
+            "bob@social.example",
+            "@bob",
+            "@@social.example",
+            "@bob@",
+            "@bob@localhost",
+            "@bob@social.example/x",
+            "@bob@-x.example",
+            "@b ob@social.example",
+            "@bob@social.example@x",
+            "@bob@social.example:8443",
+        ] {
+            assert_eq!(parse_fediverse_handle(not_one), None, "{not_one}");
+        }
+    }
+
+    #[test]
+    fn the_acct_query_asks_the_host_for_the_account() {
+        assert_eq!(
+            acct_query_url("bob", "social.example"),
+            "https://social.example/.well-known/webfinger?resource=acct%3Abob%40social.example"
+        );
+    }
+
+    /// The `self` link of an ActivityStreams type names the actor; a profile
+    /// page or an untyped self link does not.
+    #[test]
+    fn the_self_link_names_the_actor() {
+        let link = |rel: &str, ty: Option<&str>, href: &str| WebFingerLink {
+            rel: rel.into(),
+            r#type: ty.map(Into::into),
+            href: Some(href.into()),
+            template: None,
+        };
+        let mut resp = WebFingerResponse {
+            subject: "acct:bob@social.example".into(),
+            aliases: vec![],
+            links: vec![
+                link(
+                    "http://webfinger.net/rel/profile-page",
+                    Some("text/html"),
+                    "https://social.example/@bob",
+                ),
+                link("self", None, "https://social.example/untyped"),
+                link(
+                    "self",
+                    Some(r#"application/ld+json; profile="https://www.w3.org/ns/activitystreams""#),
+                    "https://social.example/users/bob",
+                ),
+            ],
+        };
+        assert_eq!(
+            self_actor_href(&resp),
+            Some("https://social.example/users/bob")
+        );
+        resp.links.truncate(2);
+        assert_eq!(self_actor_href(&resp), None);
     }
 }

@@ -97,18 +97,24 @@ def _shared_instance_world():
     """One throwaway install world for two instances to share — the same-OS-login
     premise the collision check runs under.
 
-    All three keys matter: ``credential_dir`` + ``keyring_app`` make both launches
-    read ONE registry, and ``data_dir`` is what makes them probe one set of lock
+    All four keys matter: ``credential_dir`` + ``keyring_app`` make both launches
+    read ONE registry; ``data_dir`` is what makes them probe one set of lock
     files (windows keys the lock off ``AccountStateDir.Base``, i.e.
-    ``BackupPaths.DataDir``). Supplying ``data_dir`` also means the driver will not
-    delete it (``_owns_data_dir``), so the caller cleans up. A private copy of
-    ``test_account_instance_lock_windows.py``'s helper of the same name — this repo
-    does not import helpers across test modules."""
+    ``BackupPaths.DataDir``); and ``local_appdata`` is what makes them open ONE
+    account store (shared Rust roots it at ``%LOCALAPPDATA%\\Fauna\\sync``, which the
+    driver otherwise relocates per launch). Laid out as production lays it out
+    (``data_dir`` = ``<local_appdata>\\Fauna``). Supplying both means the driver
+    deletes neither, so the caller cleans up. A private copy of
+    ``test_account_instance_lock_windows.py``'s helper of the same name, whose
+    docstring carries the full reasoning — this repo does not import helpers
+    across test modules."""
     base = tempfile.mkdtemp(prefix="fauna-e2e-win-chooser-world-")
+    local_appdata = os.path.join(base, "localappdata")
     return base, {
         "credential_dir": os.path.join(base, "credentials"),
         "keyring_app": f"fauna-e2e-chooser-world-{os.path.basename(base)}",
-        "data_dir": os.path.join(base, "data"),
+        "local_appdata": local_appdata,
+        "data_dir": os.path.join(local_appdata, "Fauna"),
     }
 
 

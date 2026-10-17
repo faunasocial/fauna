@@ -48,7 +48,8 @@ import time
 import pytest
 
 from i18n.strings import S
-from tests.test_family import _admit_adult_directly, _admit_ward, _unique_suffix
+from helpers.family_wire import admit_adult_directly, admit_ward
+from tests.test_family import _unique_suffix
 
 pytestmark = [pytest.mark.tier_3]
 
@@ -66,12 +67,12 @@ def _admit_guardian_and_two_wards(
     TWO anonymous invite-request submits, and both are structural: this test's
     whole subject is the seam between two DIFFERENT supervised accounts, so the
     wards cannot be shared or collapsed. The guardian is direct-admitted over
-    the admin path instead (`_admit_adult_directly`), which is what brings the
+    the admin path instead (`admit_adult_directly`), which is what brings the
     cost down from three — the shipped-budget fit rule, `testing.md` § Default
     app and nest mode."""
-    guardian_identity = _admit_adult_directly(nest_instance, guardian_handle)
-    ward_a_identity = _admit_ward(nest_instance, guardian_identity, ward_a_handle)
-    ward_b_identity = _admit_ward(nest_instance, guardian_identity, ward_b_handle)
+    guardian_identity = admit_adult_directly(nest_instance, guardian_handle)
+    ward_a_identity = admit_ward(nest_instance, guardian_identity, ward_a_handle)
+    ward_b_identity = admit_ward(nest_instance, guardian_identity, ward_b_handle)
     return guardian_identity, ward_a_identity, ward_b_identity
 
 

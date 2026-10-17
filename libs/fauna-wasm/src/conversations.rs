@@ -126,6 +126,7 @@ use fauna_conversations::backends::bridged::{BridgedBackend, poll_inbound_bridge
 #[cfg(target_arch = "wasm32")]
 struct WebBridgedKeySource {
     standing: Rc<RefCell<Vec<fauna_mls::wrapped_blob::StandingMailKeypair>>>,
+    retirements: Rc<RefCell<Vec<u64>>>,
     epoch_roots: Rc<RefCell<Vec<[u8; 32]>>>,
     own_public: Rc<RefCell<Option<fauna_mls::wrapped_blob::XWingPublicKey>>>,
 }
@@ -134,6 +135,7 @@ struct WebBridgedKeySource {
 #[cfg(target_arch = "wasm32")]
 struct WebBridgedKeys {
     standing: Vec<fauna_mls::wrapped_blob::StandingMailKeypair>,
+    retirements: Vec<u64>,
     epoch_roots: Vec<[u8; 32]>,
     own_public: fauna_mls::wrapped_blob::XWingPublicKey,
 }
@@ -145,12 +147,10 @@ impl fauna_client_conversations::BridgedKeys for WebBridgedKeys {
     }
 
     fn open_bridged(&self, sealed: &[u8], received_at_ms: i64) -> Option<String> {
-        // No retirement instants cross the JS seam yet: the whole set walks
-        // newest first (every generation still opens).
         fauna_client_conversations::open_bridged_row(
             &self.standing,
             &self.epoch_roots,
-            &[],
+            &self.retirements,
             sealed,
             received_at_ms,
         )
@@ -169,6 +169,7 @@ impl fauna_client_conversations::BridgedKeySource for WebBridgedKeySource {
         }
         Some(WebBridgedKeys {
             standing,
+            retirements: self.retirements.borrow().clone(),
             epoch_roots: self.epoch_roots.borrow().clone(),
             own_public,
         })
@@ -412,6 +413,66 @@ impl SchedulingSink for WebSchedulingSink {
     }
 }
 
+/// The `name` of the JS `Error` a refused conversations-engine role rejects
+/// `conversationsManager` with — read only through
+/// [`is_conversations_engine_role_refusal`], so the spelling lives here alone.
+#[cfg(target_arch = "wasm32")]
+const ENGINE_ROLE_REFUSAL: &str = "ConversationsEngineRoleRefused";
+
+/// Take this tab's conversations-engine role for `actor_id_hex` BEFORE any
+/// engine exists — the wasm engine-construction path's twin of the role lock
+/// `SqliteStorage::open` takes natively (`fauna_mls::engine_role`, which owns
+/// the postures). A refusal — another tab serves the account, or no lock
+/// manager can prove this tab is alone — rejects with a typed `Error` the SPA
+/// renders as `conversations.errors.served_elsewhere`, never a crash and never
+/// a second writer.
+#[cfg(target_arch = "wasm32")]
+pub(crate) async fn take_engine_role(actor_id_hex: &str) -> Result<(), JsValue> {
+    fauna_mls::engine_role::take_conversations_engine_role(actor_id_hex)
+        .await
+        .map_err(|refusal| {
+            let error = js_sys::Error::new(&refusal.to_string());
+            error.set_name(ENGINE_ROLE_REFUSAL);
+            error.into()
+        })
+}
+
+/// Whether `error` is `conversationsManager`'s refusal of the
+/// conversations-engine role ([`take_engine_role`]), rather than a build that
+/// failed for another reason.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = isConversationsEngineRoleRefusal)]
+pub fn is_conversations_engine_role_refusal(error: JsValue) -> bool {
+    error
+        .dyn_ref::<js_sys::Error>()
+        .is_some_and(|e| e.name() == ENGINE_ROLE_REFUSAL)
+}
+
+/// Hand this tab's conversations-engine role back — `actorId`'s alone (a build
+/// that learned its account was switched away mid-build), or every one this tab
+/// holds when absent (the tab's one teardown, `resetConversationsManager`,
+/// which releases the role and stops the runtime together). Resolves once the
+/// lock manager has let it go. Never `free()` the manager for this: its readers
+/// may outlive the teardown, and the role is the tab's, not the manager's.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = releaseConversationsEngineRole, unchecked_return_type = "Promise<void>")]
+pub fn release_conversations_engine_role(actor_id: Option<String>) -> js_sys::Promise {
+    future_to_promise(async move {
+        match actor_id {
+            Some(actor) => fauna_mls::engine_role::release_conversations_engine_role(&actor).await,
+            None => fauna_mls::engine_role::release_all_conversations_engine_roles().await,
+        }
+        Ok(JsValue::UNDEFINED)
+    })
+}
+
+/// Whether this tab holds `actorId`'s conversations-engine role.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = holdsConversationsEngineRole)]
+pub fn holds_conversations_engine_role(actor_id: String) -> bool {
+    fauna_mls::engine_role::holds_conversations_engine_role_here(&actor_id)
+}
+
 #[wasm_bindgen]
 pub struct WasmConversationsManager {
     manager: Arc<ConversationsManager>,
@@ -428,6 +489,13 @@ pub struct WasmConversationsManager {
     /// `Rc`, like the two cells below it: the bridged rail's glue reads the
     /// same three through its key source ([`WebBridgedKeySource`]).
     standing_keypairs: Rc<RefCell<Vec<fauna_mls::wrapped_blob::StandingMailKeypair>>>,
+    /// The prior generations' retirement instants (unix seconds), aligned with
+    /// `standing_keypairs[1..]` — set via [`Self::set_recipient_retirements`] from
+    /// `WasmMailSettingsMachine::recipientGenerationRetirements`. The openers
+    /// select the generation current at a record's seal time with them; empty ⇒
+    /// the whole set walks newest first (every generation still opens). Shared
+    /// with the bridged rail's key source like the cells around it.
+    recipient_retirements: Rc<RefCell<Vec<u64>>>,
     /// The account's own X-Wing recipient **public** key — what the bridged
     /// rail seals the user's own copy of a sent message to — set via
     /// [`Self::set_recipient_public_key`] beside the key set. `None` ⇒ mail
@@ -713,6 +781,21 @@ fn folders_author_parts(
     Ok((client, engine, backend))
 }
 
+/// JS shape of one `fauna_client_caldav::RefusedChangeView` — the Events
+/// page's `refused-change-item` (the web twin of fauna-ffi's
+/// `FfiRefusedChange`). `last_refused_at` is a float: epoch seconds never near
+/// 2^53, and an `i64` would cross as a `bigint`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RefusedChangeJs {
+    key: String,
+    headline: fauna_core::localized::LocalizedText,
+    author: fauna_core::localized::LocalizedText,
+    reason: fauna_core::localized::LocalizedText,
+    attempts: Option<fauna_core::localized::LocalizedText>,
+    last_refused_at: f64,
+}
+
 /// JS shape of `FoldersAuthor::share_set`'s `ShareOutcome` (`channelId` hex +
 /// `inboxId`). The web twin of fauna-ffi's `FfiShareOutcome`.
 #[cfg(target_arch = "wasm32")]
@@ -824,6 +907,7 @@ impl WasmConversationsManager {
         Self {
             manager,
             standing_keypairs: Default::default(),
+            recipient_retirements: Default::default(),
             recipient_public: Default::default(),
             mail_epoch_roots: Default::default(),
             // No transport on the client-less constructor → no bridged rail.
@@ -910,6 +994,33 @@ impl WasmConversationsManager {
     #[wasm_bindgen(js_name = acceptCurrentRecipientChip)]
     pub fn accept_current_recipient_chip(&self) -> bool {
         self.manager.accept_current_recipient_chip()
+    }
+
+    /// `recipient-picker-suggestion[i]` — the Enter path over the suggestion's
+    /// spelling (`ConversationsManager::accept_suggestion`). Resolves to whether
+    /// a chip was committed.
+    #[wasm_bindgen(js_name = acceptSuggestion)]
+    pub fn accept_suggestion(&self, index: u32) -> js_sys::Promise {
+        let mgr = self.manager.clone();
+        future_to_promise(async move { Ok(JsValue::from_bool(mgr.accept_suggestion(index).await)) })
+    }
+
+    /// `recipient-picker-chip[i]`'s × — drop the active picker's chip.
+    #[wasm_bindgen(js_name = removeRecipientChip)]
+    pub fn remove_recipient_chip(&self, index: u32) {
+        self.manager.remove_recipient_chip(index);
+    }
+
+    /// Re-read the contact roster the recipient picker completes over
+    /// (`ConversationsManager::refresh_contact_roster`) — the JS receive tick's
+    /// twin of the native receive loop's re-read. Resolves once loaded.
+    #[wasm_bindgen(js_name = refreshContactRoster)]
+    pub fn refresh_contact_roster(&self) -> js_sys::Promise {
+        let mgr = self.manager.clone();
+        future_to_promise(async move {
+            mgr.refresh_contact_roster().await;
+            Ok(JsValue::UNDEFINED)
+        })
     }
 
     /// Commit a known Fauna actor (`handle` + 64-hex `actor_id`) directly as a
@@ -1039,6 +1150,21 @@ impl WasmConversationsManager {
             .collect();
         *self.standing_keypairs.borrow_mut() = parsed;
         Ok(())
+    }
+
+    /// Stash the prior key generations' retirement instants (unix seconds,
+    /// aligned with the grace generations of [`Self::set_recipient_keypairs`]'
+    /// set) from `WasmMailSettingsMachine::recipientGenerationRetirements`, so
+    /// the openers select the generation current at a record's seal time
+    /// instead of walking the whole ring. `f64` entries (a JS `number`, not a
+    /// `BigInt`); a negative or non-finite entry clamps to 0 (a generation
+    /// treated as retired at the epoch). Idempotent; an empty array clears.
+    #[wasm_bindgen(js_name = setRecipientRetirements)]
+    pub fn set_recipient_retirements(&self, instants: Vec<f64>) {
+        *self.recipient_retirements.borrow_mut() = instants
+            .into_iter()
+            .map(|t| if t.is_finite() { t.max(0.0) as u64 } else { 0 })
+            .collect();
     }
 
     /// Stash the account's own X-Wing recipient **public** key (1216 B, from
@@ -1525,6 +1651,15 @@ impl WasmConversationsManager {
         crate::rpc::to_js(&self.manager.snapshot())
     }
 
+    /// The Status page's `status-mls-channels` — the threads on the MLS rail,
+    /// each one MLS group (`ConversationsManager::secure_channel_count`, the
+    /// shared fold every app paints). An f64 across the boundary (wasm `i64`
+    /// becomes a bigint).
+    #[wasm_bindgen(js_name = secureChannelCount)]
+    pub fn secure_channel_count(&self) -> f64 {
+        self.manager.secure_channel_count() as f64
+    }
+
     /// The bound nest-channel id (hex) for a FaunaMls thread once its MLS group
     /// has bootstrapped, else `None`. Sourced from the manager's channel binding
     /// (not [`Self::thread_detail`] — `ThreadDetail` carries no channel id), the
@@ -1659,6 +1794,21 @@ impl WasmConversationsManager {
             })
             .collect();
         crate::rpc::to_js(&rows)
+    }
+
+    /// The thread ids of the snapshot that seeded the banner tracker (empty
+    /// until one has) — the batch rule 1 keeps silent, which the e2e banner log
+    /// names because a reader cannot infer it from a thread list it read itself
+    /// (`MessageNotificationTracker::seeded_with`).
+    #[wasm_bindgen(js_name = messageBannerSeed)]
+    pub fn message_banner_seed(&self) -> Result<JsValue, JsValue> {
+        let ids: Vec<String> = self
+            .notif_tracker
+            .seeded_with()
+            .into_iter()
+            .map(|id| id.0)
+            .collect();
+        crate::rpc::to_js(&ids)
     }
 
     /// The full [`ThreadDetail`] for one thread (messages + compose +
@@ -2159,6 +2309,19 @@ impl WasmConversationsManager {
                 &keypair,
             )
             .with_predecessors(mls_predecessors)
+            // The walk's actor half: the restore door parks the retired leaf
+            // it finds at this identity's `provider` path under the
+            // predecessor these name, before the first save replaces it — on
+            // web the only durable copy (`succession-propagation.md`
+            // § Propagation → *Own device fleet*, *Where the retired leaf rests
+            // on a device with no local MLS store*, rule (1)).
+            .with_predecessor_actors(
+                crate::succession::account_registry()
+                    .predecessor_backup_keys_by_actor(&keypair.actor_id_hex())
+                    .into_iter()
+                    .map(|(actor, _)| actor)
+                    .collect(),
+            )
             // Leg 3's NARRATION, the other half of the line above. `with_predecessors` makes the re-seal *happen*;
             // without this the pass runs and reports to nobody, so the Recovery
             // kit section renders no leg-3 line and the journey asserting it
@@ -2191,6 +2354,12 @@ impl WasmConversationsManager {
         // (`WsConversationsRpc` impls both `ConversationsRpc` and `LinkPreviewRpc`), so a
         // conversation bubble's bare-url `LinkPreview` resolves through the manager.
         manager.set_link_preview_rpc(rpc.clone());
+        // The recipient picker's contacts (`conversations.md` § Where logic lives
+        // → *Recipient suggestions*) — the one shared roster source; the JS
+        // receive tick reads it through `refreshContactRoster`.
+        manager.register_contact_roster(Arc::new(
+            fauna_client_conversations::NestContactRoster::new(client.clone()),
+        ));
         // The room plane's four nest-backed seams, the SAME object again
         // (`WsConversationsRpc` implements all four), registered on the backend
         // below as one bundle so no seam can be left out.
@@ -2262,12 +2431,14 @@ impl WasmConversationsManager {
         // on the raw manager, because this app has no session; the JS receive
         // loop drives [`Self::poll_bridged`].
         let standing_keypairs: Rc<RefCell<Vec<_>>> = Default::default();
+        let recipient_retirements: Rc<RefCell<Vec<u64>>> = Default::default();
         let recipient_public: Rc<RefCell<Option<_>>> = Default::default();
         let mail_epoch_roots: Rc<RefCell<Vec<_>>> = Default::default();
         let bridged_glue = fauna_client_conversations::NestBridgedGlue::new(
             client.clone(),
             Arc::new(WebBridgedKeySource {
                 standing: Rc::clone(&standing_keypairs),
+                retirements: Rc::clone(&recipient_retirements),
                 epoch_roots: Rc::clone(&mail_epoch_roots),
                 own_public: Rc::clone(&recipient_public),
             }),
@@ -2330,6 +2501,7 @@ impl WasmConversationsManager {
             manager,
             self_address,
             standing_keypairs,
+            recipient_retirements,
             recipient_public,
             mail_epoch_roots,
             bridged: RefCell::new(Some((bridged_backend, bridged_glue))),
@@ -2405,6 +2577,20 @@ impl WasmConversationsManager {
         let mgr = self.manager.clone();
         future_to_promise(async move {
             mgr.resolve_recipient().await;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    /// Re-derive a compose's list-send view (`ComposeState.list_send`) — the
+    /// thread `threadId`'s compose, or the new-thread compose when omitted. The
+    /// page calls it after a recipient chip commits and when a thread opens
+    /// (`mail-mass-mailing.md` § Composing a list message); the next snapshot
+    /// carries the three `dm-compose-list-*` texts. Resolves once updated.
+    #[wasm_bindgen(js_name = refreshListSend)]
+    pub fn refresh_list_send(&self, thread_id: Option<String>) -> js_sys::Promise {
+        let mgr = self.manager.clone();
+        future_to_promise(async move {
+            mgr.refresh_list_send(thread_id.map(ThreadId)).await;
             Ok(JsValue::UNDEFINED)
         })
     }
@@ -2678,6 +2864,122 @@ impl WasmConversationsManager {
     ) -> Result<JsValue, JsValue> {
         let draft: RoomSettingsDraft = crate::rpc::from_js(draft)?;
         crate::rpc::to_js(&draft.edits(&self.room_participants(&thread_id)))
+    }
+
+    /// Stage `room-nest-read-toggle` — flip the staged home-nest read
+    /// ([`RoomSettingsDraft::toggle_nest_read`]); a no-op where the draft
+    /// carries none to stage.
+    #[wasm_bindgen(js_name = roomSettingsToggleNestRead)]
+    pub fn room_settings_toggle_nest_read(&self, draft: JsValue) -> Result<JsValue, JsValue> {
+        let mut draft: RoomSettingsDraft = crate::rpc::from_js(draft)?;
+        draft.toggle_nest_read();
+        crate::rpc::to_js(&draft)
+    }
+
+    /// Stage `room-labeler-toggle[i]` for the labeler `labeler_id` (lowercase
+    /// hex — the catalog entry's id, never a row index).
+    #[wasm_bindgen(js_name = roomSettingsToggleLabeler)]
+    pub fn room_settings_toggle_labeler(
+        &self,
+        draft: JsValue,
+        labeler_id: String,
+    ) -> Result<JsValue, JsValue> {
+        let mut draft: RoomSettingsDraft = crate::rpc::from_js(draft)?;
+        draft.toggle_labeler(&labeler_id);
+        crate::rpc::to_js(&draft)
+    }
+
+    /// `room-labeler-toggle[i]`'s `checked` state, staging included.
+    #[wasm_bindgen(js_name = roomSettingsLabelerStaged)]
+    pub fn room_settings_labeler_staged(
+        &self,
+        draft: JsValue,
+        labeler_id: String,
+    ) -> Result<bool, JsValue> {
+        let draft: RoomSettingsDraft = crate::rpc::from_js(draft)?;
+        Ok(draft.labeler_staged(&labeler_id))
+    }
+
+    /// Whether `room-labeler-toggle[i]` may act, capability aside (the painter
+    /// adds its own `capabilities.can_set_policy` term).
+    #[wasm_bindgen(js_name = roomSettingsLabelerToggleLive)]
+    pub fn room_settings_labeler_toggle_live(
+        &self,
+        draft: JsValue,
+        labeler_id: String,
+    ) -> Result<bool, JsValue> {
+        let draft: RoomSettingsDraft = crate::rpc::from_js(draft)?;
+        Ok(draft.labeler_toggle_live(&labeler_id))
+    }
+
+    // ── The community room's three controls + pending invitations ────────
+    //
+    // `ui/conversations.md` § Element IDs → *The community room's three
+    // controls* / *Pending invitations*. Each call is the one
+    // `ConversationsManager` method every app reaches — web adds no policy.
+
+    /// `recipient-picker-home-nest-toggle`: whether the new room's home nest is
+    /// itself a member (the composer's choice; the send founds through
+    /// `room.create` when the prospective class is community).
+    #[wasm_bindgen(js_name = setNewThreadHomeNest)]
+    pub fn set_new_thread_home_nest(&self, include: bool) {
+        self.manager.set_new_thread_home_nest(include);
+    }
+
+    /// `room-invitation-accept-button[i]` — accept the invitation `id`
+    /// (`RoomInvitationSnapshot::id`, a plain JS number). Resolves to the
+    /// room's thread id (the manager selects it), else `null`; a refusal rides
+    /// the page's `error-message`.
+    #[wasm_bindgen(js_name = acceptRoomInvitation)]
+    pub fn accept_room_invitation(&self, id: f64) -> js_sys::Promise {
+        let mgr = self.manager.clone();
+        future_to_promise(async move {
+            match mgr.accept_room_invitation(id as i64).await {
+                Some(thread) => Ok(JsValue::from_str(&thread.0)),
+                None => Ok(JsValue::NULL),
+            }
+        })
+    }
+
+    /// `room-invitation-decline-button[i]` — decline (and acknowledge) the
+    /// invitation `id`.
+    #[wasm_bindgen(js_name = declineRoomInvitation)]
+    pub fn decline_room_invitation(&self, id: f64) -> js_sys::Promise {
+        let mgr = self.manager.clone();
+        future_to_promise(async move {
+            mgr.decline_room_invitation(id as i64).await;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    /// `room-pending-invite-withdraw-button[i]` — withdraw the invitation of
+    /// `invitee_actor_hex` (`RoomPendingInviteSnapshot::invitee_actor_hex`).
+    /// Acts immediately, outside the editor's staged set.
+    #[wasm_bindgen(js_name = withdrawRoomInvite)]
+    pub fn withdraw_room_invite(
+        &self,
+        thread_id: String,
+        invitee_actor_hex: String,
+    ) -> js_sys::Promise {
+        let mgr = self.manager.clone();
+        future_to_promise(async move {
+            mgr.withdraw_room_invite(ThreadId(thread_id), invitee_actor_hex)
+                .await;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    /// `room-leave-confirm` — walk out of the room `thread_id`. One verb: the
+    /// manager dispatches by the room's class inside the backend, so no app
+    /// branches on it. The thread stays in the leaver's list; a refusal rides
+    /// the page's `error-message`.
+    #[wasm_bindgen(js_name = leaveRoom)]
+    pub fn leave_room(&self, thread_id: String) -> js_sys::Promise {
+        let mgr = self.manager.clone();
+        future_to_promise(async move {
+            mgr.leave_room(ThreadId(thread_id)).await;
+            Ok(JsValue::UNDEFINED)
+        })
     }
 
     /// The thread's participants, which every staging call above indexes
@@ -3614,6 +3916,8 @@ impl WasmConversationsManager {
                 crate::account_runtime::ledger_seam(),
                 &keypair,
             ));
+            let walk_backend = Arc::clone(&gate_backend);
+            let walk_client = client.clone();
             let mut author = FoldersAuthor::new(
                 FoldersClient::new(client.clone()),
                 keypair_from_secret_hex(&owner_secret_hex)?,
@@ -3637,6 +3941,16 @@ impl WasmConversationsManager {
                 .resume_pending_removals()
                 .await
                 .map_err(crate::rpc::err_to_js)?;
+            // The launch pass converged every owned envelope; from here the
+            // folder commit walk re-seals one whenever the group's epoch
+            // moves past it — the native pass's twin (`launch_resume.rs`).
+            walk_backend.set_folder_envelope_owner(Arc::new(FoldersAuthor::new(
+                FoldersClient::new(walk_client),
+                keypair_from_secret_hex(&owner_secret_hex)?,
+                crate::account_runtime::folder_key_store(actor_hex.clone()),
+                crate::account_runtime::mail_store(),
+                walk_backend.engine(),
+            )));
             if !SERVED_BLOB_FOLLOWING.replace(true) {
                 let store = crate::account_runtime::folder_key_store(actor_hex);
                 match fauna_client_folders::FolderKeyStore::change_notices(&*store).await {
@@ -4065,6 +4379,59 @@ impl WasmConversationsManager {
         Ok(self.manager.handle_for_person(&person))
     }
 
+    /// The private contact overlay's face over this manager's projection
+    /// (`crate::contact_overlays`) — what every surface keyed on a person
+    /// reads its names through, and the private section's Save.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = contactOverlays)]
+    pub fn contact_overlays(&self) -> crate::contact_overlays::WasmContactOverlays {
+        crate::contact_overlays::WasmContactOverlays::over(Arc::clone(&self.manager))
+    }
+
+    /// The Events page's open refused changes (`ui/events.md` § Refused
+    /// scheduling changes) — a list of `{ key, headline, author, reason,
+    /// attempts, lastRefusedAt }`, the texts `LocalizedText`s the SPA resolves
+    /// (`resolveLocalized`). Empty (the list stays absent) when nothing is
+    /// open or the account store is not up yet. Each sender handle is
+    /// re-derived here at read, never cached into the record, and is only a
+    /// candidate the shared view may decline to lend.
+    #[wasm_bindgen(js_name = refusedChanges)]
+    pub fn refused_changes(&self) -> js_sys::Promise {
+        let manager = self.manager.clone();
+        future_to_promise(async move {
+            let store = crate::account_runtime::handle();
+            let rows: Vec<RefusedChangeJs> =
+                fauna_account_seams::refused_changes::load_views(store.as_ref(), &manager)
+                    .await
+                    .into_iter()
+                    .map(|view| RefusedChangeJs {
+                        key: view.key,
+                        headline: view.headline,
+                        author: view.author,
+                        reason: view.reason,
+                        attempts: view.attempts,
+                        last_refused_at: view.last_refused_at as f64,
+                    })
+                    .collect();
+            crate::rpc::to_js(&rows)
+        })
+    }
+
+    /// Dismiss the refused-change row `key` names — the owner's *I have seen
+    /// this*, a local store write. Resolves to whether it was open (a sibling
+    /// device may have dismissed it first — a success no-op); rejects when
+    /// the account store is not up or refused the write.
+    #[wasm_bindgen(js_name = dismissRefusedChange)]
+    pub fn dismiss_refused_change(&self, key: String) -> js_sys::Promise {
+        future_to_promise(async move {
+            let store = crate::account_runtime::handle();
+            let was_open = fauna_account_seams::refused_changes::dismiss(store.as_ref(), &key)
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            Ok(JsValue::from_bool(was_open))
+        })
+    }
+
     /// Record **Keep** — closes every open item for `person` with no group
     /// changes. Resolves to whether anything was actually open (a concurrent
     /// device may have already answered — a success no-op, never a rejection).
@@ -4232,6 +4599,8 @@ impl fauna_client_inbox::InboxApply for WebInboxApply {
                 welcome.set_name_sealed.as_deref().map(|b| &b[..]),
                 welcome.set_name_hash.as_deref().map(|b| &b[..]),
             ),
+            // The home nest's residency stamp — seeds the foreign-set record.
+            residency: welcome.residency,
         };
         ingest_welcome_by_kind(
             backend,
@@ -4295,21 +4664,21 @@ fn open_sealed_mail_record(
     // record, which the chain's standing arm opens. `f64` param (not `i64`) to
     // keep the JS boundary a `number`, not a `BigInt`.
     let seal_instant = (stored_at_secs as i64).max(0) as u64;
+    let retirements = manager.recipient_retirements.borrow();
     let epoch_roots_guard = manager.mail_epoch_roots.borrow();
     let epoch_roots: Vec<&[u8; 32]> = epoch_roots_guard.iter().collect();
     // The one shared opener the native page opener uses too: the epoch chain
     // over the roots, then the standing arm over the complete key set (current
     // + grace generations, either suite per keypair), so standing-sealed and
     // pre-rotation mail open exactly as they do on every other app.
-    // No retirement instants cross the JS seam yet (`setRecipientKeypairs`
-    // carries the keypairs alone): the whole set walks newest first, which
-    // opens every generation — only the seal-time ordering is native-only.
+    // The custody's retirement instants (`setRecipientRetirements`) select the
+    // generation current at the seal time and trial outward, as on native.
     fauna_mail::open_inbound_record_with_keys(
         sealed_envelope,
         &epoch_roots,
         seal_instant,
         &keypairs,
-        &[],
+        &retirements,
     )
     .map_err(|e| OpenMiss::Unopenable(format!("open inbound record (uid {uid}): {e}")))
 }
@@ -4379,8 +4748,9 @@ async fn resolve_mail_body_ref_inner(
 ///
 /// Kept out of the `#[wasm_bindgen]` impl deliberately: this is a Rust-side seam
 /// between two wasm modules, not a JS face. The engine and the sync it must be
-/// persisted through never cross into JS — the SPA passes the *manager* to
-/// `succeedIdentityWithHeldKit` and this assembles the pair on this side.
+/// persisted through never cross into JS — the SPA lends the *manager* to
+/// `succeedIdentityWithHeldKit` (by reference: a by-value export would zero the
+/// SPA's live handle) and this assembles the pair on this side.
 #[cfg(target_arch = "wasm32")]
 impl WasmConversationsManager {
     /// This session's MLS engine plus everything needed to land its state, or
@@ -4390,10 +4760,10 @@ impl WasmConversationsManager {
     /// `None` is a legitimate ceremony outcome, not a failure: it is exactly
     /// native's `SweepStatus::NoEngine` arm — conversations were not up, so there
     /// was no engine to sweep from.
-    pub(crate) fn succession_engine(&self) -> Option<crate::succession::OldEngineHandle> {
+    pub(crate) fn succession_engine(&self) -> Option<crate::succession::LiveEngineHandle> {
         let backend = self.fauna_mls.borrow().clone()?;
         let sync = self.mls_sync.clone()?;
-        Some(crate::succession::OldEngineHandle {
+        Some(crate::succession::LiveEngineHandle {
             engine: backend.engine(),
             backend,
             manager: self.manager.clone(),
@@ -4412,6 +4782,17 @@ impl WasmConversationsManager {
 // `format!("{:?}")` and serde's unit-variant name are the same string), so the
 // SPA feeds a helper what it just read off the thread and never maintains a
 // parallel table.
+
+/// Whether an available key-package count is low enough for the Settings →
+/// Encryption page's read-only warning — the shared
+/// [`fauna_conversations::keypackages_low`] (`direct-messages.md` § Key
+/// Package Management: fewer than five, a display flag only). `f64` because a
+/// wasm `u64` parameter crosses as a JS `bigint`; the count is a small
+/// non-negative integer.
+#[wasm_bindgen(js_name = keypackagesLow)]
+pub fn keypackages_low(count: f64) -> bool {
+    fauna_conversations::keypackages_low(count.max(0.0) as u64)
+}
 
 /// The class's localized sentence — what `thread-room-class` and
 /// `recipient-picker-class` state (`RoomClass::label`).
@@ -4530,4 +4911,59 @@ pub fn room_join_rule_token(rule: JsValue) -> Result<String, JsValue> {
 pub fn room_history_policy_token(policy: JsValue) -> Result<String, JsValue> {
     let policy: fauna_conversations::room::HistoryPolicy = crate::rpc::from_js(policy)?;
     Ok(policy.token().to_string())
+}
+
+/// The room's standing notice, if one holds — `"AwaitingKey"` /
+/// `"ModerationUnverified"` or `null` (`RoomNotice::for_facts`: awaiting-key
+/// wins). Takes the two facts off the projected room, so no app re-decides
+/// which one speaks (`thread-room-notice`).
+#[wasm_bindgen(js_name = roomNoticeFor)]
+pub fn room_notice_for(
+    awaiting_key: bool,
+    moderation_unverified: bool,
+) -> Result<JsValue, JsValue> {
+    match fauna_conversations::room::room_notice_for(awaiting_key, moderation_unverified) {
+        Some(notice) => crate::rpc::to_js(&notice),
+        None => Ok(JsValue::NULL),
+    }
+}
+
+/// `thread-room-notice`'s text (`RoomNotice::label`).
+#[wasm_bindgen(js_name = roomNoticeLabel)]
+pub fn room_notice_label(notice: JsValue) -> Result<String, JsValue> {
+    let notice: fauna_conversations::room::RoomNotice = crate::rpc::from_js(notice)?;
+    Ok(fauna_conversations::room::room_notice_label(notice))
+}
+
+/// `thread-room-notice`'s `state` attribute — `moderation-unverified` /
+/// `awaiting-key` (`RoomNotice::attr_token`).
+#[wasm_bindgen(js_name = roomNoticeAttrToken)]
+pub fn room_notice_attr_token(notice: JsValue) -> Result<String, JsValue> {
+    let notice: fauna_conversations::room::RoomNotice = crate::rpc::from_js(notice)?;
+    Ok(fauna_conversations::room::room_notice_attr_token(notice))
+}
+
+/// The `room-invitation[i]` row's sentence (`RoomInvitationSnapshot::text`) —
+/// one wording for all seven apps.
+#[wasm_bindgen(js_name = roomInvitationText)]
+pub fn room_invitation_text(invitation: JsValue) -> Result<String, JsValue> {
+    let invitation: fauna_conversations::room::RoomInvitationSnapshot =
+        crate::rpc::from_js(invitation)?;
+    Ok(fauna_conversations::room::room_invitation_text(invitation))
+}
+
+/// The `room-pending-invite[i]` row's sentence
+/// (`RoomPendingInviteSnapshot::text`).
+#[wasm_bindgen(js_name = roomPendingInviteText)]
+pub fn room_pending_invite_text(invite: JsValue) -> Result<String, JsValue> {
+    let invite: fauna_conversations::room::RoomPendingInviteSnapshot = crate::rpc::from_js(invite)?;
+    Ok(fauna_conversations::room::room_pending_invite_text(invite))
+}
+
+/// Whether a community room may name a labeler of this artifact kind — the
+/// filter every editor applies to the catalog before painting a
+/// `room-labeler-toggle` row (`room_may_name_labeler_kind`).
+#[wasm_bindgen(js_name = roomMayNameLabelerKind)]
+pub fn room_may_name_labeler_kind(kind: String) -> bool {
+    fauna_conversations::room_settings::room_may_name_labeler_kind(kind)
 }

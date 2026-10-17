@@ -17,6 +17,7 @@ reachability path runs the full client UI against the live session.
 
 import pytest
 
+from helpers.budgets import ORCHESTRATION_STEP_S
 from i18n.strings import S
 
 # The mail-settings page is implemented on linux + web + windows (the linux
@@ -289,10 +290,21 @@ def test_mail_settings_rotate_keys_completes(logged_in_app):
     assert before >= 1
 
     app.mail_settings.rotate_keys()
-    # page_error_text waits up to the timeout for an error to surface, returning
-    # "" if none — which doubles as the settle window for the rotation loop.
-    err = app.mail_settings.page_error_text(timeout=10.0)
+    # Settle on observable state, never a wall-clock window (convention 14): the
+    # confirm form closes when StartRotation's dispatch returns, and the page
+    # reads "All up to date" once the re-wrapped snapshot settles. Waiting for
+    # the latter keeps the next test on this shared user out of the window a
+    # relaunch before the rotation settles exposes.
+    assert app.mail_settings.wait_for_rotation_to_finish(ORCHESTRATION_STEP_S), (
+        "rotate-keys never finished: the confirm form is still open; "
+        f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
+    )
+    err = app.mail_settings.page_error_text(timeout=2.0)
     assert not err, f"rotate-keys should complete without error; got {err!r}"
+    assert app.mail_settings.wait_for_enabled_status(timeout=ORCHESTRATION_STEP_S), (
+        "rotate-keys must settle to up to date; "
+        f"status={app.mail_settings.status_text()!r}"
+    )
     assert app.mail_settings.credential_count() == before, (
         f"rotation should preserve all {before} surviving credential(s); "
         f"got {app.mail_settings.credential_count()}"
@@ -366,7 +378,11 @@ def test_calendar_written_before_a_key_rotation_still_opens(app, request, nest_i
         f"error: {app.error_text()!r}"
     )
     ev.select_calendar(cal_name)
-    summaries = ev.event_summaries()
+    # Polled by identity: the calendar is no longer "freshly created", so the
+    # selection waits for nothing, and a single read lands while the remounted
+    # page's ring-keyed query is still in flight — on web, which keeps no
+    # relaunch to absorb it, that read was always `[]` (convention 14).
+    summaries = ev.wait_for_listed([summary])
     assert summary in summaries, (
         f"the event created before the rotation must still render; "
         f"events={summaries!r}, error: {app.error_text()!r}"

@@ -40,6 +40,7 @@ use core::time::Duration;
 
 use fauna_core::data::DeploymentSeedEntry;
 use fauna_core::identity::{ActorId, ActorKeypair};
+use fauna_core::localized::LocalizedText;
 use fauna_core::secret::SecretString;
 use fauna_protocol::admin::{AdminDeploymentSeedRotateReply, AdminDeploymentSeedRotateRequest};
 use fauna_protocol::nest_rotation::{
@@ -141,38 +142,42 @@ impl DeploymentSeedCustody {
     }
 }
 
+/// The i18n key of the BR-2 warning — the box handed off a seed that does not
+/// derive to the identity this connection is bound to.
+pub const CUSTODY_MISMATCH_KEY: &str = "launch.recovery_custody_mismatch";
+
+/// The i18n key of every other unconfirmed custody — the fetch, the store or
+/// the bound-id resolution did not land it this run, or the box holds no seed
+/// to hand over. Retried at the next edge; the detail is logged, not shown.
+pub const CUSTODY_UNCONFIRMED_KEY: &str = "launch.recovery_custody_failed";
+
 /// The user-visible warning a custody-leg run owes the admin, or `None` when
 /// nothing is owed (custody held, captured, or not an admin here) —
 /// `box-recovery.md` § The plane-era recovery floor, *(c)*: a run that ends
 /// with custody unconfirmed for an admin of the bound nest warns. Every host
-/// renders this one text onto its own existing warning surface, so the wording
-/// cannot drift per app.
+/// renders this one [`LocalizedText`] through its own resolver onto its
+/// existing warning surface, so neither the wording nor the choice between the
+/// two warnings can drift per app.
 #[must_use]
-pub fn custody_leg_warning(custody: &DeploymentSeedCustody) -> Option<String> {
+pub fn custody_leg_warning(custody: &DeploymentSeedCustody) -> Option<LocalizedText> {
     match custody {
         DeploymentSeedCustody::AlreadyCustodied
         | DeploymentSeedCustody::Captured
         | DeploymentSeedCustody::NotAdmin => None,
-        DeploymentSeedCustody::RefusedMismatch => Some(
-            "the nest handed off an inconsistent recovery key — total-box-loss recovery is \
-             not protected"
-                .to_string(),
-        ),
-        DeploymentSeedCustody::NestHoldsNoSeed => Some(
-            "this nest holds no recovery key to save — total-box-loss recovery is not \
-             protected"
-                .to_string(),
-        ),
-        DeploymentSeedCustody::HandoffUnavailable => Some(
-            "total-box-loss recovery custody not yet saved: the nest could not be asked for \
-             its recovery key; retrying on the next connect"
-                .to_string(),
-        ),
-        DeploymentSeedCustody::StoreRefused(detail) => Some(format!(
-            "total-box-loss recovery custody not yet saved: {detail}; retrying on the next \
-             connect"
-        )),
+        DeploymentSeedCustody::RefusedMismatch => Some(LocalizedText::key(CUSTODY_MISMATCH_KEY)),
+        DeploymentSeedCustody::NestHoldsNoSeed
+        | DeploymentSeedCustody::HandoffUnavailable
+        | DeploymentSeedCustody::StoreRefused(_) => Some(custody_leg_unattempted_warning()),
     }
+}
+
+/// The warning owed when the custody leg could not even be attempted — the
+/// bound nest id did not resolve, or the host could not reach the leg at all
+/// (no connection, no secret). Custody is then not confirmed, so the admin is
+/// warned exactly as for an unconfirmed run.
+#[must_use]
+pub fn custody_leg_unattempted_warning() -> LocalizedText {
+    LocalizedText::key(CUSTODY_UNCONFIRMED_KEY)
 }
 
 /// How the mark half of [`run_deployment_seed_custody_leg`] ended.
@@ -458,9 +463,6 @@ fn successor_on_verified_chain(
 /// in every arm the box was not asked to rotate.
 #[derive(Debug)]
 pub enum PlaneSeedRotationError<E> {
-    /// No account-store handle: the plane custody the ceremony must precede
-    /// does not exist in this session.
-    NoAccountStore,
     /// The account store refused the successor's custody merge (or the read
     /// of it) — most often the door's refusal while no generation tip
     /// resolves.
@@ -476,12 +478,6 @@ pub enum PlaneSeedRotationError<E> {
 impl<E: core::fmt::Display> core::fmt::Display for PlaneSeedRotationError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::NoAccountStore => {
-                write!(
-                    f,
-                    "seed rotation needs the account store, which is not ready"
-                )
-            }
             Self::CustodyRefused(e) => write!(f, "seed rotation: successor custody refused: {e}"),
             Self::NotPublished => write!(
                 f,
@@ -514,24 +510,24 @@ impl<E: core::fmt::Display + core::fmt::Debug> std::error::Error for PlaneSeedRo
 ///    idempotently).
 /// 5. **Mark** the predecessor `superseded_by` the successor.
 ///
-/// No handle, a refused merge, or a row not published in time aborts BEFORE
-/// step 4. A mark that fails after the dispatch returns
+/// `store` is the host's per-call resolver over its account-store handle
+/// ([`crate::ResolvingLedgerStore`]): a confirm clicked while the store is
+/// still assembling waits out [`crate::LEDGER_READY_WAIT`], and a store that
+/// never comes is refused plainly as [`PlaneSeedRotationError::CustodyRefused`]
+/// carrying [`crate::LEDGER_NOT_READY`]. A refused merge, or a row not
+/// published in time, aborts BEFORE step 4 the same way. A mark that fails after the dispatch returns
 /// `predecessor_marked: false` — and is no longer final: the custody leg's
 /// mark reconcile re-derives it from the verified chain at the next edge.
 pub async fn rotate_deployment_seed_on_plane<R, S>(
     nest: &R,
     bound_nest_id: ActorId,
-    store: Option<&S>,
+    store: &S,
 ) -> Result<SeedRotation, PlaneSeedRotationError<R::Error>>
 where
     R: RpcRequester,
     R::Error: RpcErrorClass,
     S: DeploymentSeedStore + ?Sized,
 {
-    let Some(store) = store else {
-        return Err(PlaneSeedRotationError::NoAccountStore);
-    };
-
     // Step 1 — mint.
     let successor_kp = ActorKeypair::generate();
     let successor_seed = *successor_kp.secret_bytes();
@@ -713,9 +709,27 @@ mod tests {
                 "{outcome:?}"
             );
         }
-        let refused = custody_leg_warning(&DeploymentSeedCustody::StoreRefused("no tip".into()))
-            .expect("warns");
-        assert!(refused.contains("no tip"), "carries the detail: {refused}");
+        // One wording per kind of failure, never per app: the BR-2 mismatch is
+        // its own warning, every other unconfirmed arm the one "not saved" line.
+        assert_eq!(
+            custody_leg_warning(&DeploymentSeedCustody::RefusedMismatch),
+            Some(LocalizedText::key(CUSTODY_MISMATCH_KEY))
+        );
+        for unconfirmed in [
+            DeploymentSeedCustody::HandoffUnavailable,
+            DeploymentSeedCustody::NestHoldsNoSeed,
+            DeploymentSeedCustody::StoreRefused("no tip".into()),
+        ] {
+            assert_eq!(
+                custody_leg_warning(&unconfirmed),
+                Some(custody_leg_unattempted_warning()),
+                "{unconfirmed:?}"
+            );
+        }
+        assert_eq!(
+            custody_leg_unattempted_warning(),
+            LocalizedText::key(CUSTODY_UNCONFIRMED_KEY)
+        );
     }
 
     /// A host that builds its machines before the store is up holds the
@@ -1120,7 +1134,7 @@ mod tests {
         let (nest, store) = rotating(&pred);
         store.set_publish(SeedPublish::AfterPolls(3));
 
-        let outcome = rotate_deployment_seed_on_plane(&nest, pred.actor_id(), Some(&store))
+        let outcome = rotate_deployment_seed_on_plane(&nest, pred.actor_id(), &store)
             .await
             .expect("rotate");
         let SeedRotation::Rotated {
@@ -1157,7 +1171,7 @@ mod tests {
         let (nest, store) = rotating(&pred);
         store.refuse_next_merges(1);
 
-        let err = rotate_deployment_seed_on_plane(&nest, pred.actor_id(), Some(&store))
+        let err = rotate_deployment_seed_on_plane(&nest, pred.actor_id(), &store)
             .await
             .expect_err("refused before dispatch");
 
@@ -1174,7 +1188,7 @@ mod tests {
         let (nest, store) = rotating(&pred);
         store.set_publish(SeedPublish::Never);
 
-        let err = rotate_deployment_seed_on_plane(&nest, pred.actor_id(), Some(&store))
+        let err = rotate_deployment_seed_on_plane(&nest, pred.actor_id(), &store)
             .await
             .expect_err("gave up before dispatch");
 
@@ -1185,21 +1199,21 @@ mod tests {
         assert!(!rotate_dispatched(&nest));
     }
 
+    /// A store that never comes up: the per-call resolver waits out
+    /// [`crate::LEDGER_READY_WAIT`] and then the drive refuses plainly, before
+    /// any dispatch — the one shape every host's rotate action drives.
     #[tokio::test(start_paused = true)]
     async fn without_a_handle_the_drive_refuses_plainly() {
         let pred = kp(33);
         let nest = FakeConfigNest::default();
+        let never = crate::ResolvingLedgerStore::new(|| None::<FakeDeploymentSeedStore>);
 
-        let err = rotate_deployment_seed_on_plane::<_, FakeDeploymentSeedStore>(
-            &nest,
-            pred.actor_id(),
-            None,
-        )
-        .await
-        .expect_err("no store");
+        let err = rotate_deployment_seed_on_plane(&nest, pred.actor_id(), &never)
+            .await
+            .expect_err("no store");
 
         assert!(
-            matches!(err, PlaneSeedRotationError::NoAccountStore),
+            matches!(&err, PlaneSeedRotationError::CustodyRefused(e) if e.is_not_ready()),
             "{err:?}"
         );
         assert!(nest.calls.lock().unwrap().is_empty());
@@ -1214,7 +1228,7 @@ mod tests {
         let (nest, store) = rotating(&pred);
         store.refuse_after(1); // the successor's merge lands; the mark does not
 
-        let outcome = rotate_deployment_seed_on_plane(&nest, pred.actor_id(), Some(&store))
+        let outcome = rotate_deployment_seed_on_plane(&nest, pred.actor_id(), &store)
             .await
             .expect("the rotation itself committed");
         let SeedRotation::Rotated {

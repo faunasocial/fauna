@@ -45,24 +45,25 @@ Stamped 2026-10-01 at e129e78aa0.
    - `tests/e2e-unified/tests/test_trust_prompt.py::test_the_joiner_can_decline_and_still_reach_the_app`
    - `tests/e2e-unified/tests/test_trust_prompt.py::test_the_joiner_can_accept_and_still_reach_the_app`
 9. [nest] A paid membership code admits you like an invite code, wherever the nest takes invite codes — `docs/goal/behavior/monetization.md` § Pillar 4
-   - (none)
+   - `tests/e2e-unified/tests/api/test_membership_admission.py::test_a_paid_membership_code_admits_like_an_invite_code`
+   - `tests/e2e-unified/tests/api/test_membership_admission.py::test_a_paid_membership_code_is_refused_when_the_nest_takes_no_codes`
 10. [nest] A request to join that a verified payment backs is approved without waiting for an admin — `docs/goal/behavior/monetization.md` § Pillar 4
-   - (none)
+   - `tests/e2e-unified/tests/api/test_membership_admission.py::test_a_join_request_a_verified_payment_backs_is_approved_without_an_admin`
 11. [nest] A sign-up whose app reports the person as a minor is refused and pointed to joining through a guardian — `docs/goal/architecture/nest/public-mode.md` § Registration Modes
-    - (none)
+    - `tests/e2e-unified/tests/api/test_registration_posture.py::test_a_sign_up_reported_as_a_minor_is_pointed_to_a_guardian`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+4bc2efab standalone |
-| linux | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| windows | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| macos | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| ios | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
+| web | ✅ full | 0.1.2-dev+4bc2efab standalone |
+| linux | ✅ full | 0.1.4-dev+52904896 standalone |
+| windows | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| macos | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| ios | ⚠ partial | 0.1.4-dev+52904896 standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.2-dev+7663afa6 standalone |
+| tui | ✅ full | 0.1.2-dev+7663afa6 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -84,7 +85,8 @@ Stamped 2026-10-01 at e129e78aa0.
 | 8 | app | `tests/e2e-unified/tests/test_trust_prompt.py::test_joining_by_invite_code_offers_the_one_tap_trust` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_trust_prompt.py::test_the_joiner_can_decline_and_still_reach_the_app` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_trust_prompt.py::test_the_joiner_can_accept_and_still_reach_the_app` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 9 | nest | (none) | — |
-| 10 | nest | (none) | — |
-| 11 | nest | (none) | — |
+| 9 | nest | `tests/e2e-unified/tests/api/test_membership_admission.py::test_a_paid_membership_code_admits_like_an_invite_code` | nest (linux): passed |
+| 9 | nest | `tests/e2e-unified/tests/api/test_membership_admission.py::test_a_paid_membership_code_is_refused_when_the_nest_takes_no_codes` | nest (linux): passed |
+| 10 | nest | `tests/e2e-unified/tests/api/test_membership_admission.py::test_a_join_request_a_verified_payment_backs_is_approved_without_an_admin` | nest (linux): passed |
+| 11 | nest | `tests/e2e-unified/tests/api/test_registration_posture.py::test_a_sign_up_reported_as_a_minor_is_pointed_to_a_guardian` | nest (linux): passed |
 <!-- features-render:end -->

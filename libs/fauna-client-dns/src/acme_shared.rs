@@ -209,6 +209,10 @@ pub enum Dns01Error {
     /// (needed for the `TlsCertBundle.expires_at` the consumer renews against).
     #[error("parse issued certificate: {0}")]
     CertParse(String),
+    /// Sealing the issued cert to its target nest failed (HPKE seal or CBOR
+    /// encoding — [`seal_issued_cert_for_nest`]).
+    #[error("seal cert: {0}")]
+    Seal(String),
 }
 
 // `fauna-acme-core` is a `not(target_arch = "wasm32")`-only dependency
@@ -262,6 +266,26 @@ pub fn tls_cert_bundle_from_issued(issued: &Dns01Issued) -> Result<TlsCertBundle
         expires_at,
         issued_at: Timestamp::now_secs().max(0) as u64,
     })
+}
+
+/// Seal a finished order's cert to the nest it is for and sign it as the admin:
+/// the `(ciphertext, actor_sig)` pair `fauna.tls.publish_cert` carries. The seal
+/// target is `target_nest_id` (the nest's published, client-pinned Ed25519 node
+/// id) converted to its x25519 pubkey — the convention the nest's installer
+/// opens with (`lan_cert::install_client_issued_cert`). The one producer: the
+/// admin-dns machine's delivery and the e2e harness's export both call it.
+pub fn seal_issued_cert_for_nest(
+    issued: &Dns01Issued,
+    domain: &str,
+    target_nest_id: &[u8; 32],
+    actor_sk: &ed25519_dalek::SigningKey,
+) -> Result<(Vec<u8>, Vec<u8>), Dns01Error> {
+    let bundle = tls_cert_bundle_from_issued(issued)?;
+    let target_x25519 = fauna_core::identity::ActorId(*target_nest_id)
+        .to_x25519_public()
+        .to_bytes();
+    fauna_mls::wrapped_blob::seal_lan_tls_cert_entry(&bundle, domain, &target_x25519, actor_sk)
+        .map_err(|e| Dns01Error::Seal(e.to_string()))
 }
 
 /// Parse the leaf (first PEM block) certificate's `notAfter` as a Unix second.

@@ -257,6 +257,55 @@
                 </Grid>
             </StackPanel>
 
+            <!-- Web-app origin (fauna.admin.web_app_origin.{get,set}; admin.md § N
+                 Nest → Web-app origin), directly after NAT mode. Every rendering
+                 decision is the shared fauna_client_admin::admin_web_app_origin_view
+                 fold — this page paints what it hands back: radios unmarked and
+                 disabled until the read lands and whenever can_set is false, the
+                 central radio's label and the status + scope lines are the view's,
+                 and a save repaints from the set's own reply. A radio pick is local;
+                 the save commits it. Mirrors android's WebAppOriginSection. -->
+            <StackPanel x:Name="WebAppOriginSection"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestWebAppOriginSection}"
+                        AutomationProperties.Name="admin-nest-web-app-origin-section"
+                        Spacing="8">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=admin/nest_page/web_app_origin_label}" />
+                <TextBlock Opacity="0.6" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=admin/nest_page/web_app_origin_desc}" />
+
+                <RadioButton x:Name="WebAppOriginBundledRadio"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestWebAppOriginBundledRadio}"
+                             GroupName="AdminWebAppOrigin"
+                             IsEnabled="False"
+                             Checked="WebAppOriginBundledRadio_Checked"
+                             Content="{loc:Localize Key=admin/nest_page/web_app_origin_bundled}" />
+
+                <!-- No static Name and no Content binding in markup: the label is
+                     the view's centralLabel, set at render. -->
+                <RadioButton x:Name="WebAppOriginCentralRadio"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestWebAppOriginCentralRadio}"
+                             GroupName="AdminWebAppOrigin"
+                             IsEnabled="False"
+                             Checked="WebAppOriginCentralRadio_Checked" />
+
+                <!-- No AutomationProperties.Name, so get_text reads the dynamic
+                     Text (mirrors nest-os-maintenance-status). -->
+                <TextBlock x:Name="WebAppOriginStatusText"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestWebAppOriginStatus}"
+                           TextWrapping="Wrap" Opacity="0.7" />
+                <!-- A direct child of this panel: the offline gate hosts its inline
+                     reason caption as the next sibling. -->
+                <Button x:Name="WebAppOriginSaveButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestWebAppOriginSaveButton}"
+                        HorizontalAlignment="Left"
+                        IsEnabled="False"
+                        Click="WebAppOriginSaveButton_Click"
+                        Content="{loc:Localize Key=admin/nest_page/web_app_origin_save}" />
+                <TextBlock x:Name="WebAppOriginScopeText"
+                           Opacity="0.6" TextWrapping="Wrap" />
+            </StackPanel>
+
             <!-- Deployment-identity rotation (box-recovery.md § Deployment-seed
                  rotation). Arm → roster read → confirm/cancel, no dialog (the
                  roster rows are the decision surface, not decoration — the

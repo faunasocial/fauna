@@ -114,3 +114,25 @@ Deno.test('a feed_source renders the grant key, not only the ward label', () => 
     'feed_source row text',
   );
 });
+
+// family-safety.md § Guardian policy — a held mail's row reads sender · time
+// (envelope metadata); the shared rule (`approvalTimestamp`, over wasm) decides
+// which kinds carry a time, so the call site only joins what it returns.
+Deno.test('a held mail reads sender · time; no stamp or another kind reads as before', () => {
+  const when = (kind: string, createdAt: number): string | null =>
+    kind === 'mail_hold' && createdAt > 0 ? '14:03' : null;
+  const hold = entry({ kind: 'mail_hold', peer_address: 'stranger@example.com', created_at: 1_700_000_000 });
+  eq(approvalText(hold, fakeRaw, when), 'stranger@example.com · 14:03', 'stamped hold');
+  eq(
+    approvalText({ ...hold, created_at: 0 }, fakeRaw, when),
+    'stranger@example.com',
+    'unstamped hold',
+  );
+  eq(
+    approvalText({ ...hold, peer_address: '' }, fakeRaw, when),
+    `${t.family.approval_no_sender} · 14:03`,
+    'null-path hold',
+  );
+  const contact = entry({ kind: 'contact', summary: 'hi from bob', created_at: 1_700_000_000 });
+  eq(approvalText(contact, fakeRaw, when), 'hi from bob', 'contact row');
+});

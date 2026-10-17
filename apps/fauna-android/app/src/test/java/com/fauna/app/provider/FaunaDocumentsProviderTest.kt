@@ -25,7 +25,7 @@ import org.robolectric.annotation.Config
 
 /**
  * The provider contract of the android on-demand binding
- * (`on-demand-files.md` § Android SAF DocumentsProvider binding), driven
+ * (`on-demand-files-android.md` § Android SAF DocumentsProvider binding), driven
  * against a fake [OnDemandSource] — the Kotlin translation layer headlessly:
  * the read path, and the write half's mapping onto the host (flags, the close
  * listener's one `closedWrite` per open, create / delete / rename / move, the

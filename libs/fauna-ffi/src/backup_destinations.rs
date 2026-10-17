@@ -744,7 +744,9 @@ pub async fn folder_destination_detach(
 
 /// One destination's audit picture, resolved for rendering.
 ///
-/// The FFI twin of `WasmDestinationAuditRow`, field-for-field (priority #1/#3),
+/// The FFI twin of `WasmDestinationAuditRow`, field-for-field (priority #1/#3)
+/// but for [`Self::recover_offered`] — the recovery leg is native-only, so the
+/// wasm row has no button to offer until a wasm leg exists —
 /// projected from `fauna_client_backup::audit::DestinationAuditRecord`.
 /// Deliberately **not** a wrapper over the record: the record carries the whole
 /// `AuditVerdict`, and a shell handed that would be one `match` away from
@@ -769,6 +771,18 @@ pub struct FfiDestinationAuditRow {
     /// [`crate::backup_audit_alert_label`] and treat the reason as opaque.
     /// [`Self::alert_reason`] stays for shells not yet moved.
     pub alert_reasons: Vec<fauna_core::format::BackupAuditAlertReason>,
+    /// Whether this row's fifth-reason banner carries
+    /// `backup-audit-recover-button` — the shared
+    /// `fauna_client_backup::recover::recover_offered` answer at the pass's
+    /// `now`: a standing source regression on a **nest** destination, or on
+    /// **this device's own** client-device row (the one the pass's
+    /// `own_custodian` names). The confirm runs the row's leg — a nest:
+    /// [`backup_recover_from_destination`] with this row's `destination_id`;
+    /// this device's own row: the recovery from this device's own store
+    /// (`crate::recover_custodian_store` in process, or
+    /// `FfiSyncAgentProvisioner::recover_custodian_store` through the agent).
+    /// Never re-derive it from `alert_reasons`.
+    pub recover_offered: bool,
 }
 
 /// Run one client-side backup **audit** pass and hand back the full
@@ -872,6 +886,7 @@ pub async fn backup_audit_run_pass(
                 held: r.held,
                 served: r.served,
                 observed_at: r.observed_at,
+                floored_at: r.floored_at,
             })
             .collect(),
     });
@@ -890,7 +905,20 @@ pub async fn backup_audit_run_pass(
         tracing::warn!("backup audit: {degradation}");
     }
 
-    Ok(pass.records.iter().map(|r| audit_row(r, now)).collect())
+    Ok(pass
+        .records
+        .iter()
+        .map(|r| {
+            audit_row(
+                r,
+                &state.backup.destinations,
+                own_custodian
+                    .as_ref()
+                    .map_or("", |own| own.device_id.as_str()),
+                now,
+            )
+        })
+        .collect())
 }
 
 /// The directory this machine's local sync **agent** keeps `actor_id_hex`'s
@@ -902,21 +930,141 @@ pub async fn backup_audit_run_pass(
 /// per-OS base, and on windows the test-build harness data-dir override).
 #[cfg(feature = "backup-audit")]
 #[uniffi::export]
-pub fn backup_audit_local_agent_state_dir(actor_id_hex: String) -> String {
+pub fn backup_audit_local_agent_state_dir(actor_id_hex: String) -> Result<String, crate::FfiError> {
     fauna_sync_engine::segment_backup::local_agent_state_dir(&actor_id_hex)
-        .to_string_lossy()
-        .into_owned()
+        .map(|dir| dir.to_string_lossy().into_owned())
+        .map_err(|e| crate::FfiError::General {
+            msg: format!("{e:#}"),
+        })
+}
+
+/// What one recovery run did, resolved for `backup-audit-recover-result`
+/// (`ui/backups.md` § Audit-alert surface, the fifth reason).
+///
+/// The FFI face of `fauna_client_backup::recover::RecoveryOutcome`, carrying
+/// only what a shell renders: the lines are already resolved, so no shell
+/// composes them, and `whole` is the outcome's own `is_whole`, never re-derived.
+#[cfg(feature = "backup-audit")]
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiRecoveryResult {
+    /// `RecoveryOutcome::is_whole` — the one bit a shell may render as
+    /// "recovered". A run with nothing to recover is not whole.
+    pub whole: bool,
+    /// The result view's text, in order — the shared
+    /// `fauna_client_backup::recover::result_lines`, each resolved with its
+    /// nested keys (the set names and remedies are themselves keys).
+    pub lines: Vec<String>,
+}
+
+/// Run the backup **recovery** from one nest destination into the owner's own
+/// nest that regressed — the confirm of `backup-audit-recover-button`
+/// (`ui/backups.md` § Audit-alert surface, the fifth reason;
+/// `segment-backup-protocol.md` § Implementation status today → *Recovery into
+/// the lived-in nest that regressed*).
+///
+/// A thin face over `fauna_sync_engine::recovery::recover_from_destination`,
+/// the one native composition tui and linux call directly: this resolves its
+/// inputs and projects its result, and decides nothing — which sets run, in
+/// what order, and how the result reads are all the shared driver's.
+///
+/// * `nest` — the owner's connection to their own nest, the recovery's target;
+/// * `owner_secret` — the owner's 32-byte identity seed;
+/// * `device_id_hex` — this device's sync device id, the one its custodian
+///   store carries;
+/// * `destination_id` — the row whose `recover_offered` was true; resolved
+///   against the client's **own pinned** destination list, as
+///   [`backup_audit_run_pass`] resolves it;
+/// * `state_path` — the same actor-scoped audit-state path the shell hands
+///   [`backup_audit_run_pass`]: the notice's record there names the sets, and
+///   the run's duty clears it.
+///
+/// After it returns, run [`backup_audit_run_pass`] again for the page — the
+/// cleared notice is read from the store, never assumed.
+///
+/// # Errors
+///
+/// `FfiError::General` for a run that never reached the shared driver or that
+/// the driver stopped (a bad secret or device id, a destination not on the
+/// pinned list or not a nest, an unreadable audit store, a destination that
+/// will not connect or proves another identity, a transport fault mid-run) —
+/// in every case nothing the owner can lose: a re-run resumes by content
+/// address.
+#[cfg(feature = "backup-audit")]
+#[fauna_uniffi_async::export]
+pub async fn backup_recover_from_destination(
+    nest: Arc<FfiNestClient>,
+    owner_secret: Vec<u8>,
+    device_id_hex: String,
+    destination_id: String,
+    state_path: String,
+) -> Result<FfiRecoveryResult, FfiError> {
+    let secret = secret32(&owner_secret)?;
+    let device_id = fauna_core::hex32::decode(&device_id_hex)
+        .map_err(|e| general_err(format!("device id {device_id_hex:?}: {e}")))?;
+    let source_nest = bound_source_nest(&nest).await?;
+    let state = load_backup_state(crate::backup_seam().as_ref(), source_nest)
+        .await
+        .map_err(general_err)?;
+    let destination = state
+        .backup
+        .destinations
+        .iter()
+        .find(|d| d.destination_id == destination_id)
+        .ok_or_else(|| general_err(format!("no backup destination {destination_id}")))?;
+    let audit =
+        fauna_client_backup::native_store::FileAuditStateStore::at(PathBuf::from(state_path));
+    let outcome = fauna_sync_engine::recovery::recover_from_destination(
+        fauna_sync_engine::recovery::NativeRecovery {
+            source: nest.nest_arc(),
+            owner_secret: secret,
+            device_id,
+            destination,
+            audit: &audit,
+        },
+    )
+    .await
+    .map_err(general_err)?;
+    Ok(recovery_result(&outcome))
+}
+
+/// Project a recovery outcome to its FFI face — the one finish every recovery
+/// entry point ends in: this one, and the recovery from this device's own
+/// store, in process (`crate::recover_custodian_store`) or through the agent
+/// (`FfiSyncAgentProvisioner::recover_custodian_store`). Split out so the
+/// projection is unit-testable without a nest.
+#[cfg(feature = "backup-audit")]
+pub(crate) fn recovery_result(
+    outcome: &fauna_client_backup::recover::RecoveryOutcome,
+) -> FfiRecoveryResult {
+    FfiRecoveryResult {
+        whole: outcome.is_whole(),
+        lines: fauna_client_backup::recover::result_lines(outcome)
+            .iter()
+            .map(|line| line.resolve_nested(fauna_i18n::strings::lookup))
+            .collect(),
+    }
 }
 
 /// Project one persisted record to its render row. Split out so the
 /// verdict-never-crosses rule is unit-testable without a nest. `now` is the
-/// pass's own clock, so a recovery window's countdown agrees with the pass.
+/// pass's own clock, so a recovery window's countdown agrees with the pass;
+/// `destinations` is the pinned list the pass audited, read for the row's kind;
+/// `this_device_id` is this device's sync id as its own custodian store was
+/// reported (empty when none was), which picks out this device's own row.
 #[cfg(feature = "backup-audit")]
 fn audit_row(
     record: &fauna_client_backup::audit::DestinationAuditRecord,
+    destinations: &[BackupDestination],
+    this_device_id: &str,
     now: i64,
 ) -> FfiDestinationAuditRow {
     FfiDestinationAuditRow {
+        recover_offered: destinations
+            .iter()
+            .find(|d| d.destination_id == record.state.destination_id)
+            .is_some_and(|d| {
+                fauna_client_backup::recover::recover_offered(record, d, this_device_id, now)
+            }),
         destination_id: record.state.destination_id.clone(),
         last_passed_at: record
             .state
@@ -1251,7 +1399,7 @@ mod tests {
         };
         use fauna_core::format::BackupAuditAlertReason;
 
-        let audit_row = |r: &DestinationAuditRecord| super::audit_row(r, 1_800_000_000);
+        let audit_row = |r: &DestinationAuditRecord| super::audit_row(r, &[], "", 1_800_000_000);
         let record =
             |verdict: Option<AuditVerdict>, last_passed_at: Option<i64>| DestinationAuditRecord {
                 state: DestinationAuditState {
@@ -1340,6 +1488,8 @@ mod tests {
                 },
                 verdict: None,
             },
+            &[],
+            "",
             1_800_000_000,
         );
         assert_eq!(row.last_passed_at, None);
@@ -1378,7 +1528,7 @@ mod tests {
             verdict: Some(AuditVerdict::Passed),
         };
 
-        let open = audit_row(&record, NOW);
+        let open = audit_row(&record, &[], "", NOW);
         assert!(open.alert_reason.is_none());
         assert_eq!(
             open.alert_reasons,
@@ -1386,7 +1536,131 @@ mod tests {
                 left_secs: Some(1_000)
             }]
         );
-        assert!(audit_row(&record, NOW + 1_000).alert_reasons.is_empty());
+        assert!(
+            audit_row(&record, &[], "", NOW + 1_000)
+                .alert_reasons
+                .is_empty()
+        );
+    }
+
+    /// `recover_offered` is the shared rule's answer for the row's own pinned
+    /// destination: a standing regression on a nest or on this device's own
+    /// client-device row, never on another device's, never without a
+    /// regression, never for a row the pinned list no longer carries.
+    #[cfg(feature = "backup-audit")]
+    #[test]
+    fn audit_row_offers_recovery_on_a_regressed_nest_or_this_devices_own_row() {
+        use fauna_client_backup::audit::{
+            AcceptedRegression, DestinationAuditRecord, DestinationAuditState,
+        };
+        use fauna_core::data::DESTINATION_KIND_CLIENT_DEVICE;
+
+        const NOW: i64 = 1_800_000_000;
+        let regressed = |id: &str| {
+            let mut state = DestinationAuditState {
+                destination_id: id.to_string(),
+                ..Default::default()
+            };
+            state.accepted_regressions.insert(
+                "__mail/ab/manifest.mail".to_string(),
+                AcceptedRegression {
+                    pinned: 40,
+                    served: 30,
+                    observed_at: NOW,
+                    floored_at: None,
+                    recoverable_until: Some(NOW + 1_000),
+                },
+            );
+            DestinationAuditRecord {
+                state,
+                verdict: None,
+            }
+        };
+        let destinations = vec![
+            BackupDestination {
+                destination_id: "nest".into(),
+                destination_nest_url: "https://backup.example".into(),
+                ..Default::default()
+            },
+            BackupDestination {
+                destination_id: "device".into(),
+                kind: DESTINATION_KIND_CLIENT_DEVICE.into(),
+                custodian_device_id: Some("aa11".into()),
+                ..Default::default()
+            },
+        ];
+
+        let row = |record: &DestinationAuditRecord, me: &str| {
+            audit_row(record, &destinations, me, NOW).recover_offered
+        };
+        assert!(row(&regressed("nest"), "aa11"));
+        assert!(row(&regressed("nest"), ""));
+        assert!(row(&regressed("device"), "aa11"), "this device's own row");
+        assert!(!row(&regressed("device"), "bb22"), "another device's row");
+        assert!(
+            !row(&regressed("device"), ""),
+            "no custodian store reported"
+        );
+        assert!(!row(&regressed("gone"), "aa11"));
+        assert!(!row(&DestinationAuditRecord::never("nest"), "aa11"));
+    }
+
+    /// The recovery result crosses resolved: `whole` is the outcome's own
+    /// `is_whole`, and every line is the shared `result_lines` with its nested
+    /// keys (the set name) translated — nothing left for a shell to compose.
+    #[cfg(feature = "backup-audit")]
+    #[test]
+    fn recovery_result_carries_the_shared_verdict_and_resolved_lines() {
+        use fauna_client_backup::recover::{
+            RecoveredCounts, RecoveryOutcome, RecoverySetOutcome, RecoverySetResult, result_lines,
+        };
+
+        let set = |counts: RecoveredCounts, duties: Option<&str>| RecoverySetResult {
+            set_name: "__mail".to_string(),
+            outcome: RecoverySetOutcome::Recovered { counts },
+            duties_unfinished: duties.map(str::to_string),
+        };
+        let whole = RecoveryOutcome {
+            sets: vec![set(
+                RecoveredCounts {
+                    recovered: 4,
+                    ..Default::default()
+                },
+                None,
+            )],
+        };
+        let gap = RecoveryOutcome {
+            sets: vec![set(
+                RecoveredCounts {
+                    recovered: 4,
+                    ..Default::default()
+                },
+                Some("offline"),
+            )],
+        };
+
+        for outcome in [&whole, &gap, &RecoveryOutcome::default()] {
+            let result = recovery_result(outcome);
+            assert_eq!(result.whole, outcome.is_whole());
+            let expected: Vec<String> = result_lines(outcome)
+                .iter()
+                .map(|l| l.resolve_nested(fauna_i18n::strings::lookup))
+                .collect();
+            assert_eq!(result.lines, expected);
+            assert!(
+                result.lines.iter().all(|l| !l.contains("backups.")),
+                "every key resolved: {:?}",
+                result.lines
+            );
+        }
+        assert!(recovery_result(&whole).whole);
+        assert!(!recovery_result(&gap).whole);
+        assert!(!recovery_result(&RecoveryOutcome::default()).whole);
+        assert_eq!(
+            recovery_result(&gap).lines.len(),
+            3,
+            "verdict, the set's line, the duty gap"
+        );
     }
 
     /// The ms→s conversion belongs to this face, not to four shells

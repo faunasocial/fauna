@@ -54,8 +54,13 @@ fn secret_bytes(secret_hex: &str) -> Option<[u8; 32]> {
 /// (`fauna_client_account_runtime::build_params` resolves
 /// [`StoreRoot::platform`] for a desktop host), so the local read sees the
 /// rows the runtime wrote.
-fn store_root() -> StoreRoot {
+///
+/// `None` — logged — when the process has no absolute home (the shared no-home
+/// refusal): the recovery reads then answer nothing rather than panic.
+fn store_root() -> Option<StoreRoot> {
     StoreRoot::platform()
+        .inspect_err(|e| tracing::error!("recovery: no account-store root: {e:#}"))
+        .ok()
 }
 
 /// The custodied boxes the `nest_recovery` hub (and the launch-retry recover
@@ -63,13 +68,13 @@ fn store_root() -> StoreRoot {
 /// at `nest_url` when one is given. Only public `nest_actor_id`s cross out; the
 /// seed stays in Rust.
 pub async fn load_recoverable_boxes(nest_url: Option<&str>, secret_hex: &str) -> Vec<String> {
-    let Some(secret) = secret_bytes(secret_hex) else {
+    let (Some(secret), Some(root)) = (secret_bytes(secret_hex), store_root()) else {
         return Vec::new();
     };
     fauna_client_account_runtime::deployment_seeds::recoverable_box_ids(
         nest_url.map(str::to_owned),
         secret,
-        store_root(),
+        root,
     )
     .await
 }
@@ -92,7 +97,7 @@ pub async fn load_selfhosted_command(
     fauna_client_account_runtime::deployment_seeds::selfhosted_command(
         nest_url.map(str::to_owned),
         secret,
-        store_root(),
+        store_root()?,
         nest_actor_id_hex,
     )
     .await
@@ -110,9 +115,10 @@ pub fn spawn_custody_leg(
     tx: UnboundedSender<UiMessage>,
 ) {
     tokio::spawn(async move {
-        if let Some(msg) =
+        if let Some(warning) =
             fauna_client_account_runtime::deployment_seeds::run_custody_leg(&nest, &store).await
         {
+            let msg = crate::wizard::localized(&warning);
             let _ = tx.send(UiMessage::Data(DataMessage::RecoveryCustodyWarning(msg)));
         }
     });

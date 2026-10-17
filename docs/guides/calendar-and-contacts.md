@@ -55,7 +55,7 @@ halfway through filling in the form and the next time you open **New event**
 it is still there, on whichever of your devices you pick up — the title, the
 times, the description and the location, exactly as you typed them. Creating
 the event clears it, and so does starting a fresh one by clicking a day or a
-time. Like everything else you write, an unfinished event is encrypted before
+time, or pressing **Discard** on the form to throw the unfinished event away. Like everything else you write, an unfinished event is encrypted before
 it leaves the device: your nest keeps it for you but cannot read it.
 
 The week starts on whichever day your system's language and region setting

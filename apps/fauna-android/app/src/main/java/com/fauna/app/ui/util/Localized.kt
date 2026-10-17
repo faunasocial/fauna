@@ -94,6 +94,23 @@ fun cellValueText(context: Context, cell: com.fauna.ffi.FfiLimitCell): String {
 }
 
 /**
+ * A feature-policy editor cell's no-effect note, fully composed (`null` when the
+ * cell has none) — the Kotlin twin of shared Rust
+ * `fauna_client_features::editor_note_text`. When `noteMagnitude` is set it is
+ * resolved first and substituted for the note's `{limit}` hole, for the same
+ * reason as [cellValueText]: a localized magnitude ("2 GB") is a flat string by
+ * the time the outer template resolves.
+ */
+fun editorNoteText(context: Context, cell: com.fauna.ffi.FfiEditorCell): String? {
+    val note = cell.note ?: return null
+    val magnitude = cell.noteMagnitude ?: return resolveLocalized(context, note)
+    return resolveLocalized(
+        context,
+        LocalizedText(note.key, note.args + ("limit" to (resolveLocalized(context, magnitude) ?: ""))),
+    )
+}
+
+/**
  * The `custody-holder-receipt-status` line (`docs/goal/ui/devices.md` § Custody
  * facet) — the A7 three-state honesty rule, where fresh / stale / no-receipt-yet
  * are three different strings that never collapse or go empty.

@@ -27,10 +27,17 @@ class SyncService : Service() {
         syncJob = scope.launch {
             // Observe progress and update notification
             launch {
-                photoBackupEngine.uploadedCount.collect { uploaded ->
-                    val total = photoBackupEngine.totalScanned.value
+                photoBackupEngine.progress.pendingCount.collect { _ ->
+                    // The pass's position, the same "n of m" the screen reads.
+                    val total = photoBackupEngine.progress.passTotal.value
                     if (total > 0) {
-                        updateNotification(getStringFmt(R.string.photo_backup_notification_progress, uploaded, total))
+                        updateNotification(
+                            getStringFmt(
+                                R.string.photo_backup_notification_progress,
+                                photoBackupEngine.progress.processed,
+                                total,
+                            )
+                        )
                     }
                 }
             }

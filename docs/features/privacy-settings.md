@@ -35,9 +35,10 @@ Stamped 2026-10-01 at d8cb0887cb.
 7. [app] Opening the privacy page never changes the setting it shows you — `docs/goal/ui/settings.md` § Layout & flow
    - `tests/e2e-unified/tests/test_settings.py::test_opening_the_privacy_page_never_writes_the_inbox_mode_back`
 8. [app] The spam filter's strength reads back in words — aggressive, moderate or permissive — for the value you chose — `docs/goal/ui/settings.md` § Spam threshold slider labels
-   - (none)
+   - `tests/e2e-unified/tests/test_settings.py::test_spam_threshold_reads_back_in_band_words`
 9. [app] Content flagged above your own spam threshold is collapsed in your own view — `docs/goal/behavior/moderation.md` § Categories & enforcement
    - `tests/e2e-unified/tests/test_family.py::test_own_spam_threshold_collapses_flagged_conversation_message`
+   - `tests/e2e-unified/tests/test_family.py::test_own_spam_threshold_binds_on_ws_reconnect_without_relaunch`
 
 ## Status
 
@@ -45,12 +46,12 @@ Stamped 2026-10-01 at d8cb0887cb.
 | App | Status | Stamp |
 |---|---|---|
 | web | ⚠ partial | 0.1.2-dev+4ca6f9ab standalone |
-| linux | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
+| linux | ✅ full | 0.1.4-dev+52904896 standalone |
 | windows | ⚠ partial | 0.1.2-dev+6d8dc256.dirty standalone |
-| macos | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| ios | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
+| macos | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| ios | ⚠ partial | 0.1.4-dev+52904896 standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.2-dev+7663afa6 standalone |
+| tui | ✅ full | 0.1.2-dev+7663afa6 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -64,6 +65,7 @@ Stamped 2026-10-01 at d8cb0887cb.
 | 5 | nest | `tests/e2e-unified/tests/api/test_conversation_reach_policy.py::test_a_stranger_is_refused_until_the_recipient_accepts_them` | nest (linux): passed |
 | 6 | nest | `tests/e2e-unified/tests/api/test_conversation_reach_policy.py::test_a_closed_inbox_holds_against_a_sender_on_another_nest` | nest (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_settings.py::test_opening_the_privacy_page_never_writes_the_inbox_mode_back` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 8 | app | (none) | — |
+| 8 | app | `tests/e2e-unified/tests/test_settings.py::test_spam_threshold_reads_back_in_band_words` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_family.py::test_own_spam_threshold_collapses_flagged_conversation_message` | linux (linux): passed, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_family.py::test_own_spam_threshold_binds_on_ws_reconnect_without_relaunch` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 <!-- features-render:end -->

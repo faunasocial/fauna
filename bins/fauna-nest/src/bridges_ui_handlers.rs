@@ -878,7 +878,9 @@ fn feeds_list_handler() -> RpcHandler {
 // would make some legal operations unaskable — the ward would face a refusal
 // with no way to request it.
 pub(crate) const MAX_BRIDGE_LEN: usize = 64;
-pub(crate) const MAX_FEED_URI_LEN: usize = 2048;
+// The feed URI cap is `fauna-core`'s, so the family approval card (which never
+// cuts a target below it) and this handler cannot drift apart.
+pub(crate) const MAX_FEED_URI_LEN: usize = fauna_core::format::FEED_SOURCE_TARGET_MAX_LEN;
 pub(crate) const MAX_NAME_LEN: usize = 128;
 
 fn feeds_create_handler() -> RpcHandler {

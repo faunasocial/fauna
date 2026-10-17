@@ -109,6 +109,65 @@ pub struct NestConsentRow {
     /// The client document's kind manifest, the compact JWS verbatim — the
     /// approving device verifies it before it admits a kind or wraps a key.
     pub fauna_manifest: Option<String>,
+    /// The install section of an admin's install card (`third-party.md`
+    /// § The runner contract → *The install-approval leg*), raw. `None` on
+    /// every consent a client started.
+    pub install: Option<NestConsentInstall>,
+}
+
+/// What an install card would install and run, exactly as the nest's
+/// `ConsentInstallInfo` reported it. Raw for the same reason as
+/// [`NestConsentRow`]: the publisher domain and the settings labels are
+/// publisher-authored, and the control-strip fence is the machine's
+/// composition pass ([`crate::consent_card_row`]), never a seam's.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NestConsentInstall {
+    pub execution_form: String,
+    pub requested_kinds: Vec<String>,
+    /// The settings schema's fields, in its order.
+    pub settings: Vec<NestInstallSetting>,
+    pub publisher_domain: String,
+    /// The `did:key`; empty for a development plugin.
+    pub publisher_key: String,
+    pub module_digest: String,
+    pub hosts: Vec<String>,
+    pub ingress_paths: Vec<String>,
+    pub development: bool,
+}
+
+/// One field of a plugin's settings schema: what the card's settings summary
+/// names.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NestInstallSetting {
+    pub key: String,
+    pub label: String,
+    /// The `BridgeProvider` settings vocabulary's type (`bool`, `string`,
+    /// `select`, `number`, …), verbatim.
+    pub setting_type: String,
+}
+
+impl From<fauna_protocol::atproto_pds::ConsentInstallInfo> for NestConsentInstall {
+    fn from(i: fauna_protocol::atproto_pds::ConsentInstallInfo) -> Self {
+        Self {
+            execution_form: i.execution_form,
+            requested_kinds: i.requested_kinds,
+            settings: i
+                .settings_fields
+                .into_iter()
+                .map(|f| NestInstallSetting {
+                    key: f.key,
+                    label: f.label,
+                    setting_type: f.setting_type,
+                })
+                .collect(),
+            publisher_domain: i.publisher_domain,
+            publisher_key: i.publisher_key,
+            module_digest: i.module_digest,
+            hosts: i.hosts,
+            ingress_paths: i.ingress_paths,
+            development: i.development,
+        }
+    }
 }
 
 impl From<fauna_protocol::atproto_pds::PendingConsentRow> for NestConsentRow {
@@ -135,6 +194,7 @@ impl From<fauna_protocol::atproto_pds::PendingConsentRow> for NestConsentRow {
             holder_x25519: c.holder_x25519.map(|b| b.into_vec()),
             writer_ed25519: c.writer_ed25519.map(|b| b.into_vec()),
             fauna_manifest: c.fauna_manifest,
+            install: c.install.map(|i| (*i).into()),
         }
     }
 }
@@ -204,6 +264,9 @@ pub struct IntegrationStatus {
     pub handle_preview: String,
     /// The hosted identity summary, when a row exists (any status).
     pub identity: Option<NestIdentitySummary>,
+    /// How many posts a history backfill would publish (the history
+    /// opt-in's label names it).
+    pub public_post_count: u64,
 }
 
 /// The nest's identity summary inside [`IntegrationStatus`].
@@ -402,11 +465,13 @@ pub trait AtprotoSettingsNestApi: fauna_core::MaybeSendSync + std::fmt::Debug {
     /// A `false` return is not an error: nest decides ownership, replay and
     /// expiry in the UPDATE's own `WHERE` clause, so "another device answered",
     /// "it expired" and "not yours" are one indistinguishable answer by
-    /// construction. The caller re-lists rather than guessing which.
+    /// construction. The caller re-lists rather than guessing which. `folder`
+    /// is the card's choice for a row carrying a bare folder-plane scope.
     async fn resolve_consent(
         &self,
         consent_id: Vec<u8>,
         approved: bool,
+        folder: Option<i64>,
     ) -> Result<bool, AtprotoSettingsApiError>;
 
     /// `fauna.capabilities.mint` — deposit the consent-time grant an approve

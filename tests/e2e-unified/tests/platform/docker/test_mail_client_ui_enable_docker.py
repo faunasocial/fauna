@@ -196,7 +196,7 @@ def test_linux_ui_enable_mail_boots_docker_bridge(app, docker_mail_nest):
     # ── Turn mail on through the mail-settings UI (the action under test) ────
     app.mail_settings.navigate()
     app.mail_settings.enable_mail(display_name="Default")
-    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=15.0), (
+    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=app.mail_settings.ENABLE_SETTLE_S), (
         "the per-user mail enable (mint first credential) did not complete against "
         f"the docker nest; mail-page error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
     )

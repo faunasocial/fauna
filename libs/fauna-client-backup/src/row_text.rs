@@ -33,10 +33,14 @@ pub fn destination_last_upload_text(
 
 /// `backup-destination-backlog-count` row text, via the shared
 /// [`fauna_core::format::backup_backlog_label`]. An absent status is the
-/// not-yet-read baseline of `0`, applied inside the shared fn.
+/// not-yet-read baseline of `0`, applied inside the shared fn; a row whose
+/// `writer_state` is refused reads the refusal in place of the count.
 pub fn destination_backlog_text(status: Option<&BackupDestinationStatusItem>) -> String {
-    fauna_core::format::backup_backlog_label(status.map(|s| s.backlog_count))
-        .resolve(fauna_i18n::strings::lookup)
+    fauna_core::format::backup_backlog_label(
+        status.map(|s| s.backlog_count),
+        status.and_then(|s| s.writer_state.as_deref()),
+    )
+    .resolve(fauna_i18n::strings::lookup)
 }
 
 /// `backup-destination-last-audit-time` row text: when **this client's own**
@@ -125,6 +129,22 @@ mod tests {
             destination_backlog_text(Some(&zero))
         );
         assert!(destination_backlog_text(Some(&seven)).contains('7'));
+    }
+
+    /// A refused writer reads the refusal, not its queued count.
+    #[test]
+    fn backlog_of_a_refused_writer_reads_the_refusal() {
+        let refused = BackupDestinationStatusItem {
+            backlog_count: 7,
+            writer_state: Some(fauna_protocol::backup::WRITER_STATE_REFUSED.to_string()),
+            ..Default::default()
+        };
+        let got = destination_backlog_text(Some(&refused));
+        assert_eq!(
+            got,
+            fauna_i18n::strings::backups::BACKUP_DESTINATION_WRITER_REFUSED
+        );
+        assert!(!got.contains('7'), "the count is replaced: {got:?}");
     }
 
     /// A `None` record — never audited — reads as "never", not blank, and a

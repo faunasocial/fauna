@@ -717,9 +717,9 @@ async fn the_attestation_seam_refuses_a_failed_check_and_degrades_a_cannot_check
     let st = state_in_mode(db.clone(), RegistrationMode::Open);
     let r = router();
 
-    // The advertisement: iOS is armed (`fauna_protocol::age::FAUNA_IOS_APP_ID`
-    // is the team-prefixed App ID), android is not
-    // (`age_attest::FAUNA_ANDROID_PLAY_INTEGRITY_KEYS` is `None`).
+    // The advertisement: iOS is armed (`fauna_protocol::age::FAUNA_IOS_APP_IDS`
+    // pins both team-prefixed App IDs), android is not
+    // (every `age_attest::FAUNA_ANDROID_PLAY_APPS` entry's keys are `None`).
     let reply = mint_age_nonce(&r, st.clone()).await;
     assert_eq!(reply.attestation_platforms, vec!["ios".to_string()]);
 

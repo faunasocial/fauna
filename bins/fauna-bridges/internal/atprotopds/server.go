@@ -188,7 +188,10 @@ func NewServer(nest wsrpc.Caller, minter *TokenMinter, authz Authorizer, signers
 // nudge: a kill-switch flip carries the new flag value; a revoke nudge
 // (nil) just means registry state changed — nothing cached here to drop
 // beyond the flag, since access tokens are registry-checked only at
-// refresh (their 60-min lifetime is the revocation bound, per design).
+// refresh (their 60-min lifetime is the revocation bound for a read, per
+// design). A WRITE is checked live: every write route forwards the caller's
+// session on its one nest round trip, and the nest refuses a revoked session
+// there (the oracle's live check, repo_write.go).
 func (s *Server) HandleSessionsChanged(actorID []byte, externalAppsEnabled *bool) {
 	if externalAppsEnabled != nil {
 		s.flags.set(actorID, *externalAppsEnabled)
@@ -287,10 +290,44 @@ func (s *Server) RegisterRoutes(x *xrpc.Server) {
 		NSID: "app.bsky.actor.putPreferences", Method: http.MethodPost,
 		Auth: xrpc.Session, Class: xrpc.ClassAuthed, Handle: s.putPreferences,
 	})
+	// D6's fauna-surface refusals (atproto-pds-full.md § Problem 4): app
+	// passwords and the account's deletion exist, but only in Fauna apps.
+	// Registered so an authenticated call reaches D8, whose AccountMutation
+	// class refuses it with the message saying where to go — left to the
+	// frame's closed-world MethodNotImplemented, they answered the DEFERRED
+	// flavour, "not yet", which is the opposite of the truth.
+	for nsid, method := range faunaSurfaceMethods {
+		x.Register(xrpc.Route{
+			NSID: nsid, Method: method,
+			Auth: xrpc.Session, Class: xrpc.ClassAuthed, Handle: s.refuseFaunaSurface,
+		})
+	}
 	// F2 — com.atproto.repo.{createRecord,deleteRecord} (repo_write.go).
 	s.registerWriteRoutes(x)
 	// F2.4 — com.atproto.repo.uploadBlob (blob_upload.go).
 	s.registerBlobRoutes(x)
+}
+
+// faunaSurfaceMethods are the account and credential methods D6 refuses as
+// *fauna-surface* (NSID → HTTP method, per the vendored lexicons):
+// app-password management, and the account delete with its request step,
+// so refusing only the second never leaves the first half-served.
+var faunaSurfaceMethods = map[string]string{
+	"com.atproto.server.createAppPassword":    http.MethodPost,
+	"com.atproto.server.listAppPasswords":     http.MethodGet,
+	"com.atproto.server.revokeAppPassword":    http.MethodPost,
+	"com.atproto.server.requestAccountDelete": http.MethodPost,
+	"com.atproto.server.deleteAccount":        http.MethodPost,
+}
+
+// refuseFaunaSurface is the handler behind faunaSurfaceMethods. D8 refuses
+// every one of them before a handler runs, so this is reached only if the
+// module ever allowed one — and then it still refuses, uniformly, and says
+// that something is wrong. Go never words the refusal itself: the module
+// owns that sentence.
+func (s *Server) refuseFaunaSurface(w http.ResponseWriter, r *http.Request, _ *xrpc.Caller) {
+	s.logger.Error("D8 allowed a fauna-surface method; refusing at the handler", "path", r.URL.Path)
+	xrpc.WriteError(w, xrpc.AuthRequired())
 }
 
 // ── Handlers ────────────────────────────────────────────────────

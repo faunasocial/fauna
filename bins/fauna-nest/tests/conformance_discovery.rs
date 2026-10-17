@@ -323,15 +323,20 @@ async fn setup_status_surfaces_provisioned_dkim_records() {
     let stored = st.db.list_dkim_selectors(None).await.unwrap();
 
     let recs = dkim_records(&r, st.clone()).await;
-    assert_eq!(recs.len(), 1, "the record is surfaced");
-    assert_eq!(recs[0].domain, "nest.example");
-    assert_eq!(recs[0].selector, "default");
-    assert_eq!(recs[0].public_dns_value, stored[0].public_dns_value);
-    assert!(
-        recs[0]
-            .public_dns_value
-            .starts_with("v=DKIM1; k=ed25519; p=")
-    );
+    assert_eq!(recs.len(), 2, "both of the label's records are surfaced");
+    for ((rec, stored), (selector, k)) in recs
+        .iter()
+        .zip(&stored)
+        .zip([("default-rsa", "rsa"), ("default-ed25519", "ed25519")])
+    {
+        assert_eq!(rec.domain, "nest.example");
+        assert_eq!(rec.selector, selector);
+        assert_eq!(rec.public_dns_value, stored.public_dns_value);
+        assert!(
+            rec.public_dns_value
+                .starts_with(&format!("v=DKIM1; k={k}; p="))
+        );
+    }
 }
 
 #[tokio::test]

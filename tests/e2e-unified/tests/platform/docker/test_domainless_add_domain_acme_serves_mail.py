@@ -9,7 +9,7 @@ handle, and add the domain later from a client
 (``domains-and-tls-bootstrap.md`` § Env contract; ``installers/docker.md``
 § Default: Domainless). This proves that path end-to-end through the real image.
 
-**Status — XFAIL(strict=False), FIX LANDED, tier_4 re-run pending.** The fix closed
+**Status — LIVE (see the marker comment below); the history follows.** The fix closed
 the nest *acquisition* half (asserts 1–3: the nest gets a trusted cert for the
 post-claim-added domain, chain covers ``mail.<domain>``); the remaining *serving* half —
 assert 4, the MDA/IMAPS-993 listener serving that pebble chain — was the MDA-cert-fan-out
@@ -75,11 +75,21 @@ Asserts:
      to serving and the IMAPS (993) listener presents the **pebble-issued** leaf
      for ``mail.<domain>`` — mail TLS on a domain that did not exist at boot.
 
+Three later tests run on the same box (the stack is module-scoped): mail from an
+outside sender reaches a member on the added domain (`admin-dns-and-certificates`
+outcome 65); a second domain that does not point here yet never breaks the
+primary's certificate, then joins it once it does (outcome 57 — and
+`certificates-by-themselves` outcome 8's re-issue when the served names change);
+and an admin's self-signed stopgap heals back to a new trusted certificate that
+reaches the mail and calendar ports with no restart (`certificates-by-themselves`
+outcomes 6 and 12; the SNI router's 443 is published for the calendar half).
+
 Reuses the pebble + fake_dns + trust-bundle scaffolding of
 ``test_acme_http01_pebble_issuance.py`` (imported, not duplicated).
 """
 
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -89,6 +99,7 @@ from cryptography import x509
 
 
 from helpers.tls_spki import served_leaf
+from helpers.waiting import wait_until
 
 from .helpers import (
     admin_ws,
@@ -97,14 +108,20 @@ from .helpers import (
     claim_admin_api,
     container_ip,
     create_network,
+    deliver_inbound_loopback_curl,
+    enforce_mail_perimeter,
     find_free_ports,
     get_repo_root,
+    imap_fetch_only_inbox_message,
+    provision_mail_recipient,
+    provision_self_signed_cert,
     register_primary_domain,
     remove_container,
     remove_network,
     start_container_with_ports,
     start_fake_dns_sidecar,
     start_fake_scanner_sidecars,
+    svstat,
     wait_for_health,
     write_dns_records,
 )
@@ -149,24 +166,64 @@ ADDED_DOMAIN = "added.test"
 MX_SNI = f"mail.{ADDED_DOMAIN}"
 CLAIM_CODE = "DMLESS1"
 
+# The external sender of the inbound message (outcome 65): delivered over the
+# container's loopback, so its published SPF authorizes 127.0.0.1, and it carries
+# a `p=reject` DMARC policy the enforced perimeter checks for real.
+SENDER_DOMAIN = "sender.test"
+RECIPIENT_LOCAL = "reader"
+RECIPIENT_PASSWORD = "domainless-reader-pw"
+
+# A second domain the admin adds once the primary's certificate is serving
+# (outcome 57). It does not resolve until the test publishes its record.
+SECOND_DOMAIN = "second.test"
+
+# The nest's line each cycle it leaves a secondary out of the order because its
+# name does not point here yet (`acme_http01::reachable_mail_domains`).
+SECONDARY_DEFERRED_LOG = "secondary domain apex does not resolve to the nest yet"
+
+
+def _publish_dns(records_dir: str, nest_ip: str, *, second: bool = False) -> None:
+    """Publish the stack's whole zone in ONE write (the fake name server reloads
+    the file whole, so a second write would drop the first): the added domain and
+    its mail host at the nest, the sender's passing SPF + DMARC policy, and — once
+    ``second`` — the second domain at the nest too."""
+    a = {ADDED_DOMAIN: nest_ip, MX_SNI: nest_ip, SENDER_DOMAIN: "127.0.0.1"}
+    if second:
+        a[SECOND_DOMAIN] = nest_ip
+    write_dns_records(
+        records_dir,
+        a=a,
+        mx={SENDER_DOMAIN: f"0 {SENDER_DOMAIN}"},
+        txt={
+            SENDER_DOMAIN: "v=spf1 ip4:127.0.0.1 -all",
+            f"_dmarc.{SENDER_DOMAIN}": "v=DMARC1; p=reject",
+        },
+    )
+
 
 def _leaf_is_pebble(leaf: x509.Certificate) -> bool:
     return "Pebble" in leaf.issuer.rfc4514_string()
 
 
-@pytest.fixture()
+@pytest.fixture(scope="module")
 def domainless_stack():
     """A docker network with `pebble` (real ACME CA) + `fake_dns` + fake
     clamd/rspamd scanners + a **domainless** nest (NO ``FAUNA_DOMAIN``) pointed at
     pebble via ``FAUNA_ACME_DIRECTORY_URL`` and trusting its directory CA via
     ``SSL_CERT_FILE``. The nest boots on the floor with the ACME machinery up but
-    idle. Yields ``(nest, mail_ports)``; tears the whole stack down after."""
+    idle, and resolves through the same ``fake_dns`` pebble does, so what the test
+    publishes there is what both the CA and the nest see. Yields
+    ``(nest, mail_ports)``; tears the whole stack down after.
+
+    Module-scoped: the tests below run in file order on ONE box, each starting
+    where the one before it left the box (the stack costs a full image boot plus
+    an ACME issuance)."""
     net = f"fauna-dmless-net-{os.getpid()}"
     dns_name = f"fauna-dmless-dns-{os.getpid()}"
     pebble_name = "pebble"  # must match the pebble directory-cert SAN + the URL
     clamd_name = f"fauna-dmless-clamd-{os.getpid()}"
     rspamd_name = f"fauna-dmless-rspamd-{os.getpid()}"
-    (api_port, pebble_host_port, p25, p465, p587, p993) = find_free_ports(6)
+    (api_port, router_port, pebble_host_port, p25, p465, p587, p993) = find_free_ports(7)
     nest_name = f"fauna-dmless-nest-{api_port}"
     mail_ports = {25: p25, 465: p465, 587: p587, 993: p993}
 
@@ -209,7 +266,7 @@ def domainless_stack():
 
         start_container_with_ports(
             nest_name,
-            {3000: api_port, **mail_ports},
+            {3000: api_port, 443: router_port, **mail_ports},
             env={
                 # NO FAUNA_DOMAIN — this is the domainless boot under test.
                 "FAUNA_CLAIM_CODE": CLAIM_CODE,
@@ -225,6 +282,7 @@ def domainless_stack():
                 "FAUNA_RSPAMD_URL": scan["rspamd_url"],
             },
             network=net,
+            dns=dns_ip,
             mounts=[(bundle_path, "/etc/fauna/ssl-bundle.pem")],
         )
         started.append(nest_name)
@@ -234,12 +292,13 @@ def domainless_stack():
         # nest's :8080 challenge listener. Both apex-name and `mail.<domain>` are
         # covered (the order's SAN set is `[<domain>, mail.<domain>]`).
         nest_ip = container_ip(nest_name)
-        write_dns_records(records_dir, a={ADDED_DOMAIN: nest_ip, MX_SNI: nest_ip})
+        _publish_dns(records_dir, nest_ip)
 
         wait_for_health(api_port, nest_name)
         admin = claim_admin_api(api_port, CLAIM_CODE, handle="admin")  # bare handle
         url = f"https://127.0.0.1:{api_port}"
-        nest = {"name": nest_name, "port": api_port, "url": url, "admin": admin}
+        nest = {"name": nest_name, "port": api_port, "url": url, "admin": admin,
+                "ip": nest_ip, "records_dir": records_dir, "router_port": router_port}
         yield (nest, mail_ports)
     finally:
         for name in reversed(started):
@@ -250,11 +309,12 @@ def domainless_stack():
 
 def _active_mail_domains(nest) -> list[dict]:
     with admin_ws(nest) as admin:
-        return admin.call("fauna.bridges.list_local_domains", {}).get("domains", [])
+        return admin.call("fauna.bridges.list_local_domains", {})["active"]
 
 
 @pytest.mark.feature("admin-dns-and-certificates", "certificates-by-themselves")
-def test_domainless_add_domain_acquires_acme_cert_and_serves_mail(domainless_stack):
+def test_domainless_add_domain_acquires_acme_cert_and_serves_mail(domainless_stack,
+                                                                 run_seal_helper):
     nest, mail_ports = domainless_stack
     host, port = "127.0.0.1", nest["port"]
 
@@ -314,6 +374,14 @@ def test_domainless_add_domain_acquires_acme_cert_and_serves_mail(domainless_sta
     #    leaf for `mail.<domain>` — mail TLS on a domain that did not exist at boot.
     #    (register_primary_domain above satisfies bring_bridges_to_serving's
     #    precondition; it is idempotent on an already-active domain.)
+    #    Before the bring-up, put the box in the live-box inbound posture and
+    #    provision a reader on the added domain the way a member's app would, so
+    #    the mail leg below (outcome 65) runs against the box exactly as it serves.
+    enforce_mail_perimeter(nest, domain=ADDED_DOMAIN)
+    nest["recipient"] = provision_mail_recipient(
+        nest, run_seal_helper, domain=ADDED_DOMAIN, local_part=RECIPIENT_LOCAL,
+        password=RECIPIENT_PASSWORD,
+    )
     bring_bridges_to_serving(nest["name"], nest, mail_ports, ADDED_DOMAIN)
 
     # The cert-watcher fans the ACME chain out to the MDA (sealed); poll the served
@@ -359,3 +427,236 @@ def test_domainless_add_domain_acquires_acme_cert_and_serves_mail(domainless_sta
                 + "\n".join(nest_lines[-60:])
             )
         time.sleep(2)
+
+
+@pytest.mark.feature("admin-dns-and-certificates")
+def test_a_domain_added_after_install_receives_mail_once_its_certificate_is_in_place(
+        domainless_stack):
+    """Outcome 65: on the box the test above left — a domain added after install,
+    its trusted certificate issued and serving on the mail port — a message from
+    an outside sender to a member's address on that domain is accepted under the
+    enforced perimeter and read back over IMAPS (`domains-and-tls-bootstrap.md`
+    § Add domains after install)."""
+    nest, mail_ports = domainless_stack
+    recipient = nest.get("recipient")
+    assert recipient, (
+        "the premise: the test above provisions a reader on the added domain and "
+        "brings mail to serving — it did not get that far"
+    )
+    assert recipient["username"].endswith(f"@{ADDED_DOMAIN}"), recipient["username"]
+    assert _leaf_is_pebble(served_leaf("127.0.0.1", mail_ports[993], MX_SNI)), (
+        "the premise: the mail port serves the added domain's trusted certificate"
+    )
+
+    subject = "Mail to a domain added after install"
+    body_marker = "domainless add-domain inbound"
+    msg_id = deliver_inbound_loopback_curl(
+        nest["name"],
+        mail_from=f"external-sender@{SENDER_DOMAIN}",
+        rcpt_to=recipient["username"],
+        subject=subject,
+        body_text=f"Hello from the {body_marker} test.\n",
+    )
+    try:
+        raw = imap_fetch_only_inbox_message(
+            "127.0.0.1", mail_ports[993], MX_SNI,
+            recipient["username"], recipient["password"],
+        )
+    except (AssertionError, TimeoutError) as e:
+        raise AssertionError(f"{e}\n\n── bridge diagnostics ──\n{bridge_diag(nest['name'])}") from e
+
+    text = raw.decode("utf-8", errors="replace")
+    assert subject in text, f"the delivered message must carry its Subject; got {text[:400]!r}"
+    assert body_marker in text, f"the delivered message must carry its text; got {text[:400]!r}"
+    assert msg_id.strip("<>") in text, "the delivered message must carry its Message-ID"
+
+
+def _sans(leaf: x509.Certificate) -> list[str]:
+    try:
+        ext = leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+    except x509.ExtensionNotFound:
+        return []
+    return ext.value.get_values_for_type(x509.DNSName)
+
+
+def _deferrals_of_second(name: str) -> int:
+    """How many issuance cycles so far left the second domain out of the order
+    because its name does not point here."""
+    logs = subprocess.run(["docker", "logs", name], capture_output=True, text=True, timeout=30)
+    return sum(
+        1 for ln in (logs.stdout + logs.stderr).splitlines()
+        if SECONDARY_DEFERRED_LOG in ln and SECOND_DOMAIN in ln
+    )
+
+
+def _issuance_now(nest) -> None:
+    """The admin's "retry issuance now" — it wakes the issuance cycle instead of
+    waiting out its five-minute poll, and changes nothing else on a box whose
+    certificate was never overridden (no preserved backup to restore)."""
+    with admin_ws(nest) as admin:
+        admin.call("fauna.bridges.restore_real_tls_cert", {})
+
+
+@pytest.mark.feature("admin-dns-and-certificates", "certificates-by-themselves")
+def test_a_second_domain_not_pointing_here_never_breaks_the_primarys_certificate(
+        domainless_stack):
+    """Outcome 57: with the primary's trusted certificate serving, the admin adds
+    a second domain whose name does not point at the nest yet. An issuance cycle
+    runs, leaves the second domain out, and the primary keeps its trusted
+    certificate; once the second domain's record points here, the next cycle
+    issues a certificate that covers it too (`tls-certificates.md` § HTTP-01 —
+    a secondary apex joins the all-or-nothing order only once it resolves)."""
+    nest, _ = domainless_stack
+    host, port = "127.0.0.1", nest["port"]
+    # The mail bring-up in the first test overrides the nest's own listener with a
+    # self-signed certificate (`provision_self_signed_cert`, which keeps the real
+    # one aside) — a harness step no real deploy takes. Undo it the way an admin
+    # would ("switch back to a real certificate") before the premise is read.
+    def _primary_trusted_after_restore():
+        _issuance_now(nest)
+        return _leaf_is_pebble(served_leaf(host, port, ADDED_DOMAIN))
+
+    wait_until(
+        _primary_trusted_after_restore, 120, interval=5,
+        diagnose=lambda: (
+            "the premise: the primary serves its trusted certificate before the "
+            "second domain is added — still self-signed after restoring the real one; "
+            f"issuer={served_leaf(host, port, ADDED_DOMAIN).issuer.rfc4514_string()!r}, "
+            f"cert_status={_cert_status(nest, [ADDED_DOMAIN]).get(ADDED_DOMAIN)!r}\n"
+            f"--- bridge_diag ---\n{bridge_diag(nest['name'])}"
+        ),
+    )
+
+    # Add the second domain, unpublished, and run an issuance cycle now.
+    deferred_before = _deferrals_of_second(nest["name"])
+    with admin_ws(nest) as admin:
+        admin.call("fauna.bridges.add_local_domain", {
+            "domain": SECOND_DOMAIN,
+            "mta_sts_cert_mode": "expand_primary",
+        })
+    _issuance_now(nest)
+    wait_until(
+        lambda: _deferrals_of_second(nest["name"]) > deferred_before, 120, interval=2,
+        diagnose=lambda: (
+            "no issuance cycle ran with the second domain added (no "
+            f"{SECONDARY_DEFERRED_LOG!r} line for {SECOND_DOMAIN}) — the premise "
+            "of the outcome, that a cycle saw the unpublished domain, never held\n"
+            f"--- bridge_diag ---\n{bridge_diag(nest['name'])}"
+        ),
+    )
+
+    # That cycle left the primary's certificate whole and trusted.
+    leaf = served_leaf(host, port, ADDED_DOMAIN)
+    status = _cert_status(nest, [ADDED_DOMAIN])[ADDED_DOMAIN]
+    assert _leaf_is_pebble(leaf), (
+        "adding a second domain that does not point here took the primary off its "
+        f"trusted certificate: issuer={leaf.issuer.rfc4514_string()!r}"
+    )
+    assert status["state"] == "ValidTrusted" and status["is_floor"] is False, status
+    assert {ADDED_DOMAIN, MX_SNI} <= set(_sans(leaf)), _sans(leaf)
+    assert SECOND_DOMAIN not in _sans(leaf), (
+        f"the unpublished second domain was put into the order: {_sans(leaf)!r}")
+
+    # Point the second domain here: the next cycle covers it as well.
+    _publish_dns(nest["records_dir"], nest["ip"], second=True)
+    next_wake = [0.0]
+
+    def _second_joined():
+        # Wake the cycle at most every 20 s; read the served certificates every poll.
+        if time.monotonic() >= next_wake[0]:
+            _issuance_now(nest)
+            next_wake[0] = time.monotonic() + 20
+        primary = served_leaf(host, port, ADDED_DOMAIN)
+        second = served_leaf(host, port, SECOND_DOMAIN)
+        joined = (_leaf_is_pebble(primary) and SECOND_DOMAIN in _sans(primary)
+                  and _leaf_is_pebble(second))
+        return primary if joined else None
+
+    leaf = wait_until(
+        _second_joined, 180, interval=2,
+        diagnose=lambda: (
+            "the second domain, once pointing here, never joined the trusted "
+            f"certificate: primary sans={_sans(served_leaf(host, port, ADDED_DOMAIN))!r}, "
+            "second-domain issuer="
+            f"{served_leaf(host, port, SECOND_DOMAIN).issuer.rfc4514_string()!r}\n"
+            f"--- bridge_diag ---\n{bridge_diag(nest['name'])}"
+        ),
+    )
+    assert {ADDED_DOMAIN, MX_SNI} <= set(_sans(leaf)), (
+        f"the re-issued certificate dropped a primary name: {_sans(leaf)!r}")
+
+
+def _service_pid(name: str, service: str) -> int | None:
+    """The s6-supervised process id of `service` (`up (pid N pgid N) …`), or None."""
+    m = re.match(r"up \(pid (\d+)", svstat(name, service))
+    return int(m.group(1)) if m else None
+
+
+@pytest.mark.feature("certificates-by-themselves")
+def test_a_self_signed_stopgap_heals_to_trusted_and_reaches_mail_and_calendar_without_restart(
+        domainless_stack):
+    """Outcomes 6 and 12, on the box the tests above left (trusted cert issued,
+    mail serving). The admin puts a self-signed certificate in place over the
+    trusted one — the stopgap `provision_self_signed_cert` writes. With nobody
+    acting after that, the nest replaces it with a NEW trusted certificate
+    (`tls-certificates.md` § Keeping the cert alive — the self-heal), and that
+    newly issued certificate is what the mail port (IMAPS 993) and the calendar
+    port (CalDAV, behind the SNI router's 443) serve within moments — with the
+    mail bridge's process never restarted (the `"tls"` config-changed push makes
+    it re-fetch; the bring-up's restarts and SIGHUPs are all behind us)."""
+    nest, mail_ports = domainless_stack
+    host, port = "127.0.0.1", nest["port"]
+    mda = "fauna-mail-bridge-mda"
+
+    def _trusted():
+        leaf = served_leaf(host, port, ADDED_DOMAIN)
+        return leaf if _leaf_is_pebble(leaf) else None
+
+    before = wait_until(
+        _trusted, 120, interval=2,
+        diagnose=lambda: (
+            "the premise: the box serves a trusted cert before the stopgap; issuer="
+            f"{served_leaf(host, port, ADDED_DOMAIN).issuer.rfc4514_string()!r}"),
+    )
+    mda_pid = _service_pid(nest["name"], mda)
+    assert mda_pid, f"the premise: the MDA is up; svstat={svstat(nest['name'], mda)!r}"
+
+    reply = provision_self_signed_cert(nest, ADDED_DOMAIN)
+    assert reply.get("expires_at_unix"), reply
+
+    def _healed():
+        leaf = served_leaf(host, port, ADDED_DOMAIN)
+        fresh = _leaf_is_pebble(leaf) and leaf.serial_number != before.serial_number
+        return leaf if fresh else None
+
+    healed = wait_until(
+        _healed, 180, interval=2,
+        diagnose=lambda: (
+            "the self-signed stopgap was never replaced by a new trusted cert: issuer="
+            f"{served_leaf(host, port, ADDED_DOMAIN).issuer.rfc4514_string()!r}, "
+            f"cert_status={_cert_status(nest, [ADDED_DOMAIN]).get(ADDED_DOMAIN)!r}\n"
+            f"--- bridge_diag ---\n{bridge_diag(nest['name'])}"),
+    )
+    assert MX_SNI in _sans(healed), _sans(healed)
+
+    # The newly issued cert reaches the mail and calendar ports, no restart.
+    def _on_mail_and_calendar():
+        imaps = served_leaf(host, mail_ports[993], MX_SNI)
+        caldav = served_leaf(host, nest["router_port"], MX_SNI)
+        return (imaps.serial_number == healed.serial_number
+                and caldav.serial_number == healed.serial_number)
+
+    def _diagnose_ports():
+        imaps = served_leaf(host, mail_ports[993], MX_SNI)
+        caldav = served_leaf(host, nest["router_port"], MX_SNI)
+        return (
+            f"the new cert (serial {healed.serial_number:x}) did not reach the mail and "
+            f"calendar ports: IMAPS serial {imaps.serial_number:x} issuer "
+            f"{imaps.issuer.rfc4514_string()!r}, CalDAV serial {caldav.serial_number:x} "
+            f"issuer {caldav.issuer.rfc4514_string()!r}\n"
+            f"--- bridge_diag ---\n{bridge_diag(nest['name'])}")
+
+    wait_until(_on_mail_and_calendar, 90, interval=2, diagnose=_diagnose_ports)
+    assert _service_pid(nest["name"], mda) == mda_pid, (
+        "the mail bridge was restarted to pick up the new cert; it must be served "
+        f"without one (pid {mda_pid} → svstat {svstat(nest['name'], mda)!r})")

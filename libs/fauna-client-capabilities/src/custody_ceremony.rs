@@ -793,6 +793,36 @@ pub fn record_host_knobs(
     }
 }
 
+/// The host's Stop/budget edit, structurally RECORD-then-row: apply `edit`
+/// to the custody's knobs, stamp them on the ceremony record, and return the
+/// `(cap, stopped)` the runtime row must carry. The act obtains its row
+/// values only from here, so there is no path to a row knob that skips the
+/// record write — a fresher deliver re-derives the row from the record, so a
+/// knob held only on the row would be reset by it.
+///
+/// The edit starts from the record's knobs when the host has set any, else
+/// from `current` (the runtime row's own state, which the caller fetched —
+/// so a budget edit cannot silently un-stop a stopped custody). Returns
+/// `None` — nothing recorded — when no held record names `grant_id` or its
+/// accept does not decode.
+pub fn apply_host_knob_edit(
+    cfg: &mut CustodyConfig,
+    grant_id: &[u8],
+    current: (u64, bool),
+    edit: impl FnOnce(&mut u64, &mut bool),
+    now: Timestamp,
+) -> Option<(u64, bool)> {
+    let record = cfg.held.iter().find(|h| h.grant_id == grant_id)?;
+    let (mut cap, mut stopped) = if record.host_knobs.is_some() {
+        let accept = decode_accept_record(record).ok()?;
+        runtime_knobs(record, &accept)
+    } else {
+        current
+    };
+    edit(&mut cap, &mut stopped);
+    record_host_knobs(cfg, grant_id, cap, stopped, now).then_some((cap, stopped))
+}
+
 pub(crate) fn decode_offer(envelope: &EmbedAsBytes) -> Result<CustodyOffer, CustodyCeremonyError> {
     let (bytes, _env) = envelope.clone().into_signed()?;
     Ok(fauna_core::encoding::decode_signed_bytes(&bytes)?)
@@ -1079,11 +1109,9 @@ where
     for g in cfg.granted.clone() {
         // (1) an unposted offer → post, mark.
         if !g.offer_posted {
-            let offer_env: EmbedAsBytes = match fauna_core::encoding::canonical_decode(&g.offer) {
-                Ok(env) => env,
-                Err(_) => continue, // unreadable record — never fatal to the pass
+            let Some(bytes) = offer_message_bytes(&g)? else {
+                continue; // unreadable record — never fatal to the pass
             };
-            let bytes = encode_ceremony_message(&CustodyCeremonyMessage::Offer(offer_env))?;
             if poster.post(&g.channel_hex, bytes).await {
                 config
                     .mark(CeremonySide::Granted, &g.grant_id, |r| match r {
@@ -1208,42 +1236,7 @@ where
         // so a custodian holding either copy (a post that landed before its
         // mark did) unions to the same exclusions.
         if g.minted && !g.delivered {
-            let accept = decode_accept_record_granted(&g)?;
-            let offer_env: EmbedAsBytes = fauna_core::encoding::canonical_decode(&g.offer)
-                .map_err(|e| CustodyCeremonyError::Payload(format!("recorded offer: {e}")))?;
-            let offer = decode_offer(&offer_env)?;
-            let stored = ledger.load().await.map_err(|e| {
-                CustodyCeremonyError::Payload(format!("reading the grant ledger: {e}"))
-            })?;
-            let (window_start, window_end) =
-                recorded_window(&stored, &g.grant_id).ok_or_else(|| {
-                    CustodyCeremonyError::NoMatchingCeremony(
-                        "minted ceremony has no recorded Mint event".into(),
-                    )
-                })?;
-            let effective = effective_scope_set(&offer.scopes, accept.narrowed_scopes.as_ref())?;
-            let removed_devices = canonical_removed_devices(writer.removed_device_ids().await);
-            let witness = sign_custody_grant(
-                owner_keypair,
-                &CustodyGrant {
-                    grant_id: g.grant_id.clone(),
-                    owner: owner_keypair.actor_id(),
-                    custodian_key: accept.custodian_key,
-                    scopes: effective,
-                    minted_at: Timestamp(window_start * 1_000_000),
-                    expires_at: Timestamp(window_end * 1_000_000),
-                    removed_devices,
-                },
-            )?;
-            let deliver = CustodyDeliver {
-                grant_id: g.grant_id.clone(),
-                owner: owner_keypair.actor_id(),
-                witness,
-                owner_devices: offer.owner_devices.clone(),
-                owner_nest_url: offer.owner_nest_url.clone(),
-            };
-            let deliver_env = sign_custody_deliver(owner_keypair, &deliver)?;
-            let bytes = encode_ceremony_message(&CustodyCeremonyMessage::Deliver(deliver_env))?;
+            let bytes = deliver_message_bytes(&g, ledger, owner_keypair, writer).await?;
             if poster.post(&g.channel_hex, bytes).await {
                 config
                     .mark(CeremonySide::Granted, &g.grant_id, |r| {
@@ -1552,6 +1545,146 @@ impl<S: CustodyCeremonyStore + ?Sized> CeremonyRecords for S {
         self.merge_custody(state).await?;
         Ok(out)
     }
+}
+
+/// The offer post's channel bytes, from the record's verbatim envelope —
+/// `None` for an unreadable record (never fatal to a pass). The one encoder
+/// of an offer post: the drive's step (1) and the e2e re-send both use it.
+fn offer_message_bytes(g: &GrantedCustody) -> Result<Option<Vec<u8>>, CustodyCeremonyError> {
+    let offer_env: EmbedAsBytes = match fauna_core::encoding::canonical_decode(&g.offer) {
+        Ok(env) => env,
+        Err(_) => return Ok(None),
+    };
+    Ok(Some(encode_ceremony_message(
+        &CustodyCeremonyMessage::Offer(offer_env),
+    )?))
+}
+
+/// Sign a minted ceremony's deliver — the witness over the RECORDED Mint
+/// window, then the deliver envelope — and encode it for the channel. The one
+/// witness-signing site (the drive's step (3) carries the reasoning); the e2e
+/// re-send signs through it too, so a re-sent deliver is the production one.
+async fn deliver_message_bytes<W: CustodyRegistryWriter>(
+    g: &GrantedCustody,
+    ledger: &dyn SuccessionLedgerStore,
+    owner_keypair: &ActorKeypair,
+    writer: &W,
+) -> Result<Vec<u8>, CustodyCeremonyError> {
+    let accept = decode_accept_record_granted(g)?;
+    let offer_env: EmbedAsBytes = fauna_core::encoding::canonical_decode(&g.offer)
+        .map_err(|e| CustodyCeremonyError::Payload(format!("recorded offer: {e}")))?;
+    let offer = decode_offer(&offer_env)?;
+    let stored = ledger
+        .load()
+        .await
+        .map_err(|e| CustodyCeremonyError::Payload(format!("reading the grant ledger: {e}")))?;
+    let (window_start, window_end) = recorded_window(&stored, &g.grant_id).ok_or_else(|| {
+        CustodyCeremonyError::NoMatchingCeremony(
+            "minted ceremony has no recorded Mint event".into(),
+        )
+    })?;
+    let effective = effective_scope_set(&offer.scopes, accept.narrowed_scopes.as_ref())?;
+    let removed_devices = canonical_removed_devices(writer.removed_device_ids().await);
+    let witness = sign_custody_grant(
+        owner_keypair,
+        &CustodyGrant {
+            grant_id: g.grant_id.clone(),
+            owner: owner_keypair.actor_id(),
+            custodian_key: accept.custodian_key,
+            scopes: effective,
+            minted_at: Timestamp(window_start * 1_000_000),
+            expires_at: Timestamp(window_end * 1_000_000),
+            removed_devices,
+        },
+    )?;
+    let deliver = CustodyDeliver {
+        grant_id: g.grant_id.clone(),
+        owner: owner_keypair.actor_id(),
+        witness,
+        owner_devices: offer.owner_devices.clone(),
+        owner_nest_url: offer.owner_nest_url.clone(),
+    };
+    let deliver_env = sign_custody_deliver(owner_keypair, &deliver)?;
+    Ok(encode_ceremony_message(&CustodyCeremonyMessage::Deliver(
+        deliver_env,
+    ))?)
+}
+
+/// What one [`resend_owner_ceremonies`] pass posted.
+#[cfg(any(debug_assertions, feature = "e2e-agent"))]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ResendReport {
+    /// Unanswered offers posted again.
+    pub offers: usize,
+    /// Delivers signed and posted again.
+    pub delivers: usize,
+    /// Re-sends that could not be built or did not reach the channel.
+    pub failed: usize,
+}
+
+/// The owner **sends again** — the e2e stand-in for an owner whose post mark
+/// was lost (the one production edge that re-posts a sent step), so a journey
+/// can witness that a re-send never re-opens the host's consent
+/// (`account-replica-posture.md` § The custody grant + ceremony, "A deliver
+/// never re-opens consent"). No app gesture re-sends, hence the poke
+/// (`fauna_e2e_agent::CUSTODY_OWNER_RESEND_NOW` owns the contract).
+///
+/// Per granted record, the newest step this owner sent goes out again: a
+/// delivered ceremony's deliver, re-signed through the drive's own
+/// [`deliver_message_bytes`]; an offer still unanswered, its verbatim
+/// envelope. Records with nothing sent yet are the drive's business.
+///
+/// **It posts and records nothing.** The obvious shape — clear the `delivered`
+/// / `offer_posted` marks and run the drive — cannot work: the marks are
+/// monotone and the record join ORs them ([`GrantedCustody::merge`]), so the
+/// stored `true` wins every write. Posting directly also keeps the poke off
+/// the account's at-rest state.
+///
+/// Compiled out of release artifacts (convention 15); a consumer forwards its
+/// own opt-in feature to this crate's `e2e-agent`.
+#[cfg(any(debug_assertions, feature = "e2e-agent"))]
+pub async fn resend_owner_ceremonies<U, P, W>(
+    config: &U,
+    ledger: &dyn SuccessionLedgerStore,
+    owner_keypair: &ActorKeypair,
+    poster: &P,
+    writer: &W,
+) -> Result<ResendReport, CustodyCeremonyError>
+where
+    U: CeremonyRecords,
+    P: CustodyPayloadPoster,
+    W: CustodyRegistryWriter,
+{
+    let mut report = ResendReport::default();
+    for g in config.snapshot().await?.granted {
+        let (bytes, is_deliver) = if g.delivered {
+            match deliver_message_bytes(&g, ledger, owner_keypair, writer).await {
+                Ok(bytes) => (bytes, true),
+                Err(_) => {
+                    report.failed += 1;
+                    continue;
+                }
+            }
+        } else if g.offer_posted && g.accept.is_empty() {
+            match offer_message_bytes(&g) {
+                Ok(Some(bytes)) => (bytes, false),
+                _ => {
+                    report.failed += 1;
+                    continue;
+                }
+            }
+        } else {
+            continue;
+        };
+        if !poster.post(&g.channel_hex, bytes).await {
+            report.failed += 1;
+        } else if is_deliver {
+            report.delivers += 1;
+        } else {
+            report.offers += 1;
+        }
+    }
+    Ok(report)
 }
 
 /// Apply a mark to the `side` record carrying `grant_id` — the shared body
@@ -3954,6 +4087,69 @@ mod tests {
         });
     }
 
+    /// The act's record half, through the one function the act obtains its
+    /// row knobs from: Stop via `apply_host_knob_edit`, a
+    /// candidate-refresh re-deliver, then the drive — the re-derived row keeps
+    /// the Stop and the budget. Reddens if the record write inside the
+    /// function is dropped (the row values would then be only the returned
+    /// ones, and the re-deliver resets them). Both forms.
+    #[test]
+    fn the_acts_knob_edit_records_before_the_row_and_survives_a_redeliver() {
+        block_on(async {
+            for nest_form in [false, true] {
+                let (host_cfg, key) = accepted_host(nest_form, None);
+                let (m, e) = honest_window();
+                host_ingest(
+                    &host_cfg,
+                    &crafted_deliver(key, CustodyScopeSet::Account, m, e, candidates(1)),
+                    T0,
+                )
+                .unwrap();
+                host_drive(&host_cfg, T0).await;
+
+                let cap = DEFAULT_RETAINED_BYTES_CAP / 4;
+                let row = host_cfg
+                    .with(|c| {
+                        apply_host_knob_edit(
+                            c,
+                            &GID,
+                            (DEFAULT_RETAINED_BYTES_CAP, false),
+                            |c, s| {
+                                *c = cap;
+                                *s = true;
+                            },
+                            T0,
+                        )
+                    })
+                    .expect("a held record names the grant");
+                assert_eq!(row, (cap, true), "the row carries the edit");
+                assert!(
+                    host_cfg
+                        .with(|c| apply_host_knob_edit(c, b"unknown", (0, false), |_, _| {}, T0))
+                        .is_none(),
+                    "no record, no row values"
+                );
+
+                host_ingest(
+                    &host_cfg,
+                    &crafted_deliver(key, CustodyScopeSet::Account, m, e, candidates(2)),
+                    T0,
+                )
+                .expect("a candidate refresh is still taken");
+                let (held, deposits) = host_drive(&host_cfg, T0).await;
+                let (row_cap, row_stopped) = if nest_form {
+                    let d = deposits.last().expect("the hosting row is re-registered");
+                    (d.retained_bytes_cap, d.stopped)
+                } else {
+                    let r = held.last().expect("the fleet row is re-written");
+                    (r.retained_bytes_cap, r.stopped)
+                };
+                assert!(row_stopped, "nest_form={nest_form}: the Stop survives");
+                assert_eq!(row_cap, cap, "nest_form={nest_form}: the budget survives");
+            }
+        });
+    }
+
     // ── The held-offer bound ──
 
     /// One owner's signed offer under grant id `[id; 16]`, offered at `at`
@@ -4052,6 +4248,34 @@ mod tests {
         ));
     }
 
+    /// The cap counts an owner's unanswered offers on EVERY channel it shares
+    /// with the host: spreading offers across channels (each under a fresh
+    /// grant id) cannot sidestep it, and the refusal persists nothing.
+    #[test]
+    fn the_per_owner_offer_cap_spans_every_channel_the_owner_shares() {
+        let (o, h) = (owner_kp(), host_kp());
+        let now = Timestamp(1_000_000_000);
+        let host_cfg = MemConfig::new(h.actor_id());
+        let on_channel = |id: u8, channel: &str| {
+            let bytes = held_bound_offer(&o, h.actor_id(), id, 30 * 24 * 3600, now);
+            host_cfg.with(|c| ingest_payload(c, &h.actor_id(), &o.actor_id(), channel, &bytes, now))
+        };
+        for id in 1..=MAX_PENDING_HELD_OFFERS_PER_OWNER as u8 {
+            let channel = format!("{id:02x}").repeat(32);
+            assert!(matches!(
+                on_channel(id, &channel).expect("under the cap"),
+                IngestOutcome::OfferPending { .. }
+            ));
+        }
+        let before = host_cfg.0.current();
+        let err = on_channel(0xEE, &"ee".repeat(32)).expect_err("a fresh channel is no way round");
+        assert!(
+            matches!(err, CustodyCeremonyError::TooManyPendingOffers { .. }),
+            "{err}"
+        );
+        assert_eq!(host_cfg.0.current(), before, "nothing persisted");
+    }
+
     /// An offer whose term has passed with no answer is spent on the host
     /// exactly as the owner's decay treats it: off the consent surface, no
     /// longer acceptable, and its slot free — but only once the slot floor
@@ -4113,5 +4337,188 @@ mod tests {
         let err = host_takes(&host_cfg, &h, &o, &stale, past_floor).expect_err("stale on arrival");
         assert!(matches!(err, CustodyCeremonyError::OfferExpired), "{err}");
         assert_eq!(host_cfg.0.current(), before);
+    }
+
+    /// The e2e owner re-send (`resend_owner_ceremonies`): a delivered
+    /// ceremony's deliver goes out again through the drive's own signing —
+    /// byte-identical, since the witness re-signs over the recorded window and
+    /// the signatures are deterministic, so a held custody takes it as a
+    /// duplicate and a removed one refuses it; an unanswered offer goes out
+    /// verbatim and the host's ingest dedupes it. Nothing is recorded on the
+    /// owner: the marks are OR-joined, so the re-send must not depend on them.
+    #[test]
+    fn an_owner_resend_reposts_what_was_sent_and_never_reopens_consent() {
+        block_on(async {
+            let (o_kp, h_kp) = (owner_kp(), host_kp());
+            let owner_cfg = MemConfig::new(o_kp.actor_id());
+            let host_cfg = MemConfig::new(h_kp.actor_id());
+            let now = Timestamp(1_000_000_000);
+            let channel = "aa".repeat(32);
+            let take = |bytes: &[u8]| {
+                host_cfg.with(|c| {
+                    ingest_payload(c, &h_kp.actor_id(), &o_kp.actor_id(), &channel, bytes, now)
+                })
+            };
+
+            // A delivered ceremony (offer → accept → drive) the host holds.
+            let offer_bytes = owner_cfg
+                .with(|c| {
+                    begin_offer(
+                        c,
+                        &o_kp,
+                        offer_params(h_kp.actor_id(), CustodyScopeSet::Account),
+                        now,
+                    )
+                })
+                .expect("offer");
+            take(&offer_bytes).expect("ingest offer");
+            let custodian_key = [0xC5u8; 32];
+            let accept_bytes = host_cfg
+                .with(|c| {
+                    build_accept(
+                        c,
+                        &h_kp,
+                        &[0x1D; 16],
+                        custodian_key,
+                        DeviceEndpoints {
+                            node_id: custodian_key,
+                            lan_addrs: Vec::new(),
+                            public_addrs: vec!["198.51.100.7:4433".into()],
+                            relay_url: None,
+                        },
+                        DEFAULT_RETAINED_BYTES_CAP / 2,
+                        None,
+                        now,
+                    )
+                })
+                .expect("accept");
+            owner_cfg
+                .with(|c| {
+                    ingest_payload(
+                        c,
+                        &o_kp.actor_id(),
+                        &h_kp.actor_id(),
+                        &channel,
+                        &accept_bytes,
+                        now,
+                    )
+                })
+                .expect("ingest accept");
+            let (poster, writer) = (MemPoster::default(), MemWriter::default());
+            drive_ceremonies(
+                &owner_cfg,
+                owner_cfg.ledger(),
+                &o_kp,
+                &poster,
+                &writer,
+                &MemDepositor::default(),
+                &MemHosting::default(),
+                now,
+            )
+            .await
+            .expect("owner drive");
+            let delivered = poster.posted.lock().unwrap().last().unwrap().1.clone();
+            assert!(matches!(
+                take(&delivered).unwrap(),
+                IngestOutcome::WitnessHeld { .. }
+            ));
+
+            // A second offer to the same host, posted and never answered.
+            let mut params = offer_params(h_kp.actor_id(), CustodyScopeSet::Account);
+            params.grant_id = [0x2E; CUSTODY_GRANT_ID_LEN];
+            let pending_offer = owner_cfg
+                .with(|c| begin_offer(c, &o_kp, params, now))
+                .expect("second offer");
+            owner_cfg.with(|c| {
+                apply_mark(
+                    c,
+                    CeremonySide::Granted,
+                    &[0x2E; CUSTODY_GRANT_ID_LEN],
+                    |r| {
+                        if let CeremonyRecord::Granted(r) = r {
+                            r.offer_posted = true;
+                        }
+                    },
+                )
+            });
+
+            let before = owner_cfg.with(|c| c.clone());
+            let resend = MemPoster::default();
+            let report =
+                resend_owner_ceremonies(&owner_cfg, owner_cfg.ledger(), &o_kp, &resend, &writer)
+                    .await
+                    .expect("resend");
+            assert_eq!(
+                report,
+                ResendReport {
+                    offers: 1,
+                    delivers: 1,
+                    failed: 0
+                }
+            );
+            assert_eq!(
+                owner_cfg.with(|c| c.clone()),
+                before,
+                "a re-send records nothing"
+            );
+            let posted = resend.posted.lock().unwrap().clone();
+            assert_eq!(posted.len(), 2);
+            assert!(posted.iter().all(|(ch, _)| *ch == channel));
+            let redelivered = posted
+                .iter()
+                .find(|(_, b)| {
+                    matches!(
+                        decode_ceremony_message(b),
+                        Ok(CustodyCeremonyMessage::Deliver(_))
+                    )
+                })
+                .expect("the deliver went out again")
+                .1
+                .clone();
+            let reoffered = posted
+                .iter()
+                .find(|(_, b)| {
+                    matches!(
+                        decode_ceremony_message(b),
+                        Ok(CustodyCeremonyMessage::Offer(_))
+                    )
+                })
+                .expect("the unanswered offer went out again")
+                .1
+                .clone();
+            assert_eq!(
+                redelivered, delivered,
+                "the re-signed deliver is the production one"
+            );
+            assert_eq!(reoffered, pending_offer, "the offer goes out verbatim");
+
+            // The host: a held custody dedupes the deliver, a removed one
+            // refuses it; the unanswered offer is pending once, then a dupe.
+            assert!(matches!(
+                take(&redelivered).unwrap(),
+                IngestOutcome::Duplicate
+            ));
+            assert!(matches!(
+                take(&pending_offer).unwrap(),
+                IngestOutcome::OfferPending { .. }
+            ));
+            assert!(matches!(
+                take(&reoffered).unwrap(),
+                IngestOutcome::Duplicate
+            ));
+            host_cfg.with(|c| {
+                c.held
+                    .iter_mut()
+                    .find(|h| h.grant_id == [0x1D; 16])
+                    .unwrap()
+                    .removed = true;
+            });
+            let held_before = host_cfg.with(|c| c.clone());
+            assert!(
+                take(&redelivered).is_err(),
+                "a removed custody refuses the re-send"
+            );
+            assert_eq!(host_cfg.with(|c| c.clone()), held_before);
+        });
     }
 }

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.LaunchSignInRefusedPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:ids="using:FaunaApp.UiIds">
+    <Grid Padding="48" HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="500">
+        <StackPanel Spacing="16" HorizontalAlignment="Center">
+            <!-- `launch_sign_in_refused` (ui.yaml): the saved nest no longer signs
+                 this identity in. The sentence renders in the dedicated
+                 `launch-sign-in-refused-notice`, always paired with Retry — the way
+                 back in after the admin restores the account. -->
+            <TextBlock x:Name="MessageText"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.LaunchSignInRefusedNotice}"
+                       Style="{StaticResource SubtitleTextBlockStyle}"
+                       TextWrapping="Wrap"
+                       TextAlignment="Center" />
+            <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Center">
+                <Button x:Name="RetryButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.LaunchRetryButton}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Click="OnRetryClick" />
+                <Button x:Name="FallthroughButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.LaunchFallthroughButton}"
+                        Click="OnFallthroughClick" />
+            </StackPanel>
+        </StackPanel>
+    </Grid>
+</Page>

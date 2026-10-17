@@ -37,8 +37,10 @@ import time
 import pytest
 from nacl.signing import SigningKey
 
-from clients.ws_rpc_admin_client import WsRpcAdminClient
+from clients.ws_rpc_admin_client import RpcCallError, WsRpcAdminClient
 from common.auth import mint_token_via_handshake
+from conftest import MAIL_PRIMARY_DOMAIN
+from i18n.strings import S
 
 pytestmark = [pytest.mark.tier2, pytest.mark.tier_3]
 
@@ -144,4 +146,144 @@ def test_admit_with_a_handle_yields_a_working_account(admin_app, nest_instance):
         f"the admitted actor's profile never indexed under {handle!r} within the "
         f"budget — the handle did not survive the UI → wire crossing. "
         f"last error: {last2!r}; page error: {admin_app.error_text()!r}"
+    )
+
+
+@pytest.mark.feature("family-safety")
+def test_admit_with_a_guardian_yields_a_supervised_ward(admin_app, nest_instance):
+    """The Admit section's guardian picker (`family-safety.md` § The guardianship
+    link, *Set at admission*): the admin picks a guardian beside the tier and
+    admits; the admitted account's OWN `fauna.family.status` names that guardian
+    (`supervised_by`), and the guardian's names the ward. A picker that did
+    nothing admits an ordinary account — the failure this reads back to catch.
+
+    The guardian is fixture setup (the picker offers every non-suspended
+    account); the admit itself goes through the UI."""
+    from helpers.admin_wire import admit_adult
+
+    admin_app.admin.require_admit_guardian_supported()
+    guardian_handle = f"admitguardian-{int(time.time() * 1000)}"
+    guardian = admit_adult(nest_instance, guardian_handle)
+    sk = SigningKey.generate()
+    actor_hex = bytes(sk.verify_key).hex()
+    handle = f"admitward-{actor_hex[:10]}"
+
+    admin_app.admin.navigate_users()
+    admin_app.admin.admit_user(actor_hex, handle=handle, tier="free", guardian=guardian_handle)
+
+    last: list = []
+    token = _poll(time.time() + ADMIT_BUDGET_S,
+                  lambda: mint_token_via_handshake(nest_instance["url"], sk), last)
+    assert token, (
+        f"the admitted ward never authenticated within {ADMIT_BUDGET_S}s. "
+        f"last refusal: {last!r}; page error: {admin_app.admin.users_action_error_text()!r}"
+    )
+
+    with WsRpcAdminClient(
+        nest_instance["url"], actor_id=bytes(sk.verify_key), signing_key=bytes(sk),
+    ) as me:
+        ward_status = me.call("fauna.family.status", {})
+    supervised_by = ward_status.get("supervised_by") or {}
+    assert supervised_by.get("actor_id") is not None and (
+        bytes(supervised_by["actor_id"]).hex() == guardian["actor_id_hex"]
+    ), (
+        f"the admitted account must be supervised by {guardian_handle!r}; its "
+        f"family status reads {ward_status!r}; page error: "
+        f"{admin_app.admin.users_action_error_text()!r}"
+    )
+
+    with WsRpcAdminClient(
+        nest_instance["url"],
+        actor_id=bytes(guardian["signing_key"].verify_key),
+        signing_key=bytes(guardian["signing_key"]),
+    ) as g:
+        guardian_status = g.call("fauna.family.status", {})
+    ward_ids = {bytes(w["actor_id"]).hex() for w in guardian_status.get("wards", [])}
+    assert actor_hex in ward_ids, (
+        f"the guardian's family status must list the admitted ward: {guardian_status!r}"
+    )
+
+
+@pytest.mark.feature("admin-users")
+def test_a_mistyped_person_id_is_caught_on_the_page_and_nothing_is_sent(admin_app, nest_instance):
+    """A person id that is not 64 hex characters is refused on the page with
+    the form's own hint, and nothing reaches the nest (`admin.md` § 2. Users —
+    a malformed actor id is a local hint with nothing dispatched).
+
+    The typo is one character off a real key. The hint is the LOCAL message,
+    never the nest's refusal text, which is what tells "caught on the page"
+    apart from "sent and refused"; and the real key stays unregistered — the
+    handshake is refused `not_registered` — so no admission happened."""
+    sk = SigningKey.generate()
+    actor_hex = bytes(sk.verify_key).hex()
+    typo = actor_hex[:-1] + "g"
+
+    admin_app.admin.navigate_users()
+    admin_app.admin.admit_user(typo, handle=f"typo-{actor_hex[:10]}", tier="free")
+
+    hint = S.admin.users_page.admit_actor_hint
+    last: list = []
+    shown = _poll(time.time() + ADMIT_BUDGET_S,
+                  lambda: admin_app.admin.users_action_error_text() == hint, last)
+    assert shown, (
+        f"a mistyped id must be caught on the page with {hint!r}; the page shows "
+        f"{admin_app.admin.users_action_error_text()!r} (global banner: "
+        f"{admin_app.error_text()!r}; last probe error: {last!r})"
+    )
+    assert not admin_app.has_error(), (
+        f"the hint belongs on the Users page's own line, not the global banner: "
+        f"{admin_app.error_text()!r}"
+    )
+    with pytest.raises(Exception) as refused:
+        mint_token_via_handshake(nest_instance["url"], sk)
+    assert "not_registered" in str(refused.value), (
+        f"the real key must not have been admitted: {refused.value!r}"
+    )
+
+
+@pytest.mark.feature("admin-users")
+def test_admitting_with_the_handle_left_blank_signs_in_and_cannot_send_from_the_nest(
+        admin_app, nest_instance):
+    """The handle left blank admits a handle-less account: it signs in, and the
+    nest refuses it a `From:` on the nest's own mail domain until it has a
+    handle (`admin.md` § 2. Users; the From-handle gate in
+    `bins/fauna-nest/src/email_handlers.rs`).
+
+    The send is the admitted member's own act over their own session — the
+    observable the outcome names. A send can fail for other reasons, so the
+    assertion reads the refusal's code and its no-handle reason."""
+    sk = SigningKey.generate()
+    actor_hex = bytes(sk.verify_key).hex()
+
+    admin_app.admin.navigate_users()
+    admin_app.admin.admit_user(actor_hex, handle=None, tier="free")
+
+    last: list = []
+    token = _poll(time.time() + ADMIT_BUDGET_S,
+                  lambda: mint_token_via_handshake(nest_instance["url"], sk), last)
+    assert token, (
+        f"the handle-less admission never signed in within {ADMIT_BUDGET_S}s. "
+        f"last refusal: {last!r}; page error: "
+        f"{admin_app.admin.users_action_error_text()!r}"
+    )
+
+    sender = f"nobody-{actor_hex[:10]}@{MAIL_PRIMARY_DOMAIN}"
+    raw = (
+        f"From: {sender}\r\nTo: someone@external.test\r\n"
+        f"Subject: handle-less\r\nMessage-ID: <{actor_hex[:16]}@{MAIL_PRIMARY_DOMAIN}>\r\n"
+        f"\r\nhello\r\n"
+    ).encode()
+    with WsRpcAdminClient(
+        nest_instance["url"], actor_id=bytes(sk.verify_key), signing_key=bytes(sk),
+    ) as me:
+        with pytest.raises(RpcCallError) as refused:
+            me.call("fauna.email.send", {
+                "recipients": ["someone@external.test"],
+                "raw_rfc5322": raw,
+            })
+    assert refused.value.code == "fauna.email.permission_denied", (
+        f"a handle-less member must be refused the nest's own From:; got {refused.value!r}"
+    )
+    assert "set a handle" in str(refused.value.details), (
+        f"the refusal must be the no-handle arm: {refused.value.details!r}"
     )

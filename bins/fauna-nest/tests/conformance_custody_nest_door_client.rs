@@ -83,6 +83,10 @@ fn custodian_key() -> SigningKey {
     SigningKey::from_bytes(&CUSTODIAN_SECRET)
 }
 
+/// A custody cap below any one segment pair (a pair is a `.dat` plus its
+/// `.meta`, well over this).
+const SMALL_CAP: u64 = 64;
+
 async fn start_door_nest() -> (String, Arc<AppState>, tempfile::TempDir) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -1655,6 +1659,198 @@ async fn the_pump_adopts_the_owners_mail_segments_end_to_end() {
         );
         tokio::task::yield_now().await;
     }
+}
+
+/// **The admission bound, end to end** (`account-replica-posture.md` § Custody
+/// policy → *Admission*): the sibling of
+/// [`the_pump_adopts_the_owners_mail_segments_end_to_end`] with the custody row's
+/// `retained_bytes_cap` BELOW one segment pair. The pump's nest pass completes
+/// (the pull itself works), and the budget it hands the bulk half leaves no
+/// room, so the owner's pair is offered and not adopted.
+///
+/// Pins the composition no unit sees: the worker passes the row's cap
+/// (`Some(cap)`, not the 8 GiB default), `pull_from_owner_nest` meters the
+/// headroom from it, and the segment half runs under that budget. Mutate: pass
+/// `None` for the cap in `custody_hosting_worker`, or call the unbudgeted
+/// `bootstrap_scope_segments` in `adopt_scope_segments`, and the pair adopts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cap_below_one_pair_leaves_the_owners_mail_segments_unadopted() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .try_init();
+    let (base, state, tmp) = start_door_nest().await;
+
+    state
+        .db
+        .create_user_with_handle(&owner().actor_id().0, "free", "owner", None)
+        .await
+        .unwrap();
+    let owner_nest = connected_client(&base, owner()).await;
+    let owner_hex = owner().actor_id_hex();
+
+    // The bytes under test: one sealed mail record on the owner's mail scope,
+    // written by the nest's production append path. Opaque at-rest carrier —
+    // the custodian must hold it without being able to open it.
+    let appended = fauna_nest::segments::mail::append_record(
+        &state.mail_segments,
+        &state.db,
+        &owner().actor_id().0,
+        &fauna_mls::wrapped_blob::SealedRecordBytes::carried_at_rest_unchecked(
+            b"the sealed mail a custodian must actually HOLD, not merely name".to_vec(),
+        ),
+        &fauna_mls::wrapped_blob::SealedRecordBytes::carried_at_rest_unchecked(
+            b"sealed-index-hint".to_vec(),
+        ),
+        fauna_mail::segments::MailFloorMetadata {
+            format_version: fauna_mail::segments::MAIL_FLOOR_FORMAT_VERSION,
+            received_at: 1_715_000_000_000,
+            timestamp: 1_715_000_000,
+            sender_domain: "example.com".to_string(),
+            spam_disposition: "accept".to_string(),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("append one sealed mail record on the owner's scope");
+    assert!(appended.inserted, "first append inserts");
+    state
+        .mail_segments
+        .finalize_open(&owner().actor_id().0)
+        .await
+        .expect("finalize the open mail segment so the pair is adoptable");
+
+    // ── The custody row (Account form) + the witness ──────────────────────
+    mint_custody_row(&owner_nest, &CustodyScopeSet::Account, GRANT_ID).await;
+    let witness = witness_for(CustodyScopeSet::Account);
+
+    // ── The custodian: a different account, no credential for the owner ───
+    state
+        .db
+        .create_user_with_handle(&custodian_account().actor_id().0, "free", "custodian", None)
+        .await
+        .unwrap();
+    let custodian_hex = custodian_account().actor_id_hex();
+    let custodian_nest = connected_client(&base, custodian_account()).await;
+
+    let state_base = tmp.path().join("custodian-state");
+    let store_root = StoreRoot::at(state_base.clone());
+    let creds_dir = tmp.path().join("custodian-creds");
+    fauna_credential_store::cred_file_write(
+        &creds_dir,
+        CRED_NAMESPACE,
+        &std::collections::BTreeMap::from([(custodian_hex.clone(), hex::encode(CUSTODIAN_SECRET))]),
+    )
+    .expect("seed the custodian's writer-key slot");
+    let creds = CredentialStore::with_file_backend(CRED_NAMESPACE, creds_dir);
+
+    {
+        let own_dir = store_root.store_dir(&custodian_hex).expect("store dir");
+        let own = AccountStore::open(
+            SqliteBackend::open(&own_dir).unwrap(),
+            &custodian_hex,
+            WriterId(custodian_key().verifying_key().to_bytes()),
+        )
+        .await
+        .unwrap();
+        let kind = fauna_protocol::merge_policy::KIND_CUSTODIES_HELD;
+        own.put_state(fauna_account_store::types::StateEntry {
+            kind: kind.into(),
+            key: fauna_core::custody_grant::custody_entry_key(&GRANT_ID),
+            scope: fauna_protocol::merge_policy::home_scope_for_kind(kind)
+                .unwrap()
+                .into(),
+            value: fauna_core::encoding::canonical_encode(
+                &fauna_core::custodies_held::CustodyHeld {
+                    grant_id: GRANT_ID.to_vec(),
+                    owner: owner().actor_id().0,
+                    witness: fauna_core::encoding::canonical_encode(&witness)
+                        .unwrap()
+                        .to_vec(),
+                    // EMPTY on purpose — the peer leg has nothing to dial.
+                    owner_devices: Vec::new(),
+                    owner_nest_url: Some(base.clone()),
+                    retained_bytes_cap: SMALL_CAP,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .to_vec(),
+            merge_meta: None,
+            entry_version: 0,
+            tombstone: false,
+        })
+        .await
+        .unwrap();
+    }
+
+    let handle = AccountStoreRuntime::start(AccountRuntimeParams {
+        store_backup_exclusion:
+            fauna_sync_engine::account_runtime::CloudBackupExclusion::NotApplicable {
+                platform: "test".into(),
+            },
+        store_root: store_root.clone(),
+        actor_id_hex: custodian_hex.clone(),
+        rpc: Arc::clone(&custodian_nest),
+        process_rpc: None,
+        principal: RuntimePrincipal::SeedHolding(custodian_account().into()),
+        credentials: creds,
+        reconnects: None,
+        pushes: None,
+        backstop_interval: Duration::from_secs(3600), // disarmed: passes are explicit
+        memberships: None,
+        trusted_escrow_holders: fauna_sync_engine::account_runtime::fixed_holders(Vec::new()),
+        attested_predecessors: Default::default(),
+        linked_nests: None,
+        owed_nests: None,
+        peer_transport: None, // ⚠ no peer leg on this machine at all
+        // The machine's named row (the RULED 2026-09-28 block, decision 3).
+        enrollment_target_device_id: "cd".repeat(32),
+    })
+    .await
+    .expect("the custodian's runtime assembles");
+
+    let mail_scope = fauna_protocol::scope::ContentScope::new("mail", owner().actor_id().0)
+        .expect("the owner's own-actor mail scope")
+        .to_string();
+    let custodied_dir = store_root
+        .store_dir(&owner_hex)
+        .expect("custodied store dir");
+
+    // Pass until the nest leg's pull COMPLETES — so "nothing adopted" below is
+    // the budget's doing, not a pull that never ran.
+    let deadline = std::time::Instant::now() + Duration::from_secs(180);
+    loop {
+        let report = handle.reconcile_now().await.expect("pass");
+        if let Some(nest) = report.custody_nest
+            && nest.pulled >= 1
+        {
+            assert_eq!(
+                nest.adopted_segments, 0,
+                "the cap leaves no room for a pair, so the pass adopts none: {report:?}"
+            );
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the nest leg never completed a pull; last report: {report:?}"
+        );
+        tokio::task::yield_now().await;
+    }
+    let held = AccountStore::open(
+        SqliteBackend::open(&custodied_dir).unwrap(),
+        &owner_hex,
+        WriterId(custodian_key().verifying_key().to_bytes()),
+    )
+    .await
+    .unwrap();
+    assert!(
+        held.adopted_segments(&mail_scope).await.unwrap().is_empty(),
+        "no segment pair was adopted past the cap"
+    );
+    assert!(
+        held.block(&appended.cid).await.unwrap().is_none(),
+        "and the record's bytes are not held"
+    );
 }
 
 /// **Row 69 — calendar + card on the serve plane, end to end**

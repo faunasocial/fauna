@@ -5,7 +5,8 @@
 //! `fauna.posts.*` cluster `posts_handlers.rs`).
 //!
 //! Caller-class enforcement lives in `bridge_method_allowlist::is_permitted`
-//! (User-only arms for these kinds); the same gate the `fauna.posts.*`,
+//! (User arms for these kinds, plus `ThirdParty` on the five reads the
+//! principal twins at the bottom of this file serve); the same gate the `fauna.posts.*`,
 //! `fauna.email.*`, `fauna.search.*`, and `fauna.conversations.*` user-facing
 //! kinds use, partitioned by `CallerClass`.
 //!
@@ -25,8 +26,10 @@
 //! - Post `score` rides as `i64` micro-units (×1e6); the handler converts at
 //!   the boundary (`(f64 * 1e6).round() as i64` / the inverse).
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use fauna_core::scoring::CompositionEntry;
 use fauna_protocol::{
     RpcError, decode_strict as decode,
@@ -163,6 +166,12 @@ fn post_item(p: &FeedPostOut) -> FeedPostItem {
         // the arm's channel id — the same floor as the tier): a member's card
         // names the room by its own label. Additive + `None`-default.
         gated_room: p.gated_room.as_ref().map(hex::encode),
+        // A repost row's TARGET gate (`restricted-posts.md` § Encryption at
+        // rest, ruling 3): the repost card paints the target's badge over the
+        // target's teaser. Separate from the row's own `gated_*` above, which
+        // stay the public repost's. Additive + `None`-default.
+        reposted_gated_tier: p.reposted_gated_tier.clone(),
+        reposted_gated_room: p.reposted_gated_room.as_ref().map(hex::encode),
         // Web-publish state (`content_links link_type='web_published'`): the
         // slug the post serves under, `None` when unpublished. Together with
         // `gated_tier` this is what the ⋯ overflow derives its own-post web
@@ -188,32 +197,44 @@ fn feed_list_handler() -> RpcHandler {
             require_permission(&state, &actor_id, "fauna.feed.list").await?;
             let _req: FeedListRequest = decode(&payload).map_err(malformed)?;
 
-            // No core needed — list_feeds has no logic beyond the DB read +
-            // the per-feed projection (rules omitted, matching the HTTP shape).
-            let feeds = state
-                .db
-                .list_feeds()
-                .await
-                .map_err(|e| internal(format!("list_feeds: {e}")))?;
-            let feeds = feeds
-                .iter()
-                .map(|f| FeedSummary {
-                    feed_id: f.feed_id.clone(),
-                    owner: hex::encode(&f.owner),
-                    name: f.name.clone(),
-                    combination: f.combination.clone(),
-                    created_at: f.created_at,
-                    scope: f.scope.clone(),
-                    contributor_seeds: serde_json::from_str::<Vec<String>>(&f.contributor_seeds)
-                        .unwrap_or_default(),
-                    extra: std::collections::BTreeMap::new(),
-                })
-                .collect();
-            encode_reply(&FeedListReply {
-                feeds,
-                extra: std::collections::BTreeMap::new(),
-            })
+            list_feeds_reply(&state, FeedReader::Account(actor_id)).await
         })
+    })
+}
+
+/// `fauna.feed.list`'s reply for `reader`: every feed the nest holds for the
+/// account, only the account's own for a principal
+/// ([`FeedReader::own_feeds_only`]). No core needed — list_feeds has no logic
+/// beyond the DB read + the per-feed projection (rules omitted, matching the
+/// HTTP shape).
+async fn list_feeds_reply(
+    state: &Arc<crate::AppState>,
+    reader: FeedReader,
+) -> Result<Bytes, RpcError> {
+    let feeds = state
+        .db
+        .list_feeds()
+        .await
+        .map_err(|e| internal(format!("list_feeds: {e}")))?;
+    let owner = reader.own_feeds_only();
+    let feeds = feeds
+        .iter()
+        .filter(|f| owner.is_none_or(|o| f.owner == o.to_vec()))
+        .map(|f| FeedSummary {
+            feed_id: f.feed_id.clone(),
+            owner: hex::encode(&f.owner),
+            name: f.name.clone(),
+            combination: f.combination.clone(),
+            created_at: f.created_at,
+            scope: f.scope.clone(),
+            contributor_seeds: serde_json::from_str::<Vec<String>>(&f.contributor_seeds)
+                .unwrap_or_default(),
+            extra: std::collections::BTreeMap::new(),
+        })
+        .collect();
+    encode_reply(&FeedListReply {
+        feeds,
+        extra: std::collections::BTreeMap::new(),
     })
 }
 
@@ -254,25 +275,41 @@ fn feed_get_handler() -> RpcHandler {
         Box::pin(async move {
             require_permission(&state, &actor_id, "fauna.feed.get").await?;
             let req: FeedGetRequest = decode(&payload).map_err(malformed)?;
-
-            let (feed, rules, composition) = get_feed_core(&state, &req.feed_id)
-                .await
-                .map_err(rpc_error_from_api)?;
-            encode_reply(&FeedGetReply {
-                feed_id: feed.feed_id,
-                owner: hex::encode(&feed.owner),
-                name: feed.name,
-                rules,
-                combination: feed.combination,
-                created_at: feed.created_at,
-                scope: feed.scope,
-                contributor_seeds: serde_json::from_str::<Vec<String>>(&feed.contributor_seeds)
-                    .unwrap_or_default(),
-                composition: composition
-                    .map(|entries| entries.into_iter().map(composition_to_wire).collect()),
-                extra: std::collections::BTreeMap::new(),
-            })
+            get_feed_reply(&state, FeedReader::Account(actor_id), &req.feed_id).await
         })
+    })
+}
+
+/// `fauna.feed.get`'s reply for `reader`: a principal reads only the
+/// account's own feeds, and any other id answers as a missing feed — the same
+/// `not_found` a deleted one gets, so the reply never says whose it is.
+async fn get_feed_reply(
+    state: &Arc<crate::AppState>,
+    reader: FeedReader,
+    feed_id: &str,
+) -> Result<Bytes, RpcError> {
+    let (feed, rules, composition) = get_feed_core(state, feed_id)
+        .await
+        .map_err(rpc_error_from_api)?;
+    if reader
+        .own_feeds_only()
+        .is_some_and(|owner| feed.owner != owner.to_vec())
+    {
+        return Err(rpc_error_from_api(ApiError::not_found("feed not found")));
+    }
+    encode_reply(&FeedGetReply {
+        feed_id: feed.feed_id,
+        owner: hex::encode(&feed.owner),
+        name: feed.name,
+        rules,
+        combination: feed.combination,
+        created_at: feed.created_at,
+        scope: feed.scope,
+        contributor_seeds: serde_json::from_str::<Vec<String>>(&feed.contributor_seeds)
+            .unwrap_or_default(),
+        composition: composition
+            .map(|entries| entries.into_iter().map(composition_to_wire).collect()),
+        extra: std::collections::BTreeMap::new(),
     })
 }
 
@@ -330,28 +367,37 @@ fn feed_posts_handler() -> RpcHandler {
         Box::pin(async move {
             require_permission(&state, &actor_id, "fauna.feed.posts").await?;
             let req: FeedPostsRequest = decode(&payload).map_err(malformed)?;
-
-            let out = query_feed_core(
-                &state,
-                actor_id,
-                &req.feed_id,
-                req.cursor,
-                req.limit,
-                req.order.as_deref(),
-                score_cursor(req.score_cursor, req.score_cursor_created_at)?,
-                req.search.as_deref(),
-            )
-            .await
-            .map_err(rpc_error_from_api)?;
-
-            encode_reply(&FeedPostsReply {
-                posts: out.posts.iter().map(post_item).collect(),
-                cursor: out.cursor,
-                score_cursor: out.score_cursor.map(score_to_micro),
-                score_cursor_created_at: out.score_cursor_created_at,
-                extra: std::collections::BTreeMap::new(),
-            })
+            feed_posts_reply(&state, FeedReader::Account(actor_id), &req).await
         })
+    })
+}
+
+/// `fauna.feed.posts`'s reply for `reader` — [`query_feed_core`] holds a
+/// principal to the account's own feeds and to public posts.
+async fn feed_posts_reply(
+    state: &Arc<crate::AppState>,
+    reader: FeedReader,
+    req: &FeedPostsRequest,
+) -> Result<Bytes, RpcError> {
+    let out = query_feed_core(
+        state,
+        reader,
+        &req.feed_id,
+        req.cursor,
+        req.limit,
+        req.order.as_deref(),
+        score_cursor(req.score_cursor, req.score_cursor_created_at)?,
+        req.search.as_deref(),
+    )
+    .await
+    .map_err(rpc_error_from_api)?;
+
+    encode_reply(&FeedPostsReply {
+        posts: out.posts.iter().map(post_item).collect(),
+        cursor: out.cursor,
+        score_cursor: out.score_cursor.map(score_to_micro),
+        score_cursor_created_at: out.score_cursor_created_at,
+        extra: std::collections::BTreeMap::new(),
     })
 }
 
@@ -455,20 +501,69 @@ fn feed_trending_posts_handler() -> RpcHandler {
     })
 }
 
-// ── the principal twins of the two public timelines ────────────
+// ── the principal twins ────────────────────────────────────────
 //
-// `fauna:feed:read` (`authorization-server.md` § Scope grammar → *The Fauna
-// family, exactly*): the same cores, read as `FeedReader::Principal` — public
-// posts only under the off-box predicate, and nothing of the account's own
-// state. The gate (ceiling + scopes) ran in `principal_handlers` before these.
+// The same cores, read under the session's arm. `fauna:feed:read`
+// (`authorization-server.md` § Scope grammar → *The Fauna family, exactly*)
+// reads the two public timelines as `FeedReader::Principal` — public posts
+// only under the off-box predicate, and nothing of the account's own state.
+// `fauna:feed:read:account` (§ *The fourth arm*) reads the account's own
+// custom feeds, and refines the two timelines, as
+// `FeedReader::PrincipalAccount` — the account's view (block list, factors,
+// viewer state) over the same public posts. The gate (ceiling + scopes) ran
+// in `principal_handlers` before these.
+
+/// The reader a principal session reads the two public timelines as: the
+/// bare arm is their one arm (`principal_reach`), and the refining account
+/// arm, when the session also holds it, reads them as the account
+/// (`apps/bridges.md` rule (c)'s refinement).
+fn principal_timeline_reader(caller: &crate::principal_handlers::PrincipalCaller) -> FeedReader {
+    if fauna_bridge_atproto::fauna_scope::reads_feed_as_account(&caller.scopes) {
+        FeedReader::PrincipalAccount(caller.account)
+    } else {
+        FeedReader::Principal
+    }
+}
+
+pub(crate) fn principal_feed_list_handler() -> crate::principal_handlers::PrincipalHandler {
+    Box::new(|state, caller, payload| {
+        Box::pin(async move {
+            let _req: FeedListRequest = decode(&payload).map_err(malformed)?;
+            list_feeds_reply(&state, FeedReader::PrincipalAccount(caller.account)).await
+        })
+    })
+}
+
+pub(crate) fn principal_feed_get_handler() -> crate::principal_handlers::PrincipalHandler {
+    Box::new(|state, caller, payload| {
+        Box::pin(async move {
+            let req: FeedGetRequest = decode(&payload).map_err(malformed)?;
+            get_feed_reply(
+                &state,
+                FeedReader::PrincipalAccount(caller.account),
+                &req.feed_id,
+            )
+            .await
+        })
+    })
+}
+
+pub(crate) fn principal_feed_posts_handler() -> crate::principal_handlers::PrincipalHandler {
+    Box::new(|state, caller, payload| {
+        Box::pin(async move {
+            let req: FeedPostsRequest = decode(&payload).map_err(malformed)?;
+            feed_posts_reply(&state, FeedReader::PrincipalAccount(caller.account), &req).await
+        })
+    })
+}
 
 pub(crate) fn principal_feed_local_posts_handler() -> crate::principal_handlers::PrincipalHandler {
-    Box::new(|state, _caller, payload| {
+    Box::new(|state, caller, payload| {
         Box::pin(async move {
             let req: FeedLocalPostsRequest = decode(&payload).map_err(malformed)?;
             let out = query_local_feed_core(
                 &state,
-                FeedReader::Principal,
+                principal_timeline_reader(&caller),
                 req.cursor,
                 req.limit,
                 req.search.as_deref(),
@@ -486,12 +581,12 @@ pub(crate) fn principal_feed_local_posts_handler() -> crate::principal_handlers:
 
 pub(crate) fn principal_feed_trending_posts_handler() -> crate::principal_handlers::PrincipalHandler
 {
-    Box::new(|state, _caller, payload| {
+    Box::new(|state, caller, payload| {
         Box::pin(async move {
             let req: FeedTrendingPostsRequest = decode(&payload).map_err(malformed)?;
             let out = query_trending_feed_core(
                 &state,
-                FeedReader::Principal,
+                principal_timeline_reader(&caller),
                 score_cursor(req.score_cursor, req.score_cursor_created_at)?,
                 req.limit,
                 req.search.as_deref(),

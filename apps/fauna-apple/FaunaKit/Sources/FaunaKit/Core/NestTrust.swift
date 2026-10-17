@@ -47,8 +47,18 @@ public enum NestTrust {
         }
         #if os(macOS)
             // Primary in the user domain (the ONE derivation the agent + tui
-            // read), replica in the container for the extension.
-            let primary = installScopedTrustHome()
+            // read), replica in the container for the extension. No absolute
+            // home → shared Rust refuses the derivation (never a `/tmp` store
+            // another account could pre-plant): the in-memory pin store stays
+            // installed and the reason is logged — the linux/tui posture.
+            let primary: String
+            do {
+                primary = try installScopedTrustHome()
+            } catch {
+                logMessage(level: .error, target: "fauna.trust",
+                           message: "no install-scoped trust home; pins stay in memory: \(error)")
+                return
+            }
             installNestIdentityPinStoreWithMirror(dataDir: primary, replicaDir: shared.path)
         #else
             install_nest_identity_pin_store(shared.path)

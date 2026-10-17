@@ -44,10 +44,10 @@ use fauna_protocol::{
         CreateEmailFilterRequest, DeleteEmailFilterReply, DeleteEmailFilterRequest,
         EmailFilter as WireEmailFilter, EmailFilterAction as WireEmailFilterAction,
         EmailFilterRule as WireEmailFilterRule, FlagChange, FlagChangesReply, FlagChangesRequest,
-        GetEmailFilterReply, GetEmailFilterRequest, InboxFetchReply, InboxFetchRequest,
-        InboxMessage, ListEmailFiltersReply, ListEmailFiltersRequest, MarkSeenReply,
-        MarkSeenRequest, SPAM_SCORED_KEYWORD, SendEmailReply, SendEmailRequest,
-        UpdateEmailFilterReply, UpdateEmailFilterRequest,
+        GetEmailFilterReply, GetEmailFilterRequest, INBOX_FLAG_WRITE_MAX_UIDS, InboxFetchReply,
+        InboxFetchRequest, InboxMessage, ListEmailFiltersReply, ListEmailFiltersRequest,
+        MarkSeenReply, MarkSeenRequest, SPAM_SCORED_KEYWORD, SendEmailReply, SendEmailRequest,
+        UpdateEmailFilterReply, UpdateEmailFilterRequest, WarmupHold,
     },
 };
 
@@ -755,6 +755,7 @@ async fn resolve_in_domain(
         domain,
         local_part,
         sender_domain,
+        crate::bridge_routing_handlers::ResolvePurpose::Delivery,
     )
     .await?
     {
@@ -767,7 +768,11 @@ async fn resolve_in_domain(
             target: actor_id,
             stamped_headers,
         })),
-        LocalRecipientOutcome::Forward { .. } | LocalRecipientOutcome::Reject { .. } => Ok(None),
+        // A processor address (`dmarc-report@`) has no mailbox either: onto the
+        // outbound queue, where our own MX perimeter hands it to the processor.
+        LocalRecipientOutcome::Forward { .. }
+        | LocalRecipientOutcome::Reject { .. }
+        | LocalRecipientOutcome::Processor { .. } => Ok(None),
     }
 }
 
@@ -865,6 +870,9 @@ fn send_handler() -> RpcHandler {
         Box::pin(async move {
             require_permission(&state, &actor_id, "fauna.email.send").await?;
             let req: SendEmailRequest = decode(&payload).map_err(malformed)?;
+            // The sender's own send switch (`mail-policy-config.md` § Tier 3)
+            // — first, so a refused send writes nothing, not even a Sent copy.
+            crate::bridge_routing_handlers::refuse_if_send_disabled(&state, &actor_id).await?;
 
             // Product-ceiling pre-check — the typed first-party sibling of the
             // SMTP perimeter's `552 5.3.4` (`smtp-server.md` § Message size
@@ -927,11 +935,17 @@ fn send_handler() -> RpcHandler {
                 )));
             }
             let from_mailbox = from_mailboxes.remove(0);
+            // The From: host, canonicalised ONCE with the shared DNS-name
+            // normaliser (lowercase, trailing FQDN dots stripped): the reader
+            // returns the host as written, and `fauna.test.` IS `fauna.test`,
+            // so the ownership gate, the alias resolver, the sender metadata
+            // and the outbound envelope sender must all see the same name.
+            let from_host = fauna_core::web::normalize_dns_name(&from_mailbox.host);
             // The From: addr-spec every reader below sees — the in-domain
             // sender metadata, the ownership gate, the rate limit's
             // subordinate key and the outbound envelope sender — as
             // `local@domain`, the shape `mail-parser`'s `address()` yields.
-            let from_addr = format!("{}@{}", from_mailbox.mailbox, from_mailbox.host);
+            let from_addr = format!("{}@{}", from_mailbox.mailbox, from_host);
 
             // Recipients: merge into a single deduplicated list. The
             // wire shape doesn't carry a separate `to` (the HTTP twin
@@ -1005,92 +1019,45 @@ fn send_handler() -> RpcHandler {
             // non-empty by construction: `from_mailboxes` above admits only a
             // mailbox carrying a local part AND a domain, so there is no
             // `@`-less shape left that could slip past a split-on-`@` gate.
-            let (from_local, from_domain) =
-                (from_mailbox.mailbox.as_str(), from_mailbox.host.as_str());
+            let (from_local, from_domain) = (from_mailbox.mailbox.as_str(), from_host.as_str());
             // The From: domain, reused for both the in-domain delivery metadata
             // and the sender's own Sent-copy metadata below. Never empty
             // (`persist_decoded_inbound_mail` rejects an empty `sender_domain`).
             let sender_domain = from_domain.to_string();
 
-            // Sender-ownership verification — the app door's arm of the one
-            // rule both sender doors enforce (`mail-multidomain.md` § *From:
-            // header ownership*; this door's statement: `mail-app-surface.md`
-            // § *Sender-handle verification*). The deployment claims authority
-            // over EVERY active local domain, not just the primary: a handle
-            // is "addressable and login-reachable as `bob@<domain>` for every
-            // active `local_domains` entry" (`mail-multidomain.md` § *The
-            // model: one handle, addressable on every active domain*), so
-            // `<handle>@<any active domain>` IS that actor's own address, and
-            // so is any alias the alias resolver attributes to the actor.
-            // Comparing against the primary alone once left every additional
-            // domain a free impersonation surface — and because this same
-            // From: address becomes the outbound envelope sender
-            // (`original_sender` below) and DKIM signs on the From: domain,
-            // the forgery went out DMARC-aligned. Off-domain From: addresses
-            // still bypass (the deployment isn't authoritative for them).
-            let deployment_claims_from_domain = state
-                .db
-                .list_active_mail_domains()
-                .await
-                .map_err(internal)?
-                .iter()
-                .any(|d| d.domain_name.eq_ignore_ascii_case(from_domain));
-            if deployment_claims_from_domain {
-                // `get_handle` returns `Ok(None)` only when there is no `users`
-                // row at all; a REGISTERED actor without a handle stores the
-                // empty string (`create_user` writes `''`, and
-                // `fauna.admin.users.clear_handle` sets it back to `''`). So an
-                // empty handle is folded into the no-handle arm — left in the
-                // mismatch arm it produced the nonsense refusal "from address
-                // does not match your handle ()", and the honest no-handle
-                // message was unreachable for every actor that could actually
-                // get this far.
-                let handle = state
-                    .db
-                    .get_handle(&actor_id)
-                    .await
-                    .map_err(|e| internal(format!("get_handle: {e}")))?
-                    .filter(|h| !h.is_empty());
-                let is_own_handle = handle
-                    .as_deref()
-                    .is_some_and(|h| h.eq_ignore_ascii_case(from_local));
-                if !is_own_handle {
-                    // Not the handle: an alias the actor owns is theirs to send
-                    // from too (the MUA-facing door accepts it as `MAIL FROM`
-                    // and `From:` alike — an app must not be held to less).
-                    // The SAME in-process resolver the MTA reaches over
-                    // `fauna.bridges.resolve_recipient`, and the same
-                    // reading of its answer: only a deliverable mailbox owned
-                    // by THIS actor authorises; Forward (an admin external
-                    // forwarder — no sending mailbox), Reject, or another
-                    // owner are all "not yours".
-                    let owned = matches!(
-                        crate::bridge_routing_handlers::resolve_local_recipient_unstamped(
-                            &state,
-                            from_domain,
-                            from_local,
-                            primary_domain.as_deref().unwrap_or(from_domain),
-                        )
-                        .await?,
-                        crate::bridge_routing_handlers::LocalRecipientOutcome::Mailbox {
-                            actor_id: owner,
-                            ..
-                        } if owner == actor_id
-                    );
-                    if !owned {
-                        return Err(match handle.as_deref() {
-                            Some(handle) => permission_denied(&format!(
-                                "from address does not match your handle ({handle}) or an alias you own"
-                            )),
-                            None => permission_denied("you must set a handle before sending email"),
-                        });
-                    }
-                }
+            // Sender-ownership verification — the app door's call of the one
+            // predicate every door that hands the nest a user's message applies
+            // (`mail-multidomain.md` § *From: header ownership*; this door's
+            // statement: `mail-app-surface.md` § *Sender-handle verification*):
+            // a From: the deployment signs for — an active local domain or a
+            // subdomain of one — must be the actor's handle on an active local
+            // domain, or an alias the resolver attributes to the actor. This
+            // same From: address becomes the outbound envelope sender
+            // (`original_sender` below) and DKIM signs on its domain, so a
+            // forgery would leave DMARC-aligned. An address on a domain the
+            // deployment does not sign for bypasses (not ours to vouch for).
+            let from_ownership = crate::mail_from_ownership::from_ownership(
+                &state,
+                &actor_id,
+                from_local,
+                from_domain,
+            )
+            .await?;
+            if let crate::mail_from_ownership::FromOwnership::NotOwned { handle } = &from_ownership
+            {
+                return Err(match handle.as_deref() {
+                    Some(handle) => permission_denied(&format!(
+                        "from address does not match your handle ({handle}) or an alias you own"
+                    )),
+                    None => permission_denied("you must set a handle before sending email"),
+                });
             }
             // The address this door verified, for the in-domain copies'
-            // authenticated-sender stamp: the `From:` iff the handle gate above
-            // fired and passed; the off-domain bypass verified nothing.
-            let verified_from = deployment_claims_from_domain.then_some(from_addr.as_str());
+            // authenticated-sender stamp: the `From:` iff the ownership gate
+            // above fired and passed; the out-of-scope bypass verified nothing.
+            let verified_from = (from_ownership
+                == crate::mail_from_ownership::FromOwnership::Owned)
+                .then_some(from_addr.as_str());
 
             // Outbound rate limit. Only fires when there is remote delivery to
             // do — pure in-domain sends never leave the deployment, so they
@@ -1121,12 +1088,20 @@ fn send_handler() -> RpcHandler {
             if !remote_addrs.is_empty() {
                 let by_actor = state
                     .db
-                    .count_outbound_by_actor_window(&actor_id, SEND_RATE_WINDOW_SECS)
+                    .count_outbound_by_actor_window(
+                        &actor_id,
+                        state.outbound_now(),
+                        SEND_RATE_WINDOW_SECS,
+                    )
                     .await
                     .map_err(internal)?;
                 let by_sender = state
                     .db
-                    .count_outbound_by_sender_window(&from_addr, SEND_RATE_WINDOW_SECS)
+                    .count_outbound_by_sender_window(
+                        &from_addr,
+                        state.outbound_now(),
+                        SEND_RATE_WINDOW_SECS,
+                    )
                     .await
                     .map_err(internal)?;
                 if by_actor >= SEND_RATE_LIMIT_PER_HOUR || by_sender >= SEND_RATE_LIMIT_PER_HOUR {
@@ -1266,9 +1241,17 @@ fn send_handler() -> RpcHandler {
 
             if !remote_addrs.is_empty() {
                 let rcpt_refs: Vec<&str> = remote_addrs.iter().map(String::as_str).collect();
-                match state
-                    .db
-                    .enqueue_outbound(crate::db::outbound::NewOutbound {
+                // Through the fresh-IP warm-up chokepoint (`mail-deliverability.md`
+                // § Enforcement at submission time): this is a user's own send
+                // leaving via the deployment IP, so it consumes the
+                // deployment-wide allowance and, over today's cap, is queued for
+                // the next 00:00 UTC — still accepted, the reply's queued count
+                // unchanged. `remote_addrs` is already this door's own partition
+                // (the exact-match in-domain path above stays this handler's), so
+                // only the cap is shared, never `submit_outbound`'s resolver.
+                match crate::bridge_routing_handlers::enqueue_outbound_warmup_capped(
+                    &state,
+                    crate::db::outbound::NewOutbound {
                         original_msgid: &msgid,
                         original_sender: &from_addr,
                         recipients: &rcpt_refs,
@@ -1287,8 +1270,11 @@ fn send_handler() -> RpcHandler {
                         // actually sent it rather than the `From:` string it
                         // chose.
                         submit_actor_id: Some(&actor_id),
-                    })
-                    .await
+                    },
+                    state.outbound_now(),
+                    true,
+                )
+                .await
                 {
                     Ok(ids) => remote_queued = ids.len() as u32,
                     Err(e) => {
@@ -1475,6 +1461,19 @@ fn mailbox_fetch_handler(mailbox: &'static str, permission: &'static str) -> Rpc
             // resumes from the last included uid.
             let frame_budget =
                 fauna_mail::transport_limits::INLINE_MAIL_REQUEST_BUDGET_BYTES as usize;
+            // The warm-up's holds on the caller's own sent mail
+            // (`mail-deliverability.md` § Enforcement at submission time, the
+            // deferred-state bullet). Only Sent carries them: an INBOX message
+            // is never the caller's outbound.
+            let warmup_holds = if mailbox == "Sent" {
+                state
+                    .db
+                    .warmup_holds_for_actor(&actor_id, state.outbound_now())
+                    .await
+                    .map_err(internal)?
+            } else {
+                Default::default()
+            };
             let mut page_bytes: usize = 0;
             let mut messages: Vec<InboxMessage> = Vec::with_capacity(rows.len());
             for (row, env) in rows.into_iter().zip(envelopes) {
@@ -1614,6 +1613,13 @@ fn mailbox_fetch_handler(mailbox: &'static str, permission: &'static str) -> Rpc
                             // the on-device scorer can read the `$FaunaSpamScored`
                             // watermark (mail-spam.md § Re-file timing).
                             flags: row.flags.split_whitespace().map(String::from).collect(),
+                            warmup_hold: warmup_holds.get(&row.message_id[..]).map(|p| {
+                                WarmupHold {
+                                    release_at: p.release_at,
+                                    messages_ahead: p.messages_ahead,
+                                    extra: Default::default(),
+                                }
+                            }),
                             extra: Default::default(),
                         });
                     }
@@ -1666,8 +1672,10 @@ fn apply_spam_disposition_handler() -> RpcHandler {
             // Least-privilege guard: every junk UID must be one the scorer
             // scored (it only ever moves messages it scored). A stray UID is a
             // malformed request, not a silent skip.
-            let scored: std::collections::BTreeSet<u32> = req.scored_uids.iter().copied().collect();
-            if let Some(stray) = req.junk_uids.iter().find(|u| !scored.contains(u)) {
+            let scored_uids = capped_distinct_uids("scored_uids", &req.scored_uids)?;
+            let junk_uids = capped_distinct_uids("junk_uids", &req.junk_uids)?;
+            let scored: std::collections::BTreeSet<u32> = scored_uids.iter().copied().collect();
+            if let Some(stray) = junk_uids.iter().find(|u| !scored.contains(u)) {
                 return Err(malformed(format!(
                     "junk_uids must be a subset of scored_uids (stray uid {stray})"
                 )));
@@ -1700,7 +1708,7 @@ fn apply_spam_disposition_handler() -> RpcHandler {
             // flag change — it appends no placement-journal record (an IMAP MUA
             // never acts on it).
             let watermark_flags = [SPAM_SCORED_KEYWORD.to_string()];
-            let watermarked = if req.scored_uids.is_empty() {
+            let watermarked = if scored_uids.is_empty() {
                 0
             } else {
                 let outcome = state
@@ -1708,7 +1716,7 @@ fn apply_spam_disposition_handler() -> RpcHandler {
                     .apply_store_flags(
                         &actor_id,
                         "INBOX",
-                        &req.scored_uids,
+                        &scored_uids,
                         StoreFlagsDbOp::Add,
                         &watermark_flags,
                         None,
@@ -1721,12 +1729,12 @@ fn apply_spam_disposition_handler() -> RpcHandler {
             // (2) Move the spam subset INBOX→Junk. No quota pre-check: a
             // same-actor INBOX→Junk reshuffle adds no net storage, and spam
             // must always be demotable regardless of the actor's quota.
-            let moved_to_junk = if req.junk_uids.is_empty() {
+            let moved_to_junk = if junk_uids.is_empty() {
                 0
             } else {
                 let outcome = state
                     .db
-                    .apply_move(&actor_id, "INBOX", &req.junk_uids, "Junk")
+                    .apply_move(&actor_id, "INBOX", &junk_uids, "Junk")
                     .await
                     .map_err(internal)?;
 
@@ -1797,11 +1805,28 @@ fn apply_spam_disposition_handler() -> RpcHandler {
 
 const SEEN_FLAG: &str = "\\Seen";
 
+/// Refuse a UID list longer than [`INBOX_FLAG_WRITE_MAX_UIDS`] BEFORE any DB
+/// work (`apply_store_flags` / `apply_move` walk the list holding the nest-wide
+/// `CacheDb` mutex with no await point, so the RPC deadline cannot cut it),
+/// then drop repeats, keeping first-seen order — a repeated unseen UID would
+/// otherwise count once per copy in the reply, the journal and the push work.
+fn capped_distinct_uids(field: &str, uids: &[u32]) -> Result<Vec<u32>, RpcError> {
+    if uids.len() > INBOX_FLAG_WRITE_MAX_UIDS {
+        return Err(invalid_params(&format!(
+            "{field} carries {} uids; at most {INBOX_FLAG_WRITE_MAX_UIDS} per request",
+            uids.len()
+        )));
+    }
+    let mut seen = std::collections::HashSet::with_capacity(uids.len());
+    Ok(uids.iter().copied().filter(|u| seen.insert(*u)).collect())
+}
+
 fn mark_seen_handler() -> RpcHandler {
     Box::new(|state, actor_id, payload| {
         Box::pin(async move {
             require_permission(&state, &actor_id, "fauna.email.inbox.mark_seen").await?;
             let req: MarkSeenRequest = decode(&payload).map_err(malformed)?;
+            let uids = capped_distinct_uids("uids", &req.uids)?;
             crate::bridge_routing_handlers::refuse_if_pure_backup(
                 &state,
                 "mail",
@@ -1809,7 +1834,7 @@ fn mark_seen_handler() -> RpcHandler {
                 crate::bridge_routing_handlers::pure_backup_destination,
             )
             .await?;
-            if req.uids.is_empty() {
+            if uids.is_empty() {
                 return encode_reply(&MarkSeenReply::default());
             }
             // Unknown/expunged UIDs are skipped by the STORE; an already-seen
@@ -1819,7 +1844,7 @@ fn mark_seen_handler() -> RpcHandler {
                 .apply_store_flags(
                     &actor_id,
                     "INBOX",
-                    &req.uids,
+                    &uids,
                     StoreFlagsDbOp::Add,
                     &[SEEN_FLAG.to_string()],
                     None,
@@ -2796,6 +2821,229 @@ mod tests {
             inbox.len(),
             1,
             "the sub-addressed recipient must receive it"
+        );
+    }
+
+    // ── the warm-up's hold on the sender's Sent read ────────────────
+    //
+    // `mail-deliverability.md` § Enforcement at submission time, the
+    // deferred-state bullet: a message the warm-up holds says, where its
+    // sender reads their sent mail, that it is held, until when, and how many
+    // held messages are ahead of it.
+
+    /// Submit `raw` to one external recipient through the warm-up-counted door
+    /// and file the sender's Sent copy, as a counted submission does.
+    async fn submit_counted_with_sent_copy(state: &Arc<AppState>, sender: &[u8; 32], raw: &[u8]) {
+        let recipients = ["x@remote.example"];
+        crate::bridge_routing_handlers::submit_outbound(
+            state,
+            crate::db::outbound::NewOutbound {
+                original_msgid: "<queued@fauna.test>",
+                original_sender: "sender@fauna.test",
+                recipients: &recipients,
+                raw_message: raw,
+                inbound_verdicts: crate::db::outbound::InboundVerdictsSnapshot {
+                    spf: "none".into(),
+                    dmarc: "none".into(),
+                    dmarc_policy: "none".into(),
+                },
+                is_forwarded: false,
+                forward_actor_id: None,
+                forward_rule_id: None,
+                forward_copy_mode: None,
+                submit_actor_id: None,
+            },
+            state.outbound_now(),
+            true,
+        )
+        .await
+        .expect("submit");
+        crate::bridge_routing_handlers::seal_and_store_sent_copy(state, sender, raw, "fauna.test")
+            .await
+            .expect("sent copy");
+    }
+
+    async fn sent_page(state: &Arc<AppState>, actor: [u8; 32]) -> Vec<InboxMessage> {
+        let payload = bytes::Bytes::from(
+            fauna_protocol::encode_canonical(&InboxFetchRequest::default())
+                .unwrap()
+                .to_vec(),
+        );
+        let bytes = sent_fetch_handler()(state.clone(), actor, payload)
+            .await
+            .expect("sent.fetch ok");
+        let reply: InboxFetchReply = fauna_protocol::decode_strict(&bytes).expect("decodes");
+        reply.messages
+    }
+
+    fn sent_mail(n: u32) -> Vec<u8> {
+        format!(
+            "From: sender@fauna.test\r\nTo: x@remote.example\r\nSubject: m{n}\r\n\
+             Message-ID: <m{n}@fauna.test>\r\n\r\nbody {n}\r\n"
+        )
+        .into_bytes()
+    }
+
+    #[tokio::test]
+    async fn a_message_the_warm_up_holds_reads_back_held_on_the_senders_sent_read() {
+        let state = crate::test_support::fixture_state();
+        let sender = [0x51u8; 32];
+        state.db.create_user(&sender, "free", "t").await.unwrap();
+        crate::test_support::seed_recipient_seal_key(
+            &state.db,
+            &sender,
+            &crate::test_support::FIXTURE_MSEK,
+        )
+        .await;
+        let now = state.outbound_now();
+
+        // Message 1 goes out under today's cap; then the cap is spent.
+        submit_counted_with_sent_copy(&state, &sender, &sent_mail(1)).await;
+        let day_one_cap = fauna_mail::warmup::max_for_day(1).unwrap() as u32;
+        state
+            .db
+            .try_consume_warmup(now, day_one_cap - 1)
+            .await
+            .unwrap();
+        // Messages 2 and 3 are past the day's ramp: held until tomorrow.
+        submit_counted_with_sent_copy(&state, &sender, &sent_mail(2)).await;
+        submit_counted_with_sent_copy(&state, &sender, &sent_mail(3)).await;
+
+        let page = sent_page(&state, sender).await;
+        assert_eq!(page.len(), 3, "every send left its Sent copy");
+        let tomorrow = fauna_mail::warmup::next_utc_midnight(now);
+        let holds: Vec<Option<(i64, u32)>> = page
+            .iter()
+            .map(|m| {
+                m.warmup_hold
+                    .as_ref()
+                    .map(|h| (h.release_at, h.messages_ahead))
+            })
+            .collect();
+        assert_eq!(
+            holds,
+            vec![None, Some((tomorrow, 0)), Some((tomorrow, 1))],
+            "the message under the cap is not held; the two past it are held \
+             until the next 00:00 UTC, in submission order"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_borrowed_message_id_does_not_mark_another_senders_mail_held() {
+        let state = crate::test_support::fixture_state();
+        let holder = [0x52u8; 32];
+        let other = [0x53u8; 32];
+        for actor in [&holder, &other] {
+            state.db.create_user(actor, "free", "t").await.unwrap();
+            crate::test_support::seed_recipient_seal_key(
+                &state.db,
+                actor,
+                &crate::test_support::FIXTURE_MSEK,
+            )
+            .await;
+        }
+        let now = state.outbound_now();
+        let day_one_cap = fauna_mail::warmup::max_for_day(1).unwrap() as u32;
+        state.db.try_consume_warmup(now, day_one_cap).await.unwrap();
+        submit_counted_with_sent_copy(&state, &holder, &sent_mail(7)).await;
+
+        // `other` files mail of its own under the very same Message-ID.
+        let borrowed = b"From: other@fauna.test\r\nTo: y@remote.example\r\nSubject: mine\r\n\
+            Message-ID: <m7@fauna.test>\r\n\r\nsomething else\r\n";
+        crate::bridge_routing_handlers::seal_and_store_sent_copy(
+            &state,
+            &other,
+            borrowed,
+            "fauna.test",
+        )
+        .await
+        .unwrap();
+
+        assert!(sent_page(&state, holder).await[0].warmup_hold.is_some());
+        let others = sent_page(&state, other).await;
+        assert_eq!(others.len(), 1);
+        assert_eq!(
+            others[0].warmup_hold, None,
+            "a Message-ID is the sender's choice — only the agreeing envelope \
+             key ties a held row to a mailbox copy"
+        );
+    }
+
+    // ── The fresh-IP warm-up cap at the APP send door ───────────────────────
+    //
+    // `mail-deliverability.md` § Enforcement at submission time: the cap is the
+    // deployment IP's, so a send from the Fauna app consumes the same
+    // deployment-wide allowance the 465/587 submission does, and over today's
+    // cap is accepted and queued for tomorrow — never refused.
+
+    const REMOTE_RAW: &[u8] =
+        b"From: sender@example.com\r\nTo: friend@example.org\r\nSubject: hi\r\n\r\nbody\r\n";
+
+    async fn send_remote(state: &Arc<AppState>, sender: [u8; 32]) -> SendEmailReply {
+        let req = fauna_protocol::email::SendEmailRequest {
+            recipients: vec!["friend@example.org".into()],
+            raw_rfc5322: REMOTE_RAW.to_vec(),
+            extra: Default::default(),
+        };
+        let payload = bytes::Bytes::from(fauna_protocol::encode_canonical(&req).unwrap().to_vec());
+        let bytes = send_handler()(state.clone(), sender, payload)
+            .await
+            .expect("send handler ok");
+        fauna_protocol::decode_strict(&bytes).expect("decodes")
+    }
+
+    #[tokio::test]
+    async fn an_app_send_under_the_warmup_cap_leaves_now_and_counts() {
+        let state = send_fixture("example.com").await;
+        let sender = seed_sender(&state).await;
+        let now = state.outbound_now();
+
+        let reply = send_remote(&state, sender).await;
+
+        assert_eq!(reply.remote_queued, 1);
+        let rows = state.db.fetch_all_outbound_for_test().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows[0].next_attempt_at <= now + 5,
+            "under the cap the row is due now"
+        );
+        let status = state.db.read_warmup_status(now).await.unwrap();
+        assert_eq!(
+            status.today_used, 1,
+            "the app send consumes the deployment-wide warm-up allowance"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_app_send_over_the_warmup_cap_is_accepted_and_queued_for_tomorrow() {
+        let state = send_fixture("example.com").await;
+        let sender = seed_sender(&state).await;
+        let now = state.outbound_now();
+        // Day 1 of the ramp: spend the whole day's allowance first.
+        let day_one = fauna_mail::warmup::max_for_day(1).unwrap() as u32;
+        assert_eq!(
+            state.db.try_consume_warmup(now, day_one).await.unwrap(),
+            crate::db::mail_warmup::WarmupDecision::Allowed
+        );
+
+        let reply = send_remote(&state, sender).await;
+
+        assert_eq!(
+            reply.remote_queued, 1,
+            "over the cap the send is still accepted with its queued count"
+        );
+        assert!(reply.remote_errors.is_empty());
+        let rows = state.db.fetch_all_outbound_for_test().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        let midnight = fauna_mail::warmup::next_utc_midnight(row.created_at);
+        assert_eq!(
+            row.next_attempt_at, midnight,
+            "over the cap the message is held until the next 00:00 UTC"
+        );
+        assert!(
+            row.created_at <= now + 5,
+            "created_at stays the submission time"
         );
     }
 }

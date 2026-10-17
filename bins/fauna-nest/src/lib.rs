@@ -21,6 +21,8 @@
 pub mod abuse_report_federation;
 pub mod account_core;
 pub mod account_handlers;
+#[cfg(feature = "test-hooks")]
+pub mod account_lock_test_hook;
 pub mod acme;
 pub mod acme_http01;
 #[cfg(feature = "activitypub")]
@@ -35,6 +37,9 @@ pub mod atproto_authoring_key;
 pub mod atproto_blob_sweeper;
 #[cfg(feature = "test-hooks")]
 pub mod atproto_identity_test_hook;
+/// The oracle's `atproto.service_auth` door — the nest's policy half of the
+/// bridge-held custodian.
+pub mod atproto_oracle;
 pub mod auth;
 pub mod auth_core;
 pub mod auth_handlers;
@@ -42,6 +47,8 @@ pub mod backup;
 pub mod backup_handlers;
 pub mod blob_routes;
 pub mod blob_store;
+#[cfg(feature = "test-hooks")]
+pub mod blocklist_self_check_test_hook;
 #[cfg(feature = "bluesky")]
 pub mod bluesky;
 #[cfg(test)]
@@ -60,6 +67,8 @@ pub mod bridge_management;
 pub mod bridge_method_allowlist;
 pub mod bridge_push_registry;
 pub mod bridge_rate_limit;
+/// The nest→bridge round trip's shared waiter registry (push out, RPC back).
+pub mod bridge_round_trip;
 pub mod bridge_routing_handlers;
 #[cfg(any(feature = "nostr", feature = "bluesky", feature = "activitypub"))]
 pub mod bridge_schema;
@@ -70,8 +79,12 @@ pub mod bridged_conversation_handlers;
 pub mod bridges_ui_handlers;
 pub mod bulk_byte_token;
 pub mod caldav_bridge;
+#[cfg(feature = "test-hooks")]
+pub mod capability_withhold_test_hook;
 pub mod carddav_bridge;
 pub mod cert_nudge;
+#[cfg(feature = "test-hooks")]
+pub mod cert_nudge_test_hook;
 pub mod challenge_auth;
 #[cfg(feature = "test-hooks")]
 pub mod channel_refusal_test_hook;
@@ -91,6 +104,7 @@ pub mod content_index_handlers;
 pub mod conversations_handlers;
 pub mod cursor_seal;
 pub mod custody_admission;
+pub mod custody_fleet;
 pub mod custody_hosting_handlers;
 pub mod custody_hosting_test_hook;
 pub mod custody_hosting_worker;
@@ -109,6 +123,8 @@ pub mod discovery_core;
 pub mod discovery_handlers;
 pub mod dispatch_core;
 pub mod dns_handlers;
+#[cfg(feature = "test-hooks")]
+pub mod dns_seed_test_hook;
 pub mod dns_verifier;
 pub mod domain_expiry;
 pub mod domain_expiry_handlers;
@@ -126,6 +142,8 @@ pub mod well_known_dav;
 // bridges/email WS-RPC sweep — clients use `fauna.email.filters.*` +
 // `fauna.email.send` via `fauna-client-email::EmailClient`.
 pub mod eviction;
+#[cfg(feature = "test-hooks")]
+pub mod eviction_test_hook;
 pub mod exchange_originator;
 pub mod export;
 pub mod export_routes;
@@ -165,10 +183,16 @@ pub mod generation_escrow_handlers;
 pub mod host_maintenance;
 pub mod http_range;
 pub mod identity_domain_core;
+/// The oracle's grant check every custodian shares (TP11).
+pub mod identity_op_grant;
 pub mod inbox_handlers;
 pub mod interact_routes;
 pub mod invite_core;
 pub mod invite_handlers;
+#[cfg(feature = "test-hooks")]
+pub mod invite_request_prune_test_hook;
+#[cfg(feature = "test-hooks")]
+pub mod keypackage_age_test_hook;
 pub mod label_handlers;
 pub mod labeler_handlers;
 pub(crate) mod lan_cert;
@@ -181,6 +205,8 @@ pub mod mail_deliverability;
 pub mod mail_dkim_key;
 pub mod mail_enable;
 pub mod mail_export_blobs;
+pub(crate) mod mail_from_ownership;
+pub(crate) mod mail_submitter_proof;
 #[cfg(feature = "test-hooks")]
 pub mod mass_mailing_test_hook;
 pub mod media_handlers;
@@ -188,11 +214,15 @@ pub mod media_proxy_routes;
 pub mod media_ticket;
 pub mod media_ticket_secret;
 pub mod membership_lapse;
+#[cfg(feature = "test-hooks")]
+pub mod membership_lapse_test_hook;
 pub mod mls_replica_handlers;
 pub mod mode_commit;
 pub mod moderation_handlers;
 pub mod moderation_withhold;
 pub mod mta_sts_advance;
+#[cfg(feature = "test-hooks")]
+pub mod mta_sts_advance_test_hook;
 #[cfg(feature = "test-hooks")]
 pub mod mta_sts_test_hook;
 pub mod nat_mode_core;
@@ -209,9 +239,18 @@ pub mod node_policy_handlers;
 #[cfg(feature = "nostr")]
 pub mod nostr;
 pub mod notifications_handlers;
+#[cfg(feature = "test-hooks")]
+pub mod share_link_age_test_hook;
 // The nest-held OAuth issuer signing key set (TP5) — custody, rotation, the
 // JWKS read and the admin surface over them. All three deliberately un-gated:
 // the authorization server is up whenever the nest is up.
+#[cfg(feature = "test-hooks")]
+pub mod mail_domain_gc_test_hook;
+/// Test-only: answer `fauna.bridges.mail_health` with a chosen `state` token.
+#[cfg(feature = "test-hooks")]
+pub mod mail_health_state_test_hook;
+#[cfg(feature = "test-hooks")]
+pub mod mail_portability_test_hook;
 /// The consent ceremony's memory — the browser flow, the authorization code it
 /// releases, and the wake-ups that make a resolution immediate.
 pub mod oauth_as_ceremony;
@@ -251,6 +290,9 @@ pub mod oauth_session_secret;
 pub mod outbound_bounce;
 #[cfg(feature = "test-hooks")]
 pub mod outbound_clock_test_hook;
+pub mod outbound_dmarc;
+#[cfg(feature = "test-hooks")]
+pub mod outbound_dmarc_test_hook;
 #[cfg(feature = "test-hooks")]
 pub mod outbound_drain_test_hook;
 pub mod outbound_retry;
@@ -267,9 +309,15 @@ pub mod post_fanout_test_hook;
 #[cfg(feature = "test-hooks")]
 pub mod region_relay_test_hook;
 #[cfg(feature = "test-hooks")]
+pub mod region_status_test_hook;
+#[cfg(feature = "test-hooks")]
+pub mod release_test_hook;
+#[cfg(feature = "test-hooks")]
 pub mod rescore_drain_test_hook;
 pub mod room_post_view;
 pub mod room_read_key;
+#[cfg(feature = "test-hooks")]
+pub mod spam_baseline_cadence_test_hook;
 #[cfg(feature = "test-hooks")]
 pub mod spam_history_gc_test_hook;
 // pairing_routes deleted — `fauna.pair.list` is the sole surface (pair_handlers).
@@ -287,8 +335,11 @@ pub mod peer_query;
 pub mod pending_action_handlers;
 pub mod pending_actions;
 pub mod personalization_handlers;
+pub mod plugin_ingress;
 pub mod plugin_runner;
 pub mod plugins_handlers;
+/// The oracle's posting custodian (TP11, the `post.author` class).
+pub mod post_author_oracle;
 pub mod post_delete_redrive;
 pub mod posts_handlers;
 pub mod pre_identity_allowlist;
@@ -318,6 +369,8 @@ pub mod region_relay;
 pub mod region_tier;
 pub mod registration;
 pub mod relay_admission;
+#[cfg(feature = "test-hooks")]
+pub mod rename_cert_test_hook;
 pub mod restore;
 pub mod routes;
 pub mod rpc_errors;
@@ -330,6 +383,8 @@ pub mod version_prune_test_hook;
 pub mod web_blank_site_test_hook;
 #[cfg(feature = "test-hooks")]
 pub mod web_domain_activate_test_hook;
+#[cfg(feature = "test-hooks")]
+pub mod web_render_fault_test_hook;
 // search_routes deleted — `fauna.search.query` is the sole surface (search_handlers).
 pub mod security_notify;
 pub mod segment_backup;
@@ -356,6 +411,8 @@ pub mod sweeper;
 // Buy side of the `payments` member (§ Charter members: "…and tips").
 #[cfg(feature = "payments")]
 pub mod tip_handlers;
+#[cfg(feature = "test-hooks")]
+pub mod tls_cert_withhold_test_hook;
 pub mod tls_handlers;
 #[cfg(feature = "test-hooks")]
 pub mod tlsa_test_hook;
@@ -380,6 +437,7 @@ pub mod trend_sweeper;
 pub mod ttl_gc;
 #[cfg(unix)]
 pub mod unix_signal;
+pub mod update_channel;
 pub mod video;
 pub mod video_routes;
 pub mod web_app_origin;
@@ -405,6 +463,22 @@ async fn info_page() -> axum::response::Html<&'static str> {
 <p>Open the web app: <a href="/app">local</a> · <a href="https://app.fauna.social">app.fauna.social</a></p>
 </body></html>"#,
     )
+}
+
+/// The public router's fallback: a hosted plugin's declared ingress prefix on
+/// the nest's own host first (`plugin_ingress`), then web content / the info
+/// page. Only an unrouted path ever reaches it.
+async fn public_fallback(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    match plugin_ingress::proxy_if_routed(&state, req).await {
+        Ok(response) => response,
+        Err(req) => {
+            let (parts, _) = req.into_parts();
+            web_content_or_info(axum::extract::State(state), parts.headers, parts.uri).await
+        }
+    }
 }
 
 /// Handler that checks the `Host` header for web content domains.
@@ -792,14 +866,6 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
             fauna_bridge_atproto::oauth_metadata::PATH_PRINCIPAL_WS,
             get(principal_session::principal_ws_handler),
         )
-        // A remote principal's folder deposit — HTTP residue for a server
-        // that cannot speak WS-RPC (`file-sync.md` § Third-party deposit
-        // ingress; `api-layers.md` § HTTP residue). DPoP-bound token, the
-        // same admission and dispatch as the principal session.
-        .route(
-            fauna_bridge_atproto::oauth_metadata::PATH_FOLDER_DEPOSIT,
-            post(folder_deposit::deposit_http_handler),
-        )
         // A remote principal's own `ext.*` records — the HTTP record door
         // (`third-party-kinds.md` § The record doors; `api-layers.md` § HTTP
         // residue). The same admission, dispatch and plane as the principal
@@ -1104,6 +1170,22 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
         ),
         post(payment_routes::payment_webhook),
     );
+    // The web paywall's two visitor entitlement doors (monetization.md
+    // § Pillar 2 → *Visitor entitlement doors*): the webhook's class — an
+    // unauthenticated external caller (a browser with no Fauna identity),
+    // above the serving fallback so user content can never shadow them,
+    // compiled away with the money plane. Paths from the shared constants the
+    // apps render the creator-facing return URL from.
+    #[cfg(feature = "payments")]
+    let router = router
+        .route(
+            fauna_payments::REDEEM_PATH,
+            post(web_content::paywall_doors::paywall_redeem),
+        )
+        .route(
+            &format!("{}/{{provider}}", fauna_payments::RETURN_PATH_PREFIX),
+            get(web_content::paywall_doors::paywall_return),
+        );
     // The legacy plaintext-`content`-table calendar/event control plane
     // (`fauna.{calendars,events}.*` WS-RPC kinds + the `calendar_handlers` /
     // `events_handlers` / `calendar_routes` / `event_social_routes` /
@@ -1202,9 +1284,19 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
     #[cfg(feature = "test-hooks")]
     let router = router.merge(outbound_clock_test_hook::routes());
     #[cfg(feature = "test-hooks")]
+    let router = router.merge(mail_health_state_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
     let router = router.merge(outbound_drain_test_hook::routes());
     #[cfg(feature = "test-hooks")]
     let router = router.merge(pending_actions_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
+    let router = router.merge(eviction_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
+    let router = router.merge(invite_request_prune_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
+    let router = router.merge(keypackage_age_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
+    let router = router.merge(share_link_age_test_hook::routes());
     #[cfg(feature = "test-hooks")]
     let router = router.merge(recovery_landing_test_hook::routes());
     #[cfg(feature = "test-hooks")]
@@ -1214,35 +1306,67 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
     #[cfg(feature = "test-hooks")]
     let router = router.merge(web_domain_activate_test_hook::routes());
     #[cfg(feature = "test-hooks")]
+    let router = router.merge(web_render_fault_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
     let router = router.merge(rescore_drain_test_hook::routes());
     #[cfg(feature = "test-hooks")]
     let router = router.merge(spam_history_gc_test_hook::routes());
     #[cfg(feature = "test-hooks")]
+    let router = router.merge(mail_domain_gc_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
+    let router = router.merge(mta_sts_advance_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
+    let router = router.merge(cert_nudge_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
+    let router = router.merge(mail_portability_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
     let router = router.merge(post_fanout_test_hook::routes());
     #[cfg(feature = "test-hooks")]
     let router = router.merge(mta_sts_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
+    let router = router.merge(dns_seed_test_hook::routes());
     #[cfg(feature = "test-hooks")]
     let router = router.merge(segment_backup_test_hook::routes());
     #[cfg(feature = "test-hooks")]
     let router = router.merge(snapshot_scheduler_test_hook::routes());
     #[cfg(feature = "test-hooks")]
     let router = router.merge(custody_hosting_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
+    let router = router.merge(membership_lapse_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
+    let router = router.merge(account_lock_test_hook::routes());
     #[cfg(all(feature = "test-hooks", feature = "bluesky"))]
     let router = router.merge(bluesky::feed_test_hook::routes());
+    #[cfg(all(feature = "test-hooks", feature = "bluesky"))]
+    let router = router.merge(bluesky::dm_test_hook::routes());
+    #[cfg(all(feature = "test-hooks", feature = "nostr"))]
+    let router = router.merge(nostr::inbound_test_hook::routes());
     #[cfg(feature = "test-hooks")]
     let router = router.merge(tlsa_test_hook::routes());
     #[cfg(feature = "test-hooks")]
     let router = router.merge(domain_expiry_test_hook::routes());
     #[cfg(feature = "test-hooks")]
+    let router = router.merge(rename_cert_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
     let router = router.merge(atproto_identity_test_hook::routes());
     #[cfg(feature = "test-hooks")]
     let router = router.merge(outbound_tlsrpt_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
+    let router = router.merge(spam_baseline_cadence_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
+    let router = router.merge(blocklist_self_check_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
+    let router = router.merge(outbound_dmarc_test_hook::routes());
     #[cfg(feature = "test-hooks")]
     let router = router.merge(mass_mailing_test_hook::routes());
     #[cfg(feature = "test-hooks")]
     let router = router.merge(link_preview_test_hook::routes());
     #[cfg(feature = "test-hooks")]
     let router = router.merge(bridge_status_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
+    let router = router.merge(capability_withhold_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
+    let router = router.merge(tls_cert_withhold_test_hook::routes());
     #[cfg(feature = "test-hooks")]
     let router = router.merge(channel_refusal_test_hook::routes());
     #[cfg(feature = "test-hooks")]
@@ -1255,6 +1379,10 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
     let router = router.merge(web_paywall_test_hook::routes());
     #[cfg(feature = "test-hooks")]
     let router = router.merge(region_relay_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
+    let router = router.merge(region_status_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
+    let router = router.merge(release_test_hook::routes());
     #[cfg(feature = "test-hooks")]
     let router = router.merge(delegation_lease_test_hook::routes());
 
@@ -1346,6 +1474,10 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
     // didn't have. Merged AFTER `.layer(cors)` so the blanket credentialed
     // layer — deliberately untouched for every other route — never stacks a
     // second, conflicting `Access-Control-Allow-Origin` on these responses.
+    // `Authorization` is admitted for the chunk GET's folder-hinted arm
+    // (`file-sync.md` § Relay serving, step (4)), which needs a bearer naming
+    // its caller; the browser preflights it, and a script-held bearer is no
+    // ambient authority, so the layer stays credential-less.
     let public_bytes = axum::Router::new()
         .route("/api/v1/chunks/{hash}", get(chunk_routes::download_chunk))
         .route(
@@ -1368,7 +1500,8 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
         .layer(
             tower_http::cors::CorsLayer::new()
                 .allow_origin(tower_http::cors::Any)
-                .allow_methods([axum::http::Method::GET, axum::http::Method::HEAD]),
+                .allow_methods([axum::http::Method::GET, axum::http::Method::HEAD])
+                .allow_headers([axum::http::header::AUTHORIZATION]),
         );
 
     // The OAuth issuer's plane — the two discovery documents, the JWKS and every
@@ -1380,12 +1513,33 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
     // `Access-Control-Allow-Origin` per response, never two.
     let oauth_issuer = oauth_issuer_routes::routes(Arc::clone(&state.oauth_limiter));
 
+    // A remote principal's folder deposit — HTTP residue for a server that
+    // cannot speak WS-RPC (`folder-deposit.md`;
+    // `api-layers.md` § HTTP residue). DPoP-bound token, the same admission and
+    // dispatch as the principal session. Merged AFTER the blanket body limit:
+    // the body streams up to `MAX_DEPOSIT_TOTAL_BYTES`, cut into sealed parts
+    // as it arrives, and the handler bounds it. Server to server, so no CORS.
+    let deposit_door = axum::Router::new().route(
+        fauna_bridge_atproto::oauth_metadata::PATH_FOLDER_DEPOSIT,
+        post(folder_deposit::deposit_http_handler),
+    );
+
+    // A hosted plugin's claimed whole name (`plugin_ingress::whole_name_gate`)
+    // is answered AHEAD of every route, merge and the credentialed CORS layer
+    // — the nest serves nothing on such a name, and the plugin's own CORS
+    // headers must not be stacked with the nest's. Inside `hsts` on purpose:
+    // the name is served under the nest's TLS, so it carries the policy too.
+    let whole_name_gate =
+        axum::middleware::from_fn_with_state(Arc::clone(&state), plugin_ingress::whole_name_gate);
+
     router
-        .fallback(web_content_or_info)
+        .fallback(public_fallback)
         .layer(cors)
         .merge(public_bytes)
         .merge(oauth_issuer)
         .layer(body_limit)
+        .merge(deposit_door)
+        .layer(whole_name_gate)
         .layer(hsts)
         .with_state(state)
 }
@@ -1508,6 +1662,69 @@ fn refuse_plain_http_for_public_domain(domain: Option<&str>, tls_enabled: bool) 
 pub(crate) fn is_fronted_by_router() -> bool {
     std::env::var_os("FAUNA_FRONTED_BY_ROUTER")
         .is_some_and(|v| !v.is_empty() && v != std::ffi::OsStr::new("0"))
+}
+
+/// Seed the live [`HostResolver`](web_content::serve::HostResolver) from
+/// persisted state: the admin-designated apex actor → the node domain, every
+/// `active` custom web domain → its owner, and every opted-in actor's
+/// `<handle>` → its actor (Slice 3). Run at boot, and again right after an
+/// identity succession commits: the succession's transaction re-points the
+/// `web_apex_actor`, `web_domains` and `web_subdomain_enabled` rows to the
+/// successor, and a resolver still holding the retired key would serve that
+/// account's site as a 404 until the next boot (`web-content-hosting.md`
+/// § Admin apex hosting). One seed for both, so the two cannot drift.
+pub(crate) async fn seed_host_resolver(state: &AppState) {
+    let Some(resolver) = &state.host_resolver else {
+        return;
+    };
+
+    match state.db.get_apex_actor().await {
+        Ok(apex) => resolver.set_apex_actor(apex).await,
+        Err(e) => tracing::warn!("web host resolver: failed to read apex actor: {e}"),
+    }
+    // The same projection the lifecycle task re-runs every pass, so boot and
+    // steady state cannot drift into two different notions of "routable".
+    if let Err(e) =
+        crate::web_content::domain::reconcile_custom_domain_routing_once(&state.db, resolver).await
+    {
+        tracing::warn!("web host resolver: failed to list web domains: {e}")
+    }
+    // Subdomain hosting (Slice 3): each opted-in actor's `<handle>` →
+    // its actor. The handle keys the subdomain (`<handle>.<node-domain>`);
+    // an opted-in actor with no handle (or a reserved-label handle, or one
+    // a hosted plugin claims as its whole name — `plugin_ingress`) is
+    // skipped here — `resolve` excludes reserved hosts regardless, the
+    // whole-name gate answers a plugin's name ahead of this table, and the
+    // 5-min cert reconcile re-evaluates once a handle exists.
+    let plugin_labels = match crate::plugin_runner::claimed_plugin_labels(&state.db).await {
+        Ok(labels) => labels,
+        Err(e) => {
+            tracing::warn!("web host resolver: failed to list hosted plugins: {e}");
+            Vec::new()
+        }
+    };
+    match state.db.list_subdomain_enabled().await {
+        Ok(actors) => {
+            for actor in actors {
+                match state.db.get_handle(&actor).await {
+                    Ok(Some(handle))
+                        if !handle.is_empty()
+                            && !crate::web_content::serve::is_reserved_subdomain_label(&handle)
+                            && !plugin_labels.contains(&handle) =>
+                    {
+                        resolver.register_subdomain(&handle, actor).await
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(
+                        "web host resolver: failed to resolve handle for opted-in subdomain actor: {e}"
+                    ),
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("web host resolver: failed to list opted-in subdomain actors: {e}")
+        }
+    }
 }
 
 /// Boot-resolve the effective client-facing bind address: on a direct-listener
@@ -1707,6 +1924,8 @@ pub(crate) fn build_rpc_router() -> rpc_router::RpcRouter {
     region_tier::register_region_handlers(&mut b);
     // The admin's web-app origin choice: what this nest's `/app` answers.
     web_app_origin::register_web_app_origin_handlers(&mut b);
+    // Which builds this box's updater follows (`nest/update-channel.md`).
+    update_channel::register_update_channel_handlers(&mut b);
     region_relay::register_region_relay_handlers(&mut b);
     crate::segments::register_segments_handlers(&mut b);
     crate::filesync_handlers::register_filesync_handlers(&mut b);
@@ -1722,6 +1941,18 @@ pub(crate) fn build_rpc_router() -> rpc_router::RpcRouter {
     // user's NIP-46 signer).
     #[cfg(feature = "nostr")]
     nostr::bunker_handlers::register_nostr_bunker_handlers(&mut b);
+    // The oracle's ActivityPub door (`fauna.activitypub.oracle.http_sig`,
+    // TP11) — principal-only; the actor-side half only carries the wire
+    // contract.
+    #[cfg(feature = "activitypub")]
+    activitypub::oracle::register_activitypub_oracle_handlers(&mut b);
+    // The oracle's posting door (`fauna.posts.author.{create,delete}`, TP11)
+    // — principal-only; the actor-side half only carries the wire contract.
+    post_author_oracle::register_post_author_handlers(&mut b);
+    // The oracle's ATProto door (`fauna.atproto.oracle.service_auth`, TP11)
+    // — principal-only, the same split. Ungated: the PDS bridge it hands off
+    // to is the first-party `atproto.pds` role, not a nest feature.
+    atproto_oracle::register_atproto_oracle_handlers(&mut b);
     // Protocol-native Nostr content (`nostr.{zaps.total,badges.list,
     // events.publish_signed}`) — the WS-RPC successors to the deleted
     // `/api/v1/nostr/{zaps,badges,publish-signed}` HTTP routes (the
@@ -1778,6 +2009,11 @@ pub async fn start_server(
     push_service: Option<Arc<push::PushService>>,
     services_json_path: std::path::PathBuf,
     sidecar_tokens: std::collections::HashMap<String, Vec<sidecar_tokens::SidecarScope>>,
+    // The ONE resolved ACME cert directory: `main.rs` takes it from
+    // `acme::build_acme_config` (`--acme-dir` > `[acme].dir` > default), the
+    // embedded desktop nest from its data dir. Never re-derived here, so the
+    // watcher/loops and everything reading `AppState.acme_dir` share a directory.
+    acme_dir: std::path::PathBuf,
 ) -> Result<(
     std::net::SocketAddr,
     tokio::task::JoinHandle<()>,
@@ -1821,6 +2057,8 @@ pub async fn start_server(
     // nudge.
     #[cfg(feature = "nostr")]
     let (nostr_bunker_wake_tx, nostr_bunker_wake_rx) = tokio::sync::mpsc::channel(1);
+    #[cfg(feature = "nostr")]
+    let (nostr_inbound_wake_tx, nostr_inbound_wake_rx) = tokio::sync::mpsc::channel(1);
     #[cfg(feature = "activitypub")]
     let ap_delivery_nudge = Arc::new(tokio::sync::Notify::new());
     // Shutdown signal for long-running background tasks (discovery poller,
@@ -1954,6 +2192,10 @@ pub async fn start_server(
     // What `/app` answers: the `nest_web_app_origin` row, else bundled (there is
     // no seed — the choice is app-set only).
     let resolved_web_app_origin = web_app_origin::resolve_web_app_origin(&db).await;
+    // The update channel: the `nest_update_channel` row, else the
+    // `config.nest.image_tag` seed (`FAUNA_IMAGE_TAG`); `None` is a pinned box.
+    let resolved_update_channel =
+        update_channel::resolve_update_channel(&db, nest_config.nest.image_tag.as_deref()).await;
     // The deployment's identity domain: a projection of the primary `mail_domains`
     // row (the single source of truth — that row IS the identity), else the
     // `config.nest.domain` seed (an admin `--domain` pin; `FAUNA_DOMAIN` is
@@ -2054,15 +2296,6 @@ pub async fn start_server(
         db.clone(),
         nest_identity.clone(),
     ));
-
-    // Phase D1.3: derive the ACME cert directory the same way main.rs does.
-    // Prefer [acme].dir from config; fall back to the default (/var/lib/fauna/acme).
-    let acme_dir: std::path::PathBuf = nest_config
-        .acme
-        .as_ref()
-        .and_then(|a| a.dir.as_deref())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/fauna/acme"));
 
     // Always-live self-signed floor (tls-certificates.md § A): write it on EVERY
     // nest entry path, here in the shared `start_server` init. `main.rs`'s
@@ -2216,6 +2449,18 @@ pub async fn start_server(
             };
         Arc::new(crate::dns_verifier::DnsVerifier::new(resolver, clock))
     };
+    // The outbound MX resolver (`fauna.bridges.resolve_mx`; see the
+    // `mx_resolver` field below). A `test-hooks` build answers a domain whose
+    // MX the e2e seeded into `dns_verifier` from that seed, so a tier_3 test
+    // can stand up a no-MX domain, a failed lookup or a two-MX set.
+    let live_mx: Arc<dyn fauna_mail::outbound::mx::MxRrsetResolver> =
+        Arc::new(fauna_mail::outbound::mx::LiveMxRrsetResolver);
+    #[cfg(feature = "test-hooks")]
+    let mx_resolver: Arc<dyn fauna_mail::outbound::mx::MxRrsetResolver> = Arc::new(
+        crate::dns_seed_test_hook::SeededMxRrsetResolver::new(dns_verifier.clone(), live_mx),
+    );
+    #[cfg(not(feature = "test-hooks"))]
+    let mx_resolver = live_mx;
 
     // Web-content hosting: activate the serving layer (previously hardcoded
     // `None` — dormant, see `web-content-hosting.md` § Implementation status
@@ -2296,6 +2541,7 @@ pub async fn start_server(
         oauth_as: Arc::new(crate::oauth_as_state::OAuthAsRuntime::production(
             fauna_core::data::Timestamp::now_secs_or_zero(),
         )),
+        atproto_service_auth: Arc::new(crate::atproto_oracle::new_requests()),
         // Plugins live under the data dir (`plugins/<principal_id>/`), the
         // same derivation as the web-serve holder's seed above.
         plugins: Arc::new(crate::plugin_runner::PluginRunner::new(
@@ -2332,6 +2578,7 @@ pub async fn start_server(
         tls_enabled: tls_config.is_some(),
         cors_origins: Arc::new(arc_swap::ArcSwap::from_pointee(resolved_cors_origins)),
         web_app_origin: Arc::new(arc_swap::ArcSwap::from_pointee(resolved_web_app_origin)),
+        update_channel: Arc::new(arc_swap::ArcSwap::from_pointee(resolved_update_channel)),
         identity_domain: Arc::new(arc_swap::ArcSwapOption::from(
             resolved_identity_domain.map(Arc::new),
         )),
@@ -2365,6 +2612,9 @@ pub async fn start_server(
         email: state::EmailState {
             inbound_deliver_key: std::env::var("FAUNA_INBOUND_DELIVER_KEY").ok(),
             tlsrpt_aggregator: tlsrpt_aggregator.clone(),
+            dmarc_aggregator: std::sync::Arc::new(std::sync::Mutex::new(
+                fauna_mail::outbound::dmarc::DmarcAggregator::default(),
+            )),
         },
         bridge: state::BridgeState {
             providers: Some(Arc::new(bridge_registry)),
@@ -2381,6 +2631,7 @@ pub async fn start_server(
             relay_tx: nostr_relay_tx.clone(),
             sync_tx: nostr_sync_tx,
             bunker_wake_tx: nostr_bunker_wake_tx,
+            inbound_wake_tx: nostr_inbound_wake_tx,
             gift_wrap_limiter: Some(Arc::new(nostr::relay_endpoint::new_gift_wrap_limiter())),
             bunker_limiter: Some(Arc::new(nostr::relay_endpoint::new_bunker_limiter())),
             link_challenges: Default::default(),
@@ -2446,6 +2697,10 @@ pub async fn start_server(
             crate::anonymous_rate_limit::invite_verify_config(),
         )),
         invite_verify_rate_limit_shed: Arc::new(fauna_conn_limit::ShedCounter::new()),
+        paywall_door_rate_limit: Arc::new(crate::bridge_rate_limit::Limiter::with_config(
+            crate::anonymous_rate_limit::paywall_door_config(),
+        )),
+        paywall_door_rate_limit_shed: Arc::new(fauna_conn_limit::ShedCounter::new()),
         register_rate_limit: Arc::new(crate::bridge_rate_limit::Limiter::with_config(
             crate::anonymous_rate_limit::register_config(),
         )),
@@ -2470,13 +2725,22 @@ pub async fn start_server(
         #[cfg(feature = "test-hooks")]
         outbound_clock_override: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         #[cfg(feature = "test-hooks")]
+        mail_health_state_override: Arc::new(std::sync::Mutex::new(None)),
+        #[cfg(feature = "test-hooks")]
         rescore_worklist_serves: Arc::new(Default::default()),
         #[cfg(feature = "test-hooks")]
         post_fanout_initiations: Arc::new(Default::default()),
         #[cfg(feature = "test-hooks")]
+        account_lock_refusals: Arc::new(Default::default()),
+        #[cfg(feature = "test-hooks")]
         epoch_sealing_test_override: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        custody_hosting_brakes: Arc::default(),
         #[cfg(feature = "test-hooks")]
         custody_hosting_periodic_held: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        #[cfg(feature = "test-hooks")]
+        custody_hosting_clock_offset_secs: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        #[cfg(feature = "test-hooks")]
+        custody_hosting_meter_fault: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         mta_sts_fetcher,
         dns_verifier,
         #[cfg(feature = "test-hooks")]
@@ -2496,7 +2760,7 @@ pub async fn start_server(
         // alongside the hosts. Same construction shape as `tlsa_resolver`:
         // infallible, a fresh DNSSEC resolver per lookup (one lookup per
         // delivery attempt).
-        mx_resolver: Arc::new(fauna_mail::outbound::mx::LiveMxRrsetResolver),
+        mx_resolver,
         #[cfg(feature = "test-hooks")]
         tlsa_override: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         // Deliverability-diagnostic outbound-STARTTLS prober (the gmail `:25`
@@ -2520,62 +2784,24 @@ pub async fn start_server(
             std::sync::Mutex::new(std::collections::HashSet::new()),
         ),
         #[cfg(feature = "test-hooks")]
+        capabilities_withheld: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        #[cfg(feature = "test-hooks")]
+        tls_cert_fetch_withheld: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        #[cfg(feature = "test-hooks")]
         channel_send_refusal: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         #[cfg(feature = "test-hooks")]
         rpc_hold: Arc::new(crate::rpc_hold_test_hook::RpcHoldRegistry::default()),
+        #[cfg(feature = "test-hooks")]
+        region_status_registry_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
     });
 
-    // Boot-seed the live HostResolver from persisted state: the admin-designated
-    // apex actor (if any) → the node domain, every `active` custom web domain →
-    // its owner, and every opted-in actor's `<handle>` → its actor (Slice 3).
+    // Boot-seed the live HostResolver from persisted state (`seed_host_resolver`).
     // Live updates thereafter ride the RPC handlers (`fauna.web.set_apex_actor`,
     // `fauna.web.set_subdomain_enabled`, `fauna.web.domain.delete`), the domain
-    // lifecycle task's per-pass custom-domain reconcile, and the
-    // per-domain/-subdomain cert lifecycle. (web-content-hosting.md § Routing —
-    // boot population of the resolver.)
-    if let Some(resolver) = &state.host_resolver {
-        match state.db.get_apex_actor().await {
-            Ok(Some(apex)) => resolver.set_apex_actor(Some(apex)).await,
-            Ok(None) => {}
-            Err(e) => tracing::warn!("web host resolver: failed to read apex actor at boot: {e}"),
-        }
-        // The same projection the lifecycle task re-runs every pass, so boot and
-        // steady state cannot drift into two different notions of "routable".
-        if let Err(e) =
-            crate::web_content::domain::reconcile_custom_domain_routing_once(&state.db, resolver)
-                .await
-        {
-            tracing::warn!("web host resolver: failed to list web domains at boot: {e}")
-        }
-        // Subdomain hosting (Slice 3): each opted-in actor's `<handle>` →
-        // its actor. The handle keys the subdomain (`<handle>.<node-domain>`);
-        // an opted-in actor with no handle (or a reserved-label handle) is
-        // skipped here — `resolve` excludes reserved hosts regardless, and the
-        // 5-min cert reconcile re-evaluates once a handle exists.
-        match state.db.list_subdomain_enabled().await {
-            Ok(actors) => {
-                for actor in actors {
-                    match state.db.get_handle(&actor).await {
-                        Ok(Some(handle))
-                            if !handle.is_empty()
-                                && !crate::web_content::serve::is_reserved_subdomain_label(
-                                    &handle,
-                                ) =>
-                        {
-                            resolver.register_subdomain(&handle, actor).await
-                        }
-                        Ok(_) => {}
-                        Err(e) => tracing::warn!(
-                            "web host resolver: failed to resolve handle for opted-in subdomain actor at boot: {e}"
-                        ),
-                    }
-                }
-            }
-            Err(e) => tracing::warn!(
-                "web host resolver: failed to list opted-in subdomain actors at boot: {e}"
-            ),
-        }
-    }
+    // lifecycle task's per-pass custom-domain reconcile, the per-domain/-subdomain
+    // cert lifecycle, and the succession commit, which re-runs this same seed.
+    // (web-content-hosting.md § Routing — boot population of the resolver.)
+    seed_host_resolver(&state).await;
 
     // Bridge rate-limiter bucket sweeper. Drops empty buckets every
     // 5 × window so a long-lived deployment can't grow the DashMap
@@ -2638,6 +2864,12 @@ pub async fn start_server(
     // discovery limiter under a sustained enumeration campaign.
     state.scope_handle(crate::bridge_rate_limit::spawn_sweeper(
         state.invite_verify_rate_limit.clone(),
+        std::time::Duration::from_secs(300),
+    ));
+    // Web paywall door limiter sweeper (same cadence): per-source buckets for
+    // the anonymous claim-code guess surface on every hosted site.
+    state.scope_handle(crate::bridge_rate_limit::spawn_sweeper(
+        state.paywall_door_rate_limit.clone(),
         std::time::Duration::from_secs(300),
     ));
     // Registration limiter sweeper (same cadence). Per-source buckets for the
@@ -2719,6 +2951,34 @@ pub async fn start_server(
             tlsrpt_fetcher,
             tlsrpt_poster,
             crate::outbound_tlsrpt::TLSRPT_JITTER_WINDOW_SECS,
+        )
+    });
+    // DMARC aggregate-report sender (RFC 7489 §7.2): drains the per-message
+    // buckets the `report_dmarc_observation` handler fills once per UTC day
+    // and queues one report per peer policy domain that publishes a
+    // `rua=mailto:` (docs/goal/behavior/dmarc-reporting.md § Outbound
+    // aggregate-report sender). Same hickory-resolver + 24 h cache shape as
+    // the TLSRPT fetcher; a resolver build failure degrades to the no-op
+    // fetcher (no peer found, nothing sent) so startup never aborts.
+    state.scope_handle({
+        let dmarc_fetcher: std::sync::Arc<dyn fauna_mail::outbound::dmarc::DmarcRecordFetcher> =
+            match fauna_mail::outbound::dmarc::LiveDmarcRecordFetcher::new() {
+                Ok(live) => {
+                    let clock: fauna_mail::outbound::mta_sts::ClockFn =
+                        std::sync::Arc::new(fauna_core::data::Timestamp::now_secs_or_zero);
+                    std::sync::Arc::new(
+                        fauna_mail::outbound::dmarc::CachingDmarcRecordFetcher::new(live, clock),
+                    )
+                }
+                Err(e) => {
+                    tracing::warn!("failed to build DMARC record fetcher: {e}; reports disabled");
+                    std::sync::Arc::new(fauna_mail::outbound::dmarc::NullDmarcRecordFetcher)
+                }
+            };
+        crate::outbound_dmarc::spawn_dmarc_daily_dispatch(
+            state.clone(),
+            dmarc_fetcher,
+            crate::outbound_dmarc::DMARC_JITTER_WINDOW_SECS,
         )
     });
     // alias_hits retention sweeper (§ A2.4):
@@ -2959,7 +3219,8 @@ pub async fn start_server(
         // Enables the zap purchase leg: a believed receipt meeting its target
         // tier's asking price goes through the payment waist rather than being
         // recorded as a tip (`monetization.md` § The asking price).
-        .with_state(state.clone());
+        .with_state(state.clone())
+        .with_inbound_wake(nostr_inbound_wake_rx);
         state.spawn_scoped(worker.run());
         tracing::info!("Nostr sync worker spawned");
     }
@@ -3619,7 +3880,7 @@ async fn serve_http_connection<IO>(
     // torn down the instant after the handshake — the client sees
     // "rpc disconnected (was_in_flight=false)". The plain-HTTP path used
     // to ride `axum::serve`, which handles upgrades, which is why only
-    // HTTPS deployments (example.com / any real VPS) broke; both flavours
+    // HTTPS deployments (a live nest / any real VPS) broke; both flavours
     // now share this one call. The connection future must be pinned for
     // the upgradeable variant.
     let conn = builder.serve_connection_with_upgrades(io, hyper_svc);
@@ -4344,7 +4605,7 @@ mod plain_http_guard_tests {
     #[test]
     fn public_domain_without_tls_is_refused() {
         assert!(
-            refuse_plain_http_for_public_domain(Some("example.com"), false).is_err(),
+            refuse_plain_http_for_public_domain(Some("example.net"), false).is_err(),
             "a public domain in cleartext must refuse to boot"
         );
     }
@@ -4352,7 +4613,7 @@ mod plain_http_guard_tests {
     #[test]
     fn public_domain_with_tls_is_allowed() {
         assert!(
-            refuse_plain_http_for_public_domain(Some("example.com"), true).is_ok(),
+            refuse_plain_http_for_public_domain(Some("example.net"), true).is_ok(),
             "the standard deploy (public domain + TLS) must serve"
         );
     }

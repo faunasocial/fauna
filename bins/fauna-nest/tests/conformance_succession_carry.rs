@@ -47,11 +47,11 @@ use fauna_nest::{
 };
 use fauna_protocol::account_state::{ACCOUNT_STATE_FLEET_SCOPE, ACCOUNT_STATE_SCOPE};
 use fauna_protocol::merge_policy::{
-    KIND_GENERATION_MINT, KIND_MODERATION, KIND_READ_MARKER, KIND_SEEN_SET, LwwStamp,
-    PREFERENCE_KEY,
+    AdmittedKinds, KIND_GENERATION_MINT, KIND_MODERATION, KIND_READ_MARKER, KIND_SEEN_SET,
+    LwwStamp, MergePolicy, PREFERENCE_KEY,
 };
 use fauna_protocol::{RpcError, RpcErrorClass, RpcRequester, encode_canonical};
-use fauna_sync_engine::account_state_plane::{AccountStatePlane, ItemId};
+use fauna_sync_engine::account_state_plane::{AccountStatePlane, ItemId, put_lww_row_local};
 use fauna_sync_engine::attested_predecessors::AttestedPredecessors;
 use fauna_sync_engine::generation_tip::{GenerationTrust, RetainedKeyCustody};
 use fauna_sync_engine::preference_put::put_preference_local;
@@ -573,8 +573,8 @@ async fn a_second_walk_writes_nothing_and_a_second_device_converges() {
 /// mint-kind keys (which the driver does set on this plane) open the mint
 /// kind alone, and the retired machinery keys (which the driver sets on it
 /// too) are tried by the reclamation pass's predecessor arm only, never by
-/// the walk (`account-data-taxonomy.md` § The generation machinery →
-/// *Fleet-scope reclamation*, clause (3)(i)).
+/// the walk (`fleet-scope-reclamation.md`
+/// § *Fleet-scope reclamation*, clause (3)(i)).
 #[tokio::test]
 async fn a_predecessors_fleet_only_generation_0_row_stays_unopened() {
     let rpc = nest();
@@ -905,13 +905,15 @@ async fn a_predecessors_mint_row_crosses_only_bound_signed_and_keyed() {
 /// The nest's live rows of the delegable scope, counted by origin writer —
 /// the census the 2026-10-01 measurement read.
 async fn census(rpc: &Arc<RouterRequester>) -> std::collections::BTreeMap<Vec<u8>, usize> {
-    let Some(folder) = rpc
-        .state
-        .db
-        .find_state_scope(&ACTOR, ACCOUNT_STATE_SCOPE)
-        .await
-        .unwrap()
-    else {
+    census_of(rpc, ACCOUNT_STATE_SCOPE).await
+}
+
+/// [`census`] of any scope — an `ext:<kind>` scope's included.
+async fn census_of(
+    rpc: &Arc<RouterRequester>,
+    scope: &str,
+) -> std::collections::BTreeMap<Vec<u8>, usize> {
+    let Some(folder) = rpc.state.db.find_state_scope(&ACTOR, scope).await.unwrap() else {
         return Default::default();
     };
     let read = rpc
@@ -973,16 +975,16 @@ async fn settle(
     plane: &Plane<'_>,
     device: &SigningKey,
 ) -> std::collections::BTreeMap<Vec<u8>, usize> {
-    let mut before = census(rpc).await;
+    let mut before = census_of(rpc, plane.scope()).await;
     for _ in 0..8 {
         successor_pass(store, plane, device).await;
-        let after = census(rpc).await;
+        let after = census_of(rpc, plane.scope()).await;
         if after == before && plane.publish_pending().await.ok() == Some(0) {
             return after;
         }
         before = after;
     }
-    panic!("the delegable scope did not settle in 8 passes: {before:?}");
+    panic!("{} did not settle in 8 passes: {before:?}", plane.scope());
 }
 
 /// Proof (2): one predecessor device's preference cluster, one seen-set row
@@ -1225,4 +1227,339 @@ async fn at_the_cap_every_carry_is_count_neutral_and_the_scope_converges_to_the_
             "the seed-only device reads marker {i}"
         );
     }
+}
+
+// ── (i) a connected app's `ext:<kind>` rows cross by the same carry ─────────
+//
+// `succession-aftermath.md` § Re-key scope: an `ext:<kind>` row is a
+// delegable-rung row, so it crosses exactly as the preference cluster does —
+// each kind's plane walked under the predecessors' schedules, the carry
+// re-authored as the walking device's own row, the predecessor's row retired
+// behind it. The account driver hands the schedules to the bound nest's ext
+// planes only (`account_driver::pass::bound_ext_plane`); the peer and linked
+// legs derive no ext plane and hand no plane a schedule (their source pins).
+//
+// The walk's writer door (`third-party-kinds.md` § Principal write
+// authority, position (2)) still judges the row it opened: the connected
+// app's writer stays authorized across the succession (the re-minted grant
+// keeps each writer), so the app's rows cross; a predecessor device crosses
+// because the ceremony device attests it departed in the successor's device
+// set (`succession-aftermath.md` § Re-key scope → *Predecessor devices are
+// departed devices*); a writer the successor's authority does not name is
+// skipped and counted, carried by nothing.
+
+const EXT_KIND: &str = "ext.example.com.notes";
+
+/// The connected app's attested writer key — what it signs its rows with.
+const APP_WRITER: u8 = 0x0E;
+
+/// A writer no authority names — neither the account's devices, enrolled or
+/// departed, nor any grant.
+const STRANGER: u8 = 0x0F;
+
+fn ext_kind() -> fauna_protocol::ext_kind::ExtKind {
+    EXT_KIND.parse().expect("a well-formed ext kind")
+}
+
+/// The overlay a verified manifest row admitting [`EXT_KIND`] yields.
+fn admitted() -> AdmittedKinds {
+    let mut overlay = AdmittedKinds::new();
+    overlay
+        .admit(ext_kind(), MergePolicy::LatestWins)
+        .expect("admit the kind");
+    overlay
+}
+
+/// The connected app's principal row as its consent leaves it: the account
+/// serves an `ext:<kind>` scope only while an approved principal declares the
+/// kind (`third-party-kinds.md` § The `ext` sub-scope).
+async fn connected_app_declares(rpc: &Arc<RouterRequester>, kind: &str) {
+    rpc.state
+        .db
+        .conn()
+        .await
+        .execute(
+            "INSERT INTO third_party_principals
+                (actor_id, principal_id, client_id, execution_form, declared_kinds,
+                 granted_scopes, created_at)
+             VALUES (?1, ?2, 'https://example.com/app', 'remote', ?3, '[]', 0)",
+            (
+                &ACTOR[..],
+                &[0x9A_u8; 16][..],
+                serde_json::to_string(&[kind]).unwrap(),
+            ),
+        )
+        .expect("the connected app's principal row");
+}
+
+/// The successor's grant log as the re-mint leaves it: one successor-signed
+/// `Mint` whose `content.write` tuple over [`EXT_KIND`] keeps the app's
+/// writer, filed as the `fauna.state.succession-ledger` row it rides in.
+async fn successor_grants_the_app_write(store: &AccountStore<SqliteBackend>) {
+    use fauna_core::grant_event::{
+        CLASS_CONTENT_WRITE, GrantEvent, GrantEventKind, GrantEventScope, writer_factor,
+    };
+    use fauna_core::succession_ledger::SuccessionLedgerRecord;
+    let event = GrantEvent {
+        grant_id: vec![0x5E; 16],
+        holder: vec![0x5F; 32],
+        kind: GrantEventKind::Mint,
+        scope: vec![
+            GrantEventScope {
+                class: CLASS_CONTENT_WRITE.into(),
+                kind: Some(EXT_KIND.into()),
+                tier: None,
+            }
+            .with_factor(&writer_factor(&writer_id(APP_WRITER).0)),
+        ],
+        window_start: 0,
+        window_end: u64::MAX,
+        at: 1,
+        sig: Vec::new(),
+    }
+    .sign(ActorKeypair::from_secret(SUCC_SEED).signing_key())
+    .unwrap();
+    let record = SuccessionLedgerRecord::Event(event);
+    store
+        .put_state(fauna_account_store::types::StateEntry {
+            kind: fauna_protocol::merge_policy::KIND_SUCCESSION_LEDGER.into(),
+            key: record.key().unwrap().render(),
+            scope: ACCOUNT_STATE_FLEET_SCOPE.into(),
+            value: record.encode().unwrap(),
+            merge_meta: None,
+            entry_version: 0,
+            tombstone: false,
+        })
+        .await
+        .unwrap();
+}
+
+/// `device` enrolled in the successor's verified device set, as its fleet
+/// walk merges it: the successor root's cert, the device's own signature.
+async fn enrolled_in_successor_fleet(store: &AccountStore<SqliteBackend>, device: u8) {
+    use fauna_core::data::{Capability, DeviceAuthorization, Timestamp};
+    use fauna_core::encoding::{EmbedAsBytes, sign_envelope};
+    let id = writer_id(device).0;
+    let cert = DeviceAuthorization {
+        actor_id: ActorKeypair::from_secret(SUCC_SEED).actor_id(),
+        device_key: id,
+        capabilities: vec![Capability::RenewBearer],
+        created_at: Timestamp(1_000),
+        expires_at: None,
+    };
+    let (bytes, env) = sign_envelope(&ActorKeypair::from_secret(SUCC_SEED), &cert).unwrap();
+    let authorization = canonical_encode(&EmbedAsBytes::from_signed(bytes, env)).unwrap();
+    let record =
+        fauna_core::generation::sign_device_enrollment(&signing_key(device), authorization, 5_000);
+    store
+        .put_state(fauna_account_store::types::StateEntry {
+            kind: fauna_protocol::merge_policy::KIND_DEVICE_SET.into(),
+            key: fauna_core::hex32::encode(&id),
+            scope: ACCOUNT_STATE_FLEET_SCOPE.into(),
+            value: canonical_encode(&record).unwrap(),
+            merge_meta: None,
+            entry_version: 0,
+            tombstone: false,
+        })
+        .await
+        .unwrap();
+}
+
+/// One predecessor-era row of [`EXT_KIND`] at `key`, sealed under the
+/// predecessor's pair and signed by `writer` — the app's rows reach the nest
+/// through the record door as its own writer; the owner's session stands in
+/// for that door here, the seal and signature being the same.
+async fn predecessor_era_ext_row(rpc: &Arc<RouterRequester>, writer: u8, key: &str, value: &[u8]) {
+    let keys = schedule(PRED_SEED);
+    let store = replica(writer).await;
+    let device = signing_key(writer);
+    let overlay = admitted();
+    let fleet = pred_plane(&store, rpc, &keys, &device, ACCOUNT_STATE_FLEET_SCOPE);
+    let plane = fleet.ext_plane(&ext_kind(), &overlay);
+    put_lww_row_local(&plane, EXT_KIND, key, value.to_vec(), writer_id(writer).0)
+        .await
+        .expect("the predecessor-era ext put");
+    assert_eq!(plane.publish_pending().await.expect("publish"), 1);
+}
+
+/// Proof (i): a predecessor-sealed `ext:<kind>` row the connected app wrote,
+/// its kind admitted, is carried by the successor's walk of that kind's
+/// plane and its own row retired behind the carry; a device holding only the
+/// successor's seed then reads it, and so does the app through the consent
+/// grant re-minted to the successor's pairs (`open_ext_kind_keys`). A
+/// predecessor device's row is carried too, once the ceremony device has
+/// attested that device departed in the successor's device set
+/// (`fleet_removal::attest_departed_predecessor_devices`) — so the carry
+/// survives a second succession. A row from a writer the successor's
+/// authority does not name opens, is skipped and stays where it is.
+///
+/// Red-verified: before the carry tried the plane's own `ext.*` kind, the
+/// walk counted the app's row unopened and carried nothing; before the seal
+/// asked the overlay, no device could publish an `ext.*` row at all; without
+/// the attestation, the predecessor device's row is skipped like the
+/// stranger's (`(1, 0, 2)`).
+#[tokio::test]
+async fn a_connected_apps_ext_row_is_carried_and_read_by_the_seed_only_device_and_the_reminted_grant()
+ {
+    let rpc = nest();
+    let kind = ext_kind();
+    let overlay = admitted();
+    let scope = fauna_protocol::scope::ext_scope(&kind);
+    let note = b"a note the app kept".to_vec();
+    connected_app_declares(&rpc, EXT_KIND).await;
+    let pred_note = b"a note a predecessor device wrote".to_vec();
+    predecessor_era_ext_row(&rpc, APP_WRITER, "note-1", &note).await;
+    predecessor_era_ext_row(&rpc, PRED_DEVICE, "note-2", &pred_note).await;
+    predecessor_era_ext_row(&rpc, STRANGER, "note-3", b"a writer no one names").await;
+    let before = census_of(&rpc, &scope).await;
+    assert_eq!(
+        (
+            live_rows_of(&before, APP_WRITER),
+            live_rows_of(&before, PRED_DEVICE),
+            live_rows_of(&before, STRANGER)
+        ),
+        (1, 1, 1)
+    );
+
+    let succ_keys = schedule(SUCC_SEED);
+    let inherited = predecessor_schedules();
+    let s = replica(S_DEVICE).await;
+    let s_device = signing_key(S_DEVICE);
+    successor_grants_the_app_write(&s).await;
+    let s_fleet = AccountStatePlane::new(
+        &s,
+        &rpc,
+        &succ_keys,
+        &s_device,
+        &SUCC_TRUST,
+        ACCOUNT_STATE_FLEET_SCOPE,
+    )
+    .unwrap();
+    // The ceremony device's attestation: the predecessor's fleet, as this
+    // device merged it, written departed into the successor's device set.
+    assert_eq!(
+        fauna_sync_engine::fleet_removal::attest_departed_predecessor_devices(
+            &s,
+            &s_fleet,
+            &s_device,
+            &[writer_id(PRED_DEVICE).0],
+        )
+        .await
+        .expect("the attestation"),
+        1
+    );
+    let s_plane = s_fleet
+        .ext_plane(&kind, &overlay)
+        .with_predecessor_schedules(&inherited);
+    let (walk, _retire) = successor_pass(&s, &s_plane, &s_device).await;
+    assert_eq!(
+        (walk.inherited, walk.unopened, walk.unmergeable),
+        (2, 0, 1),
+        "the app's and the departed device's rows carried, the unnamed writer's skipped: \
+         {walk:?}"
+    );
+    assert_eq!(
+        s.state(EXT_KIND, "note-1").await.unwrap().map(|e| e.value),
+        Some(note.clone()),
+        "the successor's device holds the carried row"
+    );
+    assert_eq!(
+        s.state(EXT_KIND, "note-2").await.unwrap().map(|e| e.value),
+        Some(pred_note.clone()),
+        "the departed predecessor device's row is carried too"
+    );
+    assert!(s.state(EXT_KIND, "note-3").await.unwrap().is_none());
+    let settled = settle(&rpc, &s, &s_plane, &s_device).await;
+    assert_eq!(
+        (
+            live_rows_of(&settled, APP_WRITER),
+            live_rows_of(&settled, PRED_DEVICE),
+            live_rows_of(&settled, STRANGER),
+            live_rows_of(&settled, S_DEVICE)
+        ),
+        (0, 0, 1, 2),
+        "both carried rows retired behind the carry, the skipped row untouched: {settled:?}"
+    );
+
+    // A device holding only the successor's seed reads it.
+    let f = replica(F_DEVICE).await;
+    let f_device = signing_key(F_DEVICE);
+    enrolled_in_successor_fleet(&f, S_DEVICE).await;
+    let f_fleet = AccountStatePlane::new(
+        &f,
+        &rpc,
+        &succ_keys,
+        &f_device,
+        &SUCC_TRUST,
+        ACCOUNT_STATE_FLEET_SCOPE,
+    )
+    .unwrap();
+    let walk = f_fleet
+        .ext_plane(&kind, &overlay)
+        .walk()
+        .await
+        .expect("the seed-only device's walk");
+    assert_eq!(
+        (walk.unmergeable, walk.unopened),
+        (0, 1),
+        "the carry admitted, only the stranger's skipped row unopened: {walk:?}"
+    );
+    assert_eq!(
+        f.state(EXT_KIND, "note-1").await.unwrap().map(|e| e.value),
+        Some(note.clone()),
+        "the seed-only device reads the carried row"
+    );
+    assert_eq!(
+        f.state(EXT_KIND, "note-2").await.unwrap().map(|e| e.value),
+        Some(pred_note.clone()),
+        "and the departed device's"
+    );
+
+    // So does the connected app, through the grant re-minted to the
+    // successor's delegable pairs: the row the nest serves opens under it.
+    let (holder_sk, holder_pk) = fauna_mls::wrapped_blob::generate_x25519_keypair();
+    let blob = fauna_client_capabilities::mint_ext_kinds_grant(
+        &DelegableSchedule::derive(&backup_key(SUCC_SEED)),
+        &ActorKeypair::from_secret(SUCC_SEED).actor_id().0,
+        &[0x5E; 16],
+        &holder_pk,
+        None,
+        fauna_mls::wrapped_blob::GrantWindow(0, u64::MAX),
+        std::slice::from_ref(&kind),
+        Some(&writer_id(APP_WRITER).0),
+    )
+    .expect("the re-minted grant");
+    let granted = fauna_client_capabilities::open_ext_kind_keys(&blob, &holder_sk)
+        .expect("the grant's ext pair opens");
+    let served = f
+        .relay_rows(&scope, "state-entry", &[], 1000)
+        .await
+        .expect("the seed-only device's relay copy of the scope");
+    let mut opened: Vec<(WriterId, Vec<u8>)> = served
+        .iter()
+        .filter_map(|row| {
+            let coords = fauna_core::account_entry_crypto::EntryCoordinates {
+                writer_id: row.writer.0,
+                writer_seq: row.writer_seq,
+                scope: &scope,
+            };
+            let item_key: [u8; 32] = row.item_key.as_slice().try_into().ok()?;
+            let envelope = row.entry.as_deref()?;
+            granted.iter().find_map(|keys| {
+                fauna_core::account_entry_crypto::open_entry(keys, &coords, &item_key, envelope)
+                    .ok()
+                    .map(|pt| (row.writer, pt.value.to_vec()))
+            })
+        })
+        .collect();
+    opened.sort();
+    let mut want = vec![
+        (writer_id(S_DEVICE), note),
+        (writer_id(S_DEVICE), pred_note),
+    ];
+    want.sort();
+    assert_eq!(
+        opened, want,
+        "the re-minted grant opens the successor's carry, and only it"
+    );
 }

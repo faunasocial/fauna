@@ -305,14 +305,27 @@ public partial class MailImportViewModel : ObservableObject
         ConfirmSummary = Strings.Format(
             "mail_import/confirm_summary_fmt",
             SourceKindLabel(snap.sourceKind), selected.Count, plannedMessages);
-        ProgressSummary = Strings.Format(
-            "mail_import/progress_summary_fmt",
-            snap.importedCount, snap.totalCount, snap.skippedCount, snap.erroredCount);
+        var timing = TransferTimingText.Of(
+            snap.startedAt, snap.lastProgressAt,
+            snap.sessionState == ImportSessionState.Running,
+            (ulong)snap.importedCount + (ulong)snap.skippedCount + (ulong)snap.erroredCount,
+            (ulong)snap.totalCount);
+        ProgressSummary = TransferTimingText.WithTiming(
+            "mail_import",
+            Strings.Format(
+                "mail_import/progress_summary_fmt",
+                snap.importedCount, snap.totalCount, snap.skippedCount, snap.erroredCount),
+            timing);
         ProgressFraction = FaunaFfiMethods.QuotaFraction((long)snap.importedCount, (long)snap.totalCount);
         ErrorLog = string.Join("\n", snap.errorLog);
-        DoneSummary = Strings.Format(
-            "mail_import/done_summary_fmt",
-            snap.importedCount, snap.skippedCount, snap.erroredCount);
+        // A snapshot with no clock yet keeps the untimed form.
+        DoneSummary = timing.elapsedSecs is ulong took
+            ? Strings.Format(
+                "mail_import/done_summary_timed_fmt",
+                snap.importedCount, snap.skippedCount, snap.erroredCount, ValueFormat.DurationSecs(took))
+            : Strings.Format(
+                "mail_import/done_summary_fmt",
+                snap.importedCount, snap.skippedCount, snap.erroredCount);
         CanPause = snap.sessionState == ImportSessionState.Running;
         CanResume = snap.sessionState == ImportSessionState.Paused;
 

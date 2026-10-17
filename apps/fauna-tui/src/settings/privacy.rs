@@ -74,9 +74,12 @@ pub(super) fn privacy_elements(state: &SettingsState, filter_marks: &[i64]) -> V
         )
         .labelled(spam::SPAM_THRESHOLD),
     );
-    // The band label (Aggressive/Moderate/Permissive) — untagged chrome, like
-    // linux's `dim-label` suffix (no ui.yaml id of its own).
-    els.push(Element::chrome(spam_band_label(&p.spam_threshold_input)));
+    // The band label (Aggressive/Moderate/Permissive), tagged so
+    // `privacy-settings` outcome 8 can read it back.
+    els.push(Element::label(
+        ids::SPAM_THRESHOLD_BAND,
+        spam_band_label(&p.spam_threshold_input),
+    ));
     els.push(
         Element::input(
             ids::PHISHING_THRESHOLD,

@@ -11,7 +11,7 @@ namespace FaunaApp.Tests;
 /// export <c>FaunaFfiMethods.ShortId</c> (the native <c>fauna_ffi</c> dll loads in
 /// the test host — memory <c>reference_windows_dotnet_test_loads_native_ffi</c>),
 /// locking windows to the canonical first-12 + <c>…</c> form so the linked-nests
-/// list (`Abbreviate`) and the feed author (`ShortAuthor`) never re-derive a
+/// list (`Abbreviate`) and the shared peer-label fallback (the feed author) never re-derive a
 /// first-8…last-8 or ASCII-<c>...</c> truncation (priority #1/#4).
 /// </summary>
 public class ShortIdFfiTests

@@ -23,8 +23,8 @@ fauna-protocol = { workspace = true }
 fauna-ws-substrate = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
-# The shared dial-retry policy's own log lines (`retry_while_reaching_nest` /
-# `serve_while_reaching_nest`). Both consumers already install a
+# The shared dial-retry policy's own log lines (`serve_while_reaching_nest`).
+# Every consumer already installs a
 # `tracing_subscriber`, so the retry story reads on the sidecar's own stderr —
 # and in `docker logs` — exactly as it did when each binary owned its loop.
 tracing = { workspace = true }

@@ -14,24 +14,30 @@
   // never picks a revoke verb — a row's `key` is opaque. Reference painter:
   // `apps/fauna-tui/src/settings/connected_apps.rs`.
   //
-  // The lift: the AT Protocol page's consent cards + connected-app rows and the
-  // Nostr page's bunker rows render HERE and no longer on their old pages. The
-  // mail app-password rows do NOT reach web yet — this chunk's machine is built
-  // without the mail machine, so they stay on Mail & Calendar.
+  // The lift: the AT Protocol page's consent cards + connected-app rows, the
+  // Nostr page's bunker rows and Mail & Calendar's app-password rows render HERE
+  // and no longer on their old pages. The mail rows ride a mail-settings machine
+  // the chunk builds for itself (`$lib/wasm-connected-apps`); a mail row alone
+  // carries the type / login / secret leaves, and its secret is read on demand
+  // (`revealSecret`), never part of the snapshot.
   import { onDestroy, onMount } from 'svelte';
   import { afterNavigate } from '$app/navigation';
   import { identity } from '$lib/store';
   import { sharedRpcPort } from '$lib/rpc';
-  import { resolveLocalized } from '$lib/i18n/localized';
-  import { consentSetLines } from '$lib/consent-sets';
+  import { resolveComposed, resolveLocalized } from '$lib/i18n/localized';
   import {
+    composeRequestCard,
+    composeRosterRow,
     createConnectedAppsMachine,
+    factsSeparator,
     type ConnectedAppRow,
     type ConnectedAppsMachine,
     type ConnectedAppsSnapshot,
     type ConsentCardRow,
   } from '$lib/wasm-connected-apps';
+  import { ensureWasm, resolveMuaUsername } from '$lib/wasm';
   import { t } from '$lib/i18n/strings';
+  import { localTimestamp } from '$lib/value-format';
   import { IDS } from '$lib/generated/uiIds';
 
   // The parent settings page owns the single error surface (`error-message`).
@@ -44,6 +50,12 @@
   let codeInput = $state('');
   // The row key whose inline revoke confirm is open.
   let revokeArmed = $state<string | null>(null);
+  // Mail app-password secrets the user revealed, by row key. Held only while
+  // shown and dropped on every visit; never logged or persisted.
+  let revealed = $state<Record<string, string>>({});
+  // The login the copy button last put on the clipboard, published as its
+  // `copied` attr (the `account-actor-id-copy-btn` contract), by row key.
+  let copiedLogin = $state<{ key: string; login: string } | null>(null);
   let destroyed = false;
   // True while a visit's own read is in flight: the machine still holds the
   // previous visit's snapshot until that read lands, so no fold may paint it.
@@ -62,9 +74,12 @@
     const id = $identity;
     if (!id?.secretHex) return;
     try {
+      // The core chunk resolves a mail row's login (`resolveMuaUsername`).
+      await ensureWasm();
       const built = await createConnectedAppsMachine(
         { onChanged: () => fold() },
         await sharedRpcPort(id.secretHex),
+        id.secretHex,
       );
       if (destroyed) {
         built.free();
@@ -86,6 +101,8 @@
     reading = true;
     snap = null;
     revokeArmed = null;
+    revealed = {};
+    copiedLogin = null;
     codeInput = '';
     error = '';
     try {
@@ -139,62 +156,49 @@
     fold();
   }
 
-  // The class badge's words — the one per-app half of the grouping key, which the
-  // machine derives. An unknown class paints no badge rather than a guess.
-  function classLabel(cls: string): string | null {
-    switch (cls) {
-      case 'remote': return t.connected_apps.class_remote;
-      case 'device': return t.connected_apps.class_device;
-      case 'wasm': return t.connected_apps.class_wasm;
-      case 'container': return t.connected_apps.class_container;
-      case 'app_password': return t.connected_apps.class_app_password;
-      case 'signer': return t.connected_apps.class_signer;
-      case 'oauth': return t.connected_apps.class_oauth;
-      default: return null;
+  // Reveal is a toggle: the first click reads the secret on demand, the second
+  // hides it again. A failed read is the machine's page error (`null` here).
+  async function toggleSecret(key: string): Promise<void> {
+    if (key in revealed) {
+      const next = { ...revealed };
+      delete next[key];
+      revealed = next;
+      return;
     }
+    if (!machine) return;
+    const secret = await machine.revealSecret(key);
+    if (secret != null) revealed = { ...revealed, [key]: secret };
+    fold();
   }
 
-  // Web formats times in JS: `format_unix_local` needs the OS timezone database,
-  // which wasm lacks (same boundary as `DevicesSection`).
-  function when(ms: number): string {
-    return new Date(ms).toLocaleString();
+  async function copyText(value: string): Promise<void> {
+    try { await navigator.clipboard.writeText(value); } catch { /* headless / no perm */ }
   }
 
-  function rowHead(row: ConnectedAppRow): string {
-    const badge = classLabel(row.class);
-    const name = resolveLocalized(row.name);
-    return badge ? `${name} · ${badge}` : name;
+  async function copyLogin(key: string, login: string): Promise<void> {
+    await copyText(login);
+    copiedLogin = { key, login };
+  }
+
+  // The concrete login: shared Rust resolved everything but `{handle}`, so the
+  // paint is one substitution and never a locally built address.
+  function mailLogin(template: string): string {
+    return resolveMuaUsername(template, $identity?.handle ?? '');
   }
 
   // The row's description as ONE newline-joined text (the shape tui paints and
-  // the cross-app actions read: name · badge / publisher — client id / one
-  // "• scope" line each / the facts line). One text node, not a block per line:
-  // the e2e text read is `textContent`, which has no break between blocks.
+  // the cross-app actions read), composed once in shared Rust
+  // (`compose::roster_row_text`): name · badge / a burned row's revoked line /
+  // publisher — client id / the scopes / the permission sets / the oracle
+  // summary / the facts line. Web resolves each `ComposedText` through its own
+  // string table and joins; instants are formatted by `localTimestamp`
+  // (`$lib/value-format`, `format_unix_local_ms`'s shape — wasm has no timezone
+  // database). One text node, not a block per line: the e2e text read is
+  // `textContent`, which has no break between blocks.
   function rowText(row: ConnectedAppRow): string {
-    const lines = [rowHead(row)];
-    if (row.client_id && row.publisher) {
-      lines.push(`${t.connected_apps.publisher({ domain: row.publisher })} — ${row.client_id}`);
-    }
-    for (const scope of row.scope_descriptions) lines.push(`• ${resolveLocalized(scope)}`);
-    lines.push(rowFacts(row));
-    return lines.join('\n');
-  }
-
-  function rowFacts(row: ConnectedAppRow): string {
-    const facts: string[] = [];
-    if (!row.connected) facts.push(t.connected_apps.not_connected);
-    facts.push(t.connected_apps.created({ time: when(row.created_at_millis) }));
-    facts.push(
-      row.last_used_at_millis != null
-        ? t.connected_apps.last_used({ time: when(row.last_used_at_millis) })
-        : t.connected_apps.never_used,
-    );
-    facts.push(
-      row.lasts_until_millis != null
-        ? t.connected_apps.lasts_until({ time: when(row.lasts_until_millis) })
-        : t.connected_apps.open_ended,
-    );
-    return facts.join(' · ');
+    const text = composeRosterRow(row);
+    const facts = text.facts.map(resolveComposed).join(factsSeparator());
+    return [...text.lines.map(resolveComposed), facts].join('\n');
   }
 </script>
 
@@ -207,20 +211,12 @@
     <h3>{t.connected_apps.requests_heading}</h3>
     {#each snap?.requests ?? [] as request (request.consent_id_hex)}
       <div class="card" data-testid={IDS.CONNECTED_APPS_REQUEST_CARD}>
-        <p>{t.atproto_settings.consent_heading}</p>
-        <p>
-          {request.client_name
-            ? t.atproto_settings.consent_client({ name: request.client_name, client_id: request.client_id })
-            : t.atproto_settings.consent_client_unnamed({ client_id: request.client_id })}
-        </p>
-        <p>{t.atproto_settings.consent_scopes_heading}</p>
-        <div class="scopes">
-          {#each request.scope_descriptions as line}
-            <div>• {line}</div>
-          {/each}
-        </div>
-        {#each consentSetLines(request.sets) as setLine}
-          <div class="scopes">{setLine}</div>
+        <!-- The card's lines are composed once in shared Rust
+             (`compose::request_card_lines`): heading, who is asking, the scopes
+             heading and its bullets, the permission sets, then what the approve
+             ends besides granting. Only the markup ramp is the shell's. -->
+        {#each composeRequestCard(request).map(resolveComposed) as line, i}
+          {#if i < 3}<p>{line}</p>{:else}<div class="scopes">{line}</div>{/if}
         {/each}
         <p data-testid={IDS.CONNECTED_APPS_REQUEST_CODE} data-code={request.code}>
           {t.atproto_settings.consent_code({ code: request.code })}
@@ -270,8 +266,43 @@
       <p class="muted small" data-testid={IDS.CONNECTED_APPS_EMPTY}>{t.connected_apps.empty}</p>
     {/if}
     {#each snap.principals as row (row.key)}
-      <div class="card" data-testid={IDS.CONNECTED_APPS_ITEM} data-key={row.key}>
+      <div
+        class="card"
+        data-testid={IDS.CONNECTED_APPS_ITEM}
+        data-key={row.key}
+        data-revoked={row.mail?.revoked || row.signer_burned ? 'true' : undefined}
+        data-oracle_ops={row.oracle ? String(row.oracle.ops_in_window) : undefined}
+        data-status={row.paused ? 'paused' : row.connected ? 'connected' : 'not_connected'}
+      >
         <div class="row-text">{rowText(row)}</div>
+        {#if row.mail}
+          {@const login = mailLogin(row.mail.mua_username)}
+          <span class="badge" data-testid={IDS.CONNECTED_APPS_ITEM_TYPE}>{resolveLocalized(row.mail.kind)}</span>
+          <div class="field">
+            <span class="field-label">{t.settings.mail.mua_username}</span>
+            <code class="mono" data-testid={IDS.CONNECTED_APPS_ITEM_USERNAME}>{login}</code>
+            <button
+              class="btn small"
+              data-testid={IDS.CONNECTED_APPS_ITEM_COPY_USERNAME}
+              data-copied={copiedLogin?.key === row.key ? copiedLogin.login : undefined}
+              onclick={() => copyLogin(row.key, login)}
+            >{t.settings.mail.copy_username}</button>
+          </div>
+          <!-- ⚠ The hidden secret's text MUST stay EMPTY — never a mask: the
+               cross-app driver polls it until it turns non-empty and returns
+               that AS the secret, so a mask would pass the reveal test without
+               the on-demand read ever running. -->
+          <div class="field">
+            <span class="field-label">{t.settings.mail.secret_label}</span>
+            <code class="mono" data-testid={IDS.CONNECTED_APPS_ITEM_SECRET}>{revealed[row.key] ?? ''}</code>
+            <button class="btn small" data-testid={IDS.CONNECTED_APPS_ITEM_REVEAL_SECRET} onclick={() => toggleSecret(row.key)}>
+              {row.key in revealed ? t.settings.mail.hide_secret : t.settings.mail.reveal_secret}
+            </button>
+            <button class="btn small" data-testid={IDS.CONNECTED_APPS_ITEM_COPY_SECRET} onclick={() => copyText(revealed[row.key] ?? '')}>
+              {t.settings.mail.copy_secret}
+            </button>
+          </div>
+        {/if}
         {#if revokeArmed === row.key}
           <p>{t.connected_apps.revoke_prompt({ name: resolveLocalized(row.name) })}</p>
           <div class="actions">
@@ -301,7 +332,7 @@
       <div class="card" data-testid={IDS.CONNECTED_APPS_BLOCKED_ITEM}>
         <!-- The client id verbatim, as the request card showed it. -->
         <div>{blocked.client_id}</div>
-        <div class="muted small">{t.connected_apps.blocked_since({ time: when(blocked.blocked_at_millis) })}</div>
+        <div class="muted small">{t.connected_apps.blocked_since({ time: localTimestamp(blocked.blocked_at_millis) })}</div>
         <div class="actions">
           <button class="btn small" data-testid={IDS.CONNECTED_APPS_BLOCKED_ITEM_UNBLOCK} onclick={() => unblock(blocked.client_id)}>
             {t.connected_apps.unblock}
@@ -323,6 +354,10 @@
     gap: 0.25rem;
   }
   .row-text { white-space: pre-line; }
+  .badge { align-self: flex-start; font-size: 0.8rem; border: 1px solid var(--border); border-radius: 4px; padding: 0 0.4rem; }
+  .field { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
+  .field-label { font-size: 0.85rem; }
+  .mono { font-family: monospace; }
   .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; margin-top: 0.25rem; }
   .scopes { display: flex; flex-direction: column; }
   h3 { margin-top: 1.25rem; font-size: 1rem; }

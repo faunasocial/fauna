@@ -62,6 +62,15 @@ class AwaitingManualDnsVM @Inject constructor(
      * standard-path run's records-less slot. */
     fun copyEnabled(): Boolean = host.machine.awaitingDnsCopyEnabled()
 
+    /** Whether the "Use a different nest" exit is live — off only while a claim
+     * is in flight, ON during a bare probe (a box that never answers lives in
+     * `Checking`), so it is NOT the recheck button's `busy`. */
+    fun fallthroughEnabled(): Boolean = host.machine.awaitingDnsFallthroughEnabled()
+
+    /** The exit: the machine clears the slot through the store it was built with
+     * and re-lands at handle_entry holding the identity. Nothing else to do. */
+    fun abandon() = host.machine.abandonAwaitingManualDns()
+
     suspend fun recheck(): OnboardingStep = host.machine.recheckManualDns()
 
     /** True while the wizard is still parked at the deferred-DNS exit. */
@@ -86,6 +95,7 @@ fun AwaitingManualDnsScreen(
     // Records-less resumed runs have nothing to copy; disabled, never hidden —
     // ui.yaml scopes this ID to the page's required elements.
     val copyEnabled = remember(tick) { vm.copyEnabled() }
+    val fallthroughEnabled = remember(tick) { vm.fallthroughEnabled() }
 
     // One probe, then route on what it produced. Note the middle branch: on this
     // surface `DONE` is *also* the still-waiting state (the wizard sits at Done
@@ -170,5 +180,19 @@ fun AwaitingManualDnsScreen(
                 modifier = Modifier.testTag(Ids.AWAITING_DNS_RECHECK_BUTTON),
             ) { Text(stringResource(R.string.onboarding_awaiting_dns_recheck_button)) }
         }
+
+        // The exit for a box that never answers (onboarding-provisioning.md
+        // § "Almost ready" surface → Exit): borrows the launch surface's label.
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(
+            onClick = {
+                vm.abandon()
+                navController.navigate(routeForStep(vm.host.machine.step()))
+            },
+            enabled = fallthroughEnabled,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(Ids.AWAITING_DNS_FALLTHROUGH_BUTTON),
+        ) { Text(stringResource(R.string.onboarding_launch_use_different_nest)) }
     }
 }

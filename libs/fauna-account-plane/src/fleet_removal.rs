@@ -1,8 +1,8 @@
 //! Gathers the client-held facts a devices-page removal resolves its target
 //! from — the store half of `fauna_core::fleet_removal`, which owns the rule.
 //!
-//! Authority: `docs/goal/architecture/account-data-taxonomy.md` § The
-//! generation machinery → *Fleet-scope reclamation*, clause (4) (*The removal
+//! Authority: `docs/goal/architecture/fleet-scope-reclamation.md`
+//! § *Fleet-scope reclamation*, clause (4) (*The removal
 //! target*). Everything read here is merged plane state this replica holds:
 //! the verified fleet view over `fauna.state.device-set`, and each member's
 //! own row statement on its `fauna.state.device-endpoints` entry
@@ -176,6 +176,32 @@ pub async fn removed_device_ids<B: StoreBackend>(
     Ok(view.removed().map(|(id, _)| *id).collect())
 }
 
+/// Every fleet id this replica's verified view names — its members and its
+/// removed ids, in id order, without duplicates. What the device running a
+/// succession ceremony records as the predecessor's departed devices
+/// (`succession-aftermath.md` § Re-key scope → *Predecessor devices are
+/// departed devices*), for the successor to attest with
+/// [`attest_departed_predecessor_devices`]. A row that verifies as nothing
+/// names no id.
+pub async fn fleet_device_ids<B: StoreBackend>(
+    store: &AccountStore<B>,
+    trust: &GenerationTrust,
+) -> Result<Vec<[u8; 32]>> {
+    Ok(fleet_view_device_ids(&fleet_view(store, trust).await?))
+}
+
+/// [`fleet_device_ids`]' answer over a view already built — shared with the
+/// runtime-free read of a closed store
+/// (`departed_fleet::read_local_fleet_device_ids`), so both name the same ids.
+pub fn fleet_view_device_ids(view: &FleetView) -> Vec<[u8; 32]> {
+    let ids: std::collections::BTreeSet<[u8; 32]> = view
+        .wrap_targets()
+        .map(|m| m.device_id)
+        .chain(view.removed().map(|(id, _)| *id))
+        .collect();
+    ids.into_iter().collect()
+}
+
 /// This replica's verified [`FleetView`] — [`FleetView::build`] over the
 /// live `fauna.state.device-set` rows, against the account root alone. The
 /// one read every consumer here takes, and the peer leg's dial pass besides:
@@ -251,6 +277,75 @@ where
         )
         .await
         .map(|_| ())
+}
+
+/// Attest a succession's **departed devices**: one `Removed` row, attributed
+/// to this device, for every id in `departed` that this replica's merged
+/// device-set state holds no row for — locally; the caller owes the publish,
+/// as for [`write_removed`]. Returns how many rows it wrote.
+///
+/// `departed` is the predecessor's verified fleet view, members and removed
+/// ids alike, as the device that ran the ceremony merged it and recorded it in
+/// its account registry (`succession-aftermath.md` § Re-key scope →
+/// *Predecessor devices are departed devices*). A `Removed` row excludes
+/// unconditionally, so `ExtWriters::admits`' removed-device clause then
+/// admits a predecessor device's inherited `ext:<kind>` rows — and nothing
+/// else changes: a `Removed` id is no member, no wrap target and no tip
+/// member, and the enrollment check stays root-only.
+///
+/// **A sibling of [`write_removed`], never a widening of it.** That writer
+/// refuses an id its fleet view does not verify, and must stay strict; a
+/// predecessor id is by construction not a member of the successor's view.
+/// And no generation is closed: a predecessor device keys no successor
+/// generation, so its closure set is empty by definition. An id merged state
+/// already holds ANY row for is skipped — already removed, or (never for an
+/// honest predecessor id, since a keypair is per (machine, account)) enrolled
+/// in this fleet, which an attestation must not unseat. This device's own id
+/// is skipped for the same reason. Idempotent: a second call writes nothing.
+pub async fn attest_departed_predecessor_devices<B, R>(
+    store: &AccountStore<B>,
+    fleet: &AccountStatePlane<'_, B, R>,
+    writer_key: &SigningKey,
+    departed: &[[u8; 32]],
+) -> Result<usize>
+where
+    B: StoreBackend,
+    R: RpcRequester + Clone,
+    R::Error: RpcErrorClass,
+{
+    let me = writer_key.verifying_key().to_bytes();
+    let mut written = 0;
+    for device_id in departed {
+        if *device_id == me {
+            continue;
+        }
+        let key = fauna_core::hex32::encode(device_id);
+        if store
+            .state(KIND_DEVICE_SET, &key)
+            .await?
+            .is_some_and(|held| !held.tombstone)
+        {
+            continue;
+        }
+        let value = fauna_core::encoding::canonical_encode(&DeviceSetRecord::Removed {
+            removed_at_ms: fauna_core::data::Timestamp::now_millis_or_zero() as i64,
+            removed_by: me,
+        })
+        .context("encoding a departed predecessor device")?;
+        fleet
+            .put_local(
+                &ItemId {
+                    kind: KIND_DEVICE_SET.into(),
+                    key,
+                },
+                value,
+                None,
+            )
+            .await
+            .context("attesting a departed predecessor device")?;
+        written += 1;
+    }
+    Ok(written)
 }
 
 /// [`write_removed`]'s closure half: journal a closed row for every generation
@@ -599,6 +694,113 @@ mod tests {
         let before = journal(&f).await.len();
         remove(&f, THEM).await;
         assert_eq!(journal(&f).await.len(), before);
+    }
+
+    /// **The departed-device attestation** (`succession-aftermath.md`
+    /// § Re-key scope → *Predecessor devices are departed devices*): one
+    /// `Removed` row per attested id merged state holds nothing for,
+    /// attributed to this device, and no closed row — a predecessor id keys
+    /// no generation here. An id this fleet enrolls (THEM) and this device's
+    /// own id are never unseated; a second call writes nothing. The
+    /// attested id is then excluded, never a member and never a wrap target,
+    /// and the honest-writer [`write_removed`] still refuses such an id.
+    #[tokio::test]
+    async fn attesting_departed_predecessor_devices_writes_one_removed_row_each_and_closes_nothing()
+    {
+        const PRED_A: [u8; 32] = [0xE5u8; 32];
+        const PRED_B: [u8; 32] = [0xE6u8; 32];
+        let f = fixture().await;
+        f.put(enrollment_row(US)).await;
+        f.put(enrollment_row(THEM)).await;
+        f.mint_over(&[member_of(US), member_of(THEM)]).await;
+        let fleet = AccountStatePlane::new_pull_only(
+            &f.store,
+            &Offline,
+            &f.schedule,
+            &f.writer_key,
+            &f.trust,
+            ACCOUNT_STATE_FLEET_SCOPE,
+        )
+        .expect("fleet plane");
+        let (a, b, them, us) = (
+            device_id_of(PRED_A),
+            device_id_of(PRED_B),
+            device_id_of(THEM),
+            device_id_of(US),
+        );
+        let before = journal(&f).await.len();
+
+        let written =
+            attest_departed_predecessor_devices(&f.store, &fleet, &f.writer_key, &[a, them, us])
+                .await
+                .expect("attest");
+        assert_eq!(written, 1, "only the predecessor id draws a row");
+        let written = attest_departed_predecessor_devices(&f.store, &fleet, &f.writer_key, &[a, b])
+            .await
+            .expect("attest again");
+        assert_eq!(written, 1, "the id merged state already holds is skipped");
+        assert_eq!(
+            journal(&f).await.split_off(before),
+            vec![
+                (KIND_DEVICE_SET.to_string(), fauna_core::hex32::encode(&a)),
+                (KIND_DEVICE_SET.to_string(), fauna_core::hex32::encode(&b)),
+            ],
+            "two Removed rows, no generation-closed row"
+        );
+        assert!(
+            live_rows(&f.store, KIND_GENERATION_CLOSED)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let held = f
+            .store
+            .state(KIND_DEVICE_SET, &fauna_core::hex32::encode(&a))
+            .await
+            .unwrap()
+            .expect("the attestation row");
+        let DeviceSetRecord::Removed { removed_by, .. } =
+            fauna_core::encoding::canonical_decode(&held.value).unwrap()
+        else {
+            panic!("a Removed row");
+        };
+        assert_eq!(removed_by, us, "attributed to this device");
+        assert_eq!(
+            attest_departed_predecessor_devices(&f.store, &fleet, &f.writer_key, &[a, b])
+                .await
+                .expect("a third call"),
+            0
+        );
+
+        let view = fleet_view(&f.store, &f.trust).await.unwrap();
+        for id in [a, b] {
+            assert!(view.is_excluded(&id));
+            assert!(!view.is_verified_member(&id));
+            assert!(view.wrap_targets().all(|m| m.device_id != id));
+        }
+        assert!(
+            view.is_verified_member(&them),
+            "an enrolled id stays seated"
+        );
+        let mut named = vec![us, them, a, b];
+        named.sort_unstable();
+        assert_eq!(
+            fleet_device_ids(&f.store, &f.trust).await.unwrap(),
+            named,
+            "what a ceremony on this replica records: members and removed alike"
+        );
+        assert!(
+            write_removed(
+                &f.store,
+                &fleet,
+                &f.trust,
+                &f.writer_key,
+                device_id_of([0xE7u8; 32])
+            )
+            .await
+            .is_err(),
+            "the honest-writer check still refuses a non-member"
+        );
     }
 
     /// The closure set at the writer: a mint naming a member this view does

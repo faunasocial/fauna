@@ -750,7 +750,7 @@ public final class BackupDestinationsVM {
     /// Backlog-count → i18n text mapping via the shared `backupBacklogLabel`
     /// FFI fn. `nil` ⇒ "0 queued".
     static func backlogText(_ status: FfiBackupDestinationStatus?) -> String {
-        renderLocalizedText(backupBacklogLabel(backlogCount: status?.backlogCount))
+        renderLocalizedText(backupBacklogLabel(backlogCount: status?.backlogCount, writerState: status?.writerState))
     }
 
     /// `backup-destination-last-audit-time` text for a row: when this

@@ -18,7 +18,10 @@
 //!  * a method of a class the grant does not name (`nip44_encrypt`) is refused;
 //!  * after the owner deletes the grant, the very next `sign_event` is refused
 //!    — per-request re-resolution, no cached authority;
-//!  * revoking the principal deletes its client row.
+//!  * revoking the principal deletes its client row;
+//!  * the owner reads the record — the roster row's oracle summary and
+//!    `fauna.principals.ops`, newest first and bounded — and another account
+//!    reads none of it.
 //!
 //! The dep is a dev-dependency only, and its **source is never read** — the
 //! project's dep-source rule. Only compiled under `--features nostr`.
@@ -201,6 +204,7 @@ async fn a_principal_signs_through_the_oracle_under_its_live_grant_only() {
         account: ACCOUNT,
         principal_id: principal_id.clone(),
         token_scopes: vec![SCOPE.to_string()],
+        family_id: None,
     };
 
     let app_keys = Keys::generate();
@@ -392,6 +396,7 @@ async fn a_bound_client_key_belongs_to_one_principal() {
             .principal_id
             .clone(),
         token_scopes: vec![SCOPE.to_string()],
+        family_id: None,
     };
     let (one, two) = (principal_holding(HOLDER), principal_holding(HOLDER_TWO));
     let key = Keypair::generate().public_key_hex();
@@ -408,4 +413,164 @@ async fn a_bound_client_key_belongs_to_one_principal() {
     // A malformed key is refused before any row is touched.
     let err = bind(&state, &two, "NOT-HEX").await.unwrap_err();
     assert_eq!(err.code, "fauna.protocol.malformed", "{err:?}");
+}
+
+/// Call one of the account's own `fauna.principals.*` kinds as `actor`.
+async fn principals_call<Req: serde::Serialize, Reply: serde::de::DeserializeOwned>(
+    state: &Arc<AppState>,
+    actor: [u8; 32],
+    kind: &str,
+    req: &Req,
+) -> Reply {
+    let mut b = fauna_nest::rpc_router::RpcRouter::builder();
+    fauna_nest::principals_handlers::register_principals_handlers(&mut b);
+    let router = b.build();
+    let payload = fauna_protocol::encode_canonical(req).unwrap();
+    let reply =
+        (router.kind_meta(kind).expect("registered").handler)(state.clone(), actor, payload)
+            .await
+            .unwrap_or_else(|e| panic!("{kind}: {e:?}"));
+    fauna_protocol::decode_strict(&reply).unwrap()
+}
+
+/// The audit split's custodian half, served to the owner
+/// (`key-material-hierarchy.md` § *The oracle*): after N operations through
+/// the oracle, the roster row's summary counts them and `fauna.principals.ops`
+/// returns them newest first — and another account sees none of it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_owner_reads_the_oracles_per_operation_record() {
+    use fauna_protocol::principals::{
+        ListPrincipalOpsReply, ListPrincipalOpsRequest, ListPrincipalsReply, ListPrincipalsRequest,
+    };
+    use nostr_connect::prelude::*;
+
+    const OTHER: [u8; 32] = [0xB8; 32];
+    let relay = spawn_relay().await;
+    let state = relay.state.clone();
+    for (actor, name) in [(ACCOUNT, "owner"), (OTHER, "other")] {
+        state.db.create_user(&actor, "free", name).await.unwrap();
+    }
+    let actor_hex = hex::encode(ACCOUNT);
+    link_custodial(&state, &actor_hex).await;
+    state
+        .db
+        .record_atproto_oauth_grant(
+            &ACCOUNT,
+            b"family-1",
+            CLIENT,
+            Some("Oracle App"),
+            SCOPE,
+            &[],
+            "jkt",
+            i64::MAX,
+            None,
+            fauna_nest::db::atproto_pds::OAUTH_GRANT_ISSUER_NEST,
+            &PrincipalAttestation {
+                keys: AttestedKeys {
+                    holder_x25519: Some(HOLDER),
+                    writer_ed25519: None,
+                },
+                execution_form: ExecutionForm::Device,
+                manifest: None,
+            },
+        )
+        .await
+        .unwrap();
+    let list = |actor| {
+        let state = state.clone();
+        async move {
+            principals_call::<_, ListPrincipalsReply>(
+                &state,
+                actor,
+                "fauna.principals.list",
+                &ListPrincipalsRequest::default(),
+            )
+            .await
+            .principals
+        }
+    };
+    let roster = list(ACCOUNT).await;
+    let principal_id = roster[0].principal_id.clone();
+    assert_eq!(roster[0].oracle, None, "no custodian has served it yet");
+
+    mint_grant(&state, IdentityOpClass::NostrSignEvent).await;
+    let binding = PrincipalBinding {
+        account: ACCOUNT,
+        principal_id: principal_id.clone(),
+        token_scopes: vec![SCOPE.to_string()],
+        family_id: None,
+    };
+    let app_keys = Keys::generate();
+    let reply = bind(&state, &binding, &app_keys.public_key().to_hex())
+        .await
+        .expect("bind");
+    let uri = NostrConnectUri::parse(format!(
+        "bunker://{}?relay={}",
+        reply.signer_pubkey, relay.url
+    ))
+    .expect("parse bunker URI");
+    let signer =
+        NostrConnect::new(uri, app_keys, Duration::from_secs(10), None).expect("nip46 client");
+    let user_pk = tokio::time::timeout(Duration::from_secs(15), signer.get_public_key_async())
+        .await
+        .expect("get_public_key within 15s")
+        .expect("get_public_key over the wire");
+    // N operations of distinct kinds, so the order is observable.
+    const KINDS: [u16; 3] = [1, 7, 30023];
+    for kind in KINDS {
+        let unsigned = EventBuilder::new(Kind::Custom(kind), "audited").finalize_unsigned(user_pk);
+        tokio::time::timeout(Duration::from_secs(15), signer.sign_event_async(unsigned))
+            .await
+            .expect("an answer within 15s")
+            .expect("signed under the grant");
+    }
+
+    let roster = list(ACCOUNT).await;
+    let summary = roster[0].oracle.clone().expect("the oracle summary");
+    assert_eq!(summary.ops_in_window, 3, "{summary:?}");
+    assert!(
+        summary.requests_served > 3,
+        "the key-less requests count as served: {summary:?}"
+    );
+    let last = summary.last_op.expect("the newest operation");
+    assert_eq!(
+        (last.class.as_str(), last.detail.as_str()),
+        ("nostr.sign_event", "30023")
+    );
+
+    let ops: ListPrincipalOpsReply = principals_call(
+        &state,
+        ACCOUNT,
+        "fauna.principals.ops",
+        &ListPrincipalOpsRequest {
+            principal_id: principal_id.clone(),
+            extra: Default::default(),
+        },
+    )
+    .await;
+    let details: Vec<&str> = ops.ops.iter().map(|o| o.detail.as_str()).collect();
+    assert_eq!(details, ["30023", "7", "1"], "newest first");
+    assert!(ops.ops.iter().all(|o| o.class == "nostr.sign_event"));
+    // The page bound keeps the newest (the kind passes the hard constant).
+    let page = state
+        .db
+        .list_principal_oracle_ops(&ACCOUNT, &principal_id, 2)
+        .await
+        .unwrap();
+    let details: Vec<&str> = page.iter().map(|o| o.detail.as_str()).collect();
+    assert_eq!(details, ["30023", "7"]);
+
+    // Another account: not its principal, so no record and no roster row.
+    let theirs: ListPrincipalOpsReply = principals_call(
+        &state,
+        OTHER,
+        "fauna.principals.ops",
+        &ListPrincipalOpsRequest {
+            principal_id,
+            extra: Default::default(),
+        },
+    )
+    .await;
+    assert!(theirs.ops.is_empty(), "{theirs:?}");
+    assert!(list(OTHER).await.is_empty());
 }

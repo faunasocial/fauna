@@ -13,11 +13,12 @@
   // run in a browser (content-index.md § Where queries run), so `has_more`,
   // `results`, etc. are always nest-only here; that is a normal state, not a
   // gap, and there is nothing to "fix".
+  import { onMount } from 'svelte';
   import { get } from 'svelte/store';
   import { goto } from '$app/navigation';
   import { identity } from '$lib/store';
   import { getSearchManager, searchSnapshot, refreshSearch, setPendingSearchNav, type PendingSearchNav } from '$lib/search';
-  import { searchTypeFilterOptions, searchTypeFilterLabel } from '$lib/wasm';
+  import { ensureWasm, searchTypeFilterOptions, searchTypeFilterLabel } from '$lib/wasm';
   import MessageBanner from '$lib/components/MessageBanner.svelte';
   import { t } from '$lib/i18n/strings';
   import { relativeTime } from '$lib/value-format';
@@ -25,7 +26,13 @@
   import { IDS } from '$lib/generated/uiIds';
 
   const TYPE_FILTER_ALL = 'all';
-  const typeFilterTokens = searchTypeFilterOptions();
+  // Read after `ensureWasm()`: the shell renders this page before the core
+  // chunk is up, so a top-level sync read would throw on a cold load.
+  let typeFilterTokens = $state<string[]>([]);
+  onMount(async () => {
+    await ensureWasm();
+    typeFilterTokens = searchTypeFilterOptions();
+  });
 
   let query = $state('');
   let barVisible = $state(true);

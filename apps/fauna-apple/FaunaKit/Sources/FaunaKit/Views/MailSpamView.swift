@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import SwiftUI
 
 /// The user-facing **mail-spam** page (`docs/goal/behavior/mail-spam.md`), shared
@@ -329,3 +332,4 @@ public struct MailSpamView: View {
         .automationValue(Ids.mailSpamTrainingHistoryListItem, text: { event.message })
     }
 }
+#endif // !FAUNA_KIDS

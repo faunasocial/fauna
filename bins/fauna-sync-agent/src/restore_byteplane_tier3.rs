@@ -57,7 +57,9 @@ use fauna_nest::routes::AppState;
 use fauna_sync_engine::FileHydrator;
 use fauna_sync_engine::always_resident::LocalWriteHost;
 use fauna_sync_engine::db::{SyncDb, SyncState};
-use fauna_sync_engine::engine::{PlaceholderFold, StaleHydratedRow, SyncEngine};
+use fauna_sync_engine::engine::{
+    FoldedDelete, FoldedDeleteOutcome, PlaceholderFold, StaleHydratedRow, SyncEngine,
+};
 use fauna_sync_engine::engine_host::CancellationToken;
 use fauna_sync_engine::enumerate::{PlaceholderLister, PlaceholderRow};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -184,6 +186,15 @@ async fn restore_repoint_rehydrates_historical_bytes_against_real_nest() {
             None,
         )
         .expect("re-point row at v1's manifest");
+    // The head is this device's own record: a head with no persisted signer
+    // reads as another writer's and is offered no owner root.
+    let own = fauna_core::identity::ActorId::from_hex(&engine.owner_actor_id_hex())
+        .expect("the harness's actor id")
+        .0;
+    engine
+        .db()
+        .set_head_signed_as(rel, &manifest_v1, &own)
+        .expect("stamp the head's signer");
 
     // The next open resolves v1's manifest from the row → fetches v1's chunks from
     // the real store → decrypts under the owner BackupKey → reassembles v1's
@@ -287,6 +298,13 @@ impl HydrationHost for RealNestHost {
     async fn repoint_placeholder(&self, row: &StaleHydratedRow) -> anyhow::Result<()> {
         HydrationHost::repoint_placeholder(&self.engine, row).await
     }
+    async fn apply_folded_delete(
+        &self,
+        delete: &FoldedDelete,
+        remove: &dyn for<'p> Fn(&'p std::path::Path) -> anyhow::Result<()>,
+    ) -> anyhow::Result<FoldedDeleteOutcome> {
+        HydrationHost::apply_folded_delete(&self.engine, delete, remove).await
+    }
     async fn repull(&self) -> anyhow::Result<PlaceholderFold> {
         Ok(PlaceholderFold::default())
     }
@@ -294,6 +312,10 @@ impl HydrationHost for RealNestHost {
     // corpus passes are not what it measures and would re-record nothing here (a
     // fresh engine over an unbound row set). A deliberate no-op, owned here.
     async fn converge_corpus_at_start(&self, _folder: &str) {}
+
+    async fn adopt_deposits(&self, _folder: &str) -> Vec<String> {
+        Vec::new()
+    }
     async fn refresh_and_converge_corpus(&self, _folder: &str) {}
     async fn answer_engine_command(&self, cmd: fauna_sync_engine::always_resident::EngineCommand) {
         HydrationHost::answer_engine_command(&self.engine, cmd).await
@@ -305,8 +327,16 @@ impl HydrationHost for RealNestHost {
         self.reconnect.1.clone()
     }
 
-    async fn is_dehydration_safe(&self, rel: &str) -> bool {
-        self.engine.is_dehydration_safe(rel)
+    async fn is_recorded_content(&self, rel: &str) -> bool {
+        self.engine.is_recorded_content(rel)
+    }
+
+    async fn keeps_own_record(&self, rel: &str) -> bool {
+        self.engine.keeps_own_record(rel)
+    }
+
+    async fn kept_own_records(&self) -> anyhow::Result<Vec<String>> {
+        self.engine.kept_own_records()
     }
 
     async fn subtree_fully_synced(&self, dir_rel: &str) -> bool {
@@ -335,7 +365,7 @@ async fn restore_byteplane_cfapi_fetch_data_serves_historical_bytes() {
     // A real cfapi sync root + a per-folder SyncDb path. run_hydration_loop is
     // driven directly (no IPC / SyncServiceState), so only the paths are needed.
     let tmp = tempfile::tempdir().expect("tempdir");
-    let paths = SyncPaths::new(Some(tmp.path().to_path_buf()));
+    let paths = SyncPaths::at(tmp.path().to_path_buf());
     let root = tmp.path().join("root");
     std::fs::create_dir_all(&root).expect("create sync root");
     let db_path = paths.sync_db_path_for_ref(FOLDER_REF);
@@ -356,7 +386,7 @@ async fn restore_byteplane_cfapi_fetch_data_serves_historical_bytes() {
     // same-nest; the folder's state DB is `db_path`, under the data-root).
     let engine = fauna_sync_engine::engine_lifecycle::assemble_engine(
         agent_engine_params(
-            agent_control_plane(capability, url.clone(), [9u8; 32]),
+            agent_control_plane(capability, url.clone(), [9u8; 32], [7u8; 32]),
             paths.base_dir(),
             root.clone(), // watch_dir
             FOLDER_REF,
@@ -414,6 +444,13 @@ async fn restore_byteplane_cfapi_fetch_data_serves_historical_bytes() {
             None,
         )
         .expect("seed the restored placeholder row");
+        // The head is this device's own record: a head with no persisted
+        // signer reads as another writer's and is offered no owner root.
+        let own = fauna_core::identity::ActorId::from_hex(&engine.owner_actor_id_hex())
+            .expect("the harness's actor id")
+            .0;
+        db.set_head_signed_as(rel, &manifest_v1, &own)
+            .expect("stamp the head's signer");
     }
 
     // Serve the root with the engine (download_file_bytes delegated, real).

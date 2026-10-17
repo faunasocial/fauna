@@ -329,7 +329,7 @@ mod tests {
             // A hydrated page always carries the nest's own serving domain (the
             // `nest.info` read that opens `read_web_page`); the fixtures that
             // care about the no-serving-domain path override it with "".
-            serving_domain: "example.com".to_string(),
+            serving_domain: "example.net".to_string(),
             ..Default::default()
         };
         app
@@ -352,7 +352,7 @@ mod tests {
     fn state_with_posts(posts: Vec<fauna_protocol::web::PublishedPost>) -> crate::app::App {
         let mut app = state_with(SubdomainView {
             enabled: true,
-            url: Some("https://alice.example.com/".to_string()),
+            url: Some("https://alice.example.net/".to_string()),
             disabled_reason: None,
         });
         // `site_link` resolves from the handle + the nest's SERVING DOMAIN (not
@@ -386,7 +386,7 @@ mod tests {
     fn enabled_view_paints_toggle_on_with_the_live_url() {
         let app = state_with(SubdomainView {
             enabled: true,
-            url: Some("https://alice.example.com/".to_string()),
+            url: Some("https://alice.example.net/".to_string()),
             disabled_reason: None,
         });
         let els = web_elements(&app.settings);
@@ -419,7 +419,7 @@ mod tests {
             els.iter()
                 .find(|e| e.id == "web-settings-subdomain-url")
                 .map(|e| e.text.as_str()),
-            Some("https://alice.example.com/")
+            Some("https://alice.example.net/")
         );
     }
 
@@ -430,7 +430,7 @@ mod tests {
     fn disabled_view_still_shows_where_the_site_would_serve() {
         let app = state_with(SubdomainView {
             enabled: false,
-            url: Some("https://alice.example.com/".to_string()),
+            url: Some("https://alice.example.net/".to_string()),
             disabled_reason: None,
         });
         let els = web_elements(&app.settings);
@@ -500,7 +500,7 @@ mod tests {
     fn clicking_the_toggle_does_not_move_state_until_the_nest_confirms() {
         let mut app = state_with(SubdomainView {
             enabled: false,
-            url: Some("https://alice.example.com/".to_string()),
+            url: Some("https://alice.example.net/".to_string()),
             disabled_reason: None,
         });
         // A live session, so the gesture actually produces its network op rather
@@ -526,7 +526,7 @@ mod tests {
             &mut app,
             crate::settings::Outcome::WebView(Ok(SubdomainView {
                 enabled: true,
-                url: Some("https://alice.example.com/".to_string()),
+                url: Some("https://alice.example.net/".to_string()),
                 disabled_reason: None,
             })),
         );
@@ -812,7 +812,7 @@ mod tests {
         assert_eq!(
             attr(btn, "value"),
             Some("https://live.example/post/my-post.html"),
-            "the active custom domain must win over alice.example.com"
+            "the active custom domain must win over alice.example.net"
         );
     }
 
@@ -831,7 +831,7 @@ mod tests {
                 all_with(&els, "web-published-post-copy-link-button")[0],
                 "value"
             ),
-            Some("https://alice.example.com/post/my-post.html")
+            Some("https://alice.example.net/post/my-post.html")
         );
     }
 
@@ -849,7 +849,7 @@ mod tests {
             app.settings.web.copied,
             Some(CopiedLink::Web {
                 index: 1,
-                url: "https://alice.example.com/post/second-post.html".to_string(),
+                url: "https://alice.example.net/post/second-post.html".to_string(),
             }),
             "row 1's link, not row 0's"
         );
@@ -857,7 +857,7 @@ mod tests {
         let buttons = all_with(&els, "web-published-post-copy-link-button");
         assert_eq!(
             attr(buttons[1], "copied"),
-            Some("https://alice.example.com/post/second-post.html"),
+            Some("https://alice.example.net/post/second-post.html"),
             "the copied value paints back onto the button that produced it"
         );
         assert_eq!(
@@ -868,7 +868,7 @@ mod tests {
         assert!(
             crate::ui::painted_line_texts(&web_elements(&app.settings))
                 .iter()
-                .any(|l| l.contains("https://alice.example.com/post/second-post.html")),
+                .any(|l| l.contains("https://alice.example.net/post/second-post.html")),
             "the copied link must also be VISIBLE — OSC 52 may be ignored by the terminal"
         );
     }
@@ -975,7 +975,7 @@ mod tests {
             }) => {
                 assert_eq!(index, 1);
                 assert_eq!(slug, "paid-one");
-                assert_eq!(origin, "https://alice.example.com/");
+                assert_eq!(origin, "https://alice.example.net/");
             }
             _ => panic!("expected a WebMintPaywallLink op"),
         }
@@ -1000,14 +1000,14 @@ mod tests {
             &mut app,
             crate::settings::Outcome::WebPaywallLink(Ok((
                 0,
-                "https://alice.example.com/post/paid-one.html?token=AbC-_123".to_string(),
+                "https://alice.example.net/post/paid-one.html?token=AbC-_123".to_string(),
             ))),
         );
         assert_eq!(
             app.settings.web.copied,
             Some(CopiedLink::Paywall {
                 index: 0,
-                url: "https://alice.example.com/post/paid-one.html?token=AbC-_123".to_string(),
+                url: "https://alice.example.net/post/paid-one.html?token=AbC-_123".to_string(),
             })
         );
         let painted = crate::ui::painted_line_texts(&web_elements(&app.settings));
@@ -1120,10 +1120,10 @@ mod tests {
             crate::settings::Outcome::WebPage(Box::new(Ok(crate::settings::WebPageRead {
                 view: SubdomainView {
                     enabled: true,
-                    url: Some("https://alice.example.com/".to_string()),
+                    url: Some("https://alice.example.net/".to_string()),
                     disabled_reason: None,
                 },
-                serving_domain: "example.com".to_string(),
+                serving_domain: "example.net".to_string(),
                 domains: vec![fauna_client_web::WebDomainRow {
                     domain: "live.example".to_string(),
                     status: "active".to_string(),

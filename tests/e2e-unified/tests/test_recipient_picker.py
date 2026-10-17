@@ -135,29 +135,124 @@ def test_resolves_email(logged_in_app):
         f"an email recipient should commit on the email rail, got {room_class!r}"
     )
 
-def test_resolves_bluesky_did(logged_in_app):
-    """Typing did:plc:... resolves as Bluesky."""
+def test_far_network_shape_reads_not_found(logged_in_app):
+    """A bare far-network shape (a Bluesky account DID) no rail claims reads the
+    ``not-found`` terminal — never ``resolved``, never a hang in ``resolving``.
+
+    Since the per-rail Bluesky/Nostr backends were retired (2026-10-03) no app
+    parses a bridged address; the grammar is the nest's
+    (``docs/goal/behavior/conversation-rooms.md`` § Implementation status today),
+    and the shared parse pins ``did:plc:…`` as unrecognised
+    (``libs/fauna-conversations/src/address.rs``,
+    ``parse_leaves_far_network_shapes_unrecognised``). The shared resolve then
+    answers ``ResolveState::NotFound`` — a probed address no rail claimed,
+    distinct from ``error`` (a probe failure; ``docs/goal/ui/conversations.md``
+    § Errors & edge cases)."""
     state = logged_in_app.conversations.resolve_recipient("did:plc:test123")
-    # error acceptable if test DID doesn't exist; the assertion only requires a
-    # terminal resolve state, never the in-flight "resolving".
-    assert state in ("resolved", "error"), (
-        f"a bluesky DID should reach a terminal resolve state, got {state!r}. "
+    assert state == "not-found", (
+        f"a bare did:plc: shape no rail claims should read 'not-found', got {state!r}. "
         f"{logged_in_app.driver.diagnose('recipient-resolve-status')}"
     )
 
-def test_rail_locks_after_first_chip(logged_in_app):
-    """After accepting a Fauna chip, suggestions filter to compatible rails."""
-    logged_in_app.conversations.navigate()
-    logged_in_app.driver.click("new-conversation-button")
-    logged_in_app.driver.fill("recipient-picker-input", "alice@self-nest.test")
-    logged_in_app.conversations._wait_resolve()
-    logged_in_app.conversations.accept_recipient_chip("alice@self-nest.test")
-    # Now type a Bluesky account DID — should not auto-suggest cross-rail
-    logged_in_app.driver.fill("recipient-picker-input", "did:plc:other")
-    # Implementation: suggestions filter; expect no Bluesky suggestion for rail-locked thread
-    assert logged_in_app.driver.count("recipient-picker-suggestion") == 0, (
-        "Bluesky suggestion should not appear after Fauna chip locks the rail: "
-        f"{logged_in_app.driver.diagnose('recipient-picker-suggestion')}"
+# `test_rail_locks_after_first_chip` was RETIRED 2026-10-13: it asserted that no
+# `recipient-picker-suggestion` row appears after a first chip, a rule no doc
+# ratified — the ratified completion has NO rail lock (`docs/goal/ui/conversations.md`
+# § Where logic lives → *Recipient suggestions*), and when it was written nothing
+# filled the suggestion list at all, so its count was zero on every app.
+
+
+def _fresh_composer(app) -> None:
+    """Open the new-thread composer with no draft left by an earlier test
+    (``test_user`` is session-scoped, and a half-written new message survives
+    navigation — conversations.md § Persistence): discard any draft, then ``+``."""
+    conv = app.conversations
+    conv.navigate()
+    app.driver.click("new-conversation-button")
+    app.driver.wait_for("recipient-picker-input", timeout=10.0)
+    if app.driver.is_visible("new-conversation-cancel"):
+        app.driver.click("new-conversation-cancel")
+        conv.navigate()
+        app.driver.click("new-conversation-button")
+        app.driver.wait_for("recipient-picker-input", timeout=10.0)
+
+
+def _contact_peer(nest_instance, test_user) -> dict:
+    """A fresh same-nest peer that is ``test_user``'s accepted contact and can be
+    reached on the FaunaMls rail (key packages published, and they accept
+    ``test_user`` too)."""
+    port = nest_instance["port"]
+    bob = conv_api.reachable_peer(
+        port, nest_instance["admin"]["signing_key"], test_user["actor_id_hex"]
+    )
+    conv_api.accept_contact(port, test_user, bob["actor_id_hex"])
+    return bob
+
+
+@pytest.mark.feature("conversations")
+def test_typed_prefix_suggests_known_contact(logged_in_app, nest_instance, test_user):
+    """Typing part of a contact's handle offers them as a suggestion, and clicking
+    the row commits a probed Fauna chip (`docs/goal/ui/conversations.md` § Where
+    logic lives → *Recipient suggestions*: contacts are a source; the click is the
+    Enter path, so the chip is end-to-end, not a typed-text resolution).
+
+    The typed text is a slice of the handle's distinctive part — every e2e handle
+    starts ``e2e-``, so its first characters would match every contact
+    ``test_user`` accumulated earlier in the session."""
+    bob = _contact_peer(nest_instance, test_user)
+    _fresh_composer(logged_in_app)
+    typed = bob["handle"][4:10]
+    logged_in_app.driver.type_text("recipient-picker-input", typed)
+
+    driver = logged_in_app.driver
+    wait_until(
+        lambda: driver.count("recipient-picker-suggestion") >= 1,
+        UI_SETTLE_S,
+        diagnose=lambda: driver.diagnose("recipient-picker-suggestion"),
+    )
+    row = driver.get_text("recipient-picker-suggestion", index=0)
+    assert bob["handle"] in row, (
+        f"typing {typed!r} should offer the contact {bob['handle']!r} first; "
+        f"row 0 reads {row!r}. {driver.diagnose('recipient-picker-suggestion')}"
+    )
+
+    driver.click("recipient-picker-suggestion", index=0)
+    wait_until(
+        lambda: driver.count("recipient-picker-chip") >= 1,
+        UI_SETTLE_S,
+        diagnose=lambda: (
+            f"{driver.diagnose('recipient-picker-chip')} "
+            f"resolve={driver.get_attr('recipient-resolve-status', 'state')!r}"
+        ),
+    )
+    room_class = wait_until(
+        logged_in_app.conversations.prospective_room_class,
+        UI_SETTLE_S,
+        diagnose=lambda: driver.diagnose("recipient-picker-class"),
+    )
+    assert room_class == "end-to-end", (
+        f"the clicked contact should commit on the FaunaMls rail; got {room_class!r}. "
+        f"error: {logged_in_app.error_text()!r}"
+    )
+
+
+@pytest.mark.feature("conversations")
+def test_empty_input_has_no_suggestions(logged_in_app, nest_instance, test_user):
+    """An empty picker shows no list — the suggestions are a completion, not a
+    browse list — even with a contact and correspondents to offer."""
+    bob = _contact_peer(nest_instance, test_user)
+    _fresh_composer(logged_in_app)
+    driver = logged_in_app.driver
+    driver.type_text("recipient-picker-input", bob["handle"][4:10])
+    wait_until(
+        lambda: driver.count("recipient-picker-suggestion") >= 1,
+        UI_SETTLE_S,
+        diagnose=lambda: driver.diagnose("recipient-picker-suggestion"),
+    )
+    driver.fill("recipient-picker-input", "")
+    wait_until(
+        lambda: driver.count("recipient-picker-suggestion") == 0,
+        UI_SETTLE_S,
+        diagnose=lambda: driver.diagnose("recipient-picker-suggestion"),
     )
 
 @pytest.mark.feature("conversations")

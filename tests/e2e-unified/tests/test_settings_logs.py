@@ -17,6 +17,7 @@ import uuid
 
 import pytest
 
+from helpers import budgets
 from helpers.app_surface import skip_unbuilt
 from helpers.waiting import wait_until
 from i18n.strings import S
@@ -153,9 +154,11 @@ def test_logs_copy_and_clear(logged_in_app):
 
     # Clear wipes the ring → the rendered list drops below its pre-clear size.
     app.logs.clear()
-    assert app.logs.entry_count() < n_before, (
-        f"clearing should drop the live view below {n_before} entries, "
-        f"got {app.logs.entry_count()}"
+    wait_until(
+        lambda: app.logs.entry_count() < n_before,
+        budgets.UI_SETTLE_S,
+        diagnose=lambda: f"clearing should drop the live view below {n_before} "
+        f"entries, got {app.logs.entry_count()}",
     )
 
 
@@ -206,26 +209,10 @@ def test_displayed_banner_reaches_ring(logged_in_app):
     )
 
 
-_ROW_HEAD = re.compile(r"(TRACE|DEBUG|INFO|WARN|ERROR) · \d\d:\d\d:\d\d · (\S+)")
-
-
 def _ring_rows(app) -> list[tuple[str, str, str]]:
-    """The Logs page's rows as ``(level, target, message)``.
-
-    Two row shapes, both from `fauna_log::format`: the one-line `format_line`
-    (``level · time · target · message``, tui/linux) and the two-line `LogRow`
-    (the message, then its ``level · time · target`` subtitle — web)."""
-    rows = []
-    for text in app.logs.entry_texts():
-        m = _ROW_HEAD.search(text)
-        if not m:
-            continue
-        if m.start() == 0:
-            message = text[m.end():].removeprefix(" · ").strip()
-        else:
-            message = text[: m.start()].strip()
-        rows.append((m.group(1), m.group(2), message))
-    return rows
+    """The Logs page's rows as ``(level, target, message)`` — `LogsActions.rows`
+    without the time column."""
+    return [(level, target, message) for level, _, target, message in app.logs.rows()]
 
 
 @pytest.mark.feature("app-log")
@@ -241,18 +228,6 @@ def test_a_copied_notice_reaches_the_ring_at_info(logged_in_app):
     carry the copied id itself — only the displayed line (§ 2's redaction rule).
     """
     app = logged_in_app
-    if not (
-        app.driver.is_tui() or app.driver.is_linux() or app.driver.is_web()
-        or app.driver.is_macos() or app.driver.is_ios() or app.driver.is_windows()
-    ):
-        skip_unbuilt(
-            app.driver,
-            surface="the copy-button confirmation's log line",
-            detail="tui, linux, web, macos, ios and windows log the 'Copied' "
-            "confirmation through their copy funnel; this app's copy "
-            "buttons do not log yet",
-            tracked="",
-        )
     copied_lines = {S.common.copied, S.settings.account_page.copied_clipboard}
 
     app.logs.navigate()
@@ -264,11 +239,6 @@ def test_a_copied_notice_reaches_the_ring_at_info(logged_in_app):
     button = "account-actor-id-copy-btn" if app.driver.is_tui() else "status-actor-id-copy-btn"
     app.driver.click(button)
 
-    # Leave Settings before re-entering Logs. On web a Status → Logs sub-page
-    # switch (component kept mounted) painted NO rows at all, not even the
-    # line this assert looks for, while the feed hop remounts and reads the
-    # ring fresh — observed 2026-09-24, cause not yet found. This test's subject is the ring, so it hops.
-    app.driver.navigate_to("feed")
     app.logs.navigate()
     assert app.logs.is_page_visible()
     matches = wait_until(
@@ -393,6 +363,23 @@ def _printed_events(stderr: str) -> list[tuple[str, str]]:
     return events
 
 
+#: web's console layer (`fauna-wasm/src/logs.rs::ConsoleLayer`) prints
+#: ``[LEVEL] target: message`` — no timestamp, the console stamps its own.
+_CONSOLE_LINE = re.compile(r"\[(TRACE|DEBUG|INFO|WARN|ERROR)\] (\S+: .*)$")
+
+
+def _console_events(console: str) -> list[tuple[str, str]]:
+    """``(level, "target: message")`` for every line web's tracing console layer
+    printed; the browser's own console noise (a failed fetch, a CSP note) does
+    not match the layer's bracketed-level shape and is skipped."""
+    events = []
+    for line in console.splitlines():
+        m = _CONSOLE_LINE.search(line)
+        if m:
+            events.append((m.group(1), m.group(2)))
+    return events
+
+
 @pytest.mark.feature("app-log")
 def test_what_the_app_printed_or_swallowed_reaches_the_ring(logged_in_app):
     """Categories 2 and 3 (observability.md § What must be logged): a line the
@@ -412,21 +399,13 @@ def test_what_the_app_printed_or_swallowed_reaches_the_ring(logged_in_app):
     iOS off the same rolling `fauna.log.<date>` file inside the app's own
     sandbox container, windows off the on-disk file its FFI `install_logging`
     writes with the same `fauna_log::init` tracing-fmt layer, all surfaced
-    through each driver's `app_stderr_text()`). web's "stderr" is its console,
-    a different format.
+    through each driver's `app_stderr_text()`). android reads the same shared
+    `fauna_log` rolling file out of the app's `filesDir` over the bridge
+    (`AndroidBridgeDriver.app_log_text`). web's "stderr" is its console ring,
+    printed by the wasm console layer as ``[LEVEL] target: message``
+    (:func:`_console_events`).
     """
     app = logged_in_app
-    if not (
-        app.driver.is_tui() or app.driver.is_linux() or app.driver.is_macos()
-        or app.driver.is_ios() or app.driver.is_windows()
-    ):
-        skip_unbuilt(
-            app.driver,
-            surface="the printed-vs-ring comparison",
-            detail="written against the Rust apps' tracing fmt stderr; this "
-            "app's console/print stream needs its own parser",
-            tracked="",
-        )
 
     app.logs.navigate()
     assert app.logs.is_page_visible()
@@ -444,10 +423,13 @@ def test_what_the_app_printed_or_swallowed_reaches_the_ring(logged_in_app):
         "linking an unreachable nest should fail visibly"
     )
 
-    printed = _printed_events(_drop_agent_lines(
-        _app_only_text(app.driver.app_stderr_text())[printed_before:],
-        app.driver.inherited_agent_log_text(),
-    ))
+    after = _app_only_text(app.driver.app_stderr_text())[printed_before:]
+    if app.driver.is_web():
+        printed = _console_events(after)
+    else:
+        printed = _printed_events(_drop_agent_lines(
+            after, app.driver.inherited_agent_log_text(),
+        ))
     assert printed, (
         "the failed link printed nothing to stderr — the probe provoked no "
         "event to compare"

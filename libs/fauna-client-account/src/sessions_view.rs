@@ -208,6 +208,51 @@ where
     )
 }
 
+/// The roster half of the fold's input, owned so it can be gathered before the
+/// read: the device names and this machine's enrolled principal.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionsRoster {
+    pub devices: Vec<RosterDevice>,
+    pub this_device_principal: Option<String>,
+}
+
+/// Reduce the Devices roster to what the fold reads. `devices` yields
+/// `(device_id, principal, rendered name)` per roster row — the Devices
+/// machine's `DeviceSummary` fields; a row with no principal names no session
+/// and is skipped. `this_device_row` is the shared This-device rule's answer
+/// (`fauna_devices_machine::this_device_row`): its principal is the one a
+/// session minted by this machine carries, so the device id is matched here
+/// and only the principal crosses into the fold (the join key, never the id).
+pub fn roster_from<I>(devices: I, this_device_row: Option<&str>) -> SessionsRoster
+where
+    I: IntoIterator<Item = (String, Option<String>, String)>,
+{
+    let mut this_device_principal = None;
+    let devices = devices
+        .into_iter()
+        .filter_map(|(device_id, principal, name)| {
+            let principal = principal?;
+            if this_device_row == Some(device_id.as_str()) {
+                this_device_principal = Some(principal.clone());
+            }
+            Some(RosterDevice { principal, name })
+        })
+        .collect();
+    SessionsRoster {
+        devices,
+        this_device_principal,
+    }
+}
+
+/// The lock's action-arm gate: `None` when `typed` is exactly `word`, else the
+/// page error naming the word. Never case-folded. The caller passes
+/// `fauna_client_recovery::ceremony::LOCKOUT_CONFIRM_WORD` (that constant's
+/// home); every app refuses a wrong word through this one check, in its action
+/// arm and not only in the render (`ui/sessions.md` § Errors & edge cases).
+pub fn lockout_word_refusal(typed: &str, word: &str) -> Option<LocalizedText> {
+    (typed != word).then(|| LocalizedText::key_arg(keys::LOCKOUT_WRONG_WORD, "word", word))
+}
+
 /// A failed read → the page error, carrying the transport's own words.
 pub fn load_failed(error: impl std::fmt::Display) -> LocalizedText {
     LocalizedText::key_arg(keys::LOAD_FAILED, "error", error.to_string())
@@ -377,6 +422,38 @@ mod tests {
         );
         assert!(snap.rows.is_empty());
         assert_eq!(snap.error, Some(err));
+    }
+
+    #[test]
+    fn roster_skips_principal_less_rows_and_finds_this_devices_principal() {
+        let p = "aa".repeat(32);
+        let roster = roster_from(
+            [
+                ("dev-1".to_string(), Some(p.clone()), "Laptop".to_string()),
+                ("dev-2".to_string(), None, "Unenrolled".to_string()),
+            ],
+            Some("dev-1"),
+        );
+        assert_eq!(
+            roster.devices,
+            [RosterDevice {
+                principal: p.clone(),
+                name: "Laptop".into()
+            }]
+        );
+        assert_eq!(roster.this_device_principal, Some(p));
+        assert_eq!(
+            roster_from(Vec::new(), Some("dev-1")).this_device_principal,
+            None
+        );
+    }
+
+    #[test]
+    fn lockout_word_is_exact() {
+        assert_eq!(lockout_word_refusal("LOCK", "LOCK"), None);
+        let refusal = lockout_word_refusal("lock", "LOCK").expect("never case-folded");
+        assert_eq!(refusal.key, keys::LOCKOUT_WRONG_WORD);
+        assert_eq!(refusal.args["word"], "LOCK");
     }
 
     #[test]

@@ -27,7 +27,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use fauna_client_bridges::BridgesClient;
 use fauna_client_core::post::{
@@ -38,6 +38,7 @@ use fauna_client_feed::FeedClient;
 use fauna_client_feed::encode_filter_rule;
 use fauna_client_feed::feed::{FeedCompositionEntry, FeedPostItem};
 use fauna_client_linkpreview::LinkPreviewClient;
+use fauna_client_media::MediaClient;
 use fauna_client_posts::PostsClient;
 use fauna_core::data::{PostId, Timestamp, Tombstone};
 use fauna_core::encoding::sign_and_pack;
@@ -72,8 +73,8 @@ use crate::cues::{
 };
 use crate::observer::FeedSnapshotObserver;
 use crate::personalization::{
-    ReviewNgram, ScoredExemplar, SealedEntry, SealedScorer, SealedScorers, TrainResult, TrainVerb,
-    TrainedModelReview, model_text,
+    ReviewNgram, ScoredExemplar, SealedEntry, SealedScorer, SealedScorers, SubscribedWasm,
+    TrainResult, TrainVerb, TrainedModelReview, WasmMemo, model_text,
 };
 use crate::quote;
 use crate::sealed_compose::{adjusted_score_micro, rerank_loaded_window};
@@ -81,6 +82,8 @@ use crate::snapshot::{
     AvailableBridge, BridgeFeedView, FeedSnapshot, FeedStatus, FeedSummaryView, PlaybackSource,
     PostResolution, PostSummary, QuotedPostView, ReplyAudience, UnlockOfferView,
 };
+use crate::thread::{ThreadPage, ThreadStatus};
+use fauna_protocol::bluesky::BlueskyThreadRequest;
 // The tip projection's own types — reached only by `resolve_post_tips`, which
 // the `payments` feature gates (`dynamic-features.md` § Charter members). The
 // types themselves stay ungated on `PostSummary`, inert in an excised build.
@@ -254,10 +257,27 @@ pub struct FeedManager<R> {
     /// re-include a quote resolved by an earlier
     /// [`resolve_quoted_post`](Self::resolve_quoted_post) (and vice versa), so the
     /// embed-fold (render-model.md § D6) survives whichever embed resolves last.
-    /// Identity-stable (a quoted post's content doesn't depend on the viewing
-    /// feed), so it is *not* cleared on `reload`. Internal only — the render
-    /// surface is `PostSummary.document`, never a parallel sibling field.
+    /// Lives for ONE loaded page: a quoted post's *content* is identity-stable,
+    /// but whether the nest still *serves* it is not — its author deletes it, an
+    /// admin takes it down under a legal obligation — so every
+    /// [`reload`](Self::reload) clears it, and the next resolve asks again (an
+    /// in-page target re-projects from the fresh page for free; an out-of-page
+    /// one costs one `fauna.posts.get` per reload, never per notify). Internal
+    /// only — the render surface is `PostSummary.document`, never a parallel
+    /// sibling field.
     resolved_quotes: RwLock<HashMap<String, QuotedPostView>>,
+    /// What [`resolve_media`](Self::resolve_media) decoded for each post, keyed by
+    /// the post's hex id — re-folded by [`reapply_resolved_media`](Self::reapply_resolved_media)
+    /// onto every page a `reload` / `load_more` lands, which always arrives
+    /// unresolved (the feed index never carries the body's media). Unlike
+    /// [`resolved_quotes`](Self::resolved_quotes) it is never cleared: it describes
+    /// the post's OWN body, the id is that body's hash (`decode_fetched_post` binds
+    /// them), and a post the nest stops serving is simply absent from the landed
+    /// page, so nothing re-folds onto it. Without it a refresh painted every card
+    /// media-less until the app resolved it again, and the live `video-thumbnail`
+    /// was torn down and remounted idle mid-tap (render-model.md § D6c → *Inline
+    /// playback*). In-memory only.
+    resolved_media: RwLock<HashMap<String, ResolvedMedia>>,
     /// Per-post remote-image reveal set (render-model.md § D3) — the feed twin of
     /// `ConversationsManager`'s set, keyed by the post's hex id. The single source
     /// of truth for "the user opted into loading this post's remote images";
@@ -323,6 +343,12 @@ pub struct FeedManager<R> {
     /// (`topic-factors.md` § Scoring). Refreshed per `reload`; a train swaps its
     /// model in place. Empty ⇒ the seam is inert.
     sealed: RwLock<SealedScorers>,
+    /// Each subscribed `wasm` labeler version's answers by post, keyed
+    /// `(factor, version, module hash)` — kept across (re)loads so a post runs
+    /// a labeler version once (`content-moderation-and-ranking.md` § Tier-3 →
+    /// *Where it runs*, invariant (d)). A (re)load keeps only the versions it
+    /// composes, so the map is bounded by the composition.
+    wasm_memos: Mutex<HashMap<WasmMemoKey, Arc<Mutex<WasmMemo>>>>,
     /// The current feed's effective composition (own + global), as resolved at
     /// the last `reload`. Drives the train-in-context target and the sealed
     /// reload; kept so `load_more` need not re-resolve it mid-scroll.
@@ -491,6 +517,26 @@ struct CueState {
     last_put_ms: u64,
 }
 
+/// A subscribed `wasm` labeler version's memo key: `(factor, version, module
+/// hash)`.
+type WasmMemoKey = (String, u64, fauna_core::data::ContentHash);
+
+/// Re-verify an `inspect` reply against the labeler it was fetched **for**:
+/// decode `metadata_blob`, then `verify_labeler_metadata_for` (hash, size,
+/// Ed25519, and `algorithm_id == id`). The nest that served the reply is not
+/// trusted to have served the right publisher's artifact
+/// (`content-moderation-and-ranking.md` § Tier-3 artifact kinds).
+fn verify_inspect_reply_for(
+    reply: &fauna_protocol::labelers::InspectLabelerReply,
+    id: &fauna_core::identity::ActorId,
+) -> Result<(), String> {
+    let metadata: fauna_core::scoring::AlgorithmLabeler =
+        fauna_core::encoding::canonical_decode(reply.metadata_blob.as_ref())
+            .map_err(|e| format!("decode labeler metadata: {e}"))?;
+    fauna_core::scoring::verify_labeler_metadata_for(&metadata, reply.wasm_bytes.as_ref(), id)
+        .map_err(|e| e.to_string())
+}
+
 /// Map a derived cue verdict to the topic-model example label it trains as
 /// (owner doc § Layer A): a `watch-complete` is a weak *more like this*, a
 /// `skip` a weak *less like this*. The mapping lives at the `FeedManager` call
@@ -541,7 +587,7 @@ pub fn feed_reloads_json(counts: Option<(u64, u64, u64)>) -> serde_json::Value {
 /// [`FeedManager::is_muted`] needs the live manager (mute keywords), not just
 /// the cloned snapshot.
 ///
-/// `reposted_post_id`/`viewer_repost_id` serialize `None` as JSON `null`
+/// `reposted_post_id`/`viewer_repost_id`/`quoted_post_id` serialize `None` as JSON `null`
 /// (linux's/windows' shape) rather than `""` (apple's) — the harness's
 /// truthiness-based readers accept either, and `null` is the more honest
 /// "absent" for a field callers key off `.get(...)`.
@@ -570,6 +616,9 @@ pub fn feed_posts_json(
                     "viewer_liked": p.viewer_liked,
                     "reposted_post_id": p.reposted_post_id,
                     "viewer_repost_id": p.viewer_repost_id,
+                    // The post a quote embeds (`null` when it quotes none) —
+                    // what the legal-takedown witness finds the quoting post by.
+                    "quoted_post_id": p.quoted_post_id,
                     // Every link preview in the body with its state, in body
                     // order (`RenderDocument::link_previews`, render-model.md
                     // § D4): a card is absent while a preview is still
@@ -682,6 +731,16 @@ struct ResolvedGated {
     gated: fauna_core::subscription::types::GatedInfo,
 }
 
+/// What [`FeedManager::resolve_media`] decoded from one post's body, cached in
+/// [`FeedManager::resolved_media`] so a landed page re-folds it without a fetch.
+#[derive(Clone)]
+struct ResolvedMedia {
+    media_hash: String,
+    media: Vec<RenderBlock>,
+    verification: VerificationStatus,
+    authoring_origin: AuthoringOriginStatus,
+}
+
 impl<R: RpcRequester + Clone> FeedManager<R> {
     /// Construct over the WS-RPC transport `nest` and the local actor's 32-byte
     /// signing secret. The snapshot starts empty + `Loading`.
@@ -699,11 +758,13 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             reload_hold: ReloadHold::default(),
             observers: RwLock::new(Vec::new()),
             resolved_quotes: RwLock::new(HashMap::new()),
+            resolved_media: RwLock::new(HashMap::new()),
             revealed_remote: RwLock::new(HashSet::new()),
             unlock_purchase_requested: RwLock::new(HashSet::new()),
             resolved_previews: RwLock::new(HashMap::new()),
             base_scores: RwLock::new(HashMap::new()),
             sealed: RwLock::new(SealedScorers::default()),
+            wasm_memos: Mutex::new(HashMap::new()),
             composition: RwLock::new(Vec::new()),
             pending_gated: RwLock::new(None),
             pending_seal: RwLock::new(None),
@@ -866,6 +927,9 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             }
         }
         label_room_posts(&mut snap);
+        for p in rendered_posts_mut(&mut snap) {
+            p.plays_media = p.derive_plays_media();
+        }
         let me_hex = hex::encode(ActorKeypair::from_secret(self.actor_secret).actor_id().0);
         state_reply_audiences(&mut snap, &me_hex);
         snap
@@ -1095,6 +1159,19 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
         c.hydrated = true;
         c.dirty = false;
         Ok(())
+    }
+
+    /// Whether the live engagement-cue engine has been hydrated from the nest
+    /// ([`Self::hydrate_cues`]), and the verdict it holds for `content_id` —
+    /// read-only. The one way to witness the rollup's cross-device job
+    /// (`engagement-cues.md` § At rest: the phone's watches inform the desktop's
+    /// feeds) from outside: a second device's engine holding the first's
+    /// verdict, so a re-watch there is last-wins rather than taught twice. The
+    /// sealed topic model cannot show it — `sample_count` excludes engagement.
+    #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+    pub fn cue_verdict_for_test(&self, content_id: &str) -> (bool, Option<CueVerdict>) {
+        let c = self.cue.read().unwrap();
+        (c.hydrated, c.engine.verdict(content_id))
     }
 
     /// Register `per_post_key` as what opens the sealed media blob `blob_hash`,
@@ -1350,6 +1427,7 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
                 {
                     let mut s = self.state.write().unwrap();
                     append_deduped(&mut s.posts, page.items);
+                    self.reapply_resolved_media(&mut s.posts);
                     // Newly-paged posts arrive sealed; re-fold this reader's open
                     // unlocks so scrolling never reverts a post to its teaser.
                     self.reapply_unlocked(&mut s.posts);
@@ -1475,6 +1553,18 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
                     let mut fresh = Vec::new();
                     append_deduped(&mut fresh, page.items);
                     s.posts = fresh;
+                    // The page just landed is what the nest serves now, so a
+                    // quote resolved against the old one may name a post it has
+                    // since stopped serving (deleted by its author, taken down
+                    // under a legal obligation): forget every resolved quote, and
+                    // the apps' re-resolve of each embed the fresh cards lack asks
+                    // again (`resolved_quotes`' field doc). Under the `state` lock,
+                    // the lock order `unlock_gated_post` keeps.
+                    self.resolved_quotes.write().unwrap().clear();
+                    // Re-fold the media already resolved for these posts, in the
+                    // same write that lands them, so no snapshot shows a live card
+                    // media-less (`resolved_media`' field doc).
+                    self.reapply_resolved_media(&mut s.posts);
                     // Re-fold any gated posts this reader already unsealed — the
                     // freshly-fetched list arrives sealed and would otherwise revert
                     // an open unlock to the teaser (the iOS reload-revert).
@@ -1662,14 +1752,17 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             }
         }
 
-        // Subscribed tier-3 `text-model` labelers (frame § Tier-3 artifact
-        // kinds). The client fetches the raw artifact via `inspect` at feed
-        // (re)load and follows version bumps there — there is no nest-side row
-        // to read, because the placement matrix forbids the nest evaluating
-        // content even over public posts. Only `text-model` rides this seam: a
-        // `list` labeler is materialized nest-side and already arrives as a bus
-        // term, and a `wasm` labeler is a holder's drain output.
+        // Subscribed tier-3 labelers evaluated at the subscriber's own app —
+        // `text-model` and post-kind `wasm` (frame § Tier-3 → *Where it runs*,
+        // position (1), ruled 2026-10-09). The client fetches the raw artifact
+        // via `inspect` at feed (re)load and follows version bumps there —
+        // there is no nest-side row to read, because the placement matrix
+        // forbids the nest evaluating content even over public posts. A `list`
+        // labeler is materialized nest-side and already arrives as a bus term;
+        // a `mail`-kind `wasm` module meets no post (invariant (c)) — its
+        // position is the capability holder's drain.
         let labelers = LabelersClient::new(self.nest.clone());
+        let mut live_memos = HashSet::new();
         for entry in composition
             .iter()
             .filter(|e| fauna_core::scoring::is_labeler_factor(&e.factor))
@@ -1679,7 +1772,69 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             };
             match labelers.inspect(id.0.to_vec()).await {
                 Ok(reply) => {
+                    if reply.artifact_kind == fauna_core::scoring::artifact_kind::WASM {
+                        if reply.content_kind != "post" {
+                            continue;
+                        }
+                        // The shared boundary's prepare half runs every guard —
+                        // decode, re-verify against this factor's id, the
+                        // `label_abi` check, the clamp to the feed ceiling,
+                        // the compile — once per (re)load (invariant (a)). Any
+                        // refusal leaves the factor inert and says so once
+                        // (invariant (e)); outcome 14's too-new labeler is one.
+                        match fauna_labeler::PreparedLabeler::prepare_for_feed(
+                            reply.metadata_blob.as_ref(),
+                            reply.wasm_bytes.as_ref(),
+                            &id,
+                        ) {
+                            Ok(prepared) => {
+                                let key = (
+                                    entry.factor.clone(),
+                                    prepared.metadata().version,
+                                    prepared.metadata().wasm_hash,
+                                );
+                                let memo = self
+                                    .wasm_memos
+                                    .lock()
+                                    .unwrap()
+                                    .entry(key.clone())
+                                    .or_default()
+                                    .clone();
+                                live_memos.insert(key);
+                                entries.push(SealedEntry {
+                                    factor: entry.factor.clone(),
+                                    weight_permille: entry.weight_permille,
+                                    scorer: SealedScorer::SubscribedWasm(Box::new(
+                                        SubscribedWasm { prepared, memo },
+                                    )),
+                                });
+                            }
+                            Err(e) => {
+                                error = Some(LocalizedText::key_arg(
+                                    "feed.error_subscribed_model",
+                                    "message",
+                                    format!("{e:#}"),
+                                ));
+                            }
+                        }
+                        continue;
+                    }
                     if reply.artifact_kind != fauna_core::scoring::artifact_kind::TEXT_MODEL {
+                        continue;
+                    }
+                    // ⚠ The nest is not trusted to have served the labeler the
+                    // user chose: decode the signed metadata and bind it to
+                    // BOTH the served bytes and this factor's id before the
+                    // artifact is read at all. A failure
+                    // leaves the factor inert and says so — it never scores.
+                    // Done once per reply, ahead of the per-kind read below,
+                    // so a second client-evaluated kind shares the gate.
+                    if let Err(e) = verify_inspect_reply_for(&reply, &id) {
+                        error = Some(LocalizedText::key_arg(
+                            "feed.error_subscribed_model",
+                            "message",
+                            e,
+                        ));
                         continue;
                     }
                     match validate_text_model_artifact(reply.wasm_bytes.as_ref()) {
@@ -1764,6 +1919,10 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             }
         };
         *self.engagement_factors.write().unwrap() = engagement_on;
+        self.wasm_memos
+            .lock()
+            .unwrap()
+            .retain(|key, _| live_memos.contains(key));
         if !muted.is_empty() {
             let explicit: i64 = composition
                 .iter()
@@ -2226,32 +2385,47 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
     /// reply carries `counts: None` by design, since its `post_id` names the
     /// dying repost, not the post on screen.
     ///
-    /// A **bridged** post keeps the shipped `interact(post_id, "repost")` path
-    /// verbatim (the nest's bridged arms drive the origin protocol's own
-    /// repost API) — the same source routing as `compose_referencing_post`,
-    /// so no app leg knows the difference. Two devices racing the toggle
-    /// converge: each repost post is individually unrepostable and the nest
-    /// serves the latest, so a stale `viewer_repost_id` un-reposts one of
-    /// them and the next reload reports what remains.
+    /// A **bridged** post never composes: it rides `interact(post_id, …)`
+    /// (the nest's bridged arms drive the origin protocol's own repost API)
+    /// — the same source routing as `compose_referencing_post`, so no app leg
+    /// knows the difference. A **Bluesky** post is a toggle through that
+    /// door (`feed.md` § Interaction bar → *The viewer-state carrier*, the
+    /// Bluesky exception): the nest projects the caller's stored repost
+    /// record as `viewer_repost_id` naming the TARGET itself, because the
+    /// bridged `unrepost` takes the target and looks the record up by its
+    /// AT-URI — so the off-arm sends `interact(post_id, "unrepost")` and
+    /// drops no row (no Fauna post exists to drop). Every other bridged
+    /// source keeps the one-way `repost`: its nest arm has no undo. Two
+    /// devices racing the native toggle converge: each repost post is
+    /// individually unrepostable and the nest serves the latest, so a stale
+    /// `viewer_repost_id` un-reposts one of them and the next reload reports
+    /// what remains.
     pub async fn repost(&self, post_id: String) -> Result<(), String> {
-        let (is_native, is_fauna_native, viewer_repost_id, audience) = {
+        let (source, viewer_repost_id, audience) = {
             let s = self.state.read().unwrap();
             match s.find_post(&post_id) {
-                Some(p) => {
-                    let source = crate::SourceKind::classify(&p.source);
-                    (
-                        source.is_native(),
-                        matches!(source, crate::SourceKind::Fauna),
-                        p.viewer_repost_id.clone(),
-                        referenced_audience(p),
-                    )
-                }
+                Some(p) => (
+                    Some(crate::SourceKind::classify(&p.source)),
+                    p.viewer_repost_id.clone(),
+                    referenced_audience(p),
+                ),
                 // A post the window can't answer for falls back to the
                 // interact path — exactly today's behaviour, the safe
                 // direction (`compose_referencing_post`'s rule).
-                None => (false, false, None, ReferencedAudience::Public),
+                None => (None, None, ReferencedAudience::Public),
             }
         };
+        let is_native = source.as_ref().is_some_and(crate::SourceKind::is_native);
+        let is_fauna_native = matches!(source, Some(crate::SourceKind::Fauna));
+        if matches!(source, Some(crate::SourceKind::Bluesky)) {
+            let reposted = viewer_repost_id.is_some();
+            let action = if reposted { "unrepost" } else { "repost" };
+            self.interact(post_id.clone(), action.to_string(), None)
+                .await?;
+            let carrier = (!reposted).then(|| post_id.clone());
+            self.set_viewer_repost(&post_id, carrier);
+            return Ok(());
+        }
         if !is_native {
             return self.interact(post_id, "repost".to_string(), None).await;
         }
@@ -2362,23 +2536,30 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
     /// so it goes first and the field flips only on success — a failed call
     /// must not leave a lit ♥ the nest disagrees with.
     ///
-    /// A **bridged** post keeps the shipped one-way `interact(post_id, "like")`
-    /// verbatim: its interactions live in the origin protocol, which is why the
-    /// projection generally carries no viewer state for those rows. A post the
+    /// A **Bluesky** post is the same toggle: the nest projects the caller's
+    /// stored `app.bsky.feed.like` record as `viewer_liked`, and its bridged
+    /// `unlike` deletes that record (`feed.md` § Interaction bar → *The
+    /// viewer-state carrier*, the Bluesky exception). Every other **bridged**
+    /// post keeps the shipped one-way `interact(post_id, "like")` verbatim:
+    /// its interactions live in the origin protocol with no undo arm, which is
+    /// why the projection carries no viewer state for those rows. A post the
     /// loaded window cannot answer for falls back the same way — the safe
     /// direction, since it is exactly today's behaviour.
     pub async fn like(&self, post_id: String) -> Result<(), String> {
-        let (is_native, liked) = {
+        let (toggles, liked) = {
             let s = self.state.read().unwrap();
             match s.find_post(&post_id) {
-                Some(p) => (
-                    crate::SourceKind::classify(&p.source).is_native(),
-                    p.viewer_liked,
-                ),
+                Some(p) => {
+                    let source = crate::SourceKind::classify(&p.source);
+                    (
+                        source.is_native() || matches!(source, crate::SourceKind::Bluesky),
+                        p.viewer_liked,
+                    )
+                }
                 None => (false, false),
             }
         };
-        if !is_native {
+        if !toggles {
             return self.interact(post_id, "like".to_string(), None).await;
         }
         let action = if liked { "unlike" } else { "like" };
@@ -2612,6 +2793,16 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             // …and a hidden tier (the reserved owner-only tier the archive
             // import mints) is never a compose-time choice either —
             // monetization.md § The unifying model.
+            //
+            // **This list has a SECOND consumer**: `reply_audience_of` takes
+            // "is the target's tier in `own_tiers`" as the answer to *may this
+            // author seal a reply under the arm* (`restricted-posts.md` §
+            // Encryption at rest, detail (d)). So an author's reply under their
+            // own sold or archive-import post resolves to public-by-confirmation
+            // — the safe direction, pinned by
+            // `an_authors_reply_under_a_sold_or_hidden_tier_post_is_never_sealed`.
+            // Adding a tier here to "fix" that would also widen all seven apps'
+            // gate pickers; give the reply its own predicate instead.
             .filter(|t| t.unlocks_post.is_none() && !t.hidden)
             .map(|t| crate::compose::GateTierOption {
                 name: t.name,
@@ -3482,13 +3673,17 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
                 + 1
         };
 
+        // Neither refusal names a tier: `compose_gate_no_key` takes a `{tier}`
+        // argument this closure cannot carry, and "does not hold the key" is
+        // not what happened — the account store is not installed yet, or it
+        // failed while the fresh tier's key was being recorded.
         let author = self.subscriptions_author().inspect_err(|_| {
-            fail("feed.compose_gate_no_key");
+            fail("feed.compose_sell_account_not_ready");
             self.notify();
         })?;
         let tier = fauna_client_subscriptions::mint_unlock_tier_name();
         let staged = author.stage_tier(&tier).await.map_err(|e| {
-            fail("feed.compose_gate_no_key");
+            fail("feed.compose_sell_tier_unavailable");
             self.notify();
             format!("stage unlock tier: {e}")
         })?;
@@ -3618,7 +3813,7 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
 
         let keypair = ActorKeypair::from_secret(self.actor_secret);
         let author = self.subscriptions_author().inspect_err(|_| {
-            fail("feed.compose_gate_no_key");
+            fail("feed.compose_sell_account_not_ready");
             self.notify();
         })?;
 
@@ -4127,6 +4322,37 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
         }
     }
 
+    /// Re-fold the media [`resolve_media`](Self::resolve_media) already decoded
+    /// ([`resolved_media`](Self::resolved_media)) onto every still-unresolved post
+    /// of a landed page — the same fold, from the same decode, so a refresh keeps
+    /// each card's media (and an app's live player) instead of painting it
+    /// media-less until a fresh `fauna.posts.get`. A no-op for a resolved post and
+    /// for one never resolved. Runs before
+    /// [`reapply_unlocked`](Self::reapply_unlocked), whose opened body is the
+    /// authority for a gated post's media. Caller holds the `state` write lock
+    /// (lock order state → resolved_media → resolved_quotes).
+    fn reapply_resolved_media(&self, posts: &mut [PostSummary]) {
+        let cache = self.resolved_media.read().unwrap();
+        if cache.is_empty() {
+            return;
+        }
+        for p in posts.iter_mut() {
+            if !p.has_media || p.media_hash.is_some() {
+                continue;
+            }
+            if let Some(r) = cache.get(&p.post_id) {
+                p.media_hash = Some(r.media_hash.clone());
+                p.verification = r.verification;
+                p.authoring_origin = r.authoring_origin;
+                let quote = match &p.quoted_post_id {
+                    Some(q) => self.resolved_quotes.read().unwrap().get(q).cloned(),
+                    None => None,
+                };
+                p.document = build_post_document(&p.body, quote.as_ref(), &r.media);
+            }
+        }
+    }
+
     /// Merge the verdicts the room's nest served for `p`
     /// ([`room_post_labels`](Self::room_post_labels)) into the card's own
     /// labels, a server entry winning its category
@@ -4213,13 +4439,10 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
     /// decision behind every app's native player. A `Video` whose item this reader
     /// unlocked is [`PlaybackSource::Sealed`] (the [`is_sealed_media`] branch web's
     /// images already take: no URL can play it); any other `Video` is the
-    /// unauthenticated blob route, nest-relative; every other block is
-    /// [`PlaybackSource::Unplayable`].
-    ///
-    /// Async because the proxied arm mints a `fauna.media.playback_ticket` — the
-    /// faces are stable across that arm's landing. A bridged video now folds to a
-    /// `ProxiedVideo` block, but its ticket arm is not built yet:
-    /// until it lands such a block falls to `Unplayable` here.
+    /// unauthenticated blob route, nest-relative; a bridged video's `ProxiedVideo`
+    /// is its proxied path with a playback ticket (`exp` + `sig`, answer 4)
+    /// minted by `fauna.media.playback_ticket` — a failed mint is
+    /// [`PlaybackSource::Unplayable`], as is every other block.
     ///
     /// [`is_sealed_media`]: Self::is_sealed_media
     pub async fn playback_source(&self, block: &RenderBlock) -> PlaybackSource {
@@ -4230,6 +4453,17 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             RenderBlock::Video { hash, .. } => PlaybackSource::Url {
                 url: format!("/api/v1/blob/{hash}"),
             },
+            RenderBlock::ProxiedVideo { path, .. } => {
+                match MediaClient::new(self.nest.clone())
+                    .playback_ticket(path.clone())
+                    .await
+                {
+                    Ok(reply) => PlaybackSource::Url { url: reply.path },
+                    Err(e) => PlaybackSource::Unplayable {
+                        reason: format!("playback ticket refused: {e}"),
+                    },
+                }
+            }
             _ => PlaybackSource::Unplayable {
                 reason: "not a video block".into(),
             },
@@ -4572,6 +4806,9 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             return PostResolution::Unavailable;
         };
         let mut summary = map_fetched_post(&post_id, &post, verification, origin);
+        // The one thing the raw body cannot say: the bridged author's face,
+        // which only the nest's `bridge_authors` projection holds.
+        summary.author_display = reply.author_display.map(Into::into);
         {
             let mut s = self.state.write().unwrap();
             // A gated post this reader already unsealed must not revert to its
@@ -4590,6 +4827,63 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
     // takedown arm above was its last caller. An affordance nobody drives is a
     // dark capability; a future surface that genuinely needs one adds it in the
     // same commit that calls it.)
+
+    // ── Bluesky thread page ──────────────────────────────────────
+
+    /// Open the thread page for the Bluesky post `post_id` (hex Fauna id)
+    /// names — `feed-post-view-thread-button` (`bridges.md` § Bluesky-native
+    /// thread view). [`FeedSnapshot::thread`] reads `Loading` at once, then
+    /// `Loaded` with the nest's flat thread (the opened post marked from its
+    /// `focal_index`) or `Failed` with the reason (`bluesky.not_found`,
+    /// `bluesky.blocked`, `bluesky.upstream` and transport faults alike).
+    ///
+    /// A result lands only while the page is still open on the same post: a
+    /// `close_thread` — or a thread opened from another post — in the meantime
+    /// wins, so a slow fetch never reopens a page the reader left.
+    pub async fn open_thread(&self, post_id: String) {
+        self.state.write().unwrap().thread = Some(ThreadPage::loading(post_id.clone()));
+        self.notify();
+
+        let page = match hex::decode(&post_id) {
+            Ok(raw) => {
+                let client = fauna_client_bluesky::BlueskyClient::new(self.nest.clone());
+                match client
+                    .thread(BlueskyThreadRequest::PostId { post_id: raw })
+                    .await
+                {
+                    Ok(reply) => ThreadPage::loaded(post_id.clone(), reply),
+                    Err(e) => ThreadPage::failed(
+                        post_id.clone(),
+                        LocalizedText::key_arg("feed.error_thread", "message", e.to_string()),
+                    ),
+                }
+            }
+            Err(e) => ThreadPage::failed(
+                post_id.clone(),
+                LocalizedText::key_arg("feed.error_thread", "message", e.to_string()),
+            ),
+        };
+        {
+            let mut s = self.state.write().unwrap();
+            let still_open = s
+                .thread
+                .as_ref()
+                .is_some_and(|t| t.post_id == post_id && t.status == ThreadStatus::Loading);
+            if !still_open {
+                return;
+            }
+            s.thread = Some(page);
+        }
+        self.notify();
+    }
+
+    /// Leave the thread page — back to the post detail it was opened from.
+    pub fn close_thread(&self) {
+        let had = self.state.write().unwrap().thread.take().is_some();
+        if had {
+            self.notify();
+        }
+    }
 
     // ── Media resolution ─────────────────────────────────────────
 
@@ -4646,6 +4940,17 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
         // The typed, in-body-order fold — this is the only path that holds the decoded body,
         // so it is where image-vs-video is decided for every app (render-model.md § D6).
         let media = media_blocks(&post.body);
+        if let Some(hash) = media_hash.as_deref() {
+            self.resolved_media.write().unwrap().insert(
+                post_id.clone(),
+                ResolvedMedia {
+                    media_hash: hash.to_string(),
+                    media: media.clone(),
+                    verification: status,
+                    authoring_origin: origin_status,
+                },
+            );
+        }
         let changed = {
             let mut s = self.state.write().unwrap();
             match rendered_posts_mut(&mut s).find(|p| p.post_id == post_id) {
@@ -4702,12 +5007,30 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
         // Already bought by this actor — the nest would re-offer (its read has
         // no caller axis by design), so the teaser would reappear on the very
         // notification the buy emitted. See `unlock_purchase_requested`.
+        // Declining still writes: `unlock_purchase_pending` is the positive
+        // trace of this pass (a reload rebuilt the record with `false`), and
+        // the only state an app can render or a test can await to know a
+        // later pass ran and did not re-offer. Written once — the `notify()`
+        // it emits re-enters here and finds it already set.
         if self
             .unlock_purchase_requested
             .read()
             .unwrap()
             .contains(&post_id)
         {
+            let changed = {
+                let mut s = self.state.write().unwrap();
+                match rendered_posts_mut(&mut s).find(|p| p.post_id == post_id) {
+                    Some(p) if !p.unlock_purchase_pending && !p.gated_unlocked => {
+                        p.unlock_purchase_pending = true;
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            if changed {
+                self.notify();
+            }
             return;
         }
         let (needs, author_hex) = {
@@ -4921,6 +5244,7 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
                 match rendered_posts_mut(&mut s).find(|p| p.post_id == post_id) {
                     Some(p) => {
                         p.unlock_offer = None;
+                        p.unlock_purchase_pending = true;
                         true
                     }
                     None => false,
@@ -5670,28 +5994,37 @@ fn label_room_posts(snap: &mut FeedSnapshot) {
             .find(|r| r.room == room)
             .map(|r| r.label.clone())
     };
-    let labels: Vec<Option<String>> = snap
-        .posts
-        .iter()
-        .map(|p| p.gated_room.as_deref().and_then(label_of))
-        .collect();
-    for (p, label) in snap.posts.iter_mut().zip(labels) {
+    // A repost row's target room is labelled by the same rule, into its own
+    // field (`PostSummary::reposted_room_label`), so a member's repost card
+    // names the room exactly as the target's card does.
+    let pair = |p: &PostSummary| {
+        (
+            p.gated_room.as_deref().and_then(label_of),
+            p.reposted_gated_room.as_deref().and_then(label_of),
+        )
+    };
+    let labels: Vec<_> = snap.posts.iter().map(pair).collect();
+    for (p, (label, reposted)) in snap.posts.iter_mut().zip(labels) {
         p.room_label = label;
+        p.reposted_room_label = reposted;
     }
-    let deep = snap
-        .deep_linked_post
-        .as_ref()
-        .and_then(|p| p.gated_room.as_deref().and_then(label_of));
-    if let Some(p) = snap.deep_linked_post.as_mut() {
-        p.room_label = deep;
+    let deep = snap.deep_linked_post.as_ref().map(pair);
+    if let (Some(p), Some((label, reposted))) = (snap.deep_linked_post.as_mut(), deep) {
+        p.room_label = label;
+        p.reposted_room_label = reposted;
     }
 }
 
 /// Where `me`'s reply to `p` would go — `None` for a public post
-/// (`ui/feed.md` § Encryption at rest → *Ruling 5's build — the shape*, (d)).
-/// The one place the three-way answer is decided: the snapshot states it and
-/// the prepare verb acts on it, so the dialog can never promise an audience the
-/// send does not use.
+/// (`behavior/restricted-posts.md` § Encryption at rest → *Ruling 5's build —
+/// the shape*, (d)). The one place the three-way answer is decided: the
+/// snapshot states it and the prepare verb acts on it, so the dialog can never
+/// promise an audience the send does not use.
+///
+/// `own_tiers` is the compose picker's list, already stripped of per-post
+/// unlock and hidden tiers (see [`FeedManager::refresh_own_tiers`]), so an
+/// author's own sold or hidden-tier post answers public-by-confirmation here —
+/// a ruled, pinned consequence, not an oversight.
 fn reply_audience_of(
     p: &PostSummary,
     own_rooms: &[crate::compose::GateRoomOption],
@@ -5761,6 +6094,8 @@ fn map_post(p: FeedPostItem) -> PostSummary {
         timestamp: p.created_at / 1000,
         tags: p.tags,
         has_media: p.has_media,
+        // Projected at every snapshot read (`PostSummary::derive_plays_media`).
+        plays_media: false,
         is_reply: p.is_reply,
         source: p.source,
         quoted_post_id: p.quoted_post_id,
@@ -5800,6 +6135,13 @@ fn map_post(p: FeedPostItem) -> PostSummary {
         // `snapshot()` read, never stored.
         gated_room: p.gated_room,
         room_label: None,
+        // A repost row's TARGET gate, carried straight from the wire item
+        // (the nest projects it beside `reposted_post_id`, so it answers for a
+        // target outside the loaded window too); its room's label is derived
+        // at every `snapshot()` read beside `room_label`.
+        reposted_gated_tier: p.reposted_gated_tier,
+        reposted_gated_room: p.reposted_gated_room,
+        reposted_room_label: None,
         reply_audience: None,
         // Web-publish state → the ⋯ overflow's own-post web verbs. Carried
         // straight from the wire item; no per-row query.
@@ -5818,6 +6160,8 @@ fn map_post(p: FeedPostItem) -> PostSummary {
         // carries no tip totals, which is *why* the resolver can't use a data
         // trigger and writes `Some` on every outcome instead.
         tips: None,
+        // Set only by the buy and by a later resolve its guard declines.
+        unlock_purchase_pending: false,
     }
 }
 
@@ -5862,17 +6206,17 @@ fn map_fetched_post(
     PostSummary {
         post_id: post_id.to_string(),
         author: hex::encode(post.author.0),
-        // The raw post carries no bridged-author face; `fauna.posts.get` does
-        // not project one yet (captured as the deep-link carrier follow-on to
-        // `bridges.md` § Unified feed ingestion → *Bridged authors*), so the
-        // deep-linked detail paints the short id where the timeline card
-        // paints the name until it does.
+        // The raw post carries no bridged-author face; `resolve_post` fills it
+        // from `PostGetReply.author_display` (`bridges.md` § Unified feed
+        // ingestion → *Bridged authors*).
         author_display: None,
         body,
         document,
         timestamp: (post.created_at.0 as i64) / 1000,
         tags: post.indexed_tags(),
         has_media: post.has_media(),
+        // Projected at every snapshot read (`PostSummary::derive_plays_media`).
+        plays_media: false,
         is_reply: post.is_reply(),
         source: "fauna".to_string(),
         quoted_post_id: post.quoted_post_id().map(hex::encode),
@@ -5901,6 +6245,12 @@ fn map_fetched_post(
             .and_then(|g| fauna_core::room_post::room_post_of(&g.key_access))
             .map(|(room, _)| hex::encode(room)),
         room_label: None,
+        // The raw post names its repost target but carries nothing of the
+        // target's gate — only the feed-index projection does (the
+        // `FeedPostItem` door above).
+        reposted_gated_tier: None,
+        reposted_gated_room: None,
+        reposted_room_label: None,
         reply_audience: None,
         web_slug: None,
         gated_unlocked: false,
@@ -5914,6 +6264,7 @@ fn map_fetched_post(
         // from the reply's marker before it ever reaches this projection, via
         // `PostSummary::taken_down`.
         legal_takedown_ref: None,
+        unlock_purchase_pending: false,
     }
 }
 
@@ -6495,10 +6846,14 @@ mod tests {
         /// page query, and a test that means "the *page query* failed" must say
         /// so rather than race whichever call happens to go first.
         fail_kind: Option<(String, String)>,
-        /// `labeler_id → (artifact_kind, artifact bytes)` answered to
-        /// `fauna.labelers.inspect` — the read a subscribed **client-evaluated**
-        /// labeler's compose seam makes at feed (re)load.
-        labeler_artifacts: std::collections::HashMap<Vec<u8>, (String, Vec<u8>)>,
+        /// `labeler_id → (artifact_kind, content_kind, artifact bytes)`
+        /// answered to `fauna.labelers.inspect` — the read a subscribed
+        /// **client-evaluated** labeler's compose seam makes at feed (re)load.
+        labeler_artifacts: std::collections::HashMap<Vec<u8>, (String, String, Vec<u8>)>,
+        /// `labeler_id → canonical AlgorithmLabeler bytes` answered as
+        /// `fauna.labelers.inspect`'s `metadata_blob`; unseeded ⇒ empty, which
+        /// is what a nest that serves no signed metadata sends.
+        labeler_metadata: std::collections::HashMap<Vec<u8>, Vec<u8>>,
         /// Bytes answered to `fauna.posts.get`.
         posts_get_body: Vec<u8>,
         /// Per-`post_id` bytes for `fauna.posts.get`. When non-empty it takes
@@ -6523,6 +6878,9 @@ mod tests {
         /// body is withheld (empty) and `legal_takedown` carries this reference
         /// (the taken-down-post wire shape — moderation.md § Categories item 1).
         posts_get_legal_takedown: Option<String>,
+        /// When set, `fauna.posts.get` carries this bridged-author face on its
+        /// reply (`PostGetReply.author_display`).
+        posts_get_author_display: Option<fauna_protocol::feed::AuthorDisplay>,
         /// Subscriptions answered to `fauna.bridges.feeds.list`.
         bridge_subs: Vec<fauna_protocol::bridges_ui::FeedSubscription>,
         /// Bridge-list answered to `fauna.bridges.list` (the build/runtime-gated
@@ -6559,6 +6917,9 @@ mod tests {
         /// `signal_share.set`. The producer's cache mirrors this after a status
         /// read / set (engagement-cues.md § Layer B).
         share_signals: bool,
+        /// The reply answered to `bluesky.feed.thread` (seed it, or fail the
+        /// kind with `fail_kind`).
+        thread_reply: Option<fauna_protocol::bluesky::BlueskyThreadReply>,
     }
 
     #[derive(Default)]
@@ -6693,11 +7054,60 @@ mod tests {
         /// what the compose seam fetches for a subscribed tier-3 labeler, since
         /// a client-evaluated kind has no nest-side bus row to read.
         fn seed_labeler_artifact(&self, labeler_id: [u8; 32], kind: &str, artifact: Vec<u8>) {
-            self.inner
-                .lock()
-                .unwrap()
-                .labeler_artifacts
-                .insert(labeler_id.to_vec(), (kind.to_string(), artifact));
+            self.seed_labeler_artifact_over(labeler_id, kind, "post", artifact);
+        }
+        /// [`Self::seed_labeler_artifact`] for a labeler declared over
+        /// `content_kind` (`post` | `mail`).
+        fn seed_labeler_artifact_over(
+            &self,
+            labeler_id: [u8; 32],
+            kind: &str,
+            content_kind: &str,
+            artifact: Vec<u8>,
+        ) {
+            self.inner.lock().unwrap().labeler_artifacts.insert(
+                labeler_id.to_vec(),
+                (kind.to_string(), content_kind.to_string(), artifact),
+            );
+        }
+        /// Seed `metadata_blob` for `labeler_id` as `signer` signed it over
+        /// `artifact` — the publisher's genuine signed metadata. `signer` is
+        /// the key that signs (the labeler's own id for an honest artifact,
+        /// another publisher's for the swap the compose seam must refuse).
+        fn seed_labeler_metadata_signed_by(
+            &self,
+            labeler_id: [u8; 32],
+            signer: &ActorKeypair,
+            artifact: &[u8],
+        ) {
+            let metadata = fauna_core::scoring::sign_labeler_metadata(
+                signer.signing_key(),
+                fauna_core::scoring::AlgorithmLabeler {
+                    algorithm_id: signer.actor_id(),
+                    version: 1,
+                    wasm_hash: fauna_core::encoding::content_hash(artifact),
+                    wasm_size: artifact.len() as u64,
+                    input_schema: fauna_core::scoring::LabelerInput {
+                        needs_text: true,
+                        needs_hashtags: false,
+                        needs_media_metadata: false,
+                        needs_author: false,
+                        needs_attachment_bytes: false,
+                    },
+                    output_schema: Default::default(),
+                    resource_limits: fauna_core::scoring::ScorerLimits {
+                        max_memory_bytes: 16 * 1024 * 1024,
+                        max_cpu_microseconds: 100_000,
+                    },
+                    updated_at: Timestamp(1_700_000_000_000_000),
+                    signature: Vec::new(),
+                },
+            )
+            .unwrap();
+            self.inner.lock().unwrap().labeler_metadata.insert(
+                labeler_id.to_vec(),
+                fauna_core::encoding::canonical_encode(&metadata).unwrap(),
+            );
         }
         /// Register one trained factor (`id` → its `topic:<hex>` key) in the
         /// account's trained-topic registry, with the v2 `learn_from_engagement` flag —
@@ -6838,6 +7248,17 @@ mod tests {
                 .unwrap_or_else(|| panic!("no recorded call for {kind}"));
             fauna_protocol::decode_strict(bytes).expect("decode recorded payload")
         }
+        /// Decode every recorded payload of `kind`, in call order.
+        fn reqs<T: DeserializeOwned>(&self, kind: &str) -> Vec<T> {
+            let g = self.inner.lock().unwrap();
+            g.calls
+                .iter()
+                .filter(|(k, _)| k == kind)
+                .map(|(_, bytes)| {
+                    fauna_protocol::decode_strict(bytes).expect("decode recorded payload")
+                })
+                .collect()
+        }
     }
 
     #[derive(Debug)]
@@ -6915,6 +7336,9 @@ mod tests {
                     return Err(MockErr::Fault(msg.clone()));
                 }
                 match kind {
+                    "bluesky.feed.thread" => fauna_protocol::encode_canonical(
+                        g.thread_reply.as_ref().expect("seed thread_reply"),
+                    ),
                     "fauna.feed.list" => fauna_protocol::encode_canonical(&FeedListReply {
                         feeds: g.feeds.clone(),
                         extra: Default::default(),
@@ -7024,6 +7448,7 @@ mod tests {
                         fauna_protocol::encode_canonical(&fauna_protocol::posts::PostGetReply {
                             body: serde_bytes::ByteBuf::from(body),
                             legal_takedown,
+                            author_display: g.posts_get_author_display.clone(),
                             extra: Default::default(),
                         })
                     }
@@ -7056,6 +7481,19 @@ mod tests {
                             .clone()
                             .unwrap_or(LinkPreviewResolveReply::Failed),
                     ),
+                    // The nest's mint (`bins/fauna-nest/src/media_ticket.rs`) appends
+                    // `&exp=…&sig=…` to the proxied path; the fake does the same with
+                    // fixed values.
+                    fauna_protocol::media_ticket::KIND_MEDIA_PLAYBACK_TICKET => {
+                        let req: fauna_protocol::media_ticket::PlaybackTicketRequest =
+                            fauna_protocol::decode_strict(&bytes).unwrap();
+                        fauna_protocol::encode_canonical(
+                            &fauna_protocol::media_ticket::PlaybackTicketReply {
+                                path: format!("{}&exp=1700000000&sig=fake-sig", req.path),
+                                extra: Default::default(),
+                            },
+                        )
+                    }
                     "fauna.feed.factors.get" => fauna_protocol::encode_canonical(
                         &fauna_client_feed::feed::FeedFactorsGetReply {
                             factors: g.global_factors.clone(),
@@ -7082,16 +7520,22 @@ mod tests {
                     "fauna.labelers.inspect" => {
                         let req: fauna_protocol::labelers::InspectLabelerRequest =
                             fauna_protocol::decode_strict(&bytes).unwrap();
-                        let (kind, artifact) = g
+                        let (kind, content_kind, artifact) = g
                             .labeler_artifacts
                             .get(req.labeler_id.as_ref())
                             .cloned()
                             .expect("MockNest: labelers.inspect called with no seeded artifact");
                         fauna_protocol::encode_canonical(
                             &fauna_protocol::labelers::InspectLabelerReply {
-                                metadata_blob: Default::default(),
+                                metadata_blob: g
+                                    .labeler_metadata
+                                    .get(req.labeler_id.as_ref())
+                                    .cloned()
+                                    .map(serde_bytes::ByteBuf::from)
+                                    .unwrap_or_default(),
                                 wasm_bytes: serde_bytes::ByteBuf::from(artifact),
                                 artifact_kind: kind,
+                                content_kind,
                                 extra: Default::default(),
                             },
                         )
@@ -8698,15 +9142,61 @@ mod tests {
         assert_eq!(target_row.viewer_repost_id, None, "the toggle state clears");
     }
 
-    /// A bridged row keeps the shipped interact path verbatim — the nest's
-    /// bridged arms drive the origin protocol's own repost API, so composing
-    /// a local fauna post would strand the repost on the wrong network.
+    /// A bridged row never composes — the nest's bridged arms drive the
+    /// origin protocol's own repost API, so a local fauna post would strand
+    /// the repost on the wrong network. A **Bluesky** row is a toggle through
+    /// that door (`feed.md` § Interaction bar → *The viewer-state carrier*,
+    /// the Bluesky exception): `repost` then `unrepost`, both naming the
+    /// TARGET — the bridged `unrepost` looks up the caller's stored repost
+    /// record by the target's AT-URI — and no row ever leaves the window,
+    /// since no Fauna post was created.
     #[test]
-    fn a_repost_on_a_bridged_row_keeps_the_interact_path() {
+    fn a_repost_on_a_bluesky_row_toggles_through_the_interact_door() {
         let target = "cc".repeat(32);
         let nest = MockNest::arc();
         let mut bridged = post(&target, 2);
         bridged.source = "bluesky".into();
+        nest.push_page(vec![bridged], None);
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+
+        block_on(m.repost(target.clone())).expect("repost ok");
+        assert_eq!(
+            m.snapshot().posts[0].viewer_repost_id,
+            Some(target.clone()),
+            "a bridged repost folds the target itself — the bridged unrepost's argument"
+        );
+        block_on(m.repost(target.clone())).expect("unrepost ok");
+
+        assert!(!nest.kinds().contains(&"fauna.posts.create".to_string()));
+        let reqs: Vec<fauna_protocol::posts::PostInteractRequest> =
+            nest.reqs("fauna.posts.interact");
+        let calls: Vec<(&str, &str)> = reqs
+            .iter()
+            .map(|r| (r.post_id.as_str(), r.action.as_str()))
+            .collect();
+        assert_eq!(
+            calls,
+            vec![(target.as_str(), "repost"), (target.as_str(), "unrepost")]
+        );
+        let snap = m.snapshot();
+        assert_eq!(snap.posts.len(), 1, "the target row stays in the window");
+        assert_eq!(
+            snap.posts[0].viewer_repost_id, None,
+            "the toggle state clears"
+        );
+    }
+
+    /// Any other bridged row keeps the shipped one-way interact path: its
+    /// nest arm has no undo, and the nest projects it no viewer state — so
+    /// even a stale field must not route a second tap to `unrepost`.
+    #[test]
+    fn a_repost_on_a_nostr_row_keeps_the_one_way_interact_path() {
+        let target = "cc".repeat(32);
+        let nest = MockNest::arc();
+        let mut bridged = post(&target, 2);
+        bridged.source = "nostr".into();
+        bridged.viewer_repost_id = Some(target.clone());
         nest.push_page(vec![bridged], None);
         let m = mgr(nest.clone());
         block_on(m.select_feed(None));
@@ -8717,6 +9207,7 @@ mod tests {
         let req: fauna_protocol::posts::PostInteractRequest = nest.req("fauna.posts.interact");
         assert_eq!(req.post_id, target);
         assert_eq!(req.action, "repost");
+        assert_eq!(m.snapshot().posts.len(), 1);
     }
 
     /// The like toggle's ON direction. A like is **recorded** against the
@@ -8793,16 +9284,44 @@ mod tests {
         );
     }
 
-    /// A bridged row keeps the shipped one-way `interact(id, "like")` verbatim
-    /// (`feed.md` § Interaction bar → Repost: bridged rows generally project
-    /// no viewer state, and their interactions live in the origin protocol) —
-    /// the same source routing as `repost`, so no app leg has to know.
+    /// A **Bluesky** row's like is the same toggle as a native one
+    /// (`feed.md` § Interaction bar → *The viewer-state carrier*, the Bluesky
+    /// exception: the nest projects the caller's stored like record as
+    /// `viewer_liked`), so a lit ♥ un-likes — the nest's bridged `unlike`
+    /// deletes the `app.bsky.feed.like` record.
     #[test]
-    fn a_like_on_a_bridged_row_keeps_the_interact_path() {
+    fn a_like_on_a_bluesky_row_toggles_off_its_viewer_state() {
         let target = "cc".repeat(32);
         let nest = MockNest::arc();
         let mut bridged = post(&target, 2);
         bridged.source = "bluesky".into();
+        bridged.viewer_liked = true;
+        nest.push_page(vec![bridged], None);
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+
+        block_on(m.like(target.clone())).expect("unlike ok");
+
+        let req: fauna_protocol::posts::PostInteractRequest = nest.req("fauna.posts.interact");
+        assert_eq!(req.post_id, target);
+        assert_eq!(req.action, "unlike");
+        assert!(
+            !m.snapshot().posts[0].viewer_liked,
+            "the toggle state clears"
+        );
+    }
+
+    /// Any other bridged row keeps the shipped one-way `interact(id, "like")`
+    /// verbatim (`feed.md` § Interaction bar → *The viewer-state carrier*:
+    /// only Bluesky rows project viewer state; the others' interactions live
+    /// in the origin protocol with no undo arm) — the same source routing as
+    /// `repost`, so no app leg has to know.
+    #[test]
+    fn a_like_on_a_nostr_row_keeps_the_one_way_interact_path() {
+        let target = "cc".repeat(32);
+        let nest = MockNest::arc();
+        let mut bridged = post(&target, 2);
+        bridged.source = "nostr".into();
         bridged.viewer_liked = true;
         nest.push_page(vec![bridged], None);
         let m = mgr(nest.clone());
@@ -9127,6 +9646,71 @@ mod tests {
             "a wordless quote stays the public reference it always was"
         );
         assert!(m.pending_gated.read().unwrap().is_none());
+    }
+
+    /// **An author cannot seal a reply under their own sold or hidden-tier
+    /// post — and the test holds the oracle's second consumer down.**
+    /// `own_tiers` filters per-post unlock tiers and hidden tiers out for the
+    /// compose picker; `reply_audience_of` reads the same list, so the author's
+    /// own `post-unlock-*` / hidden-tier post answers public-by-confirmation,
+    /// `prepare_sealed_reply` stages nothing, and the plain `reply` is refused
+    /// (`restricted-posts.md` § Encryption at rest, the unlock-tier ruling).
+    /// Flipping this means giving the reply its own predicate, not widening
+    /// the picker's list.
+    #[test]
+    fn an_authors_reply_under_a_sold_or_hidden_tier_post_is_never_sealed() {
+        let me = hex::encode(ActorKeypair::from_secret(TEST_SECRET).actor_id().0);
+        let cases = [
+            ("unlock", "post-unlock-c1c1c1c1", false),
+            ("hidden", fauna_core::subscription::OWNER_ONLY_TIER, true),
+        ];
+        for (class, tier, hidden) in cases {
+            let target = "c1".repeat(32);
+            let nest = MockNest::arc();
+            nest.inner
+                .lock()
+                .unwrap()
+                .tiers
+                .push(fauna_protocol::subscriptions::TierItem {
+                    name: tier.into(),
+                    rank: 9,
+                    unlocks_post: (!hidden).then(|| target.clone()),
+                    hidden,
+                    ..Default::default()
+                });
+            let mut item = post(&target, 3);
+            item.author = me.clone();
+            item.gated_tier = Some(tier.into());
+            nest.push_page(vec![item], None);
+            let m = mgr(nest.clone());
+            block_on(m.select_feed(None));
+            block_on(m.refresh_own_tiers());
+            assert!(
+                m.snapshot().own_tiers.is_empty(),
+                "{class}: the picker never offers it"
+            );
+            assert_eq!(
+                reply_audience(&m, &target),
+                Some(ReplyAudience::PublicByConfirmation),
+                "{class}: the author's own arm is not sealable"
+            );
+            assert!(
+                block_on(m.prepare_sealed_reply(target.clone(), "my words".into()))
+                    .expect("not an error — just nothing to upload")
+                    .is_none(),
+                "{class}"
+            );
+            assert!(m.pending_gated.read().unwrap().is_none(), "{class}");
+            assert_eq!(
+                block_on(m.reply(target.clone(), "my words".into())).expect_err("still refused"),
+                fauna_client_core::post::REFERENCE_REFUSED_RESTRICTED,
+                "{class}"
+            );
+            assert!(
+                !nest.kinds().contains(&"fauna.posts.create".to_string()),
+                "{class}"
+            );
+        }
     }
 
     // ── Ruling 5's confirmation arm (`ui/feed.md` § Encryption at rest →
@@ -10052,6 +10636,104 @@ mod tests {
         assert_eq!(m.snapshot().posts[0].media_hash, Some("ab".repeat(32)));
     }
 
+    // ── Cue subject: playable media (engagement-cues.md § Cue vocabulary) ──
+
+    /// A loaded `has_media` post whose signed body `posts.get` serves with ONE
+    /// media item of `media_type` — the setup the cue-subject tests below share.
+    fn media_post_manager(media_type: &str) -> FeedManager<Arc<MockNest>> {
+        let nest = MockNest::arc();
+        let mut p = post("aa", 1);
+        p.has_media = true;
+        nest.push_page(vec![p], None);
+        let kp = ActorKeypair::from_secret([7u8; 32]);
+        let media = fauna_core::data::MediaItem {
+            blob_hash: fauna_core::data::ContentHash::from_digest_raw([0xab; 32]),
+            media_type: media_type.into(),
+            size_bytes: 10,
+            dimensions: None,
+            thumbnail: None,
+            ..Default::default()
+        };
+        let bytes = build_post_with_media(&kp, "hi", vec![media], &[], None).unwrap();
+        nest.inner.lock().unwrap().posts_get_body = bytes;
+        let m = mgr(nest);
+        block_on(m.select_feed(None));
+        m
+    }
+
+    /// Feed the snapshot's `plays_media` for post `aa` into a real `CueTracker`
+    /// held fully visible for 9 s with no playback reported, and derive the
+    /// exposure through a fresh `CueEngine` — the chain every capture shell
+    /// runs, minus the geometry probe.
+    fn derive_long_dwell_with_no_playback(m: &FeedManager<Arc<MockNest>>) -> Option<CueVerdict> {
+        let is_media = m.snapshot().posts[0].plays_media;
+        let mut tracker = crate::CueTracker::new(crate::LeaveModel::HoldUnmeasured);
+        let window = vec!["aa".to_string()];
+        let mut now = 1_000u64;
+        while now <= 10_000 {
+            let row = crate::CueRow {
+                post_id: "aa".into(),
+                top: 0.0,
+                height: 500.0,
+                is_media,
+                media_played_pm: None,
+            };
+            tracker.sample(&[row], &window, 0.0, 1000.0, now, now);
+            now += 250;
+        }
+        let obs = tracker.drain_all(now);
+        assert_eq!(obs.len(), 1, "one exposure");
+        CueEngine::new(CueRollup::new()).observe(obs.into_iter().next().unwrap())
+    }
+
+    /// An image-only post is a NON-media post for cue derivation
+    /// (engagement-cues.md § Cue vocabulary & derivation: `watch-complete` is
+    /// media *played* ≥ 0.85 of its duration, or a non-media post held — a still
+    /// has no duration to play). Once `resolve_media` folds its `Image` block
+    /// in, the snapshot says it does not play, and a long dwell derives
+    /// `watch-complete` exactly as on a text post.
+    #[test]
+    fn an_image_post_is_not_playable_media_and_dwell_completes() {
+        let m = media_post_manager("image/png");
+        block_on(m.resolve_media("aa".into()));
+        assert!(!m.snapshot().posts[0].plays_media);
+        assert_eq!(
+            derive_long_dwell_with_no_playback(&m),
+            Some(CueVerdict::WatchComplete)
+        );
+    }
+
+    /// A video post is playable media: its `watch-complete` is the played
+    /// fraction alone, so a long dwell with no playback derives nothing.
+    #[test]
+    fn a_video_post_is_playable_media_and_dwell_alone_does_not_complete() {
+        let m = media_post_manager("video/mp4");
+        block_on(m.resolve_media("aa".into()));
+        assert!(m.snapshot().posts[0].plays_media);
+        assert_eq!(derive_long_dwell_with_no_playback(&m), None);
+    }
+
+    /// Before `resolve_media` lands, a `has_media` post's kind is unknown — the
+    /// feed-index item says only "has an attachment". It reads as playable, the
+    /// conservative side: a video never dwell-completes on a guess, and since
+    /// the tracker takes the latest reading, an image post's exposure moves to
+    /// the dwell arm the moment its media resolves.
+    #[test]
+    fn an_unresolved_media_post_reads_as_playable() {
+        let m = media_post_manager("image/png");
+        assert_eq!(m.snapshot().posts[0].media_hash, None);
+        assert!(m.snapshot().posts[0].plays_media);
+    }
+
+    #[test]
+    fn a_text_post_is_not_playable_media() {
+        let nest = MockNest::arc();
+        nest.push_page(vec![post("aa", 1)], None);
+        let m = mgr(nest);
+        block_on(m.select_feed(None));
+        assert!(!m.snapshot().posts[0].plays_media);
+    }
+
     #[test]
     fn resolve_media_is_a_noop_for_a_post_without_media() {
         let nest = MockNest::arc();
@@ -10112,6 +10794,94 @@ mod tests {
 
     /// A post the timeline already holds costs no round trip (the ordinary
     /// `post-card` click), and clears any stale slot.
+    fn thread_reply() -> fauna_protocol::bluesky::BlueskyThreadReply {
+        let post = |uri: &str, text: &str| fauna_protocol::bluesky::BlueskyPost {
+            at_uri: uri.into(),
+            author_handle: "bob.test".into(),
+            text: text.into(),
+            source: "bluesky".into(),
+            ..Default::default()
+        };
+        fauna_protocol::bluesky::BlueskyThreadReply {
+            posts: vec![
+                post("at://b/1", "the root"),
+                post("at://b/2", "the opened post"),
+                post("at://b/3", "a reply"),
+            ],
+            focal_index: 1,
+            extra: Default::default(),
+        }
+    }
+
+    /// `open_thread` asks the nest for the post by its raw Fauna id and lands
+    /// the flat thread on the snapshot, the nest-named post marked
+    /// (`bridges.md` § Bluesky-native thread view).
+    #[test]
+    fn open_thread_lands_the_thread_with_the_nest_named_post_marked() {
+        let nest = MockNest::arc();
+        nest.inner.lock().unwrap().thread_reply = Some(thread_reply());
+        let m = mgr(nest.clone());
+        let post_id = "ab".repeat(32);
+
+        block_on(m.open_thread(post_id.clone()));
+
+        let (kind, payload) = nest.inner.lock().unwrap().calls.last().cloned().unwrap();
+        assert_eq!(kind, "bluesky.feed.thread");
+        let req: BlueskyThreadRequest = fauna_protocol::decode_strict(&payload).unwrap();
+        assert_eq!(
+            req,
+            BlueskyThreadRequest::PostId {
+                post_id: vec![0xab; 32]
+            }
+        );
+        let page = m.snapshot().thread.expect("the page is open");
+        assert_eq!(page.post_id, post_id);
+        assert_eq!(page.status, ThreadStatus::Loaded);
+        let texts: Vec<_> = page.posts.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(texts, ["the root", "the opened post", "a reply"]);
+        let marked: Vec<_> = page.posts.iter().map(|p| p.is_focal).collect();
+        assert_eq!(marked, [false, true, false]);
+        assert_eq!(
+            m.snapshot().error,
+            None,
+            "the feed's own error is untouched"
+        );
+    }
+
+    /// A failed fetch fails the PAGE with the reason, never the feed.
+    #[test]
+    fn a_failed_thread_fetch_fails_the_page_with_the_reason() {
+        let nest = MockNest::arc();
+        nest.inner.lock().unwrap().fail_kind =
+            Some(("bluesky.feed.thread".into(), "bluesky.not_found".into()));
+        let m = mgr(nest);
+
+        block_on(m.open_thread("ab".repeat(32)));
+
+        let page = m.snapshot().thread.expect("the page is open");
+        assert_eq!(page.status, ThreadStatus::Failed);
+        assert!(page.posts.is_empty());
+        let error = page.error.expect("the reason");
+        assert!(
+            format!("{error:?}").contains("bluesky.not_found"),
+            "the nest's reason is carried: {error:?}"
+        );
+        assert_eq!(m.snapshot().error, None);
+    }
+
+    /// Leaving the page clears it.
+    #[test]
+    fn close_thread_clears_the_page() {
+        let nest = MockNest::arc();
+        nest.inner.lock().unwrap().thread_reply = Some(thread_reply());
+        let m = mgr(nest);
+
+        block_on(m.open_thread("ab".repeat(32)));
+        assert!(m.snapshot().thread.is_some());
+        m.close_thread();
+        assert_eq!(m.snapshot().thread, None);
+    }
+
     #[test]
     fn resolve_post_is_a_noop_for_a_post_the_timeline_already_holds() {
         let nest = MockNest::arc();
@@ -10139,6 +10909,40 @@ mod tests {
             None,
             "the stale slot is released"
         );
+    }
+
+    /// A bridged post opened through the deep-link door names its author as the
+    /// timeline card does: the reply's `author_display` lands on the summary,
+    /// and a native reply (no face) leaves it `None`.
+    #[test]
+    fn resolve_post_carries_the_bridged_author_face_onto_the_summary() {
+        let nest = MockNest::arc();
+        nest.push_page(vec![post("aa", 1)], None);
+        let kp = ActorKeypair::from_secret([9u8; 32]);
+        nest.inner.lock().unwrap().posts_get_body = build_post(&kp, "body", &[], None).unwrap();
+
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+        block_on(m.resolve_post("zz".into()));
+        assert_eq!(m.snapshot().find_post("zz").unwrap().author_display, None);
+
+        nest.inner.lock().unwrap().posts_get_author_display =
+            Some(fauna_protocol::feed::AuthorDisplay {
+                handle: Some("alice.bsky.social".into()),
+                display_name: Some("Alice".into()),
+                avatar_url: None,
+                extra: Default::default(),
+            });
+        block_on(m.resolve_post("yy".into()));
+        let face = m
+            .snapshot()
+            .find_post("yy")
+            .unwrap()
+            .author_display
+            .clone()
+            .expect("the bridged face rides the deep-link door");
+        assert_eq!(face.display_name.as_deref(), Some("Alice"));
+        assert_eq!(face.handle.as_deref(), Some("alice.bsky.social"));
     }
 
     /// Re-opening the same deep-linked post is free — the slot already holds it.
@@ -10386,6 +11190,56 @@ mod tests {
         );
     }
 
+    /// A same-query refresh keeps the media `resolve_media` folded. The landed
+    /// page arrives with every post unresolved (the feed index never carries the
+    /// body's media); without the re-fold, each card painted media-less until the
+    /// app re-resolved it, and an app gating its thumbnail on the document's media
+    /// unmounted the live player and mounted a fresh idle one in its place — the
+    /// tap that landed in that window was lost (render-model.md § D6c → *Inline
+    /// playback*).
+    #[test]
+    fn resolved_media_survives_a_reload() {
+        let nest = MockNest::arc();
+        let kp = ActorKeypair::from_secret([7u8; 32]);
+        let media = fauna_core::data::MediaItem {
+            blob_hash: fauna_core::data::ContentHash::from_digest_raw([0xcd; 32]),
+            media_type: "video/mp4".into(),
+            size_bytes: 10,
+            dimensions: None,
+            thumbnail: None,
+            ..Default::default()
+        };
+        let bytes = build_post_with_media(&kp, "clip", vec![media], &[], None).unwrap();
+        let id = wire_post_id(&bytes);
+        let mut p = post(&id, 1);
+        p.has_media = true;
+        nest.push_page(vec![p.clone()], None);
+        nest.inner.lock().unwrap().posts_get_body = bytes;
+
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+        block_on(m.resolve_media(id.clone()));
+        let resolved = m.snapshot().posts[0].clone();
+        assert_eq!(resolved.media_hash, Some("cd".repeat(32)));
+
+        // The refresh re-fetches the same post, unresolved; nothing re-resolves it.
+        nest.push_page(vec![p], None);
+        block_on(m.refresh_current_feed());
+
+        let after = &m.snapshot().posts[0];
+        assert_eq!(after.media_hash, resolved.media_hash, "the hash survives");
+        assert_eq!(after.verification, VerificationStatus::Verified);
+        assert!(
+            after
+                .document
+                .blocks
+                .iter()
+                .any(|b| matches!(b, RenderBlock::Video { hash, .. } if *hash == "cd".repeat(32))),
+            "the video block survives the refresh: {:?}",
+            after.document.blocks
+        );
+    }
+
     /// A `has_media` post whose fetched body fails signature verification is
     /// marked `Failed` (drives the unverified-source badge) yet still renders —
     /// the media hash still resolves from the untampered inner bytes (a transient
@@ -10579,6 +11433,60 @@ mod tests {
             }) => {
                 assert_eq!(legal_takedown_ref.as_deref(), Some("EU-DSA-2024/12345"));
                 assert!(body.is_empty(), "the withheld body is empty on the block");
+            }
+            other => panic!("expected a trailing QuotedPost block, got {other:?}"),
+        }
+    }
+
+    /// A quote this device resolved from its loaded page, whose target is then
+    /// taken down (or deleted by someone else) between two reloads: the refresh
+    /// must not keep painting the withheld words. The reload is where the feed
+    /// learns what the nest serves now (`ui/feed.md` § The read model — "a
+    /// server-side deletion does not linger"), so the resolved-quote cache lives
+    /// for one loaded page, and the next resolve asks again: here, the nest's
+    /// takedown marker, and the tombstone stands in the quote's place
+    /// (`moderation.md` § Legal takedown).
+    #[test]
+    fn a_refresh_after_the_quoted_post_is_taken_down_folds_the_tombstone() {
+        use fauna_core::render::RenderBlock;
+        let target = "cc".repeat(32);
+        let nest = MockNest::arc();
+        let mut quoting = post("aa", 3);
+        quoting.quoted_post_id = Some(target.clone());
+        let mut quoted = post(&target, 1);
+        quoted.body = "words a court will order withheld".into();
+        nest.push_page(vec![quoting.clone(), quoted], None);
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+        let view = block_on(m.resolve_quoted_post(target.clone())).expect("resolves in-page");
+        assert_eq!(view.body, "words a court will order withheld");
+
+        // The takedown: the next page no longer carries the target, and a
+        // by-id read answers the withheld body with the reference.
+        nest.push_page(vec![quoting], None);
+        nest.inner.lock().unwrap().posts_get_legal_takedown = Some("Court order 42/2026".into());
+        block_on(m.refresh_current_feed());
+        // Every app re-resolves an embed its card does not carry yet.
+        let view = block_on(m.resolve_quoted_post(target)).expect("re-resolves after the refresh");
+        assert_eq!(
+            view.legal_takedown_ref.as_deref(),
+            Some("Court order 42/2026"),
+            "the refresh re-asked the nest instead of answering from the old page"
+        );
+        let aa = m
+            .snapshot()
+            .posts
+            .into_iter()
+            .find(|p| p.post_id == "aa")
+            .unwrap();
+        match aa.document.blocks.last() {
+            Some(RenderBlock::QuotedPost {
+                legal_takedown_ref,
+                body,
+                ..
+            }) => {
+                assert_eq!(legal_takedown_ref.as_deref(), Some("Court order 42/2026"));
+                assert!(body.is_empty(), "no withheld words left on the card");
             }
             other => panic!("expected a trailing QuotedPost block, got {other:?}"),
         }
@@ -11444,7 +12352,8 @@ mod tests {
     /// **no** words with any exemplar id — only the learned n-grams.
     #[test]
     fn a_subscribed_text_model_reranks_an_unseen_post() {
-        let labeler_id = [0xABu8; 32];
+        let publisher = ActorKeypair::from_secret([0xABu8; 32]);
+        let labeler_id = publisher.actor_id().0;
         let factor =
             fauna_core::scoring::labeler_factor(&fauna_core::identity::ActorId(labeler_id));
         // The vocabulary a publisher's scrub over public cat/finance examples
@@ -11466,6 +12375,7 @@ mod tests {
 
         let nest = MockNest::arc();
         nest.set_feed_composition(vec![entry(&factor, 1000)]);
+        nest.seed_labeler_metadata_signed_by(labeler_id, &publisher, &artifact);
         nest.seed_labeler_artifact(labeler_id, "text-model", artifact);
         // "fin" leads on the nest's key; the cat post trails it 3:1.
         nest.push_page(
@@ -11497,7 +12407,8 @@ mod tests {
     /// feed must also stay free of an error.
     #[test]
     fn a_text_model_at_an_unknown_tokenizer_version_is_inert() {
-        let labeler_id = [0xCDu8; 32];
+        let publisher = ActorKeypair::from_secret([0xCDu8; 32]);
+        let labeler_id = publisher.actor_id().0;
         let factor =
             fauna_core::scoring::labeler_factor(&fauna_core::identity::ActorId(labeler_id));
         // Same vocabulary as the test above — the ONLY difference is a version
@@ -11525,6 +12436,7 @@ mod tests {
 
         let nest = MockNest::arc();
         nest.set_feed_composition(vec![entry(&factor, 1000)]);
+        nest.seed_labeler_metadata_signed_by(labeler_id, &publisher, &bytes);
         nest.seed_labeler_artifact(labeler_id, "text-model", bytes);
         nest.push_page(
             vec![
@@ -11544,6 +12456,210 @@ mod tests {
         assert!(
             m.snapshot().error.is_none(),
             "inert is the contract, not an error — the badge says so, not a banner"
+        );
+    }
+
+    /// The cat/finance artifact the re-verify pins below serve.
+    fn pin_text_model_artifact() -> Vec<u8> {
+        fauna_core::scoring::build_text_model_artifact(
+            Some("Small orange cats"),
+            6,
+            6,
+            vec![
+                ("cat".to_string(), 6, 0),
+                ("kitten".to_string(), 5, 0),
+                ("dozing".to_string(), 4, 0),
+                ("earnings".to_string(), 0, 6),
+                ("quarterly".to_string(), 0, 5),
+                ("guidance".to_string(), 0, 4),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// Load the pin feed (nest order `fin`, `cat`) with `labeler_id`'s factor
+    /// composed, after the caller has staged what `inspect` will serve.
+    fn pin_load(nest: Arc<MockNest>, labeler_id: [u8; 32]) -> FeedManager<Arc<MockNest>> {
+        let factor =
+            fauna_core::scoring::labeler_factor(&fauna_core::identity::ActorId(labeler_id));
+        nest.set_feed_composition(vec![entry(&factor, 1000)]);
+        nest.push_page(
+            vec![
+                scored_post("fin", 2, 3_000_000, "quarterly earnings guidance"),
+                scored_post("cat", 1, 1_000_000, "a small ginger kitten dozing"),
+            ],
+            None,
+        );
+        let m = mgr(nest);
+        block_on(m.select_feed(Some("feed-1".into())));
+        m
+    }
+
+    /// ⚠ A structurally valid `text-model` the nest serves **without**
+    /// signed metadata composes nothing: the subscriber does not take the
+    /// nest's word that this is the labeler the user chose.
+    #[test]
+    fn a_subscribed_text_model_with_no_signed_metadata_is_not_composed() {
+        let labeler_id = [0xA1u8; 32];
+        let nest = MockNest::arc();
+        nest.seed_labeler_artifact(labeler_id, "text-model", pin_text_model_artifact());
+        let m = pin_load(nest, labeler_id);
+
+        assert_eq!(
+            ids(&m),
+            vec!["fin", "cat"],
+            "an unverified artifact must not re-rank the feed",
+        );
+        assert!(
+            m.snapshot().error.is_some(),
+            "the refusal is surfaced through feed.error_subscribed_model",
+        );
+    }
+
+    /// ⚠ A validly **signed** artifact belonging to another publisher
+    /// — the swap a lying nest can make — is self-consistent but not the
+    /// labeler the user subscribed to, so it composes nothing.
+    #[test]
+    fn a_subscribed_text_model_signed_by_another_publisher_is_not_composed() {
+        let chosen = ActorKeypair::from_secret([0xA2u8; 32]);
+        let other = ActorKeypair::from_secret([0xA3u8; 32]);
+        let labeler_id = chosen.actor_id().0;
+        let artifact = pin_text_model_artifact();
+        let nest = MockNest::arc();
+        nest.seed_labeler_metadata_signed_by(labeler_id, &other, &artifact);
+        nest.seed_labeler_artifact(labeler_id, "text-model", artifact);
+        let m = pin_load(nest, labeler_id);
+
+        assert_eq!(ids(&m), vec!["fin", "cat"]);
+        assert!(m.snapshot().error.is_some());
+    }
+
+    /// The honest case still composes (and raises no error): signed by the
+    /// labeler's own key over the served bytes.
+    #[test]
+    fn a_genuinely_signed_subscribed_text_model_still_composes() {
+        let publisher = ActorKeypair::from_secret([0xA4u8; 32]);
+        let labeler_id = publisher.actor_id().0;
+        let artifact = pin_text_model_artifact();
+        let nest = MockNest::arc();
+        nest.seed_labeler_metadata_signed_by(labeler_id, &publisher, &artifact);
+        nest.seed_labeler_artifact(labeler_id, "text-model", artifact);
+        let m = pin_load(nest, labeler_id);
+
+        assert_eq!(ids(&m), vec!["cat", "fin"]);
+        assert!(m.snapshot().error.is_none());
+    }
+
+    /// The committed tier_3 cat detector — wasmi parses WAT text, so these
+    /// bytes are the module.
+    const CAT_LABELER_WAT: &str =
+        include_str!("../../../tests/e2e-unified/fixtures/labeler/cat_labeler.wat");
+
+    /// A module whose `label()` traps on every item.
+    const TRAPPING_LABELER_WAT: &str = r#"(module
+      (memory (export "memory") 1)
+      (func (export "alloc") (param i32) (result i32) (i32.const 1024))
+      (func (export "label") (param i32 i32) (result i32) unreachable))"#;
+
+    /// Load the pin feed (nest order `fin`, `cat`) over a subscribed `wasm`
+    /// labeler declared over `content_kind`, honestly signed.
+    fn wasm_pin_load(wat: &str, content_kind: &str) -> FeedManager<Arc<MockNest>> {
+        let publisher = ActorKeypair::from_secret([0xB1u8; 32]);
+        let labeler_id = publisher.actor_id().0;
+        let bytes = wat.as_bytes().to_vec();
+        let nest = MockNest::arc();
+        nest.seed_labeler_metadata_signed_by(labeler_id, &publisher, &bytes);
+        nest.seed_labeler_artifact_over(labeler_id, "wasm", content_kind, bytes);
+        pin_load_bodies(nest, labeler_id, "my cat is asleep")
+    }
+
+    /// [`pin_load`] with the trailing post's body chosen by the caller.
+    fn pin_load_bodies(
+        nest: Arc<MockNest>,
+        labeler_id: [u8; 32],
+        trailing_body: &str,
+    ) -> FeedManager<Arc<MockNest>> {
+        let factor =
+            fauna_core::scoring::labeler_factor(&fauna_core::identity::ActorId(labeler_id));
+        nest.set_feed_composition(vec![entry(&factor, 1000)]);
+        nest.push_page(
+            vec![
+                scored_post("fin", 2, 3_000_000, "quarterly earnings guidance"),
+                scored_post("cat", 1, 1_000_000, trailing_body),
+            ],
+            None,
+        );
+        let m = mgr(nest);
+        block_on(m.select_feed(Some("feed-1".into())));
+        m
+    }
+
+    /// A subscribed **`post`-kind `wasm`** labeler runs at the subscriber's
+    /// own app, in this seam, and re-ranks the window
+    /// (`content-moderation-and-ranking.md` § Tier-3 → *Where it runs*,
+    /// position (1)).
+    #[test]
+    fn a_subscribed_post_kind_wasm_labeler_reranks_the_window() {
+        let m = wasm_pin_load(CAT_LABELER_WAT, "post");
+        assert_eq!(
+            ids(&m),
+            vec!["cat", "fin"],
+            "the module's cat label must lift the cat post over the nest's lead",
+        );
+        assert!(m.snapshot().error.is_none());
+    }
+
+    /// Invariant (c): a `mail`-kind module composed into a feed meets no post.
+    #[test]
+    fn a_mail_kind_wasm_labeler_composes_nothing() {
+        let m = wasm_pin_load(CAT_LABELER_WAT, "mail");
+        assert_eq!(ids(&m), vec!["fin", "cat"]);
+        assert_eq!(m.sealed.read().unwrap().wasm_runs(), 0);
+    }
+
+    /// Invariant (e): an item on which the module traps contributes no term —
+    /// the nest's order stands, and a per-item fault is not a feed error.
+    #[test]
+    fn a_trapping_wasm_labeler_leaves_the_order_untouched() {
+        let m = wasm_pin_load(TRAPPING_LABELER_WAT, "post");
+        assert_eq!(ids(&m), vec!["fin", "cat"]);
+        assert!(m.snapshot().error.is_none());
+    }
+
+    /// Invariant (e), the prepare half: a module that does not compile leaves
+    /// the feed as it was and says so on `feed.error_subscribed_model`.
+    #[test]
+    fn a_wasm_labeler_that_does_not_compile_says_so_and_composes_nothing() {
+        let m = wasm_pin_load("(module (this is not wasm", "post");
+        assert_eq!(ids(&m), vec!["fin", "cat"]);
+        assert!(m.snapshot().error.is_some());
+    }
+
+    /// Invariant (d): each post is scored once per labeler version — a
+    /// re-rank, and a reload over the same version, run no module again.
+    #[test]
+    fn the_wasm_memo_scores_each_post_once_per_labeler_version() {
+        let m = wasm_pin_load(CAT_LABELER_WAT, "post");
+        assert_eq!(m.sealed.read().unwrap().wasm_runs(), 2);
+        m.rerank_window();
+        assert_eq!(
+            m.sealed.read().unwrap().wasm_runs(),
+            2,
+            "a re-rank reads the memo"
+        );
+        m.nest.push_page(
+            vec![
+                scored_post("fin", 2, 3_000_000, "quarterly earnings guidance"),
+                scored_post("cat", 1, 1_000_000, "my cat is asleep"),
+            ],
+            None,
+        );
+        block_on(m.select_feed(Some("feed-1".into())));
+        assert_eq!(ids(&m), vec!["cat", "fin"]);
+        assert_eq!(
+            m.sealed.read().unwrap().wasm_runs(),
+            2,
+            "a reload over the same labeler version reads the memo too"
         );
     }
 
@@ -12668,6 +13784,93 @@ mod tests {
         assert_eq!(created.rank, 1);
     }
 
+    /// A period-key store that is present but cannot be read — the account
+    /// store answering and failing, as opposed to not installed yet.
+    struct UnreadablePeriodKeyStore;
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl fauna_client_subscriptions::period_keys::PeriodKeyStore for UnreadablePeriodKeyStore {
+        async fn custody(
+            &self,
+        ) -> Result<fauna_core::data::SubscriptionsConfig, fauna_client_config::StoreError>
+        {
+            Err(fauna_client_config::StoreError::Load("unreadable".into()))
+        }
+
+        async fn merge_custody(
+            &self,
+            _replica: fauna_core::data::SubscriptionsConfig,
+        ) -> Result<fauna_core::data::SubscriptionsConfig, fauna_client_config::StoreError>
+        {
+            Err(fauna_client_config::StoreError::Save("unreadable".into()))
+        }
+
+        async fn settle_removal(
+            &self,
+            _removal: fauna_core::data::PendingRemoval,
+        ) -> Result<fauna_core::data::SubscriptionsConfig, fauna_client_config::StoreError>
+        {
+            Err(fauna_client_config::StoreError::Save("unreadable".into()))
+        }
+    }
+
+    /// The composer's stamped refusal as the apps render it — English template
+    /// with its arguments substituted. A `{name}` left in the text is a
+    /// placeholder the stamping site forgot to fill.
+    fn rendered_compose_error(m: &FeedManager<Arc<MockNest>>) -> String {
+        m.snapshot()
+            .compose
+            .error
+            .as_ref()
+            .expect("the refusal is stamped on the composer")
+            .resolve(fauna_i18n::strings::lookup)
+    }
+
+    /// Every sell-path refusal that has no tier to name must still render a
+    /// whole sentence: three stamps of `feed.compose_gate_no_key` went through
+    /// an argument-less closure and showed the raw `{tier}` placeholder.
+    #[test]
+    fn sell_post_not_ready_refusal_renders_no_raw_placeholder() {
+        let nest = MockNest::arc();
+        let m = mgr(nest);
+        *m.period_keys.write().unwrap() = None;
+        m.update_compose("body".into(), String::new(), None);
+        m.update_compose_gate(None, "teaser".into());
+
+        // The pay-per-view arm reads the tiers first, then needs the author.
+        block_on(m.stage_sell_tier(false, None)).expect_err("no period-key store refuses");
+        let text = rendered_compose_error(&m);
+        assert!(!text.contains('{'), "unfilled placeholder: {text}");
+    }
+
+    #[test]
+    fn sell_post_stage_failure_refusal_renders_no_raw_placeholder() {
+        let nest = MockNest::arc();
+        let m = mgr(nest);
+        m.set_period_key_store(Arc::new(UnreadablePeriodKeyStore));
+        m.update_compose("body".into(), String::new(), None);
+        m.update_compose_gate(None, "teaser".into());
+
+        block_on(m.stage_sell_tier(true, None)).expect_err("an unreadable store refuses");
+        let text = rendered_compose_error(&m);
+        assert!(!text.contains('{'), "unfilled placeholder: {text}");
+    }
+
+    #[test]
+    fn sell_post_submit_not_ready_refusal_renders_no_raw_placeholder() {
+        let nest = MockNest::arc();
+        let m = mgr(nest);
+        m.update_compose("body".into(), String::new(), None);
+        m.update_compose_gate(None, "teaser".into());
+        block_on(m.stage_sell_tier(true, None)).expect("stages");
+        *m.period_keys.write().unwrap() = None;
+
+        block_on(m.prepare_sell_post(None, true, None)).expect_err("no period-key store refuses");
+        let text = rendered_compose_error(&m);
+        assert!(!text.contains('{'), "unfilled placeholder: {text}");
+    }
+
     /// A sold post is a gated post, so it needs the same public teaser — and the
     /// designated tier must NOT be minted when the composer is invalid, or a
     /// failed compose would litter the author's tier list with orphans.
@@ -13147,6 +14350,76 @@ mod tests {
              post — the teaser would reappear and the buy's completion signal \
              (a cleared unlock_offer) would never durably hold"
         );
+    }
+
+    /// "Not offered again" is an absence on a LATER resolve pass, which no app
+    /// can observe unless the guarded pass leaves a positive trace. So the buy
+    /// sets `unlock_purchase_pending`, and every later resolve the guard
+    /// declines re-writes it onto the freshly rebuilt `PostSummary` — after a
+    /// reload the marker reappearing is caused by exactly that declined pass,
+    /// and the offer stays `None` in the same write (`monetization.md`
+    /// § Per-post pay-to-unlock → *A completed buy must not be re-offered*).
+    #[test]
+    fn a_bought_posts_later_resolve_marks_the_purchase_pending() {
+        let nest = MockNest::arc();
+        let mut p = post("aa", 1);
+        p.gated_tier = Some("post-unlock-abc123".into());
+        nest.push_page(vec![p.clone()], None);
+        nest.inner
+            .lock()
+            .unwrap()
+            .tiers
+            .push(fauna_protocol::subscriptions::TierItem {
+                name: "post-unlock-abc123".into(),
+                rank: 5,
+                description: None,
+                price_hint: Some("$3".into()),
+                payment_url: None,
+                auto_approve: false,
+                created_at: fauna_core::data::Timestamp(0),
+                unlocks_post: Some("aa".into()),
+                asking_price: None,
+                hidden: false,
+                extra: Default::default(),
+            });
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+        block_on(m.resolve_post_unlock_offer("aa".into()));
+        assert!(!m.snapshot().posts[0].unlock_purchase_pending);
+        block_on(m.buy_unlock_offer("aa".into()))
+            .expect("offer resolved")
+            .expect("subscribed");
+        let after_buy = &m.snapshot().posts[0];
+        assert!(after_buy.unlock_purchase_pending, "the buy itself marks it");
+        assert_eq!(after_buy.unlock_offer, None);
+
+        // A reload rebuilds every PostSummary from the feed index: the marker
+        // is gone until the next resolve pass runs.
+        nest.push_page(vec![p], None);
+        block_on(m.refresh_current_feed());
+        assert!(!m.snapshot().posts[0].unlock_purchase_pending);
+
+        block_on(m.resolve_post_unlock_offer("aa".into()));
+        let later = &m.snapshot().posts[0];
+        assert!(
+            later.unlock_purchase_pending,
+            "the later resolve the guard declines must leave a positive trace"
+        );
+        assert_eq!(later.unlock_offer, None, "and must not re-offer");
+    }
+
+    /// A post the buyer never bought is never marked pending, whatever the
+    /// resolve answers.
+    #[test]
+    fn an_unbought_sold_post_is_never_marked_purchase_pending() {
+        let nest = MockNest::arc();
+        let mut p = post("aa", 1);
+        p.gated_tier = Some("post-unlock-abc123".into());
+        nest.push_page(vec![p], None);
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+        block_on(m.resolve_post_unlock_offer("aa".into()));
+        assert!(!m.snapshot().posts[0].unlock_purchase_pending);
     }
 
     /// The button isn't reachable before the offer resolves — `buy_unlock_offer`
@@ -13753,6 +15026,84 @@ mod tests {
         );
     }
 
+    /// A repost renders "as the target's own gated card, teaser and badge"
+    /// (`behavior/restricted-posts.md` § Encryption at rest, ruling 3): the
+    /// wire's `reposted_gated_*` (the nest's projection of the TARGET's gate)
+    /// ride onto the repost row's `PostSummary` through `map_post` — so the
+    /// card paints the badge for a target outside the loaded window too — and
+    /// a member's repost card gets the room's label by the reader's own
+    /// conversation list, following the seam exactly as `room_label` does.
+    /// The row's OWN gate stays empty: the repost is public, so its reply
+    /// audience is `None` and nothing reads it as a sealed row.
+    #[test]
+    fn a_repost_row_carries_its_targets_gate_and_names_the_room_for_a_member() {
+        use crate::test_support::feed_snapshot_with_posts;
+        let room = [0xC7u8; 32];
+        let repost = map_post(FeedPostItem {
+            post_id: "ab".repeat(32),
+            author: "01".repeat(32),
+            source: "fauna".into(),
+            reposted_post_id: Some("aa".repeat(32)),
+            reposted_gated_tier: Some(fauna_core::subscription::ROOM_POST_TIER.into()),
+            reposted_gated_room: Some(hex::encode(room)),
+            ..Default::default()
+        });
+        assert_eq!(
+            repost.reposted_gated_tier.as_deref(),
+            Some(fauna_core::subscription::ROOM_POST_TIER),
+            "the target's tier rides onto the repost row"
+        );
+        assert_eq!(
+            (repost.gated_tier.as_deref(), repost.gated_room.as_deref()),
+            (None, None),
+            "the repost row's own gate stays empty — it is a public post"
+        );
+        let mut snapshot = feed_snapshot_with_posts(vec![]);
+        snapshot.posts.push(repost);
+        let m = mgr(MockNest::arc());
+        m.set_feed_snapshot_for_test(snapshot);
+
+        let snap = m.snapshot();
+        assert_eq!(
+            (
+                snap.posts[0].reposted_room_label.as_deref(),
+                snap.posts[0].room_label.as_deref()
+            ),
+            (None, None),
+            "an outsider's repost card names no room — the reserved tier"
+        );
+        assert_eq!(
+            snap.posts[0].reply_audience, None,
+            "a reply to the repost row is to a public post"
+        );
+
+        m.set_room_post_keys(Arc::new(OneRoomKey {
+            room,
+            seal: fauna_core::room_post::RoomPostSeal::EndToEnd { epoch: 1 },
+            base: [0u8; 32],
+        }));
+        block_on(m.refresh_own_rooms());
+        let snap = m.snapshot();
+        assert_eq!(
+            snap.posts[0].reposted_room_label.as_deref(),
+            Some("the room"),
+            "a member's repost card names the room by the member's own label"
+        );
+        assert_eq!(
+            snap.posts[0].room_label, None,
+            "the row's own room label stays empty — the repost addresses no room"
+        );
+        assert_eq!(snap.posts[0].reply_audience, None);
+
+        m.set_room_post_keys(Arc::new(NoRoomKeys));
+        block_on(m.refresh_own_rooms());
+        assert_eq!(
+            m.snapshot().posts[0].reposted_room_label,
+            None,
+            "a lost seat drops the repost card back to the reserved tier"
+        );
+    }
+
     /// The composer's room arm end to end in shared Rust: a room offered from
     /// the seam, a photo sealed first, the body built over the SAME seal the
     /// photo's base was resolved under, uploaded under the room arm's sidecar
@@ -14346,6 +15697,60 @@ mod tests {
         );
     }
 
+    /// A bridged video's `ProxiedVideo` plays through the nest's media proxy on a
+    /// playback ticket (render-model.md § D6c → *Inline playback*, answers 1 and
+    /// 4): `playback_source` mints `fauna.media.playback_ticket` for the block's
+    /// proxied path and hands back the ticketed path, nest-relative — no app
+    /// builds it by hand.
+    #[test]
+    fn playback_source_tickets_a_proxied_video_through_the_media_proxy() {
+        let nest = MockNest::arc();
+        let m = mgr(nest.clone());
+        let path = "/api/v1/media/proxy?url=https%3A%2F%2Fcdn.example%2Fclip.webm";
+        let block = RenderBlock::ProxiedVideo {
+            path: path.into(),
+            alt: String::new(),
+        };
+        assert_eq!(
+            block_on(m.playback_source(&block)),
+            PlaybackSource::Url {
+                url: format!("{path}&exp=1700000000&sig=fake-sig")
+            }
+        );
+        let calls = nest.inner.lock().unwrap().calls.clone();
+        let (kind, bytes) = calls.last().expect("the mint was called");
+        assert_eq!(
+            kind,
+            fauna_protocol::media_ticket::KIND_MEDIA_PLAYBACK_TICKET
+        );
+        let req: fauna_protocol::media_ticket::PlaybackTicketRequest =
+            fauna_protocol::decode_strict(bytes).unwrap();
+        assert_eq!(req.path, path, "the block's own proxied path is ticketed");
+    }
+
+    /// A mint the nest refuses or cannot answer leaves nothing to play: the
+    /// block is `Unplayable`, carrying the failure as its reason.
+    #[test]
+    fn playback_source_reports_a_failed_ticket_mint_as_unplayable() {
+        let nest = MockNest::arc();
+        nest.inner.lock().unwrap().fail_kind = Some((
+            fauna_protocol::media_ticket::KIND_MEDIA_PLAYBACK_TICKET.into(),
+            "mint refused".into(),
+        ));
+        let m = mgr(nest);
+        let block = RenderBlock::ProxiedVideo {
+            path: "/api/v1/media/proxy?url=https%3A%2F%2Fcdn.example%2Fclip.webm".into(),
+            alt: String::new(),
+        };
+        match block_on(m.playback_source(&block)) {
+            PlaybackSource::Unplayable { reason } => assert!(
+                reason.contains("mint refused"),
+                "the reason names the failure: {reason}"
+            ),
+            other => panic!("a failed mint must be Unplayable, got {other:?}"),
+        }
+    }
+
     /// Everything that is not a video plays nothing — an image, and a text block.
     #[test]
     fn playback_source_refuses_a_non_video_block() {
@@ -14472,6 +15877,7 @@ mod tests {
             dwell_ms_at_skip_visibility: 0,
             dwell_ms_at_long_visibility: 10_000,
             observed_at_ms: at_ms,
+            ended_by: crate::ExposureEnd::ScrolledPast,
         }
     }
 
@@ -14501,6 +15907,31 @@ mod tests {
             Some(CueVerdict::WatchComplete),
             "new item captured"
         );
+    }
+
+    /// The e2e verdict read reports what the live engine holds: nothing before
+    /// hydration, the fetched rollup's verdict after it — the second-seat
+    /// witness's seam (`engagement-cues.md` § At rest, cross-device continuity).
+    #[test]
+    fn cue_verdict_for_test_reads_the_hydrated_engine() {
+        let nest = MockNest::arc();
+        let mut seeded = CueRollup::new();
+        seeded.record("aa", CueVerdict::WatchComplete, 9_000, 1_000);
+        nest.seed_cue_rollup(&seeded);
+
+        let m = mgr(nest.clone());
+        assert_eq!(
+            m.cue_verdict_for_test("aa"),
+            (false, None),
+            "not hydrated yet"
+        );
+        block_on(m.hydrate_cues()).expect("hydrate");
+        assert_eq!(
+            m.cue_verdict_for_test("aa"),
+            (true, Some(CueVerdict::WatchComplete)),
+            "the fetched verdict is live"
+        );
+        assert_eq!(m.cue_verdict_for_test("bb"), (true, None), "an unseen item");
     }
 
     /// An unopenable rollup (corruption / a newer layout) is a **surfaced error**,
@@ -14757,6 +16188,7 @@ mod tests {
             dwell_ms_at_skip_visibility: 800,
             dwell_ms_at_long_visibility: 0,
             observed_at_ms: at_ms,
+            ended_by: crate::ExposureEnd::ScrolledPast,
         }
     }
 
@@ -15214,6 +16646,7 @@ mod tests {
                 viewer_liked: true,
                 reposted_post_id: Some("orig".into()),
                 viewer_repost_id: None,
+                quoted_post_id: Some("quoted".into()),
                 document: fauna_core::render::RenderDocument {
                     blocks: vec![
                         fauna_core::render::RenderBlock::LinkPreview {
@@ -15258,6 +16691,7 @@ mod tests {
                     "viewer_liked": true,
                     "reposted_post_id": "orig",
                     "viewer_repost_id": null,
+                    "quoted_post_id": "quoted",
                     "link_previews": [
                         {"url": "https://a.example/", "state": "failed"},
                         {"url": "https://b.example/", "state": "resolving"},
@@ -15280,6 +16714,7 @@ mod tests {
                     "viewer_liked": false,
                     "reposted_post_id": null,
                     "viewer_repost_id": null,
+                    "quoted_post_id": null,
                     "link_previews": [],
                 },
             ])

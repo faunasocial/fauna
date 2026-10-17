@@ -83,6 +83,22 @@ pub struct LabelerInspectView {
     /// it reads `false`.
     #[cfg_attr(feature = "uniffi", uniffi(default = false))]
     pub needs_attachment_bytes: bool,
+    /// The declared revision of the `Label` record the module emits
+    /// (`fauna_core::scoring::LabelerOutput::label_abi` — the output half of
+    /// the `label()` ABI, `content-moderation-and-ranking.md` § Tier-3 → *The
+    /// output half of the `label()` ABI*, position (ii)). Rendered beside the
+    /// five input flags. Additive on the record: an app built before it reads 1.
+    #[cfg_attr(feature = "uniffi", uniffi(default = 1))]
+    pub label_abi: u16,
+    /// A `wasm` module declaring a [`label_abi`](Self::label_abi) newer than
+    /// this build's `fauna_core::scoring::LABEL_ABI_CURRENT` — no holder of
+    /// this app's could decode what it emits, so it reads **inert and says
+    /// so**, and [`subscribable`](Self::subscribable) is false. Only a `wasm`
+    /// artifact emits labels; a `list`/`text-model` revision stamp is never
+    /// read by a runner and never sets this. Additive: an app built before it
+    /// reads `false`.
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    pub newer_than_this_app: bool,
     /// Whether `fauna_core::scoring::verify_labeler_metadata` accepted the
     /// hash/size/signature binding — re-run client-side (not just trusted from
     /// the nest) so the transparency gate holds even against a
@@ -118,6 +134,40 @@ pub struct LabelerInspectView {
     /// bounds the artifact, so a full render is always feasible. Empty for
     /// every other kind and for an unverifiable model.
     pub model_ngrams: Vec<LabelerInspectModelNgram>,
+}
+
+impl LabelerInspectView {
+    /// Whether the inspect-before-subscribe gate lets this labeler be
+    /// subscribed — the ONE predicate both the machine's refusal
+    /// ([`crate::LabelerCatalogMachine::subscribe`]) and every app's
+    /// subscribe-enable read, so the two can never disagree.
+    ///
+    /// Exactly "no [`subscribe_refusal_key`](Self::subscribe_refusal_key)":
+    /// every reason a labeler is inspectable but not subscribable lives there,
+    /// never as a second check beside it.
+    pub fn subscribable(&self) -> bool {
+        self.subscribe_refusal_key().is_none()
+    }
+
+    /// Why this labeler may not be subscribed, as the i18n key the refusal
+    /// names on `error-message` — or `None` when it may. Two reasons, checked
+    /// in this order (a tampered artifact's declarations are not to be
+    /// believed, so "unverified" outranks what it claims):
+    ///
+    /// 1. not [`verified`](Self::verified) (`content-moderation-and-ranking.md`
+    ///    § Tier-3: "`verified` reads false and subscribe stays disabled");
+    /// 2. [`newer_than_this_app`](Self::newer_than_this_app) — the output-ABI
+    ///    ruling's position (ii): the labeler reads inert and says so, with
+    ///    subscribe disabled. The same key is the inspect panel's notice.
+    pub fn subscribe_refusal_key(&self) -> Option<&'static str> {
+        if !self.verified {
+            Some(crate::machine::SUBSCRIBE_UNVERIFIED_KEY)
+        } else if self.newer_than_this_app {
+            Some(crate::machine::NEEDS_NEWER_APP_KEY)
+        } else {
+            None
+        }
+    }
 }
 
 /// One n-gram of an inspected `text-model` artifact
@@ -186,4 +236,25 @@ pub struct LabelerCatalogSnapshot {
     ///
     /// [`LabelerCatalogMachine::refresh`]: crate::LabelerCatalogMachine::refresh
     pub loaded: bool,
+}
+
+impl LabelerCatalogSnapshot {
+    /// Whether the row at `index` paints `labeler-catalog-item-subscribe-button`
+    /// enabled — the visible half of the gate
+    /// [`crate::LabelerCatalogMachine::subscribe`] enforces. False only when the
+    /// open inspect view is THIS row's labeler and fails
+    /// [`LabelerInspectView::subscribable`] (and for a row that does not
+    /// exist); every other row stays enabled, since the machine re-inspects at
+    /// the gesture anyway. Every app reads this one method (UniFFI and WASM
+    /// through [`crate::LabelerCatalogMachine::subscribe_enabled`]), never a
+    /// mirrored `verified` check of its own.
+    pub fn subscribe_enabled(&self, index: u32) -> bool {
+        let Some(entry) = self.entries.get(index as usize) else {
+            return false;
+        };
+        self.inspecting
+            .as_ref()
+            .filter(|v| v.labeler_id == entry.labeler_id)
+            .is_none_or(LabelerInspectView::subscribable)
+    }
 }

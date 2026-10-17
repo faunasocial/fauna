@@ -52,7 +52,7 @@ Stamped 2026-09-26 at 61f9d7ceb0.
 | App | Status | Stamp |
 |---|---|---|
 | web | ✅ full | 0.1.2-dev+e48628f5 standalone |
-| linux | ✅ full | 0.1.2-dev+c4a95c20 standalone |
+| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
 | windows | ✅ full | 0.1.2-dev+6d8dc256.dirty standalone |
 | macos | ✅ full | |
 | ios | ⚠ partial | |
@@ -62,9 +62,9 @@ Stamped 2026-09-26 at 61f9d7ceb0.
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_search.py::test_search_and_clear` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_search.py::test_search_no_results` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_search.py::test_search_no_results` | web (linux): passed, linux (linux): failed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_search.py::test_search_load_more_hidden_when_under_limit` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_search.py::test_search_load_more_button_appears_at_limit` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_search.py::test_search_load_more_button_appears_at_limit` | web (linux): passed, linux (linux): failed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_search.py::test_activating_a_post_search_result_navigates_to_its_post_detail` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_search.py::test_activating_a_contact_search_result_for_a_deleted_card_surfaces_error` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_search.py::test_a_phone_result_for_a_card_deleted_since_a_desktop_seat_indexed_it_surfaces_error` | macos (macos): passed, ios (macos): passed |

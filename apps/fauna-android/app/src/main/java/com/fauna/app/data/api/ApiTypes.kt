@@ -64,11 +64,10 @@ data class BlobResponse(val hash: String)
 //  merged SearchResultRow snapshot directly, no per-app model.)
 
 // -- Feed --
-// The feed/posts surface migrated to the fauna.feed.* / fauna.posts.* WS-RPC
-// kinds; the feed list/post/query/create
-// reply types now ride the shared FfiFeedSummary / FfiFeedPostItem /
-// FfiFeedPostsReply / FfiFeedLocalPostsReply records directly (no per-app
-// model — priority #4), so the old JSON DTOs were deleted.
+// The Feed page renders the shared, stateful FeedManager (libs/fauna-feed,
+// over the FfiFeedManager UniFFI façade) — see KidsExcisedApi.feedManager /
+// FeedManagerHost. No per-app model (priority #4); the old JSON DTOs and the
+// thin FfiFeedClient wrappers were deleted.
 
 // -- Calendars & Events --
 //
@@ -184,13 +183,6 @@ data class PostDetail(
     val cid: String? = null,
     @SerialName("root_uri") val rootUri: String? = null,
     @SerialName("root_cid") val rootCid: String? = null
-)
-
-@Serializable
-data class BlueskyThreadResponse(
-    val post: PostDetail,
-    val parents: List<PostDetail> = emptyList(),
-    val replies: List<PostDetail> = emptyList()
 )
 
 // -- Calendar View --

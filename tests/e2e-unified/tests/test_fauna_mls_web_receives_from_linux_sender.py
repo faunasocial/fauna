@@ -106,7 +106,7 @@ def test_fauna_mls_web_receives_from_linux_sender(
     # bootstrap can fetch one. bob keeps the private half — that lets him DECRYPT.
     deadline = time.time() + 20
     while time.time() < deadline:
-        if conv_api.keypackage_count(port, alice, bob_actor_id) >= 1:
+        if conv_api.keypackage_count(port, test_user, bob_actor_id) >= 1:
             break
         time.sleep(0.5)
     else:
@@ -114,7 +114,7 @@ def test_fauna_mls_web_receives_from_linux_sender(
             "bob's web client never published a key package "
             "(real-backend ensureKeypackages)"
         )
-    before = conv_api.keypackage_count(port, alice, bob_actor_id)
+    before = conv_api.keypackage_count(port, test_user, bob_actor_id)
 
     # bob must ACCEPT alice, or the nest refuses her Welcome outright: since
     # 2026-08-02 the DM plane consults the recipient's inbox mode, and bob's
@@ -141,7 +141,7 @@ def test_fauna_mls_web_receives_from_linux_sender(
 
     # alice's bootstrap consumed one of bob's key packages (the Welcome was minted
     # against it) — a nest-side check the cross-engine bootstrap really fired.
-    assert conv_api.keypackage_count(port, alice, bob_actor_id) < before, \
+    assert conv_api.keypackage_count(port, test_user, bob_actor_id) < before, \
         "the 1:1 bootstrap should consume one of bob's key packages"
 
     # ── bob's WEB GUI drains his inbox, joins the Welcome's group, pulls the

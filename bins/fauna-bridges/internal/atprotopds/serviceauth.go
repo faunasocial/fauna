@@ -46,6 +46,11 @@ import (
 // Short by design: a service JWT is a bearer credential for one method against
 // one audience, and it travels to a third party we do not control. Its lifetime
 // is the whole revocation story, because nothing revokes it once issued.
+//
+// The cap's one home is shared Rust
+// (`fauna_bridge_atproto::service_auth::MAX_LIFETIME_SECS`), which the nest's
+// oracle door clamps to as well; this package is cgo-free, so it keeps a copy,
+// pinned equal by cmd/fauna-atproto-bridge's serviceauth_cap_crossbinary_test.go.
 const MaxServiceAuthLifetime = 60 * time.Second
 
 // serviceAuthAlg is the JWS algorithm for a K-256 repo signing key. Pinned

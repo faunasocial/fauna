@@ -3,6 +3,8 @@
   import { identity, reconnectTick } from '$lib/store';
   import { ensureWasm, attendeeDisplay, rsvpStatusLabel, reminderLabel, reminderPresets, resolveCalendarSelection, calendarIsDisplayed, workingDayStart, normalizeEventDatetimeInput, type ReminderPresetOption } from '$lib/wasm';
   import { resolveLocalized } from '$lib/i18n/localized';
+  import { refusedChanges, dismissRefusedChange, type RefusedChange } from '$lib/conversations';
+  import { onStoreChange } from '$lib/store-change';
   import {
     listCalendars,
     createCalendar,
@@ -160,10 +162,13 @@
   let importing = $state(false);
   let importResult = $state<{ imported: number; skipped: number; total: number } | null>(null);
   let exporting = $state(false);
+  let exportedName = $state<string | null>(null);
+  let importFileInput = $state<HTMLInputElement | undefined>(undefined);
 
   // Server-push subscription (live RSVP refresh); unsubscribed on destroy.
   let unsubPush: (() => void) | null = null;
   let unsubReconnect: (() => void) | null = null;
+  let unsubStore: (() => void) | null = null;
 
   // The reminder preset catalog (value + localized label), populated in
   // onMount from the shared `reminder_presets` map (events.md § Reminders) —
@@ -247,14 +252,57 @@
       if (firstTick) { firstTick = false; return; }
       void loadCalendars().then(refreshEvents);
     });
+
+    // The store-change notice (`$lib/store-change`): the refused-change list
+    // is this page's one store-backed render source, and a refusal is the
+    // runtime's own background write to the store — a source of the notice
+    // like a pump run (`account-runtime.md` § Multi-instance concurrency →
+    // *A runtime's own pump is a source of the notice too*, part 2). Re-read
+    // the list only — the calendars and events beside it are the nest's, so
+    // the notice says nothing about them. A level: an unchanged read paints
+    // the same rows; the page's own dismiss repaints from its own answer.
+    unsubStore = onStoreChange(() => {
+      void loadRefusedChanges(); // manager-gate-ok: store-change subscription, not a user action
+    });
   });
 
   onDestroy(() => {
     unsubPush?.();
     unsubReconnect?.();
+    unsubStore?.();
   });
 
+  // The refused-change list (`ui/events.md` § Refused scheduling changes):
+  // someone tried to change an event here and the shared apply refused them.
+  // Absent unless non-empty; its wording is the shared view's, and the only
+  // control is a dismiss — no "apply anyway", by ruling.
+  let refused = $state<RefusedChange[]>([]);
+
+  async function loadRefusedChanges() {
+    try {
+      refused = await refusedChanges();
+    } catch (e) {
+      // The manager or store is not up yet: the list stays as it was.
+      console.warn('[events] refused changes not loaded:', e);
+    }
+  }
+
+  function refusedReason(r: RefusedChange): string {
+    const reason = resolveLocalized(r.reason);
+    return r.attempts ? `${reason} ${resolveLocalized(r.attempts)}` : reason;
+  }
+
+  async function dismissRefused(key: string) {
+    try {
+      await dismissRefusedChange(key);
+    } catch (e) {
+      console.warn('[events] refused change not dismissed:', e);
+    }
+    await loadRefusedChanges();
+  }
+
   async function loadCalendars() {
+    void loadRefusedChanges();
     const id = $identity;
     if (!id) return;
     error = '';
@@ -507,6 +555,14 @@
     clearEventDraft();
   }
 
+  /** The explicit discard (`event-form-discard`): unlike the Cancel toggle, which
+   *  keeps the draft, this empties the buffers AND the rail and closes the form
+   *  (events.md § Persistence: "an explicit discard, clears the rail"). */
+  function discardEvent() {
+    clearCompose();
+    showNewEvent = false;
+  }
+
   // Double-click a month-grid day cell → open the new-event compose prefilled
   // with that date (Outlook day-cell model, events.md § Layout & flow, slice 2).
   // Prefills `dtstart` only (the `datetime-local` shape, at the shared working
@@ -668,26 +724,25 @@
     const id = $identity;
     const cal = activeCalendar;
     if (!id || !cal) return;
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = '.ics,text/calendar';
-    input.onchange = async () => {
-      const file = input.files?.[0];
-      if (!file) return;
-      importing = true;
-      importResult = null;
-      error = '';
-      try {
-        const text = await file.text();
-        importResult = await importCalendar(id.secretHex, cal.id, text, selfEmail());
-        await refreshEvents();
-      } catch (e: any) {
-        error = e.message || t.events.error.import;
-      } finally {
-        importing = false;
-      }
-    };
-    input.click();
+    const file = importFileInput?.files?.[0];
+    // No file chosen is said, never a silent no-op (events.md § Import / Export).
+    if (!file) {
+      error = t.events.ics_file_required;
+      return;
+    }
+    importing = true;
+    importResult = null;
+    exportedName = null;
+    error = '';
+    try {
+      const text = await file.text();
+      importResult = await importCalendar(id.secretHex, cal.id, text, selfEmail());
+      await refreshEvents();
+    } catch (e: any) {
+      error = e.message || t.events.error.import;
+    } finally {
+      importing = false;
+    }
   }
 
   async function handleExport() {
@@ -695,16 +750,24 @@
     const cal = activeCalendar;
     if (!id || !cal) return;
     exporting = true;
+    importResult = null;
+    exportedName = null;
     error = '';
     try {
       const icsText = await exportCalendar(id.secretHex, cal.id);
       const blob = new Blob([icsText], { type: 'text/calendar' });
       const url = URL.createObjectURL(blob);
+      const name = `${cal.name || 'calendar'}.ics`;
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${cal.name || 'calendar'}.ics`;
+      a.download = name;
+      // Attached for the click and revoked later: a detached anchor, or a URL
+      // revoked before the download has read it, can drop the download.
+      document.body.appendChild(a);
       a.click();
-      URL.revokeObjectURL(url);
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+      exportedName = name;
     } catch (e: any) {
       error = e.message || t.events.error.export;
     } finally {
@@ -801,6 +864,23 @@
 </script>
 
 <h1 data-testid={IDS.PAGE_HEADING}>{t.events.title}</h1>
+
+{#if refused.length > 0}
+  <section class="refused-changes" data-testid={IDS.REFUSED_CHANGE_LIST}>
+    <h2>{t.events.refused_changes.title}</h2>
+    {#each refused as r (r.key)}
+      <div class="refused-change" data-testid={IDS.REFUSED_CHANGE_ITEM}>
+        <div class="refused-change-texts">
+          <strong data-testid={IDS.REFUSED_CHANGE_TITLE}>{resolveLocalized(r.headline)}</strong>
+          <span data-testid={IDS.REFUSED_CHANGE_AUTHOR}>{resolveLocalized(r.author)}</span>
+          <span data-testid={IDS.REFUSED_CHANGE_REASON}>{refusedReason(r)}</span>
+          <span class="refused-change-time" data-testid={IDS.REFUSED_CHANGE_TIME}>{new Date(r.lastRefusedAt * 1000).toLocaleDateString()}</span>
+        </div>
+        <button class="view-btn" data-testid={IDS.REFUSED_CHANGE_DISMISS} onclick={() => dismissRefused(r.key)}>{t.events.refused_changes.dismiss}</button>
+      </div>
+    {/each}
+  </section>
+{/if}
 
 <div class="view-toggle" data-testid={IDS.EVENTS_VIEW_TOGGLE}>
   <button class="view-btn" data-testid={IDS.CALENDAR_VIEW_AGENDA} class:active={viewMode === 'agenda'} onclick={() => { viewMode = 'agenda'; }}>{t.events.view_agenda}</button>
@@ -915,22 +995,40 @@
               >
                 {showNewEvent ? t.common.cancel : t.events.new_event}
               </button>
-              <button
-                class="btn"
-                onclick={handleImport}
-                disabled={importing}
-              >
-                {importing ? t.events.importing : t.events.import_ics}
-              </button>
-              <button
-                class="btn"
-                onclick={handleExport}
-                disabled={exporting}
-              >
-                {exporting ? t.events.exporting : t.events.export_ics}
-              </button>
             </div>
           </div>
+
+          <div class="ics-controls">
+            <input
+              type="file"
+              accept=".ics,text/calendar"
+              data-testid={IDS.CALENDAR_IMPORT_FILE}
+              bind:this={importFileInput}
+            />
+            <button
+              data-testid={IDS.CALENDAR_IMPORT_BUTTON}
+              class="btn"
+              onclick={handleImport}
+              disabled={importing}
+            >
+              {importing ? t.events.importing : t.events.import_ics}
+            </button>
+            <button
+              data-testid={IDS.CALENDAR_EXPORT_BUTTON}
+              class="btn"
+              onclick={handleExport}
+              disabled={exporting}
+            >
+              {exporting ? t.events.exporting : t.events.export_ics}
+            </button>
+          </div>
+
+          {#if exportedName}
+            <div class="import-result">
+              {t.events.calendar_exported({ path: exportedName })}
+              <button class="btn" onclick={() => { exportedName = null; }}>{t.common.dismiss}</button>
+            </div>
+          {/if}
 
           {#if importResult}
             <div class="import-result">
@@ -996,6 +1094,14 @@
                 disabled={creatingEvent || !newEventSummary.trim() || !newEventDtstart || !newEventDtend}
               >
                 {creatingEvent ? t.common.creating : t.events.create_event}
+              </button>
+              <button
+                data-testid={IDS.EVENT_FORM_DISCARD}
+                class="btn"
+                onclick={discardEvent}
+                disabled={creatingEvent}
+              >
+                {t.events.discard_event}
               </button>
             </div>
           {/if}
@@ -1215,6 +1321,20 @@
 {/if}
 
 <style>
+  .refused-changes { margin: 0.5rem 0 1rem; }
+  .refused-changes h2 { font-size: 1rem; margin: 0 0 0.4rem; }
+  .refused-change {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    margin-bottom: 0.4rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .refused-change-texts { display: flex; flex-direction: column; gap: 0.15rem; }
+  .refused-change-time { color: var(--text-muted); font-size: 0.85em; }
   .events-layout {
     display: flex;
     gap: 1.5rem;
@@ -1523,6 +1643,13 @@
     gap: 0.375rem;
     align-items: center;
     flex-wrap: wrap;
+  }
+  .ics-controls {
+    display: flex;
+    gap: 0.375rem;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: 0.5rem;
   }
   .import-result {
     padding: 0.625rem 0.75rem;

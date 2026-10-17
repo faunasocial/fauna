@@ -143,7 +143,11 @@ const DISCOVERY_MAX_EVENTS: u32 = 60;
 /// each app launch's own bootstrap reads and the recipient picker's
 /// resolve-on-input. Sixty of those inside one sliding minute is ordinary
 /// harness traffic — which is exactly what the comment above already says about
-/// ordinary *production* traffic.
+/// ordinary *production* traffic. (Until 2026-10-10 the chattiest draw of all
+/// was the clients' own bound-identity resolver, which re-read `nest.info` on
+/// every "which nest is this" question — every backups-page read and enroll
+/// among them; it is proven once per connection since, `security.md`
+/// § Transport trust → *The proven identity is remembered per connection*.)
 ///
 /// The failure is worse than a red: it lands inside whatever test happens to be
 /// running and reads as that test's own product bug. Measured 2026-08-30 — three
@@ -261,6 +265,28 @@ pub const fn invite_verify_config() -> LimiterConfig {
         max_events: 10,
     }
 }
+
+/// Per-source throttle for the web paywall's two visitor entitlement doors
+/// (`POST /api/v1/paywall/redeem`, `GET /api/v1/paywall/return/{provider}`):
+/// sized exactly as [`invite_verify_config`], because a payment claim code is
+/// the invite code's strength (10 chars of the same 31-symbol alphabet,
+/// `admin::generate_invite_code`, ≈49 bits) and below its severity class (a
+/// guess yields reads of one creator's paid web content on one site — never an
+/// account, never admin), so a per-source bound suffices and no global cap is
+/// warranted (`monetization.md` § Pillar 2 → *Visitor entitlement doors* ruling
+/// (1)). **Neither this budget nor the code length may be loosened without the
+/// other being restored** (`federation.md` § Security). Each door keys its own
+/// bucket ([`PAYWALL_REDEEM_BUCKET`], [`PAYWALL_RETURN_BUCKET`]).
+pub const fn paywall_door_config() -> LimiterConfig {
+    invite_verify_config()
+}
+
+/// The redeem door's bucket name in the paywall-door limiter (the limiter's
+/// credential slot — an HTTP door has no WS kind).
+pub const PAYWALL_REDEEM_BUCKET: &str = "paywall.redeem";
+
+/// The return door's bucket name in the paywall-door limiter.
+pub const PAYWALL_RETURN_BUCKET: &str = "paywall.return";
 
 /// Per-source throttle for the self-service account-registration surface
 /// (`fauna.account.register`): 10 attempts / 60 s **per source IP**. Register is
@@ -700,6 +726,13 @@ mod tests {
         assert!(global_claim_config().max_events >= claim_config().max_events);
         // Invite verify is per-source only (no global), tight like the claim.
         assert_eq!(invite_verify_config().max_events, claim_config().max_events);
+        // The paywall doors guess a code of the invite code's strength: same
+        // budget, same window (monetization.md § Visitor entitlement doors (1)).
+        assert_eq!(
+            paywall_door_config().max_events,
+            invite_verify_config().max_events
+        );
+        assert_eq!(paywall_door_config().window, invite_verify_config().window);
         // Register and invite-request submit are per-source writes: generous
         // enough for a one-shot legitimate onboarding (with retries) yet bounded.
         assert!(register_config().max_events > 0);

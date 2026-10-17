@@ -1,5 +1,5 @@
 //! The off-disk placeholder posture — the engine's half of the linux FUSE root's
-//! dehydrate rule (`docs/goal/behavior/on-demand-files.md` § Linux FUSE binding:
+//! dehydrate rule (`docs/goal/behavior/on-demand-files-linux.md` § Linux FUSE binding:
 //! *Dehydrate ("free up space") removes the underlying bytes — and that removal
 //! is NEVER a delete*).
 //!

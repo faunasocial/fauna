@@ -122,22 +122,19 @@ services:
       - /opt/fauna/maintenance-host:/data/maintenance-host:ro
     environment:
       FAUNA_MODE: public
+      FAUNA_IMAGE_TAG: latest
       FAUNA_CLAMD_ADDR: clamd:3310
       FAUNA_RSPAMD_URL: http://rspamd:11333
     labels:
-      - "com.centurylinklabs.watchtower.enable=true"
+      - "social.fauna.update=true"
     logging: *default-logging
     stop_grace_period: 15s
     restart: unless-stopped
-  watchtower:
-    image: nickfedor/watchtower:latest@sha256:3b8d2e3f0f6ff9295a5d634e4fdb7062e5e6602f71d89baa15cd4d39d22b5743
+  fauna-updater:
+    image: ghcr.io/faunasocial/nest:latest
+    entrypoint: ["/usr/local/bin/fauna-updater"]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-    environment:
-      WATCHTOWER_CLEANUP: "true"
-      WATCHTOWER_POLL_INTERVAL: "300"
-      WATCHTOWER_LABEL_ENABLE: "true"
-      WATCHTOWER_ROLLING_RESTART: "true"
     logging: *default-logging
     restart: unless-stopped
   clamd:

@@ -39,6 +39,12 @@ const (
 	RefusalPolicy       = "policy"
 	RefusalFaunaSurface = "fauna_surface"
 	RefusalDeferred     = "deferred"
+	// The two whole-batch oracle refusals (atproto_pds.rs
+	// EXTERNAL_WRITE_REFUSAL_*): every row of the batch carries the same one.
+	// A revoked/expired session answers the uniform AuthenticationRequired; a
+	// session over its ceiling answers RateLimitExceeded.
+	RefusalSessionRevoked = "session_revoked"
+	RefusalRateLimited    = "rate_limited"
 )
 
 // Batch/record caps (mirror atproto_pds.rs). The bridge pre-checks so an
@@ -330,6 +336,12 @@ type ExternalWriteResult struct {
 type ingestExternalWriteRequest struct {
 	ActorID []byte          `cbor:"actor_id"`
 	Writes  []ExternalWrite `cbor:"writes"`
+	// SessionID is the session family the XRPC call authenticated under
+	// (xrpc.Caller.SessionID). It makes the round trip the oracle's per-write
+	// moment: the nest refuses a revoked or expired session, applies the
+	// per-session ceiling and records the write (key-material-hierarchy.md §
+	// The oracle → The ATProto classes ride the protocol's own door).
+	SessionID []byte `cbor:"session_id,omitempty"`
 }
 
 type ingestExternalWriteReply struct {
@@ -340,14 +352,16 @@ type ingestExternalWriteReply struct {
 // write (D2/D6 membership), round-trips what Fauna can express into real Fauna
 // mutations via the D10 delegated sub-key, journals what it cannot, and refuses
 // with a sub-type otherwise. Results are positionally aligned with writes.
+// sessionID is the caller's session family; nil omits it (the nest then skips
+// the oracle's live check, ceiling and record).
 //
 // A refused write does NOT fail the call — refusals are per-write DATA, so a
 // mixed applyWrites reports exactly which rows the caller must fix. An error
 // return means the whole batch failed (a malformed request: the bridge's bug).
-func IngestExternalWrite(ctx context.Context, c Caller, actorID []byte, writes []ExternalWrite) ([]ExternalWriteResult, error) {
+func IngestExternalWrite(ctx context.Context, c Caller, actorID, sessionID []byte, writes []ExternalWrite) ([]ExternalWriteResult, error) {
 	var reply ingestExternalWriteReply
 	if err := c.Call(ctx, MethodAtprotoIngestExternalWrite,
-		ingestExternalWriteRequest{ActorID: actorID, Writes: writes}, &reply); err != nil {
+		ingestExternalWriteRequest{ActorID: actorID, Writes: writes, SessionID: sessionID}, &reply); err != nil {
 		return nil, fmt.Errorf("atproto.ingest_external_write: %w", err)
 	}
 	if len(reply.Results) != len(writes) {
@@ -410,6 +424,43 @@ func DeliverAtprotoPermissionSet(ctx context.Context, c Caller, requestID []byte
 	req := deliverPermissionSetRequest{RequestID: requestID, NSID: nsid, Record: record}
 	if err := c.Call(ctx, MethodAtprotoDeliverPermissionSet, req, &reply); err != nil {
 		return false, fmt.Errorf("atproto.deliver_permission_set: %w", err)
+	}
+	return reply.Accepted, nil
+}
+
+// ── The oracle's atproto.service_auth class — the bridge→nest half ──────────
+
+// MethodAtprotoDeliverServiceAuth answers one
+// `fauna.bridges.atproto.service_auth_requested` push: the nest's door
+// `fauna.atproto.oracle.service_auth` decided, and this is the token this
+// bridge minted with the account's repo signing key — the key only it holds
+// (key-material-hierarchy.md § The oracle → *The bridge-held custodian*) —
+// correlated by the request id the push carried.
+const MethodAtprotoDeliverServiceAuth = "fauna.bridges.atproto.deliver_service_auth"
+
+// deliverServiceAuthRequest mirrors atproto_pds.rs::DeliverServiceAuthRequest.
+//
+// Token is omitted, not sent empty, when this bridge could not mint: the nest
+// reads absence as a refusal and answers its caller at once rather than at its
+// deadline. The reason is never carried; it describes bridge-internal key
+// state.
+type deliverServiceAuthRequest struct {
+	RequestID []byte  `cbor:"request_id"`
+	Token     *string `cbor:"token,omitempty"`
+}
+
+type deliverServiceAuthReply struct {
+	Accepted bool `cbor:"accepted"`
+}
+
+// DeliverAtprotoServiceAuth hands the nest the outcome of one requested mint:
+// the token, or nil for a refusal. It returns whether the nest still waited
+// on it — `false` is ordinary (its deadline answered first).
+func DeliverAtprotoServiceAuth(ctx context.Context, c Caller, requestID []byte, token *string) (bool, error) {
+	var reply deliverServiceAuthReply
+	req := deliverServiceAuthRequest{RequestID: requestID, Token: token}
+	if err := c.Call(ctx, MethodAtprotoDeliverServiceAuth, req, &reply); err != nil {
+		return false, fmt.Errorf("atproto.deliver_service_auth: %w", err)
 	}
 	return reply.Accepted, nil
 }

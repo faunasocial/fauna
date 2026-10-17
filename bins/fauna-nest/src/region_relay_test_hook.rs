@@ -80,7 +80,7 @@ struct SeedRequest {
     rules: Vec<SeedRule>,
 }
 
-fn synthetic_registry(region: &RegionCode) -> RegionRegistry {
+pub(crate) fn synthetic_registry(region: &RegionCode) -> RegionRegistry {
     let key = ed25519_dalek::SigningKey::from_bytes(&SYNTHETIC_SEED);
     RegionRegistry {
         version: 1,

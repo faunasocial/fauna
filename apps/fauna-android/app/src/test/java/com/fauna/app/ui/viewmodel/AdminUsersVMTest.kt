@@ -1,6 +1,7 @@
 package com.fauna.app.ui.viewmodel
 
 import com.fauna.app.core.ApiClient
+import com.fauna.ffi.FfiAdminPendingAction
 import com.fauna.ffi.FfiAdminUser
 import com.fauna.ffi.FfiAdminUsersListReply
 import kotlinx.coroutines.Dispatchers
@@ -11,6 +12,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.mockito.Mockito.verify
 import org.junit.Before
 import org.junit.Test
 import org.mockito.Mockito.mock
@@ -52,6 +54,51 @@ class AdminUsersVMTest {
         mailServingEnabled = true,
         isAdmin = false,
     )
+
+    private fun pendingAction(id: Long) = FfiAdminPendingAction(
+        id = id,
+        actorId = ByteArray(32) { 0x66 },
+        actorShort = "666666666666…",
+        actionType = "admin.add",
+        target = null,
+        description = "Grant the admin role",
+        status = "pending",
+        isPending = true,
+        createdAt = 0,
+        executeAfter = 1_700_000_000,
+        requiresQuorum = 1,
+        approvals = emptyList(),
+    )
+
+    @Test
+    fun refreshLoadsPendingAdminActions() = runTest {
+        val api = mock(ApiClient::class.java)
+        val action = pendingAction(3)
+        whenever(api.adminUsersList(AdminUsersVM.PAGE_SIZE, 0L)).thenReturn(FfiAdminUsersListReply(emptyList(), 0))
+        whenever(api.adminInviteCodesList()).thenReturn(emptyList())
+        whenever(api.adminInviteRequestsList()).thenReturn(emptyList())
+        whenever(api.adminPendingActionsList()).thenReturn(listOf(action))
+        val vm = AdminUsersVM(api)
+
+        vm.refresh()
+
+        assertEquals(listOf(action), vm.pendingActions.value)
+    }
+
+    @Test
+    fun approveAndCancelCallTheKindsThenRelist() = runTest {
+        val api = mock(ApiClient::class.java)
+        val action = pendingAction(3)
+        whenever(api.adminPendingActionsList()).thenReturn(listOf(action))
+        val vm = AdminUsersVM(api)
+
+        vm.approvePendingAction(action)
+        vm.cancelPendingAction(action)
+
+        verify(api).adminPendingActionApprove(3L)
+        verify(api).adminPendingActionCancel(3L)
+        assertEquals(listOf(action), vm.pendingActions.value)
+    }
 
     @Test
     fun refreshPopulatesAllUsersSeparatelyFromThePaginatedPage() = runTest {

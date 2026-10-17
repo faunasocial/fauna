@@ -195,6 +195,15 @@ public static class ContentPolicyCache
     /// An item's verdict is read once at construction, so the surface that changed
     /// the list re-syncs its rows (an equal-by-content row is kept in place).
     /// </summary>
+    internal static bool HiddenContentEquals(string[]? hidden)
+    {
+        lock (_gate)
+        {
+            var held = _inputs.HiddenContent ?? Array.Empty<string>();
+            return held.AsSpan().SequenceEqual(hidden ?? Array.Empty<string>());
+        }
+    }
+
     internal static void SetHiddenContent(string[]? hidden)
     {
         lock (_gate)

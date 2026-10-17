@@ -42,6 +42,7 @@ import requests
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from common.auth import create_actor_and_register, sync_changes_record, sync_register, user_create_folder
+from helpers.set_names import addressed
 
 pytestmark = pytest.mark.tier_3
 
@@ -56,7 +57,7 @@ def _ws(nest_instance, actor) -> WsRpcAdminClient:
 
 def _snapshot_rows(nest_instance, actor, folder) -> list[dict]:
     with _ws(nest_instance, actor) as ws:
-        return ws.call("fauna.filesync.snapshot.list", {"folder": folder})["rows"]
+        return ws.call("fauna.filesync.snapshot.list", addressed(folder))["rows"]
 
 
 def _set_nest_place(nest_instance, actor, folder, *, snapshots: bool, quiet_secs: int) -> None:
@@ -67,10 +68,7 @@ def _set_nest_place(nest_instance, actor, folder, *, snapshots: bool, quiet_secs
     with _ws(nest_instance, actor) as ws:
         ws.call(
             "fauna.folders.update",
-            {
-                "name": folder,
-                "nest_place": {"snapshots": snapshots, "quiet_secs": quiet_secs},
-            },
+            addressed(folder, nest_place={"snapshots": snapshots, "quiet_secs": quiet_secs}),
         )
 
 

@@ -14,7 +14,7 @@ Why no existing harness fits (so this file exists):
     snapshot-injection — they never fire the real `provision_mail_at_first_setup`
     glue;
   - the believable mail round-trip (`test_mail_enable_live_nest.py`) is
-    live-remote-only (it factory-resets example.com, env-gated), and claims the
+    live-remote-only (it factory-resets the live nest, env-gated), and claims the
     nest as **admin**;
   - `test_mail_bridge_mda.py` pre-provisions the recipient's wrapped-MSEK blob
     out-of-band via the `seal-helper` (no client driver), so it can't prove the

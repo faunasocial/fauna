@@ -32,6 +32,18 @@ thread_local! {
     /// guardian floor, and the Guardian Notify counter, all in one instance.
     static CORE: RefCell<fauna_core::obligation::ContentPolicyState> =
         RefCell::new(fauna_core::obligation::ContentPolicyState::default());
+    /// See [`epoch`].
+    static EPOCH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// The own-threshold pair last set, so [`set_spam_preferences`] bumps [`EPOCH`]
+    /// only on a real change.
+    static LAST_OWN: std::cell::Cell<Option<(u16, u16)>> = const { std::cell::Cell::new(None) };
+}
+
+/// Bumped whenever the viewer's own thresholds actually change. A view that
+/// decides a verdict at build time and reuses its widgets across renders (the
+/// conversations bubbles) compares this to know it must rebuild.
+pub fn epoch() -> u64 {
+    EPOCH.with(|e| e.get())
 }
 
 /// The current epoch seconds and the device's local UTC offset in minutes.
@@ -52,6 +64,12 @@ pub(crate) fn now_and_offset() -> (i64, i32) {
 /// `fauna.spam.get_preferences` read). A later render composes them via
 /// [`verdict_for`]. `None` clears them.
 pub fn set_spam_preferences(prefs: Option<SpamPreferences>) {
+    let pair = prefs
+        .as_ref()
+        .map(|p| (p.spam_threshold, p.phishing_threshold));
+    if LAST_OWN.with(|l| l.replace(pair)) != pair {
+        EPOCH.with(|e| e.set(e.get() + 1));
+    }
     let thresholds = prefs.map(|p| ViewerThresholds {
         spam_permille: p.spam_threshold,
         phishing_permille: p.phishing_threshold,
@@ -82,6 +100,39 @@ pub fn set_ward_content_policy(policy: Option<ContentPolicy>) {
 /// the verb reads `.verdict`.
 pub fn verdict_for(labels: &[ContentLabelEntry]) -> ComposedVerdict {
     CORE.with(|c| c.borrow().verdict_for(labels))
+}
+
+/// The render verdict for one **identified** item over labels the caller has
+/// already joined with the region scorers' factors — [`verdict_for`] plus the
+/// viewer's own reports (`moderation.md` § Corollary): an item the viewer
+/// reported, or whose author they reported, is a `Block` attributed
+/// [`VerdictSource::Reported`](fauna_core::obligation::VerdictSource::Reported),
+/// which paints the "You reported this" placeholder. `item_id` is the id the
+/// report named (a post's cid, a message's record digest); `author_id` the
+/// item's author as hex, when the surface knows it.
+pub fn verdict_for_item(
+    item_id: &str,
+    author_id: Option<&str>,
+    labels: &[ContentLabelEntry],
+) -> ComposedVerdict {
+    CORE.with(|c| c.borrow().verdict_for_item(item_id, author_id, labels))
+}
+
+/// The words a `Block` verdict paints: the viewer's own report ("You reported
+/// this"), or the policy's notice.
+pub fn block_notice(reported: bool) -> &'static str {
+    use crate::i18n::strings::{family, moderation};
+    if reported {
+        moderation::report::HIDDEN_PLACEHOLDER
+    } else {
+        family::CONTENT_BLOCKED_NOTICE
+    }
+}
+
+/// Replace the viewer's reported-and-hidden ids with the stored list a load or
+/// a hide returned (never merged — the store's own list is the truth).
+pub fn set_hidden_content(ids: Vec<String>) {
+    CORE.with(|c| c.borrow_mut().set_hidden_content(ids));
 }
 
 /// Set the region content policies in force — every region on the device's
@@ -148,6 +199,8 @@ pub fn note_enforcement(item_id: &str, labels: &[ContentLabelEntry]) {
 /// bucket at a switch is within its contract — attributing it to the wrong
 /// actor would not be.
 pub fn clear_for_identity_change() {
+    LAST_OWN.with(|l| l.set(None));
+    EPOCH.with(|e| e.set(e.get() + 1));
     CORE.with(|c| c.borrow_mut().clear_for_identity_change());
 }
 
@@ -219,6 +272,47 @@ mod tests {
     // now. What's left here is linux's own wiring: the real `SpamPreferences`
     // wire mapping, the `thread_local!` delegation, and the
     // `FamilyContentNotice` mapping on the way out.
+    /// `moderation.md` § Corollary: an item the viewer reported — by its own id
+    /// or through its author — blocks for them alone and names their own act;
+    /// the thread-local hide list reaches the shared item verdict, and an
+    /// identity change drops it.
+    #[test]
+    fn a_reported_item_blocks_as_the_viewers_own_act_and_an_identity_change_drops_it() {
+        use fauna_core::obligation::RenderVerdict;
+        reset();
+        let item = "ab".repeat(32);
+        let author = "cd".repeat(32);
+
+        let before = verdict_for_item(&item, Some(&author), &[]);
+        assert_ne!(before.verdict, RenderVerdict::Block);
+        assert!(!before.reported());
+
+        // The stored list is lowercase; ids compare case-insensitively.
+        set_hidden_content(vec![item.to_ascii_uppercase()]);
+        let by_id = verdict_for_item(&item, Some(&author), &[]);
+        assert_eq!(by_id.verdict, RenderVerdict::Block);
+        assert!(by_id.reported());
+        assert_eq!(
+            block_notice(by_id.reported()),
+            "You reported this",
+            "the placeholder names the viewer's own act"
+        );
+        // Someone else's item stays visible.
+        assert!(!verdict_for_item(&"ef".repeat(32), Some(&"01".repeat(32)), &[]).reported());
+
+        // An account report hides everything the account authored.
+        set_hidden_content(vec![author.clone()]);
+        assert!(verdict_for_item(&"ef".repeat(32), Some(&author), &[]).reported());
+
+        clear_for_identity_change();
+        assert!(!verdict_for_item(&item, Some(&author), &[]).reported());
+        assert_ne!(
+            block_notice(false),
+            block_notice(true),
+            "a policy block keeps its own words"
+        );
+    }
+
     #[test]
     fn the_thread_local_wiring_reaches_the_shared_core() {
         reset();

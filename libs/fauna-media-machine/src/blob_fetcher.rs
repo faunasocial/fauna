@@ -145,7 +145,11 @@ mod native {
     impl MediaBlobFetcher for NativeBlobFetcher {
         async fn fetch_blob(&self, hash: String) -> Result<Vec<u8>, MediaApiError> {
             self.content
-                .get(&paths::blob::by_hash(&hash))
+                .get_capped(
+                    &paths::blob::by_hash(&hash),
+                    &[],
+                    fauna_core::attachment_limits::INLINE_BLOB_BODY_LIMIT as u64,
+                )
                 .await
                 .map(|b| b.to_vec())
                 .map_err(map_api_err)
@@ -205,6 +209,7 @@ pub use native::NativeBlobFetcher;
 // verify → decrypt render leg in shared Rust on web too (priority #2).
 #[cfg(all(target_arch = "wasm32", feature = "rpc-glue"))]
 mod wasm {
+    use fauna_core::file_download::{ERROR_BODY_READ_CAP, check_declared_body_len};
     use fauna_rpc_wasm::WsRpcClient;
 
     use super::{MediaApiError, MediaBlobFetcher};
@@ -244,17 +249,36 @@ mod wasm {
 
             let status = resp.status();
             if !(200..300).contains(&status) {
-                let message = resp.text().await.unwrap_or_default();
+                let message = if check_declared_body_len(
+                    resp.headers().get("content-length").as_deref(),
+                    ERROR_BODY_READ_CAP,
+                )
+                .is_ok()
+                {
+                    resp.text().await.unwrap_or_default()
+                } else {
+                    String::new()
+                };
                 return Err(crate::nest_api::map_blob_http_err(
                     fauna_rpc_wasm::BlobHttpError::Status { status, message },
                     "blob fetch",
                 ));
             }
+            // No sealed blob is larger than the nest's inline blob door
+            // accepts; refuse a longer reply before the read, and stream the read under the cap.
+            let cap = fauna_core::attachment_limits::INLINE_BLOB_BODY_LIMIT as u64;
+            check_declared_body_len(resp.headers().get("content-length").as_deref(), cap).map_err(
+                |e| MediaApiError::Transient {
+                    detail: format!("blob fetch: {e}"),
+                },
+            )?;
             // The stored bytes verbatim (still sealed for a Library thumbnail); the
             // caller content-address-verifies + decrypts them.
-            resp.binary().await.map_err(|e| MediaApiError::Transient {
-                detail: format!("blob fetch read body: {e}"),
-            })
+            fauna_core::file_download::read_body_capped(resp, cap)
+                .await
+                .map_err(|e| MediaApiError::Transient {
+                    detail: format!("blob fetch read body: {e}"),
+                })
         }
     }
 }

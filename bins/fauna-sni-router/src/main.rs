@@ -74,7 +74,7 @@ struct Cli {
     /// close is bounded by the TCP keepalive this router arms on every accepted
     /// socket (`fauna_conn_limit::arm_dead_peer_detection`) — NOT by the
     /// backend's timeouts, which only cover a connection's pre-upgrade phase.
-    /// That mistaken assumption is what took example.com's `:443` down on
+    /// That mistaken assumption is what took the live nest's `:443` down on
     /// 2026-07-31; see the `fauna-conn-limit` crate docs.
     #[arg(long = "max-connections", default_value_t = 4096)]
     max_connections: usize,
@@ -278,7 +278,7 @@ async fn main() -> Result<()> {
         // that disappears without a clean TCP close leaves an `ESTABLISHED`
         // socket forever, permanently burning one of its IP's slots — repeat
         // ~256 times and the source is locked out for good (the 2026-07-31
-        // example.com `:443` outage). Non-fatal if it fails: the connection just
+        // the live nest `:443` outage). Non-fatal if it fails: the connection just
         // falls back to the OS default idle.
         if let Err(e) = fauna_conn_limit::arm_dead_peer_detection(&client) {
             warn!(%peer, error = %e, "could not arm TCP keepalive; connection is leak-prone");

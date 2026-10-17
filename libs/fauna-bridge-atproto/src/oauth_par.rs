@@ -504,18 +504,19 @@ fn plan_scopes(
             IncludeScope::NotAnInclude => {}
         }
         // A form-gated arm is refused to a remote-form (confidential) client
-        // (`authorization-server.md` § Scope grammar → *The read arm*): TP4
-        // grants a remote principal a folder read only over a folder it
-        // created, and no door lets one create a folder. Before the
-        // grantability check, so the bare plane and verb — a card-qualified
-        // request — is refused by this rule, by name, as the qualified
-        // string is.
+        // (`authorization-server.md` § Scope grammar → *The read arm*, *The
+        // fifth arm*): TP4 grants a remote principal keys only to a scope it
+        // created — no door lets one create a folder, and personalization
+        // models are reserved for device apps and nest-hosted code. Before
+        // the grantability check, so the bare plane and verb — a
+        // card-qualified request — is refused by this rule, by name, as the
+        // qualified string is.
         if client.is_remote_form() && crate::fauna_scope::refused_to_remote_form(scope) {
             return Err(refuse(
                 OAUTH_ERR_INVALID_SCOPE,
                 format!(
                     "`{scope}` is granted only to an app on the user's own device — a client \
-                     that authenticates with its own key cannot read the user's folders"
+                     that authenticates with its own key cannot hold keys to the user's own data"
                 ),
             ));
         }
@@ -818,6 +819,41 @@ mod tests {
         assert_eq!(
             accept(with("fauna:folder:deposit:42"), &remote).scopes,
             vec!["fauna:folder:deposit:42".to_string()]
+        );
+    }
+
+    /// The fifth arm is form-gated too (`authorization-server.md` § Scope
+    /// grammar → *The fifth arm*): a public (device) client may ask for
+    /// `fauna:personalization:rw`; a confidential (remote) client is
+    /// `invalid_scope`, on PAR and on the redirect-less start alike.
+    #[test]
+    fn the_personalization_arm_is_refused_to_a_confidential_client() {
+        let arm = crate::fauna_scope::SCOPE_PERSONALIZATION_RW;
+        let device = web_client(&format!("{arm} fauna:feed:read"));
+        let with = |scope: &str| ParRequest {
+            scope: scope.to_string(),
+            ..good_request()
+        };
+        assert_eq!(accept(with(arm), &device).scopes, vec![arm.to_string()]);
+
+        let mut remote = device.clone();
+        remote.confidential = true;
+        let (error, description) = deny(with(arm), &remote);
+        assert_eq!(error, OAUTH_ERR_INVALID_SCOPE);
+        assert!(description.contains("user's own device"), "{description}");
+        let start = StartRequest {
+            client_id: CLIENT_ID.to_string(),
+            scope: arm.to_string(),
+            login_hint: None,
+        };
+        assert!(matches!(
+            plan_start_request(start, remote.clone()),
+            ParPlan::Deny { .. }
+        ));
+        // An ungated arm stays open to the remote form.
+        assert_eq!(
+            accept(with("fauna:feed:read"), &remote).scopes,
+            vec!["fauna:feed:read".to_string()]
         );
     }
 

@@ -14,8 +14,17 @@ default = []
 # test-only setters on the wasm surface for E2E. Also forwards
 # `fauna-launch-machine/e2e-agent`, the gate on the launch clock's e2e offset:
 # `wasm-pack` builds release, so `debug_assertions` never opens it here, and
-# the localStorage clock seed + `launchClock*ForTest` getters need it.
-test-helpers = ["fauna-launch-machine/test-helpers", "fauna-launch-machine/e2e-agent"]
+# the localStorage clock seed + `launchClock*ForTest` getters need it. And
+# forwards `fauna-client-accounts/test-helpers`, the gate on the registry's
+# secret-write fault check (`write_read_back_slot`): this chunk mints and
+# persists the pending-factory-reset slot, so without it the
+# `refuse_secret_writes_for_test` fault `fauna-wasm-onboarding`'s door arms in
+# the shared localStorage backing is compiled out of the very write it targets.
+test-helpers = [
+  "fauna-launch-machine/test-helpers",
+  "fauna-launch-machine/e2e-agent",
+  "fauna-client-accounts/test-helpers",
+]
 
 # wasm32-scoped on purpose: this crate builds only for wasm32, and a plain
 # [dependencies] table would leak its wasm-only feature activations (js,

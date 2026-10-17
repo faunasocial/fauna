@@ -162,9 +162,10 @@ pub struct ResolvedHandle {
     /// Whether the resolved actor has ≥1 usable key package (one-time or
     /// last-resort), i.e. is reachable for MLS — folded from the
     /// `fauna.actor.by_handle` reply's `addressable` boolean
-    /// (`docs/goal/architecture/federation.md` § Key packages). The cross-nest
-    /// resolve path keys reachability on this (a foreign client cannot run a
-    /// `keypackage.count` probe; same-nest resolution still uses `keypackage_count`).
+    /// (`docs/goal/architecture/federation.md` § Key packages). Every handle
+    /// resolve — same-nest and foreign — keys reachability on this, with no
+    /// second call; a bare actor id asks
+    /// [`ConversationsRpc::keypackage_addressable`].
     pub addressable: bool,
 }
 
@@ -970,8 +971,20 @@ pub trait ConversationsRpc: MaybeSendSync {
     ) -> Result<Vec<FetchedRecord>, ConvRpcError>;
 
     /// `fauna.conversations.keypackage.count` — non-destructive remaining
-    /// key-package count for a target actor.
+    /// one-time key-package count. **Owner-only:** `actor_id_hex` is the
+    /// caller's own id (the top-up gauge); the nest refuses any other target
+    /// with `fauna.conversations.permission_denied`
+    /// (`docs/goal/architecture/federation.md` § Key packages — privacy &
+    /// exhaustion). Another actor's reachability is
+    /// [`ConversationsRpc::keypackage_addressable`].
     async fn keypackage_count(&self, actor_id_hex: String) -> Result<u64, ConvRpcError>;
+
+    /// `fauna.conversations.keypackage.addressable` — whether a same-nest
+    /// actor, named by a bare 64-hex id, holds ≥1 usable key package
+    /// (one-time or last-resort). The boolean reachability probe for the
+    /// actor-id form of a recipient resolve; a handle's reachability is the
+    /// `fauna.actor.by_handle` reply's [`ResolvedHandle::addressable`] bit.
+    async fn keypackage_addressable(&self, actor_id_hex: String) -> Result<bool, ConvRpcError>;
 
     /// `fauna.conversations.channel.actors` — the hex actor ids on a channel's
     /// routing roster (`actor_channels`), which the nest writes at Welcome
@@ -1295,6 +1308,10 @@ pub struct WelcomeNudge {
     /// receives; the join opens it after ingesting the set's content keys.
     /// `None` for other kinds or a carrier missing either half.
     pub set_name_seal: Option<fauna_core::label_custody::SealedSetName>,
+    /// The folder's home-nest residency stamp (`WelcomePayload.residency`) —
+    /// seeds the accept-time foreign-set record. `None` for other kinds or an
+    /// unstated stamp.
+    pub residency: Option<String>,
 }
 
 /// Inbound push seam for the fauna-native MLS conversation rail — the receive twin
@@ -1546,10 +1563,15 @@ pub trait FolderCustodySink: MaybeSendSync {
     /// record for `channel_id` — the durable twin of the backend's RAM
     /// `channel_home` map (which only covers channels joined *this* session),
     /// so a relaunched client can still route a leave/read to the set's home
-    /// nest. `None` for same-nest sets or a custody-only sink (default).
-    async fn foreign_home_url(&self, channel_id: &[u8; 32]) -> Option<String> {
+    /// nest. Tri-state: `Ok(Some(url))` foreign; `Ok(None)` same-nest (or a
+    /// custody-only sink, the default); `Err` the custody could not be read,
+    /// so the answer is **unknown** — a leave must refuse rather than treat
+    /// it as same-nest (a same-nest leave of a foreign set reports success
+    /// while the home nest keeps the member, and the retry record is then
+    /// deleted).
+    async fn foreign_home_url(&self, channel_id: &[u8; 32]) -> Result<Option<String>, String> {
         let _ = channel_id;
-        None
+        Ok(None)
     }
 
     /// Every foreign (cross-nest) set this member holds a record for, as
@@ -1574,6 +1596,33 @@ pub trait FolderCustodySink: MaybeSendSync {
     async fn foreign_homes(&self) -> Vec<([u8; 32], String)> {
         Vec::new()
     }
+}
+
+/// The owner-side twin of [`FolderCustodySink`]: re-seal a shared set's
+/// content-key envelope once the group's epoch has moved past the one it was
+/// sealed at (`mls-group-key-material.md` § Admitting a member, the *Envelope
+/// ordering* clause; `writer-signed-change-records.md` ruling (11)(b), "the
+/// owner re-publishes whenever the published epoch is behind the group's").
+/// The envelope opens only at the epoch it was sealed at, and any member's
+/// takeover commit — or the owner's own — moves the epoch with no publish
+/// behind it, so without this seam every member stays unable to open the
+/// envelope until the owner's next launch converges it.
+///
+/// The session's folder commit walk drives it: after a clean walk of a
+/// folder channel whose epoch differs from the one this seam last settled,
+/// the backend asks once. Kept behind a seam for the same dependency reason
+/// as [`FolderCustodySink`] — the sealing and signing live in
+/// `fauna_client_folders::FoldersAuthor`, whose crate depends on this one.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait FolderEnvelopeOwner: MaybeSendSync {
+    /// Re-publish `channel_id`'s envelope at the group's current epoch when
+    /// this account owns the set and the published one is behind it, absent,
+    /// or otherwise one a member cannot use. Answers whether the channel is
+    /// **settled** at the epoch the walk saw — re-published, nothing owed, or
+    /// not a set this account owns; `false` is a fault (an unreadable custody,
+    /// a transport error) and the next walk asks again. Never fails the walk.
+    async fn converge_envelope(&self, channel_id: &[u8; 32]) -> bool;
 }
 
 /// Verifier seam for the **in-group succession statement**
@@ -2070,6 +2119,57 @@ pub trait RoomRosterReader: MaybeSendSync {
     ) -> RoomPolicyVersionRead {
         RoomPolicyVersionRead::NotHeld
     }
+
+    /// Read a **run** of up to `span` consecutive policy versions starting at
+    /// `from` — [`Self::read_policy_version`] asked with the roster read's
+    /// additive `policy_version_span`, so anchoring an N-version chain costs
+    /// ceil(N / cap) reads instead of N. The run may be shorter than asked (the
+    /// nest's own cap, or the first version it never held); a nest that
+    /// predates the field serves a run of one, and the caller's walk continues
+    /// from there.
+    ///
+    /// Nothing served here is believed either: the caller judges every link.
+    /// The default asks for the one version and wraps it, so a reader that
+    /// cannot fetch a version still fails closed
+    /// ([`RoomPolicyVersionsRead::NotHeld`]).
+    async fn read_policy_versions(
+        &self,
+        channel_hex: String,
+        home_nest_url: Option<String>,
+        from: u64,
+        _span: u32,
+    ) -> RoomPolicyVersionsRead {
+        match self
+            .read_policy_version(channel_hex, home_nest_url, from)
+            .await
+        {
+            RoomPolicyVersionRead::Served { policy, birth_salt } => {
+                RoomPolicyVersionsRead::Served {
+                    policies: vec![policy],
+                    birth_salt,
+                }
+            }
+            RoomPolicyVersionRead::NotHeld => RoomPolicyVersionsRead::NotHeld,
+            RoomPolicyVersionRead::Unavailable => RoomPolicyVersionsRead::Unavailable,
+        }
+    }
+}
+
+/// The answer to [`RoomRosterReader::read_policy_versions`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RoomPolicyVersionsRead {
+    /// The home nest served a run: canonical dag-cbor
+    /// `fauna_mls::room_policy::SignedRoomPolicy` bytes, **unverified**, in
+    /// version order starting at the version asked (never empty), and the
+    /// room's birth salt when it served one.
+    Served {
+        policies: Vec<Vec<u8>>,
+        birth_salt: Option<[u8; 32]>,
+    },
+    /// As [`RoomPolicyVersionRead::NotHeld`].
+    NotHeld,
+    /// As [`RoomPolicyVersionRead::Unavailable`].
+    Unavailable,
 }
 
 /// The answer to [`RoomRosterReader::read_policy_version`].
@@ -2308,6 +2408,22 @@ pub trait ContactOverlayFolds: MaybeSendSync {
     /// fold's reload — writes nothing, and one that cannot be written is
     /// asked again at the next projection load.
     fn fold(&self, predecessor_hex: &str, successor_hex: &str);
+}
+
+/// The **contact roster** seam: where the recipient picker's contacts come
+/// from (`conversations.md` § Where logic lives → *Recipient suggestions*,
+/// source 2) — `fauna.contacts.list`, a nest read this crate never makes
+/// itself. Implemented once, in `fauna-client-conversations`
+/// (`NestContactRoster`, over `ContactsClient`), and registered on the
+/// manager by every host's session factory; the manager loads its
+/// [`crate::ContactsCache`] from it at
+/// `ConversationsManager::refresh_contact_roster`. Unset (a test manager)
+/// leaves the picker offering correspondents only.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait ContactRosterSource: MaybeSendSync {
+    /// The account's whole contact roster, or why it could not be read.
+    async fn roster(&self) -> Result<Vec<crate::contacts::RosterEntry>, String>;
 }
 
 /// The **refused-change log** seam: where the refused inbound scheduling
@@ -3403,10 +3519,16 @@ pub trait CommitGate: MaybeSendSync {
     ) -> Result<(i64, Vec<u8>), BackendError>;
 
     /// Stage → gate-send → merge a `remove_member` commit through the rebase loop.
-    /// Returns the accepted server `seq`. No Welcome (the removed member falls off
-    /// the epoch).
-    async fn gated_remove_member(&self, channel: ChannelId, leaf: u32)
-    -> Result<i64, BackendError>;
+    /// Returns the accepted server `seq`; `None` when the target was already gone
+    /// after a catch-up (nothing sent — the remove is done). No Welcome (the
+    /// removed member falls off the epoch). The target is named by `actor` and its
+    /// leaf resolved on every attempt, so a gated remove evicts only the member it
+    /// names, never whoever a concurrent commit seated in a vacated leaf.
+    async fn gated_remove_member(
+        &self,
+        channel: ChannelId,
+        actor: fauna_core::identity::ActorId,
+    ) -> Result<Option<i64>, BackendError>;
 
     /// Stage → gate-send → merge a **room policy** commit (a
     /// GroupContextExtensions proposal installing the extension `rebuild`

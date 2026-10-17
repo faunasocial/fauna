@@ -127,7 +127,7 @@ async fn localhost_handle_reaches_unclaimed_nest_not_tld_invalid() {
 /// going Back and re-importing an identity. Before the fix,
 /// `confirm_imported_identity` left the stale `HandleCheckSnapshot` (and the
 /// resolved `nest_url`) in place, so the HandleEntry page showed the prior
-/// probe's conclusion (e.g. "unregistered at example.com") until the user
+/// probe's conclusion (e.g. "unregistered at example.net") until the user
 /// clicked Check again. See docs/goal/behavior/onboarding.md § Identity stage.
 #[tokio::test]
 async fn reimporting_identity_resets_stale_handle_check() {
@@ -210,7 +210,7 @@ async fn unclaimed_nest_outcome_carries_domain_arg() {
 }
 
 /// Same guarantee on the claimed-but-user-unregistered branch — a distinct
-/// `complete()` call site (`handle_check.outcome.user_unregistered`).
+/// `complete()` call site (`onboarding.handle_check.outcome.user_unregistered`).
 #[tokio::test]
 async fn user_unregistered_outcome_carries_domain_arg() {
     let server = MockServer::start().await;

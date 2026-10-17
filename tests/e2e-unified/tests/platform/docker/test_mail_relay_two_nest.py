@@ -10,9 +10,10 @@ shared docker network:
     the standard image shape. Receives mail, HPKE-seals it to the user, holds it
     transiently.
   * **private/home box** — ``FAUNA_MODE=private`` + ``FAUNA_LAN_BIND_IP`` (the
-    ``docker-compose.home.yml`` shape, bridge-networking variant per
-    home-relay.md § If the box has a public IP): **no MTA**, MDA serves IMAP on
-    the LAN-bind. Its admin — the box's owner and the mail user — pairs it with
+    ``docker-compose.home.yml`` shape): **no MTA**, MDA serves IMAP on the
+    LAN-bind. It sits on a LAN network of its own, its pinned address there
+    being the LAN-bind, and is attached to the shared network as its route out
+    (``_bring_up_topology``). Its admin — the box's owner and the mail user — pairs it with
     the public box from their app, recording the public box's on-network URL
     on their pairing row; the home box pulls the relayed mail from that URL over
     the federation channel. No env var names the public box.
@@ -74,14 +75,22 @@ pull, never the SMTP gate. The fail-closed clamd/rspamd scan gate is satisfied b
 the fake-scanner sidecars on the shared network.
 """
 
+import datetime
+import email.message
+import email.utils
 import os
 import subprocess
+import time
+import uuid
 
 import pytest
+
+from clients.ws_rpc_admin_client import WsRpcAdminClient
 
 from .helpers import (
     IMAGE_TAG,
     ROLES,
+    _provision_submission_token,
     add_user_pairing,
     bridge_diag,
     bring_mda_only_to_serving,
@@ -89,6 +98,7 @@ from .helpers import (
     claim_admin_api,
     container_ip,
     create_network,
+    create_subnet_network,
     deliver_inbound_loopback_curl,
     docker_build,
     enforce_mail_perimeter,
@@ -96,6 +106,7 @@ from .helpers import (
     get_repo_root,
     imap_fetch_only_inbox_message,
     imap_inbox_count,
+    imap_wait_for_subject,
     node_id,
     provision_relay_user,
     publish_passing_mail_dns,
@@ -105,6 +116,7 @@ from .helpers import (
     start_container_with_ports,
     start_fake_dns_sidecar,
     start_fake_scanner_sidecars,
+    submit_message_tls,
     wait_for_health,
 )
 
@@ -172,17 +184,30 @@ def relay_net(docker_image, tmp_path):
         remove_network(network)
 
 
-@pytest.fixture()
-def topology(docker_image, relay_net):
-    """Bring up the two boxes on ``relay_net`` and claim both. Every nest is
-    sealed at rest unconditionally now (no-modes retirement, ratified
-    2026-07-12 — see the module docstring § Storage mode), so there is no
-    longer a storage-mode axis to parametrize the public box over. The public
-    box starts first so its on-network URL ``https://<public-container-ip>:3000`` (the
-    nest's internal listener — FAUNA_PORT, kept off 8443 so 8443 is the MDA's
-    user-facing CalDAV port; the federation WS is a nest route, not the
-    SNI-router/MDA :8444) is known before the home box pairs with it — the URL
-    the home-side pairing row records (``public["federation_url"]``).
+def _bring_up_topology(relay_net, *, one_admin: bool):
+    """Bring up the two boxes and claim both. Every nest is sealed at rest
+    unconditionally now (no-modes retirement, ratified 2026-07-12 — see the
+    module docstring § Storage mode), so there is no storage-mode axis to
+    parametrize the public box over. The public box starts first so its
+    on-network URL ``https://<public-container-ip>:3000`` (the nest's internal
+    listener — FAUNA_PORT, kept off 8443 so 8443 is the MDA's user-facing CalDAV
+    port; the federation WS is a nest route, not the SNI-router/MDA :8444) is
+    known before the home box pairs with it — the URL the home-side pairing row
+    records (``public["federation_url"]``).
+
+    **Two networks, as at a real home.** The home box starts on a network of its
+    own — its LAN — with a pinned address there, and that address is its
+    ``FAUNA_LAN_BIND_IP``: the MDA binds IMAP/CalDAV to it and to nothing else
+    (``deployment-home-with-public-relay.md`` § MUA reach). It is then attached
+    to the shared relay network too, so it can dial the public box — the route
+    out a home router gives it. The LAN network's name sorts before the relay
+    network's (``lan`` < ``net``), which keeps it the home box's default route,
+    so the ports published to the host are the LAN path: a mail app on the
+    host is a device on the home's LAN.
+
+    ``one_admin`` claims the public box with the home box's admin identity —
+    one person setting up both boxes from one app, the shape the home-relay
+    installer describes; otherwise each box has an admin of its own.
     Yields {public, private}."""
     net = relay_net["network"]
 
@@ -195,6 +220,7 @@ def topology(docker_image, relay_net):
     # nest is on 3000 (FAUNA_PORT), kept off 8443 so the MDA can own 8443.
     pub_http, p25, p465, p587, p993 = find_free_ports(5)
     pub_name = f"fauna-relay-public-{pub_http}"
+    lan = f"fauna-relay-lan-{pub_http}"
     start_container_with_ports(
         pub_name,
         {3000: pub_http, 25: p25, 465: p465, 587: p587, 993: p993},
@@ -208,29 +234,24 @@ def topology(docker_image, relay_net):
         network=net,
     )
     priv_name = None
+    lan_made = False
     try:
         wait_for_health(pub_http, pub_name)
-        pub_admin = claim_admin_api(pub_http, PUBLIC_CLAIM_CODE, handle="admin")
-        public = {
-            "name": pub_name, "port": pub_http,
-            "url": f"https://127.0.0.1:{pub_http}", "admin": pub_admin,
-            "mail_ports": {25: p25, 465: p465, 587: p587, 993: p993},
-            "records_dir": relay_net["records_dir"],
-        }
         # The home box reaches the public nest's federation WS at its on-network
         # IP : the nest's internal port (3000), NOT the published host port —
         # the URL the home-side pairing row records.
-        public["federation_url"] = f"https://{container_ip(pub_name)}:3000"
+        federation_url = f"https://{container_ip(pub_name)}:3000"
 
-        # ── Private/home box: FAUNA_MODE=private (the pre-claim NAT seed);
-        # FAUNA_LAN_BIND_IP=0.0.0.0 binds the MDA's IMAP listeners to all
-        # interfaces so the published port reaches them (the bridge-networking
-        # variant of the host-networking LAN-IP bind — home-relay.md § If the box
-        # has a public IP). No MTA ports (the home box runs no MTA).
+        # ── Private/home box: FAUNA_MODE=private (the pre-claim NAT seed) on its
+        # own LAN network, FAUNA_LAN_BIND_IP = its pinned LAN address. No MTA
+        # ports (the home box runs no MTA).
         # ⚠ nest MUST be on 3000 (FAUNA_PORT), NOT 8443: with FAUNA_LAN_BIND_IP set
         # the MDA binds CalDAV directly on <LAN-IP>:8443 (the admin default port),
         # so a nest on 0.0.0.0:8443 would EADDRINUSE-collide and crash-loop the MDA
         # (the home-relay deploy bug fixed 2026-06-20 by moving nest off 8443).
+        subnet = create_subnet_network(lan)
+        lan_made = True
+        home_lan_ip = str(subnet.network_address + 10)
         priv_http, priv_993 = find_free_ports(2)
         priv_name = f"fauna-relay-private-{priv_http}"
         start_container_with_ports(
@@ -238,24 +259,106 @@ def topology(docker_image, relay_net):
             {3000: priv_http, 993: priv_993},
             env={
                 "FAUNA_MODE": "private",
-                "FAUNA_LAN_BIND_IP": "0.0.0.0",
+                "FAUNA_LAN_BIND_IP": home_lan_ip,
                 "FAUNA_CLAIM_CODE": PRIVATE_CLAIM_CODE,
                 "FAUNA_PORT": "3000",
             },
-            network=net,
+            network=lan,
+            ip=home_lan_ip,
         )
+        _network_attach("connect", net, priv_name)
         wait_for_health(priv_http, priv_name)
         priv_admin = claim_admin_api(priv_http, PRIVATE_CLAIM_CODE, handle="admin")
+        pub_admin = claim_admin_api(
+            pub_http, PUBLIC_CLAIM_CODE, handle="admin",
+            signing_key=priv_admin["signing_key"] if one_admin else None)
+        public = {
+            "name": pub_name, "port": pub_http,
+            "url": f"https://127.0.0.1:{pub_http}", "admin": pub_admin,
+            "mail_ports": {25: p25, 465: p465, 587: p587, 993: p993},
+            "records_dir": relay_net["records_dir"],
+            "federation_url": federation_url, "network": net,
+        }
         private = {
             "name": priv_name, "port": priv_http,
             "url": f"https://127.0.0.1:{priv_http}", "admin": priv_admin,
-            "imap_port": priv_993,
+            "imap_port": priv_993, "lan": lan, "lan_ip": home_lan_ip,
         }
         yield {"public": public, "private": private}
     finally:
         if priv_name is not None:
             remove_container(priv_name)
         remove_container(pub_name)
+        if lan_made:
+            remove_network(lan)
+
+
+@pytest.fixture()
+def topology(docker_image, relay_net):
+    """The two boxes, each claimed by an admin of its own."""
+    yield from _bring_up_topology(relay_net, one_admin=False)
+
+
+@pytest.fixture()
+def topology_one_admin(docker_image, relay_net):
+    """The two boxes, both claimed by the home box's admin — the person who set
+    up both, and so an admin wherever the relayed-certificate route asks."""
+    yield from _bring_up_topology(relay_net, one_admin=True)
+
+
+def _network_attach(verb: str, network: str, name: str) -> None:
+    """``docker network connect|disconnect`` — the home box joining or leaving
+    the relay network, as a home loses and regains its route out."""
+    r = subprocess.run(["docker", "network", verb, network, name],
+                       capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, f"docker network {verb} {network} {name}: {r.stderr}"
+
+
+def _ip_on(name: str, network: str) -> str:
+    """The container's IPv4 on one named network (it has two)."""
+    r = subprocess.run(
+        ["docker", "inspect", "-f",
+         f'{{{{(index .NetworkSettings.Networks "{network}").IPAddress}}}}', name],
+        capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0 and r.stdout.strip(), f"no address for {name} on {network}: {r.stderr}"
+    return r.stdout.strip()
+
+
+def _link(topo, run_seal_helper, *, owner_admins_public: bool) -> dict:
+    """The deployment once its user has linked the two boxes: one user (one
+    actor, one MSEK) on both, mail serving on both (MTA + MDA on the relay, MDA
+    alone at home), and the pairing row on BOTH boxes — the end state of the
+    round-trip test's two phases, for the witnesses that start from a working
+    relay. Returns {public, private, user}."""
+    public, private = topo["public"], topo["private"]
+    enforce_mail_perimeter(public, domain=DOMAIN)
+    register_primary_domain(private, DOMAIN)
+    publish_passing_mail_dns(public["records_dir"], {SENDER_DOMAIN: "127.0.0.1"},
+                             spf_ip="127.0.0.1")
+    user = provision_relay_user(public, private, run_seal_helper,
+                                domain=DOMAIN, local_part=RECIPIENT_LOCAL,
+                                password=RECIPIENT_PASSWORD,
+                                home_owner=private["admin"],
+                                owner_admins_public=owner_admins_public)
+    bring_bridges_to_serving(public["name"], public, public["mail_ports"], DOMAIN)
+    bring_mda_only_to_serving(private["name"], private,
+                              ("127.0.0.1", private["imap_port"]), DOMAIN)
+    add_user_pairing(public, actor_id=user["actor_id"], signing_key=user["signing_key"],
+                     other_nest_id=node_id(private), capabilities=RELAY_CAPS)
+    add_user_pairing(private, actor_id=user["actor_id"], signing_key=user["signing_key"],
+                     other_nest_id=node_id(public), capabilities=RELAY_CAPS,
+                     nest_url=public["federation_url"])
+    return {"public": public, "private": private, "user": user}
+
+
+@pytest.fixture()
+def linked(topology, run_seal_helper):
+    return _link(topology, run_seal_helper, owner_admins_public=False)
+
+
+@pytest.fixture()
+def linked_one_admin(topology_one_admin, run_seal_helper):
+    return _link(topology_one_admin, run_seal_helper, owner_admins_public=True)
 
 
 # ── Failure diagnosis ─────────────────────────────────────────────────
@@ -359,7 +462,6 @@ def test_two_nest_mail_relay_round_trip_and_no_readable_copy(topology, run_seal_
     # relay is NOT yet firing (home box has no local pairing row), so the public
     # INBOX holds exactly the one message. Poll: the MTA ingest → INBOX placement
     # is async after the DATA accept.
-    import time
     try:
         deadline = time.monotonic() + 90
         pub_count = 0
@@ -432,3 +534,234 @@ def test_two_nest_mail_relay_round_trip_and_no_readable_copy(topology, run_seal_
     mta_state = svstat(private["name"], "fauna-mail-bridge-mta")
     assert not is_commanded_up(mta_state), (
         f"home box MTA must remain DOWN throughout (no-MTA boot); got: {mta_state!r}")
+
+
+# ── Witnesses that start from a linked relay ──────────────────────────
+#
+# Each outcome of `docs/features/home-nest-behind-a-relay.md` the round trip
+# above does not reach, on a deployment already linked (`linked`): the user on
+# both boxes, mail serving on both, the pairing row on both. Every read of the
+# home box is the LAN path — the host is a device on the home's network.
+
+
+def _deliver(linked, subject: str, body: str, headers: dict | None = None) -> str:
+    """One inbound message from outside, to the relay's MTA (loopback, the
+    enforced perimeter cleared by the sender's published SPF/DMARC)."""
+    return deliver_inbound_loopback_curl(
+        linked["public"]["name"],
+        mail_from=f"external-sender@{SENDER_DOMAIN}",
+        rcpt_to=linked["user"]["username"],
+        subject=subject,
+        body_text=body,
+        extra_headers=headers,
+    )
+
+
+def _diag(linked) -> str:
+    public, private = linked["public"], linked["private"]
+    return (f"\n\n── home-box relay worker ──\n{relay_diag(private['name'])}"
+            f"\n\n── public-box federation ──\n{relay_diag(public['name'], ROLES)}"
+            f"\n\n── home-box bridge diag ──\n{bridge_diag(private['name'], ('mda',))}"
+            f"\n\n── public-box bridge diag ──\n{bridge_diag(public['name'])}")
+
+
+def _home_reads(linked, subject: str, *, mailbox: str = "INBOX",
+                timeout: float = 120.0) -> bytes:
+    """The message whose Subject carries `subject`, read decrypted from the
+    home box's `mailbox` over its LAN IMAP."""
+    user = linked["user"]
+    try:
+        return imap_wait_for_subject(
+            "127.0.0.1", linked["private"]["imap_port"], DOMAIN,
+            user["username"], user["password"], subject,
+            mailbox=mailbox, timeout=timeout)
+    except (AssertionError, TimeoutError) as e:
+        raise AssertionError(f"{e}{_diag(linked)}") from e
+
+
+def _await_relay_inbox(linked, want: int, what: str, timeout: float = 90.0) -> None:
+    """Wait for the relay's INBOX (as its MDA serves it) to hold `want`."""
+    from helpers.waiting import wait_until
+
+    user = linked["user"]
+    seen: list[int] = []
+
+    def holds() -> bool:
+        seen.append(imap_inbox_count("127.0.0.1", linked["public"]["mail_ports"][993], DOMAIN,
+                                     user["username"], user["password"], timeout=30))
+        return seen[-1] == want
+
+    wait_until(holds, timeout, interval=2.0,
+               diagnose=lambda: f"{what}: the relay's INBOX shows {seen[-1:]}, wanted {want}"
+                                f"{_diag(linked)}")
+
+
+@pytest.mark.feature("home-nest-behind-a-relay")
+def test_mail_waits_on_the_relay_while_the_home_nest_is_unreachable(linked):
+    """Outcome 4: mail that arrives while the home box cannot be reached stays
+    on the relay, and comes home once the home box is back."""
+    public, private = linked["public"], linked["private"]
+    subject = f"held while home is away {uuid.uuid4().hex[:8]}"
+
+    # The home box loses its route out before the mail exists, so it cannot
+    # have pulled it: whatever the relay shows next, it is holding.
+    _network_attach("disconnect", public["network"], private["name"])
+    _deliver(linked, subject, "This waited on the relay.\n")
+    _await_relay_inbox(linked, 1, "mail for an unreachable home box must wait on the relay")
+
+    _network_attach("connect", public["network"], private["name"])
+    raw = _home_reads(linked, subject, timeout=240.0)
+    assert b"This waited on the relay." in raw, raw[:400]
+    _await_relay_inbox(linked, 0, "once home has it, the relay must hold no copy")
+
+
+@pytest.mark.feature("home-nest-behind-a-relay")
+def test_mail_you_send_lands_in_the_home_sent_folder(linked, run_seal_helper):
+    """Outcome 6: a message the user submits (to the relay, the one box that
+    takes submission) leaves its Sent copy in the home box's Sent folder."""
+    public, user = linked["public"], linked["user"]
+    _provision_submission_token(public, run_seal_helper, actor_id=user["actor_id"],
+                                signing_seed=user["signing_key"],
+                                credential=user["password"])
+    subject = f"sent from the relay user {uuid.uuid4().hex[:8]}"
+    msg = email.message.EmailMessage()
+    msg["From"] = user["username"]
+    msg["To"] = user["username"]
+    msg["Subject"] = subject
+    msg["Message-ID"] = f"<{uuid.uuid4().hex}@e2e.test>"
+    msg["Date"] = email.utils.formatdate(localtime=False, usegmt=True)
+    msg.set_content("A note to myself.\n")
+    submit_message_tls("127.0.0.1", public["mail_ports"][465], DOMAIN,
+                       sender=user["username"], password=user["password"],
+                       rcpt=user["username"], raw_message=msg.as_bytes())
+
+    raw = _home_reads(linked, subject, mailbox="Sent")
+    assert b"A note to myself." in raw, raw[:400]
+
+
+@pytest.mark.feature("home-nest-behind-a-relay")
+def test_mail_the_relay_judged_spam_lands_in_junk_at_home(linked):
+    """Outcome 7: what the relay's spam scoring files as spam arrives in the
+    home box's Junk; other mail arrives in its INBOX. The fake rspamd scores a
+    message by its `X-Test-Rspamd-Score` header (`fakes/fake_rspamd.py`): 16 is
+    a combined 8, over the default Junk threshold of 5."""
+    tag = uuid.uuid4().hex[:8]
+    spam, ham = f"spam for home {tag}", f"ham for home {tag}"
+    _deliver(linked, spam, "Scored as spam.\n", headers={"X-Test-Rspamd-Score": "16"})
+    _deliver(linked, ham, "Scored as fine.\n")
+
+    assert b"Scored as spam." in _home_reads(linked, spam, mailbox="Junk")
+    assert b"Scored as fine." in _home_reads(linked, ham, mailbox="INBOX")
+
+
+@pytest.mark.feature("home-nest-behind-a-relay")
+def test_the_home_nest_serves_mail_on_its_lan_only(linked):
+    """Outcome 8: the home box's IMAP/CalDAV answer on its LAN address and on
+    no other — its address on the relay's network refuses the connection — and
+    once the user turns serving off on the relay, the relay serves them nothing
+    while the home box still does."""
+    public, private, user = linked["public"], linked["private"], linked["user"]
+    home_imap = ("127.0.0.1", private["imap_port"])
+
+    # The LAN path (the host reaches the home box through its LAN network).
+    imap_inbox_count(*home_imap, DOMAIN, user["username"], user["password"])
+
+    # From the relay box, the home box's address on the shared network: nothing
+    # listens there, so the connection is refused (curl exit 7), not answered.
+    home_on_relay_net = _ip_on(private["name"], public["network"])
+    for port in (993, 8443):
+        probe = subprocess.run(
+            ["docker", "exec", public["name"], "curl", "--silent", "-k",
+             "--connect-timeout", "15", f"https://{home_on_relay_net}:{port}/"],
+            capture_output=True, text=True, timeout=60)
+        assert probe.returncode == 7, (
+            f"the home box must not listen on its relay-network address "
+            f"{home_on_relay_net}:{port}; curl from the relay exited "
+            f"{probe.returncode}: {probe.stderr!r}{_diag(linked)}")
+
+    # Never through the relay: the user turns serving off there.
+    with WsRpcAdminClient(public["url"], actor_id=user["actor_id"],
+                          signing_key=user["signing_key"]) as me:
+        me.call("fauna.bridges.set_mail_serving_enabled", {"enabled": False})
+    with pytest.raises(AssertionError, match="SELECT INBOX failed|AUTH PLAIN must succeed"):
+        imap_inbox_count("127.0.0.1", public["mail_ports"][993], DOMAIN,
+                         user["username"], user["password"])
+    imap_inbox_count(*home_imap, DOMAIN, user["username"], user["password"])
+
+
+@pytest.mark.feature("home-nest-behind-a-relay")
+def test_a_message_over_the_relay_frame_budget_reaches_home_and_holds_up_nothing(linked):
+    """Outcome 10: a message larger than one relay frame (2 MiB) reaches the
+    home box whole, and the message after it arrives too."""
+    tag = uuid.uuid4().hex[:8]
+    big, small = f"big message {tag}", f"after the big one {tag}"
+    line = "relay frame budget filler " + "x" * 48 + "\n"
+    body = "Start of the big message.\n" + line * (3 * 1024 * 1024 // len(line))
+    _deliver(linked, big, body + "End of the big message.\n")
+    _deliver(linked, small, "Right behind it.\n")
+
+    assert b"Right behind it." in _home_reads(linked, small, timeout=240.0)
+    raw = _home_reads(linked, big, timeout=240.0)
+    assert len(raw) > 2 * 1024 * 1024, f"the big message arrived at {len(raw)} bytes"
+    assert b"End of the big message." in raw, raw[-400:]
+    _await_relay_inbox(linked, 0, "once home has both, the relay must hold no copy")
+
+
+def _self_signed(hostname: str) -> tuple[str, str, bytes]:
+    """(cert PEM, key PEM, cert DER) — a stand-in for the CA-issued cert the
+    admin's app obtains; the relay route carries whatever it is handed."""
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, hostname)])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
+            .public_key(key.public_key()).serial_number(x509.random_serial_number())
+            .not_valid_before(now - datetime.timedelta(minutes=5))
+            .not_valid_after(now + datetime.timedelta(days=30))
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName(hostname)]), False)
+            .sign(key, hashes.SHA256()))
+    key_pem = key.private_bytes(serialization.Encoding.PEM,
+                                serialization.PrivateFormat.PKCS8,
+                                serialization.NoEncryption()).decode()
+    return (cert.public_bytes(serialization.Encoding.PEM).decode(), key_pem,
+            cert.public_bytes(serialization.Encoding.DER))
+
+
+@pytest.mark.feature("home-nest-behind-a-relay")
+def test_a_certificate_for_the_home_nest_reaches_it_through_the_relay(linked_one_admin):
+    """Outcome 11: a certificate the admin's app obtains for the home box,
+    sealed to the home box and published to the relay, is installed at home on
+    its next pull and served by its listener — while the relay, which cannot
+    open it, installs nothing and keeps serving its own.
+
+    The request is built by `fauna_ffi.build_publish_cert`: the shared
+    `seal_issued_cert_for_nest` the admin-dns machine's delivery calls."""
+    from cryptography.hazmat.primitives import serialization
+    from fauna_ffi import build_publish_cert
+    from helpers.tls_spki import served_leaf
+
+    linked = linked_one_admin
+    public, private, user = linked["public"], linked["private"], linked["user"]
+    host = "home.example.com"
+    cert_pem, key_pem, der = _self_signed(host)
+
+    request = build_publish_cert(cert_pem, key_pem, host, node_id(private),
+                                 bytes(user["signing_key"]))
+    with WsRpcAdminClient(public["url"], actor_id=user["actor_id"],
+                          signing_key=user["signing_key"]) as admin:
+        reply = admin.call("fauna.tls.publish_cert", request)
+    assert reply.get("ok") is True, f"the relay must store the entry; got {reply!r}"
+    assert reply.get("installed") is False, (
+        f"the relay must not be able to open a cert sealed to the home box; got {reply!r}")
+
+    def served(port: int) -> bytes:
+        return served_leaf("127.0.0.1", port, host).public_bytes(serialization.Encoding.DER)
+
+    from helpers.waiting import wait_until
+    wait_until(lambda: served(private["port"]) == der, 120,
+               diagnose=lambda: _diag(linked))
+    assert served(public["port"]) != der, "the relay must never serve the home box's cert"

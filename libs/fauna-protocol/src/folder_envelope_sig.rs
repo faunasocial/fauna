@@ -109,6 +109,16 @@ pub fn verify(blob: &[u8], channel_id: &[u8; 32]) -> Result<VerifiedEnvelope, En
     })
 }
 
+/// The **envelope digest** the nest echoes on a member's list row
+/// (`writer-signed-change-records.md` ruling (7)(b)(ii) rule (6)(a)): blake3
+/// over the blob exactly as `content_key.put` stored it — the owner-signed
+/// bytes this module frames. The one function both ends call, so the nest's
+/// echo and the member's remembered digest of the blob it fetched agree by
+/// construction. Only ever a reason to fetch: nothing is taken from it.
+pub fn digest(blob: &[u8]) -> [u8; 32] {
+    *blake3::hash(blob).as_bytes()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

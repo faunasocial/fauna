@@ -805,14 +805,25 @@ impl<R: RpcRequester> FeaturesClient<R> {
     /// joined with the nest's capability set, the unsupported members dropped.
     pub async fn authored_surface(&self, tier: AuthoringTier) -> Result<AuthoredSurface, R::Error> {
         let capabilities = self.node_capabilities().await?;
+        self.authored_surface_with(tier, &capabilities).await
+    }
+
+    /// [`authored_surface`](Self::authored_surface) over a capability set the
+    /// caller already holds — the [`rows_with`](Self::rows_with) twin, so one
+    /// `fauna.nest.info` read serves a whole surface load.
+    pub async fn authored_surface_with(
+        &self,
+        tier: AuthoringTier,
+        capabilities: &[String],
+    ) -> Result<AuthoredSurface, R::Error> {
         if let AuthoringTier::Guardian { ward } = tier {
             let entry = self.ward_entry(&ward).await?;
             return Ok(entry
-                .map(|entry| ward_surface(&entry, &capabilities))
+                .map(|entry| ward_surface(&entry, capabilities))
                 .unwrap_or_default());
         }
         let reply = self.authored(tier).await?;
-        Ok(authored_surface(reply, &capabilities))
+        Ok(authored_surface(reply, capabilities))
     }
 
     /// Save the editor's draft: parse (a refusal dispatches nothing), write the
@@ -1086,7 +1097,11 @@ mod tests {
             .collect()
     }
 
-    const ALL_TOKENS: [&str; 2] = [capability::SUBSCRIPTIONS, capability::P2P_SHARE];
+    const ALL_TOKENS: [&str; 3] = [
+        capability::SUBSCRIPTIONS,
+        capability::ZAPS,
+        capability::P2P_SHARE,
+    ];
 
     fn all_capabilities() -> Vec<String> {
         ALL_TOKENS.iter().map(|t| t.to_string()).collect()
@@ -1339,13 +1354,14 @@ mod tests {
         };
         let bare = authored_surface(reply.clone(), &[]);
         let keys: Vec<_> = bare.rows().into_iter().map(|r| r.feature).collect();
-        // zaps has no token, so nothing may hide it; the other two have one.
-        assert_eq!(keys, vec!["zaps"]);
+        // Every member has a token, so a nest advertising none hides all three.
+        assert!(keys.is_empty(), "{keys:?}");
 
         let full = authored_surface(
             reply,
             &[
                 capability::SUBSCRIPTIONS.to_string(),
+                capability::ZAPS.to_string(),
                 capability::P2P_SHARE.to_string(),
             ],
         );
@@ -1648,6 +1664,23 @@ mod tests {
     }
 
     // ── The wire ─────────────────────────────────────────────────────────
+
+    /// The one-read shape: given the capability set, the surface reads the
+    /// tier's document and nothing else — no `fauna.nest.info` of its own.
+    #[test]
+    fn authored_surface_with_reads_no_nest_info() {
+        use fauna_client_testkit::{ScriptedRequester, block_on};
+
+        let read = fauna_protocol::encode_canonical(&FeaturePolicyReadReply::default())
+            .expect("encode")
+            .to_vec();
+        let requester = ScriptedRequester::new([read]);
+        let client = FeaturesClient::new(&requester);
+
+        block_on(client.authored_surface_with(AuthoringTier::SelfImposed, &[])).expect("surface");
+
+        assert_eq!(requester.kinds(), vec!["fauna.features.self_limits.get"]);
+    }
 
     #[test]
     fn save_parses_writes_the_tiers_kind_and_rereads() {

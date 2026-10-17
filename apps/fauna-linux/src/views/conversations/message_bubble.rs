@@ -32,7 +32,7 @@
 //! A deleted message renders the localized `dm-message-deleted` tombstone
 //! placeholder (body/attachments/reactions/actions stripped). The affordances are
 //! **capability-gated** off `ThreadCapabilities` (`supports_reactions`,
-//! `supports_message_delete && is_own`) + `!is_own` (mark-as-spam) and route
+//! `msg.can_delete`, the snapshot's own-or-governs-the-room flag) + `!is_own` (mark-as-spam) and route
 //! through the shared `ConversationsManager` (`toggle_reaction` / `delete_message`)
 //! or `FaunaClient::mark_message_spam` — never a rail branch (capability-gated, not per-rail).
 
@@ -190,9 +190,22 @@ pub fn build(
     // blocked can never be revealed past the guardian's block. `collapse` is
     // handled after the muted arm (both are revealable collapses). Mirrors the feed
     // (`views/feed/post_list.rs`) — both surfaces share `content_policy::verdict_for`.
-    let composed = crate::region::verdict_for(&msg.message_id.0, &msg.labels, || {
-        crate::region::message_input(&msg.body)
-    });
+    // …and the viewer's own reports (`moderation.md` § Corollary): a report names
+    // a message by its plane record DIGEST (`report_key`), and hides everything
+    // an account the viewer reported authored.
+    let sender_hex = msg.sender.person_actor_id().map(|a| a.to_hex());
+    let composed = crate::region::verdict_for_item(
+        &msg.message_id.0,
+        &msg.labels,
+        crate::region::ReportKey {
+            item_id: msg
+                .plane_ref
+                .as_ref()
+                .map_or(msg.message_id.0.as_str(), |p| p.record_digest.as_str()),
+            author_id: sender_hex.as_deref(),
+        },
+        || crate::region::message_input(&msg.body),
+    );
     let content_verdict = composed.verdict;
     // Guardian Notify (family-safety.md § Guardian Notify): count this message if
     // the guardian floor enforces on it — a no-op unless content_notify is on.
@@ -243,14 +256,18 @@ pub fn build(
         return bubble;
     }
     if content_verdict == RenderVerdict::Block {
-        let placeholder =
-            gtk::Label::new(Some(crate::i18n::strings::family::CONTENT_BLOCKED_NOTICE));
+        let placeholder = gtk::Label::new(Some(crate::content_policy::block_notice(
+            composed.reported(),
+        )));
         placeholder.add_css_class("dim-label");
         placeholder.add_css_class("message-deleted");
         placeholder.set_halign(gtk::Align::Start);
         placeholder.set_wrap(true);
         placeholder.set_xalign(0.0);
         crate::testid::set_test_id(&placeholder, ids::CONTENT_POLICY_BLOCKED_NOTICE);
+        if composed.reported() {
+            crate::testid::set_test_attr(&placeholder, "source", "reported");
+        }
         bubble.append(&placeholder);
         bubble.append(&message_timestamp_label(msg.timestamp_ms, is_selected));
         bubble.set_overflow(gtk::Overflow::Hidden);
@@ -589,21 +606,29 @@ fn append_full_content(
     action_row.set_margin_top(2);
 
     // ⋯ per-bubble actions — shown iff ≥1 action is available for this message
-    // (react OR own-deletable OR spam-flaggable), so mail bubbles stay clean.
+    // (react OR deletable OR spam-flaggable), so mail bubbles stay clean.
     // Capability-gated, never rail-branched. Mark-as-spam is offered on any
     // received message (`!is_own`) — you flag others' content as spam, not your
     // own; the training itself is best-effort (silent no-op if mail isn't enabled,
     // exactly like a local moderation correction).
     let can_react = caps.supports_reactions;
-    let can_delete = caps.supports_message_delete && msg.is_own;
+    let can_delete = msg.can_delete;
     let can_flag_spam = !msg.is_own;
-    if can_react || can_delete || can_flag_spam {
+    // Report (`dm-message-report-button`, moderation.md § User-initiated
+    // reporting → App surface): a RECEIVED message that carries a plane
+    // identity — `message_target` answers none for mail and bridged rails, and
+    // then the verb paints nothing.
+    let report_target = (!msg.is_own)
+        .then(|| crate::report::message_target(msg))
+        .flatten();
+    if can_react || can_delete || can_flag_spam || report_target.is_some() {
         let actions_btn = build_actions_button(
             msg,
             thread_id,
             can_react,
             can_delete,
             can_flag_spam,
+            report_target,
             client,
             rt,
             latest_by_id,
@@ -704,6 +729,7 @@ fn build_actions_button(
     can_react: bool,
     can_delete: bool,
     can_flag_spam: bool,
+    report_target: Option<fauna_client_moderation::ReportTarget>,
     client: &Rc<FaunaClient>,
     rt: &tokio::runtime::Handle,
     latest_by_id: &LatestSnapshotById,
@@ -866,6 +892,21 @@ fn build_actions_button(
             client.mark_message_spam(mid.0.clone(), m.body, m.subject_line);
         });
         menu.append(&spam_btn);
+    }
+
+    if let Some(target) = report_target {
+        // Beside mark-as-spam: spam trains the viewer's own filter, a report
+        // tells the nest's admins. Opens the shared sheet over the message.
+        let report_btn = gtk::Button::with_label(s::REPORT_MESSAGE);
+        report_btn.add_css_class("flat");
+        crate::testid::set_test_id(&report_btn, ids::DM_MESSAGE_REPORT_BUTTON);
+        let client = Rc::clone(client);
+        let pop = popover.clone();
+        report_btn.connect_clicked(move |b| {
+            pop.popdown();
+            crate::report::open_sheet(b, target.clone(), &client, None);
+        });
+        menu.append(&report_btn);
     }
 
     popover.set_child(Some(&menu));

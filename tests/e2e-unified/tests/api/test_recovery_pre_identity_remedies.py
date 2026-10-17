@@ -34,6 +34,7 @@ import secrets
 
 import pytest
 
+from clients._ws_rpc_core import RpcCallError
 from common.auth import create_actor_and_register
 from helpers.succession import (
     emergency_lockout,
@@ -159,10 +160,14 @@ def test_a_succession_lands_through_an_active_lockout_with_no_session(nest_insta
 
     # The beside-control. Without it this test would still pass if the lockout
     # silently did nothing, and the whole exemption would go unproven.
-    with pytest.raises(Exception):
+    # Typed, not any exception: the challenge/verify sign-in `replacement_status`
+    # rides must refuse the locked account AS locked (`login.md` § Silent
+    # Challenge) — a transport failure or another refusal would prove nothing.
+    with pytest.raises(RpcCallError) as refused:
         replacement_status(
             url, actor_id_hex=old_actor_id, identity_seed_hex=seed_hex
         )
+    assert refused.value.code == "fauna.auth.account_locked", refused.value
 
     successor_id = succeed_identity(
         url,

@@ -277,6 +277,44 @@ contract has five clauses:
   seq; the tail's stamp honestly under-claims its own unechoed novelty;
   neither side can be fixed), and clause 1 applied reflexively converts it
   into a fresh, decidable log-tail row the whole fleet converges onto.
+  **(iv) The echo whose bytes no seat serves is ACCOUNTED FROM ITS
+  MANIFEST, and where it would re-adopt it RE-ASSERTS (ruled 2026-10-09).** An own echo's bytes come from the
+  local file while it still hashes to the manifest, else from the byte plane
+  ([`file-sync.md`](file-sync.md) § Relay serving, *The self-echo reads the
+  local body*); when neither answers — a superseded own write in a
+  metadata-only folder: the nest never held a chunk and the writing seat has
+  moved on — the echo still proves the log holds this device's row at `s`,
+  and local still reflects it by single-writer linearity (whatever local
+  holds now descends from what this seat published there). So the
+  accounting runs from the manifest alone: the frontier and content
+  frontier advance to `s`; the edit-frontier advances under the same
+  content licence, the manifest's whole-file hash standing in for the bytes
+  against the ledger; the manifest is remembered; nothing is held — the
+  ledger holds bytes, a hold is best-effort by its own contract, the lost
+  ancestor degrades rule 6 by one rung, and no reissue of bytes no seat
+  holds can ever arrive for rule 5 to catch. The base does not move: it
+  never did on a moved-on echo, and the pairing sentence above binds the
+  MATCHING echo, where frontier and base move together. The one arm that
+  needs the bytes is rule 3's author-blind re-adopt, and it is the one arm
+  whose loss strands the fleet: the row is the log head, no seat can fetch
+  it, every peer's pull retries it for ever, and this seat — `local ==
+  base`, no unpublished work — would never publish again. So an own
+  novel-content-free tail that would re-adopt by log order but cannot be
+  fetched re-asserts exactly as (iii)'s stale-declined tail does: the
+  device republishes its CURRENT bytes as a resolution at its current
+  anchor — a fresh, decidable log-tail row whose bytes this seat holds and
+  serves — and clause 1 supersedes the unfetchable head. Not a retry: the
+  bytes rest on no seat, so a later pass has nothing to fetch, and a
+  frontier held below `s` would re-judge the row for ever. Not a bare skip:
+  the fleet converges only onto a head some seat can produce. The shape is
+  uniform across residencies and failure causes — a fetch that fails for
+  any reason accounts from the manifest (the anchor passes the row either
+  way, and the alternative, in force until this ruling, ran NO accounting
+  at all); the recorded trade is one extra log row where a transient
+  failure in a full folder would have adopted on retry. The schedule
+  fuzzer gains no step: it has no residency axis, and this case reduces to
+  two arms it already models (the moved-on echo's accounting, the
+  re-assert) — the engine's tier-1 test pins the reduction.
   The batch-latest fold is **causal and all-or-nothing**: same-path rows fold
   only under the path's CARRIER — **the latest *superseding* row (every
   delete, every peer create/modify), not the raw batch-latest row** (ruled
@@ -1146,7 +1184,7 @@ is what the declined `spawn_blocking` at both call sites
 > whatever edit is pending, structurally precluding the KeepConflict arm from
 > ever firing.
 
-## Skipped catch-up changes reach the review list (ratified 2026-10-02; shared half BUILT — status paragraph at this section's end)
+## Skipped catch-up changes reach the review list (ratified 2026-10-02; BUILT — status paragraph at this section's end)
 
 **The question.** [`file-sync.md`](file-sync.md) § 5 rules that a permanently un-appliable change is recorded as a `catchup_failed` conflict row and skipped, and that "skipping is not silent — the recorded row surfaces in the conflict review list". The engine recorded that row only in the device's own `sync_conflicts` table and never reported it, while every app's review list reads the nest's `fauna.sync.conflicts.list` — so the promise held on no app. Two shapes were weighed: the device reports the skip to the nest, or each app folds its own device's local rows into the list through the agent.
 
@@ -1158,17 +1196,19 @@ is what the declined `spawn_blocking` at both call sites
 
 **Lifecycle — the row clears when the condition is cured, never by hand.** The row says "this device's copy of this path is behind the set's head", and it is true until this device applies a later change to that path — which is also what [`file-sync.md`](file-sync.md) § 5 promises ("a later change to the same path applies normally"). When such a change applies, the device resolves its local row and sends the candidate-free `conflicts.resolve` for its nest row by the stored `nest_id` (the only resolve a candidate-free conflict admits). Removing the device (`fauna.sync.devices.delete`) resolves its unresolved `catchup_failed` rows in the same nest transaction — a device that no longer exists has no stale copy. Until cured, the row stays: it is a true statement about a stale copy, not noise. There is no dismiss gesture in v1; the candidate-free resolve is on the wire for one if a device the user keeps but ignores ever warrants it. The user's remedy is any new version of the file — an edit from any device, or a restore from version history ([`file-versions.md`](file-versions.md)) — which delivers it again; a device that could not read a manifest too new for it applies that new version once upgraded.
 
-**The verbatim-winner shortcut must not arm on this row (a latent data-loss path, found while ruling).** The engine's apply path takes an incoming change verbatim, skipping conflict detection, whenever the path has ANY unresolved local conflict row (`has_unresolved_conflict_for_path`), because such a row used to mean "the next change on this path is the propagated winner the user chose". A `catchup_failed` row is not that: with one on record, a later remote change overwrote unpublished local edits on that path with no conflict row and no retained loser. The shortcut keys on the conflict kinds a propagated winner exists for and never on `catchup_failed`; a later change on a skipped path goes through ordinary detection and auto-resolve, and clears the skip row only after it lands (the cure above).
+**The verbatim-winner shortcut must not arm on this row (a latent data-loss path, found while ruling).** The engine's apply path takes an incoming change verbatim, skipping conflict detection, whenever the path has ANY unresolved local conflict row (`has_unresolved_conflict_for_path`), because such a row used to mean "the next change on this path is the propagated winner the user chose". A `catchup_failed` row is not that: with one on record, a later remote change overwrote unpublished local edits on that path with no conflict row and no retained loser. The shortcut keys on the conflict kinds a propagated winner exists for and never on `catchup_failed`; a later change on a skipped path goes through ordinary detection and auto-resolve, and clears the skip row only after it lands (the cure above). **The same fence holds for every winner-less row, whatever its kind (ruled 2026-10-10):** the shortcut arms on a row of a winner kind only once that row's candidate-bearing chooser report has LANDED on the nest — the local row carries the nest's conflict id — because only then can the user choose a winner the nest propagates. A candidate-free degrade (the local or surviving version's upload failed, § Candidates) and a report that never landed (every report rung failed, or there is no folder to report to) leave a row no winner can be chosen for; a later change on that path goes through ordinary detection, and a change that lands over the path clears the row. Every report site shares one rule in the engine (`record_unresolved_conflict`); a row it leaves unstamped costs, at worst, an ordinary detection pass for a winner whose reply was lost — never the unpublished edit.
 
 **Rendering — one shared fold, all 7 apps, zero new IDs.** `conflict-type-badge` gets a dedicated label, `devices.conflicts.type_catchup_failed` ("Not applied"); the generic `type_other` fallback stays for genuinely unknown types. `conflict-file-info` appends the skipping device's label (the devices snapshot already names it), so the user sees WHICH device is behind. **A `catchup_failed` row whose sealed path does not open is rendered name-less, never omitted:** the shared render drops any row this reader cannot name, which is right for a conflict the user acts on by path and wrong here, where the unreadable name IS the finding — the row renders the placeholder `devices.conflicts.unreadable_path` with its details. The audience is unchanged: this surface already ships to owner/participant readers only. Unresolved → informational, no button, as every unresolved row.
 
 **Compatibility.** Wire-additive on every edge: an older app within the major renders the row with the `type_other` badge and the path; an older nest stores and lists the report like any candidate-free one (without the dedupe — the engine's once-per-path local guard bounds what a lost reply can duplicate). The local `sync_conflicts.nest_id` column is additive at rest.
 
-> **Status (2026-10-02): shared half BUILT.** The engine reports both sites (the apply-stage refusal through `report_conflict_ws`, the sealed-path refusal through `report_sealed_skip_ws`, details sealed by `label_custody::seal_conflict_details_by_hash`), keeps the reply in `sync_conflicts.nest_id` and re-sends an unacknowledged report or cure resolve on every catch-up pass (`flush_skip_reports`); the verbatim-winner apply keys on `CONFLICT_KINDS_WITH_PROPAGATED_WINNER` only; a landed later change cures the row (`cure_skipped_path`); the shared fold renders the badge, the name-less row and the skipping device's label. Still open — until the nest dedupes, a retry after a lost reply can land a second nest row, bounded by the engine's once-per-path guard. The seat witness `tests/e2e-unified/tests/test_filesync_seat_catchup.py` reads the row off the state DB until the tui row lands.
+> **Status (2026-10-12): BUILT — shared half, nest half and the tui witness.** The engine reports both sites (the apply-stage refusal through `report_conflict_ws`, the sealed-path refusal through `report_sealed_skip_ws`, details sealed by `label_custody::seal_conflict_details_by_hash`), keeps the reply in `sync_conflicts.nest_id` and re-sends an unacknowledged report or cure resolve on every catch-up pass (`flush_skip_reports`); the verbatim-winner apply keys on `CONFLICT_KINDS_WITH_PROPAGATED_WINNER` only, and (built 2026-10-10) only on such a row stamped with its landed chooser report's nest id (`has_unresolved_winner_conflict_for_path`, pinned by `unpublished_conflict_row_test`); a landed later change cures the row (`cure_skipped_path`) — a create/modify, and (built 2026-10-11) a remote delete at every applied point: the resident pull's arm (file unlinked, or no local file at all, the common shape of a skipped create) and both of `apply_folded_delete`'s applied outcomes plus its no-row case, never a declined or kept delete (the copy is still behind); the shared fold renders the badge, the name-less row and the skipping device's label, and (built 2026-10-12) drops a cured row from the review list although the page fetches resolved rows (`fold_skipped_changes`, pinned by `a_cured_skipped_change_clears_from_the_review_list`). The nest half is built (2026-10-11): `report_conflict_signed` answers the existing id for an unresolved `catchup_failed` row of the same (set, device, `path_hash`), and `delete_device` resolves the device's unresolved `catchup_failed` rows in its transaction (pinned by `catchup_failed_report_dedupes_per_set_device_path` and `delete_device_resolves_its_catchup_failed_reports`). The e2e witness is built on tui (2026-10-12): `tests/e2e-unified/tests/test_filesync_seat_catchup.py` reads both skip sites' reports off the nest's `conflicts.list` and the seat's own Folders review list (*Not applied*, the seat named, the sealed-path row name-less), then cures the readable one with a later version and sees it leave both. The other six apps render the same shared fold.
 
 ## Implementation status today (2026-07-11)
 
-**A skipped catch-up change reaches the review list — shared half built (2026-10-02).** The engine reports and cures the row and the shared fold renders it; the nest's dedupe and device-delete cascade and the e2e witness flip are still open — § Skipped catch-up changes reach the review list, the status paragraph.
+**The byte-less own echo is BUILT (2026-10-09).** `SyncEngine::apply_self_echo` accounts a row whose bytes neither the local file nor the byte plane yields from the opened manifest (frontier, the content-licensed edit-frontier via `file_hash`, the manifest memory, no hold), leaves the base where it was, and re-asserts local in place of a re-adopt it cannot fetch — § Concurrent resolution, clause 5, refinement (iv); pinned by `self_echo_local_body_test` (a metadata-only echo of a superseded own write against a nest that 404s every chunk is accounted and the local edit untouched; an own covering tail that would re-adopt re-asserts).
+
+**A skipped catch-up change reaches the review list — BUILT (2026-10-12).** The engine reports and cures the row, the shared fold renders it and clears it once cured, the nest dedupes it and cascades a device delete, and the tui e2e witness reads it off the review list — § Skipped catch-up changes reach the review list, the status paragraph.
 
 **The review list's gesture is verified (declared a gap 2026-10-01; the listing gap closed 2026-10-02, the gesture built 2026-10-03).** The target model says the losing version is always retained in version history and that *use the other version* re-points to it; the gesture and the choose-winner now sign a candidate only once it is found as a verified version of this file in this set — the rule and its build are owned by [`../architecture/writer-signed-change-records.md`](../architecture/writer-signed-change-records.md) § Writer-signed change records, ruling (10) and § Implementation status today. The reporter's own losing version is listed again: its reporter signs the retention row (ruling (10)(d), built 2026-10-02), so every judged version history admits it as that reporter's version; a retention row minted before that build stays unsigned and unlisted, its bytes retained and pinned on the nest. The same ruling limited which resolved reports the legacy daemon could sign, until its removal (2026-10-02).
 
@@ -1361,7 +1401,9 @@ candidate upload that should precede a report can fail, so two sites degrade to
 the local version's upload fails (the conflict is kept local and reported
 `concurrent_edit`, unresolved) and `report_declined_delete` when the surviving
 version's upload fails (reported `delete_declined`); every other report site
-carries its candidates. The deleted headless daemon (removed 2026-10-02) sent the
+carries its candidates. A candidate-free degrade's local row never arms the
+verbatim-winner shortcut (§ Skipped catch-up changes reach the review list, the
+winner-less fence). The deleted headless daemon (removed 2026-10-02) sent the
 same degrade and was the writer the 2026-09-24 keep first named; the engine's
 sites were verified as the shape's ground the day the daemon
 left. The nest's report arm stores the empty set

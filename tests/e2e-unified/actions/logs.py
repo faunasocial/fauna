@@ -13,11 +13,37 @@ severity shows that level and everything more severe; "All" shows `snapshot()`.
 """
 from __future__ import annotations
 
+import re
 import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from drivers.base import PlatformDriver
+
+
+#: A rendered row's ``LEVEL · HH:MM:SS · target`` head (`fauna_log::format`).
+ROW_HEAD = re.compile(r"(TRACE|DEBUG|INFO|WARN|ERROR) · (\d\d:\d\d:\d\d) · (\S+)")
+
+#: Severity rank, most severe first — the order `snapshot_at_least` filters on.
+LEVELS = ("ERROR", "WARN", "INFO", "DEBUG", "TRACE")
+
+
+def parse_row(text: str) -> tuple[str, str, str, str] | None:
+    """One rendered row (or one copied line) as ``(level, time, target,
+    message)``, or None when it carries no row head.
+
+    Two row shapes, both from `fauna_log::format`: the one-line `format_line`
+    (``level · time · target · message`` — tui and linux rows, and every app's
+    copied text) and the two-line `LogRow` (the message, then its
+    ``level · time · target`` subtitle — web)."""
+    m = ROW_HEAD.search(text)
+    if not m:
+        return None
+    if m.start() == 0:
+        message = text[m.end():].removeprefix(" · ").strip()
+    else:
+        message = text[: m.start()].strip()
+    return m.group(1), m.group(2), m.group(3), message
 
 
 class LogsActions:
@@ -31,13 +57,14 @@ class LogsActions:
 
         Sidebar-swap shell on linux/windows/web; the sub-id is ignored on
         single-scroll clients (same two-element nav the other settings sub-pages
-        use). The ring renders synchronously from the process-global snapshot, so
-        no async hydrate wait is needed beyond letting GTK map the page.
+        use). Returns once the page landmark is up (or its budget is spent —
+        callers assert `is_page_visible()`); the rows render from the
+        process-global snapshot, and a caller reading them polls.
         """
         self.driver.set_state({
             "nav": {"stack": [{"view": "settings"}, {"view": "settings", "id": "logs"}]},
         })
-        time.sleep(1)
+        self.is_page_visible()
 
     def is_page_visible(self, timeout: float = 10.0) -> bool:
         """True once the Logs page landmark (`settings-logs`) is present."""
@@ -60,6 +87,11 @@ class LogsActions:
             self.driver.get_text("log-entry", index=i) or ""
             for i in range(self.entry_count())
         ]
+
+    def rows(self) -> list[tuple[str, str, str, str]]:
+        """The rendered rows as ``(level, time, target, message)``, top to
+        bottom — see :func:`parse_row`. Rows without a head are skipped."""
+        return [r for r in map(parse_row, self.entry_texts()) if r]
 
     def any_entry_contains(self, needle: str) -> bool:
         """True if some rendered log line contains `needle` (substring)."""
@@ -84,18 +116,18 @@ class LogsActions:
 
         `level` is one of the displayed option labels: "All", "Error", "Warn",
         "Info", "Debug", "Trace". Re-renders the list from
-        `fauna_log::snapshot_at_least`.
+        `fauna_log::snapshot_at_least`; a caller reading the narrowed list polls
+        for it (convention 14 — no fixed settle).
         """
         self.driver.select("log-level-filter", level)
-        time.sleep(0.5)
 
     def copy(self) -> None:
-        """Click the copy-to-clipboard affordance (`log-copy-button`)."""
+        """Click the copy-to-clipboard affordance (`log-copy-button`). A caller
+        reading the clipboard polls `driver.get_clipboard_text()`."""
         self.driver.click("log-copy-button")
-        time.sleep(0.3)
 
     def clear(self) -> None:
         """Clear the in-memory ring (`log-clear-button` → `fauna_log::clear`).
-        Does not touch the on-disk rolling file; the list re-renders empty."""
+        Does not touch the on-disk rolling file; the list re-renders empty, and
+        a caller asserting that polls."""
         self.driver.click("log-clear-button")
-        time.sleep(0.5)

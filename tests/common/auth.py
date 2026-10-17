@@ -80,7 +80,7 @@ def forget_nest_authority(port: int) -> None:
 # The rule is a CONJUNCTION, and both halves are load-bearing:
 #
 #   * **a loopback host** — `_LiveProvider` also declares `serve_tls`, so a real
-#     box at `https://example.com` holding a real ACME cert marks its port too.
+#     box at `https://example.net` holding a real ACME cert marks its port too.
 #     Keying on the port alone would stop verifying the one mode where a cert
 #     failure is a genuine production incident.
 #   * **a port marked by `mark_tls_nest`** — a TLS listener this harness never
@@ -769,11 +769,19 @@ def add_folder_member(
     """
     base, _ = _resolve_base(port, base_url)
     sk = _coerce_admin_signing_key(admin_signing_key)
+    from helpers.set_names import set_name_hash
+
+    # A sealed set rests no plaintext name, so it is addressed by its hash
+    # (`path-sealing.md` § the set-name plane); the name rides for a set whose
+    # name still rests plaintext. A reserved `__` set travels by its literal
+    # name alone.
     payload: dict = {
         "name": name,
         "device_id": bytes.fromhex(device_id),
         "flags": place_flags_payload(flags),
     }
+    if not name.startswith("__"):
+        payload["name_hash"] = set_name_hash(name)
     if actor_id is not None:
         payload["actor_id"] = bytes.fromhex(actor_id)
     return _authed_call(base, sk, "fauna.admin.folders.add_member", payload)
@@ -899,16 +907,17 @@ def set_folder_residency(
 
     ``residency`` is ``"full"`` or ``"metadata_only"`` (``file-sync.md``
     § Content residency). Its own wire field, never folded into ``nest_place``.
-    Owner-scoped on the nest (``WHERE name = ? AND actor_id = ?``), so
+    Owner-scoped on the nest (the row matched by its name hash and owner), so
     ``secret_key`` must be the seed of the actor that owns ``name``. Returns the
     decoded reply; the nest answers ``not_found`` when no owned row matches, and
-    refuses the value on reserved rails or against any serving surface.
+    refuses the value on reserved rails or against any serving surface. The set
+    is addressed by hash (``_addressed``): a sealed set rests no plaintext name.
     """
     return _user_call(
         port,
         secret_key,
         "fauna.folders.update",
-        {"name": name, "residency": residency},
+        _addressed({"name": name, "residency": residency}, field="name"),
         base_url,
     )
 
@@ -1306,13 +1315,20 @@ def user_folder_ref(
     ``folder_ref_for_row``, and what the ``sync_add_location`` test command must
     carry: a folder binding is keyed by its ref alone since the name-keyed bind
     was retired (2026-09-24). Raises when no row, or more than one, wears the
-    name — a name alone cannot say which set a binding means."""
+    name — a name alone cannot say which set a binding means.
+
+    Matched as ``FolderSummary::is_named`` matches — by ``name_hash``, or by the
+    plaintext a hash-less row still carries — because since schema 114 a sealed
+    set (every :func:`user_create_folder` set) rests no plaintext name, and a
+    ``row["name"] == name`` match found none of them."""
+    from helpers.set_names import find_set
+
     rows = [
         r
         for r in user_folders_list(port, secret_key=secret_key, base_url=base_url)[
             "folders"
         ]
-        if r.get("name") == name
+        if find_set([r], name) is not None
     ]
     if len(rows) != 1:
         raise AssertionError(
@@ -1568,6 +1584,19 @@ def create_actor_and_register(
     }
 
 
+def register_same_actor_on(port: int, actor: dict, *, admin_signing_key) -> dict:
+    """Register ``actor``'s EXISTING keypair on another nest and mint a token
+    there. Returns the actor dict carrying that nest's token.
+
+    The same identity on two nests: the identical signed post bytes then yield
+    the identical content-addressed post id on both, which is how a test learns
+    a post's id on one nest before the post exists on the other.
+    """
+    register_user(port, actor["actor_id_hex"], admin_signing_key=admin_signing_key)
+    token = mint_token_via_handshake(port_base_url(port), actor["signing_key"])
+    return {**actor, "token": token}
+
+
 def register_handled_actor(
     port: int,
     handle: str,
@@ -1629,7 +1658,7 @@ def register_handled_actor(
     if invite_code is not None:
         body["invite_code"] = invite_code
     with WsRpcAnonClient(base) as anon:
-        anon.call("fauna.account.register", body)
+        reply = anon.call("fauna.account.register", body)
 
     # Mint an auth token over the WS-RPC `fauna.auth.handshake` kind (replaces
     # the retired HTTP `POST /api/v1/auth/token`); same direct-auth contract as
@@ -1641,6 +1670,9 @@ def register_handled_actor(
         "actor_id_bytes": actor_id_bytes,
         "token": token,
         "handle": handle,
+        # The domain the nest placed the signup on (`RegisterReply.domain`, the
+        # deployment's current primary) — not necessarily the `domain` signed.
+        "registered_domain": reply["domain"],
     }
 
 

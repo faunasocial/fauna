@@ -19,6 +19,7 @@ pub mod awaiting_manual_dns;
 pub mod claim_code;
 pub mod dns_config;
 pub mod dns_post_instructions;
+pub mod emergency_lockout_entry;
 pub mod handle_entry;
 pub mod identity_choice;
 pub mod identity_created;
@@ -37,7 +38,7 @@ pub mod vps_config;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use fauna_client_accounts::{AccountRegistry, SecretStore};
+use fauna_client_accounts::SecretStore;
 use fauna_credential_store::CredentialStore;
 use fauna_i18n::strings::onboarding::done as t;
 use fauna_onboarding_machine::{OnboardingMachine, OnboardingObserver, OnboardingStep};
@@ -149,6 +150,15 @@ pub enum WizardField {
     /// `recovery-entry-account-field` — the account being recovered, when the
     /// payload names none.
     RecoveryAccount,
+    /// `paste-secret-field` on `emergency_lockout_entry` — the identity secret
+    /// the lock door signs with. A buffer of its own, never `ImportSecret`'s,
+    /// and scrubbed the moment the wizard leaves the step.
+    LockoutSecret,
+    /// `recovery-entry-account-field` on `emergency_lockout_entry`.
+    LockoutAccount,
+    /// `sessions-lockout-confirm-field` on `emergency_lockout_entry` — never a
+    /// secret, must equal `LOCKOUT_CONFIRM_WORD`.
+    LockoutConfirm,
     DnsCred(String),
     VpsCred(String),
     Contact(ContactField),
@@ -187,6 +197,15 @@ pub enum Action {
     BeginRecoveryEntry,
     /// `recovery-entry-submit-button` — run the pre-identity escrow restore.
     SubmitRecoveryEntry,
+    /// `emergency-lockout-entry-button` on `identity_choice` — the signed-out
+    /// lock door.
+    BeginEmergencyLockoutEntry,
+    /// `sessions-lockout-button` on `emergency_lockout_entry`. Carries the
+    /// confirm field as painted; the machine re-checks it (`LOCK`), so the word
+    /// gates the send in the action arm and not only in the render.
+    SubmitEmergencyLockout {
+        confirm_word: String,
+    },
     StartHandleCheck,
     SetControlCheckbox(bool),
     SubmitHandleCheckContinue,
@@ -361,7 +380,7 @@ impl Wizard {
         let machine = OnboardingMachine::new_with_persistence(
             observer,
             Arc::new(
-                AccountRegistry::new(Arc::clone(credentials) as Arc<dyn SecretStore>)
+                crate::session::registry_over(Arc::clone(credentials) as Arc<dyn SecretStore>)
                     .pending_provision_store(),
             ),
         );
@@ -440,7 +459,10 @@ impl Wizard {
             WizardField::ImportSecret
             | WizardField::InviteCode
             | WizardField::RecoveryPhrase
-            | WizardField::RecoveryAccount => self.inputs.get(&field).cloned().unwrap_or_default(),
+            | WizardField::RecoveryAccount
+            | WizardField::LockoutSecret
+            | WizardField::LockoutAccount
+            | WizardField::LockoutConfirm => self.inputs.get(&field).cloned().unwrap_or_default(),
             WizardField::DnsCred(_) | WizardField::VpsCred(_) => {
                 self.inputs.get(&field).cloned().unwrap_or_default()
             }
@@ -480,7 +502,10 @@ impl Wizard {
             | WizardField::ImportSecret
             | WizardField::InviteCode
             | WizardField::RecoveryPhrase
-            | WizardField::RecoveryAccount => {
+            | WizardField::RecoveryAccount
+            | WizardField::LockoutSecret
+            | WizardField::LockoutAccount
+            | WizardField::LockoutConfirm => {
                 self.inputs.insert(field, value);
             }
             WizardField::RetireCred(_) | WizardField::RetireConfirmName => {
@@ -530,6 +555,7 @@ impl Wizard {
             OnboardingStep::RecoveryKit => recovery_kit::elements(self),
             OnboardingStep::TrustPrompt => trust_prompt::elements(self),
             OnboardingStep::RecoveryEntry => recovery_entry::elements(self),
+            OnboardingStep::EmergencyLockoutEntry => emergency_lockout_entry::elements(self),
             // `Done` has no page of its own — the wizard has exited, and the
             // surface is keyed on `wizard_outcome()` from here (the "Almost
             // ready" early-return above, or the authenticated shell).
@@ -593,6 +619,7 @@ impl Wizard {
             OnboardingStep::RecoveryKit => recovery_kit::title(),
             OnboardingStep::TrustPrompt => trust_prompt::title(),
             OnboardingStep::RecoveryEntry => recovery_entry::title(),
+            OnboardingStep::EmergencyLockoutEntry => emergency_lockout_entry::title(),
             other => format!("{other:?}"),
         }
     }
@@ -624,6 +651,7 @@ impl Wizard {
             OnboardingStep::RecoveryKit => recovery_kit::description(),
             OnboardingStep::TrustPrompt => trust_prompt::description(),
             OnboardingStep::RecoveryEntry => recovery_entry::description(),
+            OnboardingStep::EmergencyLockoutEntry => emergency_lockout_entry::description(),
             OnboardingStep::Done => done_description(self),
         }
     }
@@ -636,6 +664,19 @@ impl Wizard {
     /// touching the machine" (`onboarding.md:25`). Everything else forwards
     /// its field verbatim — the machine owns every other rule.
     pub fn prepare(&mut self, action: &Action) -> Result<String, String> {
+        // The lock door keeps nothing: its pasted secret, handle and confirm
+        // word live in wizard memory only while the step is showing. The first
+        // gesture after the wizard has left it (a lock that landed, Back) drops
+        // them, so no pasted secret outlives the step.
+        if self.machine.step() != OnboardingStep::EmergencyLockoutEntry {
+            for f in [
+                WizardField::LockoutSecret,
+                WizardField::LockoutAccount,
+                WizardField::LockoutConfirm,
+            ] {
+                self.inputs.remove(&f);
+            }
+        }
         match action {
             Action::ConfirmImportedIdentity => {
                 let pasted = self.field(WizardField::ImportSecret);
@@ -659,6 +700,15 @@ impl Wizard {
                 let typed = self.field(WizardField::RecoveryAccount);
                 self.machine.set_current_handle(typed.trim().to_string());
                 Ok(self.field(WizardField::RecoveryPhrase))
+            }
+            // Same shape as `SubmitRecoveryEntry`: the secret rides as the
+            // payload, the account on the machine's one handle slot — forwarded
+            // as shown, empty included, so the pasted `handle=` or the typed
+            // field is what locates the nest, never a stale earlier handle.
+            Action::SubmitEmergencyLockout { .. } => {
+                let typed = self.field(WizardField::LockoutAccount);
+                self.machine.set_current_handle(typed.trim().to_string());
+                Ok(self.field(WizardField::LockoutSecret))
             }
             Action::SubmitClaimCode => Ok(self.field(WizardField::ClaimCode)),
             Action::VerifyOobInviteCode => Ok(self.field(WizardField::InviteCode)),
@@ -773,6 +823,10 @@ pub async fn run_action(
         },
         BeginRecoveryEntry => machine.begin_recovery_entry(),
         SubmitRecoveryEntry => run_recovery_entry(&machine, code).await,
+        BeginEmergencyLockoutEntry => machine.begin_emergency_lockout_entry(),
+        SubmitEmergencyLockout { confirm_word } => {
+            run_emergency_lockout(&machine, code, confirm_word).await
+        }
         StartHandleCheck => machine.start_handle_check(machine.current_handle()).await,
         SetControlCheckbox(checked) => machine.set_control_checkbox(checked),
         SubmitHandleCheckContinue => {
@@ -1013,6 +1067,27 @@ async fn run_recovery_entry(machine: &Arc<OnboardingMachine>, phrase: String) {
     if let Some(message) = outcome.message() {
         machine.set_error_message(localized(&message));
     }
+}
+
+/// Resolve an [`fauna_onboarding_machine::EmergencyLockoutOutcome`] into what
+/// the user sees. Every arm's words are the shared table
+/// (`EmergencyLockoutOutcome::message`); a lock that landed returns the wizard
+/// to `identity_choice`, where the confirmation (with the unlock time) paints on
+/// that page's `error-message` — a success that must speak, like
+/// `RestoredPredecessorsLost`.
+async fn run_emergency_lockout(
+    machine: &Arc<OnboardingMachine>,
+    secret: String,
+    confirm_word: String,
+) {
+    let outcome = machine.submit_emergency_lockout(secret, confirm_word).await;
+    let unlock_time = match &outcome {
+        fauna_onboarding_machine::EmergencyLockoutOutcome::Locked { locked_until } => {
+            fauna_core::format::format_unix_local(*locked_until)
+        }
+        _ => String::new(),
+    };
+    machine.set_error_message(localized(&outcome.message(&unlock_time)));
 }
 
 pub fn spawn_action(

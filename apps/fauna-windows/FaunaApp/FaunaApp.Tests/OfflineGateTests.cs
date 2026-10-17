@@ -342,6 +342,44 @@ public class OfflineGateTests
     }
 
     [Fact]
+    public void RetractingADeclarationReturnsTheControlToThePagesIntent()
+    {
+        // A conditional ceremony (the new-thread send, room-founding only while
+        // the home-nest choice makes the room a community one): when the paint
+        // stops owing the kind the control is no longer gated, and offline it
+        // is live again — what the page asked for, not the gate's verdict.
+        var gate = GateAt(Disconnected);
+        var control = new FakeControl();
+        gate.Declare(control, OnlineOnlyKind);
+        Assert.False(control.IsEnabled);
+        Assert.NotNull(control.GateReason);
+
+        gate.Retract(control.Identity);
+
+        Assert.True(control.IsEnabled, "a retracted declaration must hand the control back");
+        Assert.Null(control.GateReason);
+        Assert.Empty(gate.Declarations);
+
+        // ...and no longer re-decides it when the link state moves.
+        gate.SetConnectionState(Connected);
+        gate.SetConnectionState(Disconnected);
+        Assert.True(control.IsEnabled);
+    }
+
+    [Fact]
+    public void RetractingAControlThePageDisabledLeavesItDisabled()
+    {
+        var gate = GateAt(Connected);
+        var control = new FakeControl();
+        gate.Declare(control, OnlineOnlyKind);
+        control.PageSets(false);
+
+        gate.Retract(control.Identity);
+
+        Assert.False(control.IsEnabled, "the page's own disabling is not the gate's to undo");
+    }
+
+    [Fact]
     public void ADeadControlIsPrunedRatherThanDecided()
     {
         var gate = GateAt(Connected);

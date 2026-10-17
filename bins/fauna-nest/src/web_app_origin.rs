@@ -91,10 +91,18 @@ pub(crate) fn app_router(static_dir: Option<&str>, probe: WebAppOriginProbe) -> 
     use axum::http::{HeaderValue, StatusCode, header};
     use axum::response::IntoResponse;
 
+    // A path that names no file is the app's page (the app routes it in the
+    // browser) — except under the content-hashed asset tree, where a miss is a
+    // plain 404 so a stale hashed URL never hands the browser HTML to run as a
+    // script (`web-content-hosting.md` § The nest-served `/app/` and the
+    // central origin).
     let serve_dir = static_dir.map(|dir| {
-        tower_http::services::ServeDir::new(dir).fallback(tower_http::services::ServeFile::new(
-            std::path::Path::new(dir).join("index.html"),
-        ))
+        (
+            tower_http::services::ServeDir::new(dir).fallback(
+                tower_http::services::ServeFile::new(std::path::Path::new(dir).join("index.html")),
+            ),
+            tower_http::services::ServeDir::new(dir),
+        )
     });
     axum::Router::new().fallback(
         move |axum::extract::OriginalUri(original): axum::extract::OriginalUri,
@@ -122,11 +130,19 @@ pub(crate) fn app_router(static_dir: Option<&str>, probe: WebAppOriginProbe) -> 
                         .into_response();
                 }
                 match serve_dir {
-                    Some(mut sd) => {
+                    Some((mut with_page, mut assets_only)) => {
                         use tower_service::Service;
-                        match sd.call(req).await {
-                            Ok(resp) => resp.map(axum::body::Body::new).into_response(),
-                            Err(e) => match e {},
+                        // `req.uri()` is relative to the `/app` mount.
+                        if req.uri().path().starts_with("/_app/") {
+                            match assets_only.call(req).await {
+                                Ok(resp) => resp.map(axum::body::Body::new).into_response(),
+                                Err(e) => match e {},
+                            }
+                        } else {
+                            match with_page.call(req).await {
+                                Ok(resp) => resp.map(axum::body::Body::new).into_response(),
+                                Err(e) => match e {},
+                            }
                         }
                     }
                     None => StatusCode::NOT_FOUND.into_response(),

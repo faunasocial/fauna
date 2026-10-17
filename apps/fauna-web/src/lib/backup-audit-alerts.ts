@@ -10,3 +10,24 @@ import type { BackupAuditAlertReason } from '$lib/wasm';
 export function auditAlertReasons(row: DestinationAuditRow | undefined): BackupAuditAlertReason[] {
   return row?.alert_reasons ?? [];
 }
+
+/** One `backup-audit-alert` banner: its opaque reason, and whether it carries
+ *  `backup-audit-recover-button`. */
+export interface AuditAlertBanner {
+  reason: BackupAuditAlertReason;
+  recover: boolean;
+}
+
+// The row's banners, each marked with whether it carries the recovery gesture
+// (the fifth reason, `ui/backups.md` § Audit-alert surface). Whether a row
+// offers the gesture at all is the shared `recover_offered` answer, read off
+// the row — never re-derived here; it is true only while a `SourceRegressed`
+// stands, which the door orders **last**, so the gesture sits on the row's
+// last banner, the fifth reason's own (tui's placement).
+export function auditAlertBanners(row: DestinationAuditRow | undefined): AuditAlertBanner[] {
+  const reasons = auditAlertReasons(row);
+  return reasons.map((reason, i) => ({
+    reason,
+    recover: !!row?.recover_offered && i === reasons.length - 1,
+  }));
+}

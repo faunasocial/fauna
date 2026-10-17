@@ -177,6 +177,48 @@ async fn refresh_not_registered_lands_offline_terminal() {
     );
 }
 
+/// The nest was restarted into its degraded needs-update mode while this session
+/// was signed in — verify's `fauna.nest.outdated` (`version-compatibility.md`
+/// § Dimension 4). Terminal: the phase is the launch arm's non-retry
+/// `Offline { transient: false }` with the localized copy, and the verdict is
+/// readable as such (`needs_update`), which is what lets the bearer carry it to
+/// the reconnect supervisor typed instead of as "LaunchMachine not Online".
+#[tokio::test]
+async fn refresh_needs_update_lands_offline_terminal_and_names_it() {
+    let message: String = fauna_protocol::RpcError::nest_outdated()
+        .localized()
+        .to_string();
+    let m = machine_online_with_refresh(SilentChallengeOutcome::NeedsUpdate {
+        message: message.clone(),
+        outdated: fauna_launch_machine::OutdatedSide::Nest,
+    })
+    .await;
+    assert_eq!(
+        m.needs_update(),
+        None,
+        "precondition: a live session is not outdated"
+    );
+
+    m.refresh_token().await;
+
+    match m.snapshot().phase {
+        LaunchPhase::Offline { transient: false } => {}
+        other => panic!("expected Offline {{ transient: false }}, got {other:?}"),
+    }
+    assert!(m.current_bearer().is_none());
+    assert_eq!(
+        m.needs_update(),
+        Some(fauna_launch_machine::OutdatedSide::Nest),
+        "the refresh arm must name the needs-update verdict, and its side"
+    );
+    let snap = m.snapshot();
+    assert_eq!(snap.last_error.as_deref(), Some(message.as_str()));
+    assert!(
+        !snap.sign_in_refused,
+        "an outdated nest is not the suspended verdict"
+    );
+}
+
 /// The account is locked out — verify's `fauna.auth.account_locked`
 /// (`login.md` § Silent Challenge; `devices.md` § The locked state). Terminal
 /// until `locked_until`: the phase stays `Offline { transient: false }` and the
@@ -256,6 +298,7 @@ async fn refresh_nest_outdated_lands_offline_terminal_with_localized_banner() {
         .to_string();
     let m = machine_online_with_refresh(SilentChallengeOutcome::NeedsUpdate {
         message: banner.clone(),
+        outdated: fauna_launch_machine::OutdatedSide::Nest,
     })
     .await;
 
@@ -363,4 +406,49 @@ async fn refresh_identity_changed_blocks_on_the_warning_surface() {
     ));
     assert_eq!(m.snapshot().token, TokenStatus::Expired);
     assert!(m.current_bearer().is_none());
+}
+
+/// The machine publishes every successful mint's identity on its watch — the
+/// launch's, then each refresh's — so a session client built over its bearer
+/// learns who it is signed in as without a challenge of its own, and a
+/// server-side handle rename lands at the next re-mint
+/// (`transport-connection.md` § The dial budget). A failed refresh leaves the
+/// last confirmed identity standing.
+#[tokio::test]
+async fn every_mint_publishes_its_identity_and_a_failure_leaves_it() {
+    let mut renamed =
+        common::verify_reply_with_id("renamed.token", "renamed000000001", far_future());
+    renamed.handle = "alice2".into();
+    let m = online_with_expiry(
+        far_future(),
+        vec![
+            SilentChallengeOutcome::Success(renamed),
+            SilentChallengeOutcome::Transient {
+                error: "nest unreachable".into(),
+            },
+        ],
+    )
+    .await;
+
+    let mut rx = m.subscribe_identity();
+    assert_eq!(
+        rx.borrow_and_update().as_ref().map(|i| i.handle.as_str()),
+        Some("alice"),
+        "the launch mint's identity is on the watch before anyone subscribed"
+    );
+
+    m.refresh_token().await;
+    assert!(rx.has_changed().unwrap(), "a renamed identity is news");
+    assert_eq!(
+        rx.borrow_and_update().as_ref().map(|i| i.handle.as_str()),
+        Some("alice2")
+    );
+    assert_eq!(m.snapshot().identity.unwrap().handle, "alice2");
+
+    m.refresh_token().await;
+    assert!(!rx.has_changed().unwrap(), "a failed refresh is not news");
+    assert_eq!(
+        rx.borrow().as_ref().map(|i| i.handle.as_str()),
+        Some("alice2")
+    );
 }

@@ -212,6 +212,13 @@ pub struct CeremonyNode {
     /// empty until [`Self::with_bound_addrs`] records it. Feeds the compare
     /// code's addressing half and nothing else.
     bound_addrs: Vec<SocketAddr>,
+    /// The relay this seat's endpoint was bound with, as the assembler
+    /// observed it — `None` until [`Self::with_relay_url`] records one, and
+    /// for the seat's life when it was bound without (`p2p.md` § The relay →
+    /// *The cross-user seat and the relay*, ruling 1). The share plane
+    /// advertises it and compares a member's advertised relay against it;
+    /// no ceremony dial ever reads it.
+    relay_url: Option<String>,
     /// Held for its Drop: the listener's lifetime.
     _node: PeerNode,
 }
@@ -299,6 +306,7 @@ impl CeremonyNode {
             server,
             router,
             bound_addrs: Vec::new(),
+            relay_url: None,
             _node: node,
         })
     }
@@ -342,6 +350,19 @@ impl CeremonyNode {
     pub fn with_bound_addrs(mut self, bound: Vec<SocketAddr>) -> Self {
         self.bound_addrs = bound;
         self
+    }
+
+    /// Record the relay this seat's endpoint was bound with — the second fact
+    /// only the assembler observes, read off the same factory return as the
+    /// bound addresses (`fauna_sync_engine::offline_share::CeremonyBinding`).
+    pub fn with_relay_url(mut self, relay_url: Option<String>) -> Self {
+        self.relay_url = relay_url;
+        self
+    }
+
+    /// The relay this seat was bound with, `None` for a relay-less seat.
+    pub fn relay_url(&self) -> Option<&str> {
+        self.relay_url.as_deref()
     }
 
     /// This device's compare code — the actor key **and this listener's LAN

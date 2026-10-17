@@ -15,6 +15,7 @@ import uniffi.fauna_client_mail_settings.MailImportAction
 import uniffi.fauna_client_mail_settings.MailImportMachine
 import uniffi.fauna_client_mail_settings.MailImportSnapshot
 import uniffi.fauna_client_mail_settings.connectActions
+import uniffi.fauna_client_mail_settings.resumeActions
 import uniffi.fauna_client_mail_settings.scopeNextActions
 import javax.inject.Inject
 
@@ -123,7 +124,17 @@ class MailImportVM @Inject constructor(
     fun back() = dispatch(MailImportAction.Back)
     fun start() = dispatch(MailImportAction.Start)
     fun pause() = dispatch(MailImportAction.Pause)
-    fun resume() = dispatch(MailImportAction.Resume)
+    /**
+     * Step 5's Resume: on a session adopted after a restart, commit the
+     * credential the Progress step painted first (Generic's port when it
+     * parses, then the password), then Resume — the shared `resume_actions`;
+     * this VM only locates its own raw field values, as for [connect].
+     */
+    fun resume(port: String, password: String) {
+        val s = snapshot.value
+        dispatch(*resumeActions(s.resumeNeedsCredentials, s.sourceKind, port, password).toTypedArray())
+    }
+
     fun cancel() = dispatch(MailImportAction.Cancel)
 
     /**

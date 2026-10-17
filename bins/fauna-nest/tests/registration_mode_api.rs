@@ -298,3 +298,95 @@ async fn the_free_tier_ceiling_is_orthogonal_to_the_mode() {
     .await
     .expect("raising the ceiling admits the next free account");
 }
+
+/// "Regardless of mode" binds the door, not just `Open` (`public-mode.md`
+/// § Registration Modes → *What "regardless of mode" binds*): under `InviteRequired` a code is the only way in,
+/// and a code minted at `free` admits a free-tier account — so the ceiling bites
+/// on it exactly as on a no-code sign-up under `Open`. Three things pinned at
+/// once: the refusal, that the refused code is NOT consumed (the same code admits
+/// once the admin raises the cap), and that a non-free code is outside the cap.
+#[tokio::test]
+async fn the_free_tier_ceiling_binds_a_free_invite_code_under_invite_only() {
+    let admin = [7u8; 32];
+    let state = nest_with_admin(admin).await;
+    let r = router();
+    state
+        .db
+        .create_invite_code("FREEPASS", "free", 1)
+        .await
+        .unwrap();
+    state
+        .db
+        .create_invite_code("PAIDPASS", "personal", 1)
+        .await
+        .unwrap();
+
+    // The admin's own row is the one free account; a cap of 1 is reached.
+    set_mode(
+        &r,
+        state.clone(),
+        admin,
+        RegistrationMode::InviteRequired,
+        Some(1),
+    )
+    .await;
+
+    let alice = ActorKeypair::generate();
+    let err = dispatch(
+        &r,
+        state.clone(),
+        "fauna.account.register",
+        [0u8; 32],
+        common::register_payload(&alice, "alice", DOMAIN, Some("FREEPASS"), None),
+    )
+    .await
+    .expect_err("a free-tier code must not admit a free account past the ceiling");
+    assert_eq!(err.code, "fauna.account.free_limit_reached");
+    assert!(
+        state
+            .db
+            .peek_invite_code("FREEPASS")
+            .await
+            .unwrap()
+            .is_some(),
+        "a cap refusal must not burn the code — the person retries once the admin raises it"
+    );
+
+    // A non-free code does not create a free account: outside the cap.
+    let bob = ActorKeypair::generate();
+    dispatch(
+        &r,
+        state.clone(),
+        "fauna.account.register",
+        [0u8; 32],
+        common::register_payload(&bob, "bob", DOMAIN, Some("PAIDPASS"), None),
+    )
+    .await
+    .expect("a code minted at a non-free tier is outside the free ceiling");
+
+    // Raising the ceiling admits the same person with the same, unburnt code.
+    set_mode(
+        &r,
+        state.clone(),
+        admin,
+        RegistrationMode::InviteRequired,
+        Some(2),
+    )
+    .await;
+    dispatch(
+        &r,
+        state.clone(),
+        "fauna.account.register",
+        [0u8; 32],
+        common::register_payload(&alice, "alice", DOMAIN, Some("FREEPASS"), None),
+    )
+    .await
+    .expect("raising the ceiling admits the free code's holder");
+    let user = state
+        .db
+        .get_user(&alice.actor_id().0)
+        .await
+        .unwrap()
+        .expect("registered");
+    assert_eq!(user.tier, "free");
+}

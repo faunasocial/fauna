@@ -145,11 +145,17 @@ Pick where and how big:
 - **Updates.** Your server keeps itself up to date automatically; this choice
   decides which versions it follows:
   - **Stable** (the default) — released versions. Recommended.
-  - **Test** — release candidates that are still being checked.
-  - **Dev** — the newest development builds, before any checking. Expect
-    breakage; pick it only for a server you are happy to rebuild.
+  - **Test** — numbered releases being accepted by users before they become
+    Stable. A release reaches Test first and moves to Stable once it has been
+    verified and approved; if you want to try releases early, this is the
+    channel. Until version 0.2 a Test server works only with apps of exactly
+    the same version, so pair it with the app stores' test tracks.
+  - **Dev** — the newest development builds, before any checking, for people
+    who build the apps from source. Expect breakage; pick it only for a server
+    you are happy to rebuild.
 
-  The choice is made here, when the server is created.
+  The choice is made here, when the server is created, and cannot be changed
+  from the app afterwards yet.
 
 Turning email on here only *sizes* the box for mail (the memory the virus
 scanner and spam filter need) — it doesn't switch mail on by itself. Once you

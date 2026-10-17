@@ -188,6 +188,115 @@ impl CacheDb {
         created_at: i64,
         next_attempt_at: i64,
     ) -> Result<Vec<i64>> {
+        self.insert_outbound_rows(fields, created_at, next_attempt_at, None)
+            .await
+    }
+
+    /// Insert one row per recipient **held by the fresh-IP warm-up** until
+    /// `release_at` (`mail-deliverability.md` § Enforcement at submission time:
+    /// over today's cap the message is queued for tomorrow). The hold is a
+    /// typed fact on each row — `warmup_held_until`, plus the message's dedup
+    /// pair over its raw bytes, which is how the sender's own Sent read
+    /// ([`Self::warmup_holds_for_actor`]) recognises its copy of the message.
+    pub async fn enqueue_outbound_warmup_held(
+        &self,
+        fields: NewOutbound<'_>,
+        created_at: i64,
+        release_at: i64,
+    ) -> Result<Vec<i64>> {
+        let keys = fauna_mail::mail_dedup_keys_from_slice(fields.raw_message);
+        self.insert_outbound_rows(
+            fields,
+            created_at,
+            release_at,
+            Some((release_at, keys.dedup_key, keys.envelope_key)),
+        )
+        .await
+    }
+
+    /// The warm-up holds on `actor`'s own sent mail, keyed by the 32-byte
+    /// message id of the actor's copy (the Sent mailbox's `message_id`).
+    ///
+    /// The held queue is deployment-wide (the warm-up is the IP's), so a
+    /// message's place counts every held message ahead of it
+    /// ([`fauna_mail::warmup::held_positions`]). A held message is matched to
+    /// the actor through `actor_message_dedup`: the actor's copy records the
+    /// same dedup pair the queue row stamped at enqueue, and both halves must
+    /// agree ([`fauna_mail::envelope_keys_agree`]) — a Message-ID alone is the
+    /// sender's choice, so another sender reusing it never marks this actor's
+    /// mail as held. A row stops counting once its release has passed or it
+    /// leaves `pending`.
+    pub async fn warmup_holds_for_actor(
+        &self,
+        actor: &[u8; 32],
+        now: i64,
+    ) -> Result<std::collections::HashMap<Vec<u8>, fauna_mail::warmup::HeldPosition>> {
+        use fauna_mail::warmup::{HeldRow, held_positions};
+        use rusqlite::OptionalExtension;
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT id, warmup_dedup_key, warmup_envelope_key, warmup_held_until
+                 FROM outbound_mail_queue
+                 WHERE warmup_held_until IS NOT NULL AND warmup_held_until > ?1
+                   AND status = 'pending'
+                   AND warmup_dedup_key IS NOT NULL AND warmup_envelope_key IS NOT NULL",
+            )
+            .context("prepare warm-up held scan")?;
+        let rows = stmt
+            .query_map(rusqlite::params![now], |r| {
+                Ok(HeldRow {
+                    row_id: r.get::<_, i64>(0)?,
+                    message: (r.get::<_, String>(1)?, r.get::<_, String>(2)?),
+                    release_at: r.get::<_, i64>(3)?,
+                })
+            })
+            .context("query warm-up held rows")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("read warm-up held rows")?;
+        let mut out = std::collections::HashMap::new();
+        if rows.is_empty() {
+            return Ok(out);
+        }
+        let mut lookup = conn
+            .prepare_cached(
+                "SELECT envelope_key, message_uri FROM actor_message_dedup
+                 WHERE actor_id = ?1 AND dedup_key = ?2",
+            )
+            .context("prepare held-message dedup lookup")?;
+        for ((dedup_key, envelope_key), position) in held_positions(rows) {
+            let hit: Option<(String, String)> = lookup
+                .query_row(rusqlite::params![&actor[..], dedup_key], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .optional()
+                .context("held-message dedup lookup")?;
+            let Some((stored_envelope, message_uri)) = hit else {
+                continue;
+            };
+            if !fauna_mail::envelope_keys_agree(&stored_envelope, &envelope_key) {
+                continue;
+            }
+            // Mail rows point at their content as the hex message id; any
+            // other URI shape is not a mailbox copy and names nothing here.
+            if let Ok(message_id) = hex::decode(&message_uri) {
+                out.insert(message_id, position);
+            }
+        }
+        Ok(out)
+    }
+
+    async fn insert_outbound_rows(
+        &self,
+        fields: NewOutbound<'_>,
+        created_at: i64,
+        next_attempt_at: i64,
+        warmup_hold: Option<(i64, String, String)>,
+    ) -> Result<Vec<i64>> {
+        let (held_until, hold_dedup, hold_envelope) = match warmup_hold {
+            Some((at, d, e)) => (Some(at), Some(d), Some(e)),
+            None => (None, None, None),
+        };
         let msgid = fields.original_msgid.to_string();
         let sender = fields.original_sender.to_string();
         let recipients: Vec<String> = fields.recipients.iter().map(|s| s.to_string()).collect();
@@ -214,8 +323,10 @@ impl CacheDb {
                     attempt_count, next_attempt_at, status,
                     inbound_spf, inbound_dmarc, inbound_dmarc_pol, is_forwarded,
                     forward_actor_id, forward_rule_id,
-                    created_at, submit_actor_id, forward_copy_mode
-                ) VALUES (?1, ?2, ?3, ?4, 0, ?5, 'pending', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                    created_at, submit_actor_id, forward_copy_mode,
+                    warmup_held_until, warmup_dedup_key, warmup_envelope_key
+                ) VALUES (?1, ?2, ?3, ?4, 0, ?5, 'pending', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                          ?15, ?16, ?17)",
                 rusqlite::params![
                     msgid,
                     sender,
@@ -231,6 +342,9 @@ impl CacheDb {
                     created_at,
                     submit_actor_id,
                     forward_copy_mode,
+                    held_until,
+                    hold_dedup,
+                    hold_envelope,
                 ],
             )
             .context("insert outbound_mail_queue row")?;
@@ -399,14 +513,20 @@ impl CacheDb {
 
     /// Count rows enqueued by `sender` within the last `window_secs` seconds.
     /// Backs the per-sender outbound rate-limit at the submission boundary.
+    ///
+    /// `now` is the caller's outbound clock (`AppState::outbound_now`), the
+    /// clock every queue row's `created_at` is written on, so the window and the
+    /// rows it counts stay on one clock (real in production; the e2e override
+    /// under `test-hooks`).
     pub async fn count_outbound_by_sender_window(
         &self,
         sender: &str,
+        now: i64,
         window_secs: i64,
     ) -> Result<u32> {
         let sender = sender.to_string();
         let conn = self.conn.lock().await;
-        let cutoff = now_epoch_secs() - window_secs;
+        let cutoff = now - window_secs;
         let count: u32 = conn
             .query_row(
                 "SELECT COUNT(*) FROM outbound_mail_queue
@@ -441,13 +561,19 @@ impl CacheDb {
     /// in SQL. That is the intended reading: a system-originated row is not a
     /// user submission, and miscounting it against the wrong actor would
     /// refuse a user mail they never sent.
+    ///
+    /// `now` is the caller's outbound clock (`AppState::outbound_now`), the
+    /// clock every queue row's `created_at` is written on, so the window and the
+    /// rows it counts stay on one clock (real in production; the e2e override
+    /// under `test-hooks`).
     pub async fn count_outbound_by_actor_window(
         &self,
         submit_actor_id: &[u8; 32],
+        now: i64,
         window_secs: i64,
     ) -> Result<u32> {
         let conn = self.conn.lock().await;
-        let cutoff = now_epoch_secs() - window_secs;
+        let cutoff = now - window_secs;
         let count: u32 = conn
             .query_row(
                 "SELECT COUNT(*) FROM outbound_mail_queue
@@ -466,13 +592,19 @@ impl CacheDb {
     /// `is_forwarded` row this actor put on the outbound queue in the window,
     /// regardless of delivery status (a row is the "increment"); rows are not
     /// pruned within the hour, so `created_at` is an accurate window count.
+    ///
+    /// `now` is the caller's outbound clock (`AppState::outbound_now`), the
+    /// clock every queue row's `created_at` is written on, so the window and the
+    /// rows it counts stay on one clock (real in production; the e2e override
+    /// under `test-hooks`).
     pub async fn count_forward_dispatched_window(
         &self,
         forward_actor_id: &[u8; 32],
+        now: i64,
         window_secs: i64,
     ) -> Result<u32> {
         let conn = self.conn.lock().await;
-        let cutoff = now_epoch_secs() - window_secs;
+        let cutoff = now - window_secs;
         let count: u32 = conn
             .query_row(
                 "SELECT COUNT(*) FROM outbound_mail_queue
@@ -957,14 +1089,14 @@ mod tests {
 
         // Only the two fresh forwarded rows for `actor` count.
         assert_eq!(
-            db.count_forward_dispatched_window(&actor, 3600)
+            db.count_forward_dispatched_window(&actor, now, 3600)
                 .await
                 .unwrap(),
             2
         );
         // Widen the window past the aged row → 3.
         assert_eq!(
-            db.count_forward_dispatched_window(&actor, 10_800)
+            db.count_forward_dispatched_window(&actor, now, 10_800)
                 .await
                 .unwrap(),
             3

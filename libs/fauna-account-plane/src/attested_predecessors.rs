@@ -21,8 +21,16 @@
 //!   rider → *What crosses*);
 //! - the fleet scope's reclamation pass reads the retired machinery keys, to
 //!   open a predecessor's generation-0 machinery rows and retire them
-//!   (`account-data-taxonomy.md` § The generation machinery → *Fleet-scope
-//!   reclamation*, clause (3)(i)).
+//!   (`fleet-scope-reclamation.md`
+//!   § *Fleet-scope reclamation*, clause (3)(i)).
+//!
+//! Beside the key material it carries one list that is no key at all: the
+//! **departed devices** this device recorded at a ceremony it ran
+//! ([`departed_devices`]) — the predecessor fleet's ids, which the
+//! successor's enrollment step attests as `Removed` rows in the successor's
+//! device set (`succession-aftermath.md` § Re-key scope → *Predecessor
+//! devices are departed devices*). Only [`from_registry`] fills it: the
+//! ceremony device attests, and the seedless agent attests nothing.
 //!
 //! So they travel as ONE value, and every constructor but [`none`] takes
 //! key material: a host cannot attest an identity and leave the keys behind,
@@ -55,6 +63,7 @@
 //! [`from_lists`]: AttestedPredecessors::from_lists
 //! [`mint_kind_keys`]: AttestedPredecessors::mint_kind_keys
 //! [`retired_machinery_keys`]: AttestedPredecessors::retired_machinery_keys
+//! [`departed_devices`]: AttestedPredecessors::departed_devices
 
 use std::sync::Arc;
 
@@ -82,6 +91,9 @@ struct Inner {
     /// Every predecessor's pair for every fleet-only generation-0 kind, flat
     /// (the module docs: a set).
     machinery: Vec<AccountStateKindKeys>,
+    /// The predecessor fleets' device ids this device recorded at a ceremony
+    /// it ran — a flat set (the module docs).
+    departed_devices: Vec<[u8; 32]>,
 }
 
 /// The registry's fleet-only generation-0 kinds — the generation machinery,
@@ -152,7 +164,11 @@ impl AttestedPredecessors {
         actor_id_hex: &str,
     ) -> Self {
         let pairs = registry.predecessor_backup_keys_by_actor(actor_id_hex);
-        Self::from_backup_keys(pairs.iter().map(|(id, key)| (*id, key)))
+        let (actor_ids, keys): (Vec<ActorId>, Vec<&BackupKey>) =
+            pairs.iter().map(|(id, key)| (*id, key)).unzip();
+        let mut inner = Inner::derive(actor_ids, keys);
+        inner.departed_devices = registry.attested_departed_devices(actor_id_hex);
+        Self(Arc::new(inner))
     }
 
     /// The seedless host's constructor: the attested ids and the retired owner
@@ -202,6 +218,15 @@ impl AttestedPredecessors {
         &self.0.machinery
     }
 
+    /// The predecessor fleets' device ids this device recorded at a ceremony
+    /// it ran — what the successor's enrollment step attests as departed
+    /// (`fleet_removal::attest_departed_predecessor_devices`). Empty on every
+    /// device but the ceremony's.
+    #[must_use]
+    pub fn departed_devices(&self) -> &[[u8; 32]] {
+        &self.0.departed_devices
+    }
+
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.actor_ids.is_empty()
@@ -227,6 +252,7 @@ impl PartialEq for AttestedPredecessors {
             inner.mint_kind.iter().map(|k| k.item_key(&[])).collect()
         };
         self.0.actor_ids == other.0.actor_ids
+            && self.0.departed_devices == other.0.departed_devices
             && roots(&self.0) == roots(&other.0)
             && mint_kind(&self.0) == mint_kind(&other.0)
     }
@@ -338,7 +364,7 @@ mod tests {
 
     /// The retired machinery keys are one pair per registry kind the
     /// predecessor's own schedule seals fleet-only at generation 0 — the
-    /// eight machinery kinds today — and each predecessor row of such a kind
+    /// ten machinery kinds today — and each predecessor row of such a kind
     /// opens under exactly one of them. A delegable row opens under none.
     #[test]
     fn the_retired_machinery_keys_open_every_fleet_only_generation_0_kind_and_no_delegable_one() {
@@ -348,8 +374,8 @@ mod tests {
         use fauna_core::crypto::AccountStateKeySchedule;
         use fauna_protocol::merge_policy::{
             KIND_DEVICE_REACH, KIND_DEVICE_SET, KIND_ESCROW_RECEIPT, KIND_ESCROW_TARGET,
-            KIND_GENERATION_CLOSED, KIND_GENERATION_UNKEYABLE, KIND_GENERATION_WRAP,
-            KIND_MODERATION, kind_keys,
+            KIND_ESCROW_WRAP, KIND_GENERATION_CLOSED, KIND_GENERATION_SHRED,
+            KIND_GENERATION_UNKEYABLE, KIND_GENERATION_WRAP, KIND_MODERATION, kind_keys,
         };
 
         let machinery = [
@@ -358,9 +384,11 @@ mod tests {
             KIND_GENERATION_WRAP,
             KIND_ESCROW_TARGET,
             KIND_ESCROW_RECEIPT,
+            KIND_ESCROW_WRAP,
             KIND_GENERATION_UNKEYABLE,
             KIND_DEVICE_REACH,
             KIND_GENERATION_CLOSED,
+            KIND_GENERATION_SHRED,
         ];
         let (a, b) = (
             BackupKey::from_bytes([0x11; 32]),

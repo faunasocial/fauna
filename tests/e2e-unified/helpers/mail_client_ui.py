@@ -167,7 +167,7 @@ def _add_credential_ui(app, credential_kind):
         f"status={app.mail_settings.status_text()!r}; "
         f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
     )
-    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=UI_SETTLE_S), (
+    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=app.mail_settings.ENABLE_SETTLE_S), (
         "the claim's mailbox mint should leave its generated `default` credential; "
         f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
     )
@@ -183,7 +183,7 @@ def _add_credential_ui(app, credential_kind):
         app.mail_settings.close_add_credential_form()
     else:
         raise ValueError(f"unknown credential_kind {credential_kind!r}")
-    assert app.mail_settings.wait_for_credential_count_at_least(before + 1, timeout=UI_SETTLE_S), (
+    assert app.mail_settings.wait_for_credential_count_at_least(before + 1, timeout=app.mail_settings.ENABLE_SETTLE_S), (
         f"adding a {credential_kind} credential should grow the list past {before}; "
         f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
     )

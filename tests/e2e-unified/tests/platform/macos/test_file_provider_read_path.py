@@ -2,7 +2,7 @@
 
 Proves the M2 read path of the Apple File Provider binding end-to-end against a
 live ``fauna-nest`` binary, **headlessly**, the way macOS itself drives it
-(`docs/goal/behavior/on-demand-files.md` § On-Demand Files → Apple File Provider
+(`docs/goal/behavior/on-demand-files-apple.md` § On-Demand Files → Apple File Provider
 binding, which owns this milestone chain):
 
   1. Seal one small file into an **owner-only sync-type** folder on the nest —
@@ -77,7 +77,7 @@ def _has_codesigning_identity() -> bool:
     which macOS only lets a *properly-signed* app claim: under ad-hoc signing (no
     Team ID) `SecItemAdd`/`SecItemCopyMatching` return `errSecMissingEntitlement`
     (-34018), so `provision` cannot complete and the appex fails closed before it
-    can enumerate (`on-demand-files.md` § Apple File Provider binding → Headless-first
+    can enumerate (`on-demand-files-apple.md` § Apple File Provider binding → Headless-first
     testing). This end-to-end appex path is therefore **signing-gated**; the
     read-path *mechanism* is proven headlessly at the FFI seam instead (interim
     `cabi.rs` bridge — the meantime while the org's Apple Developer cert lands)."""

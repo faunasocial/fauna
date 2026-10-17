@@ -53,25 +53,29 @@ use fauna_conversations::backends::fauna_mls::FaunaMlsBackend;
 /// closure below re-reads the holder at the moment the reseal itself reports,
 /// not at this call's own time .
 #[cfg(feature = "recovery-aftermath")]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn mls_sync_launcher(
     nest: Arc<NestClient>,
     self_secret: &[u8],
     backend: Arc<FaunaMlsBackend>,
     manager: Arc<ConversationsManager>,
     predecessors: Vec<fauna_client_mls_sync::BackupKey>,
+    predecessor_actors: Vec<fauna_core::identity::ActorId>,
     aftermath_sink: Arc<
         std::sync::Mutex<Option<Arc<dyn crate::succession_aftermath::FfiAftermathSink>>>,
     >,
     recording_device: Option<String>,
+    attested_predecessors: Vec<[u8; 32]>,
 ) -> Option<Arc<dyn MlsSyncLauncher>> {
     tokio_launcher(
         Box::new(NestMlsReplicaTransport::new(Arc::clone(&nest))),
         self_secret,
         backend,
         manager,
-        post_restore_hook(&nest, self_secret, recording_device),
+        post_restore_hook(&nest, self_secret, recording_device, attested_predecessors),
         fauna_client_mls_sync::SuccessionReseal {
             predecessors,
+            predecessor_actors,
             sink: Some(Box::new(move |progress| {
                 // Cloned out of the lock before the call: the app's sink runs arbitrary
                 // foreign code, and holding the mutex across it would invite
@@ -99,16 +103,19 @@ pub(crate) fn mls_sync_launcher(
     backend: Arc<FaunaMlsBackend>,
     manager: Arc<ConversationsManager>,
     predecessors: Vec<fauna_client_mls_sync::BackupKey>,
+    predecessor_actors: Vec<fauna_core::identity::ActorId>,
     recording_device: Option<String>,
+    attested_predecessors: Vec<[u8; 32]>,
 ) -> Option<Arc<dyn MlsSyncLauncher>> {
     tokio_launcher(
         Box::new(NestMlsReplicaTransport::new(Arc::clone(&nest))),
         self_secret,
         backend,
         manager,
-        post_restore_hook(&nest, self_secret, recording_device),
+        post_restore_hook(&nest, self_secret, recording_device, attested_predecessors),
         fauna_client_mls_sync::SuccessionReseal {
             predecessors,
+            predecessor_actors,
             sink: None,
         },
     )
@@ -125,6 +132,7 @@ fn post_restore_hook(
     nest: &Arc<NestClient>,
     self_secret: &[u8],
     recording_device: Option<String>,
+    attested_predecessors: Vec<[u8; 32]>,
 ) -> Option<Arc<dyn PostRestoreHook>> {
     let seed: [u8; 32] = self_secret.try_into().ok()?;
     Some(Arc::new(
@@ -135,7 +143,8 @@ fn post_restore_hook(
             crate::account_runtime::mail_store(),
             crate::ledger_seam(),
         )
-        .with_recording_device(recording_device),
+        .with_recording_device(recording_device)
+        .with_predecessors(attested_predecessors),
     ))
 }
 
@@ -147,6 +156,7 @@ fn post_restore_hook(
     _nest: &Arc<NestClient>,
     _self_secret: &[u8],
     _recording_device: Option<String>,
+    _attested_predecessors: Vec<[u8; 32]>,
 ) -> Option<Arc<dyn PostRestoreHook>> {
     None
 }

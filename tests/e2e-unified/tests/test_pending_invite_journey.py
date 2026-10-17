@@ -41,6 +41,8 @@ from nacl.signing import SigningKey
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from common.launch_harness import reached_authenticated_app
+from helpers.waiting import wait_until
+from i18n.strings import S
 
 pytestmark = pytest.mark.tier_3
 
@@ -227,13 +229,18 @@ def test_admin_approval_advances_the_requester_with_no_user_action(app, nest_ins
     )
 
 
-def _seed_invite_request(nest_url: str, handle: str) -> dict:
+def _seed_invite_request(nest_url: str, handle: str, age_claim: dict | None = None) -> dict:
     """Seed a real Ed25519-signed pending invite request over the anonymous
     kind — fixture setup for the admin-side row under test (convention 8: the
     admin's approve is the mutation driven through the UI; the requester's
     submit is the precondition). Returns the requester's identity so the test
     can read the admitted account's own `fauna.family.status` afterwards.
-    Carries NO age claim, as every app but android/ios submits (D3)."""
+
+    Carries NO age claim by default, as every app but android/ios submits (D3).
+    ``age_claim`` (`AgeClaim` — ``{"band": <wire token>}``, no attestation)
+    adds a DECLARED claim, as an android/ios app sends when the store answered
+    but no attestation could be checked; it rides outside the signed message
+    (`invite_submit_signed_message`), so the signature is unchanged."""
     from clients.ws_rpc_anon_client import WsRpcAnonClient
     from common.sig_domain import invite_submit_signed_message
 
@@ -243,18 +250,109 @@ def _seed_invite_request(nest_url: str, handle: str) -> dict:
     ts = int(time.time() * 1000)
     msg = invite_submit_signed_message(bytes.fromhex(actor_hex), handle, message, ts)
     sig = sk.sign(msg).signature.hex()
+    params = {
+        "actor_id": actor_hex,
+        "handle": handle,
+        "message": message,
+        "timestamp": ts,
+        "signature": sig,
+    }
+    if age_claim is not None:
+        params["age_claim"] = age_claim
     with WsRpcAnonClient(nest_url) as anon:
-        anon.call(
-            "fauna.account.invite_request.submit",
-            {
-                "actor_id": actor_hex,
-                "handle": handle,
-                "message": message,
-                "timestamp": ts,
-                "signature": sig,
-            },
-        )
+        anon.call("fauna.account.invite_request.submit", params)
     return {"signing_key": sk, "actor_id_hex": actor_hex}
+
+
+def _await_pending_row(admin_app, handle: str) -> int:
+    """Poll the admin-users hub until ``handle``'s pending row is listed; its index."""
+    def _listed() -> bool:
+        admin_app.admin.navigate_users()
+        return handle in admin_app.admin.invite_request_handles()
+
+    wait_until(
+        _listed,
+        RECHECK_BUDGET_S,
+        interval=0.4,
+        diagnose=lambda: (
+            f"seeded request {handle!r} never listed. "
+            f"{admin_app.admin.pending_requests_diagnosis()}"
+        ),
+    )
+    return admin_app.admin.invite_request_row_index(handle)
+
+
+@pytest.mark.feature("family-safety")
+def test_a_requests_claimed_age_band_shows_and_the_band_select_starts_there(
+    admin_app, nest_instance
+):
+    """family-safety.md § App surface → *Age-band surfaces*: "the request-row
+    select **defaults to the applicant's claimed band** when the request
+    carries one (D5: the claim corroborates, the admitting adult decides)",
+    and `invite-request-row-age-claim` shows "the applicant's recorded claim:
+    band + provenance".
+
+    The request carries a DECLARED 13–15 claim (no attestation — the nest
+    records provenance `none`, "declared, not verified"); the row shows it,
+    and the band select starts at `13-15`. The admin then picks only a
+    guardian and approves, touching the band not at all — and the admitted
+    ward's own status reports 13–15, so the select's starting value is what the
+    approval carried. The claim-less arm is
+    `test_admin_admits_a_request_at_a_band_the_row_shows_the_claim`.
+    """
+    from helpers.admin_wire import admit_adult
+
+    nest_url = nest_instance["url"]
+    guardian_handle = f"claimguardian-{int(time.time() * 1000)}"
+    admit_adult(nest_instance, guardian_handle)
+    handle = f"claimward-{int(time.time() * 1000)}"
+    ward = _seed_invite_request(nest_url, handle, age_claim={"band": "13-15"})
+
+    row = _await_pending_row(admin_app, handle)
+    bands = S.family.age_band
+    want_claim = bands.claim_line(band=bands.teen_13_15, provenance=bands.provenance_none)
+    assert admin_app.admin.request_age_claim(index=row) == want_claim, (
+        f"the row must show the declared claim as {want_claim!r}, got "
+        f"{admin_app.admin.request_age_claim(index=row)!r}"
+    )
+    assert admin_app.admin.request_age_band(index=row) == "13-15", (
+        "the band select must start at the applicant's claimed band, got "
+        f"{admin_app.admin.request_age_band(index=row)!r}"
+    )
+
+    admin_app.admin.set_request_guardian(guardian_handle, index=row)
+    assert admin_app.admin.request_age_band(index=row) == "13-15", (
+        "choosing a guardian must keep the claimed band selected, got "
+        f"{admin_app.admin.request_age_band(index=row)!r}"
+    )
+    admin_app.admin.set_request_tier("personal", index=row)
+    admin_app.admin.approve_request(index=row)
+
+    def _admitted_status():
+        ward_ws = WsRpcAdminClient(
+            nest_url,
+            actor_id=bytes(ward["signing_key"].verify_key),
+            signing_key=bytes(ward["signing_key"]),
+        )
+        try:
+            with ward_ws:
+                return ward_ws.call("fauna.family.status", {})
+        except Exception:  # not admitted yet: the actor is still unregistered
+            return None
+
+    status = wait_until(
+        _admitted_status,
+        RECHECK_BUDGET_S,
+        interval=0.5,
+        diagnose=lambda: (
+            f"the request was never admitted. error: {admin_app.error_text()!r} "
+            f"{admin_app.admin.pending_requests_diagnosis()}"
+        ),
+    )
+    assert status.get("age_band", {}).get("band") == "13-15", (
+        "approving without touching the band must admit at the claimed band, got "
+        f"{status.get('age_band')!r}"
+    )
 
 
 @pytest.mark.feature("family-safety")
@@ -275,17 +373,7 @@ def test_admin_admits_a_request_at_a_band_the_row_shows_the_claim(admin_app, nes
     handle = f"bandward-{int(time.time() * 1000)}"
     ward = _seed_invite_request(nest_url, handle)
 
-    admin_app.admin.navigate_users()
-    deadline = time.monotonic() + 15.0
-    while (time.monotonic() < deadline
-           and handle not in admin_app.admin.invite_request_handles()):
-        time.sleep(0.4)
-        admin_app.admin.navigate_users()
-    assert handle in admin_app.admin.invite_request_handles(), (
-        f"seeded request {handle!r} not visible after 15s. "
-        f"{admin_app.admin.pending_requests_diagnosis()}"
-    )
-    row = admin_app.admin.invite_request_row_index(handle)
+    row = _await_pending_row(admin_app, handle)
     assert admin_app.admin.request_age_claim(index=row) == "No app age verification", (
         f"a claim-less request must say so: {admin_app.admin.request_age_claim(index=row)!r}"
     )

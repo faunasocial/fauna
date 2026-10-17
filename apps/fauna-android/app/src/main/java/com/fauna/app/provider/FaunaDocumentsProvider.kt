@@ -33,7 +33,7 @@ import kotlinx.coroutines.runBlocking
 
 /**
  * The SAF `DocumentsProvider` of the android on-demand binding
- * (`on-demand-files.md` § Android SAF DocumentsProvider binding). It runs in
+ * (`on-demand-files-android.md` § Android SAF DocumentsProvider binding). It runs in
  * the app's own process and translates `DocumentsContract` calls into the
  * shared-Rust host's (`provider_face` + `owned_tree`) through [OnDemandSource];
  * it holds no sync state and makes no sync decision.

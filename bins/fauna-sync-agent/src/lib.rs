@@ -118,7 +118,20 @@ pub fn run_main() -> anyhow::Result<()> {
     // stderr) uses `fauna_log::init`. Resolve the data root exactly as `run_agent`
     // does. The guard must stay alive for the whole process: dropping it on `main`
     // return flushes + stops the non-blocking file writer.
-    let data_dir = config::SyncPaths::new(args.data_dir.clone()).base_dir();
+    //
+    // Refuse BEFORE resolving anything when the production layout has no absolute
+    // home: the log dir, `config.toml`, the state DBs, the account
+    // store and the pin store all hang off it, and a `/tmp` fallback is a
+    // directory another local account can pre-create. There is no data dir to log
+    // into, so the reason goes to stderr (launchd/systemd capture it) and the
+    // process exits non-zero having created nothing.
+    let data_dir = match config::SyncPaths::new(args.data_dir.clone()) {
+        Ok(paths) => paths.base_dir(),
+        Err(refusal) => {
+            eprintln!("fauna-sync-agent: {refusal:#}");
+            return Err(refusal);
+        }
+    };
     let _log_guard = fauna_log::init(&data_dir);
 
     if args.cleanup_roots {

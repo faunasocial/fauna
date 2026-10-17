@@ -551,6 +551,44 @@ pub(crate) fn read_acme_pem(acme_dir: &std::path::Path) -> Option<(Vec<u8>, Vec<
     Some((cert, key))
 }
 
+/// The cert+key the sealed ports serve for `domain`: the on-disk pair, or —
+/// when that is a CA-issued chain outside its validity window — the
+/// self-signed floor in its place, on the stable floor key (the SPKI the TLSA
+/// records pin) and naming `domain` when the lapsed chain did, else the
+/// chain's own first name (`crate::acme::lapsed_trusted_floor_name`, the
+/// resolver's rule). This is `tls-certificates.md` § The two-layer model's
+/// "otherwise the floor" for the ports the main listener's resolver never
+/// sees: the bridges' IMAP/SMTP/CalDAV and the relay's `relay.<apex>`. The one
+/// read under both seal consumers ([`seal_current_tls_cert_for_bridge_impl`],
+/// [`seal_current_tls_cert_for_x25519_impl`]). `None` while no pair is on
+/// disk; an unparseable pair, or a floor that cannot be minted, is served
+/// as-is.
+pub(crate) fn read_served_tls_pem(
+    acme_dir: &std::path::Path,
+    domain: &str,
+) -> Option<(Vec<u8>, Vec<u8>)> {
+    let (cert_pem, key_pem) = read_acme_pem(acme_dir)?;
+    let floor_name = crate::acme::load_certified_key_from_pem(&cert_pem, &key_pem)
+        .ok()
+        .and_then(|chain| crate::acme::lapsed_trusted_floor_name(&chain, Some(domain)));
+    let Some(floor_name) = floor_name else {
+        return Some((cert_pem, key_pem));
+    };
+    let floor = crate::self_signed_cert::load_or_create_floor_key(acme_dir)
+        .ok()
+        .and_then(|key| crate::acme::mint_floor_pem(&floor_name, &key.serialize_pem()));
+    match floor {
+        Some((floor_cert, floor_key)) => Some((floor_cert.into_bytes(), floor_key.into_bytes())),
+        None => {
+            tracing::warn!(
+                "the on-disk trusted TLS chain has expired but no floor could be minted \
+                 for {floor_name}; sealing the expired chain"
+            );
+            Some((cert_pem, key_pem))
+        }
+    }
+}
+
 /// Seal `(cert_chain_pem, priv_key_pem)` into a wrapped `TlsCertBlob` for one
 /// bridge and return its canonical wire bytes. The single seal helper shared by
 /// the ACME/self-signed fan-out ([`Storage::store_acme_material`]) and the
@@ -585,7 +623,7 @@ pub(crate) fn seal_tls_cert_blob_bytes(
     })
 }
 
-/// Seal the cert currently on disk under `acme_dir` to one approved+attested
+/// Seal the cert served under `acme_dir` ([`read_served_tls_pem`]) to one approved+attested
 /// bridge, persisting + returning the wrapped blob bytes. Shared by both
 /// storage impls' [`Storage::seal_current_tls_cert_for_bridge`] override.
 /// `Ok(None)` when there is no on-disk cert, or no approved bridge row with an
@@ -600,7 +638,7 @@ pub(crate) async fn seal_current_tls_cert_for_bridge_impl(
     let Some(parsed_role) = crate::db::bridge_service_users::BridgeRole::parse(role) else {
         return Ok(None);
     };
-    let Some((cert_pem, key_pem)) = read_acme_pem(acme_dir) else {
+    let Some((cert_pem, key_pem)) = read_served_tls_pem(acme_dir, domain) else {
         return Ok(None);
     };
     let x25519_pk = match db
@@ -623,7 +661,7 @@ pub(crate) async fn seal_current_tls_cert_for_bridge_impl(
     Ok(Some(blob_bytes))
 }
 
-/// Seal the cert currently on disk under `acme_dir` to the relay sidecar's
+/// Seal the cert served under `acme_dir` ([`read_served_tls_pem`]) to the relay sidecar's
 /// **directly-supplied** X25519 (the one it attested in its
 /// `fauna.sidecar.hello`), returning the wrapped blob bytes. `Ok(None)` when no
 /// cert is on disk yet (fresh nest — the relay retries on its refresh timer).
@@ -642,7 +680,7 @@ pub(crate) fn seal_current_tls_cert_for_x25519_impl(
     domain: &str,
     x25519_pk: &[u8; 32],
 ) -> Result<Option<Vec<u8>>, StorageUnavailable> {
-    let Some((cert_pem, key_pem)) = read_acme_pem(acme_dir) else {
+    let Some((cert_pem, key_pem)) = read_served_tls_pem(acme_dir, domain) else {
         return Ok(None);
     };
     let now_unix = fauna_core::data::Timestamp::now_secs_or_zero() as u64;
@@ -2143,7 +2181,7 @@ mod tests {
 
     #[tokio::test]
     async fn seal_on_read_delivers_cert_to_bridge_attested_after_issuance() {
-        // The regression guard for the live example.com failure: ACME issued the
+        // The regression guard for the live nest failure: ACME issued the
         // real cert (PEM on disk) BEFORE the mail bridge attested its x25519,
         // so the eager `store_acme_material` fan-out skipped it and no blob was
         // ever stored — the bridge's `fetch_tls_cert_blob` returned nil, its
@@ -2219,5 +2257,165 @@ mod tests {
                 .is_none(),
             "no cert on disk → seal-on-read yields None (caller falls back)"
         );
+    }
+
+    /// A CA-issued chain for `san` whose validity window closed yesterday —
+    /// the on-disk shape a lapsed renewal leaves behind until the next issuance.
+    fn expired_ca_chain_pem(san: &str) -> (String, String) {
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let mut ca_params = cn_params("test-ca", "Test CA");
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+
+        let leaf_key = rcgen::KeyPair::generate().unwrap();
+        let mut leaf_params = cn_params(san, san);
+        leaf_params.not_before = time::OffsetDateTime::now_utc() - time::Duration::days(91);
+        leaf_params.not_after = time::OffsetDateTime::now_utc() - time::Duration::days(1);
+        let leaf_cert = leaf_params.signed_by(&leaf_key, &ca_cert, &ca_key).unwrap();
+        (leaf_cert.pem(), leaf_key.serialize_pem())
+    }
+
+    /// The leaf of `chain_pem`: (self-signed?, currently valid?, DNS SANs,
+    /// SPKI-SHA256).
+    fn leaf_facts(chain_pem: &[u8]) -> (bool, bool, Vec<String>, [u8; 32]) {
+        let block = x509_parser::pem::Pem::iter_from_buffer(chain_pem)
+            .next()
+            .expect("a PEM block")
+            .expect("parse PEM");
+        let cert = block.parse_x509().expect("parse leaf");
+        let now = fauna_core::data::Timestamp::now_secs_or_zero();
+        let valid = now >= cert.validity().not_before.timestamp()
+            && now < cert.validity().not_after.timestamp();
+        let sans = match cert.subject_alternative_name() {
+            Ok(Some(san)) => san
+                .value
+                .general_names
+                .iter()
+                .filter_map(|gn| match gn {
+                    x509_parser::extensions::GeneralName::DNSName(d) => Some(d.to_string()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let self_signed = cert.tbs_certificate.issuer == cert.tbs_certificate.subject;
+        let spki = crate::acme::spki_sha256_of_cert_der(&block.contents).expect("spki");
+        (self_signed, valid, sans, spki)
+    }
+
+    /// SPKI-SHA256 of the stable floor key the TLSA records pin.
+    fn floor_key_spki(acme_dir: &std::path::Path) -> [u8; 32] {
+        let key = crate::self_signed_cert::load_or_create_floor_key(acme_dir).unwrap();
+        let cert = cn_params("spki.example", "spki.example")
+            .self_signed(&key)
+            .unwrap();
+        crate::acme::spki_sha256_of_cert_der(cert.der()).expect("spki")
+    }
+
+    #[tokio::test]
+    async fn seal_on_read_serves_the_floor_when_the_on_disk_trusted_chain_has_expired() {
+        // `tls-certificates.md` § The two-layer model: the trusted cert while it
+        // is valid, otherwise the floor — on the bridges' ports too. The mail and
+        // calendar listeners serve the sealed blob, so an expired CA-issued chain
+        // left on disk must be sealed as the self-signed floor (stable floor key,
+        // naming the bridge's domain), never as the lapsed chain itself.
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Arc::new(crate::db::CacheDb::open_in_memory().unwrap());
+        let (_, mta_x_sk) = seed_approved_bridge(&db, BridgeRole::Mta, "mta-1").await;
+        let storage = SealedStorage::new(db.clone(), tmp.path().to_path_buf());
+
+        let (cert_pem, key_pem) = expired_ca_chain_pem("fauna.example");
+        std::fs::write(tmp.path().join(crate::acme::CERT_FILENAME), &cert_pem).unwrap();
+        std::fs::write(tmp.path().join(crate::acme::KEY_FILENAME), &key_pem).unwrap();
+
+        let bytes = storage
+            .seal_current_tls_cert_for_bridge("mta", "mta-1", "fauna.example")
+            .await
+            .unwrap()
+            .expect("an on-disk chain is sealed");
+        let bundle = unseal_tls_cert(
+            &TlsCertBlob::from_canonical_bytes(&bytes).unwrap(),
+            &mta_x_sk,
+        )
+        .unwrap();
+        let (self_signed, valid, sans, spki) = leaf_facts(&bundle.cert_chain);
+        assert!(
+            self_signed,
+            "the lapsed CA chain is replaced by the self-signed floor"
+        );
+        assert!(valid, "the substituted floor is inside its validity window");
+        assert_eq!(
+            sans,
+            vec!["fauna.example".to_string()],
+            "the floor names the bridge's domain"
+        );
+        assert_eq!(
+            spki,
+            floor_key_spki(tmp.path()),
+            "the floor is minted on the stable floor key"
+        );
+        assert_ne!(
+            bundle.priv_key,
+            key_pem.into_bytes(),
+            "the lapsed chain's key is not sealed"
+        );
+
+        // The relay sidecar's seal shares the read: `relay.<apex>` gets the floor too.
+        let (x_sk, x_pk) = fauna_mls::wrapped_blob::generate_x25519_keypair();
+        let relay = seal_current_tls_cert_for_x25519_impl(
+            tmp.path(),
+            "relay",
+            "relay",
+            "relay.fauna.example",
+            &x_pk,
+        )
+        .unwrap()
+        .expect("an on-disk chain is sealed");
+        let relay_bundle =
+            unseal_tls_cert(&TlsCertBlob::from_canonical_bytes(&relay).unwrap(), &x_sk).unwrap();
+        let (self_signed, valid, _, spki) = leaf_facts(&relay_bundle.cert_chain);
+        assert!(
+            self_signed && valid,
+            "the relay is sealed a valid floor, not the expired chain"
+        );
+        assert_eq!(spki, floor_key_spki(tmp.path()));
+    }
+
+    #[test]
+    fn seal_read_leaves_a_valid_trusted_chain_and_the_floor_itself_as_is() {
+        // Only a CA-issued chain outside its window is substituted: a valid
+        // trusted chain and a self-signed cert (the floor, or an admin-synthesized
+        // one) are sealed byte-for-byte.
+        let tmp = tempfile::tempdir().unwrap();
+        for (cert_pem, key_pem) in [ca_signed_leaf_pem(), self_signed_pem()] {
+            std::fs::write(tmp.path().join(crate::acme::CERT_FILENAME), &cert_pem).unwrap();
+            std::fs::write(tmp.path().join(crate::acme::KEY_FILENAME), &key_pem).unwrap();
+            let (cert, key) = read_served_tls_pem(tmp.path(), "leaf.example").unwrap();
+            assert_eq!(cert, cert_pem.into_bytes());
+            assert_eq!(key, key_pem.into_bytes());
+        }
+    }
+
+    #[test]
+    fn on_disk_trusted_chain_lapse_is_read_off_the_chain() {
+        // The renew task's edge trigger for the fan-out: true only for a
+        // CA-issued chain outside its window.
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(
+            !crate::acme::on_disk_trusted_chain_lapsed(tmp.path()),
+            "no chain on disk"
+        );
+        for ((cert_pem, key_pem), lapsed) in [
+            (ca_signed_leaf_pem(), false),
+            (self_signed_pem(), false),
+            (expired_ca_chain_pem("fauna.example"), true),
+        ] {
+            std::fs::write(tmp.path().join(crate::acme::CERT_FILENAME), &cert_pem).unwrap();
+            std::fs::write(tmp.path().join(crate::acme::KEY_FILENAME), &key_pem).unwrap();
+            assert_eq!(
+                crate::acme::on_disk_trusted_chain_lapsed(tmp.path()),
+                lapsed
+            );
+        }
     }
 }

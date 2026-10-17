@@ -64,7 +64,9 @@ pub struct PendingActionSummary {
     /// Optional target (user actor_id hex / handle / snapshot id); `None` for
     /// self-scoped actions.
     pub target: Option<String>,
-    /// `pending` / `executed` / `cancelled` / `expired`.
+    /// `pending` / `executing` / `executed` / `cancelled` / `expired`. `executing`
+    /// is the executor's transient claim on a running action; apps list only
+    /// `pending` rows.
     pub status: String,
     pub created_at: i64,
     pub execute_after: i64,

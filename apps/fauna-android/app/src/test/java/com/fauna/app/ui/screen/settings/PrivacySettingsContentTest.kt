@@ -38,6 +38,9 @@ class PrivacySettingsContentTest {
         editingFilterId: Long? = null,
         editFilterPrefill: FilterPrefill? = null,
         isFilterEditable: (FfiEmailFilter) -> Boolean = { true },
+        filterMarks: List<Long> = emptyList(),
+        onKeepFilterMark: (Long) -> Unit = {},
+        onDeleteFilter: (Long) -> Unit = {},
     ) {
         composeTestRule.setContent {
             PrivacySettingsContent(
@@ -58,7 +61,7 @@ class PrivacySettingsContentTest {
                 bandKeyFor = bandKeyFor,
                 onBack = {},
                 onInboxModeChange = {},
-                onDeleteFilter = {},
+                onDeleteFilter = onDeleteFilter,
                 onCreateFilter = { _, _, _, _ -> },
                 onEditFilter = {},
                 onSaveFilter = { _, _, _, _ -> },
@@ -66,6 +69,8 @@ class PrivacySettingsContentTest {
                 onSpamThresholdChange = {},
                 onPhishingThresholdChange = {},
                 onSaveSpamPrefs = {},
+                filterMarks = filterMarks,
+                onKeepFilterMark = onKeepFilterMark,
             )
         }
     }
@@ -167,6 +172,23 @@ class PrivacySettingsContentTest {
         composeTestRule.onNodeWithText("Permissive").assertExists()
     }
 
+    /** The e2e journey reads the band word by `spam-threshold-band`, so the tag
+     *  must sit on the node that carries the word, for every band. */
+    private fun assertBandTag(value: Float, key: String, word: String) {
+        render(spamThreshold = value, bandKeyFor = { key })
+        scrollToSpamControls()
+        composeTestRule.onNodeWithTag("spam-threshold-band").assertTextEquals(word)
+    }
+
+    @Test
+    fun aggressiveBandWordIsReadableByItsTestTag() = assertBandTag(0.1f, "aggressive", "Aggressive")
+
+    @Test
+    fun moderateBandWordIsReadableByItsTestTag() = assertBandTag(0.5f, "moderate", "Moderate")
+
+    @Test
+    fun permissiveBandWordIsReadableByItsTestTag() = assertBandTag(0.9f, "permissive", "Permissive")
+
     private fun sampleFilter(id: Long = 1) = com.fauna.ffi.FfiEmailFilter(
         id = id,
         name = "Block spam",
@@ -223,5 +245,52 @@ class PrivacySettingsContentTest {
             .assert(hasText("Block spam", substring = true))
         composeTestRule.onNodeWithTag("filter-rule-value")
             .assert(hasText("spammer@evil.com", substring = true))
+    }
+
+    // -- The post-succession review (succession-aftermath.md § Adjudicating
+    // what the aftermath carries across, the email-filter plane) --
+
+    @Test
+    fun theReviewMarkAndKeepRenderOnlyOnAMarkedRule() {
+        render(
+            // The marked rule first and the unmarked one after it, both in
+            // Robolectric's viewport once the list is scrolled to its rows.
+            emailFilters = listOf(sampleFilter(id = 2).copy(name = "Forward old"), sampleFilter(id = 1)),
+            filterMarks = listOf(2L),
+        )
+        scrollToFilterItem()
+        // The mark is a Text inside the merged ListItem row, so it is read off
+        // the unmerged tree (filter-name's own case).
+        composeTestRule.onAllNodesWithTag("filter-item").assertCountEquals(2)
+        composeTestRule.onAllNodesWithTag("filter-unattested-mark", useUnmergedTree = true).assertCountEquals(1)
+        composeTestRule.onAllNodesWithTag("filter-review-keep-button", useUnmergedTree = true).assertCountEquals(1)
+        // Both rows keep their own delete — the Remove half; there is
+        // deliberately no second remove button.
+        composeTestRule.onAllNodesWithTag("filter-delete", useUnmergedTree = true).assertCountEquals(2)
+    }
+
+    @Test
+    fun noMarksMeansNoReviewAffordance() {
+        render(emailFilters = listOf(sampleFilter()))
+        scrollToFilterItem()
+        composeTestRule.onNodeWithTag("filter-unattested-mark", useUnmergedTree = true).assertDoesNotExist()
+        composeTestRule.onNodeWithTag("filter-review-keep-button").assertDoesNotExist()
+    }
+
+    @Test
+    fun keepAndDeleteHandTheMarkedRuleIdToTheirCallbacks() {
+        val kept = mutableListOf<Long>()
+        val deleted = mutableListOf<Long>()
+        render(
+            emailFilters = listOf(sampleFilter(id = 7)),
+            filterMarks = listOf(7L),
+            onKeepFilterMark = { kept += it },
+            onDeleteFilter = { deleted += it },
+        )
+        scrollToFilterItem()
+        composeTestRule.onNodeWithTag("filter-review-keep-button").performClick()
+        composeTestRule.onNodeWithTag("filter-delete").performClick()
+        assert(kept == listOf(7L)) { "Keep must carry the marked rule's id, got $kept" }
+        assert(deleted == listOf(7L)) { "delete must carry the marked rule's id, got $deleted" }
     }
 }

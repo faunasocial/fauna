@@ -84,7 +84,9 @@ while [ $# -gt 0 ]; do
             ;;
         --blob-dir)
             [ $# -ge 2 ] || die "--blob-dir requires an argument"
-            BLOB_DIR="$2"
+            # Normalize once: the guard, mkdir, chown and the config all act on
+            # this one spelling, so root never re-resolves a raw `blobs/` or `x/../blobs`.
+            BLOB_DIR=$(realpath -sm -- "$2")
             shift 2
             ;;
         --remove-data)
@@ -201,10 +203,50 @@ install_default_config() {
 }
 
 # ---------------------------------------------------------------------------
+# Refuse a blob dir whose path crosses a symlink under $DATA_DIR
+# ---------------------------------------------------------------------------
+# $DATA_DIR is owned by the service user, so any component below it can be
+# swapped for a link. Under $DATA_DIR the lexically normalized spelling
+# (realpath -sm: handles trailing slash, //, ./ and ..) must equal the
+# link-resolved one (realpath -m) once $DATA_DIR itself is resolved.
+# A check cannot pin the middle of a path the service user can swap after it, and
+# root's mkdir and chown resolve every component by path; so a blob dir may sit
+# only directly below $DATA_DIR, where the one component left is covered by
+# `chown -h` and $DATA_DIR itself is resolved by the check above.
+refuse_linked_blob_dir() {
+    local lex data_lex data_canon canon
+    lex=$(realpath -sm -- "$1")
+    data_lex=$(realpath -sm -- "$DATA_DIR")
+    case "$lex/" in
+        "$data_lex"/*) ;;
+        *) return 0 ;;
+    esac
+    case "${lex#"$data_lex"/}" in
+        */*)
+            echo "ERROR: $1 is nested more than one level below $DATA_DIR (or is $DATA_DIR itself); use $DATA_DIR/<name> or a path outside it." >&2
+            return 1
+            ;;
+    esac
+    canon=$(realpath -m -- "$1")
+    data_canon=$(realpath -m -- "$DATA_DIR")
+    if [ "$canon" != "$data_canon${lex#"$data_lex"}" ]; then
+        echo "ERROR: $1 crosses a symlink inside $DATA_DIR; refusing to chown through it." >&2
+        return 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Generate claim code (mirrors macOS installer postinstall)
 # ---------------------------------------------------------------------------
 generate_claim_code() {
     local claim_path="$DATA_DIR/claim-code"
+    # $DATA_DIR is owned by the service user, so it can plant anything at
+    # $claim_path. Root must never write, chown or chmod through a link there:
+    # refuse a symlink or any non-regular file (a dangling link fails -f).
+    if [ -L "$claim_path" ] || { [ -e "$claim_path" ] && [ ! -f "$claim_path" ]; }; then
+        echo "ERROR: $claim_path is not a regular file (symlink or special file); refusing to write the claim code through it." >&2
+        return 1
+    fi
     if [ -f "$claim_path" ]; then
         echo "Claim code already exists at $claim_path, preserving"
         return
@@ -218,9 +260,18 @@ generate_claim_code() {
     local code
     code=$(LC_ALL=C tr -dc 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789' < /dev/urandom \
         | head -c 8 | fold -w4 | paste -sd- -)
-    echo "$code" > "$claim_path"
-    chown "$FAUNA_USER":"$FAUNA_GROUP" "$claim_path"
-    chmod 0640 "$claim_path"
+    # Finish the file (content, owner, mode) in a root-owned stage directory on
+    # $DATA_DIR's parent (root-owned; mv falls back to unlink plus an O_EXCL
+    # create when that is another filesystem), then rename it into place. install(1) would set owner and mode by path, and the mode change
+    # follows a link planted in the window; rename(2) replaces a planted link
+    # and never follows it, so the only root write into $DATA_DIR is the rename.
+    local stage
+    stage=$(mktemp -d "$(dirname "${DATA_DIR%/}")/.fauna-claim.XXXXXX")
+    echo "$code" > "$stage/claim-code"
+    chown "$FAUNA_USER":"$FAUNA_GROUP" "$stage/claim-code"
+    chmod 0640 "$stage/claim-code"
+    mv -fT "$stage/claim-code" "$claim_path"
+    rmdir "$stage"
     echo ""
     echo "=========================================="
     echo "  CLAIM CODE: ${code}"
@@ -343,8 +394,13 @@ do_install() {
     echo "Creating data directories under $DATA_DIR ..."
     mkdir -p "$DATA_DIR"
     if [ -n "$BLOB_DIR" ]; then
+        # A blob dir under $DATA_DIR sits where the service user can swap any
+        # component for a symlink: refuse that, as for the claim code, before
+        # and after mkdir, and never let chown follow a final link.
+        refuse_linked_blob_dir "$BLOB_DIR" || exit 1
         mkdir -p "$BLOB_DIR"
-        chown "$FAUNA_USER":"$FAUNA_GROUP" "$BLOB_DIR"
+        refuse_linked_blob_dir "$BLOB_DIR" || exit 1
+        chown -h "$FAUNA_USER":"$FAUNA_GROUP" "$BLOB_DIR"
     fi
     chown "$FAUNA_USER":"$FAUNA_GROUP" "$DATA_DIR"
     chmod 0750 "$DATA_DIR"

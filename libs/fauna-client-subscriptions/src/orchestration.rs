@@ -1878,7 +1878,7 @@ where
         // `custody::restamp_current`).
         if rotated_at != period.rotated_at {
             let mut cfg = self.custody().await?;
-            if custody::restamp_current(&mut cfg, tier, period.version, rotated_at) {
+            if custody::restamp_current(&mut cfg, tier, period.version, &period.key, rotated_at) {
                 self.merge_custody(cfg).await?;
             }
         }
@@ -3025,6 +3025,7 @@ mod tests {
             &mut stale,
             "gold",
             1,
+            &[0x11; 32],
             rotated.rotated_at
         ));
         nest.period_keys.restore_to(&stale);
@@ -3208,6 +3209,7 @@ mod tests {
             &mut stale,
             "gold",
             1,
+            &[0x11; 32],
             removed.rotated_at
         ));
         nest.period_keys.restore_to(&stale);

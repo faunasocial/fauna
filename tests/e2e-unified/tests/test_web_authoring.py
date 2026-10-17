@@ -141,6 +141,80 @@ def test_admin_apex_designate_and_clear(admin_app, nest_instance):
     )
 
 
+def _set_apex_over_the_wire(nest_instance, actor_id) -> None:
+    """Another admin's designation (or clear, ``None``) — state the page under
+    test must READ, so it is planted beside the app, never through it."""
+    from helpers.admin_wire import admin_client
+
+    with admin_client(nest_instance) as client:
+        client.call("fauna.web.set_apex_actor", {"actor_id": actor_id})
+
+
+def _reopen_web(admin_app) -> None:
+    admin_app.admin.navigate_dashboard()
+    admin_app.admin.navigate_web()
+    admin_app.driver.wait_for("admin-web-apex-actor-select", timeout=15.0)
+
+
+@pytest.mark.feature("admin-front-page")
+def test_admin_front_page_shows_the_address_it_serves_at(admin_app, nest_instance):
+    """admin.md § 7. Web (`admin.md:303`): with a member chosen as the front
+    page, the page shows the address that member's site serves at — the
+    `https://<domain>/` apex, read off the explainer beside the picker."""
+    from tests.api import ws_api
+
+    label, actor_id = _first_actor(nest_instance)
+    host = ws_api.nest_info(nest_instance["port"])["web_serving_domain"]
+    admin_app.admin.navigate_web()
+    admin_app.driver.wait_for("admin-web-apex-actor-select", timeout=15.0)
+    try:
+        admin_app.admin.set_apex_actor(label)
+        wait_until(
+            lambda: apex_actor(nest_instance) == actor_id,
+            RPC_ROUNDTRIP_S,
+            diagnose=lambda: f"designating {label!r} never persisted",
+        )
+        info = wait_until(
+            lambda: admin_app.driver.get_text("admin-web-apex-info"),
+            RPC_ROUNDTRIP_S,
+            diagnose=lambda: admin_app.driver.diagnose("admin-web-apex-info"),
+        )
+        assert f"https://{host}/" in info, (
+            f"the front-page explainer should carry the apex address "
+            f"https://{host}/, got {info!r}"
+        )
+    finally:
+        _set_apex_over_the_wire(nest_instance, None)
+
+
+@pytest.mark.feature("admin-front-page")
+def test_admin_front_page_opens_on_who_is_the_front_page_now(admin_app, nest_instance):
+    """admin.md § 7. Web: opening the page shows who is the front page now, or
+    that nobody is. The designation is changed beside the app (as a second
+    admin would), so the page can only show it by reading the nest when it
+    opens: designated → the picker opens on that member; cleared → it opens on
+    None."""
+    label, actor_id = _first_actor(nest_instance)
+    try:
+        _set_apex_over_the_wire(nest_instance, actor_id)
+        _reopen_web(admin_app)
+        wait_until(
+            lambda: admin_app.admin.apex_actor_selected() == label,
+            RPC_ROUNDTRIP_S,
+            diagnose=lambda: f"with {label!r} designated, the page opened on "
+            f"{admin_app.admin.apex_actor_selected()!r}; error: {admin_app.error_text()!r}",
+        )
+    finally:
+        _set_apex_over_the_wire(nest_instance, None)
+    _reopen_web(admin_app)
+    wait_until(
+        lambda: admin_app.admin.apex_actor_selected() == S.admin.web_page.apex_none,
+        RPC_ROUNDTRIP_S,
+        diagnose=lambda: f"with nobody designated, the page opened on "
+        f"{admin_app.admin.apex_actor_selected()!r}",
+    )
+
+
 # ── The Published-posts management section (tui led) ────────────────────
 #
 # `web-content-hosting.md` § Published-post management. tui was the lead app
@@ -268,6 +342,7 @@ def _upload_sealed_blob(port: int, token: str, data: bytes) -> str:
 @pytest.mark.windows
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.feature("personal-website")
 def test_published_post_management_section(web_hosting_app, web_hosting_nest):
     """The lead-app journey: a creator sees their published post, copies a link
@@ -308,7 +383,7 @@ def test_published_post_management_section(web_hosting_app, web_hosting_nest):
     # every visit runs, which is how a sibling device's publish shows up.
     web.navigate()
     index = web.wait_for_slug(slug)
-    assert not web.is_empty_state_visible()
+    assert not web.is_empty_state_visible()  # negative-visibility-ok: name collision — web_settings.is_empty_state_visible already reads `not driver.is_absent(...)`
     assert web.gated_tier(index) == "", "an ungated row must advertise no tier"
     assert not web.offers_paywall_link(index), (
         "Copy paywall link is published-AND-gated only — an ungated post has no "
@@ -354,12 +429,6 @@ def test_published_post_management_section(web_hosting_app, web_hosting_nest):
     assert not rows, f"the takedown moved the UI but not the nest: {rows}"
 
 
-# The apps whose `web-settings` paints `web-settings-render-status`
-# (`web-content-hosting.md` § Implementation status today). One app per landing
-# in the trickle-down; the set disappears when it holds all seven.
-_RENDER_STATUS_BUILT = frozenset({"tui", "linux", "web", "android", "macos", "ios"})
-
-
 @pytest.mark.tier_3
 @pytest.mark.tui
 @pytest.mark.linux
@@ -389,17 +458,8 @@ def test_a_site_the_nest_took_dark_tells_its_author(web_hosting_app, web_hosting
     web = app.web_settings
 
     from conftest import _bridge_admin_post
-    from helpers.app_surface import app_name, skip_unbuilt
     from tests.api import ws_api
     from tests.api.bare import sign_and_encode_post
-
-    if app_name(app.driver) not in _RENDER_STATUS_BUILT:
-        skip_unbuilt(
-            app.driver,
-            surface="web-settings-render-status",
-            detail="the status line is built on tui, linux, web, android, macos and ios; windows follows in trickle-down",
-            tracked="web-content-hosting.md § Implementation status today",
-        )
 
     now_us = int(time.time() * 1_000_000)
     post_id = ws_api.create_post(
@@ -454,6 +514,7 @@ def test_a_site_the_nest_took_dark_tells_its_author(web_hosting_app, web_hosting
 @pytest.mark.windows
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.feature("personal-website")
 def test_a_copied_web_link_actually_serves(web_hosting_app, web_hosting_nest):
     """The copied public link must be a link that LOADS — the external black-box
@@ -526,6 +587,7 @@ def test_a_copied_web_link_actually_serves(web_hosting_app, web_hosting_nest):
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.windows
+@pytest.mark.android
 @pytest.mark.feature("personal-website")
 def test_a_copied_paywall_link_serves_the_full_body(web_hosting_app, web_hosting_nest):
     """The *Copy paywall link* value must be a link that unseals the FULL
@@ -650,6 +712,7 @@ def test_a_copied_paywall_link_serves_the_full_body(web_hosting_app, web_hosting
 @pytest.mark.windows
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.feature("personal-website")
 def test_publishing_a_post_from_the_feed_overflow_menu(
     web_hosting_app, web_hosting_nest
@@ -777,6 +840,7 @@ def test_publishing_a_post_from_the_feed_overflow_menu(
 @pytest.mark.windows
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.feature("personal-website")
 def test_the_overflow_copy_verb_is_dead_without_a_serving_origin(
     web_hosting_app, web_hosting_nest

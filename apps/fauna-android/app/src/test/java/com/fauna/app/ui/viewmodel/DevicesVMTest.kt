@@ -95,7 +95,7 @@ class DevicesVMTest {
         // `init` beside the two above.
         val storeChangedTick = MutableSharedFlow<Unit>(replay = 0, extraBufferCapacity = 1)
         whenever(api.storeChangedTick).thenReturn(storeChangedTick)
-        val vm = DevicesVM(api, resolveService, secureStorage, appContext, OfflineShareHost(appContext))
+        val vm = DevicesVM(api, resolveService, secureStorage, appContext, OfflineShareHost(appContext), FakeOnDemandToggle())
         return Fixture(vm, api, tick, reconnectTick, storeChangedTick)
     }
 
@@ -197,9 +197,10 @@ class DevicesVMTest {
     fun aStoreChangeTickReReadsTheStoreBackedHalvesAndNothingElse() = runTest {
         // account-runtime.md § Multi-instance concurrency → *A runtime's own
         // pump is a source of the notice too*: the notice re-reads what the
-        // store backs — here the enrollment notice — and must not become a
-        // custody ceremony drive (the facet's load drives before it folds), nor
-        // re-read an expanded row's device activity, which is nest state.
+        // store backs — the enrollment notice, the custody facet's fold, the
+        // sync-defaults select — and must not become a custody ceremony drive
+        // (the facet's visit edge drives before it folds), nor re-read an
+        // expanded row's device activity, which is nest state.
         val (vm, api, _, _, storeChangedTick) = makeVm()
         whenever(api.folderDevices("photos")).thenReturn(listOf(device("laptop", 1)))
         vm.setFolderExpanded("photos", 1L, true)
@@ -208,8 +209,27 @@ class DevicesVMTest {
 
         verify(api, times(1)).accountEnrollmentNotice()
         verify(api, never()).custodyDrive()
-        verify(api, never()).custodyFacetLoad()
+        verify(api, times(1)).custodyFacetLoad()
+        verify(api, times(1)).defaultConflictPolicyGet()
         verify(api, times(1)).folderDevices("photos")
+    }
+
+    @Test
+    fun aFailedSyncDefaultsReReadKeepsThePaintedPolicy() = runTest {
+        // The notice re-runs the sync-defaults read while the page is open; a
+        // transient failure must leave the chosen policy painted, never flip
+        // it back to "auto" (null).
+        val (vm, api, _, _, storeChangedTick) = makeVm()
+        whenever(api.defaultConflictPolicyGet())
+            .thenReturn("keep_both")
+            .thenThrow(RuntimeException("store unreadable"))
+        vm.loadDefaultConflictPolicy()
+        assertEquals("keep_both", vm.defaultConflictPolicy.value)
+
+        storeChangedTick.tryEmit(Unit)
+
+        verify(api, times(2)).defaultConflictPolicyGet()
+        assertEquals("keep_both", vm.defaultConflictPolicy.value)
     }
 
     @Test

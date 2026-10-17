@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The peer-transfer plane's page-level surface on the Folders page (p2p.md §
+  Cross-user shared-set transfer; the six ids user-approved 2026-08-18):
+  `share-serve-status` plus the `share-transfer-list`'s `share-transfer-item`
+  rows. Render-only — the plane has no gestures here (severance stays the
+  member-remove / leave buttons on the set rows). Placement copies tui's and
+  linux's: directly under the co-present offline-share panel.
+
+  RENDERS NOTHING while no plane is running (SharePlaneModel.View == null) — a
+  different fact from "no shared folders to serve", which is a reading INSIDE a
+  non-null view. The root is Collapsed by default and shown only by Render().
+
+  ⚠ THIS FILE IS PART OF THE EXCISION UNIT of the `p2p-share` member, like its
+  sibling OfflineShareSection.xaml: an AutomationId literal in XAML ships in the
+  store-safe flavor unless the ITEM is removed (FaunaApp.csproj drops
+  `Views\P2pShare\**`). NOTHING may reference this type from markup; FoldersPage
+  hosts it through the same `#if P2P_SHARE` code-behind that hosts the ceremony.
+  The per-row ids are built in code-behind (indexed rows), in this same unit.
+
+  Reference: apple `SharePlaneSectionView`; tui (the lead app).
+-->
+<UserControl
+    x:Class="FaunaApp.Views.P2pShare.SharePlaneSection"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <StackPanel x:Name="SharePlaneRoot" Spacing="4" Visibility="Collapsed">
+        <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                   Text="{loc:Localize Key=folders/share_transfer_section}" />
+        <TextBlock x:Name="ShareServeStatusText"
+                   AutomationProperties.AutomationId="{x:Bind ids:Ids.ShareServeStatus}"
+                   Opacity="0.7" TextWrapping="Wrap" />
+        <!-- One share-transfer-item per (set x peer) pull outcome, built in
+             code-behind. Present whenever the plane is up (ui.yaml's stated
+             presence rule), even with zero rows. -->
+        <StackPanel x:Name="ShareTransferListPanel" Spacing="2"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.ShareTransferList}" />
+    </StackPanel>
+</UserControl>

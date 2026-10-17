@@ -213,6 +213,11 @@ pub fn decide_scan_action(clamav: &ClamavVerdict, policy: &ScanPolicy) -> ScanAc
         ClamavVerdict::Error { detail } => ScanAction::Tempfail {
             reason: detail.clone(),
         },
+        // A kind this build cannot read is no proof the scanner passed the
+        // message: never allow without scan.
+        ClamavVerdict::Unknown => ScanAction::Tempfail {
+            reason: "unrecognized clamav verdict".to_string(),
+        },
         ClamavVerdict::Infected { signature } => match policy.clamav_action_on_infected {
             ClamavAction::Reject => ScanAction::RejectMalware {
                 signature: signature.clone(),

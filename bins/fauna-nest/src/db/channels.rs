@@ -215,6 +215,26 @@ impl CacheDb {
         }
     }
 
+    /// Move every key package of one actor — one-time and last-resort — back
+    /// by `secs`: `published_at` and `expires_at` both, as if each had been
+    /// published that much earlier. Returns how many rows moved. Test-only:
+    /// the `keypackage_age_test_hook` seam, so a tier_3 can reach the 30-day
+    /// expiry without waiting it out.
+    #[cfg(feature = "test-hooks")]
+    pub async fn test_age_key_packages(&self, actor_id: &[u8; 32], secs: i64) -> Result<u64> {
+        let actor_id = *actor_id;
+        let conn = self.conn.lock().await;
+        let n = conn
+            .execute(
+                "UPDATE key_packages
+                 SET published_at = published_at - ?1, expires_at = expires_at - ?1
+                 WHERE actor_id = ?2",
+                rusqlite::params![secs, actor_id.as_slice()],
+            )
+            .context("test_age_key_packages")?;
+        Ok(n as u64)
+    }
+
     /// Count the number of non-expired **one-time** key packages for an actor.
     /// Excludes the reusable last-resort KP so the client's top-up gauge
     /// (`ensure_keypackages`) measures only the consumable pool.

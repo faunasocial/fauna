@@ -291,6 +291,25 @@ class AppLaunchVMTest {
         assertEquals(AppLaunchVM.NavTarget.Superseded(CLAIMED), target)
     }
 
+    // ── Rotation-chain fork evidence (box-recovery.md § Client acceptance): the
+    // snapshot's `identityFork` bit turns the identity-changed phase into the
+    // fork surface naming both heads; with the bit clear it stays the ordinary
+    // trust-offering surface. ────
+
+    @Test
+    fun forkEvidenceRoutesToTheForkSurfaceNamingBothHeads() {
+        val (vm, _, _) = makeVm()
+        val target = vm.navTargetFor(LaunchPhase.IdentityChanged("aa", "bb"), identityFork = true)
+        assertEquals(AppLaunchVM.NavTarget.IdentityForked("aa", "bb"), target)
+    }
+
+    @Test
+    fun anIdentityChangeWithoutForkEvidenceKeepsTheOrdinaryTrustSurface() {
+        val (vm, _, _) = makeVm()
+        val target = vm.navTargetFor(LaunchPhase.IdentityChanged("aa", "bb"))
+        assertEquals(AppLaunchVM.NavTarget.IdentityChanged, target)
+    }
+
     @Test
     fun aSupersededRefusalOutranksSignInRefused() {
         val (vm, _, _) = makeVm()
@@ -532,6 +551,125 @@ class AppLaunchVMTest {
         val machine: LaunchMachine = mock(LaunchMachine::class.java),
     )
 
+    // ── The locked surface (`ui/sessions.md` § Layout & flow, leg 2;
+    // `devices.md` § The locked state) ──────────────────────────────────────
+
+    @Test
+    fun locked_onOfflineTerminal_yieldsAccountLocked() {
+        val (vm, _, _) = makeVm()
+        val target = vm.navTargetFor(LaunchPhase.Offline(transient = false), lockedUntilSecs = UNTIL)
+        assertEquals(AppLaunchVM.NavTarget.AccountLocked(UNTIL), target)
+    }
+
+    @Test
+    fun locked_outranksTheOtherOfflineSideChannels() {
+        // The machine's `Offline { transient: false }` projection would otherwise
+        // paint NeedsUpdate (or the refused surface) over a lock with no way out.
+        val (vm, _, _) = makeVm()
+        val target = vm.navTargetFor(
+            LaunchPhase.Offline(transient = false),
+            signInRefused = true,
+            supersededSuccessor = CLAIMED,
+            lockedUntilSecs = UNTIL,
+        )
+        assertEquals(AppLaunchVM.NavTarget.AccountLocked(UNTIL), target)
+    }
+
+    @Test
+    fun locked_onOtherPhases_isIgnored() {
+        val (vm, _, _) = makeVm()
+        assertEquals(
+            AppLaunchVM.NavTarget.Authenticated,
+            vm.navTargetFor(LaunchPhase.Online, lockedUntilSecs = UNTIL),
+        )
+    }
+
+    @Test
+    fun theNoticeFollowsTheSharedRule_andHoldsWhileTheUserIsMidCeremony() {
+        val (vm, _, _) = makeVm()
+        val snap = bootSnapshot()
+        val locked = AppLaunchVM.NavTarget.AccountLocked(UNTIL)
+        // No notice shown yet: the machine's target, untouched.
+        assertNull(vm.followLock(null, snap, null, false) { _, _ -> true })
+        // Shown, and the shared rule says it still holds (mid-flight refresh).
+        assertEquals(locked, vm.followLock(null, snap, UNTIL, false) { _, _ -> true })
+        // The rule lets go: the machine's settled target wins.
+        assertEquals(
+            AppLaunchVM.NavTarget.Authenticated,
+            vm.followLock(AppLaunchVM.NavTarget.Authenticated, snap, UNTIL, false) { _, _ -> false },
+        )
+        // Mid-ceremony on `identity_stolen_entry`: never yanked away.
+        assertEquals(
+            locked,
+            vm.followLock(AppLaunchVM.NavTarget.Authenticated, snap, UNTIL, true) { _, _ -> false },
+        )
+        // A new lock with another unlock time repaints the notice for it.
+        val relocked = AppLaunchVM.NavTarget.AccountLocked(UNTIL + 86_400u)
+        assertEquals(relocked, vm.followLock(relocked, snap, UNTIL, false) { _, _ -> true })
+    }
+
+    @Test
+    fun theLockedCeremonyReChecksBothGatesInTheActionArm() = runTest {
+        val f = makeVm(secretHex = SECRET, nestUrl = NEST)
+        var called = false
+        f.vm.succeedLocked = { _, _, _ -> called = true; error("must not run") }
+        assertEquals(
+            AppLaunchVM.LockedCeremonyResult.NotArmed,
+            f.vm.succeedStolenLocked("held-kit", "succeed"),
+        )
+        assertEquals(
+            AppLaunchVM.LockedCeremonyResult.NoPhrase,
+            f.vm.succeedStolenLocked("", RecoveryKitVM.STOLEN_CONFIRM_WORD),
+        )
+        assertEquals(false, called)
+    }
+
+    @Test
+    fun aPersistedLockedCeremonySwitchesToTheSuccessorAndReRunsTheMachine() = runTest {
+        val f = makeVm(secretHex = SECRET, nestUrl = NEST)
+        whenever(f.registry.active()).thenReturn(PREDECESSOR)
+        var seen: Triple<String, ByteArray, String>? = null
+        f.vm.succeedLocked = { url, secret, phrase ->
+            seen = Triple(url, secret, phrase)
+            lockedOutcome(persisted = true)
+        }
+        val result = f.vm.succeedStolenLocked("held-kit", RecoveryKitVM.STOLEN_CONFIRM_WORD)
+        assertEquals(AppLaunchVM.LockedCeremonyResult.SignedIn, result)
+        assertEquals(NEST, seen!!.first)
+        assertEquals("held-kit", seen!!.third)
+        verify(f.registry).setActive(VERIFIED)
+        verify(f.actorScope).dropActorScopedState()
+        verify(f.machine).start()
+    }
+
+    @Test
+    fun anUnpersistedLockedCeremonyPutsTheKeyOnScreenAndSwitchesNothing() = runTest {
+        val f = makeVm(secretHex = SECRET, nestUrl = NEST)
+        f.vm.succeedLocked = { _, _, _ -> lockedOutcome(persisted = false) }
+        val result = f.vm.succeedStolenLocked("held-kit", RecoveryKitVM.STOLEN_CONFIRM_WORD)
+        assertEquals(AppLaunchVM.LockedCeremonyResult.PersistFailed(SUCCESSOR_SEED), result)
+        verify(f.registry, never()).setActive(anyString())
+        verify(f.machine, never()).start()
+    }
+
+    private fun lockedOutcome(persisted: Boolean) = com.fauna.ffi.FfiStolenOutcome(
+        kind = "landed",
+        message = null,
+        landed = com.fauna.ffi.FfiLandedSuccession(
+            successorSecretHex = SUCCESSOR_SEED,
+            newActorIdHex = VERIFIED,
+            persisted = persisted,
+            sweep = com.fauna.ffi.FfiSweepView(
+                kind = "not-run", detail = null, groups = 0u, groupsOldLeafRemoved = 0u,
+                unattestedMembers = 0u, owesWork = true,
+            ),
+            reviewRoster = emptyList(),
+            sweepStateJson = """{"kind":"not-run"}""",
+            succeededAt = 1_900_000_000L,
+        ),
+        carriesTheOnlySeed = false,
+    )
+
     private fun makeVm(
         secretHex: String? = null,
         nestUrl: String? = null,
@@ -564,6 +702,8 @@ class AppLaunchVMTest {
         val PREDECESSOR = "e3".repeat(32)
         val CLAIMED = "c1".repeat(32)
         val VERIFIED = "d2".repeat(32)
+        val SUCCESSOR_SEED = "5e".repeat(32)
+        const val UNTIL: ULong = 1_800_000_000u
         val SECRET = "ab".repeat(32)
         const val NEST = "http://127.0.0.1:18600"
         const val CLAIM_FREE = "This identity was succeeded — import the new identity to continue."
