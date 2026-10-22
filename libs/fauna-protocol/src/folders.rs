@@ -1781,7 +1781,7 @@ pub struct ActorMembersListReply {
 /// `fauna.folders.members.list_actors_remote` — a **cross-nest member's**
 /// actor-roster read: the set's authoritative roster lives on its home nest, so
 /// the member's own nest relays the read there via
-/// `fauna.federation.folder.actors.fetch` (`federation.md` § Cross-nest…, *The
+/// `fauna.federation.folder.actors.fetch` (`federation-shared-folders.md` § Cross-nest…, *The
 /// cross-nest writer roster read*). The writer-signed change-record reader's
 /// roster source for a foreign set (`mls-group-key-material.md` § M2, ruling
 /// (3)).
@@ -2555,7 +2555,7 @@ pub struct ContentKeyGetReply {
     /// **Cross-nest relay only** — the caller's current access grant on the set
     /// (`"reader"`/`"writer"`), stamped by the set's HOME nest and threaded back
     /// through this nest's relay. The refresh half of *Recipient-side access
-    /// discovery* (`docs/goal/architecture/federation.md` § Cross-nest): the
+    /// discovery* (`docs/goal/architecture/federation-shared-folders.md` § Cross-nest): the
     /// client CAS-updates its `ForeignFolder.access` when it differs, so a
     /// promotion or demotion is picked up on the ordinary commit-poll cadence
     /// with no push kind.
@@ -2589,7 +2589,7 @@ pub struct ContentKeyGetReply {
     /// **Cross-nest relay only** — the folder's content residency
     /// (`"metadata_only"` / `"full"`) as the set's HOME nest stamps it off its
     /// own row, threaded back through this nest's relay
-    /// (`docs/goal/architecture/federation.md` § Cross-nest shared folders +
+    /// (`docs/goal/architecture/federation-shared-folders.md` § Cross-nest shared folders +
     /// channel append → *Relay serving across nests*, the `residency` stamp).
     /// The member refreshes its stored `ForeignFolder.residency` from it, and
     /// its engine arms the upload skip and the holder-keeps gate from that
@@ -2600,7 +2600,7 @@ pub struct ContentKeyGetReply {
     /// **Cross-nest relay only** — the set's owner's handle, as the set's HOME
     /// nest stamps it off its own `users` row, forwarded by this nest only
     /// once it bound [`Self::owner_domain`] to the home nest's verified key
-    /// (`docs/goal/architecture/federation.md` § Cross-nest shared folders +
+    /// (`docs/goal/architecture/federation-shared-folders.md` § Cross-nest shared folders +
     /// channel append → *The cross-nest owner label*). The member refreshes
     /// its stored `ForeignFolder.owner_handle` from it, so a renamed owner
     /// relabels on the commit-poll cadence. Both-or-neither with

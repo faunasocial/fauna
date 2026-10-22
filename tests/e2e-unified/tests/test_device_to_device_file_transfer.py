@@ -22,8 +22,10 @@ holds the role when present*).
 ``GetServiceStatus`` reply's ``peer_files`` (``fauna_ipc::sync::PeerFilesInfo``):
 how many siblings its peer leg holds, how many chunk bodies a sibling served,
 how many it left to the nest. "The nest never sees the data" is a claim about
-the file's BYTES: manifests and the change feed stay nest-mediated by design
-(``p2p.md`` § Implementation status today). So the direct journey uses a
+the file's BYTES: while the nest answers, manifests and the change feed stay
+nest-mediated by design (``p2p.md`` § Implementation status today); with it
+down, a sibling serves those too and the nest sequences the row on its return
+(``p2p.md`` § Same-account nest-down folder transfer). So both direct journeys use a
 **metadata-only** folder, whose bytes never rest on the nest — the only other
 road for them is the nest's relay, and a reading of every chunk served by the
 sibling and none left to the nest says they did not take it.
@@ -51,9 +53,10 @@ import pytest
 
 from common import register_user, set_folder_residency, user_create_folder
 from common.accounts import actor_id_hex
-from common.auth import UNBINDING_MAX_DEVICES, set_tier_caps
+from common.auth import UNBINDING_MAX_DEVICES, sealed_path, set_tier_caps, sync_changes_list
+from common.nest import start_nest_in_place, stop_nest
 from helpers import sync_seats
-from helpers.folder_content import _log_path
+from helpers.folder_content import _log_path, atomic_write
 from helpers.waiting import wait_until
 
 pytestmark = [
@@ -98,6 +101,8 @@ STARTUP_WINDOW = 180.0
 # backstop is five minutes, so the window covers one full backstop.
 SIBLING_WINDOW = 330.0
 WINDOW = 180.0
+# The nest's return: the agents' reconnect backoff, then an upload pass.
+RETURN_WINDOW = 300.0
 
 # Over one 1 MiB peer frame, so the sibling's chunk crosses in ranged slices
 # (`fauna_peer_sync::ranged`) rather than in one reply.
@@ -307,5 +312,157 @@ def test_a_file_still_arrives_through_the_nest_when_the_direct_path_is_gone(
                 f"seat b's agent counts chunks served by a sibling ({reading!r}), "
                 f"but its only sibling was stopped before b came back"
             )
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _sequenced_rows(nest_instance, secret_key: str, folder: str, name: str) -> list:
+    """The nest's sequenced change rows for ``name`` in ``folder``, matched by
+    the row's only label, its convergent ``path_sealed``."""
+    reply = sync_changes_list(
+        nest_instance["port"], secret_key=secret_key, folder=folder,
+        base_url=nest_instance["url"],
+    )
+    seal = sealed_path(secret_key, name)
+    return [c for c in reply.get("changes") or [] if c.get("path_sealed") == seal]
+
+
+def _row_summary(rows: list) -> str:
+    """Who sequenced each row, and when — the fields that tell a writer's
+    double upload from a sibling's re-upload, without the signature bytes."""
+    keys = ("seq", "device_id", "change_type", "created_at", "manifest_hash")
+    return repr([{k: r.get(k) for k in keys} for r in rows])
+
+
+@pytest.mark.timeout(int(2 * STARTUP_WINDOW + SIBLING_WINDOW + WINDOW + 2 * RETURN_WINDOW + 120))
+@pytest.mark.parametrize("seat_pair", _SEAT_PAIRS)
+@pytest.mark.feature("device-to-device-file-transfer")
+def test_two_devices_keep_passing_a_file_while_the_nest_is_down(
+    nest_instance, request, seat_pair
+):
+    """Outcome 7 (`p2p.md` § Same-account nest-down folder transfer). Two seats
+    of one account hold a direct path; the nest goes down; a file written on
+    seat ``a`` into a metadata-only folder lands on seat ``b`` — its change row
+    AND its bytes from ``a``, since nothing else answers. Then the nest returns:
+    ``a``'s own queued change is sequenced exactly once, attributed to ``a``
+    (``b`` held only a provisional row, which never enters the nest's log), and
+    ``b``'s copy stands with no conflict copy beside it."""
+    account = _account(nest_instance)
+    port, url, secret_key = account[0], account[1], account[2]
+    folder = f"nestdown-{secrets.token_hex(4)}"
+    user_create_folder(port, folder, secret_key=secret_key, base_url=url)
+    reply = set_folder_residency(
+        port, folder, secret_key=secret_key, residency="metadata_only", base_url=url
+    )
+    assert reply.get("ok") is True, f"residency set refused: {reply!r}"
+
+    run_token = sync_seats.new_run_token(seats=2)
+    name = f"{run_token}-nestdown.bin"
+    # Written on b once the nest is back: when ITS row is sequenced, b has run
+    # an upload pass after the return — the barrier behind which a duplicate of
+    # a's row from b would already be on the log.
+    marker = f"{run_token}-nestdown-after.txt"
+    body = secrets.token_bytes(BODY_BYTES)
+    tmp = Path(tempfile.mkdtemp(prefix=f"fauna-{folder}-"))
+    seat = _seat_factory(nest_instance, request, account, folder, tmp, run_token, seat_pair)
+
+    try:
+        with contextlib.ExitStack() as stack:
+            a = stack.enter_context(seat("a"))
+            b = stack.enter_context(seat("b"))
+            a.await_ready(STARTUP_WINDOW)
+            b.await_ready(STARTUP_WINDOW)
+            _await_siblings(b, a, "before the nest went down")
+            before = _reading(b)
+
+            stop_nest(nest_instance, graceful=True)
+            try:
+                atomic_write(a.path / name, body)
+                _await_bytes(b, name, body, "the nest-down transfer", a)
+
+                after = _reading(b)
+                served = after.get("chunks", 0) - before.get("chunks", 0)
+                left = after.get("to_nest", 0) - before.get("to_nest", 0)
+                assert served >= 1 and left == 0, (
+                    f"{name!r} reached seat b with the nest down, but its agent's "
+                    f"sibling reading went {before!r} -> {after!r} ({served} chunk(s) "
+                    f"served by a sibling, {left} left to a nest that was not "
+                    f"there)\n--- seat b ---\n{b.diagnostics()}\n"
+                    f"--- seat a ---\n{a.diagnostics()}"
+                )
+                assert after.get("bytes", 0) - before.get("bytes", 0) >= BODY_BYTES, (
+                    f"seat b's agent counts fewer sibling bytes than the file holds: "
+                    f"{before!r} -> {after!r}"
+                )
+            finally:
+                # The session-scoped nest must outlive this test: same port,
+                # same data dir, no factory reset.
+                start_nest_in_place(nest_instance)
+
+            # The nest sequences a's queued change on its catch-up.
+            wait_until(
+                lambda: _sequenced_rows(nest_instance, secret_key, folder, name),
+                RETURN_WINDOW, interval=2.0,
+                diagnose=lambda: (
+                    f"the nest came back but never sequenced {name!r} — seat a's "
+                    f"offline change was not uploaded on its catch-up\n"
+                    f"--- seat a ---\n{a.diagnostics()}\n--- seat b ---\n{b.diagnostics()}"
+                ),
+            )
+            atomic_write(b.path / marker, "written after the nest came back\n")
+            wait_until(
+                lambda: _sequenced_rows(nest_instance, secret_key, folder, marker),
+                RETURN_WINDOW, interval=2.0,
+                diagnose=lambda: (
+                    f"seat b never uploaded {marker!r} after the nest came back\n"
+                    f"--- seat b ---\n{b.diagnostics()}"
+                ),
+            )
+
+            rows = _sequenced_rows(nest_instance, secret_key, folder, name)
+            marker_device = _sequenced_rows(
+                nest_instance, secret_key, folder, marker
+            )[0].get("device_id")
+            assert len(rows) == 1, (
+                f"the nest sequenced {name!r} {len(rows)} times, not once: "
+                f"{_row_summary(rows)} (seat b's device is {marker_device}) — a "
+                f"provisional row a sibling served must never enter the nest's log "
+                f"a second time\n--- seat a ---\n{a.diagnostics()}\n"
+                f"--- seat b ---\n{b.diagnostics()}"
+            )
+            assert rows[0].get("device_id") != marker_device, (
+                f"the nest's one row for {name!r} is attributed to seat b, which "
+                f"only ever held it provisionally: {rows[0]!r}"
+            )
+            # Behind the barrier b is reconnected and has run a sync pass since
+            # the return: a reconcile that dropped or forked its copy shows here.
+            assert (b.path / name).read_bytes() == body, (
+                f"seat b's copy of {name!r} did not stand once the nest's row "
+                f"arrived\n--- seat b ---\n{b.diagnostics()}"
+            )
+            stray = sorted(
+                p.name for p in b.path.iterdir()
+                if p.name.startswith(run_token) and p.name not in (name, marker)
+            )
+            assert not stray, (
+                f"seat b holds {stray!r} beside {name!r} — the nest's echo of a "
+                f"row b already held provisionally forked it\n{b.diagnostics()}"
+            )
+            # A read that failed while the nest was down may paint "the
+            # connection to the nest was lost" on the page (`folders.md`
+            # § Errors & edge cases); once the nest answers again the reconnect
+            # re-read retires it (`transport.md` § Push events, the reconnect
+            # sweep). Telling the user the nest is unreachable while it answers
+            # is the red.
+            for s in (a, b):
+                wait_until(
+                    lambda s=s: not s.app.error_text().strip(),
+                    RETURN_WINDOW, interval=2.0,
+                    diagnose=lambda s=s: (
+                        f"seat {s.name}'s error-message still reads "
+                        f"{s.app.error_text()!r} after the nest came back and "
+                        f"its agent reconnected\n{s.diagnostics()}"
+                    ),
+                )
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

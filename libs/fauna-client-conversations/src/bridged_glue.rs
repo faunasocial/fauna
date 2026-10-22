@@ -40,7 +40,9 @@ use fauna_mls::wrapped_blob::derive_recipient_xwing_keypair;
 use fauna_mls::wrapped_blob::{
     StandingMailKeypair, XWingPublicKey, seal_to_recipient, seal_to_recipient_xwing,
 };
-use fauna_protocol::bridged_conversations::{BridgedMessageInfo, BridgedRoomInfo};
+use fauna_protocol::bridged_conversations::{
+    BRIDGED_PAGE_MAX, BridgedMessageInfo, BridgedRoomInfo,
+};
 use fauna_protocol::kind_manifest::BridgeCapabilityValue;
 use fauna_protocol::{RpcErrorClass, RpcRequester};
 
@@ -141,6 +143,12 @@ pub struct NestBridgedGlue<R: RpcRequester, K> {
     rooms: Mutex<HashMap<Vec<u8>, KnownRoom>>,
     /// The highest inbox row id this glue has read, opened or skipped.
     read_through: Mutex<i64>,
+    /// Per disconnected room, by room id: the Sent rows its re-read found
+    /// stamped undelivered ([`Self::undelivered_rows`]). Read once per
+    /// disconnection — the nest stamps in the transaction that disconnects
+    /// the room, so nothing new is stamped while it stays so — and dropped
+    /// when the room is served again, so a later disconnection reads afresh.
+    swept: Mutex<HashMap<Vec<u8>, Vec<i64>>>,
 }
 
 impl<R, K> NestBridgedGlue<R, K>
@@ -157,6 +165,7 @@ where
             keys,
             rooms: Mutex::new(HashMap::new()),
             read_through: Mutex::new(0),
+            swept: Mutex::new(HashMap::new()),
         })
     }
 
@@ -250,7 +259,59 @@ where
     }
 
     async fn rooms_inner(&self) -> Result<Vec<BridgedRoomRecord>, String> {
-        Ok(self.list_rooms().await?.iter().map(room_record).collect())
+        let rooms = self.list_rooms().await?;
+        let mut out = Vec::with_capacity(rooms.len());
+        for info in &rooms {
+            let mut record = room_record(info);
+            if info.disconnected {
+                record.undelivered_rows = self.undelivered_rows(&info.room_id).await;
+            } else {
+                self.swept.lock().unwrap().remove(&info.room_id);
+            }
+            out.push(record);
+        }
+        Ok(out)
+    }
+
+    /// The Sent rows of the disconnected room `room_id` the nest stamped
+    /// undelivered — one one-room re-read from the start, the first time
+    /// this glue sees the room disconnected. The inbox is read by cursor, so
+    /// a stamp on a row already read is never served again by
+    /// [`Self::fetch_inner`]; this is how it reaches the thread
+    /// (`apps/bridges.md` § Phase G → *When the bridge stops serving*,
+    /// consequence 3). Nothing is opened: the stamp is in the clear. A failed
+    /// read answers empty and is tried again at the next read.
+    async fn undelivered_rows(&self, room_id: &[u8]) -> Vec<i64> {
+        if let Some(rows) = self.swept.lock().unwrap().get(room_id) {
+            return rows.clone();
+        }
+        let mut rows = Vec::new();
+        let mut after_id = 0;
+        loop {
+            let page = match self
+                .client
+                .inbox_fetch(Some(room_id.to_vec()), after_id, BRIDGED_PAGE_MAX)
+                .await
+            {
+                Ok(page) => page,
+                Err(e) => {
+                    tracing::debug!(error = %e, "bridged room re-read failed");
+                    return rows;
+                }
+            };
+            rows.extend(undelivered_sent_rows(&page.messages));
+            match page.messages.last() {
+                Some(last) if page.messages.len() as u32 >= BRIDGED_PAGE_MAX => {
+                    after_id = last.id;
+                }
+                _ => break,
+            }
+        }
+        self.swept
+            .lock()
+            .unwrap()
+            .insert(room_id.to_vec(), rows.clone());
+        rows
     }
 
     async fn fetch_inner(&self, after_id: i64, limit: u32) -> Result<Vec<BridgedRecord>, String> {
@@ -363,7 +424,19 @@ fn room_record(info: &BridgedRoomInfo) -> BridgedRoomRecord {
         participants: info.participants.clone(),
         self_address: info.self_address.clone().filter(|a| !a.is_empty()),
         guardian_state: info.guardian_state.as_deref().map(GuardianState::from_wire),
+        disconnected: info.disconnected,
+        // Filled by the room's re-read (`NestBridgedGlue::undelivered_rows`).
+        undelivered_rows: Vec::new(),
     }
+}
+
+/// The ids of the account's own Sent copies on `page` the nest stamped
+/// undelivered — a peer's deposit is never stamped.
+fn undelivered_sent_rows(page: &[BridgedMessageInfo]) -> Vec<i64> {
+    page.iter()
+        .filter(|m| m.outbound && m.undelivered)
+        .map(|m| m.id)
+        .collect()
 }
 
 /// One opened inbox row as the shared driver takes it: an inbound deposit is
@@ -407,6 +480,7 @@ fn inbox_record(msg: &BridgedMessageInfo, room: Option<&KnownRoom>, body: String
         body,
         outbound: msg.outbound,
         timestamp_ms: msg.received_at,
+        undelivered: msg.outbound && msg.undelivered,
     }
 }
 
@@ -605,6 +679,9 @@ mod tests {
             ..info()
         };
         assert_eq!(room_record(&disconnected).identity, None);
+        // The fact itself rides along: it is what the room's notice says.
+        assert!(room_record(&disconnected).disconnected);
+        assert!(!room_record(&info()).disconnected);
         let keyless = BridgedRoomInfo {
             bridge_x25519: vec![1, 2, 3],
             ..info()
@@ -650,5 +727,38 @@ mod tests {
             ("@me:example.org", &["@bob:example.org".to_string()][..])
         );
         assert!(rec.outbound);
+        assert!(!rec.undelivered);
+    }
+
+    /// The nest's undelivered stamp on a Sent copy survives into the record
+    /// the shared driver takes, and a room's re-read picks exactly the
+    /// stamped Sent copies — never a peer's deposit, which nothing stamps.
+    #[test]
+    fn the_undelivered_stamp_reaches_the_shared_driver() {
+        let room = KnownRoom::of(&info());
+        let stamped = BridgedMessageInfo {
+            id: 7,
+            room_id: vec![9; 32],
+            bridge_id: "matrix".into(),
+            outbound: true,
+            undelivered: true,
+            ..Default::default()
+        };
+        assert!(inbox_record(&stamped, Some(&room), "hello".into()).undelivered);
+        let page = vec![
+            BridgedMessageInfo {
+                id: 6,
+                outbound: false,
+                undelivered: true,
+                ..stamped.clone()
+            },
+            stamped.clone(),
+            BridgedMessageInfo {
+                id: 8,
+                undelivered: false,
+                ..stamped
+            },
+        ];
+        assert_eq!(undelivered_sent_rows(&page), vec![7]);
     }
 }

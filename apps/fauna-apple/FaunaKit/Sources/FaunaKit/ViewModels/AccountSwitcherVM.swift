@@ -163,6 +163,27 @@ public final class AccountSwitcherVM {
         error = DisplayError.message(refusal)
     }
 
+    /// `userInfo` key of `.faunaAccountAddRefused` carrying the painted line.
+    public static let addRefusedMessageKey = "message"
+
+    /// Hand an add the registry refused to the mounted switcher section: the FFI's
+    /// `FfiError.General` carries the shared `add_refused_copy` line ("Not added —
+    /// this device's account list is full…"), shown verbatim. Posted by the app
+    /// roots through `completeAppendedAccount`'s `reportRefused`.
+    public static func postAddRefused(_ refusal: Error) {
+        guard let message = DisplayError.message(refusal) else { return }
+        NotificationCenter.default.post(
+            name: .faunaAccountAddRefused, object: nil,
+            userInfo: [addRefusedMessageKey: message])
+    }
+
+    /// Paint the line `postAddRefused` carried.
+    public func reportAddRefused(_ notification: Notification) {
+        if let message = notification.userInfo?[Self.addRefusedMessageKey] as? String {
+            error = message
+        }
+    }
+
     /// The Stage-2 gate in front of the app's switch seam. Resolves the re-auth
     /// question **before** anything app-owned runs, so the app's mutation-first
     /// invariant (`setActive` before teardown) holds unchanged:

@@ -110,11 +110,11 @@ Stamped 2026-10-01 at dc4b94e0f1.
 | 7 | app | `tests/e2e-unified/tests/test_erase_refused_other_instance.py::test_start_over_refuses_while_another_instance_serves_an_account` | linux (linux): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_erase_refused_other_instance_windows.py::test_windows_start_over_refuses_on_error_message_while_another_instance_serves` | windows (windows): passed |
 | 8 | app | (maintainer-only) | tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_feature_limits.py::test_a_feature_the_nest_is_too_old_for_is_hidden_not_an_error` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_feature_limits.py::test_a_feature_the_nest_is_too_old_for_is_hidden_not_an_error` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 10 | app | `tests/e2e-unified/tests/test_conversations_unknown_message_kind.py::test_a_message_of_an_unknown_kind_is_missed_alone_and_the_conversation_keeps_working` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_send_refused_by_nest_version.py::test_a_send_refused_because_the_nest_needs_updating_says_so_and_offers_no_retry` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 12 | nest | `tests/e2e-unified/tests/api/test_schema_version_compat.py::test_a_query_time_mismatch_is_answered_as_needing_an_update` | nest (linux): passed |
-| 13 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_deploy_schema_upgrade.py::test_incompatible_schema_boots_degraded_then_recovers` | — |
+| 13 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_deploy_schema_upgrade.py::test_incompatible_schema_boots_degraded_then_recovers` | nest (linux): passed |
 | 14 | app | `tests/e2e-unified/tests/test_send_refused_by_nest_version.py::test_a_refusal_the_app_does_not_recognise_is_shown_as_a_refusal_and_not_retried` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 15 | app | `tests/e2e-unified/tests/test_version_mismatch_launch.py::test_an_app_too_old_for_its_nest_says_to_update_and_offers_no_retry` | linux (linux): passed, tui (linux): passed |
 | 15 | app | `tests/e2e-unified/tests/test_version_mismatch_launch.py::test_an_app_too_old_for_its_nest_says_to_update_and_offers_no_retry_web` | web (linux): passed |

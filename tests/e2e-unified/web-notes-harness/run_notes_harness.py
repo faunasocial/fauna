@@ -12,7 +12,7 @@ Backspace routed through the shared `apply_structural_gesture` engine — and an
 IME composition pass (delta #6, the probe's other deferred item).
 
 This drives the bundle built by `build_harness.ts` (the production
-`notesEditorExtensions()` + the real `$lib/wasm`, mounted in a CodeMirror view
+`notesEditorExtensions()` + the real `#lib/wasm`, mounted in a CodeMirror view
 wired exactly as MarkdownEditor.svelte's onMount wires Notes mode). Run via
 `just notes-browser-harness` (which builds the bundle first), or directly:
 

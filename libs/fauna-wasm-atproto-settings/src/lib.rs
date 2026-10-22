@@ -3,7 +3,7 @@
 //! transition card, the hosted-identity panel, and the full-PDS login-plane
 //! surface it gates: app credentials, connected-app sessions, the
 //! external-apps kill-switch). The web atproto-settings route renders off
-//! this shared machine via `$lib/wasm-atproto-settings`, mirroring
+//! this shared machine via `#lib/wasm-atproto-settings`, mirroring
 //! `fauna-wasm-labeler-catalog` (the page-level wrapper shape) — one shared
 //! surface across clients (priority #1/#2; `docs/goal/ui/atproto.md`).
 //!
@@ -20,7 +20,7 @@
 //! so a Rust `Arc` cannot cross from this module into another one. The
 //! registry therefore lives here (the only chunk with a feeder today, module
 //! statics living as long as this JS module stays imported — i.e. the app
-//! session), and the SPA's `$lib/critical-alerts.ts` is the aggregation layer
+//! session), and the SPA's `#lib/critical-alerts.ts` is the aggregation layer
 //! a native app gets for free from its single process: it wires this
 //! chunk's `subscribeCriticalAlerts`/`criticalAlertsActive` into one shared
 //! store the shell renders, and does the same for any future chunk that
@@ -49,7 +49,7 @@ fn alerts_registry() -> Arc<CriticalAlerts> {
 }
 
 /// Repaint hook: fires on every post/clear against this chunk's registry.
-/// `$lib/critical-alerts.ts` calls this once the chunk loads.
+/// `#lib/critical-alerts.ts` calls this once the chunk loads.
 #[wasm_bindgen(js_name = subscribeCriticalAlerts)]
 pub fn subscribe_critical_alerts(observer: JsCriticalAlertsObserver) {
     fauna_client_alerts::wasm_glue::subscribe(&ALERTS_REGISTRY, observer);
@@ -155,7 +155,7 @@ pub fn enable_fake_plc_directory_for_test(url: String) {
 /// `expiring_soon` / `expired` liveness states are reachable without waiting
 /// out the real ~90-day window (testing.md convention 14 — a fake clock, never
 /// a sleep). The wasm twin of native's `atproto_delegation_advance_clock` agent
-/// command; web's caller is `$lib/atproto-delegation-e2e`, behind the SPA's own
+/// command; web's caller is `#lib/atproto-delegation-e2e`, behind the SPA's own
 /// `__FAUNA_E2E_AUTOMATION__` define.
 ///
 /// **Never the mint clock** — `authorizeExternalApps` always stamps a fresh
@@ -215,7 +215,7 @@ pub struct AtprotoSettingsMachine(Arc<InnerMachine>, ConsentWiring);
 #[wasm_bindgen]
 impl AtprotoSettingsMachine {
     /// Build the page machine over the SPA core chunk's socket, lent as
-    /// `port` (a `SharedRpcPort` — `$lib/rpc`'s `sharedRpcPort`; the owner's
+    /// `port` (a `SharedRpcPort` — `#lib/rpc`'s `sharedRpcPort`; the owner's
     /// `requestRaw` runs every request this machine makes, so web keeps one
     /// WebSocket per actor). Throws on an object that is not a port. `secret`
     /// is the actor's 32-byte ed25519 seed (signs the D10 delegation, and backs
@@ -251,7 +251,7 @@ impl AtprotoSettingsMachine {
     }
 
     /// Wire the tab's account runtime, lent as `port` (a `SharedAccountPort`
-    /// — `$lib/account-runtime`'s `sharedAccountPort`, minted for this
+    /// — `#lib/account-runtime`'s `sharedAccountPort`, minted for this
     /// machine's account), as the page's two account-plane seams — the machine
     /// and adapters the six native apps run, the runtime answering from the
     /// core chunk (`account-client-lifecycle.md` § The client-side lifecycle →

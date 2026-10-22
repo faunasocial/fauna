@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use fauna_provisioning::update_channel::registry::{ChannelHead, Registry, platform_arch};
+use fauna_provisioning::update_channel::registry::{ChannelHead, Digest, Registry, platform_arch};
 use fauna_provisioning::update_channel::{
     ImageIdentity, NEST_IMAGE_REPOSITORY, UPDATE_LABEL, UpdateChannel, UpdateDecision,
     VERSION_LABEL, decide,
@@ -17,8 +17,10 @@ use fauna_provisioning::update_channel::{
 use serde_json::Value;
 use tokio::time::Instant;
 
+use crate::catalogue::{CheckFailure, Event, PullFailure, Settled, Step};
 use crate::engine::Engine;
 use crate::handoff::{self, HandOff};
+use crate::report::Reporter;
 use crate::successor::{container_name, stop_timeout, successor_body};
 
 /// The suffix a container carries between its stop and its successor's start.
@@ -80,9 +82,12 @@ pub fn running_identity(image: &Value) -> ImageIdentity {
 }
 
 /// The nest's health URLs, from its own inspect: its `FAUNA_PORT` (the
-/// compose default when unset), on loopback under host networking — which the
-/// updater shares in the home bundle — else at its address on the bundle's
-/// network. Nothing to set: the container already says where it listens.
+/// compose default when unset) on loopback under host networking — which the
+/// updater shares in the home bundle — else its address on the bundle's
+/// network at `:443`. The image binds the nest's own port on container
+/// loopback (`deployment-threat-model.md` § Concern 1a), so from the bundle
+/// network the one way in is the SNI router, whose no-SNI default route is the
+/// nest. Nothing to set: the container already says where it listens.
 ///
 /// TLS first, then plain HTTP — the image's own `HEALTHCHECK` pair: a deployed
 /// nest serves TLS on that port (an ACME certificate, or the self-signed
@@ -90,23 +95,24 @@ pub fn running_identity(image: &Value) -> ImageIdentity {
 /// read never reaches; a plain-HTTP nest still answers the second. The
 /// certificate is not verified ([`health_client`]).
 pub fn health_urls(container: &Value) -> Option<[String; 2]> {
-    let port = container["Config"]["Env"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .find_map(|e| e.strip_prefix("FAUNA_PORT="))
-        .and_then(|p| p.parse::<u16>().ok())
-        .unwrap_or(3000);
-    let host = if container["HostConfig"]["NetworkMode"].as_str() == Some("host") {
-        "127.0.0.1".to_string()
+    let (host, port) = if container["HostConfig"]["NetworkMode"].as_str() == Some("host") {
+        let port = container["Config"]["Env"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .find_map(|e| e.strip_prefix("FAUNA_PORT="))
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(3000);
+        ("127.0.0.1".to_string(), port)
     } else {
-        container["NetworkSettings"]["Networks"]
+        let ip = container["NetworkSettings"]["Networks"]
             .as_object()?
             .values()
             .filter_map(|n| n["IPAddress"].as_str())
             .find(|ip| !ip.is_empty())?
-            .to_string()
+            .to_string();
+        (ip, 443)
     };
     Some(["https", "http"].map(|scheme| format!("{scheme}://{host}:{port}/api/v1/health")))
 }
@@ -156,16 +162,21 @@ pub fn follow(health: Option<&Value>, tag: Option<&str>) -> Follow {
     }
 }
 
-/// Per container: the channel last checked and when.
+/// Per container: the channel last checked and when; and whether a nest's
+/// health answered since the loop last asked — the updater's own liveness
+/// ([`crate::liveness`]).
 #[derive(Default)]
-pub struct Checks(HashMap<String, (UpdateChannel, Instant)>);
+pub struct Checks {
+    last: HashMap<String, (UpdateChannel, Instant)>,
+    nest_answered: bool,
+}
 
 impl Checks {
     /// A check is due on a channel change or once the channel's interval has
     /// passed (a minute on Dev and Test, an hour on Stable —
     /// `UpdateChannel::registry_check_interval`).
     pub fn due(&self, name: &str, channel: UpdateChannel, now: Instant) -> bool {
-        match self.0.get(name) {
+        match self.last.get(name) {
             Some((last, at)) => {
                 *last != channel || now.duration_since(*at) >= channel.registry_check_interval()
             }
@@ -174,19 +185,27 @@ impl Checks {
     }
 
     pub fn record(&mut self, name: &str, channel: UpdateChannel, now: Instant) {
-        self.0.insert(name.to_string(), (channel, now));
+        self.last.insert(name.to_string(), (channel, now));
+    }
+
+    /// Whether a nest's health answered since the last call.
+    pub fn take_nest_answered(&mut self) -> bool {
+        std::mem::take(&mut self.nest_answered)
     }
 }
 
 /// One minute's pass over every managed container. `me` is the updater's own
 /// container id, when it knows it: after moving the nest it moves itself to
-/// the same build ([`handoff`]), and the pass ends there.
+/// the same build ([`handoff`]), and the pass ends there. Every transition and
+/// decision goes into the container's report ([`Reporter`]).
+#[allow(clippy::too_many_arguments)]
 pub async fn check_once<E: Engine>(
     engine: &E,
     health_client: &reqwest::Client,
     registry: &Registry,
     repo: &str,
     checks: &mut Checks,
+    reporter: &mut Reporter,
     me: Option<&str>,
 ) -> Result<Pass> {
     for id in engine.labelled(UPDATE_LABEL, "true").await? {
@@ -215,10 +234,17 @@ pub async fn check_once<E: Engine>(
                 break;
             }
         }
+        checks.nest_answered |= health.is_some();
+        if let Some(event) = reporter.nest_health(&name, health.is_some(), Instant::now()) {
+            reporter.emit(engine, &id, event).await;
+        }
         let channel = match follow(health.as_ref(), Some(&tag)) {
             Follow::Channel(c) => c,
             Follow::Pinned => {
                 tracing::info!("{name}: follows no channel (pinned) — holding");
+                if let Some(event) = reporter.pinned(&name, &tag) {
+                    reporter.emit(engine, &id, event).await;
+                }
                 continue;
             }
             Follow::Skip(why) => {
@@ -232,9 +258,19 @@ pub async fn check_once<E: Engine>(
         }
         checks.record(&name, channel, now);
         let head = match registry.head(channel.image_tag(), platform_arch()).await {
-            Ok(head) => head,
+            Ok(head) => {
+                if let Some(event) = reporter.registry_succeeded(&name, Instant::now()) {
+                    reporter.emit(engine, &id, event).await;
+                }
+                head
+            }
             Err(e) => {
                 tracing::warn!("{name}: check skipped: {e}");
+                let kind = CheckFailure::of(&e);
+                if let Some(event) = reporter.registry_failed(&name, kind, channel, Instant::now())
+                {
+                    reporter.emit(engine, &id, event).await;
+                }
                 continue;
             }
         };
@@ -243,31 +279,62 @@ pub async fn check_once<E: Engine>(
         match decide(&running_identity(&image), &head.identity) {
             UpdateDecision::Current => {
                 tracing::info!("{name}: current on {}", channel.id());
+                reporter.not_held(&name);
                 // An updater a failed or interrupted hand-off left behind
                 // catches up with the nest here, at the channel's head.
                 if let Some(me) = me
-                    && follow_the_nest(engine, me, repo, &image_id).await
+                    && follow_the_nest(engine, reporter, &id, me, repo, &image_id).await
                 {
                     return Ok(Pass::HandedOff);
                 }
             }
-            UpdateDecision::Hold { running, head } => tracing::info!(
-                "{name}: following {} from its next build that is at least {running}; its head is {head}",
-                channel.id()
-            ),
+            UpdateDecision::Hold { running, head } => {
+                tracing::info!(
+                    "{name}: following {} from its next build that is at least {running}; its head is {head}",
+                    channel.id()
+                );
+                if let Some(event) =
+                    reporter.hold(&name, channel, running.to_string(), head.to_string())
+                {
+                    reporter.emit(engine, &id, event).await;
+                }
+            }
             UpdateDecision::Apply => {
                 tracing::info!("{name}: applying {} {}", channel.id(), head.digest);
-                apply(engine, &container, &image, repo, &tag, &head)
-                    .await
-                    .with_context(|| format!("{name}: re-create"))?;
+                reporter.not_held(&name);
+                let version = head.identity.version.as_ref().map(ToString::to_string);
+                let started = Event::ApplyStarted {
+                    channel,
+                    version: version.clone(),
+                    digest: head.digest.clone(),
+                };
+                reporter.emit(engine, &id, started).await;
+                let since = Instant::now();
+                let new_id = match apply(engine, &container, &image, repo, &tag, &head).await {
+                    Ok(new_id) => new_id,
+                    Err(e) => {
+                        // The old container is back under its name: its report.
+                        reporter
+                            .emit(engine, &id, apply_failed(&e, &head.digest))
+                            .await;
+                        return Err(e.context(format!("{name}: re-create")));
+                    }
+                };
                 tracing::info!("{name}: now runs {}", head.digest);
+                reporter.forget(&id);
+                let completed = Event::ApplyCompleted {
+                    version,
+                    digest: head.digest.clone(),
+                    took: since.elapsed(),
+                };
+                reporter.emit(engine, &new_id, completed).await;
                 let now_runs = engine
                     .inspect_image(&format!("{repo}:{tag}"))
                     .await
                     .ok()
                     .and_then(|i| i["Id"].as_str().map(str::to_string));
                 if let (Some(me), Some(target)) = (me, now_runs)
-                    && follow_the_nest(engine, me, repo, &target).await
+                    && follow_the_nest(engine, reporter, &new_id, me, repo, &target).await
                 {
                     return Ok(Pass::HandedOff);
                 }
@@ -285,10 +352,18 @@ pub enum Pass {
     HandedOff,
 }
 
-/// Move this updater to `target`, the image the nest now runs; `true` once
-/// the successor runs. A failed hand-off leaves this updater working, and the
-/// next check that finds the nest current tries again.
-async fn follow_the_nest<E: Engine>(engine: &E, me: &str, repo: &str, target: &str) -> bool {
+/// Move this updater to `target`, the image the nest `nest` now runs; `true`
+/// once the successor runs. A failed hand-off leaves this updater working —
+/// and says so in the nest's report — and the next check that finds the nest
+/// current tries again. A finished one is reported by the successor.
+async fn follow_the_nest<E: Engine>(
+    engine: &E,
+    reporter: &mut Reporter,
+    nest: &str,
+    me: &str,
+    repo: &str,
+    target: &str,
+) -> bool {
     match handoff::hand_off(engine, me, repo, target).await {
         Ok(HandOff::Done) => {
             tracing::info!("handed off to a successor on {target}");
@@ -300,7 +375,25 @@ async fn follow_the_nest<E: Engine>(engine: &E, me: &str, repo: &str, target: &s
         }
         Err(e) => {
             tracing::warn!("self-update: {e:#}");
+            let failed = Event::SelfUpdateFailed { step: Step::of(&e) };
+            reporter.emit(engine, nest, failed).await;
             false
+        }
+    }
+}
+
+/// Report `event` into every managed container (not one left aside): the
+/// events that belong to the updater rather than to one container's pass.
+pub async fn report_to_managed<E: Engine>(engine: &E, reporter: &mut Reporter, event: Event) {
+    let Ok(ids) = engine.labelled(UPDATE_LABEL, "true").await else {
+        return;
+    };
+    for id in ids {
+        let Ok(container) = engine.inspect_container(&id).await else {
+            continue;
+        };
+        if !container_name(&container).ends_with(OLD_SUFFIX) {
+            reporter.emit(engine, &id, event.clone()).await;
         }
     }
 }
@@ -324,7 +417,8 @@ async fn read_health(http: &reqwest::Client, url: &str) -> Option<Value> {
 /// own reference, step the old container aside and stop it within its grace
 /// period (so the nest's WS 1001 drain completes), create and start the
 /// successor under the old name, then remove the old container and its image.
-/// A failure before the successor runs puts the old container back.
+/// A failure before the successor runs puts the old container back. The
+/// successor's id; a failure carries its [`Step`].
 pub async fn apply<E: Engine>(
     engine: &E,
     container: &Value,
@@ -332,26 +426,26 @@ pub async fn apply<E: Engine>(
     repo: &str,
     tag: &str,
     head: &ChannelHead,
-) -> Result<()> {
+) -> Result<String> {
     let pulled = format!("{repo}@{}", head.digest);
-    engine.pull(&pulled).await.context("pull")?;
-    engine.tag(&pulled, repo, tag).await.context("tag")?;
+    engine.pull(&pulled).await.context(Step::Pull)?;
+    engine.tag(&pulled, repo, tag).await.context(Step::Tag)?;
     let reference = format!("{repo}:{tag}");
     let body = successor_body(container, image, &reference);
 
     let id = container["Id"].as_str().unwrap_or("").to_string();
     let name = container_name(container);
     let aside = format!("{name}{OLD_SUFFIX}");
-    engine.rename(&id, &aside).await.context("rename aside")?;
+    engine.rename(&id, &aside).await.context(Step::Rename)?;
     if let Err(e) = engine.stop(&id, stop_timeout(container)).await {
         engine.rename(&id, &name).await.ok();
-        return Err(e.context("stop"));
+        return Err(e.context(Step::Stop));
     }
     let mut created = None;
     let outcome = async {
-        let new_id = engine.create(&name, body).await.context("create")?;
+        let new_id = engine.create(&name, body).await.context(Step::Create)?;
         created = Some(new_id.clone());
-        engine.start(&new_id).await.context("start")
+        engine.start(&new_id).await.context(Step::Start)
     }
     .await;
     if let Err(e) = outcome {
@@ -380,13 +474,28 @@ pub async fn apply<E: Engine>(
             tracing::info!("old image {old_image} kept: {e:#}");
         }
     }
-    Ok(())
+    Ok(created.unwrap_or_default())
+}
+
+/// The report event of a failed [`apply`]: a pull (or the tag after it) is
+/// `apply.pull_failed`, every later step `apply.recreate_failed`.
+pub fn apply_failed(e: &anyhow::Error, digest: &Digest) -> Event {
+    match Step::of(e) {
+        Some(Step::Pull | Step::Tag) => Event::PullFailed {
+            kind: PullFailure::of(e),
+            digest: digest.clone(),
+        },
+        step => Event::RecreateFailed {
+            step: step.unwrap_or(Step::Create),
+        },
+    }
 }
 
 /// Settle a re-create interrupted by a crash or a restart: a container still
 /// aside whose successor runs is removed; one whose successor is missing or
-/// never started is put back under its name and started.
-pub async fn reconcile<E: Engine>(engine: &E) -> Result<()> {
+/// never started is put back under its name and started. Each is reported to
+/// the container left running.
+pub async fn reconcile<E: Engine>(engine: &E, reporter: &mut Reporter) -> Result<()> {
     let mut by_name = HashMap::new();
     for id in engine.labelled(UPDATE_LABEL, "true").await? {
         let inspect = engine.inspect_container(&id).await?;
@@ -401,6 +510,11 @@ pub async fn reconcile<E: Engine>(engine: &E) -> Result<()> {
             Some(successor) if successor["State"]["Running"].as_bool() == Some(true) => {
                 tracing::info!("{name}: its successor runs — removing it");
                 engine.remove_container(aside_id).await?;
+                let settled = Event::ReconcileSettled {
+                    found: Settled::RecreateFinished,
+                };
+                let successor_id = successor["Id"].as_str().unwrap_or("");
+                reporter.emit(engine, successor_id, settled).await;
             }
             successor => {
                 if let Some(id) = successor.and_then(|s| s["Id"].as_str()) {
@@ -410,6 +524,10 @@ pub async fn reconcile<E: Engine>(engine: &E) -> Result<()> {
                 tracing::warn!("{name}: an unfinished re-create — putting it back");
                 engine.rename(aside_id, base).await?;
                 engine.start(aside_id).await?;
+                let settled = Event::ReconcileSettled {
+                    found: Settled::RecreatePutBack,
+                };
+                reporter.emit(engine, aside_id, settled).await;
             }
         }
     }
@@ -534,6 +652,8 @@ mod tests {
 
     #[test]
     fn the_health_urls_come_from_the_containers_own_inspect_tls_first() {
+        // On a bundle network the nest's own port is container loopback, so
+        // the read goes to the SNI router's :443 whatever `FAUNA_PORT` says.
         let bridged = json!({
             "Config": {"Env": ["FAUNA_PORT=3100"]},
             "HostConfig": {"NetworkMode": "fauna_default"},
@@ -542,8 +662,8 @@ mod tests {
         assert_eq!(
             health_urls(&bridged).unwrap(),
             [
-                "https://172.18.0.3:3100/api/v1/health",
-                "http://172.18.0.3:3100/api/v1/health"
+                "https://172.18.0.3:443/api/v1/health",
+                "http://172.18.0.3:443/api/v1/health"
             ]
         );
         let host = json!({"Config": {"Env": []}, "HostConfig": {"NetworkMode": "host"}});
@@ -567,8 +687,9 @@ mod tests {
 
     fn head() -> ChannelHead {
         ChannelHead {
-            digest: "sha256:new".into(),
+            digest: fauna_provisioning::update_channel::registry::Digest::of(b"new"),
             identity: ImageIdentity::default(),
+            revision: None,
         }
     }
 
@@ -576,21 +697,24 @@ mod tests {
     async fn apply_steps_aside_stops_within_the_grace_period_and_replaces() {
         let engine = Fake::default();
         let c = nest("old", "fauna-nest", true);
+        let head = head();
         apply(
             &engine,
             &c,
             &json!({"Id": "sha256:oldconfig"}),
             "ghcr.io/faunasocial/nest",
             "test",
-            &head(),
+            &head,
         )
         .await
         .unwrap();
+        let digest = &head.digest;
         assert_eq!(
             engine.calls(),
             [
-                "pull ghcr.io/faunasocial/nest@sha256:new",
-                "tag ghcr.io/faunasocial/nest@sha256:new ghcr.io/faunasocial/nest:test",
+                format!("pull ghcr.io/faunasocial/nest@{digest}").as_str(),
+                format!("tag ghcr.io/faunasocial/nest@{digest} ghcr.io/faunasocial/nest:test")
+                    .as_str(),
                 "rename old fauna-nest-fauna-updater-old",
                 "stop old Some(15)",
                 "create fauna-nest ghcr.io/faunasocial/nest:test",
@@ -617,10 +741,41 @@ mod tests {
             &head(),
         )
         .await;
-        assert!(err.is_err());
+        let err = err.unwrap_err();
         assert_eq!(
             engine.calls()[5..],
             ["start new", "rm new", "rename old fauna-nest", "start old"]
+        );
+        assert_eq!(
+            apply_failed(&err, &head().digest),
+            Event::RecreateFailed { step: Step::Start }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_pull_is_reported_as_one_and_touches_no_container() {
+        let engine = Fake {
+            fail: Some("pull"),
+            ..Default::default()
+        };
+        let c = nest("old", "fauna-nest", true);
+        let err = apply(
+            &engine,
+            &c,
+            &json!({"Id": "sha256:oldconfig"}),
+            "ghcr.io/faunasocial/nest",
+            "test",
+            &head(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(engine.calls().len(), 1);
+        assert_eq!(
+            apply_failed(&err, &head().digest),
+            Event::PullFailed {
+                kind: PullFailure::Engine,
+                digest: head().digest
+            }
         );
     }
 
@@ -630,8 +785,16 @@ mod tests {
             containers: vec![nest("old", "fauna-nest-fauna-updater-old", false)],
             ..Default::default()
         };
-        reconcile(&orphan).await.unwrap();
-        assert_eq!(orphan.calls(), ["rename old fauna-nest", "start old"]);
+        reconcile(&orphan, &mut Reporter::default()).await.unwrap();
+        assert_eq!(
+            orphan.calls(),
+            [
+                "rename old fauna-nest",
+                "start old",
+                "put /var/lib/fauna-updater on old"
+            ]
+        );
+        assert_eq!(orphan.reported("old"), ["reconcile.settled"]);
 
         let finished = Fake {
             containers: vec![
@@ -640,8 +803,14 @@ mod tests {
             ],
             ..Default::default()
         };
-        reconcile(&finished).await.unwrap();
-        assert_eq!(finished.calls(), ["rm old"]);
+        reconcile(&finished, &mut Reporter::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            finished.calls(),
+            ["rm old", "put /var/lib/fauna-updater on new"]
+        );
+        assert_eq!(finished.reported("new"), ["reconcile.settled"]);
 
         let stillborn = Fake {
             containers: vec![
@@ -650,10 +819,17 @@ mod tests {
             ],
             ..Default::default()
         };
-        reconcile(&stillborn).await.unwrap();
+        reconcile(&stillborn, &mut Reporter::default())
+            .await
+            .unwrap();
         assert_eq!(
             stillborn.calls(),
-            ["rm new", "rename old fauna-nest", "start old"]
+            [
+                "rm new",
+                "rename old fauna-nest",
+                "start old",
+                "put /var/lib/fauna-updater on old"
+            ]
         );
     }
 }

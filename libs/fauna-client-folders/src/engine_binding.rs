@@ -207,62 +207,10 @@ impl fauna_client_mail_settings::WebdavServedSets for CustodyServedSets {
     }
 }
 
-/// Where a host keeps the **MLS-recorded folder owner** of a channel — the
-/// `folder_channel_owner` marker `fauna-mls` stamps at folder-group mint and
-/// folder-Welcome join and re-points on the owner's verified succession
-/// (`federation.md` § Cross-nest shared folders + channel append). Abstract
-/// here because this crate's base build is fauna-mls-free: an MLS-holding host
-/// wraps its engine, a bearer-only host has none.
-pub trait FolderChannelOwners: Sync {
-    /// The recorded owner of the channel with this id, `None` when unstamped.
-    fn folder_channel_owner(&self, channel_id: &[u8; 32]) -> Option<ActorId>;
-}
-
-/// The identity a seat verifies the owner-attested declassification against —
-/// `FolderSummary::judge_declassification`'s `trusted_owner`, resolved from
-/// sources **the nest cannot forge** (`encryption-at-rest.md` § Readable
-/// classes → *The declassification is owner-ATTESTED*). One resolver for every
-/// reader, so the live seat resolver, the engine binding decision, the pushed
-/// agent capability and Media's seam cannot disagree about whose signature
-/// arms a folder.
-pub struct DeclassificationAnchor<'a> {
-    /// This seat's own actor id — the trusted owner of every folder its
-    /// account owns (an app derives it from the identity seed; the bearer-only agent holds it in its pushed capability).
-    pub own: ActorId,
-    /// The host's MLS state, for a **member** row: the trusted owner is the
-    /// folder channel's recorded owner — never the `owner_actor_id` /
-    /// `owner_handle` the nest fills on the row. `None` on a host that holds
-    /// no MLS state (the sync agent's bearer-only engines, the File Provider
-    /// helper): its member seats have no anchor and **seal**.
-    pub channel_owners: Option<&'a dyn FolderChannelOwners>,
-}
-
-impl<'a> DeclassificationAnchor<'a> {
-    /// A host with no MLS state: own folders verify, member seats seal.
-    #[must_use]
-    pub fn own_only(own: ActorId) -> Self {
-        Self {
-            own,
-            channel_owners: None,
-        }
-    }
-
-    /// The trusted owner for `summary`: the seat's own actor id for a row its
-    /// account owns (any `role` but `member` — an owner row, or a row with no
-    /// role, which reads as owner), the channel's MLS-recorded owner for a member row.
-    /// `None` seals: a member row on an MLS-less host, a member row whose
-    /// channel this host never stamped, or a
-    /// member row whose group id does not resolve to a channel at all.
-    #[must_use]
-    pub fn trusted_owner_for(&self, summary: &FolderSummary) -> Option<ActorId> {
-        if summary.role.as_deref() != Some("member") {
-            return Some(self.own);
-        }
-        summary.mls_group_id.as_ref()?;
-        let channel = owned_custody_channel(summary).ok()?;
-        self.channel_owners?.folder_channel_owner(&channel)
-    }
-}
+/// The member-seat anchor and its resolver live in `fauna-protocol` beside
+/// `FolderSummary` (Media's seam reads them and cannot depend on this crate);
+/// re-exported so every reader keeps naming them here.
+pub use fauna_protocol::member_rows::{DeclassificationAnchor, FolderChannelOwners};
 
 /// Retired M2 content-key generations for `summary` when it is **currently**
 /// owner-only (group-less, and not served by custody's word —
@@ -580,7 +528,7 @@ pub fn resolve_engine_key_bindings(
 /// fail-safe direction.
 ///
 /// **Access is deliberately NOT consulted.** `ForeignFolder.access` is
-/// advisory-for-UI only (D2 — `federation.md` § Cross-nest → *Recipient-side
+/// advisory-for-UI only (D2 — `federation-shared-folders.md` § Cross-nest → *Recipient-side
 /// access discovery*), so filtering the blob on it would make key material depend
 /// on a value the design forbids treating as authoritative: a stale `reader`
 /// would silently unbind a legitimately-bound writer's engine, which is the

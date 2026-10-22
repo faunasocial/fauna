@@ -83,6 +83,27 @@ ENV CARGO_RESOLVER_FEATURE_UNIFICATION=selected
 # RUSTFLAGS/toolchain change), then incremental again.
 ENV CARGO_UNSTABLE_CHECKSUM_FRESHNESS=true
 
+# rust-wasm's base: rust-base's own image (the same pinned digest), on the BUILD
+# host's platform, with the parts of rust-base the wasm compile uses. The wasm
+# chunks compile on the build host (release-integrity.md § Release signing →
+# Web-app verifiability, "The wasm32 C compiler"): on rust-base the stage ran at
+# the image's platform, so the arm64 runner building amd64 ran the whole wasm
+# compile under Rosetta, where rustc crashed in a loop and filled the disk
+# (2026-10-19). `--platform` cannot go on `FROM rust-base` — a FROM naming a
+# stage re-platforms nothing — so the base is declared twice, from one digest;
+# the WASM-chunk parity gate holds the two digests equal. Keep the
+# toolchain, wasm-pack and ENV lines below identical to rust-base's. mold and
+# Debian's clang are rust-native's only, so they are not installed here.
+FROM --platform=$BUILDPLATFORM rust:bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS rust-base-build
+RUN apt-get update && apt-get install -y --no-install-recommends util-linux \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY rust-toolchain.toml ./
+RUN rustup show && rustup target add wasm32-unknown-unknown
+RUN cargo install wasm-pack --version 0.15.0 --locked
+ENV CARGO_RESOLVER_FEATURE_UNIFICATION=selected
+ENV CARGO_UNSTABLE_CHECKSUM_FRESHNESS=true
+
 # ── Rust native binaries ────────────────────────────────────────────
 # Native targets:
 #   fauna-nest, fauna-sandbox and fauna-sni-router are built in ONE cargo
@@ -171,6 +192,7 @@ COPY bins/ bins/
 # and ios/apple are not cargo members — see .dockerignore). Add a COPY here (and in
 # rust-wasm below) when a new apps/services/tools cargo member lands.
 COPY apps/fauna-tui apps/fauna-tui
+COPY apps/fauna-cli apps/fauna-cli
 COPY apps/fauna-linux apps/fauna-linux
 COPY apps/fauna-windows apps/fauna-windows
 COPY services/fauna-cors-proxy services/fauna-cors-proxy
@@ -186,11 +208,27 @@ COPY tools/check-additive-evolution tools/check-additive-evolution
 # multi-arch build (both arches on one runner, the CI case) MUST keep them
 # separate or the cache is useless. The registry/git mounts hold arch-independent
 # crate sources, so they stay shared across arches (saves re-downloading).
+#
+# `sharing=locked` on the target/ mount: the mount is shared machine-wide across
+# every checkout, and cargo's own lock covers only the compile — the strip and cp
+# below run outside it. Two checkouts building at once let the second's cargo
+# rewrite release/ while the first strips and copies it: on 2026-10-20 one
+# build died on `strip: …/fauna-sandbox: invalid operation`, and a luckier race
+# would have copied the other checkout's binary into this image without error.
+# Locked, the whole RUN is one checkout's at a time.
+#
+# `ulimit -f` caps any ONE file this RUN writes at 8 GiB (dash counts in
+# 512-byte blocks): a rustc whose crash handler loops makes cargo capture its
+# stderr into a fingerprint `output-*` file inside the cache mount, which grew
+# to 35 GB and filled the self-hosted runner's disk (2026-10-19). Capped,
+# cargo dies on SIGXFSZ within minutes; `ulimit -c 0` keeps that signal from
+# dumping a core. No real artifact comes near 8 GiB.
 ARG TARGETARCH
 RUN --mount=type=cache,id=cargo-registry-native,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cargo-git-native,target=/usr/local/cargo/git \
-    --mount=type=cache,id=rust-target-native-${TARGETARCH},target=/src/target \
-    cargo build --locked --release -p fauna-nest -p fauna-sandbox -p fauna-sni-router --features bluesky,nostr,activitypub \
+    --mount=type=cache,id=rust-target-native-${TARGETARCH},sharing=locked,target=/src/target \
+    ulimit -c 0 && ulimit -f 16777216 \
+    && cargo build --locked --release -p fauna-nest -p fauna-sandbox -p fauna-sni-router --features bluesky,nostr,activitypub \
     && cargo build --locked --release -p fauna-ffi --no-default-features --features labeler \
     && cargo build --locked --release -p fauna-iroh-relay --features fauna-iroh-relay/relay \
     && cargo build --locked --release -p fauna-updater \
@@ -222,7 +260,39 @@ RUN --mount=type=cache,id=cargo-registry-native,target=/usr/local/cargo/registry
 # same crate into one dir at once, racing on `.cargo-ok` ("File exists (os error
 # 17)"). Separate ids give each stage its own cache — full parallelism, no race.
 # Do not consolidate them back to shared ids.
-FROM rust-base AS rust-wasm
+FROM scratch AS wasm32-cc-arm64
+ADD --checksum=sha256:075da47cb832273717d4c7bad4b6b4848d7c154262e9ba0dcc0025426d4073f0 https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.2/LLVM-23.1.2-Linux-ARM64.tar.xz /llvm.tar.xz
+FROM scratch AS wasm32-cc-amd64
+ADD --checksum=sha256:b5ed9675149cc837c282e9b6962c276c9fa62863d5b2f91537b60848552995b7 https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.2/LLVM-23.1.2-Linux-X64.tar.xz /llvm.tar.xz
+# The compiler is selected by ${BUILDARCH}: rust-wasm runs on rust-base-build,
+# at the build host's platform, so it executes the build host's clang. On a
+# native per-arch build the two arches are the same.
+FROM wasm32-cc-${BUILDARCH} AS wasm32-cc
+FROM rust-base-build AS rust-wasm
+# A test hook, inert unless set: the image workflow's `hang_test` dispatch sets
+# HANG_SECONDS so this stage's first pass sleeps past a shortened build bound,
+# proving the bound stops a hung build (image-pipeline.md § Disk rationing on
+# the runner, layer 5).
+ARG HANG_SECONDS=
+RUN if [ -n "$HANG_SECONDS" ]; then sleep "$HANG_SECONDS"; fi
+# Only what the wasm32 C builds (zstd-sys's cc) use comes out of the tarball:
+# the clang driver and its versioned binary, llvm-ar, and clang's builtin
+# headers. The binaries link only glibc/libstdc++/zlib from the base image, and
+# no wasm32 runtime ships in lib/clang/<ver>/lib (rustc links). About 400 MB per
+# arch instead of the full tree's 12 GB. The probe compiles a wasm32 object
+# that includes builtin headers, so a filter that misses one fails here.
+# `clang --version` unpiped: piped into `head`, its failure was the pipe's to hide.
+RUN --mount=type=bind,from=wasm32-cc,target=/mnt/wasm32-cc \
+    mkdir -p /opt/wasm32-cc \
+    && tar -xJf /mnt/wasm32-cc/llvm.tar.xz -C /opt/wasm32-cc --strip-components=1 \
+       --wildcards '*/bin/clang' '*/bin/clang-[0-9]*' '*/bin/llvm-ar' '*/lib/clang/*/include' \
+    && /opt/wasm32-cc/bin/clang --version \
+    && printf '#include <stddef.h>\n#include <stdint.h>\nsize_t f(uint8_t x) { return x; }\n' \
+       | /opt/wasm32-cc/bin/clang --target=wasm32-unknown-unknown -O2 -c -x c - -o /tmp/probe.o \
+    && /opt/wasm32-cc/bin/llvm-ar rcs /tmp/probe.a /tmp/probe.o \
+    && rm /tmp/probe.o /tmp/probe.a
+ENV CC_wasm32_unknown_unknown=/opt/wasm32-cc/bin/clang \
+    AR_wasm32_unknown_unknown=/opt/wasm32-cc/bin/llvm-ar
 # Same parallel-rustc cap as rust-native — wasm-pack drives cargo, which honors
 # CARGO_BUILD_JOBS (see the global BUILD_JOBS comment). But CARGO_BUILD_JOBS caps
 # ONLY the cargo/rustc compile; the binaryen `wasm-opt` size pass wasm-pack runs
@@ -250,16 +320,19 @@ COPY bins/ bins/
 # resolution regardless of which crate is built, so the stripped subset would fail
 # here too. Copy the member trees instead of stripping them.
 COPY apps/fauna-tui apps/fauna-tui
+COPY apps/fauna-cli apps/fauna-cli
 COPY apps/fauna-linux apps/fauna-linux
 COPY apps/fauna-windows apps/fauna-windows
 COPY services/fauna-cors-proxy services/fauna-cors-proxy
 COPY services/fauna-front-door services/fauna-front-door
 COPY tools/check-additive-evolution tools/check-additive-evolution
-# target/ id suffixed with ${TARGETARCH} — see the rust-native stage: the wasm32
-# OUTPUT is host-arch-independent, but the build-script/proc-macro intermediates
-# in target/ are host-arch artifacts, so amd64 and arm64 builds must not share
-# this mount.
-ARG TARGETARCH
+# target/ id suffixed with ${BUILDARCH}: the wasm32 OUTPUT is
+# host-arch-independent, but the build-script/proc-macro intermediates in
+# target/ are artifacts of the arch this stage runs as — the build host's, so a
+# two-arch build on one host compiles both legs' wasm for that one arch and the
+# legs share the mount (BuildKit should dedupe the identical stage);
+# `sharing=locked` serializes them if it does not.
+ARG BUILDARCH
 # The wasm-pack tool cache (/root/.cache/.wasm-pack) holds the wasm-bindgen-cli
 # install plus the downloaded binaryen (wasm-opt) tarball. Persist it via a cache
 # mount so retries stop re-downloading binaryen from GitHub releases on the
@@ -275,12 +348,15 @@ ARG TARGETARCH
 # The trailing `-- --locked` passes through to the underlying `cargo build`
 # (wasm-pack's EXTRA_OPTIONS) — these WASM artifacts ship into the nest image
 # via web-builder below, so release-integrity.md's "--locked in every shipped
-# build" applies here too, same as the rust-native stage.
+# build" applies here too, same as the rust-native stage. The `ulimit -f` file
+# cap is the rust-native stage's too, for the same reason: this stage's mount is
+# the one the looping rustc filled.
 RUN --mount=type=cache,id=cargo-registry-wasm,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cargo-git-wasm,target=/usr/local/cargo/git \
-    --mount=type=cache,id=rust-target-wasm-${TARGETARCH},target=/src/target \
+    --mount=type=cache,id=rust-target-wasm-${BUILDARCH},sharing=locked,target=/src/target \
     --mount=type=cache,id=wasm-pack-tool-cache,target=/root/.cache/.wasm-pack \
-    CPUSET="0-$((BUILD_JOBS - 1))" \
+    ulimit -c 0 && ulimit -f 16777216 \
+    && CPUSET="0-$((BUILD_JOBS - 1))" \
     && taskset -c "$CPUSET" wasm-pack build libs/fauna-wasm --target web -- --locked \
     && taskset -c "$CPUSET" wasm-pack build libs/fauna-wasm-onboarding --target web -- --locked \
     && taskset -c "$CPUSET" wasm-pack build libs/fauna-wasm-launch --target web -- --locked \
@@ -319,7 +395,7 @@ RUN --mount=type=cache,id=cargo-registry-wasm,target=/usr/local/cargo/registry \
 # what we release. Kept equal to bins/fauna-bridges/go.mod's `toolchain`
 # directive (the single source of truth) by a dedicated merge-gate toolchain-sync
 # gate. Bump both together — § Go toolchain pin in build-system.md.
-FROM --platform=$BUILDPLATFORM golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS bridges-builder
+FROM --platform=$BUILDPLATFORM golang:1.26.10-bookworm@sha256:5b1f78db1f54cc8cb46e652c51d3f854441c4310a449161b6fe9fb553edab505 AS bridges-builder
 WORKDIR /src
 # Cap Go's build parallelism to match the Rust stages (see the global BUILD_JOBS
 # comment) so the mail-bridge cross-compile doesn't spike the shared host.
@@ -525,6 +601,13 @@ RUN setcap cap_net_bind_service=+ep /usr/local/bin/fauna-sni-router
 # same image with `entrypoint: ["/usr/local/bin/fauna-updater"]`, holding the
 # Docker socket and nothing else.
 COPY --from=rust-native /out/fauna-updater /usr/local/bin/fauna-updater
+# The updater's report directory (§ What the updater reports → *The file*):
+# root-owned 0755 in the container's writable layer — never /data (a volume),
+# never a tmpfs or under /run (the engine's archive write would land beneath
+# it, invisible inside). The path is `fauna_provisioning::update_channel::
+# report::REPORT_DIR`; the updater writes the file with the engine socket it
+# already holds, the nest reads it.
+RUN install -d -o root -g root -m 0755 /var/lib/fauna-updater
 
 # Mail bridge (cgo) + its FFI shared library + the supervisor sidekick.
 # libfauna_ffi.so goes to /usr/local/lib (matched by the binary's rpath);
@@ -564,17 +647,23 @@ RUN chmod +x /entrypoint.sh /usr/local/bin/rebless-bridge-key.sh \
     && find /etc/s6-overlay/s6-rc.d -name run -exec chmod +x {} +
 
 VOLUME /data
-# 443 = SNI router (fronts nest + MDA CalDAV); 3000 = nest's internal listener
-# (FAUNA_PORT; the router's loopback target); 8443 = the MDA's user-facing CalDAV
-# port on a bare-IP box (no SNI to front it); 465 = implicit-TLS submission;
-# 587 = STARTTLS submission; 993 = IMAPS.
-EXPOSE 8080 3000 443 8443 25 465 587 993
+# 443 = SNI router (fronts nest + MDA CalDAV); 8443 = the MDA's user-facing
+# CalDAV port on a bare-IP box (no SNI to front it); 465 = implicit-TLS
+# submission; 587 = STARTTLS submission; 993 = IMAPS. Not 3000: the nest's
+# internal listener (FAUNA_PORT, the router's target) binds container loopback,
+# so no publish can reach it (deployment-threat-model.md § Concern 1a).
+EXPOSE 8080 443 8443 25 465 587 993
 
 # Probe the nest's own listener (FAUNA_PORT, default 3000 — the entrypoint's
 # value and what the compose sets in production). Follows FAUNA_PORT so a port
-# override stays healthy.
+# override stays healthy. A container of this image whose process is the
+# updater (the bundles' entrypoint override) inherits this check too, and
+# nothing listens in it: there the check is the updater's own heartbeat
+# (nest/update-channel.md § The updater → *Its health*), so every bundle and
+# every box gets it from the image, with no compose override to keep in step.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl -sf http://localhost:${FAUNA_PORT:-3000}/api/v1/health 2>/dev/null || curl -sfk https://localhost:${FAUNA_PORT:-3000}/api/v1/health || exit 1
+    CMD if [ "$(cat /proc/1/comm)" = fauna-updater ]; then exec /usr/local/bin/fauna-updater --health; fi; \
+        curl -sf http://localhost:${FAUNA_PORT:-3000}/api/v1/health 2>/dev/null || curl -sfk https://localhost:${FAUNA_PORT:-3000}/api/v1/health || exit 1
 
 # Per-build artifact identity, served by /api/v1/health beside `commit` so the
 # release pipeline's promotion gate can bind to THIS ARTIFACT and not merely to

@@ -716,16 +716,24 @@ pub fn erase_all_account_scopes(base: &Path) -> EraseSweep {
 /// still names it, a malformed index names nothing at all, and a store root
 /// shared between apps holds accounts only a *sibling app's* registry lists.
 /// Unreadable bases and entries are skipped — the same degrade-open posture as
-/// the refusal this feeds.
+/// the refusal this feeds. A caller that must tell *holds none* from *could
+/// not look* takes [`list_account_scopes`] instead.
 pub fn account_scopes_under(base: &Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(base) else {
-        return Vec::new();
-    };
-    entries
+    list_account_scopes(base).unwrap_or_default()
+}
+
+/// [`account_scopes_under`] with the listing's own failure kept: `Err` when
+/// `base` cannot be listed at all — an absent base included — and `Ok` with
+/// what it holds otherwise, an unreadable entry still skipped. The sign-out
+/// residue re-sweep decides on exactly this difference: a recorded base that
+/// lists and holds no actor scope is done, one that cannot be listed is not
+/// (`fauna_client_accounts::SignOutResidue`).
+pub fn list_account_scopes(base: &Path) -> std::io::Result<Vec<String>> {
+    Ok(std::fs::read_dir(base)?
         .flatten()
         .filter(is_actor_scope)
         .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
-        .collect()
+        .collect())
 }
 
 /// A well-formed actor scope: a directory named by a canonical (lower-case,
@@ -2306,6 +2314,48 @@ impl SyncDb {
         Ok((files.max(0) as u64, bytes.max(0) as u64))
     }
 
+    /// The recorded bytes of this folder that are **on this device**: every
+    /// row [`tracked_totals`](Self::tracked_totals) counts except a
+    /// `Placeholder` — the `LocationInfo.on_device_bytes` reading, read against
+    /// `total_bytes` (`on-demand-files.md` § The free-up-space gesture where
+    /// the OS offers none).
+    pub fn on_device_bytes(&self) -> Result<u64> {
+        let bytes = self.conn.query_row(
+            "SELECT COALESCE(SUM(size_bytes), 0) FROM sync_entries
+             WHERE state NOT IN (?1, ?2, ?3)",
+            params![
+                SyncState::Deleted.as_str(),
+                SyncState::LocallyDeleted.as_str(),
+                SyncState::Placeholder.as_str()
+            ],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(bytes.max(0) as u64)
+    }
+
+    /// Every file of this folder with bytes on this device — the rows
+    /// [`on_device_bytes`](Self::on_device_bytes) sums — with its recorded
+    /// size, in path order: what a *Free up space* sweep walks.
+    pub fn on_device_files(&self) -> Result<Vec<(String, u64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path, size_bytes FROM sync_entries
+             WHERE state NOT IN (?1, ?2, ?3) ORDER BY path",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                SyncState::Deleted.as_str(),
+                SyncState::LocallyDeleted.as_str(),
+                SyncState::Placeholder.as_str()
+            ],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?.max(0) as u64)),
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// Stamp "a file-level content transfer just completed" (epoch secs, kept
     /// monotonic). Called at the same points that emit
     /// [`ProgressEvent::FileDone`](crate::progress::ProgressEvent) — never from
@@ -2813,6 +2863,23 @@ impl SyncDb {
         } else {
             self.meta_del("head_rejudge_owed")
         }
+    }
+
+    /// The KEY-PENDING hold's clock (`file-sync.md` § *A failed change must
+    /// not strand the device*): `(seq, first_held_at)` — the lowest seq a pull
+    /// last held for a KEY-PENDING reason, and the unix second it first did.
+    /// `None` before any such hold. Persisted, so a restart neither restarts
+    /// the bound nor forgets it.
+    pub fn key_pending_hold(&self) -> Result<Option<(i64, i64)>> {
+        Ok(self.meta_get("key_pending_hold")?.and_then(|row| {
+            let (seq, at) = row.split_once(' ')?;
+            Some((seq.parse().ok()?, at.parse().ok()?))
+        }))
+    }
+
+    /// Start the clock [`Self::key_pending_hold`] reads at `seq`, now `at`.
+    pub fn set_key_pending_hold(&self, seq: i64, at: i64) -> Result<()> {
+        self.meta_put("key_pending_hold", &format!("{seq} {at}"))
     }
 
     /// Clear one entry's `owner_sealed` marker — the declassify pass runs this
@@ -4514,6 +4581,12 @@ mod tests {
         let mut expected = vec![ACTOR_A.to_string(), ACTOR_B.to_string()];
         expected.sort();
         assert_eq!(listed, expected);
+        let mut checked = list_account_scopes(&base).expect("the base lists");
+        checked.sort();
+        assert_eq!(
+            checked, expected,
+            "the two listings agree where the base lists"
+        );
 
         assert_eq!(
             erase_all_account_scopes(&base).erased,
@@ -4523,6 +4596,10 @@ mod tests {
         assert!(
             account_scopes_under(&tmp.path().join("absent")).is_empty(),
             "a base that does not exist holds no account"
+        );
+        assert!(
+            list_account_scopes(&tmp.path().join("absent")).is_err(),
+            "but the checked listing says it could not look, not that it holds none"
         );
     }
 
@@ -5122,6 +5199,13 @@ mod tests {
         let (files, bytes) = db.tracked_totals().unwrap();
         assert_eq!(files, 3);
         assert_eq!(bytes, 1110);
+        // On this device: the same rows less the placeholder — `total_bytes`
+        // stays the denominator of the free-up-space line.
+        assert_eq!(db.on_device_bytes().unwrap(), 110);
+        assert_eq!(
+            db.on_device_files().unwrap(),
+            vec![("s.txt".to_string(), 100), ("u.txt".to_string(), 10)]
+        );
     }
 
     #[test]

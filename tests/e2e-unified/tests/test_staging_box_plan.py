@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import stat
 import sys
+from datetime import timedelta
 
 import pytest
 
@@ -29,7 +30,7 @@ def test_zone_is_the_longest_containing_zone():
     assert sb.zone_for(DOMAIN, ["other.test", "ample.test"]) is None
 
 
-def test_dev_and_test_boxes_sit_in_the_uat_zone():
+def test_the_three_nests_sit_in_the_org_zone():
     zones = ["fauna.build"]
     assert sb.zone_for("dev.fauna.build", zones) == "fauna.build"
     assert sb.zone_for("test.fauna.build", zones) == "fauna.build"
@@ -37,9 +38,9 @@ def test_dev_and_test_boxes_sit_in_the_uat_zone():
     assert sb.relative_name("dev.fauna.build", "fauna.build") == "dev"
 
 
-def test_a_missing_uat_zone_names_the_nameserver_step():
+def test_a_missing_org_zone_names_the_nameserver_step():
     msg = sb.no_zone_message("dev.fauna.build", ["fauna.social"])
-    assert "fauna.build" in msg and "nameservers" in msg and "uat.token" in msg
+    assert "fauna.build" in msg and "nameservers" in msg and "zone.token" in msg
     other = sb.no_zone_message(DOMAIN, ["other.test"])
     assert "wrong token/project" in other and "nameservers" not in other
 
@@ -77,6 +78,16 @@ def test_records_elsewhere_in_the_zone_do_not_count():
 
 def test_the_recorded_server_resumes():
     state = {"domain": DOMAIN, "server_id": 7}
+    servers = [{"id": 7, "name": "dev-example-test"}]
+    assert sb.decide_start(state=state, servers=servers, rrsets=[{"name": "dev"}], rel="dev") \
+        == sb.RESUME
+
+
+def test_a_server_id_recorded_as_a_string_still_resumes():
+    """The provisioning snapshot carries the server id as a string; the Cloud
+    API lists servers by integer id. Measured 2026-10-18 on dev.fauna.build:
+    a box built and claimed one run earlier was refused as a stranger."""
+    state = {"domain": DOMAIN, "server_id": "7"}
     servers = [{"id": 7, "name": "dev-example-test"}]
     assert sb.decide_start(state=state, servers=servers, rrsets=[{"name": "dev"}], rel="dev") \
         == sb.RESUME
@@ -345,3 +356,245 @@ def test_the_live_test_follows_the_named_channel(monkeypatch, channel, tag):
     mod = _load_live_module(monkeypatch, channel)
     assert _channel_skip(mod) is False
     assert (mod.UPDATE_CHANNEL, mod.IMAGE_TAG) == (channel, tag)
+
+
+# ── The fresh-box guard (`org-nests.md` § fauna.build) ──────────────────────
+#
+# One complex connection per re-creation of the acceptance nest. The rule is
+# "a complex connection already happened since the last re-creation", never
+# "the box has run since then" — every box has, so that rule would refuse
+# everything and guard nothing.
+
+ACCEPT = "fauna.build"
+T0, T1, T2 = "2026-10-17T10:00:00Z", "2026-10-17T11:00:00Z", "2026-10-17T12:00:00Z"
+IMAGE = "ghcr.io/faunasocial/nest@sha256:" + "ab" * 32
+
+
+def _fresh():
+    return sb.record_recreation({"domain": ACCEPT}, at=T0, image=IMAGE)
+
+
+def test_a_freshly_recreated_acceptance_nest_admits_one_complex_connection():
+    state = sb.admit_complex_connection(_fresh(), purpose="tester sign-in", at=T1)
+    assert state["complex_connection"] == {"purpose": "tester sign-in", "at": T1}
+    assert (state["recreated_at"], state["recreated_image"]) == (T0, IMAGE)
+
+
+def test_a_second_complex_connection_is_refused_until_the_box_is_recreated():
+    used = sb.admit_complex_connection(_fresh(), purpose="tester sign-in", at=T1)
+    with pytest.raises(sb.StaleBoxError) as info:
+        sb.admit_complex_connection(used, purpose="log pull", at=T2)
+    message = str(info.value)
+    assert "log pull" in message and "tester sign-in" in message
+    assert T0 in message and T1 in message
+    assert "org-nests.md § fauna.build" in message
+
+    again = sb.record_recreation(used, at=T2, image=IMAGE)
+    assert again["complex_connection"] is None
+    assert sb.admit_complex_connection(again, purpose="log pull", at=T2)["complex_connection"]
+
+
+def test_an_acceptance_nest_with_no_recorded_recreation_is_refused():
+    """A box this machine never re-created — or one provisioned before the
+    guard — is one nothing vouches for."""
+    with pytest.raises(sb.StaleBoxError, match="no re-creation"):
+        sb.admit_complex_connection({"domain": ACCEPT}, purpose="seed load", at=T1)
+
+
+def test_the_refusal_is_raised_before_anything_is_recorded():
+    used = sb.admit_complex_connection(_fresh(), purpose="tester sign-in", at=T1)
+    snapshot = json.loads(json.dumps(used))
+    with pytest.raises(sb.StaleBoxError):
+        sb.admit_complex_connection(used, purpose="log pull", at=T2)
+    assert used == snapshot
+
+
+@pytest.mark.parametrize("domain", ["dev.fauna.build", "test.fauna.build", DOMAIN])
+def test_a_staging_or_throwaway_box_needs_no_recreation(domain):
+    state = {"domain": domain}
+    assert sb.admit_complex_connection(state, purpose="sign-in", at=T1) is state
+
+
+def test_the_guard_holds_the_same_box_the_harness_refuses():
+    from helpers import nest_mode
+
+    assert sb.FRESH_BOX_HOSTS == nest_mode.ACCEPTANCE_NEST_HOSTS == {ACCEPT}
+
+
+def test_the_guard_reads_a_trailing_dot_and_case_as_the_same_box():
+    with pytest.raises(sb.StaleBoxError):
+        sb.admit_complex_connection({"domain": "Fauna.Build."}, purpose="sign-in", at=T1)
+
+
+def test_a_recreation_record_and_a_connection_must_say_what_and_when():
+    with pytest.raises(sb.StagingPlanError):
+        sb.record_recreation({"domain": ACCEPT}, at="", image=IMAGE)
+    with pytest.raises(sb.StagingPlanError):
+        sb.record_recreation({"domain": ACCEPT}, at=T0, image="")
+    with pytest.raises(sb.StagingPlanError):
+        sb.admit_complex_connection(_fresh(), purpose="", at=T1)
+
+
+def test_the_connection_record_survives_the_state_file(tmp_path, monkeypatch):
+    """The caller saves the admitted state BEFORE it connects; a rerun after
+    a crash reads the box as used, not as fresh."""
+    monkeypatch.setattr(sb, "STATE_DIR", str(tmp_path / "staging-box"))
+    state = sb.load_or_create_state(ACCEPT)
+    sb.save_state(sb.record_recreation(state, at=T0, image=IMAGE))
+    sb.save_state(sb.admit_complex_connection(sb.load_or_create_state(ACCEPT),
+                                              purpose="tester sign-in", at=T1))
+    with pytest.raises(sb.StaleBoxError):
+        sb.admit_complex_connection(sb.load_or_create_state(ACCEPT), purpose="log pull", at=T2)
+
+
+def test_the_cadence_is_a_week_held_in_the_tree():
+    """`org-nests.md` § fauna.build: weekly, the cadence a constant in the
+    tree, never a setting."""
+    assert sb.RECREATION_CADENCE == timedelta(days=7)
+
+
+def test_a_box_older_than_the_cadence_is_refused_even_unused():
+    """A box re-created more than a cadence ago is overdue its calendar
+    re-creation; even its first complex connection is refused."""
+    with pytest.raises(sb.StaleBoxError, match="older than"):
+        sb.admit_complex_connection(_fresh(), purpose="tester sign-in",
+                                    at="2026-10-24T10:00:01Z")
+
+
+def test_a_box_exactly_one_cadence_old_is_still_admitted():
+    state = sb.admit_complex_connection(_fresh(), purpose="tester sign-in",
+                                        at="2026-10-24T10:00:00Z")
+    assert state["complex_connection"]["purpose"] == "tester sign-in"
+
+
+def test_an_unreadable_time_is_refused_not_admitted():
+    """A record or a connection time the guard cannot read fails closed."""
+    with pytest.raises(sb.StagingPlanError):
+        sb.admit_complex_connection(_fresh(), purpose="sign-in", at="yesterday")
+    with pytest.raises(sb.StagingPlanError):
+        sb.admit_complex_connection({"domain": ACCEPT, "recreated_at": "soon"},
+                                    purpose="sign-in", at=T1)
+
+
+# ── The re-creation (`org-nests.md` § fauna.build) ──────────────────────────
+#
+# Teardown → the provisioning drive → the firewall → the serving gate → the
+# record. The pure halves: what the teardown removes and keeps, and what the
+# record refuses to write.
+
+REL_APEX = "@"
+OLD = {"id": 41, "name": "fauna-build",
+       "public_net": {"firewalls": [{"id": 7, "status": "applied"}]}}
+APEX_RRSETS = [
+    {"name": "@", "type": "NS", "records": [{"value": "ns1.example."}]},
+    {"name": "@", "type": "A", "records": [{"value": "192.0.2.1"}]},
+]
+
+
+def _built(**extra):
+    return {"domain": ACCEPT, "secret_hex": "00" * 32, "server_id": 41,
+            "ipv4": "192.0.2.1", "recreated_at": T0, "recreated_image": IMAGE,
+            "mail_password": "kept", **extra}
+
+
+def _torn_down():
+    return sb.finish_teardown(sb.begin_recreation(
+        state=_built(), servers=[OLD], rrsets=APEX_RRSETS, rel=REL_APEX, at=T1)["state"])
+
+
+def test_teardown_removes_the_recorded_box_and_its_own_records_only():
+    plan = sb.begin_recreation(state=_built(), servers=[OLD], rrsets=APEX_RRSETS,
+                               rel=REL_APEX, at=T1)
+    assert [s["id"] for s in plan["servers"]] == [41]
+    assert [(r["name"], r["type"]) for r in plan["rrsets"]] == [("@", "A")]
+
+
+def test_teardown_knows_a_server_id_recorded_as_a_string():
+    plan = sb.begin_recreation(state={**_built(), "server_id": "41"}, servers=[OLD],
+                               rrsets=APEX_RRSETS, rel=REL_APEX, at=T1)
+    assert [s["id"] for s in plan["servers"]] == [41]
+
+
+def test_teardown_keeps_the_identity_and_the_boxs_own_firewall():
+    state = sb.begin_recreation(state=_built(), servers=[OLD], rrsets=APEX_RRSETS,
+                                rel=REL_APEX, at=T1)["state"]
+    assert state["secret_hex"] == "00" * 32 and state["mail_password"] == "kept"
+    assert state["firewall_ids"] == [7]
+    assert state["recreation_started_at"] == T1
+    # The old record is void the moment the teardown starts: a re-creation
+    # that dies half-way leaves a box the guard refuses, never one it admits.
+    assert "recreated_at" not in state and state["complex_connection"] is None
+
+
+def test_teardown_refuses_a_server_this_machine_did_not_record():
+    stranger = {**OLD, "id": 99}
+    with pytest.raises(sb.StagingPlanError, match="does not record"):
+        sb.begin_recreation(state=_built(), servers=[stranger], rrsets=[], rel=REL_APEX, at=T1)
+    with pytest.raises(sb.StagingPlanError, match="does not record"):
+        sb.begin_recreation(state={"domain": ACCEPT, "secret_hex": "00" * 32},
+                            servers=[OLD], rrsets=[], rel=REL_APEX, at=T1)
+
+
+def test_teardown_is_for_the_acceptance_nest_alone():
+    with pytest.raises(sb.StagingPlanError, match="acceptance nest"):
+        sb.begin_recreation(state={**_built(), "domain": "test.fauna.build"},
+                            servers=[], rrsets=[], rel="test", at=T1)
+
+
+def test_a_rerun_after_a_half_done_teardown_finds_nothing_and_goes_on():
+    """The server already gone: the plan removes nothing more and keeps the
+    firewall ids it recorded the first time."""
+    again = sb.begin_recreation(state=_torn_down(), servers=[], rrsets=[], rel=REL_APEX, at=T2)
+    assert again["servers"] == [] and again["rrsets"] == []
+    assert again["state"]["firewall_ids"] == [7]
+    assert again["state"]["server_id"] is None
+
+
+def test_finish_teardown_lets_the_drive_provision_afresh():
+    state = _torn_down()
+    assert state["server_id"] is None and state["ipv4"] is None
+    assert state.get("mail_password")  # the drive turns mail on with it
+    assert sb.decide_start(state=state, servers=[], rrsets=[], rel=REL_APEX) == sb.PROVISION
+
+
+def test_a_teardown_mints_a_mail_password_the_drive_can_use():
+    state = sb.begin_recreation(state=_built(mail_password=None), servers=[OLD],
+                                rrsets=[], rel=REL_APEX, at=T1)["state"]
+    assert state["mail_password"] and state["mail_enabled_by_this_test"] is False
+
+
+def _rebuilt(**extra):
+    return {**_torn_down(), "server_id": 42, "ipv4": "192.0.2.2", **extra}
+
+
+def test_the_record_waits_for_the_new_box_and_its_seeded_accounts():
+    assert "no re-creation" in sb.recreation_record_refusal({"domain": ACCEPT})
+    no_box = {**_rebuilt(), "server_id": None}
+    assert "provisioned no box" in sb.recreation_record_refusal(no_box)
+    assert "accounts" in sb.recreation_record_refusal(_rebuilt())
+    stale = _rebuilt(accounts_seeded_at=T0)  # seeded before this re-creation began
+    assert "accounts" in sb.recreation_record_refusal(stale)
+    assert sb.recreation_record_refusal(_rebuilt(accounts_seeded_at=T2)) is None
+
+
+def test_the_record_closes_the_recreation():
+    state = sb.record_recreation(_rebuilt(accounts_seeded_at=T2), at=T2, image=IMAGE)
+    assert "recreation_started_at" not in state
+    assert sb.admit_complex_connection(state, purpose="tester sign-in", at=T2)
+
+
+def test_the_drive_resumes_a_box_mid_recreation_without_spending_its_connection():
+    mid = _rebuilt()
+    assert sb.admit_drive_resume(mid, at=T2) is mid
+
+
+def test_the_drive_resuming_a_running_box_is_a_complex_connection():
+    used = sb.admit_drive_resume(_fresh(), at=T1)
+    assert used["complex_connection"]["purpose"] == "provisioning drive resume"
+    with pytest.raises(sb.StaleBoxError):
+        sb.admit_drive_resume(used, at=T2)
+
+
+def test_the_drive_resuming_a_staging_box_is_unguarded():
+    state = {"domain": "dev.fauna.build", "server_id": 3}
+    assert sb.admit_drive_resume(state, at=T1) is state

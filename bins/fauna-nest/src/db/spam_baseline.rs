@@ -275,16 +275,29 @@ impl CacheDb {
     /// when the `departures` generation moved since `departures_seen` was
     /// read: a contributor left while the run was merging, and landing would
     /// serve the counts the departure just withdrew. The next run rebuilds
-    /// without them.
+    /// without them. `require_standing` (a cadence run) refuses the same way
+    /// when standing publish is off at landing time, read in this transaction.
     pub async fn land_spam_baseline_publish(
         &self,
         landing: &BaselineLanding<'_>,
         departures_seen: i64,
+        require_standing: bool,
     ) -> Result<bool> {
         let now = now_epoch_millis();
         let conn = self.conn.lock().await;
         let tx = conn.unchecked_transaction()?;
-        if read_run_state(&tx)?.departures != departures_seen {
+        // Standing is read here, not before the lock: the admin's switch to
+        // off writes the policy and then withdraws the baseline, and a run
+        // that read "on" earlier would otherwise land after that withdraw and
+        // stay served with the setting off.
+        let standing_off =
+            require_standing
+                && !super::singleton::read_singleton_json_in::<
+                    super::mail_policy::SpamPolicyOverrides,
+                >(&tx, "mail_spam_policy")?
+                .effective()
+                .baseline_standing_publish;
+        if standing_off || read_run_state(&tx)?.departures != departures_seen {
             record_run_outcome(&tx, now, true, landing.skipped_contributors)?;
             tx.commit()?;
             return Ok(false);
@@ -467,12 +480,53 @@ mod tests {
             .departures;
         let summed = [(ALICE, 1)];
         assert!(
-            db.land_spam_baseline_publish(&landing(&summed), seen)
+            db.land_spam_baseline_publish(&landing(&summed), seen, false)
                 .await
                 .unwrap()
         );
         let (at, deferred) = last_run(&db).await;
         assert!(at.is_some() && !deferred, "a landed run records its finish");
+    }
+
+    /// A cadence run that read standing publish as on, then met the admin's
+    /// switch to off before landing, must not land: standing is checked in the
+    /// landing transaction, so the run writes only a deferred outcome and no
+    /// baseline is left served with the setting off (`mail-spam.md` § Cold
+    /// start, Path 2 → *Standing publish*). A "publish now" click
+    /// (`require_standing = false`) still lands with standing off.
+    #[tokio::test]
+    async fn a_cadence_landing_refuses_when_standing_is_off_in_the_transaction() {
+        let db = CacheDb::open_in_memory().unwrap();
+        db.put_spam_policy(crate::db::mail_policy::SpamPolicyOverrides {
+            baseline_standing_publish: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let seen = db
+            .snapshot_spam_baseline_run()
+            .await
+            .unwrap()
+            .state
+            .departures;
+        let summed = [(ALICE, 1)];
+
+        assert!(
+            !db.land_spam_baseline_publish(&landing(&summed), seen, true)
+                .await
+                .unwrap(),
+            "a cadence run must not land once standing is off"
+        );
+        let (published, state) = db.get_spam_baseline_state().await.unwrap();
+        assert!(published.is_none(), "no baseline row is written");
+        assert!(state.deferred, "the run is recorded as deferred");
+
+        assert!(
+            db.land_spam_baseline_publish(&landing(&summed), seen, false)
+                .await
+                .unwrap(),
+            "a publish-now click lands with standing off"
+        );
     }
 
     /// A contributor who departs while a run is merging must not have their
@@ -495,7 +549,7 @@ mod tests {
 
         let summed = [(ALICE, 1)];
         assert!(
-            !db.land_spam_baseline_publish(&landing(&summed), seen)
+            !db.land_spam_baseline_publish(&landing(&summed), seen, false)
                 .await
                 .unwrap()
         );
@@ -526,7 +580,7 @@ mod tests {
             .map(|c| (c.actor, c.updated_at))
             .collect();
         assert!(
-            db.land_spam_baseline_publish(&landing(&summed), snap.state.departures)
+            db.land_spam_baseline_publish(&landing(&summed), snap.state.departures, false)
                 .await
                 .unwrap()
         );
@@ -587,7 +641,7 @@ mod tests {
             .departures;
         let summed = [(ALICE, 1)];
         assert!(
-            db.land_spam_baseline_publish(&landing(&summed), seen)
+            db.land_spam_baseline_publish(&landing(&summed), seen, false)
                 .await
                 .unwrap()
         );
@@ -627,7 +681,7 @@ mod tests {
             .departures;
         let summed = [(ALICE, 1)];
         assert!(
-            db.land_spam_baseline_publish(&landing(&summed), seen)
+            db.land_spam_baseline_publish(&landing(&summed), seen, false)
                 .await
                 .unwrap()
         );

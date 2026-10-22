@@ -1,0 +1,58 @@
+---
+// No © line (user call, 2026-08-05). Copyright is automatic under Berne and
+// Norway has no registry, so the notice carried no legal weight — and as an
+// assertion it contradicted bylaws § 7, under which contributors retain their
+// own copyright and there is no CLA. Settled 2026-08-05: the site stays
+// silent on licence names until the source code is published. No trademark
+// notice either (user call, 2026-09-01): FAUNA SOCIAL has been registered in
+// Norway since 2026-08-19 (reg. no. 343071), so a notice would be lawful — the
+// site simply carries none, and any future one must name the territory.
+import { org } from '../data/org.ts';
+---
+{/* public-text: site-chrome */}
+<footer class="site-footer">
+  <div class="wrap footer-grid">
+    <div>
+      <p class="footer-name">{org.legalName}</p>
+      <p class="footer-muted">{org.orgForm}</p>
+      <p class="footer-muted">
+        {org.orgNumber ? `Org. no. ${org.orgNumber}, Norway` : 'Registry details being completed'}
+      </p>
+      <p class="footer-muted">
+        <a href={`mailto:${org.email}`}>{org.email}</a>
+      </p>
+    </div>
+    <div class="footer-tail">
+      <p class="footer-muted">
+        Fauna is free and open-source software. No ads, no tracking, no
+        charge. Our <a href="/organization/bylaws">bylaws</a> forbid
+        charging users, selling advertising or user data, and paying members.
+      </p>
+      <p class="footer-muted">
+        Downloads are built from the published source and released under our
+        <a href="/code-signing-policy">code signing policy</a>.
+      </p>
+    </div>
+  </div>
+</footer>
+{/* public-text-end: site-chrome */}
+
+<style>
+  .site-footer {
+    border-top: 1px solid var(--border);
+    background: var(--bg-alt);
+    margin-top: 4rem;
+    padding: 2.5rem 0;
+    font-size: 0.95rem;
+  }
+  .footer-grid {
+    display: grid;
+    grid-template-columns: 1.2fr 1.2fr;
+    gap: 2rem;
+  }
+  @media (max-width: 720px) {
+    .footer-grid { grid-template-columns: 1fr; }
+  }
+  .footer-name { font-weight: 800; margin-bottom: 0.25rem; }
+  .footer-muted { color: var(--text-muted); margin-bottom: 0.25rem; }
+</style>

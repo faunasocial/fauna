@@ -549,15 +549,23 @@ pub fn diff_struct_maps_allowing(
     head: &StructMap,
     allow: &RatifiedBreaks,
 ) -> Vec<Violation> {
-    let ratified =
-        |key: &str, fname: &str, t: Transition| allow.contains(&(format!("{key}.{fname}"), t));
-    let retype_ratified = |key: &str, fname: &str, to: &str| {
-        ratified(key, fname, Transition::Retyped(to.to_string()))
-    };
+    let mut violations = struct_revivals(head, allow);
+    violations.extend(diff_struct_breaks(base, head, allow));
+    violations.sort();
+    violations
+}
+
+/// The revival half of [`diff_struct_maps_allowing`]: every head field the
+/// list records as `Removed`. A revival is a violation of the LIST's
+/// invariant (the same class as [`check_ratified_breaks_monotonic`]), not a
+/// break against the base — so `main` feeds it to the violations whatever
+/// the product version, the 0.1.x compat-free window included; only
+/// [`diff_struct_breaks`] is softened there.
+pub fn struct_revivals(head: &StructMap, allow: &RatifiedBreaks) -> Vec<Violation> {
     let mut violations = Vec::new();
     for (key, head_struct) in head {
         for fname in head_struct.fields.keys() {
-            if ratified(key, fname, Transition::Removed) {
+            if allow.contains(&(format!("{key}.{fname}"), Transition::Removed)) {
                 violations.push(Violation::new(
                     key,
                     format!(
@@ -568,6 +576,24 @@ pub fn diff_struct_maps_allowing(
             }
         }
     }
+    violations.sort();
+    violations
+}
+
+/// The break half of [`diff_struct_maps_allowing`]: removed / tightened /
+/// retyped fields against `base`, minus the ratified ones — what the 0.1.x
+/// window reports instead of refusing.
+pub fn diff_struct_breaks(
+    base: &StructMap,
+    head: &StructMap,
+    allow: &RatifiedBreaks,
+) -> Vec<Violation> {
+    let ratified =
+        |key: &str, fname: &str, t: Transition| allow.contains(&(format!("{key}.{fname}"), t));
+    let retype_ratified = |key: &str, fname: &str, to: &str| {
+        ratified(key, fname, Transition::Retyped(to.to_string()))
+    };
+    let mut violations = Vec::new();
     for (key, base_struct) in base {
         let Some(head_struct) = head.get(key) else {
             continue;
@@ -710,45 +736,71 @@ pub type RatifiedBreaks = BTreeSet<(String, Transition)>;
 pub fn parse_ratified_breaks(text: &str) -> Result<RatifiedBreaks, String> {
     let mut entries = RatifiedBreaks::new();
     for (n, raw) in text.lines().enumerate() {
-        let line = raw.split('#').next().unwrap_or("").trim();
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        let Some(&gate) = parts.first() else {
-            continue; // blank / comment-only line
-        };
-        let n = n + 1;
-        if gate == "cddl" {
-            continue;
+        if let Some(entry) = parse_ratified_line(n + 1, raw)? {
+            entries.insert(entry);
         }
-        if gate != "rust" {
-            return Err(format!(
-                "line {n}: unknown gate {gate:?} — want `cddl` or `rust`: {raw:?}"
-            ));
-        }
-        let [_, key, transition, _ratified_on, _ratification, ..] = parts[..] else {
-            return Err(format!(
-                "line {n}: want `rust <key> <transition> <ratified-on> <ratification…>`: {raw:?}"
-            ));
-        };
-        let Some(transition) = Transition::parse(transition) else {
-            return Err(format!(
-                "line {n}: transition {transition:?} is not `removed`, `optional→required` or \
-                 `retyped→<Type>`: {raw:?}"
-            ));
-        };
-        // A struct key names its wire field after a `.`; an enum key —
-        // `<crate>::<module>::<Enum>::<Variant>` — has none, and only a
-        // variant's removal is ever ratified.
-        if !key.contains('.') && (transition != Transition::Removed || key.split("::").count() < 3)
-        {
-            return Err(format!(
-                "line {n}: key {key:?} names no wire field (`module::Struct.field`) and is \
-                 not an enum variant's removal (`<crate>::<module>::<Enum>::<Variant> \
-                 removed`): {raw:?}"
-            ));
-        }
-        entries.insert((key.to_string(), transition));
     }
     Ok(entries)
+}
+
+/// [`parse_ratified_breaks`]'s merge-base mode: the base list feeds only the
+/// only-grows check, so a line the grammar rejects is skipped (its error
+/// returned in the second element for the caller to warn about) instead of
+/// failing the read — a malformed base line must never wedge the commit
+/// that fixes it. HEAD's list is always read strictly, which is what keeps
+/// it well-formed.
+pub fn parse_ratified_breaks_lenient(text: &str) -> (RatifiedBreaks, Vec<String>) {
+    let mut entries = RatifiedBreaks::new();
+    let mut skipped = Vec::new();
+    for (n, raw) in text.lines().enumerate() {
+        match parse_ratified_line(n + 1, raw) {
+            Ok(Some(entry)) => {
+                entries.insert(entry);
+            }
+            Ok(None) => {}
+            Err(e) => skipped.push(e),
+        }
+    }
+    (entries, skipped)
+}
+
+/// One line of the list: `Ok(None)` for a blank, comment-only or `cddl` line.
+fn parse_ratified_line(n: usize, raw: &str) -> Result<Option<(String, Transition)>, String> {
+    let line = raw.split('#').next().unwrap_or("").trim();
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    let Some(&gate) = parts.first() else {
+        return Ok(None); // blank / comment-only line
+    };
+    if gate == "cddl" {
+        return Ok(None);
+    }
+    if gate != "rust" {
+        return Err(format!(
+            "line {n}: unknown gate {gate:?} — want `cddl` or `rust`: {raw:?}"
+        ));
+    }
+    let [_, key, transition, _ratified_on, _ratification, ..] = parts[..] else {
+        return Err(format!(
+            "line {n}: want `rust <key> <transition> <ratified-on> <ratification…>`: {raw:?}"
+        ));
+    };
+    let Some(transition) = Transition::parse(transition) else {
+        return Err(format!(
+            "line {n}: transition {transition:?} is not `removed`, `optional→required` or \
+             `retyped→<Type>`: {raw:?}"
+        ));
+    };
+    // A struct key names its wire field after a `.`; an enum key —
+    // `<crate>::<module>::<Enum>::<Variant>` — has none, and only a
+    // variant's removal is ever ratified.
+    if !key.contains('.') && (transition != Transition::Removed || key.split("::").count() < 3) {
+        return Err(format!(
+            "line {n}: key {key:?} names no wire field (`module::Struct.field`) and is \
+             not an enum variant's removal (`<crate>::<module>::<Enum>::<Variant> \
+             removed`): {raw:?}"
+        ));
+    }
+    Ok(Some((key.to_string(), transition)))
 }
 
 /// The `rust` entries present in `base` but missing from `head` — the

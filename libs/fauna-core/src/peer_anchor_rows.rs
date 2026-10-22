@@ -254,7 +254,8 @@ mod tests {
     /// and folded back, read exactly as
     /// [`PeerAnchors::merge`] of the two — an advance on one side, an
     /// equivocation at one height, an outrun mark on the shared head, two
-    /// domains for one actor — in any row order.
+    /// domains for one actor, a stale marked head against an advanced unmarked
+    /// one — in any row order.
     #[test]
     fn the_row_fold_reads_as_the_shipped_merge() {
         let a = PeerAnchors {
@@ -262,6 +263,7 @@ mod tests {
                 head(1, 0x10, 3, 50, false),
                 head(2, 0x20, 1, 40, true),
                 head(3, 0x30, 7, 90, false),
+                head(5, 0x50, 2, 20, true),
             ],
             anchor_domains: vec![domain(1, "b.example", 60), domain(4, "d.example", 10)],
         };
@@ -270,9 +272,21 @@ mod tests {
                 head(1, 0x11, 5, 70, false),
                 head(2, 0x20, 1, 30, false),
                 head(3, 0x2f, 7, 95, false),
+                head(5, 0x51, 4, 25, false),
             ],
             anchor_domains: vec![domain(1, "a.example", 80)],
         };
+        // Actor 5: a marked stale head on `a`, a higher unmarked head on `b`.
+        // The mark is a fact about the head it was set on, so it must not
+        // re-mark the advance from either side of the join.
+        let advanced = a.merge(&b);
+        assert_eq!(advanced, b.merge(&a), "the join commutes");
+        let five = advanced
+            .chain_heads
+            .iter()
+            .find(|h| h.actor == ActorId([5; 32]))
+            .unwrap();
+        assert!(five.seq == 4 && !five.outrun, "the advance stays unmarked");
         let mut rows = a.rows();
         rows.extend(b.rows());
         let folded = fold(&rows);

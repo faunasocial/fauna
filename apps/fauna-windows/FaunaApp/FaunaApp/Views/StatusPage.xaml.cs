@@ -4,6 +4,7 @@ using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Navigation;
+using FaunaApp.Controls;
 using FaunaApp.Core.Helpers;
 using FaunaApp.Core.Models;
 using FaunaApp.Core.Services;
@@ -43,6 +44,7 @@ public sealed partial class StatusPage : Page
                 new AgentStatusProbe(() => App.CurrentSyncAgent?.Channel),
                 () => FaunaApp.Conversations.ConversationsManagerHost.Instance.SecureChannelCount());
             _viewModel.PropertyChanged += ViewModel_PropertyChanged;
+            _viewModel.FeatureLimits.Changed += QueueFeatureLimitsRepaint;
             NestUrlLabel.Text = S.Get("settings/nest_url");
             NestUrlText.Text = clients.Account.NestUrl ?? "--";
         }
@@ -326,8 +328,60 @@ public sealed partial class StatusPage : Page
                 rowPanel.Children.Add(cellPanel);
             }
 
+            // The self host (dynamic-features.md § Authoring surfaces): the
+            // person's OWN authored document for this member in words, an Edit
+            // button, and — under the row whose editor is open — the shared
+            // editor. Present only once the authored read has answered AND carries
+            // this member (a summary painted before that would say "No limit set"
+            // with no basis). The words, the editor and the write are the shared
+            // seam's; this only places them.
+            var host = _viewModel.FeatureLimits;
+            if (host.RowFor(row.@feature) is { } own)
+            {
+                var ownLabel = new TextBlock { Text = S.Get("features/own_label"), Opacity = 0.6, FontSize = 12 };
+                rowPanel.Children.Add(ownLabel);
+
+                var ownSummary = new TextBlock { Text = S.Resolve(own.@summary), TextWrapping = TextWrapping.Wrap };
+                AutomationProperties.SetAutomationId(ownSummary, Ids.FeatureLimitsOwnSummary);
+                rowPanel.Children.Add(ownSummary);
+
+                rowPanel.Children.Add(FeatureAuthoringPainter.EditButton(
+                    host, row.@feature, Ids.FeatureLimitsOwnEditButton, S.Get("features/own_edit")));
+
+                if (host.State.OpenFeature == row.@feature
+                    && FeatureAuthoringPainter.BuildEditor(host) is { } editor)
+                    rowPanel.Children.Add(editor);
+            }
+
             FeatureLimitsRowsPanel.Children.Add(rowPanel);
         }
+    }
+
+    private bool _featureRepaintQueued;
+    private string? _hostError;
+
+    /// <summary>The self authoring host changed shape: repaint once, off the stack of
+    /// whatever raised it (a radio's <c>Checked</c> handler would otherwise replace
+    /// the very control it is running on). Coalesced — a save raises several
+    /// notifications in a row.</summary>
+    private void QueueFeatureLimitsRepaint()
+    {
+        if (_featureRepaintQueued) return;
+        _featureRepaintQueued = true;
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            _featureRepaintQueued = false;
+            if (_viewModel is null) return;
+            UpdateFeatureLimits();
+            // A refused cell or a failed write lands on the page's error banner,
+            // exactly as on tui; only a CHANGE of the host's own line touches it.
+            var error = _viewModel.FeatureLimits.State.Error;
+            if (error != _hostError)
+            {
+                _hostError = error;
+                _viewModel.ErrorMessage = error;
+            }
+        });
     }
 
     // "--" is the page's "no value yet" placeholder — skip it (the shared helper

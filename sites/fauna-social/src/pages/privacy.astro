@@ -1,0 +1,33 @@
+---
+import Base from '../layouts/Base.astro';
+import Critter from '../components/Critter.astro';
+// Structure and styling only — every word comes from the copy file, imported
+// at build time (docs/sites/fauna-social/README.md § How the markdown becomes
+// the page). Same shape as who.astro: heading + illustration + lead, then the
+// body in document order.
+//
+// The page was retired with the 2026-08-04 five-page cut and republished on
+// 2026-09-05 (user call): the Microsoft Store submission needs a privacy-policy
+// URL. It is deliberately NOT in nav.ts — reachable by URL and from the
+// sitemap, like the Norwegian bylaws, so the visible navigation stays short.
+import { compiledContent, frontmatter as fm } from '../../../../docs/sites/fauna-social/privacy.md';
+import { fill } from '../data/fill.ts';
+import { takeOpening } from '../data/copy.ts';
+
+const { heading, lead, illustration, rest } = takeOpening(fill(await compiledContent()));
+---
+<Base title={fm.title} description={fm.description}>
+  <div class="wrap page">
+    <article class="prose copy">
+      <div class="page-head">
+        {illustration && <Critter name={illustration} size={90} />}
+        <div>
+          <h1 set:html={heading} />
+          <p class="lead" set:html={lead} />
+        </div>
+      </div>
+
+      <Fragment set:html={rest} />
+    </article>
+  </div>
+</Base>

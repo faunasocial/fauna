@@ -161,6 +161,39 @@ class LinkedNestsVM @Inject constructor(
         }
     }
 
+    /**
+     * The last restore from a custodian nest this session
+     * (`nests-custody-restore-notice`): null until one ran, [RestoreNotice.Running]
+     * while in flight, then the runtime's outcome.
+     */
+    val restoreNotice = MutableStateFlow<RestoreNotice?>(null)
+
+    /**
+     * Restore from a custodian nest (`nests.md` § Trust facet — restore from a
+     * custodian nest) — both entries, the typed address and a custodian row's
+     * own, dispatch the one shared runtime command; this VM holds no dial,
+     * handshake or walk logic. A `Failed` outcome (the gesture could not run)
+     * reaches the page banner, never the notice; then the custody fold
+     * re-reads so a restored custodian row paints beside the notice.
+     */
+    fun restoreFromCustodian(raw: String) {
+        val url = raw.trim()
+        if (url.isEmpty() || restoreNotice.value == RestoreNotice.Running) return
+        restoreNotice.value = RestoreNotice.Running
+        viewModelScope.launch {
+            val outcome = runCatching { api.custodyRestoreFromCustodian(url) }
+                .getOrElse { e -> com.fauna.ffi.FfiCustodianRestoreOutcome.Failed(e.message ?: "") }
+            if (outcome is com.fauna.ffi.FfiCustodianRestoreOutcome.Failed) {
+                restoreNotice.value = null
+                errorMessage.value = outcome.reason
+            } else {
+                restoreNotice.value = RestoreNotice.Done(outcome)
+            }
+            hydrate()
+            loadCustodyAndEscrow()
+        }
+    }
+
     /** Unlink a nest (`fauna.pair.revoke`); the machine re-lists on success. */
     fun unlink(nestId: String) = dispatch(LinkedNestsAction.Unlink(nestId = nestId))
 
@@ -271,6 +304,18 @@ class LinkedNestsVM @Inject constructor(
         val snap = m.snapshot()
         snapshot.value = snap
         errorMessage.value = snap.error
+    }
+
+    /** The restore notice's state — tui's `RestoreNotice`. */
+    sealed interface RestoreNotice {
+        data object Running : RestoreNotice
+
+        data class Done(val outcome: com.fauna.ffi.FfiCustodianRestoreOutcome) : RestoreNotice {
+            /** Whether the form closes — the shared
+             *  `CustodianRestoreOutcome::closes_form`, over its UniFFI export. */
+            val closesForm: Boolean
+                get() = com.fauna.ffi.custodianRestoreClosesForm(outcome)
+        }
     }
 
     private companion object {

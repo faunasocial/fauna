@@ -8,7 +8,7 @@
 //  1. It must read the composer ONCE, at the click, and send only that value.
 //     A live read after any await sends whatever the user has typed since: the
 //     next post's text under this post's photo.
-//  2. Its success path must clear only what was sent (`$lib/compose-sent`'s
+//  2. Its success path must clear only what was sent (`#lib/compose-sent`'s
 //     `clearSent`), never reset the fields wholesale. The wholesale reset erased
 //     the user's NEXT post whenever the page's own reload put this post on
 //     screen before this submit resolved — measured as `test_feed.py`'s second

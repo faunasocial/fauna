@@ -61,10 +61,114 @@ class MailSettingsVM @Inject constructor(
     val forwardPerHour = MutableStateFlow("")
     val forwardCeiling = MutableStateFlow<UInt?>(null)
 
+    // The receive / send switches, the automatic reply and the mailbox quota
+    // (mail-policy-config.md § Tier 3; email-filters.md § The auto-respond
+    // setting; imap-server.md § Composition with submission quota). Each is
+    // `null` until its first read lands, so the ids are absent until then; the
+    // switches and the reply repaint from the nest's re-read, never the tap.
+    val switches = MutableStateFlow<com.fauna.ffi.MailSwitches?>(null)
+    val autorespond = MutableStateFlow<com.fauna.ffi.FfiAutoRespond?>(null)
+    val autorespondMessage = MutableStateFlow("")
+    val quotas = MutableStateFlow<uniffi.fauna_client_mail_settings.MailQuotas?>(null)
+
     init {
         hydrate()
         hydrateForwarding()
+        hydrateAccountControls()
         regeneratePassword()
+    }
+
+    private fun hydrateAccountControls() {
+        viewModelScope.launch {
+            try { switches.value = api.mailSwitchesGet() } catch (_: Exception) { }
+            try { publishAutorespond(api.autorespondGet()) } catch (_: Exception) { }
+            try { quotas.value = api.mailQuotasGet() } catch (_: Exception) { }
+        }
+    }
+
+    private fun publishAutorespond(reply: com.fauna.ffi.FfiAutoRespond) {
+        autorespond.value = reply
+        if (reply.enabled) autorespondMessage.value = reply.message
+    }
+
+    /** Flip the receive switch from the last confirmed read; inert before one. */
+    fun toggleReceive() {
+        val current = switches.value ?: return
+        setSwitches(receive = !current.receiveEnabled, send = null)
+    }
+
+    /** Flip the send switch from the last confirmed read; inert before one. */
+    fun toggleSend() {
+        val current = switches.value ?: return
+        setSwitches(receive = null, send = !current.sendEnabled)
+    }
+
+    /** Flip the scan-result-row switch from the last confirmed read; inert
+     *  before one. The nest's re-read repaints all three switches. */
+    fun toggleScanResultVisible() {
+        val current = switches.value ?: return
+        viewModelScope.launch {
+            try {
+                switches.value = api.mailScanResultVisibleSet(!current.scanResultVisible)
+                errorMessage.value = null
+            } catch (e: Exception) {
+                errorMessage.value = e.message
+            }
+        }
+    }
+
+    private fun setSwitches(receive: Boolean?, send: Boolean?) {
+        viewModelScope.launch {
+            try {
+                switches.value = api.mailSwitchesSet(receive, send)
+                errorMessage.value = null
+            } catch (e: Exception) {
+                errorMessage.value = e.message
+            }
+        }
+    }
+
+    /** Edit the reply's draft; committed by [commitAutorespondMessage]. */
+    fun editAutorespondMessage(draft: String) { autorespondMessage.value = draft }
+
+    /** The toggle: while the reply is on it turns it off; otherwise it is the
+     *  message commit (the draft check first). */
+    fun toggleAutorespond() {
+        if (autorespond.value?.enabled == true) {
+            viewModelScope.launch {
+                try {
+                    api.autorespondClear()
+                    publishAutorespond(api.autorespondGet())
+                    errorMessage.value = null
+                } catch (e: Exception) {
+                    errorMessage.value = e.message
+                }
+            }
+        } else {
+            commitAutorespondMessage()
+        }
+    }
+
+    /** Commit the message draft, which also turns the reply on. The shared
+     *  check decides first: a blank draft names its reason on the error banner
+     *  and sends nothing. */
+    fun commitAutorespondMessage() {
+        val text = when (val outcome = uniffi.fauna_client_mail_settings.autorespondMessageDraftOutcome(autorespondMessage.value)) {
+            is uniffi.fauna_client_mail_settings.AutorespondMessageDraftOutcome.Set -> outcome.text
+            is uniffi.fauna_client_mail_settings.AutorespondMessageDraftOutcome.Refused -> {
+                errorMessage.value = com.fauna.app.ui.util.resolveLocalized(context, outcome.message)
+                return
+            }
+        }
+        viewModelScope.launch {
+            try {
+                api.autorespondSet(text)
+                publishAutorespond(api.autorespondGet())
+                errorMessage.value = null
+            } catch (e: Exception) {
+                errorMessage.value = e.message
+            }
+        }
     }
 
     private fun hydrateForwarding() {

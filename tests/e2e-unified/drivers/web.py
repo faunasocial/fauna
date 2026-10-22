@@ -143,7 +143,7 @@ class WebBridgeDriver(HttpBridgeDriver):
 
     def is_nav_tab_revealed(self, element_id: str, *, scope: str | None = None) -> bool:
         """Web's gated nav tabs (``admin-tab`` / ``family-tab`` in
-        ``routes/+layout.svelte``) are Svelte ``{#if}`` blocks: ABSENT from the
+        ``lib/components/RootShell.svelte``) are Svelte ``{#if}`` blocks: ABSENT from the
         DOM until their gate fires, PRESENT once revealed — the same
         Collapsed-until-revealed shape ``WindowsDriver`` already overrides this
         for, and for the identical reason: the base ``is_visible_scrolled``
@@ -217,6 +217,42 @@ class WebBridgeDriver(HttpBridgeDriver):
         tab._twin_of = self
         tab._shares_context = True
         tab._inject_agent()
+        return tab
+
+    def add_virtual_authenticator(self, *, has_prf: bool = True) -> str:
+        """Give this page a virtual WebAuthn platform authenticator (CDP),
+        offering the PRF extension unless ``has_prf`` is false; returns its id.
+        It and its credentials survive ``hard_reload()`` (same page target).
+        WebAuthn refuses an IP-literal origin, so the page must be served by a
+        name — ``spa_proxy_for(..., url_host="localhost")``."""
+        resp = self._post("/webauthn/virtual-authenticator", {"has_prf": has_prf})
+        return str(resp["authenticator_id"])
+
+    #: A tracked same-origin static document that runs no SPA code.
+    _LOCK_HOLDER_DOCUMENT = "/app/manifest.json"
+
+    def open_lock_holder_tab(self) -> "WebBridgeDriver":
+        """Open a second page in THIS driver's BrowserContext on a static
+        same-origin document and return a driver bound to it — a tab that shares
+        the origin's Web Locks and ``localStorage`` but runs NO app.
+
+        ``open_same_context_tab`` boots the SPA in the new tab, which is the right
+        sibling for a test about two live tabs and the wrong one for a test whose
+        subject is THIS tab's launch: the second SPA boots over the same store,
+        reaches the same launch decisions itself (the relaunch adoption, an
+        aftermath drain) and navigates away, taking its Web Lock with it. A holder
+        that runs nothing keeps the lock until the test releases it. No agent is
+        injected (there is no SPA to drive); only ``eval_js`` is meaningful."""
+        from urllib.parse import urljoin
+
+        url = urljoin(self._spa_url or "", self._LOCK_HOLDER_DOCUMENT)
+        resp = self._post("/page", {"url": url, "share_context": self._page_id})
+        tab = WebBridgeDriver()
+        tab._url = self._url
+        tab._page_id = str(resp["page_id"])
+        tab._spa_url = self._spa_url
+        tab._twin_of = self
+        tab._shares_context = True
         return tab
 
     def launch(self, config: dict) -> None:
@@ -332,6 +368,22 @@ class WebBridgeDriver(HttpBridgeDriver):
                 "  return true;"
                 "})()"
             )
+        # The account-store seed (`config["seed_credentials"]`), the twin of
+        # every native driver's pre-boot credential file: the same logical-key
+        # map (`fauna/index` + `fauna/{actor}/…`, built by
+        # `common.accounts.build_registry_seed`), which web's
+        # `LocalStorageSecretStore` reads verbatim. A page has no pre-navigation
+        # hook, so the map goes into the loaded page's origin and the SPA boots
+        # again over it — the boot that read the empty store took the
+        # signed-out redirect, and a seed landing mid-boot would race it. Web
+        # is single-origin: each seeded `nest_url` must be the SPA proxy the
+        # page is served from (the `spa_url` fixture), never the nest's own URL.
+        seed_credentials = config.get("seed_credentials")
+        if seed_credentials:
+            from helpers.web_store import seed_js
+
+            self._execute_js(seed_js(dict(seed_credentials)))
+            self._fresh_boot()
 
     def _stop_app(self) -> None:
         # A twin owns only its page: close it and leave the bridge, Chromium,
@@ -592,6 +644,15 @@ class WebBridgeDriver(HttpBridgeDriver):
         self._post("/page/kill", {})
         self._app_killed = True
 
+    def quit_app(self) -> None:
+        """The user closes the SPA's tab and leaves the machine as it is
+        (HttpBridgeDriver.quit_app's contract). Web's machine is the
+        BrowserContext, so quitting closes the page and keeps the context —
+        the `kill_uncleanly()` mechanism; the inherited `_stop_app()` would
+        tear the bridge and Chromium down, the context and its localStorage
+        with them, leaving `hard_reload()` nothing to reopen."""
+        self.kill_uncleanly()
+
     def _fresh_boot(self) -> None:
         """Boot a fresh SPA instance over the (preserved) localStorage — the web
         relaunch. If the app was unclean-killed, reopen the page in its kept
@@ -601,31 +662,84 @@ class WebBridgeDriver(HttpBridgeDriver):
             self._post("/page/relaunch", {"url": self._spa_url or ""}, timeout=HEAVY_BOOT_TIMEOUT_S)
             self._app_killed = False
         else:
-            self._execute_js("location.reload()", timeout=HEAVY_BOOT_TIMEOUT_S)
-        # ⚠ Known convention-14 debt, kept deliberately: replacing this sleep
-        # with "wait for the reloaded document's `load`, then inject" (tried
-        # 2026-10-14, both as Playwright's `page.reload()` and as this reload
-        # awaited bridge-side) turned 8 of the 20 two-account web tests red
-        # (`account-switcher-list` never mounts after `_auth_on_account_page`'s
-        # hard_reload) — mechanism unresolved. A navigation landing under the
-        # probes below is survived by `_probe_js`.
-        time.sleep(0.8)
+            self._execute_js(f"{self._OLD_DOCUMENT_MARK} = true; location.reload()",
+                             timeout=HEAVY_BOOT_TIMEOUT_S)
+            self._await_new_document("the reload")
         self._inject_agent()
         self._ensure_agent()
+        self._await_identity_restored()
+
+    # A window global set on the document a hard navigation leaves: the new
+    # document never carries it, so its absence is the state "the navigation
+    # replaced the page", where a fixed settle-sleep used to guess (convention 14).
+    _OLD_DOCUMENT_MARK = "window.__fauna_e2eOldDocument"
+
+    def _await_new_document(self, what: str) -> None:
+        """Wait until a hard navigation started under ``_OLD_DOCUMENT_MARK`` has
+        replaced the page with a loaded new document. Read through
+        ``_probe_js``, so a probe that lands mid-navigation is asked again on
+        the new document. Raises naming the path the page sat on, never
+        returns on a page that did not navigate.
+
+        This is all the driver can wait for: what the SPA does next — the root
+        index guard's or the onboarding launch's own redirect — is the boot's
+        business, and a caller that is about to navigate itself waits for that
+        landing first (`test_account_switcher_web.py::_await_boot_landed`)."""
+        deadline = time.monotonic() + HEAVY_BOOT_TIMEOUT_S
+        while time.monotonic() < deadline:
+            if self._probe_js(f"{self._OLD_DOCUMENT_MARK} === undefined "
+                              "&& document.readyState === 'complete'"):
+                return
+            time.sleep(0.05)
+        path = self._probe_js("location.pathname")
+        raise RuntimeError(
+            f"{what} never replaced the page within {HEAVY_BOOT_TIMEOUT_S}s "
+            f"(still on the old document at {path!r})"
+        )
 
     def hard_reload(self) -> None:
         """Force-quit + relaunch the web app: a fresh SPA boot over the same
         origin's localStorage. Reopens the page if a prior `kill_uncleanly()` closed
         it, else a full page reload. After it, the agent is re-injected and the SPA
-        has rehydrated."""
+        has rehydrated — its stored identity included (`_await_identity_restored`)."""
         self._fresh_boot()
+
+    #: An active account in the registry (the agent's `session.secret_hex` reads
+    #: it while the SPA has no identity yet), and whether the SPA's own identity
+    #: store holds it — the `secretHex` every actor-scoped manager gates on.
+    _STORED_ACCOUNT_JS = "!!window.__faunaTestAgent?.getState?.().session?.secret_hex"
+    _IDENTITY_RESTORED_JS = (
+        "(() => { const s = window.__fauna_stores?.identity; if (!s) return false;"
+        " let v; s.subscribe((x) => { v = x; })(); return !!(v && v.secretHex); })()"
+    )
+
+    def _await_identity_restored(self) -> None:
+        """A fresh boot over a store holding an active account waits, up to
+        ``AUTO_RELOGIN_CEILING_S``, for the SPA to restore that identity — web's
+        twin of the native pinned-store contract, which waits for its own
+        auto-login. Two races it closes: a caller's first actor-scoped command
+        after `hard_reload()` failing "conversations manager: no identity yet"
+        (`test_conversations_history_survives_restart_cross_app`), and the
+        `app` fixture's module-boundary `recover()` handing a still-restoring
+        boot to `reset()`, whose sign-out then recorded 0 accounts and left a
+        wipe owed that a later boot ran over the NEXT test's fresh login
+        (`test_conversations_reply_quote`, red only after the restart test).
+        Past the ceiling it returns: a boot that legitimately comes up signed
+        out (a sign-out the store still owed) is the caller's to assert."""
+        if not self._probe_js(self._STORED_ACCOUNT_JS):
+            return
+        deadline = time.monotonic() + self.AUTO_RELOGIN_CEILING_S
+        while time.monotonic() < deadline:
+            if self._probe_js(self._IDENTITY_RESTORED_JS):
+                return
+            time.sleep(0.2)  # sleep-ok: pacing between poll iterations, not a settle-wait
 
     def serve_from(self, spa_url: str):
         """Drive a fresh page served from ``spa_url`` — a dedicated nest's own
         SPA proxy — until the returned ``restore()`` is called.
 
         Web is single-origin: a production page is served by the nest it talks
-        to, and its CSP (``media-src 'self' blob:``, ``svelte.config.js``) lets
+        to, and its CSP (``media-src 'self' blob:``, ``vite.config.ts``) lets
         a ``<video src>`` reach only that origin. A page on the session SPA
         proxy signed in to a dedicated nest's proxy is cross-origin by port, so
         a journey that plays nest-served media on a dedicated nest drives a
@@ -725,7 +839,7 @@ class WebBridgeDriver(HttpBridgeDriver):
         ``FAUNA_DNS_PROVIDER_FAKE``) so a credentialed ``DnsManagementMachine``
         verifies/publishes a ``fake-dns-ok:<zone>`` sentinel credential offline.
         Reaches ``window.__fauna_enableDnsFakeProviderForTest`` (set up in
-        ``apps/fauna-web/src/routes/+layout.svelte``). Web-only; native sets the
+        ``apps/fauna-web/src/lib/components/RootShell.svelte``). Web-only; native sets the
         env var in its launch config instead.
         """
         self._ensure_agent()
@@ -852,7 +966,7 @@ class WebBridgeDriver(HttpBridgeDriver):
     # The web twin of the native bridges' `call_command` (HttpBridgeDriver).
     # Domain action layers (conversations) post `conversations_*` commands that
     # the running SPA routes to the shared wasm `ConversationsManager` via
-    # `window.__fauna_callCommand` (installed in `$lib/conversations.ts`,
+    # `window.__fauna_callCommand` (installed in `#lib/conversations.ts`,
     # `installConversationsCommandHook`). Mirrors `call_machine_method`'s
     # app-side-global dispatch.
 
@@ -887,7 +1001,7 @@ class WebBridgeDriver(HttpBridgeDriver):
     def barrier(self, timeout: float = 10.0) -> None:
         """Convention 14's causal anchor on web.
 
-        `call_command` above awaits the handler's promise, and `$lib/barrier-e2e`
+        `call_command` above awaits the handler's promise, and `#lib/barrier-e2e`
         makes that promise resolve only after two macrotask turns — awaiting a
         promise alone would order this against microtasks only. The state sync
         `call_command` already does then republishes the post-barrier snapshot,
@@ -909,7 +1023,7 @@ class WebBridgeDriver(HttpBridgeDriver):
     # than advance it). See `e2e-systematic-ui-walks.md` § Implementation
     # status today → the web-leg entry for the full design ruling; web's
     # registry keeps `focus_move`/`switch_pane` as named refusals pointing
-    # back here (`$lib/focus-walk-e2e.ts`), so a caller that reaches them via
+    # back here (`#lib/focus-walk-e2e.ts`), so a caller that reaches them via
     # `call_command` is told where the real door is.
 
     def focus_move(self, direction: str = "next", times: int = 1) -> None:
@@ -1092,16 +1206,14 @@ class WebBridgeDriver(HttpBridgeDriver):
         # "Execution context was destroyed".
         self._post(
             "/execute",
-            {"script": "window.__faunaTestAgent.applyPatch({__action: 'reset'})",
+            {"script": f"{self._OLD_DOCUMENT_MARK} = true; "
+                       "window.__faunaTestAgent.applyPatch({__action: 'reset'})",
              "arg": None, "navigates": True},
             timeout=HEAVY_BOOT_TIMEOUT_S,
         )
-        # Same convention-14 debt as `_fresh_boot`'s sleep (see there): awaiting
-        # the new document's load here is the untried twin of what broke the
-        # two-account tests, so the old timing is kept; `_probe_js` survives
-        # the navigation landing under the probe.
-        time.sleep(0.3)
-        # Re-inject agent in case goto() triggered a full reload
+        # The action's navigation comes after its awaited sign-out, so the
+        # evaluate can answer while the old page is still up.
+        self._await_new_document("the reset's navigation")
         self._ensure_agent()
         self._sync_state_to_cache()
 

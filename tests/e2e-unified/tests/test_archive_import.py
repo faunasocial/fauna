@@ -534,9 +534,12 @@ def _refused_on_scope(wizard: ArchiveImportActions, app, reason: str) -> None:
 
 
 @pytest.mark.feature("import-your-social-archive")
-def test_the_wizard_guards_each_step_and_writes_nothing_before_start(app, request, archive_nest, tmp_path):
+def test_the_wizard_guards_each_step_and_writes_nothing_before_start(
+    app, request, archive_nest, tmp_path, tui_opened_urls
+):
     """§ The wizard and its machine, steps 1–4, and § Parser contract: the
-    export page is linked, a wrong file is refused naming what to request, a
+    export page is linked and the link opens it through the app's OS opener
+    (the session's fake, `tui_opened_urls`), a wrong file is refused naming what to request, a
     malformed or inverted date range stops the wizard, the Confirm step
     totals what was chosen — and walking all of it and backing out writes
     nothing: the Start that follows makes the account's one archive folder."""
@@ -546,15 +549,26 @@ def test_the_wizard_guards_each_step_and_writes_nothing_before_start(app, reques
     wizard.navigate()
     assert wizard.is_page_visible(), f"page error: {wizard.error_text()!r}"
 
-    # Step 1 links to the chosen platform's own export page.
+    # Step 1 links to the chosen platform's own export page, and activating the
+    # link hands exactly that address to the OS opener.
     for platform, host in (("Instagram", "instagram.com"), ("Facebook", "facebook.com")):
         wizard.select_source(platform)
-        help_text = wait_until(
-            lambda: (h := wizard.source_help()) and host in h and h or None,
+        link_text = wait_until(
+            lambda: (h := wizard.source_export_link()) and host in h and h or None,
             budgets.UI_SETTLE_S,
-            diagnose=lambda: f"step 1 does not link to {host}: {wizard.source_help()!r}",
+            diagnose=lambda: f"step 1 does not link to {host}: {wizard.source_export_link()!r}",
         )
-        assert re.search(rf"https://\S*{re.escape(host)}/\S+", help_text), help_text
+        address = re.search(rf"https://\S*{re.escape(host)}/\S+", link_text)
+        assert address, link_text
+        assert platform.lower() in wizard.source_help().lower(), wizard.source_help()
+        opened_before = len(tui_opened_urls())
+        wizard.open_source_export_link()
+        opened = wait_until(
+            lambda: tui_opened_urls()[opened_before:] or None,
+            budgets.UI_SETTLE_S,
+            diagnose=lambda: f"activating the {platform} link opened nothing: {tui_opened_urls()!r}",
+        )
+        assert opened == [address.group(0)], (opened, link_text)
     wizard.next()
     app.driver.wait_for("archive-import-archive-path")
 

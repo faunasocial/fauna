@@ -33,6 +33,7 @@ use crate::store_seam::{MailStore, StoreError};
 use fauna_account_port::{PortFault, PortTransport, answer, forward};
 use fauna_core::data::{MailConfig, MailCredential, MsekFingerprint, PriorMsekRetirement};
 use fauna_core::mail_rows::{MailRows, MailStateRow};
+use fauna_core::secret::SecretArray32;
 use serde::{Deserialize, Serialize};
 
 /// The mail seam's doors — the crossing ones only (decision (h)). Prefixed
@@ -135,6 +136,10 @@ impl<T: PortTransport> MailStore for PortMailStore<T> {
         Err(StoreError::Save(not_crossing("write_state")))
     }
 
+    async fn clear_rotation(&self, _new_msek: SecretArray32) -> Result<bool, StoreError> {
+        Err(StoreError::Save(not_crossing("clear_rotation")))
+    }
+
     async fn put_credential(&self, _credential: MailCredential) -> Result<bool, StoreError> {
         Err(StoreError::Save(not_crossing("put_credential")))
     }
@@ -145,6 +150,14 @@ impl<T: PortTransport> MailStore for PortMailStore<T> {
         _fingerprint: MsekFingerprint,
     ) -> Result<bool, StoreError> {
         Err(StoreError::Save(not_crossing("mark_wrapped")))
+    }
+
+    async fn mark_token_minted(
+        &self,
+        _credential_id: String,
+        _minted_at: u64,
+    ) -> Result<bool, StoreError> {
+        Err(StoreError::Save(not_crossing("mark_token_minted")))
     }
 
     async fn revoke(&self, credential_id: String) -> Result<bool, StoreError> {
@@ -246,10 +259,16 @@ mod tests {
         async fn write_state(&self, _: MailStateRow) -> Result<bool, StoreError> {
             Err(StoreError::Save(self.0.into()))
         }
+        async fn clear_rotation(&self, _: SecretArray32) -> Result<bool, StoreError> {
+            Err(StoreError::Save(self.0.into()))
+        }
         async fn put_credential(&self, _: MailCredential) -> Result<bool, StoreError> {
             Err(StoreError::Save(self.0.into()))
         }
         async fn mark_wrapped(&self, _: String, _: MsekFingerprint) -> Result<bool, StoreError> {
+            Err(StoreError::Save(self.0.into()))
+        }
+        async fn mark_token_minted(&self, _: String, _: u64) -> Result<bool, StoreError> {
             Err(StoreError::Save(self.0.into()))
         }
         async fn revoke(&self, _: String) -> Result<bool, StoreError> {
@@ -373,6 +392,7 @@ mod tests {
             created_at: 1,
             updated_at: Default::default(),
             wrapped_under: None,
+            token_minted_at: None,
             revoked_at_unix: None,
             burned: None,
         }
@@ -403,6 +423,7 @@ mod tests {
             created_at: 1,
             updated_at: Default::default(),
             wrapped_under: None,
+            token_minted_at: None,
             revoked_at_unix: None,
             burned: None,
         };
@@ -413,6 +434,10 @@ mod tests {
         assert!(matches!(
             port.mark_wrapped("default".into(), MsekFingerprint::of(&[1u8; 32].into()))
                 .await,
+            Err(StoreError::Save(_))
+        ));
+        assert!(matches!(
+            port.mark_token_minted("default".into(), 1).await,
             Err(StoreError::Save(_))
         ));
         assert_eq!(seam.writes(), 0, "nothing was written through the port");

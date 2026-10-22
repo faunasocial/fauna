@@ -43,6 +43,7 @@ fn profile_for(kp: &ActorKeypair) -> Profile {
         load_hint: None,
         inbox_mode: InboxMode::default(),
         recovery_head: None,
+        audience: fauna_core::data::ProfileAudience::ThisNest,
         updated_at: Timestamp(1_700_000_000),
     }
 }

@@ -257,10 +257,21 @@ tips:
 onboarding:
   welcome:
     title: Fauna
+    # public-text: app-strings-public
     subtitle: Your personal, private communications nest.
     tagline: |-
       Private messaging and file sync,
       built on your own server.
+    # public-text-end: app-strings-public
+  # The by-continuing notice (`onboarding-terms-notice`) above the bottom row of
+  # invite_request, claim_code and nest_provisioning, and of handle_entry on a
+  # sign-in Continue (terms-and-content-guidelines.md § The decisions, item 3).
+  # A by-continuing notice shown before sign-in, so it rides in its public-texts
+  # request to be reviewed and marked in the round (the companion rule,
+  # public-texts.md § The boundary); the wording is the terms doc's § Element
+  # IDs draft, and until the round it is the apps' own.
+  terms:
+    notice: By continuing you agree to the Fauna terms and content guidelines
   # Launch-screen surface shown when the silent-challenge fast path
   # can't reach the saved nest. Per docs/goal/behavior/onboarding.md
   # §"App-launch routing" the user can wait + Retry, or fall back to
@@ -275,7 +286,9 @@ onboarding:
     # unhandled failure between boot and the first rendered surface. The
     # technical detail is appended by the app; the promise "your data is
     # safe" is literal (the failure is render-side, the store is untouched).
+    # public-text: app-strings-public
     launch_failed: "Startup hit a problem. Your data is safe — you can retry, or continue setup below."
+    # public-text-end: app-strings-public
     # (security.md § Transport trust): shown when the nest's
     # pinned deployment identity changed, or it can no longer prove the identity
     # the client previously trusted (the SSH known_hosts model). The warning is
@@ -288,7 +301,9 @@ onboarding:
     # (macOS + iOS, 2026-07-13). **windows is the sole remaining gap** — it routes
     # its launch on the machine already (`App.xaml.cs`), so it has the phase; it
     # just has no arm for it yet.
+    # public-text: app-strings-public
     identity_changed_warning: This nest's identity has changed, or it can no longer prove the identity you previously trusted. It may have been re-deployed or had its key rotated — or someone may be impersonating it. Don't continue unless you were expecting this change.
+    # public-text-end: app-strings-public
     identity_changed_trust: Trust this nest and continue
     # box-recovery.md § Client acceptance — re-pin on a verified chain: a second
     # distinct head at an accepted position (or a chain that does not extend the
@@ -297,7 +312,9 @@ onboarding:
     # user-approved 2026-10-09; shown instead of identity_changed_warning). Read
     # from `LaunchSnapshot::identity_fork`; the heads from
     # `LaunchPhase::IdentityChanged { pinned_hex, seen_hex }`.
+    # public-text: app-strings-public
     identity_fork_warning: "This nest's identity history has split: it now shows two competing successors. The one you accepted is {pinned}; the one it presents now is {seen}. Two copies of this nest may be running, or someone may be impersonating it. There is no safe way to trust either from here — contact your nest's admin."
+    # public-text-end: app-strings-public
     # identity-succession.md § Propagation → "Own device fleet": every OTHER
     # device of a succeeded fleet learns by being refused on its next connect,
     # and the affordance is the existing identity-import flow — so this text
@@ -308,8 +325,10 @@ onboarding:
     # about which identity took over; `_superseded_verified` names it only once
     # `resolve_successor` has proven the hop. Never present the claim as fact —
     # the nest is enforcer and distributor, never authorizer.
+    # public-text: app-strings-public
     identity_superseded: This identity was succeeded — import the new identity to continue. Your account now belongs to a new identity, and this one can no longer sign in.
     identity_superseded_verified: This identity was succeeded — import the new identity to continue. Your account now belongs to {successor}.
+    # public-text-end: app-strings-public
     # box-recovery.md § Recovery UI (step 4): the surviving-device recovery
     # entry on the launch retry surface. Shown only when the admin custodies
     # ≥1 deployment seed.
@@ -325,13 +344,17 @@ onboarding:
     # fresh onboarding: the accounts are not gone, they are unread. Neither
     # message ever offers to rebuild the index -- a blob nothing here can parse
     # is not thereby known to name no accounts.
+    # public-text: app-strings-public
     index_newer_build: Your accounts were saved by a newer version of this app, so this version can't read them. Nothing has been lost — update the app and they'll be here.
+    # public-text-end: app-strings-public
     # The only case that may offer the documented floor, and only behind a
     # confirm that states the residual (long-term-store.md Cleanup contract):
     # starting over clears the two routing pointers but cannot reach per-actor
     # slots, because the store seam cannot scan a namespace.
+    # public-text: app-strings-public
     index_malformed: Your saved accounts can't be read, and updating the app won't help. Nothing has been changed or deleted. You can start over on this device, or move this device's data somewhere safe first.
     index_malformed_reset_residual: Starting over removes every account from this device and returns the app to a fresh install. Your accounts still exist on your nest, but you will need your secret key or recovery kit to sign back in — this device's copy is removed. Some saved data on this device cannot be reached to clear it.
+    # public-text-end: app-strings-public
     index_newer_build_title: Update needed
     index_malformed_title: Your saved accounts can't be read
     index_malformed_reset: Start over on this device
@@ -353,12 +376,16 @@ onboarding:
     # invite wizard (a suspended actor's submit is refused as already
     # registered) and never "couldn't reach your nest" (the nest answered).
     # Rendered from `LaunchSnapshot.sign_in_refused`; `_title` is the pane title.
+    # public-text: app-strings-public
     sign_in_refused: This nest no longer signs you in. Its admin may have suspended or removed your account — nothing on this device has changed. Contact the admin; if they restore your account, try again.
+    # public-text-end: app-strings-public
     sign_in_refused_title: Can't sign in here
     # `last_error` while the machine is parked on `fauna.auth.account_locked`
     # (devices.md § The locked state). Carries no time: the unlock time rides
     # `LaunchSnapshot.locked_until_secs` and the app formats it for its locale.
+    # public-text: app-strings-public
     account_locked: This account is locked and nobody can sign in until the lock ends.
+    # public-text-end: app-strings-public
     # The locked launch surface's standing notice (`launch-account-locked-notice`,
     # ui/sessions.md § Layout & flow → The locked surface): `account_locked`
     # above, then these two sentences. `{time}` is the unlock time through the
@@ -366,8 +393,10 @@ onboarding:
     # buttons, point 5 — a lock the owner did not set is itself the sign to use
     # the kit — and it is REQUIRED copy: without it the surface reads as "wait",
     # which is the wrong advice to somebody whose key was stolen.
+    # public-text: app-strings-public
     account_locked_until: 'The lock ends {time}.'
     account_locked_not_yours: If you did not lock it, somebody else holds your secret key, and they can lock it again. Your recovery kit moves the account to a new key they do not have — the lock does not stop that.
+    # public-text-end: app-strings-public
     account_locked_title: Account locked
   # The launch-collision chooser (account-scoping.md § Concurrent instances;
   # ui.yaml page `launch_instance_chooser`, platforms [windows, linux, tui]).
@@ -398,7 +427,13 @@ onboarding:
     no_running_instance: Couldn't switch to the window running this account. Close it and launch Fauna again.
   identity_choice:
     title: Set Up Your Identity
+    # A product claim a prospect reads before sign-in: a public text (public-texts.md
+    # § The boundary, the apps' public subset; the site's privacy page makes the same
+    # claim). Inside the markers only the words and the markers sit — the trailer gate
+    # reads any other line added there as a change to the text.
+    # public-text: app-strings-public
     subtitle: Your identity is an encryption key that belongs only to you.
+    # public-text-end: app-strings-public
     create_new: Create New Identity
     import_existing: Import from Another Device
     # box-recovery.md § Recovery UI (step 4): the fresh-app recovery entry.
@@ -413,7 +448,9 @@ onboarding:
     # The THIRD optional entry (ui/sessions.md § *The signed-out door*): locks an
     # account from a device the owner does not want to sign in on. Unlike the two
     # recovery entries it restores nothing — the label says what it does, a lock.
+    # public-text: app-strings-public
     emergency_lockout_entry: Lock my account for 24 hours
+    # public-text-end: app-strings-public
   # Append-mode ("Add account") escape hatch on identity_choice — windows only
   # (frame-hosted onboarding has no window to close, unlike linux/apple's native
   # window/sheet dismissal; user-approved 2026-07-20). ID: onboarding-cancel-button.
@@ -421,15 +458,19 @@ onboarding:
     cancel: Cancel
   identity_created:
     title: Identity Created
-    desc: Your new identity has been generated. Save this secret key — it's your only way to recover your account.
+    # public-text: app-strings-public
+    desc: Your new identity has been generated. Save this secret key — it's how you sign in on another device.
     secret_key_label: 'Your secret key:'
-    warning: Write this down or save it in a password manager. If you lose it, your account cannot be recovered.
+    warning: Write this down or save it in a password manager. Without it or a recovery kit, your account cannot be recovered.
+    # public-text-end: app-strings-public
     continue: Continue
     not_generated: Identity not generated yet
   recovery_kit:
     title: Your Recovery Kit
+    # public-text: app-strings-public
     desc: This recovery phrase outranks your secret key — it is the only way to get your account back if your secret key is ever stolen or lost. Keep it offline; it is shown exactly once and never stored on any device.
     escrow_deferred: Your kit activates when your account comes online at the end of setup — until then, keep the phrase safe.
+    # public-text-end: app-strings-public
     confirm: I've saved it — continue
     skip: Skip for now
     not_minted: Recovery kit not minted yet
@@ -440,7 +481,9 @@ onboarding:
     # § Rendering → Control vocabulary). The account field reuses the shared
     # `common.handle` label — it is the same field concept as handle_entry's.
     phrase_label: Recovery phrase
+    # public-text: app-strings-public
     desc: Paste your recovery phrase (the fauna://recovery link or the 64-character code). Your identity will be restored from your nest's sealed escrow.
+    # public-text-end: app-strings-public
     # The second sentence is the locator of last resort (onboarding.md § 1
     # Identity → recovery_entry): the case recovery exists for is a domain that
     # is gone, and a user whose domain is gone has no other way to learn the
@@ -457,7 +500,9 @@ onboarding:
     account_needed: Enter the handle of the account you're restoring (user@domain) — this phrase doesn't say which account it belongs to.
     # The handle was typed but isn't `user@domain`, so there is no domain to
     # find a nest at.
-    account_malformed: 'Enter the full handle including the domain, like alice@fauna.social — or, if that domain is gone, your handle followed by your nest''s address, like alice@192.0.2.10.'
+    # public-text: app-strings-public
+    account_malformed: 'Enter the full handle including the domain, like alice@example.com — or, if that domain is gone, your handle followed by your nest''s address, like alice@192.0.2.10.'
+    # public-text-end: app-strings-public
     # `fauna.actor.not_found` from the resolved nest.
     account_unknown: 'No account named {account} exists on that nest.'
     # `fauna.recovery.no_escrow` — the ratified honest signal, not a fault.
@@ -478,19 +523,25 @@ onboarding:
     # recovery, then names exactly what is at risk. No remedy is offered from
     # this screen because there is none here: another device that still holds
     # the older identity is the only thing that can finish the re-encryption.
+    # public-text: app-strings-public
     restored_predecessors_lost: 'Your account was restored. But part of the sealed backup — material from a previous identity of yours — could not be opened, so content still encrypted under that older identity may be unreadable. If another of your devices still has that identity, sign in there to finish moving your content over. ({reason})'
+    # public-text-end: app-strings-public
   # The signed-out lock door (ui/sessions.md § Layout & flow → *The signed-out
   # door*; behavior devices.md § The signed-out door). The lock warning and the
   # LOCK prompt are the shared `sessions.*` strings — one copy of the REQUIRED
   # text. Nothing typed here is kept on the device.
   emergency_lockout:
     title: Lock Your Account
+    # public-text: app-strings-public
     desc: Lock your account from this device without signing in. Paste your secret key and enter your handle. Nothing you enter here is saved on this device.
+    # public-text-end: app-strings-public
     secret_label: Secret key
     account_hint: Your handle (user@domain) says where your account lives. If your secret key link names it, you can leave it empty.
     # The confirmation: the lock landed. `{until}` is the unlock time, formatted
     # by the shared local-time formatter.
+    # public-text: app-strings-public
     locked: 'Your account is locked until {until}. Nothing was saved on this device.'
+    # public-text-end: app-strings-public
     # A recovery phrase is not a secret key — the two are deliberate twins on
     # different hosts, and pasting the wrong one is the mistake worth naming.
     invalid_secret: That isn't a secret key. Paste the 64-character key or the fauna://identity link — not your recovery phrase.
@@ -522,15 +573,21 @@ onboarding:
   # recover_selfhosted_instructions (self-hosted seed install).
   recovery:
     title: Recover a lost box
+    # public-text: app-strings-public
     subtitle: Choose the box you lost. Fauna re-provisions a fresh box with its saved identity, so your pinned devices reconnect automatically once it's back online.
+    # public-text-end: app-strings-public
     box_list_label: Your boxes
     box_item_hint: Recovery key custodied
+    # public-text: app-strings-public
     empty_message: No recovery keys are available yet. Connect to one of your other nests first — its synced configuration holds the recovery keys for every box you administer.
+    # public-text-end: app-strings-public
     method_cloud: Re-provision on a cloud host
     method_selfhosted: Install on my own server
     selfhosted_title: Install on your own server
-    selfhosted_desc: Run the installer below on a fresh box. It carries your saved deployment identity, so the rebuilt box re-presents the same nest identity and your pinned devices reconnect automatically once its DNS is re-pointed.
-    selfhosted_command_pending: The installer command with your recovery seed will appear here.
+    # public-text: app-strings-public
+    selfhosted_desc: Put your server's key, from the line below, into the setup file of a fresh box before you start it for the first time — the setup guide's section on rebuilding after a total loss shows where it goes and how to write it. The rebuilt box is then the same nest, and your installed Fauna apps reconnect to it automatically once it's back online, with no warning that its identity changed.
+    # public-text-end: app-strings-public
+    selfhosted_command_pending: The line with your server's key will appear here.
     selfhosted_continue: Done
     restore_cta: Restore your data
   # nest-retirement.md — the nest_retire page. Every sentence that names what
@@ -539,9 +596,13 @@ onboarding:
   # apps say the same thing.
   retire:
     title: Retire a server
+    # public-text: app-strings-public
     subtitle: Delete a server Fauna created in your cloud account and clean up the DNS records that pointed at it, or get your domain's transfer code. Your cloud token is used for this visit only and is never saved.
+    # public-text-end: app-strings-public
     list_label: Servers Fauna created in this account
+    # public-text: app-strings-public
     empty_message: No servers created by Fauna were found in this account. Servers created before 2026-07-08 predate the Fauna marker and are not listed — retire those from your provider's dashboard.
+    # public-text-end: app-strings-public
     domain_label: Domain
     secondary_domains_label: Also serves
     address_label: Address
@@ -551,13 +612,17 @@ onboarding:
     transfer_code_fetching: Asking the registrar…
     transfer_code_label: Transfer code
     transfer_code_copy: Copy code
+    # public-text: app-strings-public
     transfer_code_available_after: "The registry locks this domain against transfer until {when}. Ask again after that — the code is never refused, only delayed."
+    # public-text-end: app-strings-public
     transfer_code_from_registrar: Get this domain's transfer code from your registrar's own dashboard.
     delete_button: Delete this server…
     confirm_what: "You are about to permanently delete {name} at {provider} ({address})."
     confirm_domain: "Domain: {domain}"
     confirm_secondary_domains: "Also serves: {domains}"
+    # public-text: app-strings-public
     confirm_destroyed: Everything on this server — its disk and every account's data on it — is destroyed and cannot be recovered except from a backup.
+    # public-text-end: app-strings-public
     confirm_current: This is the server you're signed into. This session's nest will stop existing.
     confirm_dns_removals: "Before the server is deleted, these DNS records pointing at it are removed: {records}"
     confirm_dns_none: No DNS records will be removed automatically. The records to remove by hand are listed below.
@@ -635,7 +700,9 @@ onboarding:
     retrieving_dkim: Retrieving email signing key
     adding_dkim_record: Adding email DNS record
     provisioning_complete: Provisioning complete
+    # public-text: app-strings-public
     time: This usually takes 2-3 minutes.
+    # public-text-end: app-strings-public
     server: Provision Server
     # New entries for the snapshot-driven nest_provisioning page.
     # `step.*` are the four user-visible step names; `substep.*` are
@@ -737,6 +804,7 @@ onboarding:
     # a heading, then one label + one-line description per channel.
     update_channel_heading: Updates
     update_channel_stable_label: Stable
+    # public-text: app-strings-public
     update_channel_stable_desc: Released versions. Recommended.
     update_channel_test_label: Test
     update_channel_test_desc: Numbered releases being accepted by users before they become Stable.
@@ -744,8 +812,25 @@ onboarding:
     update_channel_dev_label: Dev
     update_channel_dev_desc: The newest development builds, before any checking, for people who build the apps from source. Expect breakage.
     update_channel_dev_desc_same_version: The newest development builds, before any checking. For now the server works only with apps built from the same source. Expect breakage.
+    # public-text-end: app-strings-public
+    # A channel the registry has no build for — one text, one key per channel
+    # because every app looks the key up per row (`UpdateChannel::description_key_for`).
+    update_channel_stable_desc_no_build: No build has been published on this channel yet — choose another channel.
+    update_channel_test_desc_no_build: No build has been published on this channel yet — choose another channel.
+    update_channel_dev_desc_no_build: No build has been published on this channel yet — choose another channel.
     mail_mode_label: Run mail on this box
+    # public-text: app-strings-public
     mail_mode_desc: "A mail box runs email (SMTP, IMAP) and calendar, which needs the spam and virus scanners and at least 2 GB of RAM. Turn this off for a social-only box: it runs lean and works on the cheapest 1 GB plan, but cannot add mail later without resizing the VPS."
+    # public-text-end: app-strings-public
+    # The SSH door (vps-config-ssh-door-toggle, default off; the warning is
+    # vps-config-ssh-door-warning, shown only while it is on —
+    # onboarding-provisioning.md § 5). The warning states a property of the
+    # product before the admin has a nest, so it is a public text: this is the
+    # DRAFT its public-texts request carries, landed unmarked under the
+    # companion rule until the round reviews it and moves it inside an
+    # app-strings-public region.
+    ssh_door_label: Keep an SSH door to this server
+    ssh_door_warning: "This reduces your server's security. An SSH door is a second way into the server that Fauna never needs. The key is made on this device and Fauna keeps no copy; the door admits only the address you set the server up from. You alone are responsible for the key, that address and anything done through the door — changes made through it are not supported and may be undone by updates. The door cannot be added later."
   nest_provisioning:
     title: Setting up your nest…
     start_button: Buy and set up
@@ -774,6 +859,19 @@ onboarding:
     # disclosed before the charge, onboarding.md § 6. {renewal} is the
     # shared format_price() output like {price}.
     bom_line_domain: '{label}: {price} for the first year, then {renewal}/year'
+    # provisioning-ssh-door-command after a door run (onboarding-provisioning.md
+    # § 5): the command, the one address the door admits, then where this
+    # device put the key (a desktop app's ~/.ssh) — or, where the key is handed
+    # over instead, no path. {address} is the address the nest echoed at the
+    # claim, or ssh_door_address_unknown when it echoed none.
+    ssh_door_command_template: 'SSH door: {command} (admits only {address}; key {path}, fingerprint {fingerprint})'
+    ssh_door_command_no_path_template: 'SSH door: {command} (admits only {address}; fingerprint {fingerprint})'
+    ssh_door_address_unknown: the address you set the server up from
+    # provisioning-ssh-door-save-key-button (ios, android, web — the apps with
+    # no ~/.ssh): hands the door key file over once. Rides along with the
+    # warning's public-texts request under the companion rule (shown before
+    # sign-in).
+    ssh_door_save_key_button: Save the key file
     # (step.* removed 2026-06-14: the stray duplicate of onboarding.provision.step.*.
     #  All apps now render step names via the shared fauna_provisioning step_label,
     #  which returns the canonical onboarding.provision.step.* keys.)
@@ -875,11 +973,13 @@ onboarding:
       claim_code_unreadable: "The nest can't read its claim code — a server setup problem, not a wrong code. Restart the nest and try again."
   nat_mode:
     title: "Is this nest reachable from the internet?"
+    # public-text: app-strings-public
     description: "This sets how your nest connects to the world. The pre-selected option matches how it was installed, so you can usually just confirm — and you can change it anytime in Admin \u2192 Nest."
     public_label: "Public (internet-facing)"
     public_desc: "This box has a public address: it can receive email, federate directly with other nests, get automatic certificates, and relay for private nests. The usual choice for a hosted server."
     private_label: "Private (home network)"
     private_desc: "This box sits behind a home router and isn't reachable from the internet: it runs no mail receiver, keeps calendar and mail sync on your local network, and pairs with a public nest that relays for it."
+    # public-text-end: app-strings-public
     confirm_button: "Confirm"
     defer_button: "Decide later"
     choosing: "Confirm how this nest connects, or decide later."
@@ -906,13 +1006,17 @@ onboarding:
   # `the_one_tap_offer_copy_matches_the_blessing_the_tap_writes`.
   trust_prompt:
     title: "Trust this box?"
+    # public-text: app-strings-public
     summary: "This box can do more for you if you let it read the things it looks after: filtering your mail as it arrives, and serving your calendar to your other devices. Your trust renews itself while you use Fauna, you can take it back at any time in Settings → Nests, and every time you give or withdraw trust it is written down for you there."
+    # public-text-end: app-strings-public
     grant_button: "Yes, trust this box"
     skip_button: "Not now"
     # Shown when the box has nothing it could be trusted with yet — no mail set
     # up, or no service on it that would read anything. Saying so is the honest
     # alternative to a button that appears to do something and doesn't.
+    # public-text: app-strings-public
     nothing_to_grant: "There's nothing to decide yet — this box isn't running anything that would read your content. You can trust it later from Settings → Nests."
+    # public-text-end: app-strings-public
   awaiting_dns:
     title: "Almost ready"
     pending: "Add the DNS records below at your registrar. We'll bring your nest online automatically once they take effect — you can leave this screen open."
@@ -983,10 +1087,14 @@ credential_store:
   # not a tui_-prefixed namespace — another app growing a per-device custody
   # affordance adopts these strings, not twins.
   section_title: Credential store
-  status_sealed: Your sign-in keys rest in a file on this device, sealed under your passphrase.
+  # public-text: app-strings-public
+  status_sealed: Your sign-in keys are kept on this device, encrypted with your passphrase.
+  # public-text-end: app-strings-public
   rekey_button: Change passphrase…
   rekey_title: Change passphrase
-  seed_nudge: Back up your recovery seed first (Identity export, above). The sealed store has no recovery path of its own — if the new passphrase is forgotten, the seed is the only way back into your account.
+  # public-text: app-strings-public
+  seed_nudge: Back up your identity first (Export Identity, above). Nobody can reset a forgotten passphrase — if you forget the new one and nothing else opens the store, your identity comes back only from another device where you're signed in, an exported copy of your key, or your recovery kit.
+  # public-text-end: app-strings-public
   current_label: Current passphrase
   new_label: New passphrase
   confirm_label: Confirm new passphrase
@@ -994,25 +1102,64 @@ credential_store:
   success: Passphrase changed.
   error_empty: Enter your current passphrase and choose a new one
   error_mismatch: The two new entries don't match
-  error_wrong: Wrong passphrase, or the store file is corrupt
+  error_wrong: Wrong passphrase, or the stored identity is damaged
   error_failed: 'Could not change the passphrase: {message}'
-tui_unlock:
-  # The tui's headless credential store (apps/tui.md § Credential storage):
-  # when no OS secret store is reachable, the identity rests in a
-  # passphrase-encrypted file unlocked at launch. Two surface modes: unlock an
-  # existing store, or create one on first (headless) run.
+  # web only: the passkey wrap (apps/web.md § Identity store at rest → A
+  # passkey wrap). The bare labels; the status line and explainer beside them
+  # are public texts and land through their round.
+  passkey_add_button: Add a passkey
+  passkey_remove_button: Remove the passkey
+  passkey_error: 'Could not change the passkey: {message}'
+  # web only: the status line beside the remove button and the explainer
+  # beside the add button. Both sit outside the app-strings-public region
+  # until their public-texts round marks them (the wording is a public text).
+  passkey_status: A passkey also unlocks your encrypted sign-in keys in this browser. Your passphrase still works.
+  passkey_explainer: Add a passkey to unlock this browser's encrypted sign-in keys with your device's screen lock or a security key instead of typing your passphrase. Your passphrase keeps working, and your nest isn't involved.
+unlock:
+  # The unlock page (ui.yaml `unlock`, shared by tui and web): an identity
+  # store sealed under a passphrase, unlocked at launch. tui: the headless
+  # credential store (apps/tui.md § Credential storage) — when no OS secret
+  # store is reachable, the identity rests in a passphrase-encrypted file.
+  # web: the sealed identity store (apps/web.md § Identity store at rest).
+  # Two surface modes: unlock an existing store, or create one. The prompts
+  # below are the terminal's wording; web paints unlock_prompt and no create
+  # prompt until its own wording lands through the public-texts process.
   unlock_title: Unlock your credentials
+  # public-text: app-strings-public
   unlock_prompt: Your credentials are protected by a passphrase on this machine. Enter it to sign in.
   create_title: Protect your credentials
-  create_prompt: No secure OS key store is reachable here, so your sign-in keys will rest in a file protected by a passphrase. Choose one to continue — you'll need it at every launch.
+  create_prompt: There is no secure key store here that Fauna can use, so your sign-in keys will be kept on this device, encrypted with a passphrase you choose. Choose one to continue — you'll need it to unlock them from now on, and a forgotten passphrase cannot be recovered.
+  # public-text-end: app-strings-public
   passphrase_label: Passphrase
   confirm_label: Confirm passphrase
   unlock_button: Unlock
   create_button: Set passphrase
   error_empty: Enter a passphrase
   error_mismatch: The two entries don't match
-  error_wrong: Wrong passphrase, or the store file is corrupt
+  # public-text: app-strings-public
+  error_wrong: Wrong passphrase, or the stored identity is damaged
+  # public-text-end: app-strings-public
   error_failed: 'Could not open the credential store: {message}'
+  # web only (unlock mode): the start-over pair — a browser has no file a
+  # person who forgot the passphrase could delete (apps/web.md § Identity
+  # store at rest). The confirm erases this browser's identity store.
+  # public-text: app-strings-public
+  reset_button: Forgot the passphrase? Start over
+  reset_confirm_button: Erase this browser's sign-in keys and start over
+  # web only: painted above the confirm button once start-over is revealed —
+  # what starting over erases, and the ways back in (apps/web.md § Identity
+  # store at rest).
+  reset_explainer: Starting over erases this browser's copy of your sign-in keys and nothing else. You can sign in again from another device where you're signed in, from an exported copy of your key, or with your recovery kit.
+  # public-text-end: app-strings-public
+  # web only (unlock mode, a passkey wrap in the header, a secure named host):
+  # open the store with the passkey instead of typing the passphrase.
+  passkey_button: Unlock with a passkey
+  passkey_error: 'Could not open with the passkey: {message}'
+  # web only: what the `passkey_unavailable` code paints, on this page and in
+  # the credential-store section (one string, two surfaces). Sits outside the
+  # app-strings-public region until its public-texts round marks it (the
+  # wording is a public text).
+  passkey_unavailable: This browser or authenticator can't use a passkey to unlock your sign-in keys. Your passphrase still works.
 tui_nav_hints:
   # tui's persistent key-hint footer — the `nav-key-hints` element (ui.yaml
   # `global.platform_elements`, `tui: [nav-key-hints]`; architecture/apps/tui.md
@@ -1049,6 +1196,10 @@ feed:
   # snapshot's LocalizedText (feed.md § Errors & edge cases). Named {message}
   # placeholders carry the underlying transport error.
   compose_empty: Post cannot be empty
+  # tui's feed-video external handoff (apps/tui.md § External media handoff →
+  # Feed video): the reused media-external-open confirm's title, for a clip
+  # that has no file name of its own. Body + buttons are media.external_open_*.
+  video_external_open_confirm_title: Open this video externally?
   # Gate-to-tier compose (monetization.md § Pillars 2+3; feed.md § Encryption at
   # rest). A gated post needs a plaintext public teaser, and the author can only
   # gate to a tier whose period key this device holds (Pillar-1 custody —
@@ -1064,7 +1215,9 @@ feed:
   # would be an ordinary public post of the user's — so it is refused, and says
   # so, rather than sent to every follower (ui/feed.md § Encryption at rest, A
   # reply, quote or repost of a restricted post).
+  # public-text: app-strings-public
   reference_restricted: This post is for a smaller audience, and your reply would be public, so it was not sent
+  # public-text-end: app-strings-public
   # A restricted post's attachment is sealed under that post's own key, minted
   # when the file is sealed — so changing the audience afterwards leaves the
   # already-uploaded photo openable by a key this post will never derive
@@ -1174,7 +1327,9 @@ feed:
   # (security.md § App display of unverified content; VerificationStatus::Failed).
   # Shared across all 7 apps.
   unverified_source: Unverified
+  # public-text: app-strings-public
   unverified_source_tooltip: This device could not verify the author's signature on this post.
+  # public-text-end: app-strings-public
   # "Delegated origin" badge (delegated-origin-badge), shown iff this app
   # verified the post's signed envelope AND it was signed by a delegated
   # authoring sub-key rather than the account's own identity key — i.e. an
@@ -1184,7 +1339,9 @@ feed:
   # minted per account, so nothing in the signed bytes says WHICH app it was.
   # Shared across all 7 apps.
   delegated_origin: Via connected app
+  # public-text: app-strings-public
   delegated_origin_tooltip: A connected app wrote this post as you, using the access you granted it. Manage or revoke that access on the AT Protocol settings page.
+  # public-text-end: app-strings-public
   # Feed interaction-bar "Like" action (feed-like-button); a button label on
   # apps that show text (linux/web), the tooltip on icon-only apps
   # (windows/apple). Shared across all 7 apps.
@@ -1301,7 +1458,9 @@ feed:
     # room, sealed to the reader's own tier, or public only by confirmation.
     reply_audience_room: 'Reply goes to Room: {room}'
     reply_audience_tier: 'Reply goes to your tier {tier}'
+    # public-text: app-strings-public
     reply_audience_public: This post is for a smaller audience — a reply from you would be public
+    # public-text-end: app-strings-public
     reply_public_confirm: Post my reply publicly
     sell_price_placeholder: Price, e.g. $3
     # The machine-comparable price (compose-sell-asking-price) — independent of
@@ -1315,6 +1474,9 @@ feed:
     # link reuses subscriptions.payment_url / subscriptions.unsafe_payment_url
     # (same concept, same string, priority #3).
     buy_button: Buy
+    # gated-post-purchase-pending: the buy went through and the author's
+    # approval is still on its way (PostSummary.unlock_purchase_pending).
+    purchase_pending: Purchase pending — waiting for the author's approval
     open_rich_compose: Open rich compose dialog
     posting: Posting…
     post_detail: Post detail
@@ -1359,7 +1521,9 @@ conversations:
     # A newer version of the app saved this account's conversation state in a
     # form this version cannot read. Nothing was changed or lost; updating the
     # app opens them again. Standing until the app is updated.
+    # public-text: app-strings-public
     state_needs_newer_app: This version of the app is too old to open the conversations it saved here. They are intact — update the app to see them again.
+    # public-text-end: app-strings-public
     # The receive rail died on an internal error (a receive pass panicked, or
     # on web never finished) and is deliberately not restarted in place —
     # restarting the app is the safe recovery. Standing until then.
@@ -1368,7 +1532,9 @@ conversations:
     # under the account's current mail keys (a rotation past the grace window,
     # or a mailbox turned off and back on). Later mail keeps arriving; the
     # count is per app run. Ranked below every other page error.
+    # public-text: app-strings-public
     mail_unopenable: '{count} received messages could not be opened on this device. They were sealed to mail keys this account no longer holds, and were skipped.'
+    # public-text-end: app-strings-public
   list:
     title: Conversations
     new_conversation: New Conversation
@@ -1385,13 +1551,17 @@ conversations:
     body: Body
     resolve: Resolve
     write_message: Write your message...
+    # public-text: app-strings-public
     encrypted: Encrypted
+    # public-text-end: app-strings-public
   detail:
     # DM message-bubble security badge tooltips (icon badges in the top row).
+    # public-text: app-strings-public
     badge_encrypted: End-to-end encrypted
     badge_signed: Cryptographically signed
     badge_verified: Verified sender
     badge_c2pa: C2PA content credentials present
+    # public-text-end: app-strings-public
     delete_message: Delete message
     delete_message_confirm: Delete
     delete_message_confirm_title: Delete message?
@@ -1443,7 +1613,9 @@ conversations:
     # mark-as-spam only trains the reporter's own sealed model.
     report_message: Report message
   message:
+    # public-text: app-strings-public
     signed: Signed
+    # public-text-end: app-strings-public
   unified:
     attachment_button: Attach file
     # Tooltip/label on the × of a staged (not yet sent) compose attachment
@@ -1475,6 +1647,24 @@ conversations:
     # The room-side twin: an owner, an admin or the inviter withdrawing an
     # invitation still pending on their room failed — same shape.
     error_withdraw_room_invite: 'Could not withdraw this invitation: {message}'
+    # A community room's own search failed — refused, the relay to the room's
+    # home failing, the nest unreachable (room-search.md § Errors & edge
+    # cases) — same shape.
+    error_room_search: 'Could not search this room: {message}'
+    # A room-search hit on a message this device has not received yet: the
+    # row's words when it has nothing of its own to show (room-search.md
+    # § The surface). It still opens.
+    room_search_hit_pending: 'Not on this device yet'
+    # The room search's empty state after a submitted query answered zero
+    # hits — deliberately says only this (room-search.md § Errors & edge
+    # cases: nothing matched, never keyed, and a withdrawn read look alike).
+    room_search_no_results: 'Nothing in this room matches.'
+    # `room-search-button` on a community room's thread header — opens and
+    # closes the room's search strip (room-search.md § The surface).
+    room_search: Search this room
+    # `room-search-field`'s placeholder: the room's words, messages and posts
+    # alike, are what it searches.
+    room_search_placeholder: Search this room's messages and posts
     # The room's confidentiality class on the thread header
     # (community-rooms.md § The three classes) — what the room IS, stated
     # where the class matters, and repeated by the recipient picker before a
@@ -1482,9 +1672,11 @@ conversations:
     # surface for the home nest's read of the room (community-rooms.md § What
     # the read covers): it names the purposes in words, not only the
     # class.
+    # public-text: app-strings-public
     room_class_end_to_end: End-to-end encrypted
     room_class_community: Community — searched and labelled by the home nest
     room_class_transport_only: Transport-only
+    # public-text-end: app-strings-public
     # The family gate's marker on a supervised account's bridged conversation
     # (conversation-guardian-state, family-safety.md § The bridge-DM gate): the
     # nest computes the state at every read and the app only paints it. A held
@@ -1505,6 +1697,19 @@ conversations:
     # waits to be keyed in (community-rooms.md).
     room_notice_moderation_unverified: Some moderation in this room couldn't be verified on this device, so the affected messages are still shown.
     room_notice_awaiting_key: Waiting for a room key — messages will appear once an owner or admin keys you in.
+    # A bridged room no live bridge serves (apps/bridges.md § Phase G → When
+    # the bridge stops serving): readable, never writable.
+    room_notice_bridge_disconnected: The app that carried this conversation is no longer connected. You can still read it, but you can't send.
+    # Under an own message the bridge never took (dm-message-undelivered): its
+    # serving bridge was disconnected with the message still queued.
+    dm_message_undelivered: Not delivered — the app that carried this conversation was disconnected before it went out.
+    # Under an own sent mail the fresh-IP warm-up is holding back
+    # (dm-message-warmup-deferred; mail-deliverability.md § Enforcement at
+    # submission time): the release time, then the queue position.
+    dm_message_warmup_deferred: Delivery deferred until {date} per IP warm-up schedule.
+    dm_message_warmup_queue_next: Next in the queue.
+    dm_message_warmup_queue_one: 1 message ahead in the queue.
+    dm_message_warmup_queue: '{count} messages ahead in the queue.'
     # Role marks on a member chip (conversation-rooms.md § Roles and
     # authorization); a plain member carries no mark.
     room_role_owner: owner
@@ -1609,22 +1814,47 @@ conversations:
     to_line_label: 'To:'
     topic_input_placeholder: Topic (optional)
     topic_toggle_add: '+ topic'
+  # The dm-message-scan-result row on a received mail message
+  # (mail-content-scanning.md § User sees their own message's row): one line
+  # each for the ClamAV verdict, the rspamd score and what the nest did with
+  # the message — built by the shared fauna_core::mail_scan::scan_result_lines.
+  scan_result:
+    clamav_clean: 'ClamAV: clean'
+    clamav_infected: 'ClamAV: infected ({signature})'
+    clamav_error: 'ClamAV: the scan failed'
+    clamav_bypassed_oversize: 'ClamAV: not scanned (too large)'
+    clamav_not_scanned: 'ClamAV: not scanned'
+    clamav_unknown: 'ClamAV: unrecognised verdict'
+    rspamd_score: 'Rspamd score: {score}'
+    rspamd_score_rules: 'Rspamd score: {score} ({rules})'
+    rspamd_not_scanned: 'Rspamd: not scanned'
+    action_delivered: 'Action: delivered to Inbox'
+    action_junked: 'Action: delivered to Junk'
+    action_tagged: 'Action: delivered with scan headers added'
+    action_rejected_malware: 'Action: rejected as malware'
+    action_unknown: 'Action: unrecognised'
 contacts:
   title: Contacts
   detail_title: Contact
   sign_in_prompt: Sign in to view your contacts.
   find_user:
     title: Find User
-    description: 'Enter a handle (e.g. alice@fauna.social) or actor ID hex to find a user.'
-    placeholder: 'alice@fauna.social or actor ID hex'
+    # public-text: app-strings-public
+    description: 'Enter a handle (e.g. alice@example.com) or actor ID hex to find a user.'
+    placeholder: 'alice@example.com or actor ID hex'
+    # public-text-end: app-strings-public
     find: Find
+    # contact-actor-id-open-profile-button: open the found actor's Profile.
+    open_profile: View profile
   message: Message
   handle_not_found: Handle not found
   # The supervised ward's refused send (family-safety.md § Guardian policy
   # pillar 1 → contact_approval, outbound arm). The nest refuses with a typed
   # error; this is what the ward reads, and it is never a dead end — the
   # contact-request-guardian-button paints beside it.
+  # public-text: app-strings-public
   guardian_approval_required: This account can only message approved contacts.
+  # public-text-end: app-strings-public
   # contact-request-guardian-button (§ Child-initiated contact requests). The
   # ask carries WHO, never why — there is no message field to label.
   ask_guardian: Ask your guardian
@@ -1633,6 +1863,11 @@ contacts:
   # transparency). Deliberately says nothing about when: the guardian answers
   # when they answer, and a promised time would be a lie.
   contact_request_pending: Asked — waiting for your guardian
+  # knock-guardian-pending — on each incoming knock while the supervised account's
+  # policy has contact approval on: the guardian decides it, not the ward
+  # (family-safety.md § App surface, § Reach approvals). Like
+  # contact_request_pending, it promises no time.
+  knock_guardian_pending: Waiting for your guardian's approval
   message_requests:
     title: Message Requests
     none: No pending message requests.
@@ -1828,7 +2063,9 @@ groups:
   loading_group: Loading group...
   members: Members
   invite_member: Invite Member
-  invite_placeholder: 'alice@fauna.social or actor ID'
+  # public-text: app-strings-public
+  invite_placeholder: 'alice@example.com or actor ID'
+  # public-text-end: app-strings-public
   invite_nest_url_placeholder: Nest URL (optional, for cross-nest)
   node_url_placeholder: Node URL (for cross-nest invites)
   replying_to: Replying to
@@ -1859,10 +2096,12 @@ groups:
   react: React
   message_placeholder: Type a message...
   message:
+    # public-text: app-strings-public
     encrypted: Encrypted
     encrypted_title: End-to-end encrypted via MLS
     signed: Signed
     signed_title: Sender signature verified — content is plaintext in the nest
+    # public-text-end: app-strings-public
 # The AT Protocol settings page (ui.yaml page `atproto`, ui/atproto.md): the
 # integration-depth selector, the hosted-identity panel, the recovery-fork
 # contest, the delete ceremony, and the login-plane surface (app credentials,
@@ -1870,19 +2109,22 @@ groups:
 # OAuth consent — atproto-pds-full.md § App surface). The `error_*` strings
 # are the page-level error-message strings the shared AtprotoSettingsMachine
 # emits (libs/fauna-atproto-settings-machine), localized client-side from the
-# snapshot's `error` LocalizedText. Mint collects no label/dm_allowed input —
-# auto-labeled via default_credential_label.
+# snapshot's `error` LocalizedText. Mint collects no label input —
+# auto-labeled via default_credential_label; the direct-message choice is the
+# mint-time toggle (mint_dm_access_label), read when the mint button is pressed.
 atproto_settings:
   title: AT Protocol
   app_credentials_heading: App credentials
   app_credentials_empty: No app credentials yet.
   mint_button: New app credential
+  mint_dm_access_label: Let this app password read and send my Bluesky direct messages
   default_credential_label: 'App credential {count}'
   reveal_button: Reveal
   revoke_button: Revoke
   credential_created_prefix: 'Created {date}'
   credential_last_used_prefix: 'Last used {date}'
   credential_never_used: Never used
+  credential_dm_access: Direct messages allowed
   connected_apps_heading: Connected apps
   connected_apps_empty: No connected apps yet.
   session_created_prefix: 'Connected {date}'
@@ -1917,13 +2159,16 @@ atproto_settings:
   # The hint under the toggle: what OFF pauses (atproto-pds-full.md § F1
   # detail, the kill-switch bullet — the switch binds the account's
   # third-party principals too), and that nothing is lost.
+  # public-text: app-strings-public
   external_apps_hint: When this is off, every connected app is paused — apps that use Fauna directly too — until you turn it back on. Nothing is disconnected.
+  # public-text-end: app-strings-public
   # ── Integration-depth selector (ui/atproto.md § Layout & flow). Shared
   #    across all apps. The per-effect transition-card lines + the greyed
   #    hosted reason are machine-composed under atproto_settings.* (card_* /
   #    gate_reason) — these are the static selector chrome only.
   depth_heading: Integration depth
   depth_off_title: 'Off'
+  # public-text: app-strings-public
   depth_off_desc: No Bluesky presence.
   depth_linked_title: Linked account
   depth_linked_desc: Read, interact, and cross-post through an existing Bluesky account.
@@ -1931,6 +2176,7 @@ atproto_settings:
   depth_hosted_visible_desc: This nest holds your identity and publishes your public posts to the Bluesky network.
   depth_hosted_full_title: 'Hosted here — full access'
   depth_hosted_full_desc: Additionally, other Bluesky apps can log in as you through this nest.
+  # public-text-end: app-strings-public
   # The transition card (atproto-depth-confirm-card): the per-effect lines come
   # from the machine; these are the card's own chrome.
   depth_card_heading: Confirm this change
@@ -1948,10 +2194,12 @@ atproto_settings:
   # The hosted panel — DID-method radio (pre-mint) + identity summary (post-mint).
   did_method_heading: Identity method
   did_method_plc_title: 'did:plc — recommended'
+  # public-text: app-strings-public
   did_method_plc_desc: A portable identity you can move to another server later.
   did_method_web_title: 'did:web'
   did_method_web_desc: Ties your identity to this nest's domain.
   handle_either_way: 'Your Bluesky handle will be @{handle} either way.'
+  # public-text-end: app-strings-public
   history_backfill_label: Also publish my existing public posts.
   # The history opt-in's label, composed in shared Rust with the nest's count of
   # posts a backfill would publish (the count is part of the consent).
@@ -1985,7 +2233,9 @@ atproto_settings:
   delegation_heading: Posting from other apps
   # The empty state: no delegation provisioned. External apps can log in and
   # read, but any write is refused — say the consequence, not the mechanism.
+  # public-text: app-strings-public
   delegation_empty: Other Bluesky apps can sign in, but cannot post as you yet.
+  # public-text-end: app-strings-public
   # capabilities, in user voice — DelegationRow.capabilities carries the wire
   # spellings ("Post", "UpdateProfile"), which are never rendered raw.
   delegation_scope_prefix: 'Allowed: {capabilities}'
@@ -2010,7 +2260,9 @@ atproto_settings:
   # trusting this one.
   delegation_last_used: 'Last reported use: {when}'
   delegation_last_used_never: No use reported yet
+  # public-text: app-strings-public
   delegation_last_used_hint: Reported by your nest, so treat it as a hint — check your feed for posts marked "Via connected app" to see what was actually written.
+  # public-text-end: app-strings-public
   # ONE control for both first grant and renewal: provisioning overwrites the
   # stored authorization, so re-authorizing IS the renewal gesture and never
   # requires a revoke first.
@@ -2087,6 +2339,7 @@ atproto_settings:
   # The transition card's copy — one line per effect, composed by the shared
   # machine from the same TransitionPlan the nest executes (single-source:
   # the card can only ever promise what the nest actually does).
+  # public-text: app-strings-public
   card_unlink: 'The link to {account} is removed. The external account itself is untouched — it keeps existing on its own server and is not migrated.'
   card_mint: 'A new public identity {handle} is created on the Bluesky network.'
   card_reactivate: 'Your identity {handle} is restored — the same identity you had before, nothing new is created.'
@@ -2097,6 +2350,7 @@ atproto_settings:
   card_open_plane: 'Third-party Bluesky apps will be able to log in as this identity once you create an app credential.'
   card_dm_honesty: 'Bluesky direct messages are not end-to-end encrypted and pass through this nest in transit.'
   card_suspend_plane: 'Connected apps stop working immediately. Nothing is deleted — your app credentials stay listed, and stepping back up restores them.'
+  # public-text-end: app-strings-public
   # The "Delete my Bluesky presence" confirm card (ui/atproto.md § User actions
   # row 4). USER VOICE + an honesty rule that outranks brevity: the sweep is
   # reversible in IDENTITY terms (atproto-pds-bridge.md § Disable & revocation
@@ -2104,17 +2358,23 @@ atproto_settings:
   # survives and naming it — without that line the ceremony reads as "delete my
   # account" and collects consent for something stronger than what runs. The
   # honest caveat is card_no_recall above, reused rather than re-worded.
+  # public-text: app-strings-public
   delete_confirm_sweep: 'Every post published to Bluesky is deleted, and the network is told to remove them.'
   delete_confirm_identity_kept: 'Your AT Protocol identity @{handle} is kept. This removes what you published, not who you are — turning AT Protocol hosting back on later restores the same identity.'
   delete_confirm_apps_disconnected: 'Bluesky apps you are signed in to are disconnected, and other apps can no longer post as you.'
   delete_confirm_level_off: 'Your Bluesky setting returns to Off.'
+  # public-text-end: app-strings-public
   # REPLACES delete_confirm_identity_kept while the atproto-delete-tombstone
   # opt-in is ticked (S5 slice 5b) — never shown beside it. It must say, in
   # those words, that the act is permanent and cannot be undone: every other
   # destructive control on the page is reversible, this one is not.
+  # public-text: app-strings-public
   delete_confirm_identity_retired: 'Your AT Protocol identity @{handle} is also permanently retired once the deletion finishes. This cannot be undone: the identity stops existing on the Bluesky network, and no one — not you, not this nest — can ever restore it. Turning AT Protocol hosting back on later creates a new, different identity.'
+  # public-text-end: app-strings-public
   # The opt-in greyed, with why (never a control that errors on press).
+  # public-text: app-strings-public
   delete_retire_unavailable_web: 'This identity is tied to your domain, so there is no separate record to retire — it ends when your domain stops serving it.'
+  # public-text-end: app-strings-public
   delete_retire_unavailable_unpublished: 'This identity has not been published yet, so there is nothing to retire.'
   # The sweep call itself failed to reach the nest — nothing was deleted, the
   # card stays open and trying again is safe (the kind is idempotent).
@@ -2145,9 +2405,11 @@ atproto_settings:
   # availability is not"), so a user who read "you take control" and stopped
   # there would believe a compromised nest had been fully evicted. It has not:
   # it can still author posts. Never shorten this line past that sentence.
+  # public-text: app-strings-public
   contest_detail_contestable: 'A change to your AT Protocol identity {handle} was made with a key this device does not hold. You can undo it: the change and everything built on it are reversed, and afterwards only your own keys can change who controls this identity. Your posts and profile keep working through this nest — which also means it keeps the key it uses to publish them, so it could still post as you. Undoing the change does not take that key away; replacing it is a separate step.'
   contest_detail_window_closed: 'A change to your AT Protocol identity {handle} was made with a key this device does not hold, and the time limit for undoing it has passed. The change now stands permanently. Contact whoever runs your nest.'
   contest_detail_genesis: 'Your AT Protocol identity {handle} was created with a key this device does not hold, so there is no earlier state to return it to. This identity cannot be recovered — create a new one, and contact whoever runs your nest.'
+  # public-text-end: app-strings-public
   # The public record itself does not check out — someone is serving a
   # fabricated history (a tampered directory, or something intercepting the
   # connection), rather than a key having been misused. Undoing is refused
@@ -2155,7 +2417,9 @@ atproto_settings:
   # the user's own real history with their own key. Says what is wrong, that
   # nothing was signed, and the one action that can help — never a dead button,
   # and never silence (the alarm has already fired by the time this shows).
+  # public-text: app-strings-public
   contest_detail_unauthenticated: 'The public record of your AT Protocol identity {handle} does not check out: the changes it lists are not signed by keys this identity''s own history allows. That points at the record being tampered with, or your connection to it being intercepted — so nothing has been signed or changed from here, and undoing is not offered, because acting on a false record would destroy your real history. Try again from another network, and contact whoever runs your nest.'
+  # public-text-end: app-strings-public
   # The advisory countdown. The directory rules on lateness when the undo is
   # submitted, so this is what we SHOW, never a promise about acceptance.
   contest_deadline: 'About {hours} hours left to undo this.'
@@ -2178,9 +2442,11 @@ atproto_settings:
   # "your keys control the identity again" into "you take control" — the exact
   # misreading item 3 caught. `contest_confirm_signs` must keep naming
   # the key the nest retains. Never shorten it past that sentence.
+  # public-text: app-strings-public
   contest_confirm_undo: 'You are about to undo the change to {handle}, and everything published on top of it, by signing an earlier state of your identity back into place.'
   contest_confirm_signs: 'This device signs with the recovery key it holds, which puts your own keys back in charge of who can change this identity. Your nest keeps the separate key it publishes your posts with, so this does not stop it posting as you; replacing that key is a separate step.'
   contest_confirm_directory_rules: 'The public directory decides whether to accept the undo. If it refuses, nothing about your identity changes and trying again is safe.'
+  # public-text-end: app-strings-public
 
 # The cross-page critical-alerts banner (critical-alerts.md): reserved for
 # possible-compromise / data-loss-imminent conditions — never ordinary errors.
@@ -2199,22 +2465,28 @@ critical_alerts:
   # user learns the ceremony exists — so it points at the page rather than
   # repeating what undoing does and does not do (that copy lives once, in
   # atproto_settings.contest_detail_contestable).
+  # public-text: app-strings-public
   atproto_custody_mismatch: 'Security alert: the published record of your AT Protocol identity {handle} names a recovery key this device does not hold. Your identity may not be under your control — do not trust it for anything sensitive. You may be able to undo this yourself from Settings → AT Protocol, and there is a time limit; you can also contact whoever runs your nest.'
+  # public-text-end: app-strings-public
   # Feeder #3: the public record of the user's identity claims no handle at
   # their own deployment — so the world finds their posts under a name that is
   # not theirs, or cannot find them by handle at all. Two keys rather than one
   # with an empty argument: "claims nothing" and "claims someone else's name"
   # are different findings, and an English fallback composed in Rust would not
   # translate.
+  # public-text: app-strings-public
   atproto_handle_unbound: 'Security alert: the published record of your AT Protocol identity does not name a handle at {domain}. It is published as {published} instead — people looking for you may be finding someone else. Do not trust this identity for anything sensitive, and contact whoever runs your nest.'
   atproto_handle_unbound_none: 'Security alert: the published record of your AT Protocol identity names no handle at all, so nobody can find you at {domain}. Do not trust this identity for anything sensitive, and contact whoever runs your nest.'
+  # public-text-end: app-strings-public
   # A seed-alone RecoveryKey replacement is in its 30-day window
   # (identity-succession.md § The RecoveryKey → Replacement). Only the identity
   # secret is needed to request one, so a window the user did not open means
   # someone else holds that secret. Two lines: the headline stands alone, the
   # detail carries the comparison aid.
+  # public-text: app-strings-public
   recovery_replacement_pending: 'Security alert: someone used your identity secret to request a replacement of your account recovery key. If that was not you, someone else has your identity secret. Cancel it in Settings, under Recovery kit.'
   recovery_replacement_pending_detail: 'The replacement takes effect in {days} days unless cancelled. The pending recovery key begins {fingerprint} — if you hold a recovery kit and it does not begin with those characters, the request was not made with your kit.'
+  # public-text-end: app-strings-public
   # The domain-expiry watch (domains-and-tls-bootstrap.md § Domain loss →
   # Detection). Six keys, not two: the audience is EVERY authenticated user with
   # role-differentiated lines (only an admin can renew; a resident's stake — their
@@ -2229,12 +2501,14 @@ critical_alerts:
   # this banner exists to prevent.
   #
   # Each pair is {admin, resident} for one finding: expiring, expired, lapse status.
+  # public-text: app-strings-public
   domain_expiring_admin: 'Urgent: {domain} — the name this deployment runs on — expires in {days} days. If it lapses, whoever registers it next receives your mail (including password resets for accounts tied to those addresses), and anyone recovering an account from their recovery phrase alone will no longer be able to find this nest. Renew it at your registrar now.'
   domain_expiring_resident: 'Urgent: {domain} — the name this deployment runs on — expires in {days} days. If it lapses, mail sent to your address there will go to whoever registers the name next, and recovering your account from your recovery phrase alone will stop working. Contact whoever runs this nest, and make sure you know its direct address.'
   domain_expired_admin: 'Urgent: {domain} — the name this deployment runs on — has expired. Whoever registers it next receives your mail, including password resets for accounts tied to those addresses. Renew or redeem it at your registrar immediately; if it is gone, move the deployment to a new domain.'
   domain_expired_resident: 'Urgent: {domain} — the name this deployment runs on — has expired. Mail sent to your address there may now reach someone else, and recovering your account from your recovery phrase alone will not work. Contact whoever runs this nest, and make sure you know its direct address.'
   domain_lapsing_admin: 'Urgent: the registration for {domain} — the name this deployment runs on — is in a hold or deletion state ({status}) and is being withdrawn from DNS. Whoever registers it next receives your mail. Contact your registrar now; renewal is usually still possible at this stage.'
   domain_lapsing_resident: 'Urgent: the registration for {domain} — the name this deployment runs on — is being withdrawn ({status}). Mail to your address there will stop arriving, and recovering your account from your recovery phrase alone will stop working. Contact whoever runs this nest, and make sure you know its direct address.'
+  # public-text-end: app-strings-public
   # The eviction warning (admin.md § Cutting a user off → The member is told).
   # The member's account is in the two-week warning phase of an admin's
   # eviction: full access today, then access ends, then the account and its
@@ -2242,8 +2516,10 @@ critical_alerts:
   # is the member's only way to keep anything, and it closes when access ends.
   # Dates are UTC on purpose: shared Rust renders them without the device's
   # time zone, so the line says which zone it means.
+  # public-text: app-strings-public
   eviction_warning: 'Your account on this nest is being closed by its admin. Your access ends in {days} days, at {suspend_at} UTC, and your account and everything in it will be deleted at {delete_at} UTC. Until your access ends you can export all your data from Settings → Account → Export My Data.'
   eviction_warning_undated: 'Your account on this nest is being closed by its admin, and it will then be deleted with everything in it. Export all your data now from Settings → Account → Export My Data.'
+  # public-text-end: app-strings-public
   eviction_warning_reason: 'The admin gave this reason: {reason}'
 
 bridges:
@@ -2251,6 +2527,11 @@ bridges:
   detail_title: Bridge
   follows: Follows
   remove_follow: Remove Follow
+  # The follow requests waiting on the account (bridges.md § Follow requests);
+  # the heading carries the count, and an empty list reads "(0)".
+  follow_requests: 'Follow requests ({count})'
+  approve_follow_request: Approve
+  refuse_follow_request: Refuse
   refresh_list: Refresh bridge list
   link_action: Link
   unlink_action: Unlink
@@ -2297,10 +2578,41 @@ bridges:
   # The feed_sources gate's own refusal, as the ward reads it. Deliberately
   # NOT contacts.guardian_approval_required — that one says "can only message
   # approved contacts", which is about people, not sources.
+  # public-text: app-strings-public
   source_blocked: This account can only add sources your guardian approves.
+  # public-text-end: app-strings-public
   source_request_button: Ask your guardian
   source_request_pending: Asked — waiting for your guardian
   source_request_approved: Approved — try again
+  # The admin's hosted plugins (behavior/bridges.md § Hosted plugins on this
+  # page; fauna_client_bridges::installed_plugin_row).
+  plugins_heading: Plugins on this nest
+  plugins_empty: No plugins installed.
+  plugin_install_label: Plugin document URL
+  plugin_install_submit: Install
+  plugin_install_opened: 'Review the install card in Settings → Connected apps → Requests.'
+  plugin_publisher: '{domain} — {key}'
+  plugin_publisher_development: Development plugin
+  plugin_state_running: Running
+  plugin_state_restarting: Restarting
+  plugin_state_stopped: Stopped
+  plugin_state_other: '{state}'
+  plugin_faults: 'Faults since it started: {count}'
+  plugin_last_fault: 'Last fault: {text}'
+  plugin_reason: 'Why: {text}'
+  plugin_uninstall: Uninstall
+  plugin_uninstall_confirm: Uninstall now
+  plugin_uninstall_cancel: Keep
+  # public-text: app-strings-public
+  plugin_uninstall_prompt: 'Uninstall {name}? Every account''s connection to it ends and its stored data is deleted.'
+  # public-text-end: app-strings-public
+  # Each account's settings card for an installed plugin (third-party.md
+  # § The principal model → Hosted principals;
+  # fauna_client_bridges::plugin_card). Rendered as one more bridge-card.
+  plugin_card_badge: 'Plugin · {form}'
+  plugin_connect: Connect
+  plugin_disconnect: Disconnect
+  plugin_bind_opened: 'Review the request in Settings → Connected apps → Requests.'
 media:
   title: Media
   # Media explorer chrome (2026-06-28 sync/folder UI unification — media.md § Layout & flow):
@@ -2387,7 +2699,9 @@ media:
   error_followed_unavailable: This folder is no longer shared publicly. Its owner may have stopped sharing it, or removed it.
   error_followed_fetch: "Couldn't read that followed folder: {message}"
   error_followed_read_only: You follow this folder — it's read-only here. Switch to one of your own folders to upload.
+  # public-text: app-strings-public
   error_metadata_only_folder: This folder's content stays on your devices, so it can't be uploaded here. Put the file in the folder on a device that syncs it.
+  # public-text-end: app-strings-public
   # ui/media.md § Encryption at rest → "The filter and the upload target
   # address the row" (d): a shared folder the owner let this user read but not
   # write stays selectable, and an upload into it is refused with this reason.
@@ -2418,7 +2732,9 @@ media:
   # (media-external-open-*; apps/tui.md § External media handoff).
   external_open: Open externally
   external_open_confirm_title: 'Open "{name}" externally?'
+  # public-text: app-strings-public
   external_open_confirm_body: The clip is decrypted to a private temporary file and handed to your system's media player.
+  # public-text-end: app-strings-public
   external_open_confirm: Open
   external_open_cancel: Cancel
   error_external_open: 'Failed to open externally: {message}'
@@ -2455,6 +2771,21 @@ backups:
   snapshot_title: Snapshot
   select_snapshot: Select a snapshot to view files.
   no_files_in_snapshot: No files in this snapshot.
+  # The detail of a kind entry's snapshot (`ui/backups.md` § Snapshot-list
+  # shape → *Kind entries*): such a snapshot holds messages, not files.
+  kind_snapshot_restores_below: This snapshot holds messages, not files. Restore it from the Restore section below.
+  # ── Whole-snapshot restore (`ui/backups.md` § Whole-snapshot restore) ──
+  # The open snapshot's files restored into a directory. `{path}` is the
+  # destination as the restore resolved it; `{files}` the restored count;
+  # `{failed}` the count, and `{paths}` the comma-joined paths, of the files
+  # that failed their integrity check and were not written.
+  snapshot_restore_destination_placeholder: Folder to restore into, e.g. ~/Restored
+  snapshot_restore_button: Restore all files
+  snapshot_restore_progress: 'Restoring snapshot #{id} into {path}…'
+  snapshot_restore_done: 'Restored {files} files ({size}) into {path}'
+  snapshot_restore_partial: 'Restored {files} files into {path}; {failed} failed their integrity check and were not written: {paths}'
+  snapshot_restore_failed: 'Restore failed: {message}'
+  snapshot_restore_destination_not_absolute: 'Enter the full path of a folder to restore into (starting with / or ~/), not {path}'
   create_snapshot: Create Snapshot
   # ── The ratified snapshot half (`ui/backups.md` § Snapshot-list shape) ──
   # Rendered off `fauna-backups-machine`'s `BackupsSnapshot`. The older
@@ -2555,14 +2886,18 @@ backups:
   restore_divergence_close: Close
   immediate_delete_button: Delete now
   immediate_delete_modal_title: 'Delete snapshot #{id} immediately?'
+  # public-text: app-strings-public
   immediate_delete_warning: This permanently deletes the snapshot now, skipping the soft-delete window, and cannot be undone. At least three snapshots are always kept.
+  # public-text-end: app-strings-public
   immediate_delete_confirm_id_placeholder: Re-type the snapshot id to confirm
   immediate_delete_acknowledge_prompt: 'Type this exact phrase to confirm:'
   immediate_delete_acknowledge_placeholder: Acknowledgement phrase
   immediate_delete_confirm_button: Delete immediately
   immediate_delete_cancel_button: Cancel
   backup_destinations_title: Backup destinations
+  # public-text: app-strings-public
   backup_destinations_desc: Replicate your data to another nest you control. Chunks are sealed under your backup key — the destination never reads them.
+  # public-text-end: app-strings-public
   backup_destinations_empty: No backup destinations configured.
   backup_destination_add_button: Add destination
   backup_destination_form_add_title: Add a backup destination
@@ -2616,7 +2951,9 @@ backups:
   backup_destination_usage_uncapped: '{held} held, no limit set'
   backup_destination_usage_unknown: 'Nothing held yet'
   backup_sole_client_destination_warning: Every backup destination you have is one of your own devices. Devices get lost, wiped and replaced — add a nest destination so a copy lives somewhere else.
+  # public-text: app-strings-public
   backup_destination_custodian_exposure: This device will keep a complete offline copy of your data. Anyone who can unlock it can read all of it, not just what is on screen.
+  # public-text-end: app-strings-public
   # Reclaim this device's copy (`docs/goal/ui/backups.md` § Manage backup
   # destinations). Removing a client-device destination deliberately KEEPS the
   # local sealed store — it is the owner's only offline copy — so an orphaned
@@ -2635,13 +2972,22 @@ backups:
   # themselves keys, resolved nested.
   backup_destination_reseed_button: Restore my data to this nest
   backup_reseed_confirm_title: Restore this device's copy to this nest?
+  # public-text: app-strings-public
   backup_reseed_confirm_body: This copies the backup this device holds onto this nest and makes it live again. Nothing is deleted, here or on the nest. If this nest already holds your data, it stops rather than mixing the two.
+  # public-text-end: app-strings-public
   backup_reseed_confirm_button: Restore
   backup_reseed_cancel_button: Not now
   backup_reseed_running: Restoring your data to this nest…
   backup_reseed_no_agent: This device runs no backup service, so it holds no copy to restore from.
   backup_reseed_failed: 'The restore stopped before anything was made live: {reason}'
   backup_reseed_reenroll_failed: 'Your data is back on this nest, but this device could not sign up again as its backup: {reason}. Add this device as a backup destination to keep a copy here.'
+  # The same gesture on a surviving nest destination's row: the copy is the
+  # one that nest holds, pulled back by this app.
+  backup_reseed_pull_back_confirm_title: 'Restore the copy on {name} to this nest?'
+  # public-text: app-strings-public
+  backup_reseed_pull_back_confirm_body: 'This copies the backup {name} holds onto this nest and makes it live again. Nothing is deleted, here or on {name}. If this nest already holds your data, it stops rather than mixing the two.'
+  # public-text-end: app-strings-public
+  backup_reseed_pull_back_reenroll_failed: 'Your data is back on this nest, but {name} could not be set up again as its backup: {reason}. Add {name} as a backup destination again to keep a copy there.'
   reseed_result_whole: Your data is back on this nest.
   reseed_result_incomplete: The restore is not complete yet. Run it again to finish what is missing.
   reseed_set_mail: Mail
@@ -2670,7 +3016,9 @@ backups:
   # the nest answers both verbs from one refusal catalogue.
   backup_audit_recover_button: Recover what your nest lost
   backup_recover_confirm_title: Recover what your nest lost from this backup?
+  # public-text: app-strings-public
   backup_recover_confirm_body: This copies everything your nest lost back into it from this backup, as new items in the places they were. Nothing is deleted, here or at the backup, and anything you changed or deleted since stays as it is. Running it again never recovers anything twice.
+  # public-text-end: app-strings-public
   backup_recover_confirm_button: Recover
   backup_recover_cancel_button: Not now
   backup_recover_running: Recovering what your nest lost…
@@ -2706,7 +3054,9 @@ backups:
   delete_snapshot: Delete Snapshot
   delete_snapshot_confirm: Delete this snapshot? This action cannot be undone.
   prune_snapshots: Prune Old Snapshots
+  # public-text: app-strings-public
   prune_confirm: 'Prune old snapshots? Only the latest 3 will be kept.'
+  # public-text-end: app-strings-public
   prune_result: 'Pruned {count} snapshot(s).'
   check_integrity: Check Integrity
   integrity_passed: Integrity check passed.
@@ -2752,10 +3102,12 @@ backups:
     stored_size: Stored Size
     dedup_ratio: Dedup Ratio
     storage_backend: Storage Backend
+    # public-text: app-strings-public
     encryption: 'Encryption & Compression'
     encryption_algo: ChaCha20-Poly1305
     compression: zstd level 3
     chunk_sizes: 512 KB - 16 MB avg 4 MB
+    # public-text-end: app-strings-public
     loading_stats: Loading statistics...
   # Snapshot info inspector (macOS MacSnapshotDetailView Info tab).
   detail:
@@ -2792,7 +3144,9 @@ backups:
   # Restore tab help/strings (macOS MacRestoreView).
   restore_into_directory_desc: Restores every file in this snapshot into the chosen directory.
   restore_files_written: 'Restored {count} files to {path}'
+  # public-text: app-strings-public
   restore_about_detail: 'Fetches every file in snapshot #{id}, decrypts it on this device, and writes it into the chosen directory.'
+  # public-text-end: app-strings-public
   restore_directory_panel_message: Choose a directory to restore this snapshot into
   # Snapshot count label (macOS BackupSplitView folder row).
   snapshot_count: '{count} snapshots'
@@ -2846,7 +3200,9 @@ folders:
   offline_share_start: Share a folder
   offline_share_receive: Receive a folder
   offline_share_own_code_label: Your code
+  # public-text: app-strings-public
   offline_share_own_code_help: "Give this to the person next to you — read it out, or let them read it off your screen — and check that what they type back matches. It ends with where your device can be reached, so copy all of it. Never send it in a message: exchanging it in person is what makes it safe."
+  # public-text-end: app-strings-public
   offline_share_peer_code_label: Their code
   offline_share_begin: Begin sharing
   offline_share_expect: Ready to receive
@@ -2931,7 +3287,9 @@ devices:
   members_title: Signed-in devices without a matching entry
   member_fingerprint: "Device {fingerprint}"
   member_enrolled_at: "Says it signed in {when}"
+  # public-text: app-strings-public
   member_note: "Removing a device here is permanent: there is no undo, and it must sign in again from scratch. A listed device is not necessarily a problem — one that has signed in but not yet registered with the server appears here until it does. Before removing one, compare its fingerprint with the devices you still have: each shows its own on its Devices page, and the one to remove matches none of them. If two appear where you expected one, one of them is a device you hold."
+  # public-text-end: app-strings-public
   member_remove_confirm: "Yes, remove it permanently"
   folders: Folders
   add_folder: Add Folder
@@ -2980,9 +3338,11 @@ devices:
   # device-keyless-posture-badge (devices.md § Custody facet piece 1): the
   # DERIVED relay-only marker — the row's principal holds no generation wrap
   # at the current tip. Never stored or asked; no toggle.
+  # public-text: app-strings-public
   keyless_posture_badge: "Relay only — holds no keys"
   custody_holder_section: "Custodians — who holds sealed copies of your data"
-  custody_holder_scope: "Trusted to hold sealed copies — cannot read them"
+  custody_holder_scope: "Trusted to hold sealed copies — cannot read them, apart from what you published to everyone"
+  # public-text-end: app-strings-public
   custody_receipt_fresh: "Last confirmed {when}"
   custody_receipt_stale: "Stale — last confirmed {when}. Treat this copy as degraded."
   custody_receipt_none: "No confirmation yet"
@@ -2990,10 +3350,19 @@ devices:
   custody_revoke: "Stop trusting this custodian"
   # REQUIRED honest-bound copy (nests.md § Trust facet — custody rows): never
   # over-promise past this sentence.
-  custody_revoke_bound_note: "Stops future copies and serving on honest devices. Copies already held stay held — and stay sealed forever."
+  # public-text: app-strings-public
+  custody_revoke_bound_note: "Stops future copies and serving on honest devices. Copies already held stay where they are, no more readable to the holder than before."
+  # public-text-end: app-strings-public
   custody_held_section: "Held for others — sealed copies this device keeps"
   custody_held_owner: "Holding for {owner}"
-  custody_held_scope_account: "Their account's sealed planes — unreadable on this device"
+  # public-text: app-strings-public
+  custody_held_scope_account: "Their account's sealed data — unreadable on this device, apart from what they published to everyone"
+  # public-text-end: app-strings-public
+  # custody-held-restore-address (devices.md § Custody facet): a NEST-form hold
+  # only — the accept's URL verbatim, which the owner types on a new device
+  # after losing every other one (nests.md § Trust facet — restore from a
+  # custodian nest). Out of band by design: the app never sends it.
+  custody_held_restore_address: "If they lose every device, they can restore from this nest at {address} — give them this address yourself."
   custody_budget_label: "Keep at most (bytes)"
   custody_stop: "Stop holding"
   # The stopped state's honest half: stopping pauses the hold, it
@@ -3008,7 +3377,9 @@ devices:
   custody_offer_title: "{owner} asks this device to hold sealed copies"
   # REQUIRED custody-floor copy (devices.md § Custody facet piece 3): states
   # what this device would SEE — the shape, never the content — before accept.
-  custody_offer_floor: "This device would store sealed data it cannot read. It would see only the shape: which scopes exist, how much is stored, and when it changes — never the content."
+  # public-text: app-strings-public
+  custody_offer_floor: "This device would store sealed data it cannot read, apart from what they have published to everyone. Of the rest it would see only the shape: which scopes exist, how much is stored, and when it changes — never the content."
+  # public-text-end: app-strings-public
   custody_offer_accept: "Hold for them"
   custody_offer_decline: "Decline"
   # The host-side choice (the nest-custodian identity fact): where the hold
@@ -3026,7 +3397,9 @@ devices:
   custody_mint_host_placeholder: "Choose a contact"
   # REQUIRED floor copy at mint (nests.md § Trust facet — custody rows):
   # choosing custodians is choosing who sees that shape.
-  custody_mint_floor: "Their device will store sealed copies it cannot read. They will see the shape of your data — which scopes exist, how much is stored, and when it changes — never the content. Choosing custodians is choosing who sees that shape."
+  # public-text: app-strings-public
+  custody_mint_floor: "Their device will store sealed copies it cannot read, apart from what you have published to everyone. Of the rest they will see only the shape — which scopes exist, how much is stored, and when it changes — never the content. Choosing custodians is choosing who sees that shape."
+  # public-text-end: app-strings-public
   custody_mint_confirm: "Send the request"
   custody_mint_no_contacts: "Start a conversation with them first — the request travels over it."
   paths_placeholder: 'e.g. Documents, Photos'
@@ -3040,7 +3413,9 @@ devices:
   # ⚠ Says the name is public rather than asking the user to trust that it is.
   # A public folder's names and paths are world-readable by the ratified
   # audience contract, which is exactly why this field takes them in the clear.
+  # public-text: app-strings-public
   follow_folder_name_hint: Public folders are named in the clear — type the name exactly as its owner published it.
+  # public-text-end: app-strings-public
   follow_confirm: Follow
   followed_folders_section: Folders you follow
   followed_status_following: Following
@@ -3071,7 +3446,9 @@ devices:
   folder_audience_private: Private
   folder_audience_public: Public
   folder_audience_shared: Shared
+  # public-text: app-strings-public
   folder_audience_hint: Private folders are encrypted so only you can read them. Public folders are readable by anyone on the web.
+  # public-text-end: app-strings-public
   # Shown in place of folder_audience_hint while the folder is shared with other
   # people: Shared is the state the share flow put it in, not a choice on this row.
   # It says why Private is not offered and what to do instead — the nest refuses
@@ -3080,15 +3457,19 @@ devices:
   folder_audience_shared_hint: This folder is shared with other people, so it can't be made private while it's shared. To make it private, remove the sharing in the section below first — or change who it is shared with there.
   # Shown in place of folder_audience_shared_hint while a shared folder is
   # currently public: its picker offers Shared as the one way back.
+  # public-text: app-strings-public
   folder_audience_public_bound_hint: This folder is shared with other people and currently public. Pick Shared to re-seal it so only those people can read it. Anything published while it was public should still be treated as public.
+  # public-text-end: app-strings-public
   # The declassify dialog (folder-audience-public-confirm) — the explicit owner
   # confirm the public audience is gated on (principles.md § The user always
   # controls their data). Both consequences are stated, because both surprised
   # people in review: names and paths go public too (they become URLs), and the
   # flip back does NOT retroactively re-seal what was already readable.
   declassify_title: Make this folder public?
+  # public-text: app-strings-public
   declassify_body: Anyone on the web will be able to read this folder's files, and its file and folder names too — they become part of the address of each file.
   declassify_irreversible: Making it private again protects only files you add afterwards. Anything published while the folder is public should be treated as public for good.
+  # public-text-end: app-strings-public
   declassify_confirm: Make public
   # folder-audience-unattested + folder-audience-reconfirm-button — a public
   # folder whose owner confirmation this app cannot verify (missing, or inherited
@@ -3096,7 +3477,9 @@ devices:
   # owner). Its content stays sealed on up-to-date apps until the owner confirms
   # again; the button opens the declassify dialog above
   # (encryption-at-rest.md § Readable classes).
+  # public-text: app-strings-public
   folder_audience_unattested: This folder is public, but this app can't confirm that you made it public. Until you confirm again, up-to-date apps may keep its files encrypted, and your website may not show them.
+  # public-text-end: app-strings-public
   folder_audience_reconfirm: Confirm public
   # ── Content residency (folder-nest-residency-select + folder-residency-confirm;
   # folders re-model phase 5, file-sync.md § Content residency). The nest place's
@@ -3108,10 +3491,14 @@ devices:
   folder_residency: Content kept on the nest
   folder_residency_full: Full — the nest keeps this folder's content
   folder_residency_metadata_only: Metadata only — content stays on my devices
+  # public-text: app-strings-public
   folder_residency_hint: The nest keeps a copy of this folder's content, so a device can catch up while your other devices are offline.
   folder_residency_metadata_only_hint: This folder's content stays on your devices only. It moves between them while one of them holding it is online, and the nest cannot restore it. File names, changes and snapshots still sync through the nest.
+  # public-text-end: app-strings-public
   residency_confirm_title: Stop keeping this folder's content on the nest?
+  # public-text: app-strings-public
   residency_confirm_body: The nest's copy of this folder's content is deleted now, and your devices become the only holders. Content moves between your devices only while one of them holding it is online. If your devices lose it, the nest cannot restore it.
+  # public-text-end: app-strings-public
   residency_confirm: Delete the nest's copy
   error_set_residency: "Failed to change where this folder's content is kept: {message}"
   # ── Exclusive editing (folder-exclusive-editing-toggle + folder-lease-status;
@@ -3193,7 +3580,9 @@ devices:
   # the set is still public; once paywalled there is no "clear" affordance in v1 (the
   # shared unpaywall/rotation legs are built; the app control that binds them is not).
   paywall_tier: Paywall to tier
+  # public-text: app-strings-public
   paywall_tier_hint: Only subscribers to the chosen tier can view this set's files; other visitors see a teaser.
+  # public-text-end: app-strings-public
   paywall_tier_none: "Not paywalled (public)"
   paywall_tier_needs_tier: Create a subscription tier first to paywall this set.
   # Per-set conflict policy (folder-conflict-policy-select) + the page-level
@@ -3268,7 +3657,9 @@ devices:
   error_set_default_conflict_policy: "Failed to set the default conflict policy: {message}"
   delete_folder: "Delete Folder"
   delete_confirm_title: "Delete folder?"
+  # public-text: app-strings-public
   delete_confirm_body: "Delete folder \"{name}\"? All data including snapshots will be permanently removed."
+  # public-text-end: app-strings-public
   remove_member: "Remove"
   # Cross-user sharing (owner-side "Shared with" section on an expanded folder-row —
   # docs/goal/ui/folders.md § Sharing). "Active"/"Pending"/"Remove" reuse common.*.
@@ -3306,7 +3697,9 @@ devices:
   # BOTH halves plainly: the location stopped syncing, and nothing local was
   # touched — a user who reads only this line should never fear their files were
   # deleted. One string, all apps. ID user-approved 2026-07-22.
+  # public-text: app-strings-public
   access_revoked_warning: "The owner removed your permission to make changes, so this location is no longer syncing. Your local files are untouched."
+  # public-text-end: app-strings-public
   # `{message}` carries the gesture's own detail (a missed handle resolve reads
   # "no actor for handle 'bob'") — see the contract note on error_paywall_set above.
   error_share_set: "Failed to share folder: {message}"
@@ -3325,7 +3718,7 @@ devices:
   error_decline_share: "Failed to decline share: {message}"
   error_leave_share: "Failed to leave share: {message}"
   # Binding a location to a set hosted on ANOTHER nest is verified against that
-  # nest before the location is bound (docs/goal/architecture/federation.md
+  # nest before the location is bound (docs/goal/architecture/federation-shared-folders.md
   # § Cross-nest → Recipient-side access discovery: the bind is confirmed by an
   # eager write-token request, and a refusal fails the bind loudly). The grant
   # the app renders from is advisory, so it can be stale — this fires when
@@ -3456,6 +3849,18 @@ devices:
     on_demand_unavailable: On-demand isn't available here.
     on_demand_mount_refused: On-demand can't be used in this location, so only files already on this device are kept in sync. Choose a folder inside your home folder, or turn on-demand off.
     on_demand_mount_failed: On-demand couldn't start for this folder, so only files already on this device are kept in sync. Turn on-demand off to keep every file here.
+    # The Free up space verb on an on-demand row (on-demand-files.md § The
+    # free-up-space gesture where the OS offers none): the button, the standing
+    # reading, and the latest sweep's outcome. A kept file is said to be kept
+    # because this device may hold the only copy: the count covers an
+    # unrecorded change and an own record in a folder that keeps no content on
+    # the server alike.
+    free_space_button: Free up space
+    free_space_running: Freeing up space…
+    free_space_on_device: '{on_device} of {total} on this device'
+    free_space_result: 'Freed {files} files ({size}).'
+    free_space_result_kept: 'Freed {files} files ({size}). Kept {kept} files because this device may hold the only copy.'
+    free_space_kept_pinned: 'Kept {count} files you chose to keep on this device.'
     remove: Remove
     helper_unavailable: Sync service is not running. Start it and try again.
 # Settings → Sessions (ui/sessions.md). The note and the warning are REQUIRED
@@ -3478,8 +3883,10 @@ sessions:
   revoke_others: Sign Out Everywhere Else
   revoke_others_confirm: Yes, Sign Out Everywhere Else
   revoke_others_cancel: Cancel
+  # public-text: app-strings-public
   revoke_note: Revoking ends a sign-in and makes whoever held it prove themselves again. It does not sign a device out — a device that holds your secret key or a device grant signs itself straight back in. To end a device for good, remove it under Settings → Devices. If someone else holds your secret key, only your recovery kit ends them (Settings → Account → Recovery Kit → My Identity Was Stolen).
   lockout_warning: 'Lock this account for 24 hours. Every device is signed out, this one too. Nobody can sign in for 24 hours, you included, and there is no unlock. It does not remove somebody who holds your secret key — they come back when the lock ends. They can do the same to you: anyone with your secret key can sign you out and lock the account, again every 24 hours. Your recovery kit still works while the account is locked and moves it to a new key the thief cannot use (Settings → Account → Recovery Kit → My Identity Was Stolen) — a lock you did not set is itself the sign to use it.'
+  # public-text-end: app-strings-public
   lockout_confirm_placeholder: Type LOCK to confirm
   lockout_button: Lock for 24 Hours
   lockout_wrong_word: 'Type {word} exactly to lock the account.'
@@ -3495,7 +3902,9 @@ settings:
   identity_export:
     title: Export Identity
     desc: Show a QR code that another device can scan to import your identity.
+    # public-text: app-strings-public
     warning: Anyone who scans this QR code gets full access to your identity. Only show it in a trusted environment.
+    # public-text-end: app-strings-public
     show_qr: Show QR Code
     hide_qr: Hide QR Code
   # Recovery kit — the RecoveryKey's Settings home, a section on the Account
@@ -3505,18 +3914,24 @@ settings:
   # (fauna_client_recovery::status) so all seven apps say the same thing.
   recovery_kit:
     title: Recovery Kit
+    # public-text: app-strings-public
     desc: An offline key that can recover your account if you lose your identity secret — or take it back if someone steals it. It is shown once and never stored on this device.
+    # public-text-end: app-strings-public
     # The four states of recovery-kit-status.
+    # public-text: app-strings-public
     status_never_created: 'No recovery kit. If you lose your identity secret, your account cannot be recovered, and if someone steals it, you cannot take it back.'
     status_registered: Your recovery kit is active, and a sealed copy of your identity secret is stored for it.
+    # public-text-end: app-strings-public
     # ⚠ The no-escrow arm must say BOTH halves plainly (identity-succession.md
     # § Seed escrow → Lifecycle on the nest, the landed-re-put ruling,
     # 2026-08-10): the phrase does not currently recover the account, and the
     # repair is entering the kit already in hand — never "replace", which mints
     # a new kit and retires the one the user may have just spent 30 days
     # landing.
+    # public-text: app-strings-public
     status_registered_no_escrow: 'Your recovery kit is active, but no sealed copy of your identity secret is stored — your recovery phrase cannot recover this account right now. Enter your kit below and press Restore Phrase Recovery to fix this.'
     status_replacement_pending: 'A replacement of your recovery kit was requested with your identity secret alone, and takes effect in {days} days. Cancel it below if it was not you.'
+    # public-text-end: app-strings-public
     # The fifth: before the status resolves, every one of the four actions below
     # is dead (each gates on the status the page has not read yet), so the line
     # must still say something — rule 5 applies to that window too.
@@ -3561,7 +3976,9 @@ settings:
     veto: Cancel The Pending Replacement
     # The type-to-confirm gate on succession, mirroring account deletion.
     stolen_confirm_placeholder: Type SUCCEED to confirm
+    # public-text: app-strings-public
     stolen_warning: This mints a new identity and re-points your account to it. It cannot be undone, your old identity stops working, and you will need to re-add your devices. Your handle stays yours. Afterwards, create a new recovery kit — this one retires with the old identity.
+    # public-text-end: app-strings-public
     # The let-go of a dead generation (fleet-scope-reclamation.md
     # § Fleet-scope reclamation, clause (3)(j); placement settings.md
     # § Recovery kit). Rendered ONLY while some of the account's data is sealed
@@ -3802,7 +4219,9 @@ settings:
     # password to "fix" it. Receiving mail never stops, and the line says so:
     # the failure the user will otherwise infer is much larger than the real one.
     mail_burn_running: Replacing your mail keys, because your previous identity's passwords could open your mailbox…
+    # public-text: app-strings-public
     mail_burn_done: 'Your mail encryption key was replaced and your {count} mail app password(s) were revoked — whoever held your previous identity could have used them to read your mail. Your mailbox keeps receiving as normal, but each mail app needs setting up again with a new password from this page.'
+    # public-text-end: app-strings-public
     # The route to the filter list — the remedy the per-action succession ruling
     # named but nothing pointed at. It says WHAT survived, WHY that is worth a
     # look (a filter can quietly bin or divert mail, which is the harm a reader
@@ -3823,7 +4242,9 @@ settings:
     # told merely that "keys were replaced" would reasonably assume the older
     # posts were protected too.
     tier_period_rotation_running: Replacing the keys your subscriber-only posts are locked with, because your previous identity could open them…
+    # public-text: app-strings-public
     tier_period_rotation_done: 'New posts to your {count} subscriber tier(s) are now locked with keys your previous identity never had. Your subscribers keep their access, and posts you published before taking your account back stay readable to them — and to anyone who had the old keys, which is why only new posts are covered.'
+    # public-text-end: app-strings-public
     # ⚠ Nothing failed here, which is exactly why it has to be said: the
     # aftermath otherwise reports a clean pass while the old key still opens
     # every new subscriber-only post. Names the remedy, since the user has no
@@ -3860,14 +4281,26 @@ settings:
   icloud_backup:
     title: iCloud Backup
     toggle: Back up identity to iCloud Keychain
+    # public-text: app-strings-public
     footer: When off (the default), your identity stays on this device and never syncs to iCloud. Turn it on to let iCloud Keychain restore your identity on a new device. Fauna's own device-add and recovery flows are the primary way to use multiple devices.
+    # public-text-end: app-strings-public
   check_for_updates: Check for Updates
   up_to_date: Up to date
   check_failed: Check failed
   # The newer-version notice's whole sentence: the version AND where to get it
   # (installers/README.md § Knowing a newer version is out). `url` is the
   # release page (`fauna_core::version::release_page_url`).
+  # public-text: app-strings-public
   update_available_notice: 'Version {version} is available. Get it at {url}'
+  # public-text-end: app-strings-public
+  # `settings-terms-link` in the About row, and the onboarding notice's
+  # `onboarding-terms-link` — both open (or, on a terminal, show and copy)
+  # `fauna_core::TERMS_URL` (terms-and-content-guidelines.md § The decisions,
+  # item 4 (b)). Names a public page, so it rides in its public-texts request to
+  # be reviewed and marked in the round (the companion rule, public-texts.md
+  # § The boundary); the wording is the terms doc's § Element IDs draft, and
+  # until the round it is the apps' own.
+  terms_link: Terms and content guidelines
   mls_available: 'MLS encryption: Available'
   mls_not_available: 'MLS encryption: Not available'
   push_notifications:
@@ -3882,6 +4315,10 @@ settings:
     # notification while the app is closed (common.md § Transports, ws-device).
     agent_unreachable: The Fauna sync agent is not running on this computer, so it cannot show notifications while Fauna is closed.
     no_sink: This computer has no desktop notification service, so notifications cannot be shown here.
+    # android's failure cause: push reaches a phone through a UnifiedPush
+    # distributor app the user installs (common.md § Transports, the android
+    # ruling).
+    no_distributor: This phone has no push service app, such as ntfy, so notifications cannot reach it while Fauna is closed.
   configuration: Configuration
   privacy: Privacy
   moderation: Moderation
@@ -3929,12 +4366,16 @@ settings:
     strength_fair: Fair
     strength_strong: Strong
     autogenerate: Auto-generate a strong password
+    # public-text: app-strings-public
     weak_password_warning: A password you choose yourself limits how strongly your stored mail is protected at rest on an encrypted nest. Letting Fauna generate one is recommended.
-    token_warning: Copy this token into your mail app now — it is shown only once.
+    # public-text-end: app-strings-public
+    token_warning: Copy this token into your mail app now. You can show it again later from its row under Connected apps.
     copy_token: Copy token
     copied: Copied
     rotate_title: Rotate mail keys
+    # public-text: app-strings-public
     rotate_warning: Rotating replaces your mail encryption key and re-wraps it under every surviving credential. Already-received mail stays readable. Every connected mail app must re-authenticate, and any credential you mark below as compromised loses access. This is safe to interrupt — it resumes automatically.
+    # public-text-end: app-strings-public
     rotate_exclude_caption: 'Exclude compromised credentials (they lose access):'
     rotate_confirm: Rotate keys
     kind_password: Password
@@ -3985,18 +4426,24 @@ settings:
     data_export: Data Export
     export_my_data: Export My Data
     delete_account: Delete Account
+    # public-text: app-strings-public
     delete_confirm_text: 'This permanently removes your handle and data from this node. Your key is not affected. Take your data first: use Export My Data in Settings → Account and, if you have mail, Export in Settings → Mail.'
+    # public-text-end: app-strings-public
     connected_services: Connected Services
     usage: Usage
     bridges_description: Connect to other social networks
     bridge_management: Bridge Management
     bridge_management_subtitle: Open the Bridges section in the sidebar to link or manage accounts on other networks (Bluesky, ActivityPub, Nostr, Email)
     data: Data
+    # public-text: app-strings-public
     export_subtitle: Download a copy of all your data, content included — it may be large
+    # public-text-end: app-strings-public
     export_dialog_title: Export Account Data
     session: Session
     sign_out_subtitle: Remove local credentials and return to onboarding. Your secret key is still required to sign back in.
+    # public-text: app-strings-public
     delete_subtitle: Permanently delete your account and all data
+    # public-text-end: app-strings-public
     accounts: Accounts
     accounts_subtitle: Switch between the identities on this device, or add another.
     add_account: Add account
@@ -4107,6 +4554,17 @@ settings:
     # to"): the destination, and the copy-mode checkbox, checked by default.
     forward_address: Forward to
     keep_local_copy: Keep a local copy
+    # The other actions' and conditions' inputs and the rule's order and
+    # `continue` flag (email-filters.md § Email filter rules).
+    file_into_mailbox: Move to folder
+    add_label: Label
+    auto_reply_subject: Reply subject
+    auto_reply_body: Reply message
+    auto_reply_interval_hours: Reply at most once per sender every (hours)
+    header_value: Header contains
+    spam_score: Spam score at least
+    priority: Order (lower runs first)
+    continue_matching: Keep checking later rules after this one matches
     spam_preferences: Spam Preferences
     inbox_mode_description: Control who can send you messages
     inbox_mode_subtitle: Who can message you directly
@@ -4139,8 +4597,10 @@ settings:
     match_value: Match value
     spam_protection: Spam Protection
     spam_protection_description: Threshold scores for automatic filtering
+    # public-text: app-strings-public
     spam_threshold_subtitle: Messages above this score are marked as spam
     phishing_threshold_subtitle: Messages above this score are flagged as phishing
+    # public-text-end: app-strings-public
     apply_changes: Apply changes
   admin_page:
     overview: Overview
@@ -4223,13 +4683,17 @@ settings:
   configure_nest: Configure Nest
   configure_nest_desc: Change the nest URL this app connects to.
   new_nest_url: New Nest URL
-  new_nest_url_placeholder: 'https://nest.fauna.social'
+  # public-text: app-strings-public
+  new_nest_url_placeholder: 'https://nest.example.com'
+  # public-text-end: app-strings-public
   update_button: Update
   storage_desc: Account storage usage.
   about: About
+  # public-text: app-strings-public
   about_name: Fauna for Windows
   about_desc: Encrypted messaging, contacts, and file sync.
   danger_zone_desc: Permanently delete your account and all associated data. This action cannot be undone.
+  # public-text-end: app-strings-public
   delete_confirm_placeholder: Type DELETE to confirm
   general: General
   appearance: Appearance
@@ -4269,7 +4733,9 @@ nests:
   view_now: Now
   view_history: History
   # Empty state for a nest holding no grants (nest-trust-empty)
+  # public-text: app-strings-public
   not_trusted: This nest is not trusted to read any of your content.
+  # public-text-end: app-strings-public
   # participant-escrow-holder-badge (T16; participants.md § Roles) — trust
   # vocabulary, derived from recorded escrow receipts.
   escrow_holder_badge: Holds your recovery escrow
@@ -4279,6 +4745,25 @@ nests:
   # (receipt states, held-bytes, revoke + honest bound, scope line) reuses the
   # devices.custody_* strings — stated once, rendered on both pages.
   custody_nest_label: "{host}'s nest — trusted to hold sealed copies"
+  # ── Restore from a custodian nest (nests.md § Trust facet — restore from a
+  # custodian nest): the page-level form (nests-custody-restore-*), the per-row
+  # warm gesture (nest-trust-custody-restore-button), and one notice state per
+  # outcome — never collapsed. The not-admitted copy MUST name all three causes
+  # (the handshake answers one opaque refusal); the sealed count stands BESIDE
+  # the restored count, never folded into it.
+  custody_restore_button: Restore from a custodian nest…
+  custody_restore_input_label: "The custodian nest's address, as its host gave it to you (for example https://nest.example)"
+  custody_restore_submit: Restore
+  custody_restore_cancel: Cancel
+  custody_restore_row_button: Restore from this nest now
+  custody_restore_running: Restoring from the custodian nest…
+  custody_restore_refused: "That address can't be used: {reason}"
+  custody_restore_revoked: you revoked this nest's custody
+  custody_restore_not_admitted: "That nest didn't let this device in. The address may be wrong, the nest may be down, or it may hold nothing for this account — this device can't tell which."
+  custody_restore_restored: "Restored {count} of your account's records."
+  custody_restore_sealed: "{count} came back sealed and stay unreadable until this device has their key."
+  custody_restore_nothing_new: Nothing new — this device already has everything that nest holds for you.
+  custody_restore_mismatch: "Restored — but the nest that answered is not the one your records name for this address. Your records stand; check the address with whoever runs that nest."
   # A current grant (nest-trust-grant-*)
   trusted_to_read: 'Trusted to read:'          # nest-trust-grant-scope prefix
   # Content-kind labels for a grant's scope line — the per-app shell maps the
@@ -4288,7 +4773,9 @@ nests:
   # § Training-sample retention → Grant-reach + consent interaction, ratified
   # 2026-07-13): the same key also opens the spam-filter model + training
   # history — a crypto fact, so the grant-log consent copy says so.
+  # public-text: app-strings-public
   scope_mail: Mail — and the spam-filter model and training history derived from it
+  # public-text-end: app-strings-public
   scope_calendar: Calendar
   scope_posts: Posts
   # content.label-write (bundled into the Mail mint option) — never render the
@@ -4337,10 +4824,12 @@ nests:
   grant_keep_button: Keep                      # nest-trust-grant-keep-button
   # REQUIRED honest-bound copy, standing-keyed regime = every content kind today
   # (nest-trust-grant-bound-note). Must not over-promise past the honest bound.
+  # public-text: app-strings-public
   bound_note_standing: >-
     On an honest nest, revoking stops future access and re-acquisition. It cannot
     un-see what was already read, and does not yet block content arriving after
     revocation.
+  # public-text-end: app-strings-public
   # REQUIRED honest-bound copy for a BOUNDED mail grant (content-sealing epochs,
   # nest-trust-grant-bound-note) — the stronger, crypto-bounded wording nests.md
   # § Honest bound reserves for an epoch-sealed kind, WITH the honest INFO-A
@@ -4348,12 +4837,14 @@ nests:
   # window's epoch set, not necessarily everything sealed in [t1,t2]) and the
   # window's end is epoch-granular, not to-the-second. Rendered only when
   # `is_bounded_mail_grant` — every other kind/regime keeps bound_note_standing.
+  # public-text: app-strings-public
   bound_note_bounded_mail: >-
     This trust is cryptographically time-boxed: once its window ends (accurate
     to within about a week), this nest can no longer read new mail at all — not
     even by re-acquiring a key. Within the window it can only open mail sealed
     under that period's rotating keys, so content sealed before the schedule
     caught up may still be unreadable to it.
+  # public-text-end: app-strings-public
   # Grant-event history rows (nest-trust-history-item), most-recent-first
   history_minted: 'Trusted to read {scope} · {when}'
   history_renewed: 'Trust renewed: {scope} · {when}'
@@ -4375,6 +4866,7 @@ nests:
   # REQUIRED honest-bound copy (nest-trust-backup-bound-note). Both rows freeze
   # only FUTURE writes — backups already stored stay where they are until the
   # destination reclaims them, and this copy must never imply otherwise.
+  # public-text: app-strings-public
   backup_bound_note_seal: >-
     Stopping this means your nest can no longer make new backups of your
     messages. Backups it already made stay where they are until the box holding
@@ -4383,6 +4875,7 @@ nests:
     Stopping this means your nest can no longer send new backups to this
     destination. Backups already stored there stay until that box clears them
     out. You can stop it here even if your own nest is misbehaving.
+  # public-text-end: app-strings-public
   # ── Retained backup generations (nest-trust-generation-item, ratified
   # 2026-07-29; nests.md § Trust facet — generation recovery). Rendered on the
   # HOME nest's row after the backup rows: what the owner can roll back to once
@@ -4398,13 +4891,16 @@ nests:
   # window, so a user near their cap can see usage a supersede storm inflated
   # until T elapses. This is the surface where that is explicable rather than
   # mysterious, so the bound rides the deadline leaf.
+  # public-text: app-strings-public
   generation_expires: >-
     Can be restored until {when}, and counts against your storage until then
+  # public-text-end: app-strings-public
   # Row state (nest-trust-generation-status). "Could not reach" is deliberately
   # NOT the same as "nothing to restore" — collapsing them is the false
   # reassurance this whole surface exists to prevent (nests.md:122).
   generation_status_listed: Can be restored
   generation_status_unreachable: Could not reach this destination
+  holders_status_unreachable: Could not ask this nest which services it trusts   # nest-trust-holders-status
   generation_restore: Restore this version      # nest-trust-generation-restore
   # Outcome copy. "Past the recovery window" is a PRODUCT STATE, not a failure —
   # the version aged out or never existed, and saying "restore failed" would
@@ -4421,15 +4917,19 @@ nests:
   mint_scope_placeholder: Choose what to trust it with…
   # Mint-time consent copy for the mail scope MUST name the derived reach
   # (same ruling as scope_mail above).
+  # public-text: app-strings-public
   mint_option_mail: Read and filter my mail — and the spam-filter model and training history derived from it
+  # public-text-end: app-strings-public
   mint_option_calendar: Read my calendar
   mint_option_paywalled: 'Serve paywalled posts — {tier}'
   # Conditional holder pick — only when >1 holder could take the chosen scope.
   mint_holder_placeholder: Which service on this nest?
   # How long the new trust lasts (nest-trust-mint-duration-select; nests.md
   # § Expiry / renewal → Duration and blessing). Two hard-coded windows.
+  # public-text: app-strings-public
   mint_duration_one_off: For a few hours
   mint_duration_standard: For 90 days
+  # public-text-end: app-strings-public
   mint_confirm: Trust
   # The per-nest blessing (nest-trust-blessed-toggle): a blessed box's 90-day
   # trust renews itself while you use Fauna.
@@ -4484,9 +4984,11 @@ linked_nests:
   unlink: Unlink
 logs:
   title: Logs
+  # public-text: app-strings-public
   description: >-
     Recent activity recorded on this device, newest first. No message contents
     or secrets are ever logged — only what happened, when, and where.
+  # public-text-end: app-strings-public
   filter_label: Severity
   filter_all: All
   level_error: Error
@@ -4499,6 +5001,8 @@ logs:
   empty: No log entries yet.
 mail_settings:
   title: Mail & Calendar
+  # public-text: app-strings-public
+  unavailable_notice: "Mail can't be turned on for this server: it was set up without the virus scanner and spam filter that mail needs. To use mail, set up a server that includes them."
   keys_info: >-
     Your mail is protected by an encryption key held on your Fauna devices.
     Each app password or token you add unlocks that same key for one email
@@ -4508,6 +5012,7 @@ mail_settings:
     read your mail (messages you've already received stay readable). If you're
     just retiring an app you no longer use, revoke that one credential
     instead — you don't need to rotate.
+  # public-text-end: app-strings-public
   # Shown where the credential rows used to be, on an app whose Connected
   # apps page lists them (connected-apps.md § Layout & flow).
   credentials_on_connected_apps: 'Your app passwords are listed under Settings → Connected apps — copy, reveal or disconnect each one there.'
@@ -4531,12 +5036,36 @@ mail_settings:
   forward_per_hour_not_a_number: Enter the hourly forwarding limit as a whole number.
   forward_per_hour_zero: The hourly forwarding limit must be at least 1.
   forward_per_hour_above_ceiling: 'The hourly forwarding limit can''t be more than {ceiling}.'
+  # The receive / send switches (mail-policy-config.md § Tier 3 — per-account)
+  receive_label: Receive mail
+  receive_subtitle: When off, mail sent to your addresses is refused. Mail you already have stays.
+  send_label: Send mail
+  send_subtitle: When off, you can't send mail from your account. Automatic replies and forwards you have set up still go out.
+  # The scan-result switch (mail-content-scanning.md § Per-account opt-out for visible scan details)
+  scan_result_visible_label: Show scan results on received mail
+  scan_result_visible_subtitle: When off, received messages don't show the spam and virus check line. The check still runs.
+  # The automatic reply (email-filters.md § The auto-respond setting)
+  autorespond_label: Automatic reply
+  autorespond_subtitle: Answers each sender once a week while it is on.
+  autorespond_message_label: Automatic reply message
+  autorespond_message_empty: Write the automatic reply's message first.
+  # The mailbox quota readout and notice (imap-server.md § Composition with
+  # submission quota); {used} and {limit} are sizes, {messages} and
+  # {message_limit} counts
+  mailbox_quota: '{used} of {limit} · {messages} of {message_limit} messages'
+  # The daily sending allowance readout (mail-settings-submission-quota);
+  # {used} and {limit} are recipient counts
+  submission_quota: '{used} of {limit} recipients today'
+  over_quota_mailbox: Your mailbox is full. New mail is refused until you delete some.
+  over_quota_sending: "You've sent to today's limit of {limit} recipients. Sending resumes tomorrow."
 web_settings:
   title: Web
   subdomain_toggle_label: Publish my website
+  # public-text: app-strings-public
   subdomain_toggle_subtitle: >-
     When on, this nest serves your Web files and web-published posts at your
     personal address. Off by default.
+  # public-text-end: app-strings-public
   subdomain_url_label: "Your site"
   subdomain_no_handle: Set a handle first to get a personal web address.
   subdomain_reserved: Your handle is a reserved name and can't host a website.
@@ -4591,10 +5120,12 @@ web_publish:
   # Carries the ratified ~10-minute validity (monetization.md § Pillar 2 →
   # Creator comp-link surface) — the surface STATES the TTL rather than offering
   # a knob, and points at the claim code as the durable alternative.
+  # public-text: app-strings-public
   paywall_link_note: >-
     A paywall link opens the full post for anyone, but only for about 10 minutes
     — it's for a quick preview, not for giving lasting free access. For that,
     send a claim code instead.
+  # public-text-end: app-strings-public
   copied_link: 'Copied: {url}'
   copied_paywall_link: 'Copied, works for about 10 minutes: {url}'
   # The ⋯ menu's own no-address line. Unlike the settings section's reasons it
@@ -4632,6 +5163,10 @@ mail_aliases:
   delete: Delete
   edit: Edit
   show_audit: Show audit
+  # The open history disclosure (mail-aliases.md § Per-alias-hit audit list):
+  # its close label, and the line an address nothing has arrived on shows.
+  hide_audit: Hide audit
+  audit_empty: Nothing has arrived on this address yet.
   disabled_badge: disabled
   active_toggle_label: Active
   active_toggle_tooltip: >-
@@ -4649,9 +5184,17 @@ mail_aliases:
   kind_catchall: Catch-all
   kind_forwarder: Forwarder
   kind_other: Alias
+  # A received mail bubble's tag: the alias the message arrived on
+  # (mail-aliases.md § Label). `label` is the alias's own label, or the kind
+  # plus the pattern (the domain, for a catch-all) when it has none.
+  delivered_to: 'Delivered to: {address} [{label}]'
   no_default_domain: Enable mail before adding aliases.
   hits: "{count} hits"
   hits_with_last: "{count} hits · last {date}"
+  # A disposable address's expiry (mail-aliases.md § Don't do these)
+  expires_on: Expires {date}
+  expired: Expired
+  extend: Extend
   import_button: Import addresses
   import_title: Import addresses
   import_subtitle: Paste one address per line. Each becomes an exact alias that delivers to you; addresses you already have are skipped.
@@ -4662,18 +5205,23 @@ mail_aliases:
   import_invalid_line: '{address} — {reason}'
 mail_spam:
   title: Spam
+  # public-text: app-strings-public
   description: >-
     Your spam filter learns from what you mark as spam or not-spam. Reset its
     training, choose whether to help the deployment's shared filter, and undo any
     past training here.
+  # public-text-end: app-strings-public
   reset_button: Reset spam classifier
   # The armed Reset's own label: the confirm must say the reset is permanent
   # (mail-spam.md § Reset, step 2).
   reset_confirm: Reset for good? This cannot be undone.
+  # public-text: app-strings-public
   reset_subtitle: >-
     Deletes your spam-training model and history. Future mail starts from
     scratch. This cannot be undone.
+  # public-text-end: app-strings-public
   contribute_baseline_label: Contribute to deployment spam baseline
+  # public-text: app-strings-public
   contribute_baseline_subtitle: >-
     Off by default. When on, your training helps seed the shared filter new
     accounts start from — your individual messages are never shared.
@@ -4687,10 +5235,13 @@ mail_spam:
     Messages scoring at or above this override are filed to Junk, instead of the
     deployment default. 0 turns automatic filing off for this account; leave
     blank to follow the default.
+  # public-text-end: app-strings-public
   published_title: What this nest publishes
+  # public-text: app-strings-public
   published_description: >-
     The anonymized report counts your nest shares with peers, shown exactly as a
     peer nest sees them. Nothing appears here below 3 reporters.
+  # public-text-end: app-strings-public
   published_empty: This nest publishes no report aggregates yet
   published_reporters: reporters
   history_title: Training history
@@ -4706,9 +5257,11 @@ mail_spam:
   backend_unbuilt: Spam-classifier training is not available on this nest yet.
 mail_export:
   title: Export mailbox
+  # public-text: app-strings-public
   description: >-
     Download your whole mailbox in a standard format you can import into another
     mail app. The export is encrypted until you download it.
+  # public-text-end: app-strings-public
   format_title: "Step 1 — Format"
   format_mbox: "mbox (one file per mailbox — broadest support)"
   format_maildir: "Maildir++ (one file per message; preserves flags)"
@@ -4833,9 +5386,11 @@ mail_lists:
   backend_unbuilt: Mailing lists are not available on this nest yet.
 mail_import:
   title: Import mailbox
+  # public-text: app-strings-public
   description: >-
     Pull your existing mail from Gmail, Outlook, iCloud, or any IMAP server into
     your Fauna mailbox. Your credentials never leave this device.
+  # public-text-end: app-strings-public
   source_title: "Step 1 — Source"
   # Shown above the Source step by any app whose foreign-IMAP transport is not
   # built yet, so nobody types a real mailbox password into a form that cannot
@@ -4862,6 +5417,10 @@ mail_import:
   # the device-code grant): one field, the account's address (the XOAUTH2
   # user), then a short code the person enters in any browser on any device.
   source_outlook_address_label: Your Outlook address
+  # The Source step's forget control (`mailbox-migration.md` § Credential
+  # handling): shown while the account remembers the server, port, connection
+  # security and username of the last source it connected to.
+  source_forget_button: Forget saved server details
   microsoft_code_fmt: "Go to {url} and enter the code {code}."
   microsoft_open_browser: Open in browser
   microsoft_waiting: Waiting for you to finish signing in with Microsoft…
@@ -4939,6 +5498,13 @@ mail_import:
     Mailboxes map 1:1 by name — INBOX to INBOX, Sent to Sent, and so on.
     Mailboxes with no matching Fauna mailbox are created, named after the
     source.
+  # The advanced "Import duplicates anyway" toggle
+  # (`mail-import-scope-import-duplicates-toggle`, off by default). Its label
+  # carries its own warning, which is never suppressed (`mailbox-migration.md`
+  # § Opt-out per session, § Don't do these).
+  scope_import_duplicates_label: >-
+    Import duplicates anyway (advanced) — mail you already have is stored a
+    second time and counts against your storage.
   confirm_title: "Step 3 — Confirm"
   confirm_summary_fmt: "{source} · {mailboxes} mailbox(es) · {messages} messages"
   # The confirm step's summary once every selected mailbox has a size
@@ -4957,15 +5523,50 @@ mail_import:
   pause_button: Pause
   resume_button: Resume
   cancel_button: Cancel
+  # A FAILED import's one control on the Progress step
+  # (`mailbox-migration.md` § A failed import is a record the wizard shows
+  # until the user moves on): the record goes and the wizard returns to Source.
+  dismiss_failed_button: Dismiss
+  # Pause, Resume or Cancel reaching a failed or cancelled import — neither
+  # offers them; the machine refuses each with one of these.
+  failed_import_control: >-
+    This import failed — it can no longer be paused, resumed or cancelled.
+    Dismiss it and start a new import.
+  cancelled_import_control: >-
+    This import was cancelled — it can no longer be paused, resumed or
+    cancelled.
+  # Dismiss reaching an import that is still running or paused.
+  dismiss_live_import: >-
+    This import is still under way — cancel it first. Mail already imported is
+    kept.
   # The import paused itself (`mailbox-migration.md` § Failure handling): the
   # session is paused with its place kept, and Resume takes it up again.
   paused_mailbox_full: >-
     Import paused: your Fauna mailbox is full. Ask your admin for more room,
     then resume — the import picks up from the first message that did not fit.
+  # The full-mailbox notice beside that pause (`mailbox-migration.md`
+  # § Failure handling → Nest-side errors): its three ways on — Resume once
+  # the admin made room, Skip the rest, Cancel.
+  quota_notice: >-
+    Your Fauna mailbox is full. Ask your admin for more room, then resume.
+    Or skip the messages not imported yet, or cancel the import.
+  quota_skip_rest_button: Skip the rest
   paused_connection_lost: >-
     Import paused: the connection was lost and did not come back after several
     tries. Check your network, then resume — the import picks up where it
     stopped.
+  # A source mailbox whose UIDVALIDITY changed since the import began
+  # (`mailbox-migration.md` § Resume protocol step 4): its line in the error
+  # log, the paused session's sentence, and the button that restarts it.
+  mailbox_rebuilt_fmt: >-
+    {mailbox}: your old provider rebuilt this mailbox since the import began,
+    so the place the import had reached no longer points at the right
+    messages. It was not imported further.
+  paused_mailbox_rebuilt: >-
+    Import paused: your old provider rebuilt a mailbox since the import began.
+    Restart it to import it again from its first message — mail that already
+    arrived is skipped.
+  restart_button: Restart rebuilt mailbox
   error_log_title: Skipped / errored messages
   done_title: "Step 5 — Done"
   done_summary_fmt: "{imported} imported · {skipped} skipped · {errored} errored"
@@ -4981,10 +5582,12 @@ mail_import:
   back: Back
 archive_import:
   title: Import from other services
+  # public-text: app-strings-public
   description: >-
     Bring your posts, photos and events from a Facebook or Instagram export
     archive into Fauna, at their original dates and audiences. The archive
     itself stays in a sealed folder on your nest.
+  # public-text-end: app-strings-public
   unavailable: >-
     Importing needs a session that holds your identity key; this one does not.
   source_title: "Step 1 — Where the archive comes from"
@@ -5011,10 +5614,12 @@ archive_import:
   scope_audience_mode_label: Audience
   audience_original: Keep original audiences
   audience_only_me: Only me
+  # public-text: app-strings-public
   scope_audience_summary_fmt: >-
     {known} posts and albums have a recorded audience and import to it; {unknown}
     have none recorded and will be visible only to you.
   scope_audience_summary_only_me: Everything will be visible only to you.
+  # public-text-end: app-strings-public
   scope_hidden_tiers_unavailable: >-
     This nest predates hidden tiers, so only public posts can be imported now.
     Update the nest, then import again to pick up the rest.
@@ -5167,7 +5772,9 @@ nostr:
     petname_placeholder: Petname
   connected_apps:
     title: Connected apps
+    # public-text: app-strings-public
     description: 'Sign in to Nostr apps with your nest using Nostr Connect. Your key stays on the nest — apps only ask it to sign.'
+    # public-text-end: app-strings-public
     connect_button: Connect an app
     reveal_title: 'Scan or paste this in your Nostr app'
     reveal_hint: 'Shown once — copy it now.'
@@ -5242,6 +5849,7 @@ status:
     title: Inbox Privacy
     description: Control who can send you messages.
     open: Open
+    # public-text: app-strings-public
     open_desc: Anyone can message you directly.
     allow_knock: Allow Knocks
     allow_knock_desc: New contacts must send a knock request first.
@@ -5249,6 +5857,7 @@ status:
     contacts_only_desc: Only confirmed contacts can message you.
     closed: Closed
     closed_desc: No new messages accepted.
+    # public-text-end: app-strings-public
   encryption:
     key_packages: Key Packages
     available: '{count} available'
@@ -5266,14 +5875,18 @@ status:
     disabling: Disabling...
     permission_denied: Notification permission was denied.
     title: Push Notifications
+    # public-text: app-strings-public
     content_encrypted: Notification content is encrypted end-to-end.
+    # public-text-end: app-strings-public
     registered: Registered with server
     denied_title: Notifications Disabled
     denied_hint: Enable notifications in system Settings to receive alerts.
     open_settings: Open Settings
     unavailable: Push notifications are not available in this app build.
   data_export:
+    # public-text: app-strings-public
     description: Download all your data, content included, as a zip archive. It may be large.
+    # public-text-end: app-strings-public
     exported_to: 'Data exported to {path}'
   email_filters:
     none: No email filters configured.
@@ -5302,7 +5915,9 @@ status:
     placeholder: new-handle
     changing: Changing...
   danger_zone:
+    # public-text: app-strings-public
     delete_hint: Permanently removes your handle and data from this node. Your key is not affected.
+    # public-text-end: app-strings-public
   admin_section:
     title: Nest Administration
     description: You are an admin of this nest.
@@ -5312,7 +5927,9 @@ status:
   build:
     title: Build
     commit: Commit
+    # public-text: app-strings-public
     verify_hint: 'Verify this build: clone the repo at this commit, build locally, and compare file hashes.'
+    # public-text-end: app-strings-public
 admin:
   aliases: Aliases
   # Tooltip on the admin-nav-back button — leaves the admin shell for the
@@ -5370,7 +5987,9 @@ admin:
     evict: Evict
     suspend: Suspend
     cancel_eviction: Cancel Eviction
+    # public-text: app-strings-public
     evict_confirm: 'Start eviction for {id}? The user will be warned and given time to export data.'
+    # public-text-end: app-strings-public
     evict_default_reason: Evicted by admin
     suspend_default_reason: Suspended by admin
     make_admin: Make Admin
@@ -5443,6 +6062,38 @@ admin:
     # → Section 3). Generic verbs; no admin-tree Cancel/Delete const covered them.
     cancel: Cancel
     delete: Delete
+  mail_reports_page:
+    # The admin nav entry + page heading of admin-mail-reports — the reports
+    # peer mail servers send this nest about its own domains (DMARC aggregate
+    # reports today; dmarc-reporting.md § Admin pane summary surface, ids
+    # user-approved 2026-10-16). Each total and row line is filled from the
+    # shared DmarcReportsMachine snapshot; the empty line is the goal doc's own.
+    title: Mail reports
+    description: >-
+      Other mail servers send daily reports about mail that claims to come from
+      your domains: how much they saw, and whether it passed the checks that
+      prove it is really yours.
+    refresh: Refresh
+    window_label: Period
+    window_days: "Last {days} days"
+    domain_label: Domain
+    every_domain: All domains
+    summary_title: Summary
+    messages: "{messages} messages reported · {reports} reports · {peers} reporting servers"
+    alignment: "DMARC pass {dmarc} ({dmarc_share}%) · DKIM aligned {dkim} ({dkim_share}%) · SPF aligned {spf} ({spf_share}%)"
+    dispositions: "Delivered {none} · Quarantined {quarantine} · Rejected {reject}"
+    truncated: Only the newest 1,000 reports in this period are counted.
+    empty: >-
+      No DMARC reports yet. Peer mail servers usually send the first report one
+      to seven days after the policy was published.
+    sources_title: Top sources by reported messages
+    senders_title: Top senders by reported messages
+    reports_title: Reports
+    row_messages: "{count} messages"
+    report_period: "{begin} – {end}"
+    report_pass: "{passed} of {count} passed DMARC"
+    view: View
+    raw_title: Report XML
   aliases_page:
     # The admin nav entry + page heading. Named "External Forwarders" (not the
     # misleading "Email Aliases"): the page's only surface is admin external
@@ -5525,6 +6176,14 @@ admin:
     add_tier_error: 'Failed to add tier: {message}'
     add_tier_error_empty_name: "Can't add this tier — give it a name."
     add_tier_error_invalid_cap: "Can't add this tier — every limit must be a whole number."
+    # Deleting a tier (admin.md § 3, ID user-approved 2026-10-19). Any failure
+    # rides delete_tier_error's {message}; the nest's in-use refusal (its
+    # fauna.admin.conflict on this kind) is worded by delete_tier_error_in_use
+    # (fauna_client_admin::tier_delete_refusal) — the shared conflict family
+    # can only say "something went wrong", which names neither cause nor remedy.
+    delete_tier: Delete
+    delete_tier_error: 'Failed to delete tier: {message}'
+    delete_tier_error_in_use: "A member, an invite code or a paid membership still uses this tier, or it's the nest's default tier — move them off it first."
     # Membership designations (monetization.md § Pillar 4) — a link editor over
     # the admin's own subscription tiers, never a third tier list. One row per
     # owned subscription tier; the two selects name the quota tiers an admitted
@@ -5549,10 +6208,14 @@ admin:
     # "storage mode" dropped 2026-08-04 — the no-modes retirement
     # (storage-modes.md) removed the concept; naming it here described a
     # setting that no longer exists.
+    # public-text: app-strings-public
     factory_reset_desc: 'Wipe all deployment state (users, mail, stored content) and return this nest to a fresh, unclaimed state. The nest identity and TLS certificate are preserved. You will re-claim the nest immediately afterward.'
+    # public-text-end: app-strings-public
     factory_reset_button: Factory Reset…
     factory_reset_confirm_title: Factory reset this nest?
+    # public-text: app-strings-public
     factory_reset_confirm_body: 'This permanently deletes all users, mail, and deployment configuration on this nest and returns it to an unclaimed state. The nest identity and TLS certificate are kept, and you will be guided through re-claiming it. This cannot be undone.'
+    # public-text-end: app-strings-public
     factory_reset_confirm_button: Factory Reset
     factory_reset_cancel: Cancel
     factory_reset_failed: Factory reset failed. The nest is unchanged.
@@ -5644,10 +6307,69 @@ admin:
       someone types or bookmarks always wins.
     web_app_origin_load_error: 'Failed to load the web app choice: {message}'
     web_app_origin_save_error: 'Failed to save the web app choice: {message}'
+    # Update channel (admin-nest-update-channel-*; nest/update-channel.md § The
+    # UI, placement admin.md § N Nest → Update channel). Which builds this
+    # server's updater installs. The radios reuse the wizard's
+    # onboarding.vps_config.update_channel_* labels and descriptions; every
+    # status line is chosen once in fauna_client_admin::admin_update_channel_view,
+    # which runs the updater's never-downgrade decision. The Following lines'
+    # timing states UpdateChannel::registry_check_interval (a minute on Dev and
+    # Test, an hour on Stable) — a unit test pins the two together.
+    update_channel_label: Updates
+    # public-text: app-strings-public
+    update_channel_desc: >-
+      Which builds this server installs on its own. A server never moves to an
+      older version: switching to a channel that is behind waits until it catches up.
+    # public-text-end: app-strings-public
+    update_channel_save: Save update channel
+    update_channel_loading: "Loading the update channel…"
+    # public-text: app-strings-public
+    update_channel_status_following_stable: >-
+      Following Stable — new releases are picked up within the hour. This server
+      runs {version}.
+    update_channel_status_following_test: >-
+      Following Test — new builds are picked up within about a minute. This
+      server runs {version}.
+    update_channel_status_following_dev: >-
+      Following Dev — new builds are picked up within about a minute. This server
+      runs {version}.
+    update_channel_status_hold_stable: >-
+      Following Stable from the next Stable release that is at least {running};
+      this server runs {running}, and Stable is at {head}.
+    update_channel_status_hold_test: >-
+      Following Test from the next Test build that is at least {running}; this
+      server runs {running}, and Test is at {head}.
+    update_channel_status_hold_dev: >-
+      Following Dev from the next Dev build that is at least {running}; this
+      server runs {running}, and Dev is at {head}.
+    # A box installed from a tag that is no channel, with no admin choice yet.
+    update_channel_status_pinned: >-
+      This server runs {version} and follows no channel until one is chosen.
+    # A nest the container image does not run (the Windows or Mac installer's
+    # nest, or a nest installed directly on a Linux machine): no updater, so no
+    # channel applies and the nest refuses a choice — rendered read-only
+    # (nest/update-channel.md § The channel as nest state → Where the channel
+    # applies).
+    update_channel_status_not_from_image: >-
+      This server runs {version}. It was not installed from Fauna's container
+      image, so it follows no update channel: update it the same way it was
+      installed.
+    # public-text-end: app-strings-public
+    # A newer nest's channel this build cannot name — rendered read-only.
+    update_channel_status_unknown: >-
+      This server follows an update channel this app doesn't recognize
+      ({channel}). Update the app to change it.
+    # An older nest answers the read with unknown-kind.
+    update_channel_status_predates: >-
+      This server is too old to choose its update channel from the app. Update
+      the server to change it.
     # Host-OS maintenance status line (nest-os-maintenance-status), read from the
     # os_* fields on fauna.setup.status (installers/vps.md § Host OS Maintenance
     # § 4). Shared state→key decision in fauna_core::format::os_maintenance_status_label.
     # The pending security-update count renders separately in nest-os-updates-count.
+    # os_no_host_data: the nest read no host-status file (os_host_status_present
+    # false — a hand-built box, dev, desktop), so it reports nothing either way.
+    os_no_host_data: OS status not reported by this host
     os_up_to_date: OS up to date
     os_updates_pending: Security updates pending
     os_restart_pending: Restart pending — will restart automatically when idle
@@ -5660,10 +6382,12 @@ admin:
     # § Region determination, user-ratified): no wording here may offer to look
     # one up. Derived once in fauna_client_admin::admin_region_view.
     region_label: Region
+    # public-text: app-strings-public
     region_desc: >-
       The region whose laws this deployment operates under. You declare it; it is
       never detected from an address or a network. If that region has an
       authority publishing feature rules, they apply to accounts hosted here.
+    # public-text-end: app-strings-public
     region_none: No region declared
     region_declared: "Declared region: {region}"
     # Corruption, not absence — the stored declaration no longer reads. Worded
@@ -5700,19 +6424,23 @@ admin:
     # doc's own honest statement) — because an admin reaching for this in a
     # compromise is exactly the person who must not over-read it.
     rotate_seed_label: Deployment identity
+    # public-text: app-strings-public
     rotate_seed_desc: >-
       Give this nest a brand-new identity. Apps that already trust it re-trust it
       automatically, and anyone still holding the old identity — a removed admin,
       a lost device — stops being able to use it. It does not undo anything they
       already saw. Remove the admin first: everyone on the roster inherits the
       new identity.
+    # public-text-end: app-strings-public
     rotate_seed_button: Rotate deployment identity
     # Shown above the roster listing in the armed confirm. The list itself is the
     # decision surface, so this sentence's whole job is to say what the list
     # means in both directions.
+    # public-text: app-strings-public
     rotate_seed_confirm_body: >-
       These admins inherit the new identity and can still recover this nest.
       Anyone not listed loses that ability. This cannot be undone.
+    # public-text-end: app-strings-public
     rotate_seed_confirm_button: Rotate now
     rotate_seed_cancel_button: Cancel
     rotate_seed_roster_loading: Checking who currently administers this nest…
@@ -5740,11 +6468,15 @@ admin:
     # surface). The wording is deliberately compulsion-framed: this is never a
     # policy lever, and the strings say so.
     takedown_label: Legal takedown
+    # public-text: app-strings-public
     takedown_desc: >-
-      The one nest-wide content removal, for legal compulsion only (a court
-      order, a statutory demand). Every takedown serves a visible tombstone in
-      place of the content, can be appealed by the author, and writes a
+      One of two by-hand withholds, for legal compulsion only (a court order, a
+      statutory demand — and, on the nest its publisher runs, an app store's or
+      an authority's request to remove an item); the other is an admin's block
+      of a reported item. Every takedown serves a visible tombstone in place of
+      the content, can be appealed by the author of a post, and writes a
       permanent audit record. It is never a policy or opinion lever.
+    # public-text-end: app-strings-public
     takedown_content_id_label: Content id
     takedown_type_post: Post
     takedown_type_conversation: Conversation message
@@ -5756,8 +6488,8 @@ admin:
     takedown_blocked_no_reference: A legal reference is required — a takedown without one is refused.
     takedown_confirm_takedown: >-
       Take down {content_type} {content_id}, citing "{reference}"? A visible
-      tombstone will be served in its place, the author can appeal, and a
-      permanent audit row records this action.
+      tombstone will be served in its place, the author of a post can appeal,
+      and a permanent audit row records this action.
     takedown_confirm_restore: >-
       Overturn the takedown of {content_type} {content_id}? The content serves
       again; the takedown record remains as history.
@@ -5765,18 +6497,21 @@ admin:
     takedown_confirm_button_restore: Confirm restore
     takedown_cancel_button: Cancel
     takedown_working: Submitting…
-    takedown_done: Taken down. A tombstone is served in its place and the author can appeal.
+    takedown_done: Taken down. A tombstone is served in its place and the author of a post can appeal.
     takedown_restored: Restored. The content is served again; the takedown stays on record.
     takedown_failed: 'The nest refused the request: {error}'
     # Reports queue (admin-nest-reports-*; moderation.md § User-initiated
     # reporting → Where it lands). The wording keeps the invariant visible: a row
     # is a door to the levers that exist, and resolving is a record, not an act.
     reports_label: Reports
+    # public-text: app-strings-public
     reports_desc: >-
       Reports from users of this nest, and reports forwarded from other nests
       about accounts hosted here. A report is evidence for you to weigh; it
-      removes nothing by itself. Acting means the legal-takedown console or a
-      suspension — resolving a row only records what you decided.
+      removes nothing by itself. Acting means the legal-takedown console, a
+      suspension or, where this page offers it, blocking the reported item —
+      resolving a row only records what you decided.
+    # public-text-end: app-strings-public
     reports_loading: Loading reports…
     reports_empty: No open reports.
     reports_origin_local: 'Reported by {handle}'
@@ -5784,9 +6519,47 @@ admin:
     reports_open_takedown: Open in takedown console
     reports_acted: Mark as acted on
     reports_dismiss: Dismiss
+    # public-text: app-strings-public
     reports_resolved_acted: Recorded as acted on. The reporter is told the outcome, nothing more.
     reports_resolved_dismissed: Dismissed. The reporter is told the outcome, nothing more.
+    # public-text-end: app-strings-public
     reports_failed: 'Could not update the report: {error}'
+    # The admin's block of one reported item (admin-nest-report-block-*,
+    # admin-nest-blocked-*; moderation.md § Admin block of a reported item).
+    # Picked by the shared fauna_client_moderation::block folds. {item} and
+    # {reason} in the confirms are themselves keys (block_item_* and
+    # moderation.report.reason.*) — rendered through a nested lookup.
+    block_arm_block: Block…
+    block_arm_unblock: Unblock…
+    block_blocked_not_item: >-
+      A block is of one post or message. An account report has the account
+      levers — suspension on the users page.
+    block_item_post: post
+    block_item_message: message
+    block_confirm_block: >-
+      Block {item} {content_id} for everyone this nest serves? Reason:
+      {reason}. A notice is shown in its place, the author of a post keeps their
+      view of it and can appeal, and a permanent audit row records this action.
+      Nothing is deleted.
+    block_confirm_unblock: >-
+      Unblock {item} {content_id} (blocked for: {reason})? It is served again
+      exactly as it was; the block stays on record.
+    block_confirm_button_block: Confirm block
+    block_confirm_button_unblock: Confirm unblock
+    block_done: Blocked. A notice is shown in its place, the author of a post can appeal, and the report is recorded as acted on.
+    block_restored: Unblocked. The item is served again; the block stays on record.
+    block_failed: 'The nest refused the request: {error}'
+    block_cancel_button: Cancel
+    block_working: Submitting…
+    blocked_label: Blocked items
+    # public-text: app-strings-public
+    blocked_desc: >-
+      Posts and messages this nest's admins blocked after a report. Each is
+      withheld from everyone this nest serves — a post except from its author —
+      with a notice in its place. Unblock serves it again exactly as it was.
+    # public-text-end: app-strings-public
+    blocked_loading: Loading blocked items…
+    blocked_empty: Nothing is blocked.
     # The OAuth issuer's two signers (admin-nest-oauth-*; authorization-server.md
     # § The issuer → Two rotation arms). User-facing words are "sign-in key" and
     # "saved sign-in", never "issuer", "JWKS" or "refresh token". Every sentence
@@ -5931,10 +6704,22 @@ admin:
     manage_dns: Manage DNS
   logs_page:
     title: Nest Logs
+    # public-text: app-strings-public
     description: >-
       Recent activity recorded on the nest, newest first. No message contents
       or secrets are logged — only what happened, when, and where.
+    # public-text-end: app-strings-public
     empty: No nest log entries yet.
+    audit_title: Admin actions
+    audit_empty: No admin actions recorded yet.
+    audit_entry: "{who} — {action} on {target}"
+    audit_entry_no_target: "{who} — {action}"
+    audit_entry_system: "The nest — {action} on {target}"
+    audit_entry_system_no_target: "The nest — {action}"
+    audit_more: Show older
+    audit_verified: "The record checks out through the {count} entries shown."
+    audit_uncheckable: "The record checks out through the entries shown, except {count} this app cannot check."
+    audit_broken: "Entry {id} does not check out — the record may have been altered."
   custody_hosting:
     title: Held Custody
     description: >-
@@ -6000,6 +6785,14 @@ admin:
     warning: The bridge will be marked revoked and will exit; the supervisor restarts it with a fresh key. On a mail-enabled box the new key is approved automatically.
     confirm: Rotate key
     cancel: Cancel
+  # The reject-pending-bridge confirmation dialog (admin-bridges-reject-confirm),
+  # opened from a pending bridge's reject button. See mail-bridge-lifecycle.md
+  # § Pending approval (the rejection flow).
+  bridges_reject:
+    title: Reject this bridge?
+    warning: It will not be able to connect again until an admin re-approves a fresh keypair.
+    confirm: Reject bridge
+    cancel: Cancel
   # The flat admin-mail policy page (admin.md § 6 Mail; mail-policy-config.md
   # § Policy catalog Tier 2). Renders only live-write-path knobs over the shared
   # MailPolicyMachine; DKIM/TLS/DNS are automatic (no manual UI).
@@ -6033,11 +6826,39 @@ admin:
     # facts (each a relative time, or health_never).
     health_status_line: '{state} — last delivered: {delivered} · last received: {received}'
     health_delist: Request removal from the blocklist
+    # admin-mail-health-sender-dashboards-note and its two links
+    # (mail-deliverability.md § The admin-pane surface): static help, no integration.
+    health_sender_dashboards_note: Gmail Postmaster Tools and Outlook SNDS are externally managed dashboards on the receiver's website. Sign up at postmaster.google.com and sendersms.outlook.com if you want their per-receiver-side view; Fauna doesn't integrate with these APIs (none exist).
+    health_sender_dashboard_gmail: Gmail Postmaster Tools
+    health_sender_dashboard_outlook: Outlook SNDS
     health_recheck: Check again
     health_warmup_reset: Restart warm-up
     health_warmup_reset_confirm: Restart the sending warm-up at day 1? Do this only after the server's outgoing IP address changed.
+    # The two secret-rotation buttons (mail-mass-mailing.md § Secret rotation;
+    # mail-forwarding.md § SRS scheme): a resting label, the confirm sentence the
+    # first press relabels it to, and the outcome line.
+    secrets_group_title: Secrets
+    secrets_group_desc: Rotate a secret only when it may have leaked. Its value is never shown.
+    list_unsubscribe_secret_rotate: Rotate the newsletter unsubscribe secret
+    list_unsubscribe_secret_rotate_confirm: Rotate the unsubscribe secret? Unsubscribe links in newsletters already sent will stop working.
+    list_unsubscribe_secret_rotated: 'Unsubscribe secret rotated — {count} subscriptions now have new links. New issues carry them.'
+    forward_srs_secret_rotate: Rotate the forwarding secret
+    forward_srs_secret_rotate_confirm: Rotate the forwarding secret? Bounces to mail forwarded before still come back while the old secret is kept.
+    forward_srs_secret_rotated: Forwarding secret rotated. The previous one is still honoured for bounces to mail already forwarded.
     auto_enable_new_users_label: Auto-enable mail for new users
     auto_enable_new_users_subtitle: New users automatically get a mailbox at their handle on first sign-in. Each user can still turn their own mail off.
+    microsoft_group_title: Microsoft sign-in for the Outlook import
+    microsoft_group_desc: The Outlook import signs in to Microsoft through the default app registration. To use your organisation's own registration instead, enter its application (client) ID and, if you like, its directory. Leave both empty to go back to the default.
+    microsoft_requirements: "The registration needs: public client flows turned on; the delegated permissions IMAP.AccessAsUser.All (Office 365 Exchange Online) and offline_access; and supported account types that match the directory."
+    microsoft_client_id_label: Application (client) ID
+    microsoft_tenant_label: Directory (tenant)
+    microsoft_tenant_subtitle: A tenant ID, a verified domain name, or common, organizations or consumers. Empty means common.
+    microsoft_save: Save Microsoft registration
+    microsoft_using_default: Using the default registration.
+    microsoft_using_own: Using your organisation's registration.
+    microsoft_client_id_invalid: The application (client) ID must be a GUID, such as 00000000-0000-0000-0000-000000000000.
+    microsoft_tenant_invalid: The directory must be a tenant ID, a domain name, or common, organizations or consumers.
+    microsoft_tenant_needs_client_id: Enter the application (client) ID that goes with this directory.
     spam_group_title: Spam and inbound perimeter
     spam_group_desc: How inbound mail is scored, rate-limited, and gated before delivery.
     threshold_junk_label: Junk threshold
@@ -6073,7 +6894,12 @@ admin:
     unlisted_recipient_penalty_subtitle: Extra spam points added when mail arrives at an address that isn't one of a user's aliases (delivered via catch-all). 0 = off; a large value (e.g. 1000) forces such mail to Junk.
     spam_save: Save spam policy
     publish_spam_baseline_button: Publish deployment baseline
+    # The confirm sentence a first press relabels the publish button to (the
+    # same-button two-press; mail-spam.md § Cold start step 1).
+    # public-text: app-strings-public
+    publish_spam_baseline_confirm: Publish the baseline? It reflects the spam training of the members who opted in, and new users' filters start from it.
     publish_spam_baseline_subtitle: Aggregate every opted-in user's spam training into a baseline that new users start from. Never reveals who contributed, and needs at least 3 contributors.
+    # public-text-end: app-strings-public
     spam_baseline_published: 'Published from {contributors} contributors ({samples} samples).'
     spam_baseline_withheld: 'Not published — too few contributors ({contributors}); at least 3 must opt in.'
     spam_baseline_skipped_contributors: '{count} opted-in contributor(s) could not be merged this run.'
@@ -6128,7 +6954,9 @@ admin:
     outbound_suppress_ndr_spf_label: Suppress bounce on SPF hardfail
     outbound_suppress_ndr_dmarc_label: Suppress bounce on DMARC reject
     outbound_postmaster_cc_label: CC postmaster on bounces
+    # public-text: app-strings-public
     outbound_postmaster_cc_subtitle: Disabled — project policy never copies the postmaster.
+    # public-text-end: app-strings-public
     outbound_tlsrpt_send_label: Send TLSRPT reports
     outbound_ipv6_label: IPv6 outbound
     outbound_treat_5xx_label: Treat as transient (5xx codes)
@@ -6145,6 +6973,19 @@ admin:
     alias_wildcard_prefix_label: Wildcard-prefix aliases
     alias_wildcard_prefix_subtitle: Allow name-prefixed aliases that route to the same user.
     alias_save: Save alias policy
+    dmarc_group_title: DMARC reports
+    dmarc_group_desc: The reports peer mail servers send about mail claiming to be from your domains, and how long they are kept.
+    dmarc_ruf_publish_label: Ask for forensic reports
+    # public-text: app-strings-public
+    dmarc_ruf_warning: Forensic reports carry recipient email addresses from third-party senders. Enable only if your security team needs forensic-level signal.
+    # public-text-end: app-strings-public
+    dmarc_fo_mode_label: Report a message when
+    dmarc_aggregate_retention_label: Keep aggregate reports (days, 1–365)
+    dmarc_forensic_retention_label: Keep forensic reports (days, 1–90)
+    # public-text: app-strings-public
+    dmarc_forensic_retention_warning: Forensic reports hold third-party addresses — keeping them longer than 30 days keeps that personal data longer.
+    # public-text-end: app-strings-public
+    dmarc_save: Save DMARC policy
   dns:
     title: DNS
     description: >-
@@ -6168,8 +7009,20 @@ admin:
     add_domain_primary_warning: This becomes your nest's primary domain and can never be removed — undoing it later requires renaming onto a different domain.
     primary_badge: Primary
     remove: Remove
+    remove_confirm_title: "Remove {domain}?"
+    # public-text: app-strings-public
+    remove_confirm_body: >-
+      {domain} will stop receiving mail: the addresses your members have on it
+      stop working, and mail sent to them is refused. You can restore the domain
+      for 30 days, and those addresses come back with it. After 30 days the
+      domain, its signing key and the aliases on it are gone for good, and adding
+      it again starts with a new key. Mail already on its way may still arrive.
+    # public-text-end: app-strings-public
+    remove_confirm: Remove domain
     removed_title: Recently removed
+    # public-text: app-strings-public
     removed_desc: Restorable for 30 days.
+    # public-text-end: app-strings-public
     restore: Restore
     refresh: Refresh
     credentials_title: DNS-provider credentials
@@ -6208,6 +7061,11 @@ admin:
       remove_delegation: Remove delegation
       renewals_automated: Renewals automated
       delegate_no_zones: Add a DNS-provider credential first to delegate renewals.
+      # `admin-dns-cert-issuance-error`: one line per failing nest-placed order;
+      # `{error}` is the CA's own text, inserted as data (user-approved 2026-10-16).
+      issuance_failed_domain: 'Certificate request failed ({date}): {error}'
+      issuance_failed_ip: 'IP address certificate request failed ({date}): {error}'
+      issuance_failed: 'Certificate request failed ({date}): {error}'
     rename:
       button: Rename primary domain
       promote: Promote to primary
@@ -6274,8 +7132,10 @@ p2p:
   copy_to_clipboard: Copy to Clipboard
 moderation:
   spam_protection: Spam Protection
+  # public-text: app-strings-public
   spam_hint: Content scoring above this threshold is filtered as spam.
   phishing_hint: Content scoring above this threshold is flagged as phishing.
+  # public-text-end: app-strings-public
   stats_title: Moderation Stats
   total_labels: 'Total labels:'
   spam_detected: 'Spam detected:'
@@ -6297,8 +7157,16 @@ moderation:
   appeal_blocked_no_content: No content selected to appeal.
   appeal_blocked_no_reason: Enter a reason before submitting the appeal.
   appeal_blocked_reason_too_long: The reason is too long. Shorten it before submitting the appeal.
+  # public-text: app-strings-public
   appeal_recorded: Appeal recorded. An administrator will review it.
+  # public-text-end: app-strings-public
   appeal_failed: 'Appeal failed: {error}'
+  # A queue row another nest delivered names the nest whose admin decided —
+  # the suffix every app paints after the row's action label, `{nest}` its
+  # handle domain (fauna_client_moderation::QueueRow.issued_by; moderation.md
+  # § Legal takedown → The author homed on another nest).
+  queue:
+    issued_by: 'decided by {nest}'
   # User-initiated reporting (moderation.md § User-initiated reporting; IDs
   # user-approved 2026-09-25). Every sentence is picked by the shared
   # fauna_client_moderation::report fold, so all 7 apps say the same thing. The
@@ -6322,15 +7190,19 @@ moderation:
     # The consequence line on report-include-text-checkbox — rendered only for
     # a sealed subject, and it names what changes: attaching the text is the
     # reporter's own act on content they already hold.
+    # public-text: app-strings-public
     include_text_label: Include the text of this message — the admins will be able to read it
+    # public-text-end: app-strings-public
     block_author_label: Also block this person
     submit: Send report
     cancel: Cancel
     blocked_no_reason: Choose a reason before sending the report.
     blocked_note_too_long: The note is too long. Shorten it before sending the report.
     # The acknowledgement (report-status) names where the report went.
+    # public-text: app-strings-public
     sent_local: 'Report sent to the admins of {nest}.'
     sent_forwarded: 'Report sent to the admins of {nest} and forwarded, without your name, to the admins of {home_nest}.'
+    # public-text-end: app-strings-public
     failed: 'The report could not be sent: {error}'
     # The reporter-side hide (moderation.md § Corollary — block also hides):
     # the placeholder the render-verdict engine paints in place of content the
@@ -6346,7 +7218,9 @@ moderation:
     outcome_acted: Acted on
     outcome_dismissed: Dismissed
     withdraw: Withdraw
-    withdrawn: Report withdrawn. Your note and any attached text were deleted everywhere they went.
+    # public-text: app-strings-public
+    withdrawn: Report withdrawn. Your note and any attached text were deleted here, and every nest the report went to is asked to delete them too.
+    # public-text-end: app-strings-public
   # Canonical content-label badge category vocabulary (moderation.md
   # § Categories & enforcement). Rendered by every app's ContentLabelBadge via
   # the shared fauna_core::content_category::content_label_style map; an off-list
@@ -6373,6 +7247,10 @@ moderation:
     # (moderation.md § Categories & enforcement item 1). The queue-row action
     # label; the full in-place tombstone is legal_takedown.tombstone below.
     taken_down: Removed under legal obligation
+    # ObligationAction::Blocked (10) — the admin's block of one reported item
+    # (moderation.md § Admin block of a reported item). The queue-row action
+    # label; the in-place notice is admin_block.notice below.
+    blocked: Blocked by this nest's admin
   # The visible tombstone an app renders in place of a post's body once it is
   # taken down under legal compulsion (moderation.md § Categories & enforcement
   # item 1). Resolved by fauna_core::obligation::legal_takedown_tombstone; the
@@ -6380,17 +7258,37 @@ moderation:
   # silent removal — this text is always shown where the body would be.
   legal_takedown:
     tombstone: Removed under legal obligation ({reference})
+  # The visible notice an app renders in the body position of a post or message
+  # this nest's admin blocked after a report (moderation.md § Admin block of a
+  # reported item). Resolved by fauna_core::obligation::admin_block_notice; the
+  # {reason} value is itself a key (moderation.report.reason.*), rendered
+  # through a nested lookup so the reason reads in the viewer's language.
+  admin_block:
+    notice: 'Blocked by this nest''s admin after a report: {reason}'
 # The tier-1 muted-keywords Settings sub-page (content-moderation-and-ranking.md
 # § Resolved design decisions Q3; moderation.md § Muted keywords). The
 # user-global word-list is sealed client-side (the account plane's moderation record)
 # and never leaves the user's devices — the copy says so.
 muted_words:
   title: Muted words
-  description: Conversation messages containing one of these words are collapsed behind a “Show anyway” button. This list stays on your devices — the server never sees it.
+  # public-text: app-strings-public
+  description: A new word is set to “Hide”, so posts and messages containing it collapse behind “Show anyway” and matching posts sink in ranked feeds. A word set to “Show less” only sinks matching posts in ranked feeds — messages show as usual. This list is stored encrypted on your nest, and only your devices can read it.
+  # public-text-end: app-strings-public
   input_placeholder: Add a word to mute
   add: Mute word
   empty: You haven’t muted any words yet.
   remove: Un-mute
+  # The per-row level picker (ui/settings.md § Muted words — the level picker).
+  level_hide: Hide
+  level_show_less: Show less
+  # The collapse a muted word causes, on every surface it applies to
+  # (content-moderation-and-ranking.md § Composition: feed, conversations,
+  # notifications): the placeholder painted in place of the content, and the
+  # session-local reveal. One pair for the one concept — the notifications
+  # collapse uses it first (notification-muted / -reveal-button); the feed's
+  # post_muted_* and the conversation's detail.muted_* copies move onto it.
+  collapsed: Muted word
+  reveal: Show anyway
 # The personalization home (content-moderation-and-ranking.md § Composition,
 # ratified 2026-07-06) — a hub linking the Feeds facet, the ALREADY-SHIPPED
 # muted-words sub-page (reused, not rebuilt here), and the user's subscribed
@@ -6438,11 +7336,13 @@ personalization:
   publish_sheet_title: Publish this topic
   publish_name_label: Public name for this list
   publish_name_placeholder: e.g. Small orange cats
+  # public-text: app-strings-public
   publish_limitation_note: >-
     You’re sharing the posts below — not the topic itself or anything it learned
     about you. Only posts this device has already loaded and seen can be
     included, so the list won’t cover posts you never saw. It’s published
     anonymously: nothing links the list back to you or your account.
+  # public-text-end: app-strings-public
   publish_exemplars_title: Posts to include
   publish_exemplars_empty: >-
     This topic hasn’t scored any of the posts loaded so far. Open a feed it
@@ -6480,6 +7380,7 @@ personalization:
   # marked "less like this" (the dislike half is part of the disclosure, which
   # is why the direction column exists); and it is anonymous and built only from
   # examples you marked by hand, never from what you read or watched.
+  # public-text: app-strings-public
   publish_limitation_note_model: >-
     You’re sharing the word patterns this topic learned — not the topic itself,
     and none of the posts. Unlike a list, a model also matches posts nobody here
@@ -6488,6 +7389,7 @@ personalization:
     and what you marked as less like this — the direction column below shows
     which is which. It’s published anonymously, and it’s built only from posts
     you marked by hand: nothing you merely read or watched goes into it.
+  # public-text-end: app-strings-public
   # The corpus-size line § Publishing mandates beside the note. Both numbers
   # show, because M - N is what the rebuild DROPPED as private, deleted, or
   # unreachable — and a publisher only learns that happened if both are visible.
@@ -6520,14 +7422,18 @@ personalization:
   # exports to peers (byte-identical to the federation export).
   share_signals_title: Anonymous signal sharing
   share_signals_label: Share anonymous engagement signals
+  # public-text: app-strings-public
   share_signals_subtitle: >-
     Off by default. When on, whether you watched or skipped a public post joins an
     anonymized count your nest shares — but only once at least 3 people here have
     the same verdict on the same post, and never your identity or your activity.
+  # public-text-end: app-strings-public
   signal_published_title: What this nest publishes
+  # public-text: app-strings-public
   signal_published_description: >-
     The anonymized signal and report counts your nest shares with peers, shown
     exactly as a peer nest sees them. Nothing appears here below 3 contributors.
+  # public-text-end: app-strings-public
   signal_published_empty: This nest publishes no signal aggregates yet
   signal_published_contributors: contributors
 # The community-labeler catalog (content-moderation-and-ranking.md § Tier-3
@@ -6765,12 +7671,18 @@ features:
 # shared by all" note.
 family:
   title: Family
+  # The kids_ineligible page (account-age-band.md, the kids-app bullet, item 3).
+  kids_ineligible_message: 'Fauna Kids is for supervised accounts, and this account is not supervised. Sign out to use a different account.'
+  # public-text: app-strings-public
   supervised_indicator: 'This account is supervised by {guardian}'
   supervised_notice_onboarding: 'This account will be supervised by {guardian}'
+  # public-text-end: app-strings-public
   # The same notice for a code minted with an age band (family-safety.md
   # § App surface → Age-band surfaces); {band} is a NESTED family.age_band.*
   # key, so a renderer resolves it with LocalizedText::resolve_nested.
+  # public-text: app-strings-public
   supervised_notice_onboarding_band: 'This account will be supervised by {guardian} as a {band} account'
+  # public-text-end: app-strings-public
   # Guardian section — wards list.
   wards_heading: Accounts you supervise
   no_wards: You are not supervising any accounts.
@@ -6788,7 +7700,9 @@ family:
   # FALSE for any ward whose guardian set it. Names the governing control rather
   # than its position: the six apps still lifting the select render this same
   # caption. Reworded in the commit that shipped tui's select.
+  # public-text: app-strings-public
   policy_feed_sources_caveat: 'Blocks new external accounts and follows. Messages arriving through an already-connected account are governed by "Unknown message senders".'
+  # public-text-end: app-strings-public
   # The bridge-DM gate (§ The bridge-DM gate) — what happens to direct messages
   # arriving over a connected external account from someone the child has never
   # messaged. Closes the bound policy_feed_sources_caveat states.
@@ -6802,6 +7716,9 @@ family:
   policy_content_commercial_label: Ads and promotions
   # Guardian Notify (§ Guardian Notify, Slice D) — a boolean, category+count only.
   policy_content_notify_label: Notify me about flagged content
+  # public-text: app-strings-public
+  policy_content_hint: 'The apps themselves don''t detect adult content or ads and promotions yet. A limit you set on them is saved, and applies as soon as a post or message is labelled that way.'
+  # public-text-end: app-strings-public
   # Screen time (§ Screen time, Slice E) — the usage window is the hours the
   # child MAY use the account (so "no device after 21:00" is the window
   # 07:00-21:00), and it may wrap midnight. Both bounds are typed as HH:MM and
@@ -6814,7 +7731,9 @@ family:
   # The conforming-app bound, which family-safety.md § Screen time requires
   # be stated on this surface the same way policy_feed_sources_caveat states
   # pillar 1's: screen time is enforced by the child's own apps, not the nest.
+  # public-text: app-strings-public
   policy_screen_caveat: 'Enforced by the apps on your child''s devices. Leave a field empty to remove that limit.'
+  # public-text-end: app-strings-public
   policy_save_button: Save policy
   # Shared value labels for the unknown-sender-mail / feed-sources /
   # unknown-peer-dm selects (§ Wire & data shape: unknown_sender_mail =
@@ -6853,7 +7772,9 @@ family:
   # guardian flips exactly the label the child then sees on their own device
   # list, so the two ends of the transparency promise read identically.
   ward_devices_heading: Devices
+  # public-text: app-strings-public
   ward_devices_hint: 'Mark the device you enrolled into this account. {handle} cannot remove a marked device, and graduating un-enrolls it automatically.'
+  # public-text-end: app-strings-public
   no_ward_devices: No devices registered yet.
   device_mark_label: Guardian device
   # The un-deny surface (family-safety.md § The bridge-DM gate → The un-deny
@@ -6861,7 +7782,9 @@ family:
   # a denial back. Deliberately reversible in one click — a deny was otherwise
   # a one-way door in the UI.
   blocked_peers_heading: Denied message senders
+  # public-text: app-strings-public
   blocked_peers_hint: 'People you denied for {handle}. Their new messages are refused; anything already delivered stays readable. Allowing lets them message again.'
+  # public-text-end: app-strings-public
   no_blocked_peers: Nobody denied.
   blocked_peer_allow: Allow again
   # The ward's full-screen screen-time lock (screen-time-lock /
@@ -6874,6 +7797,32 @@ family:
   screen_lock_window: 'Your screen time starts again at {resumes}. Set by {guardian}.'
   screen_lock_budget: 'You have used today''s {minutes} minutes. Set by {guardian}.'
   screen_lock_family_hint: You can still open Family to see your settings.
+  # The store-consent lock (store-consent-lock / store-consent-lock-message on
+  # android + ios; store-consent-lock-ask-button on ios only — account-age-band.md
+  # § The account age band → the store-law developer duties bullet, item (3);
+  # § App surface → Store-consent surfaces). The whole app is locked before any
+  # page while the STORE's parent — the store's own family system, never the
+  # Fauna guardian (whose ask label is ask_guardian) — has a significant app
+  # change to approve or has declined one, so every line can be shown before
+  # sign-in: a public text. "The app", never "Fauna": the kids build renders
+  # this lock too. The lines are composed in shared Rust
+  # (fauna_client_family::store_consent_lock_message) and rendered in this
+  # order: title; when a change is in effect, what_changed and one line per
+  # change (rating_changed for the iOS age-rating trigger, or a ledger entry's
+  # own key under store_consent_lock.changes); state_pending or state_declined;
+  # ask_hint (ios, beside the one button, ask_button) or play_hint (android,
+  # which has no ask — Google Play raises the parent's request itself).
+  # public-text: app-strings-public
+  store_consent_lock:
+    title: A change to this app needs your parent's approval
+    what_changed: 'What changed:'
+    rating_changed: This app's age rating changed.
+    state_pending: Waiting for your parent to say yes.
+    state_declined: Your parent said no.
+    ask_button: Ask your parent
+    ask_hint: Tap the button to ask your parent. The app unlocks when they say yes.
+    play_hint: Google Play asks your parent for you. The app checks again each time you come back to it.
+  # public-text-end: app-strings-public
   # Reach approvals queue (§ Reach approvals).
   approvals_heading: Approvals
   no_approvals: No pending approvals.
@@ -6941,8 +7890,10 @@ family:
     # The onboarding notice (invite-request-age-notice, android/ios only) — the
     # store round's outcome, shown before submit/redeem (D3). A declared-only
     # claim names no store: the machine does not know which platform failed.
+    # public-text: app-strings-public
     notice_attested: 'Your age range ({band}) from {store} will be shared with this nest''s admin, verified by {verifier}'
-    notice_declared: 'Your age range ({band}) will be shared with this nest''s admin as declared, not verified'
+    notice_declared: 'Your age range ({band}) goes to this nest as declared, not verified'
+    # public-text-end: app-strings-public
     store_android: Google Play
     store_ios: the App Store
     verifier_android: Google
@@ -6995,7 +7946,9 @@ notifications:
   type_report: Report
   type_default: Notification
   update_available_summary: Fauna update available
-  update_available_body: 'Version {version} is available. Visit fauna.social to download.'
+  # public-text: app-strings-public
+  update_available_body: 'Version {version} is available from the project''s releases page.'
+  # public-text-end: app-strings-public
   # The sentence a row on the notifications page shows. The nest sends the key
   # and the args (`NotifItem.body`); the app resolves it, falling back to the
   # row's English `summary` for a key it does not have
@@ -7007,6 +7960,10 @@ notifications:
   row_mention: '{sender} mentioned you'
   row_follow: '{sender} followed you'
   row_interaction: '{sender} interacted with your content'
+  # The two deletes on the notifications page (behavior/notifications.md
+  # § Retention rule 2): the per-row dismiss and the clear-all.
+  dismiss: Dismiss
+  clear_all: Clear all
   # tip (monetization.md § Tips): a credited tip on the reader's post. The unit
   # split is fauna_core::format::tip_amount's (a sub-sat tip keeps msats); a
   # receipt with no parseable amount, or naming no tipper, has its own form.
@@ -7041,8 +7998,8 @@ notifications:
   row_security_recovery_replacement_landed: 'Security: your recovery key was replaced (new key {new_key}). Your recovery phrase cannot recover this account until you restore phrase recovery under Settings → Account → Recovery Kit. If you did not request this replacement, your account may be compromised — contact your nest administrator.'
   row_security_recovery_replacement_cancelled: 'Security: the pending recovery key replacement was cancelled by {cancelled_by}.'
   row_security_identity_succeeded: 'Security: this identity was succeeded. Your account moved to a new key ({new_actor_id}). If you did NOT perform this recovery, whoever holds your recovery kit now controls the account — contact your nest administrator immediately.'
-  row_security_archive_exported: 'Security: your full account archive was downloaded from {ip}. If this was not you, change your keys and contact your nest administrator.'
-  row_security_mailbox_export_downloaded: 'Security: a mailbox export ({format}) was downloaded from {ip}. If this was not you, change your keys and contact your nest administrator.'
+  row_security_archive_exported: 'Security: your full account archive was downloaded from {ip}. If this was not you, revoke your sessions under Settings → Security (or use the emergency lockout) and contact your nest administrator.'
+  row_security_mailbox_export_downloaded: 'Security: a mailbox export ({format}) was downloaded from {ip}. If this was not you, revoke your sessions under Settings → Security (or use the emergency lockout), discard the export from the mail export page, and contact your nest administrator.'
 # Home-screen widget picker metadata (android AppWidgetProviderInfo `android:description`)
 # + the widget's own rendered content (android Glance `FaunaWidget`).
 widget:
@@ -7093,12 +8050,17 @@ profile:
   edit_remove_avatar: Remove avatar
   edit_banner: Banner image path
   edit_remove_banner: Remove banner
+  # profile-edit-audience-toggle — the signed Profile.audience (ui/profile.md
+  # § Where logic lives → The remote read). A setting's label.
+  edit_audience_toggle: People on other nests can see your profile
   edit_save: Save
   edit_cancel: Cancel
   # The private section — your own nickname, notes and labels on another
   # person (ui/profile.md § The private section; ui/contacts.md § The private
   # overlay). Nobody else ever sees any of it. "Nickname", never "alias".
+  # public-text: app-strings-public
   private_title: Only you can see this
+  # public-text-end: app-strings-public
   private_nickname: Nickname
   private_notes: Notes
   private_labels: Labels
@@ -7159,6 +8121,8 @@ subscriptions:
   provider_tier_label: 'Tier:'
   webhook_secret: Webhook secret
   webhook_url_label: 'Webhook URL:'
+  return_url_label: 'Return URL:'
+  return_url_unavailable: Turn on your public web address (Settings, Web) to get a return URL
   redeem_claim_title: Redeem a claim code
   claim_code: Claim code
   redeem: Redeem
@@ -7172,6 +8136,12 @@ subscriptions:
   claim_status_unredeemed: Unredeemed
   claim_status_redeemed: Redeemed
   claim_status_voided: Voided
+  # The §5 row's Void verb (monetization.md § Pillar 3 → Buyer↔actor binding):
+  # the first press turns the same button into the consequence, the second voids.
+  void_claim: Void
+  void_claim_confirm_unredeemed: Void now — this code will stop working
+  void_claim_confirm_redeemed: 'Void now — {redeemer} loses access to {tier}'
+  void_claim_cancel: Keep
   provider_status_configured: Configured
   provider_status_verified: Verified
   provider_status_error: Error
@@ -7336,6 +8306,13 @@ error:
     # (caldav-server.md § QUOTA → § Enforcement points). Nothing was saved; the
     # remedy is freeing space or a bigger allowance, so the sentence names both.
     over_quota: Your storage is full, so this wasn't saved. Delete something to make room, or ask your nest admin for more space.
+    # fauna.bridges.mail_unavailable_here — set_mail_enabled(true) on a public
+    # box whose deployment wired no content scanners (mail-bridge-lifecycle.md
+    # § Default-off on first claim → A box with no content scanners cannot
+    # enable mail). Nothing changed; the remedy is a deployment with mail.
+    # public-text: app-strings-public
+    mail_unavailable_here: "Mail wasn't turned on: this server was set up without the virus scanner and spam filter that mail needs. To use mail, set up a server that includes them."
+    # public-text-end: app-strings-public
     # fauna.bridges.address_refused — conversation.rooms.open found no single
     # connected bridge whose declared address grammar accepts the typed
     # address (apps/bridges.md § Bridge-kind catalogue → Phase G).
@@ -7347,7 +8324,9 @@ error:
     # fauna.bridges.guardian_approval_required — the family bridge-DM gate:
     # a send to (or a deposit from) a peer the guardian blocked
     # (family-safety.md § The bridge-DM gate).
+    # public-text: app-strings-public
     guardian_approval_required: This account can only message approved contacts.
+    # public-text-end: app-strings-public
   # ── The content-residency serving refusals (file-sync.md § Content residency,
   # v1 scope cuts): metadata-only is refused pairwise against website serving,
   # WebDAV serving and a paywall, whichever side moves second. ONE code per
@@ -7440,7 +8419,7 @@ error:
   federation:
     # fauna.federation.peer_nest_outdated — a cross-nest relay reached a peer
     # nest that predates the required federation kind (S5 old-peer mapping,
-    # federation.md § Cross-nest shared folders + channel append; shared by
+    # federation-shared-folders.md § Cross-nest shared folders + channel append; shared by
     # the send_remote / changes.list / content_key.get / leave relays).
     # Actionable for the OTHER side's admin: their nest needs an update — never
     # an auth problem on this side, never an auto-retry.
@@ -7612,7 +8591,9 @@ registrar:
   # not): registration is performed the moment "Buy and set up" runs, which
   # is the express-consent / fully-performed exemption immediate domain
   # registration relies on — docs/goal/behavior/onboarding.md § 4.
+  # public-text: app-strings-public
   price_confirm: I accept this price and authorize the charge on my registrar account. Registration starts immediately when I continue, and I understand this means I give up any right to withdraw from this purchase.
+  # public-text-end: app-strings-public
   contact:
     first_name: First name
     last_name: Last name
@@ -7638,7 +8619,9 @@ provisioning:
   # (docs/goal/architecture/provisioning/bundled-provider-api.md).
   bundled:
     name: "Bundled provider (open API)"
+    # public-text: app-strings-public
     help: "One company that registers your domain, hosts its DNS and rents you the server — you sign up and pay once, there. Paste the address the company gave you, then sign in; it must implement the open Fauna Bundled Provider API (the link above)."
+    # public-text-end: app-strings-public
     base_url: "Provider address (https://…)"
     account: "Account"
     location: "Datacenter"
@@ -7688,22 +8671,26 @@ provisioning:
     app_key: "Application key"
     app_secret: "Application secret"
     consumer_key: "Consumer key"
-    project: "Project"
+    location: "Region"
   linode:
     name: "Linode (Akamai)"
     help: "Create a Personal Access Token at cloud.linode.com → Profile → API Tokens."
     api_token: "API token"
     location: "Region"
   managed:
+    # public-text: app-strings-public
     disabled: "Managed subdomains on fauna.social are coming soon. For now, pick another option."
+    # public-text-end: app-strings-public
 
 # The region content plane's frame (region-blocking.md § The blocked render):
 # the words around an authority's verdict, shared by every app and the nest's
 # public web page (the nest-as-publisher leg). The REASON is never an i18n
 # string: it is the authority's own text, shown verbatim beside this frame.
 region:
+  # public-text: app-strings-public
   blocked_notice: 'Not shown in {region} — blocked under the policy of {authority}'
   collapsed_notice: 'Hidden in {region} under the policy of {authority} — select to show'
+  # public-text-end: app-strings-public
   reveal_button: 'Show'
   section_title: 'Region'
   declared: 'Your region: {region}'
@@ -7720,13 +8707,96 @@ region:
   last_checked: 'Last checked {time}'
   stale_warning: 'Could not check for policy updates recently — the policies above stay in force'
 
+# The nest content policy's frame (nest-rules.md § Element IDs): the words
+# around a nest admin's rule, shared by every app and the nest's public web page
+# (the publisher leg). The REASON is never an i18n string: it is the admin's own
+# text, shown verbatim beside this frame. Resolved by
+# fauna_core::obligation::nest_rule_notice.
+nest_rules:
+  # public-text: app-strings-public
+  blocked_notice: 'Not shown on {nest} — blocked under this nest’s rules'
+  collapsed_notice: 'Hidden on {nest} under this nest’s rules — select to show'
+  # public-text-end: app-strings-public
+  changed_notice: '{nest} changed its rules — see what is in force'
+  reveal_button: 'Show'
+  # The settings rules surface (settings-nest-rules-*).
+  settings_title: 'Rules of {nest}'
+  version: 'Version {sequence}, issued {issued}'
+  # One rule as the rules surfaces list it: verdict, level (when the rule has
+  # one), and the nest's own reason verbatim.
+  rule_line: '{verdict} · {level} — {reason}'
+  rule_line_no_level: '{verdict} — {reason}'
+
+# The shared rule editor (nest-rules.md § The shared rule editor) — one editor
+# for a nest admin's rules, a guardian's rules for a ward and a region
+# authority's policy. Every label is chosen by libs/fauna-client-policy; the
+# reason text a rule carries is the publisher's own and never a string here.
+rule_editor:
+  kind:
+    category: Category
+    keywords: Keywords
+    labeler: Labeler
+    prompt: Prompt
+    list: Content list
+  verdict:
+    block: Block
+    collapse: Hide behind a warning
+  # How sure a label must be before the rule acts, most sensitive first.
+  level:
+    very_strict: Very strict
+    strict: Strict
+    standard: Standard
+    lenient: Lenient
+    very_lenient: Very lenient
+  prompt_not_applied: Not applied on this device
+  newer_version: These rules were written by a newer version of Fauna. Update the app to edit them.
+  # The editor's own frame — the controls every mounting paints around the
+  # crate's view.
+  item_label: 'Rule {rule}'
+  kind_label: Kind
+  category_label: Category
+  keywords_label: Keywords (separate with commas)
+  labeler_label: Labeler
+  prompt_label: Prompt
+  verdict_label: Verdict
+  level_label: Level
+  reason_label: Reason shown to the member
+  add_button: Add rule
+  remove_button: Remove
+  save_button: Save rules
+  loading: Loading rules…
+  saving: Saving…
+  saved: Saved
+  saved_version: 'Saved — version {sequence}'
+  no_rules: No rules yet
+  # The admin's mounting heading (admin-nest-rules-section).
+  nest_section: Nest rules
+  # The guardian's mounting heading (family-policy-rules-section).
+  family_section: Content rules
+  defect:
+    no_reason: 'Rule {rule} needs a reason.'
+    no_reason_code: 'Rule {rule} is missing its identifier. Remove it and add it again.'
+    level_out_of_range: 'Rule {rule} has a level outside the scale. Pick a level.'
+    no_subject: 'Rule {rule} needs something to apply to.'
+    missing_scorer: 'Rule {rule} refers to something these rules do not include. Remove it and add it again.'
+    malformed_scorer: 'Rule {rule} cannot be read. Remove it and add it again.'
+    list_not_admitted: 'Rule {rule} is a content list, which only a region authority may publish. Remove it.'
+    scorer_too_large: 'Rule {rule} is too large.'
+    no_keyword: 'Rule {rule} needs at least one keyword.'
+    keyword_too_long: 'Rule {rule} has a keyword longer than {max} characters.'
+    no_prompt: 'Rule {rule} needs a prompt.'
+    no_labeler: 'Rule {rule} needs a labeler.'
+    unused_scorer: 'These rules include “{name}”, which cannot be read and no rule uses.'
+
 # Connected apps (docs/goal/ui/connected-apps.md) — the one roster of everything
 # acting for the user from outside the seven apps. The user-facing word is
 # "connected app", never "principal", "client" or "grant" (participants.md
 # § Naming).
 connected_apps:
   title: Connected apps
+  # public-text: app-strings-public
   description: 'Apps and services that act for you from outside Fauna. Each one can only reach what is listed under it, and you can disconnect any of them at any time.'
+  # public-text-end: app-strings-public
   # The template a verbatim string (a resolved app name, a described scope)
   # rides through, so every row field is one translatable value.
   verbatim: '{text}'
@@ -7753,6 +8823,9 @@ connected_apps:
   revoke_confirm: Disconnect now
   revoke_cancel: Keep
   revoke_prompt: 'Disconnect {name}? It will no longer be able to act for you.'
+  # connected-apps-item-settings-link — on a hosted plugin's row: opens its
+  # settings card on the Bridges page.
+  settings_link: Plugin settings
   publisher: 'From {domain}'
   # The class badge beside a row's name — how the app reaches you.
   class_remote: Website or service
@@ -7792,8 +8865,10 @@ connected_apps:
   error_code_expired: 'That code has expired — ask the app for a new one.'
   error_handoff_expired: 'That link has expired or was already used — start again from the app.'
   error_block: 'Failed to block the app: {message}'
+  error_bind: 'Failed to connect the plugin: {message}'
   error_secret: 'Could not read the secret: {message}'
   error_record: 'Could not read what your nest did for this app: {message}'
+  error_external_apps: 'Failed to change the external-apps switch: {message}'
   # The oracle summary on a principal's row — what the nest did with the
   # user's keys for this app, the key itself never leaving it
   # (connected-apps.md § Layout & flow, region 3). {operation} is the consent
@@ -7810,13 +8885,36 @@ connected_apps:
   blocked_hint: 'Requests from these apps are never shown to you.'
   blocked_since: 'Blocked {time}'
   unblock: Allow requests again
+  # The install section of an admin's hosted-plugin install card
+  # (third-party.md § The install-approval leg; compose::request_install_text).
+  install_heading: Install this plugin on your nest
+  # public-text: app-strings-public
+  install_framing: 'Installing runs this code on your nest. It gets no access to anyone''s private data until that person connects it from their own app.'
+  # public-text-end: app-strings-public
+  # The same section on a user's bind card (fauna.plugins.bind): the plugin is
+  # already installed; approving connects it to this account.
+  install_heading_bind: Connect this plugin on your nest to your account
+  install_form: 'Runs as: {form}'
+  install_publisher: 'Publisher: {domain} — {key}'
+  install_publisher_development: 'Publisher: Development plugin'
+  install_digest: 'Module: {digest}'
+  install_kinds_heading: 'Kinds of data it defines:'
+  install_kinds_none: 'Kinds of data it defines: none'
+  install_hosts_heading: 'Sites it may reach:'
+  install_hosts_none: 'Sites it may reach: none'
+  install_ingress_heading: 'Addresses it answers on your nest:'
+  install_settings_heading: 'Settings:'
+  install_settings_none: 'Settings: none'
+  install_setting: '{label} ({kind})'
 # Browser-openable share links on the Media page (behavior/share-links.md; the
 # share-link-* ids, user-approved 2026-09-25).
 share_link:
   button: Share a link
   create_title: 'Share a link to {name}'
+  # public-text: app-strings-public
   create_body: Anyone with the link can open this file until it expires or you revoke it.
   key_notice: This file is private, so the link carries the key that unlocks it. Anyone holding the link can open the file — and wherever you paste it, anyone who can read that place can open it too.
+  # public-text-end: app-strings-public
   expiry_label: Link expires after
   expiry_1d: 1 day
   expiry_7d: 7 days
@@ -7847,6 +8945,7 @@ share_link:
 # element ids; shared Rust (`fauna_client_share::viewer`) owns which sentence
 # shows when, and nothing here may describe the file.
 share_viewer:
+  # public-text: app-strings-public
   title: A file shared with Fauna
   generic_body: Someone shared a file with you through Fauna. Open the complete link you were sent to see it.
   loading: Opening the file…
@@ -7857,3 +8956,4 @@ share_viewer:
   not_found: This link was not found. It may be mistyped, or the file is no longer stored.
   damaged: This link could not be opened. Check that you copied the whole link.
   unavailable: The file could not be loaded right now. Try again later.
+  # public-text-end: app-strings-public

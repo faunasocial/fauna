@@ -1,5 +1,5 @@
 //! The headless credential-store unlock/create surface (`tui.md` § Credential
-//! storage; ui.yaml page `tui-unlock`, user-approved 2026-07-14).
+//! storage; ui.yaml page `unlock`, user-approved 2026-07-14).
 //!
 //! Shown **before** launch routing whenever the credential store resolved to
 //! the sealed passphrase backend and is still locked — `launch::start` reads
@@ -21,7 +21,7 @@
 //! with a bullet-masked `text`, and the agent's `type` path appends through
 //! [`crate::app::App::field`] (the real buffer), so masking costs it nothing.
 
-use fauna_i18n::strings::tui_unlock as t;
+use fauna_i18n::strings::unlock as t;
 use fauna_ui_ids as ids;
 
 use crate::app::{App, UiMessage};
@@ -57,12 +57,12 @@ pub enum UnlockAction {
 /// `text` is masked ([`elements`]), never the value [`field`] returns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UnlockField {
-    /// `tui-unlock-passphrase-input` — a local buffer on `App::unlock`. The
+    /// `unlock-passphrase-input` — a local buffer on `App::unlock`. The
     /// element's registered `text` is a same-length **mask**, never the value
     /// (the buffer itself is what `App::field` serves the type path). Enter
     /// submits (the `ReplyRecipientAdd`-style special case in the keymap).
     Passphrase,
-    /// `tui-unlock-confirm-input` — the create-mode second entry; same
+    /// `unlock-confirm-input` — the create-mode second entry; same
     /// masking + submit-on-Enter contract as [`Self::Passphrase`].
     Confirm,
 }
@@ -93,11 +93,11 @@ pub(crate) fn mask(value: &str) -> String {
 }
 
 /// The ordered ui.yaml element list for the surface — the one source paint,
-/// the automation registry, and the focus ring all read (ui.yaml `tui-unlock`).
+/// the automation registry, and the focus ring all read (ui.yaml `unlock`).
 pub fn elements(app: &App, mode: Mode) -> Vec<Element> {
     let mut out = vec![
         Element::input(
-            ids::TUI_UNLOCK_PASSPHRASE_INPUT,
+            ids::UNLOCK_PASSPHRASE_INPUT,
             mask(&app.unlock.passphrase),
             Field::Unlock(UnlockField::Passphrase),
         )
@@ -106,7 +106,7 @@ pub fn elements(app: &App, mode: Mode) -> Vec<Element> {
     if mode == Mode::Create {
         out.push(
             Element::input(
-                ids::TUI_UNLOCK_CONFIRM_INPUT,
+                ids::UNLOCK_CONFIRM_INPUT,
                 mask(&app.unlock.confirm),
                 Field::Unlock(UnlockField::Confirm),
             )
@@ -114,7 +114,7 @@ pub fn elements(app: &App, mode: Mode) -> Vec<Element> {
         );
     }
     out.push(Element::gesture_button(
-        ids::TUI_UNLOCK_SUBMIT_BUTTON,
+        ids::UNLOCK_SUBMIT_BUTTON,
         match mode {
             Mode::Unlock => t::UNLOCK_BUTTON,
             Mode::Create => t::CREATE_BUTTON,
@@ -203,21 +203,21 @@ mod tests {
         elements.iter().map(|e| e.id.clone()).collect()
     }
 
-    /// ui.yaml `tui-unlock`: unlock mode paints the passphrase input + submit;
+    /// ui.yaml `unlock`: unlock mode paints the passphrase input + submit;
     /// create mode adds the confirm input between them.
     #[test]
     fn the_two_modes_paint_exactly_the_ui_yaml_elements() {
         let app = crate::app::tests::test_app();
         assert_eq!(
             ids(&elements(&app, Mode::Unlock)),
-            vec!["tui-unlock-passphrase-input", "tui-unlock-submit-button"],
+            vec!["unlock-passphrase-input", "unlock-submit-button"],
         );
         assert_eq!(
             ids(&elements(&app, Mode::Create)),
             vec![
-                "tui-unlock-passphrase-input",
-                "tui-unlock-confirm-input",
-                "tui-unlock-submit-button",
+                "unlock-passphrase-input",
+                "unlock-confirm-input",
+                "unlock-submit-button",
             ],
         );
     }

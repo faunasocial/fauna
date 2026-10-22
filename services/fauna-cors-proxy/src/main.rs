@@ -42,6 +42,14 @@ const BASE_URLS: Bases = &[
         "acme-le-staging",
         "https://acme-staging-v02.api.letsencrypt.org",
     ),
+    // The nest image's registry — the browser setup wizard's anonymous read of
+    // which update channels have a build (`onboarding-provisioning.md` § 5 →
+    // *What exists decides the default*). Pull tokens are anonymous and the
+    // client re-points the bearer-challenge realm (`https://ghcr.io/token`) at
+    // this same route, so the proxy stays credential-blind; it relays the
+    // `Authorization` header, the token query and the `Docker-Content-Digest`
+    // reply header unchanged.
+    ("ghcr", "https://ghcr.io"),
 ];
 
 /// Build the forwarder router over a given provider→base table.
@@ -267,6 +275,32 @@ mod tests {
     #[test]
     fn unknown_provider_has_no_upstream() {
         assert_eq!(upstream_url(STUB, "nope", "some/path", None), None);
+    }
+
+    /// The wizard's registry read: the OCI paths and the token realm both ride
+    /// the `ghcr` route, query intact.
+    #[test]
+    fn the_ghcr_route_forwards_registry_and_token_paths() {
+        assert_eq!(
+            upstream_url(
+                BASE_URLS,
+                "ghcr",
+                "v2/faunasocial/nest/manifests/latest",
+                None
+            )
+            .as_deref(),
+            Some("https://ghcr.io/v2/faunasocial/nest/manifests/latest"),
+        );
+        assert_eq!(
+            upstream_url(
+                BASE_URLS,
+                "ghcr",
+                "token",
+                Some("scope=repository:faunasocial/nest:pull&service=ghcr.io")
+            )
+            .as_deref(),
+            Some("https://ghcr.io/token?scope=repository:faunasocial/nest:pull&service=ghcr.io"),
+        );
     }
 
     #[test]

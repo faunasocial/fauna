@@ -4,6 +4,7 @@ import androidx.room.Database
 import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
 import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 
 /**
  * The account-scoped Room store. **Version 9 is a baseline, not a chain head:**
@@ -12,9 +13,10 @@ import androidx.room.migration.Migration
  * entities declare, exported as
  * `schemas/com.fauna.app.data.db.FaunaDatabase/9.json`. The number continues
  * rather than restarting at 1, the same choice the nest's genesis schema made
- * (§ Dimension 1): the next schema change is `9 → 10`, ships its `Migration` in
+ * (§ Dimension 1): each schema change after it ships its `Migration` in
  * the same commit in [MIGRATIONS] (registered on the one builder,
- * `AccountStores.database`), and exports its `schemas/<version>.json`. A
+ * `AccountStores.database`) and exports its `schemas/<version>.json`
+ * (`9 → 10` added `contacts.homeNestUrl`). A
  * database stamped below 9 has no path here and Room refuses to open it.
  */
 @Database(
@@ -31,7 +33,7 @@ import androidx.room.migration.Migration
         MlsChannel::class,
         MutedConversation::class,
     ],
-    version = 9,
+    version = 10,
     exportSchema = true
 )
 @TypeConverters(Converters::class)
@@ -52,10 +54,22 @@ abstract class FaunaDatabase : RoomDatabase() {
         const val BASELINE_VERSION = 9
 
         /**
-         * Every migration from [BASELINE_VERSION] on, in order — the one list
-         * the builder registers. Empty: the baseline is the only schema.
+         * `9 → 10`: `contacts.homeNestUrl` — the peer's home nest URL
+         * (`ContactItem.home_nest_url`), which the contact row's tap carries as the
+         * Profile's home (`contacts.md` § State & data shape). Nullable and additive;
+         * the column refills from the next `contacts.list` read.
          */
-        val MIGRATIONS: Array<Migration> = arrayOf()
+        val MIGRATION_9_10: Migration = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `contacts` ADD COLUMN `homeNestUrl` TEXT")
+            }
+        }
+
+        /**
+         * Every migration from [BASELINE_VERSION] on, in order — the one list
+         * the builder registers.
+         */
+        val MIGRATIONS: Array<Migration> = arrayOf(MIGRATION_9_10)
 
         @Volatile
         private var INSTANCE: FaunaDatabase? = null

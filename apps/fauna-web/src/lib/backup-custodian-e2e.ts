@@ -3,7 +3,7 @@
 // (`docs/goal/ui/backups.md` § Third destination kind).
 //
 // This module exists ONLY in builds made for testing (convention 15): its sole
-// importer is `$lib/e2e-automation`, itself reached only through
+// importer is `#lib/e2e-automation`, itself reached only through
 // `+layout.svelte`'s `if (__FAUNA_E2E_AUTOMATION__)` branch, which a production
 // `vite build` constant-folds away. The wasm face it calls
 // (`backupDestinationEnrollCustodianForTest`) is gated on `fauna-wasm`'s
@@ -23,10 +23,10 @@
 
 import { get } from 'svelte/store';
 
-import { registerE2eCommands } from '$lib/e2e-commands';
-import { rpcCall } from '$lib/rpc';
-import { identity } from '$lib/store';
-import { accountsTabSessionMaterial } from '$lib/accounts';
+import { registerE2eCommands } from '#lib/e2e-commands';
+import { rpcCall } from '#lib/rpc';
+import { identity } from '#lib/store';
+import { accountsTabSessionMaterial } from '#lib/accounts';
 
 interface CustodianEnrollSeam {
   backupDestinationEnrollCustodianForTest(
@@ -40,7 +40,7 @@ interface CustodianEnrollSeam {
 const BACKUP_CUSTODIAN_COMMANDS = ['backup_enroll_custodian_for_test'] as const;
 
 /** Register `backup_enroll_custodian_for_test`. Called once from
- *  `$lib/e2e-automation`. Payload: `{device_id: string, name?: string,
+ *  `#lib/e2e-automation`. Payload: `{device_id: string, name?: string,
  *  capacity?: string}`; a blank capacity is uncapped. */
 export function registerBackupCustodianCommands(): void {
   registerE2eCommands(BACKUP_CUSTODIAN_COMMANDS, async (action, p) => {

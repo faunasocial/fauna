@@ -3,224 +3,28 @@
 //! (`backup-restore.md` § Security Properties → Integrity, ruled 2026-10-13).
 //!
 //! A snapshot entry's `manifest_hash` is the home nest's unsigned word, and a
-//! seal licenses nothing by itself: it proves the owner sealed the bytes under
-//! the set's root, never that they are *this path's at this version* — so the
-//! nest could list one owner-sealed manifest of the owner's in place of
-//! another, and a plaintext one it built itself. What licenses an entry,
-//! sealed or plaintext, is what licenses it for the sync engine: the **judged
-//! change row** of the snapshot's set that named exactly this manifest under
-//! the hash of the path the entry restores to. The reader resolves that row
-//! from the signed version history (`fauna.files.versions.list`, soft-pruned
-//! and purged rows included — the version-retention purge stamps a snapshot's
-//! head row superseded while the snapshot still pins its bytes, and the table
-//! is append-only, so an honest nest always holds the row), judges every row
-//! through the one shared judge (writer-signed change records, ruling (3))
-//! and picks by [`JudgedCandidate::find`]'s rule (ruling (10)(a)): an admitted
-//! or history version carrying this manifest under this path. Nothing else
-//! licenses — not the seal, not the folder's owner-attested audience (it
-//! attests the audience *now*; a snapshot is history), not the nest's listing.
-//!
-//! The licence is read BEFORE any byte: an entry the history does not name is
-//! refused with the typed `ENTRY_UNLICENSED` and its manifest is never
-//! fetched; a history the nest withholds (the read fails) refuses the entry
-//! too, transiently — a snapshot whose rows the nest withholds is refused,
-//! never opened on the seal alone. The licensed open then runs under the
-//! row's signed facts: the seal requirement lifted (the writer vouched for
-//! that manifest, sealed or not), the row's stamp (ruling (10)(c)) and its
-//! signer bound exactly as the engine binds a record it verified (ruling
-//! (8)(c)).
-
-use core::fmt::Display;
-
-use fauna_client_sync::restore_branch::JudgedCandidate;
-use fauna_client_sync::row_judge::{ReaderSeat, verified_signer};
-use fauna_client_sync::{SyncClient, VersionsListing};
-use fauna_core::apply_failure::{PermanentApplyFailure, permanent};
-use fauna_core::data::ContentHash;
-use fauna_core::file_download::{
-    BlobFetcher, FileDownloadKeys, RecordSigner, download_file_bytes_by_manifest,
-};
-use fauna_protocol::filesync::SnapshotGetReply;
-use fauna_protocol::{RpcErrorClass, RpcRequester};
+//! seal licenses nothing by itself, so every entry is read through the shared
+//! **licensed manifest read** ([`fauna_client_sync::licensed_read`]): the
+//! judged change row of the snapshot's set that named exactly this manifest
+//! under the hash of the path the entry restores to is the licence, read
+//! BEFORE any byte; an entry no row names is refused unfetched with the typed
+//! `ENTRY_UNLICENSED`, a withheld history refuses it transiently. The archive
+//! import's folder reads go through the same reader — one licence, never a
+//! copy. Nothing else licenses a snapshot entry — not the seal, not the
+//! folder's owner-attested audience (it attests the audience *now*; a
+//! snapshot is history), not the nest's listing.
 
 /// The set a snapshot was taken of, as its listing named it
-/// (`SnapshotGetReply::{folder, folder_hash}`) — the address the licence read
-/// asks the version history by. The wire hash rides beside the name so a set
-/// whose plaintext name rests scrubbed still addresses.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SnapshotSet {
-    pub folder: String,
-    pub folder_hash: Option<Vec<u8>>,
-}
+/// ([`SetAddress::of`] for a `SnapshotGetReply`, [`SetAddress::from_named`]
+/// for a backups-machine detail) — the address the licence read asks the
+/// version history by.
+pub use fauna_client_sync::licensed_read::SetAddress as SnapshotSet;
 
-impl SnapshotSet {
-    /// The set a snapshot reply names.
-    pub fn of(reply: &SnapshotGetReply) -> Self {
-        Self {
-            folder: reply.folder.clone(),
-            folder_hash: reply.folder_hash.as_ref().map(|b| b.to_vec()),
-        }
-    }
+/// The reader of one snapshot's entries: the shared licensed read over the
+/// snapshot's set.
+pub use fauna_client_sync::licensed_read::LicensedManifestReader as SnapshotEntryReader;
 
-    /// The set as a backups-machine detail names it: the name and the wire
-    /// hash in hex (`SnapshotDetail::{folder, folder_hash}`). A hash that is
-    /// not 32 hex bytes is dropped, so the read addresses by name alone.
-    pub fn from_named(folder: &str, folder_hash_hex: Option<&str>) -> Self {
-        Self {
-            folder: folder.to_string(),
-            folder_hash: folder_hash_hex
-                .and_then(|h| fauna_core::hex32::decode(h).ok())
-                .map(|a| a.to_vec()),
-        }
-    }
-}
-
-/// What licensed one entry: the judged row's signed facts that the licensed
-/// open carries.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EntryLicence {
-    /// The identity the row verified as signed by; `None` for an exempt
-    /// (nest-minted class) row.
-    pub signed_as: Option<[u8; 32]>,
-    /// Whether an admitted row naming this manifest was signed as the reader's
-    /// own identity — what alone licenses the current owner root for a sealed
-    /// open (writer-signed change records, ruling (8)(c)).
-    pub signed_as_own: bool,
-    /// The row's signed generation stamp (ruling (10)(c): a stamped record
-    /// opens under its generation and nothing else) — the ONE stamp a
-    /// snapshot entry opens under; the listing carries none the reader
-    /// honours.
-    pub content_key_version: Option<u64>,
-    /// The licensing row's `seq`.
-    pub version_num: i64,
-}
-
-/// A reader of one snapshot's entries: the typed sync surface the licence
-/// read goes through, the seat that judges what it lists, and the set the
-/// snapshot names.
-pub struct SnapshotEntryReader<'a, R: RpcRequester> {
-    sync: &'a SyncClient<R>,
-    seat: &'a ReaderSeat,
-    set: &'a SnapshotSet,
-}
-
-impl<'a, R> SnapshotEntryReader<'a, R>
-where
-    R: RpcRequester,
-    R::Error: RpcErrorClass + Display,
-{
-    pub fn new(sync: &'a SyncClient<R>, seat: &'a ReaderSeat, set: &'a SnapshotSet) -> Self {
-        Self { sync, seat, set }
-    }
-
-    /// The licence for `manifest` restored to `relative_path`: the judged row
-    /// of this set naming exactly that manifest under the hash of that path,
-    /// or `None` when the history holds no such row — the nest built the
-    /// manifest, or listed another path's or version's, and either way
-    /// nothing licenses the bytes. An `Err` is a history the nest did not
-    /// serve.
-    ///
-    /// The path hash is derived from the path the entry will be written to,
-    /// never read off the listing: a version's signature covers its own
-    /// `path_hash`, so a row served under another path names another path.
-    pub async fn licence(
-        &self,
-        relative_path: &str,
-        manifest: &ContentHash,
-    ) -> Result<Option<EntryLicence>, R::Error> {
-        let path_hash = fauna_core::sync::path_hash(relative_path);
-        let listing = VersionsListing {
-            folder: Some(self.set.folder.clone()),
-            name_hash: self.set.folder_hash.clone(),
-            row: None,
-            include_pruned: true,
-            include_superseded: true,
-        };
-        let judged = self
-            .sync
-            .versions_list_judged_at(path_hash, &listing, self.seat)
-            .await?;
-        Ok(JudgedCandidate::find(
-            judged,
-            path_hash,
-            &fauna_core::hex32::encode(&manifest.digest()),
-            self.seat.own.as_ref(),
-        )
-        .map(|candidate| EntryLicence {
-            signed_as: verified_signer(&candidate.verdict),
-            signed_as_own: candidate.current_vouches,
-            content_key_version: candidate.version.content_key_version,
-            version_num: candidate.version.version_num,
-        }))
-    }
-
-    /// `keys` for one licensed open: the seal requirement lifted — the row
-    /// vouched for exactly this manifest, sealed or plaintext — and the row's
-    /// signer bound to the open exactly as the engine binds a record it
-    /// verified (ruling (8)(c)): the current identity, a proven predecessor
-    /// of this seat, or another writer, offered the owner family's roots
-    /// accordingly.
-    pub fn licensed_keys(
-        &self,
-        keys: &FileDownloadKeys,
-        licence: &EntryLicence,
-    ) -> FileDownloadKeys {
-        let record_signer = match licence.signed_as {
-            Some(id) if Some(id) == self.seat.own => RecordSigner::Current,
-            Some(id)
-                if self
-                    .seat
-                    .learned
-                    .chain_with(&self.seat.predecessors)
-                    .contains(&id) =>
-            {
-                RecordSigner::Predecessor(fauna_core::identity::ActorId(id))
-            }
-            _ => RecordSigner::Other,
-        };
-        FileDownloadKeys {
-            sealed_only: false,
-            owner_signed_record: licence.signed_as_own,
-            record_signer,
-            ..keys.clone()
-        }
-    }
-
-    /// One entry's bytes: licensed by [`Self::licence`] first, then read
-    /// under [`Self::licensed_keys`] and the licensing row's stamp. An entry
-    /// no judged row names fails with the typed `ENTRY_UNLICENSED` before
-    /// its manifest is fetched, so a walk names it among its unverified
-    /// files; a history read that fails refuses the entry too, as a transient
-    /// error a re-run retries. A sealed and a plaintext entry take the same
-    /// road: the row is the licence, the seal never is.
-    pub async fn download_bytes(
-        &self,
-        fetcher: &dyn BlobFetcher,
-        keys: &FileDownloadKeys,
-        relative_path: &str,
-        manifest: ContentHash,
-    ) -> anyhow::Result<Vec<u8>> {
-        let licence = self.licence(relative_path, &manifest).await.map_err(|e| {
-            anyhow::anyhow!("reading the version history for a snapshot entry's licence: {e}")
-        })?;
-        let Some(licence) = licence else {
-            return Err(permanent(
-                PermanentApplyFailure::ENTRY_UNLICENSED,
-                "no judged change row of this set names this manifest under this path, so \
-                 nothing licenses the entry, sealed or not (backup-restore.md § Security \
-                 Properties → Integrity)",
-            ));
-        };
-        download_file_bytes_by_manifest(
-            fetcher,
-            &self.licensed_keys(keys, &licence),
-            manifest,
-            licence.content_key_version,
-            relative_path,
-        )
-        .await
-    }
-}
+pub use fauna_client_sync::licensed_read::{ManifestLicence, SetAddress};
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
@@ -228,9 +32,13 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use fauna_client_sync::SetNonceSource;
+    use fauna_client_sync::row_judge::ReaderSeat;
+    use fauna_client_sync::{SetNonceSource, SyncClient};
     use fauna_client_testkit::{RejectingRequester, block_on};
+    use fauna_core::apply_failure::PermanentApplyFailure;
     use fauna_core::apply_failure::permanent_reason;
+    use fauna_core::data::ContentHash;
+    use fauna_core::file_download::{BlobFetcher, FileDownloadKeys, RecordSigner};
     use fauna_core::identity::ActorKeypair;
     use fauna_protocol::files::{FileVersionInfo, FilesVersionsListReply};
     use fauna_protocol::folders::{FolderSummary, FoldersListReply, KIND_FOLDERS_LIST};
@@ -563,7 +371,7 @@ mod tests {
 
         let own = reader.licensed_keys(
             &keys,
-            &EntryLicence {
+            &ManifestLicence {
                 signed_as: Some(owner().actor_id().0),
                 signed_as_own: true,
                 content_key_version: None,
@@ -576,7 +384,7 @@ mod tests {
 
         let stranger = reader.licensed_keys(
             &keys,
-            &EntryLicence {
+            &ManifestLicence {
                 signed_as: Some([0xEE; 32]),
                 signed_as_own: false,
                 content_key_version: Some(2),

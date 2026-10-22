@@ -62,12 +62,26 @@ public struct ConversationListRow: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    Text(ConversationsUI.glyphEmoji(model.glyph))
+                    let iconText = ConversationsUI.protocolIconText(model.glyph, bridge: model.bridge)
+                    Text(iconText)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier(Ids.protocolIcon)
-                        // Read-only glyph — expose the D5 concept emoji.
-                        .automationValue(Ids.protocolIcon, text: { ConversationsUI.glyphEmoji(model.glyph) })
+                        // Read-only glyph — expose the D5 concept emoji (with the
+                        // bridge's label on a bridged room; `bridge` attribute = id).
+                        .automationValue(Ids.protocolIcon, text: { iconText }, value: { model.bridge?.id })
+                }
+                // The family gate's marker — present only on a held/blocked
+                // bridged room; words and `state` token are shared Rust.
+                if let state = model.guardianState {
+                    let stateLabel = guardianStateLabel(state: state)
+                    let stateToken = guardianStateAttrToken(state: state)
+                    Text(stateLabel)
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .lineLimit(1)
+                        .accessibilityIdentifier(Ids.conversationGuardianState)
+                        .automationValue(Ids.conversationGuardianState, text: { stateLabel }, value: { stateToken })
                 }
                 automationText(Ids.dmSubject, model.snippet)
                     .font(.caption)

@@ -1,0 +1,81 @@
+# Store review — the tracks, the states and the one record of what each store is reviewing
+
+Owns: store-review
+Status: ratified 2026-10-18 for the tracks, the states and the record (refutable by the owner); the `:test` hold (§ The `:test` hold), proposed the same day, ruled by the owner 2026-10-20 as written (§ Implementation status today)
+Authority: the store review process for the three app stores as one process — which tracks and audiences each store has and which of them pass a review, what a review needs from the organisation, the states a submission passes through, and **the one record of every store submission's live state** (`installer/store-review.toml`), written by the session that submits and updated when the store answers, so that "is anything in review?" is answered by reading it. Each store's own mechanics — identity, signing, the build recipe, the upload steps, the provenance a channel doc records — stay with [`android.md`](android.md), [`ios.md`](ios.md) and [`windows.md`](windows.md); the release order the stores follow and the `:test` hold's rule are the release table's ([`../release-table.md`](../release-table.md) § Tag gate and release table); the acceptance nest a reviewer signs in to and its reviewer accounts → [`../org-nests.md`](../org-nests.md) § fauna.build; what each store publishes about the organisation and the console readback rule → [`store-listing-contact.md`](store-listing-contact.md).
+
+Last verified: 2026-10-21 | Source: `installer/store-review.toml`, `scripts/_store_review.py`, `fauna-publish stage`, the three channel docs' `## Implementation status today`, `tests/e2e-unified/tests/test_store_review_record.py`
+
+## Why this doc exists
+
+Asked "is any store reviewing a Fauna build?" on 2026-10-17, the fleet could not answer from any document: a Play build on internal testing was recorded in one doc's status bullet, the absence of a TestFlight upload in another's, the absence of a Microsoft Store submission in a third's table, and whether a later Play upload had happened was recorded nowhere. The question matters because the organisation's acceptance nest follows the `:test` channel and a store reviewer signs in there ([`../org-nests.md`](../org-nests.md) § fauna.build): moving `:test` while a review is open changes the nest under the reviewer. So the review process is defined once, here, and every submission's state lives in one tracked record that a session writes at the console and a gate can read.
+
+## The tracks
+
+Each store serves a build through tracks; a track has an audience, and some tracks put the build through the store's review before it serves. The organisation uses the pre-release track of each store for the alpha and the public track for the first public release; the per-store choice and its reasons are each channel doc's.
+
+| Store | Track (the name the record uses) | Audience | Reviewed before it serves | Channel doc |
+|---|---|---|---|---|
+| Google Play | `internal-testing` | the email list of invited testers (at most 100) | **no** — the release is available to the list within minutes | [`android.md`](android.md) § Goal |
+| Google Play | `closed-testing` | invited testers or a Google group | yes — Google's app review of the release | [`android.md`](android.md) |
+| Google Play | `open-testing` | anyone who opts in | yes | [`android.md`](android.md) |
+| Google Play | `production` | everyone | yes | [`android.md`](android.md) |
+| App Store | `testflight-internal` | App Store Connect team members holding a role (at most 100) | **no** — the team's smoke install of a build before it is submitted | [`ios.md`](ios.md) § The channel |
+| App Store | `testflight-external` | invited testers or a public link (at most 10,000; a build serves for 90 days) | yes — **Beta App Review** of a version's first build; the alpha audience | [`ios.md`](ios.md) § The channel |
+| App Store | `app-store` | everyone | yes — App Review | [`ios.md`](ios.md) |
+| Microsoft Store | `private-audience` | the known-user group of invited Microsoft accounts | yes — **certification**, the same as the public track's; only the visibility differs | [`windows.md`](windows.md) § Store distribution |
+| Microsoft Store | `public` | everyone | yes — certification | [`windows.md`](windows.md) § Store distribution |
+
+Two of the nine tracks serve without a review, and both are for the organisation's own people: Play's internal testing (the alpha audience on Play) and TestFlight's internal testing (never an audience; [`ios.md`](ios.md) § The channel rejects it for the alpha). Every other track is reviewed, and a reviewed track is where the hold below can bind.
+
+**What a review needs from the organisation — the same four things at every store.** (1) The acceptance nest serving the version under review, so the reviewer meets a nest at least as new as the app — the release order's half (a) ([`../release-table.md`](../release-table.md) § Tag gate and release table). (2) That store's own reviewer account on the acceptance nest — `google-reviewer`, `apple-reviewer`, `microsoft-reviewer` — minted by the organisation ([`../org-nests.md`](../org-nests.md) § fauna.build → *Accounts*). (3) The review-access notes in that store's own form, naming the nest and the handle and carrying the secret only in the console's review field. (4) The build graded as the flavour the store takes and the store's declarations matching it — a public text, through its round ([`../public-texts.md`](../public-texts.md) § The rule). What each store's reviewer checks beyond these is that store's policy, read in its channel doc.
+
+## The states
+
+A submission is one build of one version at one store. It passes through these states, in this order where the arrows hold; the record (§ The record) keeps only the current one, and git history keeps the rest.
+
+| State | Meaning | Who writes it |
+|---|---|---|
+| `built` | an upload candidate exists: built from the recorded public commit, graded, its hash and identity recorded in the channel doc ([`../release-integrity.md`](../release-integrity.md) § Release signing → *A store upload is built from a recorded public commit*) | the session that built it |
+| `uploaded` | the store holds the build — processing, or sitting on a track without having been submitted or released; the store texts approved for this version are entered in the same sitting ([`../public-texts.md`](../public-texts.md) § Rulings, 16) | the person at the console, the session recording |
+| `in-review` | the build was submitted to a reviewed track and the store has not answered | the person at the console |
+| `approved` | the store answered yes and the build is not yet serving (a rollout not started, an invitation not sent) | the person at the console |
+| `rejected` | the store answered no; the reason, in the store's words, goes in the note. The version string is spent: a fix ships as the next patch, never a re-upload ([`../product-version.md`](../product-version.md) § Reships) | the person at the console |
+| `withdrawn` | the organisation took the build out of the path before the store answered — a discarded draft, a cancelled submission, a candidate the owner set aside | the person or session that did it |
+| `serving` | the track's audience can install it | the person at the console |
+| `superseded` | a later version serves the same track, or the store no longer offers this one (a TestFlight build past its 90 days) | the session that records the later version |
+
+Only `in-review` is an **open review**. `built`, `uploaded`, `approved` and `serving` are not: no store is deciding anything about them. A build that `serving` an audience under a nest that has since moved on is the testers' problem the release order already answers — the next version's build follows the stage promptly ([`../release-table.md`](../release-table.md) § Tag gate and release table, half (a)) — and never a reason to hold the stage.
+
+## The record
+
+**`installer/store-review.toml` is the one place the live state of every store submission is kept** — one `[[submission]]` table per (store, version), the newest state replacing the previous one in place. It is bookkeeping the tree ships beside `installer/official-apps.json`, so it carries no secret, no address, no tester and no internal identifier; the store, the version, the build identity, the track, the flavour, the state, two dates and a short note are all it holds. Its grammar is pinned by `tests/e2e-unified/tests/test_store_review_record.py` (tier_1: the enumerations above, one table per (store, version), the dates in order, the note free of addresses).
+
+| Field | Value |
+|---|---|
+| `store` | `play`, `app-store` or `microsoft-store` |
+| `version` | the product version string ([`../product-version.md`](../product-version.md)) |
+| `build` | the store's own build identity: Play's `versionCode`, App Store Connect's `CFBundleVersion` (pinned at `1`), the Microsoft package version (`0.1.3.0`) |
+| `track` | the track name from § The tracks, one of that store's |
+| `flavour` | the build flavour the recipe names ([`../dynamic-features.md`](../dynamic-features.md) § The App-Store escape hatch → *The store flavors*): `release`, `store-safe`, `store-no-payments` |
+| `state` | one of § The states |
+| `since` | the date the state was entered |
+| `read` | the date of the console reading the state rests on — the readback rule ([`store-listing-contact.md`](store-listing-contact.md) § The readback rule); for `built`, the date of the grade |
+| `note` | one or two sentences: the store's own words on a rejection, what was discarded, the audience list's name; never a person, an address or a secret |
+
+**The writing rule.** The session that builds a candidate writes its `built` row in the commit that records the build's provenance in the channel doc. Every console act that changes a state — the upload, the submission, the rollout, the store's answer — is written in the same session by the session guiding the person at the console, from what the console shows after the act, dated in `read`; a reading taken later (an owner's console check, a review answer that arrived by mail) updates `state` and `read` the day it is read. A store with no table has nothing built or uploaded. No session reads a store console it has no access to: the owner's reading is the source, and a state nobody has read back is not written. **`just store-review <store> <version> <state> --read <date> …` is the record's only writer** (`scripts/store-review.py`, its grammar in `scripts/_store_review.py`): it refuses a name outside the lists above, a `read` before `since` or in the future, and a note with an address, and renders the whole file with a digest of its tables in the header, so a hand edit — misspelled or well spelled — fails the tier_1 pin.
+
+## The `:test` hold
+
+**The rule itself is the release order's and lives in its paragraph:** `:test` does not move past a version while a store review of that version's app build is open ([`../release-table.md`](../release-table.md) § Tag gate and release table, half (a) of *The nest precedes the apps* — ruled 2026-10-20 by the owner as proposed). This section owns what that rule reads and what happens when it bites.
+
+**What counts as open:** a `[[submission]]` of the version `:test` currently serves whose `state` is `in-review`, at any store, on any reviewed track. Nothing else holds: a `serving` pre-release build, an `approved` one awaiting its invitation, an `uploaded` one nobody submitted, and every build on an unreviewed track (Play internal testing, TestFlight internal) are not reviews. **When it binds:** only while a reviewer can meet a nest the app under review was not built against — throughout 0.1.x, which owes no compatibility ([`../version-compatibility.md`](../version-compatibility.md) § Dimension 2, the fifth exception), and at every major bump thereafter; within a major version from 0.2.0 on, the compatibility rule makes the mismatch safe and the hold lapses to a courtesy. And only once the acceptance nest serves reviewers at all: the acceptance nest does not exist today — the test nest `test.fauna.build` serves `:test` since 2026-10-20, but a reviewer signs in to the acceptance nest, not there ([`../org-nests.md`](../org-nests.md) § Implementation status today) — so no review is open against it and the rule does not reach a stage before the nest does.
+
+**What the stage does when a review is open:** by default it waits — the next version's first public image dispatch is held until the last open review of the previous version closes, in whichever way the store closes it. **The owner's alternative, theirs alone and in the moment:** withdraw the open review (cancel the submission in that console and write `withdrawn`), stage, and let that version's store release go unmade — the string stays spent, the store ships the next train, and the reviewer is sent the next version's build against the nest that now serves it. The choice is a trade of calendar days against one store's release of one version, which nobody but the owner weighs; a session never withdraws a review and never bypasses the hold. **Enforcement:** the stage dispatch reads the record and refuses while it holds, printing the open reviews and the owner's one way out — `fauna-publish stage <version>`, the only path that dispatches the public `build-nest-image.yml`, the version release's stage step. It reads the version `:test` serves live, off the image's `org.opencontainers.image.version` label, and the record off private `origin/main`, refusing a record `just store-review` did not write; the predicate is `scripts/_store_review.py::stage_hold`. No flag lifts a hold: only a recorded store answer or the owner's recorded withdrawal does. The tool cannot see whether the acceptance nest serves reviewers yet; it needs not, since before it does no review is open against it.
+
+## Implementation status today
+
+- **The record exists and shows today's state, every table read back at the consoles by the owner on 2026-10-21:** Play serves `0.1.3`/`103` on internal testing since 2026-10-09 (the full `release` flavour; the unreviewed track; the latest release on the track, its bundle Active) and holds the withdrawn `0.1.2`/`102` draft (uploaded 2026-10-07, its bundle Inactive in the App bundle explorer); **no `0.1.4` build reached any Play track** (the tree records only a private-tree rehearsal AAB of 2026-10-14, never an upload — [`android.md`](android.md) § Implementation status today); the Microsoft Store `0.1.3` packages, built and graded 2026-10-10, are withdrawn, Partner Center holding no submission — the upload is the version the acceptance nest serves, in the store-safe flavour (owner, 2026-10-14; [`windows.md`](windows.md) § Store distribution); App Store Connect holds nothing. **No review is open at any store (Play Console, App Store Connect and Partner Center all read 2026-10-21), and nothing but Play's unreviewed track serves anyone.** The record states what the consoles showed on that day; the next console act rewrites its table.
+- **The `:test` hold is ruled (owner, 2026-10-20, as proposed: wait by default, withdrawing is the owner's).** Its text is in the release table's paragraph and its mechanics above bind as written. It changes nothing for `0.1.5`'s first dispatch: no acceptance nest exists, so no review can be open against it.
+- **The record has its writer and the hold is enforced (2026-10-20).** `just store-review` writes every state and the tier_1 pin fails on a hand edit (§ The record, the writing rule). `fauna-publish stage <version>` is the public image dispatch and refuses as § The `:test` hold says, with no override beyond the owner's withdrawal; the predicate's arms (open → held, closed or withdrawn → not, an older version's open review → not, outside the binding window → not) are pinned by `tests/e2e-unified/tests/test_store_review_record.py`, the caller's by the release tooling's own tests. Nothing has been staged through it yet.
+- **The three channel docs keep their provenance records** (the commit, the artifact hash, the identity of each upload candidate) and point here for the state; their `## Implementation status today` bullets written before this doc still narrate state inline and are read as history — the record is current.

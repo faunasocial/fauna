@@ -1,9 +1,10 @@
 //! Shared "drop expired entries" ceremony for the nest's small in-memory TTL
-//! stores ([`crate::challenge_auth`]'s `ChallengeStore`, [`crate::token_store`]'s
-//! `TokenStore`, [`crate::age_attest`]'s replay-nonce map): each hand-copied
-//! the identical "count before, retain live entries, diff" `gc()` body,
-//! differing only in the map's value shape and whether a grace period is
-//! folded into the caller's cutoff.
+//! stores (today [`crate::token_store`]'s `TokenStore`; the ceremony
+//! `ChallengeStore`, which [`crate::age_attest`]'s nonce store wraps, keeps
+//! per-source bookkeeping and so runs its own `gc()`): each hand-copied the
+//! identical "count before, retain live entries, diff" `gc()` body, differing
+//! only in the map's value shape and whether a grace period is folded into the
+//! caller's cutoff.
 
 use std::collections::HashMap;
 

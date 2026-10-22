@@ -6,6 +6,9 @@ public class ContactsVM {
     public var contacts: [Contact] = []
     public var findQuery = ""
     public var findResult: (actorId: String, handle: String?, domain: String?)?
+    /// The peer nest `findResult`'s actor resolved on — nil for a home-nest actor.
+    /// Travels with the knock as `recipient_nest_url` (``addContact(actorId:)``).
+    public private(set) var findNestUrl: String?
     public var findError: String?
     public var isLoading = false
     public var errorMessage: String?
@@ -51,6 +54,7 @@ public class ContactsVM {
         contacts = []
         findQuery = ""
         findResult = nil
+        findNestUrl = nil
         findError = nil
         isLoading = false
         errorMessage = nil
@@ -142,15 +146,17 @@ public class ContactsVM {
         let query = findQuery.trimmingCharacters(in: .whitespaces)
         guard !query.isEmpty else { return }
         findResult = nil
+        findNestUrl = nil
         findError = nil
 
         do {
             // Parse + both network lookups run in shared Rust (classifyRecipient
-            // → resolveNest → resolveHandle); no Swift `@`-split or raw-actor-id
-            // fallback remains (priority #2/#4).
+            // → findUser); no Swift `@`-split or raw-actor-id fallback remains
+            // (priority #2/#4).
             let r = try await api.resolveRecipient(query)
             guard self.api === api else { return }   // the in-flight clause
             findResult = (actorId: r.actorId, handle: r.handle, domain: r.domain)
+            findNestUrl = r.nestUrl
         } catch {
             guard self.api === api else { return }
             findError = DisplayError.http(error)
@@ -169,9 +175,13 @@ public class ContactsVM {
     public func addContact(actorId: String) async {
         guard let api, let myId = self.actorId else { return }
         do {
-            try await api.sendKnock(actorId: myId, peerId: actorId)
+            // The knock goes to the nest the lookup resolved the actor on — the
+            // lookup's URL, never a second derivation.
+            let peerNest = findResult?.actorId == actorId ? findNestUrl : nil
+            try await api.sendKnock(actorId: myId, peerId: actorId, recipientNestUrl: peerNest)
             guard self.api === api else { return }   // the in-flight clause
             findResult = nil
+            findNestUrl = nil
             await refresh()
         } catch {
             guard self.api === api else { return }

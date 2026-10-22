@@ -15,7 +15,7 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use fauna_client_account_runtime::contact_overlays::{StagedSave, save_staged};
-use fauna_core::contact_overlay::{OverlayEditor, OverlayForm};
+use fauna_core::contact_overlay::{OverlayEditor, OverlayForm, label_suggestions};
 use fauna_ui_ids as ids;
 
 use crate::async_helper::spawn_with_snapshot;
@@ -35,6 +35,8 @@ struct Section {
     notes: gtk::TextView,
     labels: gtk::Box,
     label_input: gtk::Entry,
+    /// The completion rows under the add field (`profile-label-suggestion`).
+    suggestions: gtk::Box,
     error_label: gtk::Label,
 }
 
@@ -80,6 +82,34 @@ impl Section {
             });
             row.append(&remove);
             self.labels.append(&row);
+        }
+        self.paint_suggestions();
+    }
+
+    /// The completion under the add field: the derived vocabulary's labels
+    /// matching what is typed, minus those already staged
+    /// (`label_suggestions`). Nothing is offered until something is typed; a
+    /// pick stages through `add_label` exactly as typing it and pressing add.
+    fn paint_suggestions(self: &Rc<Self>) {
+        while let Some(child) = self.suggestions.first_child() {
+            self.suggestions.remove(&child);
+        }
+        let typed = self.label_input.text();
+        if typed.trim().is_empty() {
+            return;
+        }
+        let staged = self.editor.borrow().form(&self.live()).labels;
+        let vocabulary = overlays::projection().vocabulary();
+        for label in label_suggestions(&vocabulary, &typed, &staged) {
+            let row = gtk::Button::with_label(&label);
+            row.add_css_class("flat");
+            set_test_id(&row, ids::PROFILE_LABEL_SUGGESTION);
+            let section = Rc::clone(self);
+            row.connect_clicked(move |_| {
+                section.label_input.set_text(&label);
+                section.add_label();
+            });
+            self.suggestions.append(&row);
         }
     }
 
@@ -221,6 +251,8 @@ pub fn build(
     set_test_id(&add_btn, ids::PROFILE_LABEL_ADD_BUTTON);
     add_row.append(&add_btn);
     root.append(&add_row);
+    let suggestions = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    root.append(&suggestions);
 
     let save_btn = gtk::Button::with_label(p::PRIVATE_SAVE);
     save_btn.add_css_class("suggested-action");
@@ -236,6 +268,7 @@ pub fn build(
         notes,
         labels,
         label_input,
+        suggestions,
         error_label,
     });
 
@@ -263,6 +296,12 @@ pub fn build(
     {
         let s = Rc::clone(&section);
         add_btn.connect_clicked(move |_| s.add_label());
+    }
+    {
+        let s = Rc::clone(&section);
+        section
+            .label_input
+            .connect_changed(move |_| s.paint_suggestions());
     }
     {
         let s = Rc::clone(&section);
@@ -364,6 +403,62 @@ mod tests {
 
             click(&root, ids::PROFILE_LABEL_REMOVE_BUTTON);
             assert_eq!(texts(&root, ids::PROFILE_LABEL_CHIP), ["Family"]);
+        });
+    }
+
+    /// Typing a prefix of a label used on another person offers it as a
+    /// `profile-label-suggestion` row; picking the row stages it.
+    #[test]
+    fn typing_a_prefix_offers_the_vocabulary_and_a_pick_stages_it() {
+        crate::testid::run_on_gtk_thread(|| {
+            use fauna_core::contact_overlay::{ContactOverlay, Register, Stamp};
+            let reg = |v: &str| Register {
+                stamp: Stamp::new(1, [1; 32]),
+                value: Some(v.to_string()),
+            };
+            overlays::projection().replace(std::collections::BTreeMap::from([(
+                "cd".repeat(32),
+                ContactOverlay {
+                    labels: std::collections::BTreeMap::from([
+                        ("family".to_string(), reg("Family")),
+                        ("fencing".to_string(), reg("Fencing")),
+                    ]),
+                    ..Default::default()
+                },
+            )]));
+            let (tx, _rx) = crate::client::ui_channel();
+            let machine = fauna_launch_machine::LaunchMachine::new(
+                std::sync::Arc::new(fauna_launch_machine::NullObserver),
+                std::sync::Arc::new(fauna_launch_machine::InMemoryPersistence::new()),
+            );
+            let client = Rc::new(FaunaClient::new(
+                "http://127.0.0.1:1".to_string(),
+                "11".repeat(32),
+                tx,
+                machine,
+            ));
+            let error_label = gtk::Label::builder().visible(false).build();
+            let (section, _repaint) = build(&client, &"ab".repeat(32), error_label);
+            let root: gtk::Widget = section.upcast();
+            let field = find::find_in(&root, ids::PROFILE_LABEL_FIELD)
+                .and_then(|w| w.downcast::<gtk::Entry>().ok())
+                .expect("profile-label-field is an entry");
+            assert!(texts(&root, ids::PROFILE_LABEL_SUGGESTION).is_empty());
+            field.set_text("f");
+            assert_eq!(
+                texts(&root, ids::PROFILE_LABEL_SUGGESTION),
+                ["Family", "Fencing"]
+            );
+            let mut rows = Vec::new();
+            find::collect_in(&root, ids::PROFILE_LABEL_SUGGESTION, &mut rows);
+            rows[1]
+                .clone()
+                .downcast::<gtk::Button>()
+                .expect("a suggestion is a button")
+                .emit_clicked();
+            assert_eq!(texts(&root, ids::PROFILE_LABEL_CHIP), ["Fencing"]);
+            assert_eq!(field.text(), "");
+            assert!(texts(&root, ids::PROFILE_LABEL_SUGGESTION).is_empty());
         });
     }
 }

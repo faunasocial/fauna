@@ -229,7 +229,7 @@ fn channel_kind_scheduling_key(channel_id: &ChannelId) -> Vec<u8> {
 /// (`fauna-client-folders`' group seam) and member-side at
 /// `join_folder_welcome` from the Welcome's MLS-authenticated sender (the
 /// owner, by the owner-only-Adds invariant this same policy preserves —
-/// `federation.md` § Cross-nest shared folders + channel append). Never
+/// `federation-shared-folders.md` § Cross-nest shared folders + channel append). Never
 /// cleared; a channel without the key keeps today's open-commit
 /// processing; old binaries carry it inertly (the standard additive at-rest
 /// compat argument).
@@ -315,7 +315,7 @@ fn policy_refused_commit_key(channel_id: &ChannelId) -> Vec<u8> {
 /// conversations backend, which owns the set's replacement policy
 /// (`identity-succession.md` § The succession statement (wire) → *The slot's
 /// replacement policy*), so the folder commit walk's hold behind it survives
-/// the session (`federation.md` § Cross-nest shared folders + channel append →
+/// the session (`federation-shared-folders.md` § Cross-nest shared folders + channel append →
 /// *The folder commit walk inherits the harvest wait*). One value per channel,
 /// each write replacing the last; forgotten when the harvest speaks for the
 /// owner and with the group ([`MlsEngine::forget_group`]). Derived, recreatable state — the
@@ -2378,7 +2378,7 @@ impl MlsEngine {
 
     /// Re-point every folder-owner marker naming one of `predecessors` to
     /// **this engine's own identity** — the successor's own-seat half of
-    /// *The marker follows the owner's verified succession* (`federation.md`
+    /// *The marker follows the owner's verified succession* (`federation-shared-folders.md`
     /// § Cross-nest shared folders + channel append): an identity that
     /// succeeded from `predecessors` now owns every channel they owned, and a
     /// marker still naming the retired key would refuse its own roster
@@ -2951,7 +2951,7 @@ impl MlsEngine {
                 }
 
                 // Folder commit policy (owner-managed roster —
-                // `federation.md` § Cross-nest shared folders + channel
+                // `federation-shared-folders.md` § Cross-nest shared folders + channel
                 // append): on a channel stamped with a folder owner
                 // ([`Self::mark_folder_channel_owner`]), a commit carrying ANY
                 // proposal (Add/Remove/Update/PSK/extensions — a roster or
@@ -4388,7 +4388,7 @@ mod tests {
 
     // ── Folder commit policy (owner-managed roster) ─────────────────────────
     //
-    // The member-side enforcement of `federation.md` § Cross-nest shared
+    // The member-side enforcement of `federation-shared-folders.md` § Cross-nest shared
     // folders + channel append: the nest admits any rostered member's Commit
     // (it cannot read PrivateMessage commit content), and every honest member
     // refuses a proposal-carrying commit whose authenticated committer is not

@@ -224,9 +224,9 @@ pub fn validate_labeler_publish(
         // the vocabulary cap, the per-class count sanity, the
         // distinct-document **prune floor**, and (at a version this build's
         // tokenizer contract covers) each n-gram's **1-3-token shape** are
-        // all enforced here, at the one boundary that can refuse a buggy or
-        // hostile publisher's artifact
-        // (`fauna_core::scoring::validate_text_model_artifact`). Note it
+        // all enforced here (`fauna_core::scoring::validate_text_model_artifact`).
+        // That is what the artifact *asserts*, plus its shape; whether its
+        // counts are true rests with the publisher's scrub. Note it
         // deliberately accepts an unrecognized `version` — shape included:
         // the version is the subscriber's tokenizer contract, not this
         // nest's, so rejecting one would make an older nest refuse a newer

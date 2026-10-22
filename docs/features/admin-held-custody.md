@@ -51,7 +51,7 @@ Stamped 2026-10-01 at e129e78aa0.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.4-dev+b811e865.dirty standalone |
+| web | ✅ full | 0.1.5-dev+110d1248 standalone |
 | linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
 | windows | ⚠ partial | 0.1.2-dev+ab96a0f8.dirty standalone |
 | macos | ⚠ partial | 0.1.2-dev+923cec2d standalone |

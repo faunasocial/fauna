@@ -13,7 +13,7 @@ use wasm_bindgen::prelude::*;
 /// Accepts JSON: `{"provider": "hetzner"|"digitalocean"|"vultr"|"ovh"|"linode", ...fields}`
 ///
 /// - hetzner / digitalocean / vultr / gandi / linode: `token`
-/// - ovh: `app_key`, `app_secret`, `consumer_key`, `project_id`
+/// - ovh: `app_key`, `app_secret`, `consumer_key` (locations are `<project>/<region>`)
 ///
 /// Returns a JSON array of `{id, name, city, country}` objects.
 #[wasm_bindgen]
@@ -237,17 +237,21 @@ pub fn registrar_list_tld_pricing(provider_id: &str, creds_json: &str) -> js_sys
 /// Curated VPS plans for a provider, intersected with what the API
 /// currently lists. `curated_ids_json` is a JSON array of the provider's
 /// native server-type IDs (e.g. `["cx23","cx33",...]` for Hetzner) —
-/// callers source these from `ProviderMeta::curated_offers`. Returns a
+/// callers source these from `ProviderMeta::curated_offers`. `location` is
+/// the chosen `VpsLocation::id`: the plans and prices are that location's
+/// (`registry.md` § Server offers follow the location). Returns a
 /// JSON-encoded `Vec<ServerTypeInfo>`.
 #[wasm_bindgen]
 pub fn vps_list_server_types(
     provider_id: &str,
     creds_json: &str,
     curated_ids_json: &str,
+    location: &str,
 ) -> js_sys::Promise {
     let provider_id = provider_id.to_string();
     let creds_json = creds_json.to_string();
     let curated_ids_json = curated_ids_json.to_string();
+    let location = location.to_string();
     wasm_bindgen_futures::future_to_promise(async move {
         use fauna_provisioning::vps::VpsProvider;
         let id = parse_provider_id(&provider_id)?;
@@ -261,7 +265,7 @@ pub fn vps_list_server_types(
             })?;
         let client = reqwest::Client::new();
         let result = dispatch
-            .list_server_types(&client, &curated_refs)
+            .list_server_types(&client, &curated_refs, &location)
             .await
             .map_err(err_to_js)?;
         let json = serde_json::to_string(&result)
@@ -325,7 +329,7 @@ pub struct OnboardingMachine(Arc<InnerMachine>);
 fn pending_provision_store() -> Arc<dyn fauna_launch_machine::PendingProvisionStore> {
     Arc::new(
         fauna_client_accounts::AccountRegistry::new(Arc::new(
-            fauna_client_accounts::LocalStorageSecretStore,
+            fauna_client_accounts::WebIdentityStore,
         ))
         .pending_provision_store(),
     )
@@ -335,7 +339,7 @@ fn pending_provision_store() -> Arc<dyn fauna_launch_machine::PendingProvisionSt
 impl OnboardingMachine {
     /// Production constructor: no provider base-URL override channel exists.
     ///
-    /// The JS caller (`$lib/wasm-onboarding`) passes an override argument
+    /// The JS caller (`#lib/wasm-onboarding`) passes an override argument
     /// unconditionally, but it is only ever non-`undefined` inside the
     /// `__FAUNA_E2E_AUTOMATION__` branch that a production `vite build`
     /// constant-folds away — and this flavor drops the parameter outright, so
@@ -440,6 +444,14 @@ impl OnboardingMachine {
     #[wasm_bindgen(js_name = clearError)]
     pub fn clear_error(&self) {
         self.0.clear_error()
+    }
+
+    /// The app's moment-1 write of the identity just confirmed failed: back to
+    /// the confirm screen with `message` on `error-message` (the shared shape,
+    /// `long-term-store.md` § Save-failure handling).
+    #[wasm_bindgen(js_name = identityCommitFailed)]
+    pub fn identity_commit_failed(&self, message: String) {
+        self.0.identity_commit_failed(message)
     }
 
     #[wasm_bindgen(js_name = isLoading)]
@@ -856,6 +868,42 @@ impl OnboardingMachine {
         self.0.provision_mail_mode_enabled()
     }
 
+    /// `vps-config-ssh-door-toggle` wiring (default off): whether the box is
+    /// provisioned with a key-only sshd admitting the admin's own address —
+    /// drives `CloudInitParams::ssh_door`. The WASM twin of the UniFFI
+    /// `set_provision_ssh_door`. Per
+    /// `docs/goal/behavior/onboarding-provisioning.md` § 5.
+    #[wasm_bindgen(js_name = setProvisionSshDoor)]
+    pub fn set_provision_ssh_door(&self, enabled: bool) {
+        self.0.set_provision_ssh_door(enabled);
+    }
+
+    /// Whether the `vps-config-ssh-door-toggle` is on; while it is, the page
+    /// shows `vps-config-ssh-door-warning`.
+    #[wasm_bindgen(js_name = provisionSshDoorEnabled)]
+    pub fn provision_ssh_door_enabled(&self) -> bool {
+        self.0.provision_ssh_door_enabled()
+    }
+
+    /// JSON-encoded `SshDoorReadout` for `provisioning-ssh-door-command`, or
+    /// `""` for a door-less run (the `vpsContinueBlockedReasonJson`
+    /// convention). Carries no secret.
+    #[wasm_bindgen(js_name = sshDoorReadoutJson)]
+    pub fn ssh_door_readout_json(&self) -> String {
+        self.0
+            .ssh_door_readout()
+            .and_then(|r| serde_json::to_string(&r).ok())
+            .unwrap_or_default()
+    }
+
+    /// `provisioning-ssh-door-save-key-button`: the door's private key, handed
+    /// over ONCE (the browser has no `~/.ssh`); the machine drops its copy as
+    /// it returns it. `undefined` once taken or for a door-less run.
+    #[wasm_bindgen(js_name = takeSshDoorPrivateKey)]
+    pub fn take_ssh_door_private_key(&self) -> Option<String> {
+        self.0.take_ssh_door_private_key()
+    }
+
     /// `vps-config-update-channel-row[<channel>]` wiring: which builds the
     /// box's updater follows (`stable` / `test` / `dev`). An id that names no
     /// channel is ignored. The WASM twin of the UniFFI
@@ -876,13 +924,15 @@ impl OnboardingMachine {
         self.0.provision_update_channel().id().to_string()
     }
 
-    /// The i18n key of channel `channel_id`'s row description at the running
-    /// product version, or `""` for an id that names no channel. The WASM twin
-    /// of the UniFFI `update_channel_description_key`.
+    /// The i18n key of channel `channel_id`'s row description — the no-build
+    /// wording when the registry has nothing on the channel, else the compat
+    /// line's at the running product version — or `""` for an id that names
+    /// no channel. The WASM twin of the UniFFI
+    /// `update_channel_description_key_for_row`.
     #[wasm_bindgen(js_name = updateChannelDescriptionKey)]
     pub fn update_channel_description_key(&self, channel_id: String) -> String {
         fauna_provisioning::cloud_init::UpdateChannel::from_id(&channel_id)
-            .map(|c| c.description_key().to_string())
+            .map(|c| self.0.update_channel_description_key_for_row(c))
             .unwrap_or_default()
     }
 
@@ -1525,7 +1575,7 @@ impl OnboardingMachine {
     // Reached after the deferred-DNS exit (`continueFromDnsPostInstructions`
     // → `Done` with `wizardOutcome == AwaitingManualDns`). The web app
     // saves the slot (the registry's per-actor awaiting-DNS record —
-    // `$lib/onboarding/awaiting-dns-store`), renders the surface from
+    // `#lib/onboarding/awaiting-dns-store`), renders the surface from
     // `awaitingManualDnsSnapshotJson`, and polls `recheckManualDns` until the
     // freshly-provisioned nest comes online and can be claimed. Every probe
     // here is pre-claim HTTP — there is no WS-RPC until the claim succeeds.
@@ -2587,7 +2637,7 @@ pub fn call_machine_free_method_for_test(name: String, json_arg: String) -> Opti
 #[cfg(feature = "test-helpers")]
 fn registry_method_for_test(name: &str, json_arg: &str) -> Option<String> {
     let registry = fauna_client_accounts::AccountRegistry::new(Arc::new(
-        fauna_client_accounts::LocalStorageSecretStore,
+        fauna_client_accounts::WebIdentityStore,
     ));
     match fauna_client_accounts::call_registry_method_for_test(&registry, name, json_arg) {
         fauna_client_accounts::RegistryMethodOutcome::Handled(v) => {

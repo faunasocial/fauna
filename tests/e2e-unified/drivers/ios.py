@@ -790,7 +790,7 @@ class IosInProcessDriver(InProcessAgentDriver):
         if not Path(app_path).exists():
             raise RuntimeError(
                 f"iOS app bundle not found at {app_path}.\n"
-                f"Run 'just apple-ffi-test' then rebuild via the iOS e2e setup."
+                f"Run 'just apple-ffi-test-sim' then rebuild via the iOS e2e setup."
             )
 
         port = find_free_port()
@@ -922,7 +922,7 @@ class IosInProcessDriver(InProcessAgentDriver):
             env["SIMCTL_CHILD_FAUNA_E2E_NEST_URL"] = config["url"]
         # The resident engine's full-reconcile cadence (`always_resident::rescan_interval`,
         # the compile-gated `FAUNA_E2E_RESCAN_MS` seam) — linux's, tui's and (since
-        # 2026-08-25) macOS's twin of this launch all default it. iOS's `apple-ffi-test`
+        # 2026-08-25) macOS's twin of this launch all default it. iOS's `apple-ffi-test-sim`
         # build (release profile, so `debug_assertions` is false) only started reading
         # the var once `fauna-ffi/test-helpers` forwarded `fauna-sync-engine/e2e-agent`
         # (2026-08-27) — until then this override was inert on

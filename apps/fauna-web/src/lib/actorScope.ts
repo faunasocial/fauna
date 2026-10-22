@@ -129,3 +129,67 @@ export function resetActorScopedState(): void {
 export function registeredActorScopedResetCount(): number {
   return resets.size;
 }
+
+/**
+ * Is a shared rpc port minted for `mine` stale — built for an actor that is no
+ * longer the current one? `sharedRpcPort`'s `request` refuses on exactly this.
+ *
+ * Two independent clauses, both load-bearing:
+ *  - the **singleton** clause: the live client is keyed to another actor
+ *    (`clientActorId`). Vacuous while `clientActorId` is null — the window after
+ *    `retireRpcClient` (sign-out, the onboarding `LoggedIn` terminal), before the
+ *    next identity's first `getClient`;
+ *  - the **identity** clause: the identity store has moved on to another actor.
+ *    It alone covers that post-retire window, where dialling would re-key the
+ *    singleton back to the retired actor and run `resetActorScopedState` over
+ *    the new actor's state.
+ *
+ * A signed-out store (`currentActorId === null`) does NOT make a port stale.
+ * Sign-out runs `retireRpcClient` → `resetActorScopedState`, which drops every
+ * registered machine holding a port (and the polls, `createActorScopedPoll`),
+ * and null is also the boot state before the identity store is populated.
+ */
+export function portIsStale(
+  mine: string,
+  clientActorId: string | null,
+  currentActorId: string | null,
+): boolean {
+  return (clientActorId !== null && clientActorId !== mine) ||
+    (currentActorId !== null && currentActorId !== mine);
+}
+
+/**
+ * The 15 s page-machine poll, scoped to the actor it was started for
+ * (`account-scoping.md` § The scoping taxonomy: background loops die with the
+ * state they write). One shape for every component that polls a machine:
+ *  - `start` refuses (no timer) when `sameActor` — captured with
+ *    `sameActorSince()` BEFORE the mount's first await — reads false, because an
+ *    identity change landing during those awaits already ran the drop and a
+ *    poll started now would resurrect the outgoing actor's loop;
+ *  - the canonical drop (`resetActorScopedState`) stops a running poll;
+ *  - `dispose` is `onDestroy`: stop and unregister.
+ */
+export function createActorScopedPoll(intervalMs: number): {
+  start: (sameActor: () => boolean, tick: () => void) => void;
+  stop: () => void;
+  dispose: () => void;
+} {
+  let timer: ReturnType<typeof setInterval> | null = null;
+  function stop(): void {
+    if (timer) clearInterval(timer);
+    timer = null;
+  }
+  const unregister = registerActorScopedReset(stop);
+  return {
+    start(sameActor, tick) {
+      if (!sameActor()) return;
+      stop();
+      timer = setInterval(tick, intervalMs);
+    },
+    stop,
+    dispose() {
+      stop();
+      unregister();
+    },
+  };
+}

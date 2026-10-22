@@ -6,7 +6,7 @@
   // leg (dynamic-features.md § Platform-family surface excision: "a gated
   // plane's user-facing INPUTS excise with it") — mirrors `ClaimRedeem.svelte`'s
   // extraction out of `SubscriptionsSection.svelte`.
-  import { PAYMENTS_IDS } from '$lib/components/payments/generatedIds';
+  import { PAYMENTS_IDS } from '#lib/components/payments/generatedIds';
 
   interface Props {
     /** Which caller is rendering this — selects the id + the scoped chrome

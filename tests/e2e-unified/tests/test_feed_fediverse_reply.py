@@ -67,18 +67,26 @@ def fediverse_nest(ap_binary, tmp_path_factory):
     """One AP-enabled nest for the module, its domain its own loopback
     authority (the federation suite's shape). Each test registers its own
     user and follower on it, so no test reads another's state."""
-    port = find_free_port()
-    nest = start_ap_nest(
-        ap_binary,
-        tmp_path_factory.mktemp("fediverse-reply-nest"),
-        port,
-        f"127.0.0.1:{port}",
-    )
+    # An android venue run leases the port from the range its tunnel carries
+    # (`helpers.android_venue.nest_port`); every other run takes a free one.
+    from helpers import android_venue
+    port, release_port = android_venue.nest_port(find_free_port)
+    try:
+        nest = start_ap_nest(
+            ap_binary,
+            tmp_path_factory.mktemp("fediverse-reply-nest"),
+            port,
+            f"127.0.0.1:{port}",
+        )
+    except BaseException:
+        release_port()
+        raise
     try:
         yield nest
     finally:
         nest["proc"].kill()
         nest["proc"].wait()
+        release_port()
 
 
 @pytest.fixture

@@ -74,6 +74,16 @@ class LocalRestoreVM @Inject constructor(
         }
     }
 
+    /** Re-read the local picker after a snapshot gesture changed which
+     *  snapshots exist. A failed read keeps what the picker paints — the next
+     *  page entry's [refresh] reports a real fault — and the restore's progress
+     *  line is left alone. */
+    fun rereadSnapshots() {
+        viewModelScope.launch {
+            runCatching { api.listMessageKindSnapshots() }.onSuccess { _snapshots.value = it }
+        }
+    }
+
     /** Dispatch the local single-snapshot restore. The friction bar (typed id ==
      *  selected snapshot id) is enforced in the Content; this trusts it. */
     fun restore(snapshotId: Long, confirmId: String) {

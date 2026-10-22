@@ -90,9 +90,10 @@ pub enum BackupTrustKind {
 pub enum BackupTrustStatus {
     /// The grant is in force.
     Active,
-    /// The destination's writer-grant read failed — unreachable, refused, or
-    /// malformed. Deliberately distinct from [`Missing`](Self::Missing): "we
-    /// could not ask" must not read as "the trust is gone".
+    /// The read that would say failed — a destination's writer-grant list, or (on
+    /// the seal row) the home nest's backup status: unreachable, refused, or
+    /// malformed. Deliberately distinct from [`Missing`](Self::Missing) and from
+    /// an absent row: "we could not ask" must not read as "the trust is gone".
     Unreachable,
     /// The destination answered, and this owner has authorized **no** writer
     /// grant for the source nest there. The config lists the destination but
@@ -491,10 +492,13 @@ pub async fn connect_destination(
 /// `writer_nest_id` is the home nest's hex identity **as its connection proved
 /// it** — the caller's bound nest id, never the source's `fauna.nest.info`
 /// claim (module docs). `destinations` is the client's own pinned
-/// `fauna.state.backup` destination list (source-untrusted). Only the source-nest
-/// status read can fail the call — a per-destination failure degrades that row
-/// to [`BackupTrustStatus::Unreachable`] and never the whole facet, so one dead
-/// destination can't blank out the others or the seal row.
+/// `fauna.state.backup` destination list (source-untrusted). **No read fails the
+/// facet** (`nests.md` § Trust facet — backup rows, ruled 2026-10-19): a failed
+/// home-nest status read renders the seal row
+/// [`BackupTrustStatus::Unreachable`] — we could not ask whether the nest holds
+/// the seal, which must not read as "it does not" — and a failed destination
+/// read degrades only that destination's row, so one dead read can blank out
+/// neither the others nor the seal row.
 ///
 /// **The read carries a rotated box's seat** (`segment-backup-protocol.md`
 /// § Cross-location backup protocol → *Where the carry runs*): over each
@@ -508,13 +512,17 @@ pub async fn backup_trust_rows(
     writer_nest_id: &str,
     destinations: &[BackupDestination],
     connector: &dyn BackupDestinationConnector,
-) -> Result<Vec<BackupTrustRow>, String> {
+) -> Vec<BackupTrustRow> {
     let mut rows = Vec::new();
 
-    if source.status().await?.enrolled {
+    let seal = match source.status().await {
+        Ok(reply) => reply.enrolled.then_some(BackupTrustStatus::Active),
+        Err(_) => Some(BackupTrustStatus::Unreachable),
+    };
+    if let Some(status) = seal {
         rows.push(BackupTrustRow {
             kind: BackupTrustKind::Seal,
-            status: BackupTrustStatus::Active,
+            status,
             since: None,
         });
     }
@@ -544,7 +552,7 @@ pub async fn backup_trust_rows(
             since,
         });
     }
-    Ok(rows)
+    rows
 }
 
 /// One destination's writer-grant lookup. `Err` ⇒ we could not ask (the caller
@@ -658,6 +666,8 @@ mod tests {
         seal_revoked: Mutex<bool>,
         /// The bound box's rotation chain; `None` = the kind is not answered.
         chain: Option<Vec<fauna_protocol::nest_rotation::SignedNestRotation>>,
+        /// `fauna.backup.status` errors — the home nest could not answer.
+        status_fails: bool,
     }
 
     impl MockSource {
@@ -666,6 +676,7 @@ mod tests {
                 enrolled,
                 seal_revoked: Mutex::new(false),
                 chain: None,
+                status_fails: false,
             }
         }
     }
@@ -673,6 +684,9 @@ mod tests {
     #[async_trait]
     impl BackupNestSeam for MockSource {
         async fn status(&self) -> Result<BackupStatusReply, String> {
+            if self.status_fails {
+                return Err("fauna.protocol.internal".into());
+            }
             Ok(BackupStatusReply {
                 enrolled: self.enrolled,
                 destinations: vec![],
@@ -866,13 +880,42 @@ mod tests {
             SOURCE_ID,
             &[],
             &MockConnector::default(),
-        ))
-        .unwrap();
+        ));
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].kind, BackupTrustKind::Seal);
         assert_eq!(rows[0].status, BackupTrustStatus::Active);
         assert_eq!(rows[0].since, None, "the seal grant carries no timestamp");
+    }
+
+    /// **A failed status read is not an absent seal** (`nests.md` § Trust
+    /// facet — backup rows, ruled 2026-10-19): the seal row renders
+    /// `unreachable`, and the writer rows — read over each destination's own
+    /// connection, never through the home nest — still render. Before the
+    /// ruling one failed home read blanked the whole facet, the writer rows
+    /// included, and the page said nothing.
+    #[test]
+    fn a_failed_status_read_renders_the_seal_unreachable_and_keeps_the_writer_rows() {
+        let src = MockSource {
+            status_fails: true,
+            ..MockSource::enrolled(true)
+        };
+        let conn = MockConnector::default().with(
+            "https://aunt.example",
+            vec![granted(SOURCE_ID, 1_700_000_000)],
+        );
+        let rows = block_on(backup_trust_rows(
+            &src,
+            SOURCE_ID,
+            &[dest("d1", "https://aunt.example", None)],
+            &conn,
+        ));
+
+        assert_eq!(rows.len(), 2, "the seal row, then the writer row");
+        assert_eq!(rows[0].kind, BackupTrustKind::Seal);
+        assert_eq!(rows[0].status, BackupTrustStatus::Unreachable);
+        assert_eq!(rows[1].status, BackupTrustStatus::Active);
+        assert_eq!(rows[1].since, Some(1_700_000_000));
     }
 
     #[test]
@@ -883,8 +926,7 @@ mod tests {
             SOURCE_ID,
             &[],
             &MockConnector::default(),
-        ))
-        .unwrap();
+        ));
         assert!(rows.is_empty());
     }
 
@@ -900,8 +942,7 @@ mod tests {
             SOURCE_ID,
             &[dest("d1", "https://aunt.example", Some("Aunt's nest"))],
             &conn,
-        ))
-        .unwrap();
+        ));
 
         assert_eq!(rows.len(), 2, "seal row then one writer row");
         assert_eq!(rows[1].status, BackupTrustStatus::Active);
@@ -940,8 +981,7 @@ mod tests {
             SOURCE_ID,
             &[enrolled, covered],
             &conn,
-        ))
-        .unwrap();
+        ));
 
         assert_eq!(rows.len(), 2, "seal row then exactly one writer row");
     }
@@ -957,8 +997,7 @@ mod tests {
             SOURCE_ID,
             &[dest("d1", "https://aunt.example", None)],
             &conn,
-        ))
-        .unwrap();
+        ));
 
         assert_eq!(rows[1].status, BackupTrustStatus::Missing);
         assert_eq!(rows[1].since, None);
@@ -1003,8 +1042,7 @@ mod tests {
             &bound_hex,
             &[dest("d1", "https://aunt.example", None)],
             &conn,
-        ))
-        .unwrap();
+        ));
 
         assert_eq!(rows[1].status, BackupTrustStatus::Active);
         assert_eq!(rows[1].since, Some(1_800_000_000), "the handover's grant");
@@ -1031,8 +1069,7 @@ mod tests {
                 dest("up", "https://up.example", None),
             ],
             &conn,
-        ))
-        .unwrap();
+        ));
 
         assert_eq!(rows.len(), 3);
         assert_eq!(
@@ -1060,8 +1097,7 @@ mod tests {
             SOURCE_ID,
             &[dest("d1", "https://aunt.example", None)],
             &conn,
-        ))
-        .unwrap();
+        ));
 
         assert_eq!(rows[1].status, BackupTrustStatus::Active);
     }
@@ -1075,8 +1111,7 @@ mod tests {
             SOURCE_ID,
             &[dest("d1", "https://aunt.example", None)],
             &conn,
-        ))
-        .unwrap();
+        ));
 
         match &rows[1].kind {
             BackupTrustKind::Writer {
@@ -1161,8 +1196,7 @@ mod tests {
             SOURCE_ID,
             &[dest("d1", "https://aunt.example", None)],
             &conn,
-        ))
-        .unwrap();
+        ));
         assert_eq!(
             rows[1].status,
             BackupTrustStatus::Unreachable,

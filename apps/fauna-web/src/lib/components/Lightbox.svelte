@@ -5,8 +5,8 @@
     onclose: () => void;
   }
 
-  import { t } from '$lib/i18n/strings';
-  import { IDS } from '$lib/generated/uiIds';
+  import { t } from '#lib/i18n/strings';
+  import { IDS } from '#lib/generated/uiIds';
 
   let { src, alt = "", onclose }: Props = $props();
 

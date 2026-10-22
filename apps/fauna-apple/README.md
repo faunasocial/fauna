@@ -17,7 +17,7 @@ just apple-ffi        # the 3-slice XCFramework (device + simulator + Mac) — P
 just apple-ffi-test   # same 3 slices WITH the e2e seams; what the iOS e2e suite needs
 ```
 
-The iOS app builds from Xcode with the `FaunaiOS` scheme (simulator, or your
+The iOS app builds from Xcode with the `Fauna-iOS` scheme (simulator, or your
 own device with your signing), after `just apple-ffi`. Use **`apple-ffi-test`**
 instead whenever you build the app in Debug and drive it from the e2e harness —
 a Debug build compiles FaunaKit's `#if DEBUG` TestAgent, whose calls into the

@@ -47,6 +47,28 @@ public struct FeedCreateForm {
 
     public var factors: [FactorWeightInput] = []
     public var selectedFactorKey: String = FeedCreateForm.builtinFactors[0].value
+
+    /// The picker's options as it paints them, in order: the built-ins' resolved
+    /// labels, then each trained topic by its name — the `options` read, never
+    /// the `topic:<hex>` keys the composition stores (topic-factors.md §
+    /// Authoring surface & picker).
+    public var factorOptionLabels: [String] {
+        Self.builtinFactors.map { renderLocalizedText($0.label) } + trainedFactorOptions.map(\.label)
+    }
+
+    /// The stable keys behind `factorOptionLabels`, index for index.
+    public var factorOptionKeys: [String] {
+        Self.builtinFactors.map(\.value) + trainedFactorOptions.map(\.key)
+    }
+
+    /// Select by a stable key, or by the label the picker paints for one.
+    public mutating func selectFactor(_ keyOrLabel: String) {
+        if let i = factorOptionLabels.firstIndex(of: keyOrLabel), !factorOptionKeys.contains(keyOrLabel) {
+            selectedFactorKey = factorOptionKeys[i]
+        } else {
+            selectedFactorKey = keyOrLabel
+        }
+    }
     public var newFactorWeight = "1.0"
     public var newFactorGlobal = false
 

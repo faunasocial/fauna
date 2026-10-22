@@ -63,10 +63,12 @@ const DEVICE_B: [u8; 32] = [0x1B; 32];
 const FOLDER: &str = "vault";
 const REL: &str = "ledger.bin";
 
-/// Generous next to a healthy round trip, far short of the relay's 30 s
-/// per-seat fetch deadline — so a read that was made to wait out a silent seat
-/// fails the assertion rather than passing slowly.
-const PROMPT: Duration = Duration::from_secs(15);
+/// Generous next to a healthy round trip, short of the relay's 30 s per-seat
+/// fetch deadline — so a read that was made to wait out a silent seat fails
+/// the assertion rather than passing slowly. Not 15 s: a 12 MiB relayed pull of
+/// a debug build took 15.5 s on a 4-core CI runner beside the rest of the
+/// suite, with every seat answering; the discriminated event is ≥ 30 s.
+const PROMPT: Duration = Duration::from_secs(25);
 
 /// Past the 8 MiB single-chunk threshold and varied, so the file is several
 /// chunks and the relay is asked more than once.
@@ -91,9 +93,8 @@ async fn start_test_nest() -> Nest {
     let owner = ActorKeypair::from_secret(OWNER_SECRET).actor_id().0;
     let db = Arc::new(CacheDb::open_in_memory().unwrap());
 
-    let blob_dir = tempfile::tempdir().unwrap();
-    let blob_path = blob_dir.path().to_path_buf();
-    std::mem::forget(blob_dir); // outlive the test; never deleted under test
+    let base = AppState::for_test(db.clone());
+    let blob_path = base.test_scratch_path("blobs");
     let backup_svc =
         Arc::new(BackupService::new(db.clone(), None, false, blob_path, None).unwrap());
     let store = backup_svc.local_blob_store();
@@ -150,7 +151,7 @@ async fn start_test_nest() -> Nest {
         sync: fauna_nest::state::SyncState {
             chunk_resolver: resolver,
         },
-        ..AppState::for_test(db)
+        ..base
     });
 
     let app = fauna_nest::build_router(state);

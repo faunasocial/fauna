@@ -145,7 +145,7 @@ impl SupervisionSnapshot {
         let policy = status.policy.as_ref().filter(|_| guardian.is_some());
         Self {
             supervised_by: guardian.map(SnapshotGuardian::from_wire),
-            content_policy: policy.and_then(|p| p.content_policy),
+            content_policy: policy.and_then(|p| p.content_policy.clone()),
             content_notify: policy.and_then(|p| p.content_notify) == Some(true),
             screen_time: policy.and_then(|p| p.screen_time),
         }

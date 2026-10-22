@@ -162,29 +162,6 @@ data class PostInteraction(
     val body: String? = null
 )
 
-@Serializable
-data class PostDetail(
-    @SerialName("post_id") val postId: String,
-    val author: String,
-    @SerialName("created_at") val createdAt: Long,
-    val body: String = "",
-    val tags: List<String> = emptyList(),
-    @SerialName("has_media") val hasMedia: Boolean = false,
-    @SerialName("is_reply") val isReply: Boolean = false,
-    val source: String = "",
-    @SerialName("like_count") val likeCount: Int = 0,
-    @SerialName("repost_count") val repostCount: Int = 0,
-    @SerialName("reply_count") val replyCount: Int = 0,
-    @SerialName("is_liked") val isLiked: Boolean = false,
-    @SerialName("is_reposted") val isReposted: Boolean = false,
-    @SerialName("reply_to_id") val replyToId: String? = null,
-    // Bluesky-specific
-    val uri: String? = null,
-    val cid: String? = null,
-    @SerialName("root_uri") val rootUri: String? = null,
-    @SerialName("root_cid") val rootCid: String? = null
-)
-
 // -- Calendar View --
 
 // The calendar view vocabulary is `com.fauna.ffi.FfiCalendarViewMode`

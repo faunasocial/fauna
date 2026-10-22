@@ -1,9 +1,10 @@
 """E2E test: Docker nest image integration test.
 
-Boots the nest image (the shared `fauna-nest-test:local` tag — `helpers.docker_build`
-reuses it and never builds on a dev VM), starts a container, verifies
-health/setup-status endpoints, claims admin via API, and checks admin
-status is visible in the web app via Playwright.
+Boots the nest image (this tree's keyed `fauna-nest-test:src-<key>` tag —
+`helpers.docker_build` reuses it and builds it only on an explicit opt-in), starts
+a container, verifies
+health/setup-status endpoints, claims admin via API, and checks the served
+floor certificate. No test here drives a client or a browser.
 """
 
 import json
@@ -37,10 +38,11 @@ try:
 except Exception:
     HAS_DOCKER = False
 
-# `web` scopes these web-SPA-driven docker tests to --client web (they were
-# wrongly "client-independent", so a non-web --include-independent run pulled
-# them in); the marker is a no-op for the no-`--client` `just e2e-tier-4-test`.
-pytestmark = [pytest.mark.skipif(not HAS_DOCKER, reason="Docker not available"), pytest.mark.tier_4, pytest.mark.self_contained_docker, pytest.mark.web]
+# No `web` marker: these tests drive no client (the Playwright admin check that
+# once earned it is gone), and the marker made a run whose app set holds web —
+# the self-hosted tier_4 workflow's, where the platform is `github` — build the
+# web SPA at collection with a toolchain that runner does not have.
+pytestmark = [pytest.mark.skipif(not HAS_DOCKER, reason="Docker not available"), pytest.mark.tier_4, pytest.mark.self_contained_docker]
 
 
 # What `fauna.setup.status` reports for a box that has never been given a domain:

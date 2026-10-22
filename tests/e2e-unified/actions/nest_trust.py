@@ -500,6 +500,51 @@ class NestTrustActions:
         """How many custodian-NEST rows render (`nest-trust-custody-item`)."""
         return self.driver.count("nest-trust-custody-item")
 
+    # ── restore from a custodian nest (nests.md § Trust facet — restore from
+    # a custodian nest): the page-level form and its outcome notice.
+
+    def require_custody_restore_supported(self) -> None:
+        """Skip unless this app renders the restore-from-a-custodian form
+        (`nests-custody-restore-*`) — tui leads, linux and web follow
+        (android's surfaces are Robolectric-verified, with no device run
+        venue), and the rest follow in their trickle-down rows (e2e
+        convention 7). On web the full cold-device journey still skips at the
+        custody ceremony, a declared absence there (`ui/devices.md` § Where
+        logic lives); `test_custody_restore_honest_arms.py` needs none."""
+        d = self.driver
+        if not (d.is_tui() or d.is_linux() or d.is_web()):
+            from helpers.app_surface import skip_unbuilt
+
+            skip_unbuilt(
+                d,
+                surface="the Nests page's restore from a custodian nest "
+                        "(nests-custody-restore-*)",
+                detail="the shared RestoreFromCustodian command is exported; "
+                       "this app's Nests page does not paint the form yet",
+                tracked="nests.md § Implementation status today",
+            )
+
+    def restore_from_custodian(self, address: str) -> None:
+        """Reveal the form, type `address`, submit — the typed-address entry
+        (`RestoreFromCustodian { url }`)."""
+        d = self.driver
+        d.click("nests-custody-restore-button")
+        d.wait_for("nests-custody-restore-input", timeout=10.0)
+        d.clear_and_type("nests-custody-restore-input", address)
+        d.click("nests-custody-restore-submit-button")
+
+    def custody_restore_notice(self) -> str:
+        """The last restore's outcome (`nests-custody-restore-notice`); `""`
+        while none ran this session."""
+        if self.driver.is_absent("nests-custody-restore-notice"):
+            return ""
+        return self.driver.get_text("nests-custody-restore-notice") or ""
+
+    def restore_from_custody_row(self, index: int = 0) -> None:
+        """The warm gesture on custodian row `index`
+        (`nest-trust-custody-restore-button`), the row's own address."""
+        self.driver.click("nest-trust-custody-restore-button", index=index)
+
     def custody_receipt_status_text(self, index: int = 0) -> str:
         """The custodian row's receipt line (`nest-trust-custody-receipt-status`)
         — fresh ("Last confirmed …"), stale ("Stale — last confirmed …") or

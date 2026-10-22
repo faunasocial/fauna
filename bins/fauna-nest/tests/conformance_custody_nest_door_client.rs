@@ -1668,11 +1668,14 @@ async fn the_pump_adopts_the_owners_mail_segments_end_to_end() {
 /// (the pull itself works), and the budget it hands the bulk half leaves no
 /// room, so the owner's pair is offered and not adopted.
 ///
-/// Pins the composition no unit sees: the worker passes the row's cap
-/// (`Some(cap)`, not the 8 GiB default), `pull_from_owner_nest` meters the
-/// headroom from it, and the segment half runs under that budget. Mutate: pass
-/// `None` for the cap in `custody_hosting_worker`, or call the unbudgeted
-/// `bootstrap_scope_segments` in `adopt_scope_segments`, and the pair adopts.
+/// Pins the composition no unit sees: the device leg's pump passes the row's
+/// cap (`row_cap_bytes`, not the 8 GiB default), `pull_from_owner_nest` meters
+/// the headroom from it, and the segment half runs under that budget. Mutate:
+/// pass `None` for the cap at the device leg's `pull_from_owner_nest` call in
+/// `custody_leg`, or call the unbudgeted `bootstrap_scope_segments` in
+/// `adopt_scope_segments`, and the pair adopts. (The nest-hosted form's cap is
+/// pinned by `a_hosted_custody_with_a_cap_below_one_pair_adopts_no_segment`
+/// in `conformance_custody_hosting_pump_client.rs`.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_cap_below_one_pair_leaves_the_owners_mail_segments_unadopted() {
     let _ = tracing_subscriber::fmt()
@@ -2435,5 +2438,62 @@ async fn the_pump_adopts_a_channels_conv_segments_under_the_member_mint_rule() {
         "fauna.segments.not_owner",
         "the refusal is the door's uniform not_owner — indistinguishable from a \
          stranger's"
+    );
+}
+
+/// A custodian's session is not the owner signing in (`login.md` § Direct Auth
+/// → the verify reply, `first_sign_in`): the custody handshake mints, and the
+/// owner's durable first-session mark is still unset, so the owner's own first
+/// sign-in afterwards is still read as first.
+///
+/// The owner's custody row is minted over a bearer put straight into the token
+/// store — not through any auth ceremony, so nothing has marked the account
+/// before the custodian's mint, and the mark's state at the end is the
+/// custodian mint's doing alone.
+#[tokio::test]
+async fn a_custodian_mint_leaves_the_owners_first_session_mark_unset() {
+    let (base, state, _tmp) = start_door_nest().await;
+    state
+        .db
+        .create_user_with_handle(&owner().actor_id().0, "free", "owner", None)
+        .await
+        .unwrap();
+    let minted = state
+        .auth
+        .token_store
+        .insert_with_metadata(owner().actor_id(), 3600, None, None)
+        .await;
+    let bearer: Arc<dyn fauna_nest_http::BearerSource> =
+        Arc::new(fauna_nest_http::StaticBearer(minted.token));
+    let owner_nest = NestClient::with_auth(Arc::new(fauna_client::AuthClient::bearer_only(
+        base.clone(),
+        owner().actor_id().0,
+        bearer,
+        reqwest::Client::new(),
+    )));
+    owner_nest
+        .connect()
+        .await
+        .expect("the owner's bearer connects");
+    common::wait_for_connected(&owner_nest).await;
+    mint_custody_row(&owner_nest, &CustodyScopeSet::Account, GRANT_ID).await;
+
+    let custodian_nest = fauna_client::ws_custody_handshake_bearer::custody_nest_client(
+        &base,
+        owner().actor_id().0,
+        custodian_key(),
+        witness_for(CustodyScopeSet::Account),
+    );
+    connect_custody(&custodian_nest)
+        .await
+        .expect("the custody handshake mints and the WS connects");
+
+    assert!(
+        state
+            .db
+            .mark_first_session(&owner().actor_id().0)
+            .await
+            .unwrap(),
+        "the custodian's mint must not set the owner's first-session mark"
     );
 }

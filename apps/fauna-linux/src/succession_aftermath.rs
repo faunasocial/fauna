@@ -171,6 +171,13 @@ impl AftermathSink for AftermathUi {
         self.report(AftermathUpdate::GrantRemint(progress));
     }
 
+    fn period_rotation(
+        &mut self,
+        progress: fauna_client_subscriptions::orchestration::PeriodRotationProgress,
+    ) {
+        self.report(AftermathUpdate::PeriodRotation(progress));
+    }
+
     fn drafts_reseal(&mut self, progress: fauna_client_drafts::DraftsResealProgress) {
         self.report(AftermathUpdate::DraftsReseal(progress));
     }

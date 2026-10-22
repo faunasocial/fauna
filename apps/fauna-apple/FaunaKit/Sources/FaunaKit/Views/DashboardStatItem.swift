@@ -1,63 +1,38 @@
 import SwiftUI
 
-/// One headline metric on the admin Dashboard (admin.md § 1 Dashboard).
+/// One `admin-stat-card` on the admin Dashboard (admin.md § 1. Dashboard →
+/// *The card set*), its label and value already resolved for display.
 ///
-/// The shared *definition* of a stat card — its label, formatted value, SF
-/// Symbol, and accent color — so the macOS card grid (`AdminDashboardView` →
-/// `LazyVGrid` of `StatCard`) and the iOS stat-row list (`AdminDashboardView` →
-/// `List` of `statRow`) render the **same** metric set, in the same order, with
-/// the same labels, formatting, and colors, from one place. Each platform keeps
-/// its own layout *shell* (the grid vs. the list is a form-factor divergence —
-/// a 4-col grid is wrong on a phone, plain rows are sparse on a wide Mac) but
-/// consumes this single item list, so an "add / relabel / reorder / recolor a
-/// stat" change lands once instead of in two near-identical files.
+/// The card set itself — which cards, in what order, with what labels and
+/// values — is the shared-Rust fold `admin_dashboard_snapshot()` (the five
+/// reads, once, for all 7 apps); Apple chooses none of its own. The macOS card
+/// grid and the iOS stat-row list are each platform's layout *shell* over this
+/// one list.
 ///
 /// The per-card e2e ids (`admin-stat-card`, `admin-stat-card-value`,
 /// `admin-stat-card-label`) are constant across every card, so they are applied
 /// by the rendering shell, not carried per item.
 public struct DashboardStatItem: Identifiable {
-    /// Stable key for `ForEach` (also distinguishes the per-tier cards).
-    public let id: String
+    /// The card's position in the snapshot — stable for `ForEach` (two tiers
+    /// could share a label, so the label is not a key).
+    public let id: Int
     public let label: String
     public let value: String
-    public let systemImage: String
-    public let color: Color
 
-    public init(id: String, label: String, value: String, systemImage: String, color: Color) {
+    public init(id: Int, label: String, value: String) {
         self.id = id
         self.label = label
         self.value = value
-        self.systemImage = systemImage
-        self.color = color
     }
 }
 
-/// The canonical headline-metric list for the admin Dashboard, in display order:
-/// version, users, suspended, storage, connections, then one card per user
-/// tier (`stats.usersByTier`). Shared by the macOS + iOS `AdminDashboardView`s
-/// (admin.md § 1 Dashboard). The version card always renders (`"—"` when the
-/// node-info version hasn't loaded), mirroring the prior macOS behavior.
-public func dashboardStatItems(stats: FfiAdminStats, version: String?) -> [DashboardStatItem] {
-    var items: [DashboardStatItem] = [
-        DashboardStatItem(id: "version", label: L.admin.dashboard.version,
-                          value: version ?? "—", systemImage: "number", color: .green),
-        // `"Users"` is a literal in both prior views — there is no
-        // `L.admin.dashboard.users`; kept verbatim to preserve behavior.
-        DashboardStatItem(id: "users", label: "Users",
-                          value: "\(stats.totalUsers)", systemImage: "person.3", color: .blue),
-        DashboardStatItem(id: "suspended", label: L.admin.dashboard.suspended,
-                          value: "\(stats.suspendedUsers)",
-                          systemImage: "exclamationmark.triangle",
-                          color: stats.suspendedUsers > 0 ? .orange : .green),
-        DashboardStatItem(id: "storage", label: L.admin.dashboard.totalStorage,
-                          value: ValueFormat.byteSize(UInt64(max(0, stats.totalStorageBytes))),
-                          systemImage: "externaldrive", color: .purple),
-        DashboardStatItem(id: "connections", label: L.admin.dashboard.connections,
-                          value: "\(stats.wsConnections)", systemImage: "wifi", color: .green),
-    ]
-    for row in stats.usersByTier {
-        items.append(DashboardStatItem(id: "tier-\(row.tier)", label: row.tier.capitalized,
-                                       value: "\(row.count)", systemImage: "person", color: .secondary))
+/// The snapshot's cards, in the fold's order, each `LocalizedText` resolved
+/// against the app's string table. Shared by the macOS + iOS
+/// `AdminDashboardView`s.
+public func dashboardStatItems(_ snapshot: FfiAdminDashboardSnapshot) -> [DashboardStatItem] {
+    snapshot.stats.enumerated().map { index, card in
+        DashboardStatItem(id: index,
+                          label: renderLocalizedText(card.label),
+                          value: renderLocalizedText(card.value))
     }
-    return items
 }

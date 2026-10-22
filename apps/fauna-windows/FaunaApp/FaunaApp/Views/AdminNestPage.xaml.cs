@@ -4,6 +4,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
+using FaunaApp.Controls;
 using FaunaApp.Core.Services;
 using FaunaApp.Core.ViewModels;
 using FaunaApp.Helpers;
@@ -102,7 +103,11 @@ public sealed partial class AdminNestPage : Page
         if (e.Parameter is ServiceClients clients)
         {
             _clients = clients;
-            _vm ??= new AdminNestViewModel(clients.Rpc!);
+            if (_vm is null)
+            {
+                _vm = new AdminNestViewModel(clients.Rpc!);
+                _vm.FeatureLimits.Changed += QueueFeatureLimitsRepaint;
+            }
         }
     }
 
@@ -115,6 +120,9 @@ public sealed partial class AdminNestPage : Page
         try
         {
             await _vm.LoadCommand.ExecuteAsync(null);
+            // The Feature limits host's authored read (never throws — a failure
+            // lands in its state and is painted by RenderFeatureLimits).
+            await _vm.FeatureLimits.RefreshAsync();
             ServingPortBox.Text = _vm.ServingPort;
             RenderServingPortFronted();
             RenderPairingToggle();
@@ -319,6 +327,47 @@ public sealed partial class AdminNestPage : Page
         await _vm.SetRegionAsync(null);
         RenderRegion();
         RenderError(_vm.Error);
+    }
+
+    // ── Feature limits for everyone (fauna.features.policy.{get,update} via the
+    //     shared FfiPolicyEditor, admin.md § N Nest → Feature limits) ──────────
+
+    private bool _featureRepaintQueued;
+
+    /// <summary>The authoring host changed shape: repaint once, off the stack of
+    /// whatever raised it (a radio's <c>Checked</c> handler would otherwise
+    /// replace the very control it is running on). Coalesced — a save raises
+    /// several notifications in a row.</summary>
+    private void QueueFeatureLimitsRepaint()
+    {
+        if (_featureRepaintQueued) return;
+        _featureRepaintQueued = true;
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            _featureRepaintQueued = false;
+            RenderFeatureLimits();
+        });
+    }
+
+    /// <summary>
+    /// Paint <c>admin-nest-feature-limits-section</c> from the VM's authoring host.
+    /// This paints; it decides nothing — the rows, the editor and the verdict lines
+    /// are the shared editor's (<see cref="FeatureAuthoringPainter"/>). Hidden until
+    /// the authored read answers; a read that failed, a refused cell or a failed
+    /// write surfaces on <c>error-message</c>.
+    /// </summary>
+    private void RenderFeatureLimits()
+    {
+        if (_vm is null) return;
+        var host = _vm.FeatureLimits;
+        var state = host.State;
+
+        FeatureLimitsSection.Visibility = state.Rows is null ? Visibility.Collapsed : Visibility.Visible;
+        FeatureLimitsRowsHost.Children.Clear();
+        if (state.Rows is not null)
+            FeatureLimitsRowsHost.Children.Add(FeatureAuthoringPainter.BuildRows(host, FeatureHostIds.Admin));
+
+        RenderError(state.Error ?? state.ReadError ?? _vm.Error);
     }
 
     // ── NAT mode (fauna.setup.nat_mode via the shared AdminNatModeMachine,

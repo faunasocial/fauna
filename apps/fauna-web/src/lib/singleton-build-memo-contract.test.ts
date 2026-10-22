@@ -226,7 +226,7 @@ for (const [name, { url, memo }] of Object.entries(MEMOS)) {
       if (!new RegExp(`\\b${GUARD}\\b`).test(src)) {
         throw new Error(
           `${name}: the build memoized in \`${memo}\` is not routed through ` +
-            `\`${GUARD}\` (\`$lib/singleton-build.ts\`), so a build that never ` +
+            `\`${GUARD}\` (\`#lib/singleton-build.ts\`), so a build that never ` +
             `SETTLES — the wasm-task-died-mid-poll class, whose internal ` +
             `deadlines die with the task — leaves \`${memo}\` holding a ` +
             `permanently pending promise. Every awaiting surface then hangs ` +

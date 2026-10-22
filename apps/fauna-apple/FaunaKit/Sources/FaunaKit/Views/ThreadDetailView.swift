@@ -21,10 +21,22 @@ public struct ThreadDetailView: View {
     /// banner beside the thread, so it passes `false` — two banners would be two
     /// `error-message` elements on one page.
     public let showsPageError: Bool
+    /// A room-search POST hit's destination (`room-search.md` § The surface →
+    /// *Opening a hit*): the shell switches to its feed page and parks the post id
+    /// with the room's `homeNestUrl` (non-nil iff the room is homed on another
+    /// nest) on `FeedVM.pendingPostOpen`/`pendingPostOpenHome`, which resolves it
+    /// through `resolve_post_from`. The page switch is per shell (macOS sidebar,
+    /// iOS tab), so it rides in as a closure; `nil` (the kids build, which has no
+    /// feed) leaves a post hit inert.
+    public var onOpenRoomPost: ((String, String?) -> Void)?
 
-    public init(detail: ThreadDetail, showsPageError: Bool = false) {
+    public init(
+        detail: ThreadDetail, showsPageError: Bool = false,
+        onOpenRoomPost: ((String, String?) -> Void)? = nil
+    ) {
         self.detail = detail
         self.showsPageError = showsPageError
+        self.onOpenRoomPost = onOpenRoomPost
     }
 
     @Environment(ConversationsVM.self) private var vm
@@ -36,16 +48,16 @@ public struct ThreadDetailView: View {
     @Environment(ContentPolicyStore.self) private var contentPolicy: ContentPolicyStore?
     @State private var renameRequest: RenameRequest?
     /// The open room policy editor, seeded at the moment its door was pressed
-    /// (`roomSettingsSeed` — `nil` on a policy-less room or a non-room, where the
-    /// door is greyed anyway, so nothing opens).
+    /// (`roomSettingsSeed` — `nil` on a policy-less room or a non-room, where
+    /// there is no policy to edit, so nothing opens).
     @State private var roomSettingsRequest: RoomSettingsRequest?
-    /// The viewer's muted-keyword list (moderation.md § Muted keywords), fetched
-    /// fresh whenever a DIFFERENT thread opens (`.task(id: detail.threadId)`) —
-    /// mirrors web's reload-on-enter (linux instead keeps a persistent
-    /// process-wide cache updated at mute time; either shape satisfies the
-    /// shared contract). Threaded down to every bubble so the collapse check
-    /// stays a dumb render, not a per-bubble fetch.
-    @State private var mutedKeywords: [MutedKeyword] = []
+    /// The viewer's muted-keyword list (moderation.md § Muted keywords) is the
+    /// process-held ``MutedWordsHolder`` — the one copy the notifications page
+    /// and the knock toast read too (notifications.md § Muted words). It is
+    /// re-read whenever a DIFFERENT thread opens (`.task(id: detail.threadId)`),
+    /// which is where another device's mute reaches this process, and threaded
+    /// down to every bubble so the collapse check stays a dumb render.
+    private var mutedKeywords: [MutedKeyword] { MutedWordsHolder.shared.words }
 
     private struct RenameRequest: Identifiable { let id: ThreadId; let current: String }
     private struct RoomSettingsRequest: Identifiable {
@@ -120,6 +132,12 @@ public struct ThreadDetailView: View {
                 onAddParticipant: { vm.openAddParticipant(detail.threadId) },
                 onRename: { renameRequest = RenameRequest(id: detail.threadId, current: detail.label) },
                 onRoomSettings: { openRoomSettings() },
+                // `room-search-button` — opens/closes the strip on the manager
+                // (view state on the detail, never a draft here).
+                onRoomSearch: {
+                    if detail.room?.search != nil { vm.closeRoomSearch(detail.threadId) }
+                    else { vm.openRoomSearch(detail.threadId) }
+                },
                 onKeepMember: { keepMemberReview(person: $0) },
                 // `thread-member-chip[i]` → `manager.remove_participant` on a
                 // membership-change-capable thread. Async (a FaunaMls group
@@ -132,6 +150,73 @@ public struct ThreadDetailView: View {
                 }
             )
 
+            // The room's search strip, then — once a query is submitted — its rows in
+            // the message stream's place (`room-search.md` § The surface).
+            let roomSearch = detail.room?.search
+            if roomSearch != nil {
+                RoomSearchStrip(onSubmit: { query in
+                    Task { await vm.roomSearch(detail.threadId, query) }
+                })
+            }
+            if roomSearchReplacesStream(roomSearch), let roomSearch {
+                RoomSearchResults(search: roomSearch, onOpenHit: openRoomSearchHit)
+                    .frame(maxHeight: .infinity)
+            } else {
+                messageStream
+            }
+
+            if !bannerError.isEmpty {
+                ErrorBanner(message: bannerError)
+                    .padding(.horizontal, 12)
+            }
+
+            Divider()
+
+            composeBar
+        }
+        .sheet(item: $renameRequest) { req in
+            RenameSheet(threadId: req.id, current: req.current)
+        }
+        // The room policy editor — `room_settings`. The sheet is bound to state
+        // this view owns, and only the editor's own verdict clears it: `onClose`
+        // fires once every staged commit landed (`RoomSettingsSheet.save`), or
+        // on Cancel; a refusal keeps it open.
+        .sheet(item: $roomSettingsRequest) { req in
+            RoomSettingsSheet(detail: req.detail, seed: req.seed, onClose: { roomSettingsRequest = nil })
+        }
+        .sheet(isPresented: addParticipantPresented) {
+            if let ap = vm.addParticipant { AddParticipantSheet(state: ap) }
+        }
+        .task(id: detail.threadId) {
+            // A mail thread to one of the account's own lists shows the
+            // list-send texts on its compose (`mail-mass-mailing.md` §
+            // Composing a list message).
+            await vm.refreshListSend(detail.threadId)
+            // Each received mail message's scan verdict row, read once per
+            // opened thread (`mail-content-scanning.md` § User sees their own
+            // message's row) — the snapshot then carries `scanResultLines`.
+            await vm.refreshMessageScanResults(detail.threadId)
+            guard let client else { return }
+            await MutedWordsHolder.shared.refresh(api: client.api)
+        }
+    }
+
+    /// A hit opens through its typed target (`room-search.md` § The surface →
+    /// *Opening a hit*): a message hit through `select_thread_and_message` (the
+    /// manager closes the strip and lands the selection; the detail's
+    /// selected-message scroll brings the row into view), a post hit through the
+    /// shell's feed door with the room's home.
+    private func openRoomSearchHit(_ nav: RoomSearchNav) {
+        switch nav {
+        case .message(let threadId, let messageId):
+            vm.selectThreadAndMessage(threadId, messageId)
+        case .post(let postId, let homeNestUrl):
+            onOpenRoomPost?(postId, homeNestUrl)
+        }
+    }
+
+    private var messageStream: some View {
+        Group {
             // `ScrollViewReader` is what makes the selected-message deep link worth
             // having (`conversations.md` § The selected message) — the mark alone
             // is silent if the matched row is scrolled off-screen. `LazyVStack`
@@ -153,7 +238,11 @@ public struct ThreadDetailView: View {
                                 onReply: { vm.startReply(detail.threadId, $0, replyAll: $1) },
                                 loadAttachment: { vm.attachmentBytes($0) },
                                 attachmentResidency: vm.attachmentResidency(msg),
-                                onRevealRemoteImages: { vm.revealRemoteImages($0) },
+                                onRevealRemoteImages: { mid in
+                                    #if !FAUNA_KIDS
+                                    vm.revealRemoteImages(mid)
+                                    #endif
+                                },
                                 onToggleReaction: { mid, emoji in
                                     Task { await vm.toggleReaction(detail.threadId, mid, emoji) }
                                 },
@@ -192,48 +281,26 @@ public struct ThreadDetailView: View {
                     }
                 }
             }
+        }
+    }
 
-            if !bannerError.isEmpty {
-                ErrorBanner(message: bannerError)
-                    .padding(.horizontal, 12)
-            }
-
-            Divider()
-
-            DmComposeBar(
-                compose: detail.compose,
-                capabilities: detail.capabilities,
-                replyPreviewText: replyPreviewText,
-                onBodyChange: { vm.setComposeBody(detail.threadId, $0) },
-                onSubjectChange: { vm.setComposeSubject(detail.threadId, $0) },
-                onToggleTopic: { vm.toggleTopic(detail.threadId) },
-                onCancelReply: { vm.clearReplyTo(detail.threadId) },
-                onAddReplyRecipient: { vm.addReplyRecipient(detail.threadId, $0) },
-                onRemoveReplyRecipient: { vm.removeReplyRecipient(detail.threadId, $0) },
-                onAttachFile: { try vm.attachFile(detail.threadId, at: $0) },
-                onAttachError: { vm.clientErrorMessage = $0 },
-                onRemoveAttachment: { vm.removeAttachment(detail.threadId, at: $0) },
-                onSend: { Task { await vm.send(detail.threadId) } }
-            )
-            .padding(12)
-        }
-        .sheet(item: $renameRequest) { req in
-            RenameSheet(threadId: req.id, current: req.current)
-        }
-        // The room policy editor — `room_settings`. The sheet is bound to state
-        // this view owns, and only the editor's own verdict clears it: `onClose`
-        // fires once every staged commit landed (`RoomSettingsSheet.save`), or
-        // on Cancel; a refusal keeps it open.
-        .sheet(item: $roomSettingsRequest) { req in
-            RoomSettingsSheet(detail: req.detail, seed: req.seed, onClose: { roomSettingsRequest = nil })
-        }
-        .sheet(isPresented: addParticipantPresented) {
-            if let ap = vm.addParticipant { AddParticipantSheet(state: ap) }
-        }
-        .task(id: detail.threadId) {
-            guard let client else { return }
-            mutedKeywords = (try? await client.api.mutedKeywordsList())?.keywords ?? []
-        }
+    private var composeBar: some View {
+        DmComposeBar(
+            compose: detail.compose,
+            capabilities: detail.capabilities,
+            replyPreviewText: replyPreviewText,
+            onBodyChange: { vm.setComposeBody(detail.threadId, $0) },
+            onSubjectChange: { vm.setComposeSubject(detail.threadId, $0) },
+            onToggleTopic: { vm.toggleTopic(detail.threadId) },
+            onCancelReply: { vm.clearReplyTo(detail.threadId) },
+            onAddReplyRecipient: { vm.addReplyRecipient(detail.threadId, $0) },
+            onRemoveReplyRecipient: { vm.removeReplyRecipient(detail.threadId, $0) },
+            onAttachFile: { try vm.attachFile(detail.threadId, at: $0) },
+            onAttachError: { vm.clientErrorMessage = $0 },
+            onRemoveAttachment: { vm.removeAttachment(detail.threadId, at: $0) },
+            onSend: { Task { await vm.send(detail.threadId) } }
+        )
+        .padding(12)
     }
 
     private var addParticipantPresented: Binding<Bool> {

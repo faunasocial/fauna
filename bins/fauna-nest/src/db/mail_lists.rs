@@ -258,6 +258,7 @@ impl CacheDb {
     ) -> std::result::Result<([u8; 16], [u8; 16]), ListWriteError> {
         let local_domain = local_domain.to_ascii_lowercase();
         let pattern = pattern.to_ascii_lowercase();
+        let owner_key = owner;
         let owner = owner.to_vec();
         let alias_id = *Uuid::new_v4().as_bytes();
         let list_id = *Uuid::new_v4().as_bytes();
@@ -267,12 +268,14 @@ impl CacheDb {
             .transaction()
             .context("begin create_list transaction")?;
         // One holder per exact-tier key: an exact alias or forwarder already on
-        // the address is a `kind` the UNIQUE index cannot see.
-        if super::mail_aliases::exact_key_held_by_other_kind(
+        // the address is a `kind` the UNIQUE index cannot see, and a handle
+        // naming the local part holds it on every active local domain.
+        if super::mail_aliases::exact_key_held(
             &tx,
             &local_domain,
             &pattern,
             super::mail_aliases::ALIAS_KIND_LIST,
+            owner_key,
         )? {
             return Err(ListWriteError::Conflict);
         }

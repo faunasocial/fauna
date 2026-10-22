@@ -324,13 +324,17 @@ impl From<fauna_sync_engine::db::EraseSweep> for FfiEraseSweep {
 /// the shared per-user root — a *sibling* of the app's base, not a child — so
 /// an erase iterating `base_dir` alone leaves it behind. The credential
 /// namespace this erase accompanies is exactly where that store's Ed25519
-/// writer key lives, so the stranded store then **refuses every later sign-in**
-/// ("account store belongs to a different writer") and the app runs with no
-/// account runtime at all, silently, for good: every store-backed surface
-/// fails and the account's own scopes go unwalked, with nothing on screen
-/// saying why. Measured on tui 2026-08-18 (78 ms from *minted this machine's
-/// store writer key* to *assembly failed*) and fixed there; this is the same
-/// fix at the seat that inherits the duty.
+/// writer key lives, so the stranded store is one whose writer the slot no
+/// longer holds. Until 2026-08-27 that refused every later sign-in ("account
+/// store belongs to a different writer") and left the app with no account
+/// runtime, silently, for good — measured on tui 2026-08-18 (78 ms from
+/// *minted this machine's store writer key* to *assembly failed*) and fixed
+/// there; this is the same fix at the seat that inherits the duty. Today the
+/// next sign-in of the same account self-heals it by adopting the survivor
+/// under a fresh writer (`account-replica-posture.md` § The store device
+/// principal → refinement 10), which is why the erase must still reach it: a
+/// signed-OUT user's data must not outlive the sign-out in a directory the
+/// next sign-in silently adopts (`account-scoping.md` § Erasure follows scope).
 ///
 /// Entries that are not an actor scope survive, which is exactly how
 /// install-scoped state (log files, host-keyed TOFU pin stores) is preserved
@@ -363,11 +367,44 @@ pub fn account_state_erase_all_scopes(
     base_dir: String,
     store_container_dir: Option<String>,
 ) -> FfiEraseSweep {
-    erase_all_scopes_under(
-        &PathBuf::from(base_dir),
-        store_root_for(store_container_dir.map(PathBuf::from)).as_deref(),
-    )
+    guard_erase_panic(|| {
+        erase_all_scopes_under(
+            &PathBuf::from(base_dir),
+            store_root_for(store_container_dir.map(PathBuf::from)).as_deref(),
+        )
+    })
     .into()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only panic injection on the REAL sweep path: while set,
+    /// [`erase_all_scopes_under`] panics, so a test can call the export itself
+    /// and watch the guard fold the panic into a survivor.
+    static PANIC_IN_ERASE_SWEEP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Fold a panic inside the sweep into a SURVIVOR. A panic is the one hard
+/// failure this infallible export can have, and UniFFI raises it as an exception
+/// on Kotlin and C#; a seat that catches that and paints a clean sign-out tells
+/// the user the device is clean when the erase may not have run at all. So the
+/// panic is caught here, once, for every seat, and reported in the only shape
+/// that may not read as clean: a non-empty `survivors`.
+fn guard_erase_panic(
+    sweep: impl FnOnce() -> fauna_sync_engine::db::EraseSweep + std::panic::UnwindSafe,
+) -> fauna_sync_engine::db::EraseSweep {
+    std::panic::catch_unwind(sweep).unwrap_or_else(|payload| {
+        let what = payload
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "panic".to_string());
+        tracing::error!("[account-state] the erase panicked: {what}");
+        fauna_sync_engine::db::EraseSweep {
+            erased: 0,
+            survivors: vec![PathBuf::from(format!("<erase failed: {what}>"))],
+        }
+    })
 }
 
 /// The pure half of [`account_state_erase_all_scopes`], both roots passed in —
@@ -381,6 +418,10 @@ fn erase_all_scopes_under(
     app_base: &Path,
     store_root: Result<&Path, &FfiError>,
 ) -> fauna_sync_engine::db::EraseSweep {
+    #[cfg(test)]
+    if PANIC_IN_ERASE_SWEEP.with(std::cell::Cell::get) {
+        panic!("disk on fire");
+    }
     // BOTH roots are attempted, and neither one's survivors end the sweep. These
     // are two independent directory trees; a `?` here made one undeletable file
     // under the app base cost the store root its erase entirely — so a Windows
@@ -420,6 +461,56 @@ mod tests {
         let file = dir.join(name);
         std::fs::write(&file, b"bytes").unwrap();
         file
+    }
+
+    /// A panicking erase comes back as a survivor, never as an empty (CLEAN)
+    /// sweep — the seats' `catch` on a UniFFI-raised panic used to paint clean.
+    #[test]
+    fn a_panicking_erase_is_a_survivor_not_a_clean_sweep() {
+        let sweep = guard_erase_panic(|| panic!("disk on fire"));
+        assert!(!sweep.is_clean(), "a panic must never read as clean");
+        assert_eq!(sweep.erased, 0);
+        assert_eq!(
+            sweep.survivors,
+            vec![PathBuf::from("<erase failed: disk on fire>")]
+        );
+        // The ordinary path passes through untouched.
+        let ok = guard_erase_panic(fauna_sync_engine::db::EraseSweep::default);
+        assert!(ok.is_clean());
+    }
+
+    /// The EXPORT itself, not just the guard: with the real sweep set to panic,
+    /// `account_state_erase_all_scopes` comes back as one survivor and owed work,
+    /// on the converted FFI shape. Calling `erase_all_scopes_under` directly from
+    /// the export (bypassing the guard) turns this red.
+    #[test]
+    fn the_erase_export_folds_a_panicking_sweep_into_a_survivor() {
+        /// Clears the injection flag even if an assertion unwinds.
+        struct ClearOnDrop;
+        impl Drop for ClearOnDrop {
+            fn drop(&mut self) {
+                PANIC_IN_ERASE_SWEEP.with(|f| f.set(false));
+            }
+        }
+        // Both roots are temp dirs, never `None`: `None` resolves the machine's
+        // REAL platform store root, which a regressed injection would sweep.
+        let tmp = tempfile::tempdir().unwrap();
+        let app_base = tmp.path().join("Fauna");
+        let store_container = tmp.path().join("container");
+        PANIC_IN_ERASE_SWEEP.with(|f| f.set(true));
+        let _clear = ClearOnDrop;
+        let out = account_state_erase_all_scopes(
+            app_base.to_string_lossy().into_owned(),
+            Some(store_container.to_string_lossy().into_owned()),
+        );
+        assert_eq!(
+            out.survivors,
+            vec!["<erase failed: disk on fire>".to_string()]
+        );
+        assert!(
+            out.residue.owes_work,
+            "a panic must owe work, never read clean"
+        );
     }
 
     /// Sign-out reaches the W6 store root, not only the app's own base.

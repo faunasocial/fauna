@@ -184,6 +184,29 @@ pub struct BridgeApprovalSnapshot {
     pub status: BridgeApprovalStatus,
     /// Last action's error, surfaced via the `error-message` element.
     pub error: Option<String>,
+    /// The act an open confirm dialog is asking about (`None` = no dialog):
+    /// the renderer paints `admin-bridges-reject-confirm` or
+    /// `admin-bridges-rotate-confirm` for it, and
+    /// [`BridgeApprovalAction::Confirm`] runs it. Set by
+    /// [`BridgeApprovalMachine::arm`]; every other action and every re-read
+    /// disarms, so a confirm never lands on a card the feed has since moved.
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub armed: Option<BridgeConfirm>,
+}
+
+/// A bridge act the page confirms in a dialog before it reaches the nest —
+/// one shape for both of the page's confirms (`mail-bridge-lifecycle.md`
+/// § Pending approval → rejection flow; § Service-user re-keying). The arm
+/// lives in [`BridgeApprovalMachine`], not per app.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum BridgeConfirm {
+    /// `admin-bridges-pending-reject-button` → `admin-bridges-reject-confirm`
+    /// → `reject_pending_bridge`. `pubkey_hex` is the pending card's.
+    Reject { pubkey_hex: String },
+    /// `admin-bridges-approved-rotate-button` → `admin-bridges-rotate-confirm`
+    /// → `revoke_service_user`. `pubkey_hex` is the approved card's.
+    Rotate { pubkey_hex: String },
 }
 
 impl BridgeApprovalSnapshot {
@@ -197,6 +220,7 @@ impl BridgeApprovalSnapshot {
             webdav_enabled: None,
             status: BridgeApprovalStatus::Idle,
             error: None,
+            armed: None,
         }
     }
 }
@@ -215,16 +239,25 @@ pub enum BridgeApprovalAction {
     Approve { pubkey_hex: String, role: String },
     /// Reject a pending bridge (`→ revoked`; the row is kept so a re-connect
     /// from the same pubkey rejects immediately rather than re-pending).
-    /// Idempotent. The UI gates this behind a confirmation dialog
-    /// (`mail-bridge-lifecycle.md` § Pending approval → rejection flow).
+    /// Idempotent, with NO confirm: a renderer arms
+    /// [`BridgeConfirm::Reject`] and dispatches [`Self::Confirm`] instead. This
+    /// direct form stays only for the apps that still hold the rejection
+    /// dialog in their own renderer, and goes when they move to the arm.
     Reject { pubkey_hex: String },
     /// Rotate an **approved** bridge's service-user key (`mail-bridge-lifecycle.md`
     /// § Service-user re-keying, step 3). Dispatches `revoke_service_user(pubkey)`:
     /// the running bridge detects the revoke and exits, the supervisor restarts
-    /// it, and on a mail-enabled box the fresh key auto-approves. The UI gates
-    /// this behind the `admin-bridges-rotate-confirm` dialog (no DKIM warning
-    /// for any role: the nest holds every DKIM key). `pubkey_hex` is the approved card's `admin-bridges-approved-pubkey-hex`.
+    /// it, and on a mail-enabled box the fresh key auto-approves — with NO
+    /// confirm: a renderer arms [`BridgeConfirm::Rotate`] (the
+    /// `admin-bridges-rotate-confirm` dialog; no DKIM warning for any role: the
+    /// nest holds every DKIM key) and dispatches [`Self::Confirm`]. This direct
+    /// form stays only for the apps that still hold the dialog in their own
+    /// renderer. `pubkey_hex` is the approved card's `admin-bridges-approved-pubkey-hex`.
     Rotate { pubkey_hex: String },
+    /// The open dialog's confirm button: disarm and run the armed act
+    /// ([`BridgeApprovalSnapshot::armed`]). Nothing armed is an error — the
+    /// dialog was already dismissed — and reaches no nest.
+    Confirm,
     /// Flip the deployment-wide `mail.enabled` toggle (§ Default-off on first
     /// claim). `true` materializes the flag file + brings the bridge services
     /// up; `false` brings them down.
@@ -421,6 +454,20 @@ impl BridgeApprovalMachine {
     pub fn snapshot(&self) -> BridgeApprovalSnapshot {
         fauna_core::clone_locked(&self.inner, |s| s)
     }
+
+    /// Open the confirm dialog for `confirm` (replacing any open one). Arming
+    /// reaches no nest, so it is a sync call: a renderer paints the dialog in
+    /// the same frame as the click that opened it — the inline-reveal
+    /// contract the e2e reads synchronously (`admin.md` § Approved-bridges
+    /// roster).
+    pub fn arm(&self, confirm: BridgeConfirm) {
+        self.inner.lock().expect("snapshot mutex").armed = Some(confirm);
+    }
+
+    /// The open dialog's cancel button: close it, no write.
+    pub fn disarm(&self) {
+        self.inner.lock().expect("snapshot mutex").armed = None;
+    }
 }
 
 #[cfg_attr(feature = "uniffi", fauna_uniffi_async::export)]
@@ -436,8 +483,13 @@ impl BridgeApprovalMachine {
     }
 
     pub async fn dispatch(&self, action: BridgeApprovalAction) -> Result<(), DispatchError> {
-        // Clear any prior error before the new action runs.
-        self.inner.lock().expect("snapshot mutex").error = None;
+        // Clear any prior error before the new action runs; and disarm — a
+        // `Confirm` takes the arm with it, any other action closes the dialog.
+        let armed = {
+            let mut snap = self.inner.lock().expect("snapshot mutex");
+            snap.error = None;
+            snap.armed.take()
+        };
         crate::dispatch_capturing_error!(
             self,
             BridgeApprovalStatus,
@@ -448,6 +500,13 @@ impl BridgeApprovalMachine {
                 }
                 BridgeApprovalAction::Reject { pubkey_hex } => self.reject(pubkey_hex).await,
                 BridgeApprovalAction::Rotate { pubkey_hex } => self.rotate(pubkey_hex).await,
+                BridgeApprovalAction::Confirm => match armed {
+                    Some(BridgeConfirm::Reject { pubkey_hex }) => self.reject(pubkey_hex).await,
+                    Some(BridgeConfirm::Rotate { pubkey_hex }) => self.rotate(pubkey_hex).await,
+                    None => Err(DispatchError::InvalidState(
+                        "no bridge confirm is open".into(),
+                    )),
+                },
                 BridgeApprovalAction::SetMailEnabled { enabled } => {
                     self.set_mail_enabled(enabled).await
                 }
@@ -699,6 +758,74 @@ mod tests {
             m.snapshot().pending.is_empty(),
             "revoked bridge left the feed"
         );
+    }
+
+    /// Both confirms are one shape held by the machine: arming opens the
+    /// dialog and reaches no nest; `Confirm` disarms and runs the armed act.
+    #[tokio::test]
+    async fn an_armed_confirm_runs_its_act_only_on_confirm() {
+        let m = machine_with(vec![
+            bridge(0x22, "mda", "pending"),
+            approved_bridge(0x33, "mta"),
+        ]);
+        m.hydrate().await.unwrap();
+        let pending_hex = m.snapshot().pending[0].pubkey_hex.clone();
+        let approved_hex = m.snapshot().approved[0].pubkey_hex.clone();
+
+        let reject = BridgeConfirm::Reject {
+            pubkey_hex: pending_hex,
+        };
+        m.arm(reject.clone());
+        assert_eq!(m.snapshot().armed, Some(reject), "arming opens the dialog");
+        m.dispatch(BridgeApprovalAction::Refresh).await.unwrap();
+        assert_eq!(m.snapshot().pending.len(), 1, "arming rejected nothing");
+
+        m.arm(BridgeConfirm::Reject {
+            pubkey_hex: m.snapshot().pending[0].pubkey_hex.clone(),
+        });
+        m.dispatch(BridgeApprovalAction::Confirm).await.unwrap();
+        let snap = m.snapshot();
+        assert!(snap.pending.is_empty(), "the confirm rejected the bridge");
+        assert_eq!(snap.armed, None, "the confirm closes the dialog");
+
+        m.arm(BridgeConfirm::Rotate {
+            pubkey_hex: approved_hex,
+        });
+        assert_eq!(m.snapshot().approved.len(), 1, "arming rotated nothing");
+        m.dispatch(BridgeApprovalAction::Confirm).await.unwrap();
+        let snap = m.snapshot();
+        assert!(snap.approved.is_empty(), "the confirm rotated the key");
+        assert_eq!(snap.armed, None);
+    }
+
+    /// Cancel closes the dialog with no write; any other action or re-read
+    /// closes it too, so a confirm never lands on a stale arm — and a confirm
+    /// with nothing armed surfaces an error instead of acting.
+    #[tokio::test]
+    async fn cancel_or_any_other_action_disarms_and_a_bare_confirm_errors() {
+        let m = machine_with(vec![bridge(0x22, "mda", "pending")]);
+        m.hydrate().await.unwrap();
+        let hex = m.snapshot().pending[0].pubkey_hex.clone();
+        let reject = BridgeConfirm::Reject { pubkey_hex: hex };
+
+        m.arm(reject.clone());
+        m.disarm();
+        assert_eq!(m.snapshot().armed, None, "cancel closes the dialog");
+
+        m.arm(reject.clone());
+        m.dispatch(BridgeApprovalAction::SetMailEnabled { enabled: true })
+            .await
+            .unwrap();
+        assert_eq!(m.snapshot().armed, None, "another action disarms");
+
+        m.arm(reject);
+        m.dispatch(BridgeApprovalAction::Refresh).await.unwrap();
+        assert_eq!(m.snapshot().armed, None, "a re-read disarms");
+
+        assert!(m.dispatch(BridgeApprovalAction::Confirm).await.is_err());
+        let snap = m.snapshot();
+        assert!(snap.error.is_some(), "a bare confirm surfaces an error");
+        assert_eq!(snap.pending.len(), 1, "a stale confirm must never reject");
     }
 
     #[tokio::test]

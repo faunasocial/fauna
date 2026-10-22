@@ -42,12 +42,13 @@ use fauna_protocol::bridge_routing::{
     PutDmarcPolicyRequest, PutImapPolicyRequest, PutOutboundPolicyRequest, PutSpamPolicyRequest,
     PutSubmissionPolicyRequest, SpamPolicyThresholds, SubmissionPolicyThresholds,
 };
+use fauna_protocol::microsoft_registration::MicrosoftRegistrationStatus;
 use serde::{Deserialize, Serialize};
 
 use fauna_core::format::ReachPolicyOption;
 use fauna_core::localized::LocalizedText;
 
-use crate::error::{DispatchError, NestError};
+use crate::error::{DispatchError, NestError, SetMailEnabledError};
 
 /// The Spam/Inbound-perimeter policy sub-struct as the `admin-mail` form renders
 /// and edits it. Field-identical to the wire [`SpamPolicyThresholds`] (a *local*
@@ -662,6 +663,98 @@ impl From<MailHealthReply> for MailHealthView {
     }
 }
 
+/// The two receiver-side sender dashboards `admin-mail-health-sender-dashboard-link`
+/// points at, as `(index key, hard-coded URL)` in display order — static help,
+/// never queried (`mail-deliverability.md` § Out-of-scope: Gmail Postmaster
+/// Tools + Outlook SNDS → *The admin-pane surface*). The key is the link's
+/// `[gmail]` / `[outlook]` index; each app maps it to its label string.
+pub const SENDER_DASHBOARD_LINKS: [(&str, &str); 2] = [
+    ("gmail", "https://postmaster.google.com/"),
+    (
+        "outlook",
+        "https://sendersupport.olc.protection.outlook.com/snds/",
+    ),
+];
+
+/// One `admin-mail-health-sender-dashboard-link` for an app that cannot read
+/// [`SENDER_DASHBOARD_LINKS`] directly (web over wasm, android/apple/windows
+/// over UniFFI): the `[gmail]` / `[outlook]` index key, the URL, and the
+/// `admin.mail_page.health_sender_dashboard_*` i18n key of its label.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct SenderDashboardLink {
+    pub key: String,
+    pub url: String,
+    pub label_key: String,
+}
+
+/// [`SENDER_DASHBOARD_LINKS`] as records, in display order, each with its label
+/// key — so no app hand-writes the URLs or the key→label mapping. Exported
+/// over UniFFI — see [`fcrdns_mode_options`].
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn sender_dashboard_links() -> Vec<SenderDashboardLink> {
+    SENDER_DASHBOARD_LINKS
+        .into_iter()
+        .map(|(key, url)| SenderDashboardLink {
+            key: key.to_string(),
+            url: url.to_string(),
+            label_key: format!("admin.mail_page.health_sender_dashboard_{key}"),
+        })
+        .collect()
+}
+
+/// The `admin-mail` section's view of the deployment's own Microsoft app
+/// registration (`mailbox-migration.md` § Microsoft sign-in, *An
+/// admin-supplied registration*): the two stored strings the fields seed
+/// from, empty when none is set, and whether the project's registration is the
+/// one in force.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct MicrosoftRegistrationView {
+    pub client_id: String,
+    pub tenant: String,
+    pub is_default: bool,
+}
+
+impl MicrosoftRegistrationView {
+    fn from_status(status: Option<&MicrosoftRegistrationStatus>) -> Self {
+        match status {
+            Some(s) => Self {
+                client_id: s.client_id.clone(),
+                tenant: s.tenant.clone(),
+                is_default: false,
+            },
+            None => Self {
+                is_default: true,
+                ..Self::default()
+            },
+        }
+    }
+}
+
+/// Check the section's two drafts before the round trip — the same rule the
+/// nest runs at `fauna.bridges.set_microsoft_registration`
+/// (`fauna_protocol::microsoft_registration::normalize`, priority #2: one
+/// rule), so a refusal shown here is exactly one the nest would have made.
+/// `Ok(None)` is the clear (both blank); `Ok(Some((client_id, tenant)))` the
+/// normalised pair (an ID alone gets `common`); `Err` the sentence each app
+/// resolves through its own string table.
+pub fn parse_microsoft_registration_draft(
+    client_id: &str,
+    tenant: &str,
+) -> Result<Option<(String, String)>, LocalizedText> {
+    use fauna_protocol::microsoft_registration::{RegistrationError, normalize};
+    normalize(client_id, tenant).map_err(|e| {
+        LocalizedText::key(match e {
+            RegistrationError::ClientIdNotGuid => "admin.mail_page.microsoft_client_id_invalid",
+            RegistrationError::TenantInvalid => "admin.mail_page.microsoft_tenant_invalid",
+            RegistrationError::TenantWithoutClientId => {
+                "admin.mail_page.microsoft_tenant_needs_client_id"
+            }
+        })
+    })
+}
+
 /// Read-only snapshot the per-app `admin-mail` UI renders. Projected from the
 /// admin read twin `get_mail_config` (the overlaid effective config).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -677,6 +770,15 @@ pub struct MailPolicySnapshot {
     /// read twin, exactly as the alias group hydrates from `get_alias_policy`.
     /// `mail-policy-config.md` § Tier-2 *Auto-enable mail for new users*.
     pub auto_enable_mail_for_new_users: bool,
+    /// The box cannot enable mail — a public box whose deployment wired no
+    /// content scanners (`admin.md` § 6 Mail; the fact:
+    /// `mail-bridge-lifecycle.md` § Default-off on first claim → *A box with no
+    /// content scanners cannot enable mail*). `admin-mail-enabled-toggle`
+    /// renders disabled under `admin-mail-unavailable-notice`, and the machine
+    /// refuses `SetMailEnabled { enabled: true }` while it holds. Re-read on
+    /// every refresh from `fauna.setup.status`, like the auto-enable policy.
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    pub mail_unavailable_here: bool,
     /// The Spam/Inbound-perimeter sub-struct (`put_spam_policy`).
     pub spam: SpamPolicyView,
     /// The Auth/enforcement sub-struct (`put_auth_policy`).
@@ -693,6 +795,11 @@ pub struct MailPolicySnapshot {
     /// The deployment-wide **DMARC** catalog (`put_dmarc_policy`). Hydrated
     /// from the *separate* `get_dmarc_policy` read twin, like the alias group.
     pub dmarc: DmarcPolicyView,
+    /// The deployment's own Microsoft app registration for the Outlook import
+    /// (`set_microsoft_registration`), read back from `fauna.setup.status`
+    /// like the auto-enable policy. `mailbox-migration.md` § Microsoft
+    /// sign-in, *An admin-supplied registration*.
+    pub microsoft_registration: MicrosoftRegistrationView,
     pub status: MailPolicyStatus,
     /// Outcome of the last `PublishSpamBaseline` action (`None` until the admin
     /// clicks the publish-baseline button). Rendered in the Spam group as the
@@ -712,6 +819,71 @@ pub struct MailPolicySnapshot {
     /// Last action's error, surfaced via `admin-mail`'s `error-message`
     /// (`fauna.protocol.malformed` on an out-of-order spam-threshold write, etc.).
     pub error: Option<String>,
+    /// The confirm button a first press has armed (`None` when none is): the
+    /// renderer relabels that button to its confirm sentence, and the next
+    /// [`MailPolicyAction::Press`] of the same button runs its act. Every
+    /// other action and every re-read disarms — a second press must mean
+    /// "yes, now", never land on a stale arm.
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub armed: Option<MailPolicyConfirm>,
+    /// Outcome of the last secret rotation (`None` until one ran). A transient
+    /// action outcome like [`Self::baseline_publish_result`]: the next re-read
+    /// clears it. Rendered through [`secret_rotation_text`].
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub secret_rotation: Option<SecretRotationView>,
+}
+
+/// The `admin-mail` buttons confirmed by a second press of the same button —
+/// ui.yaml scopes no confirm id to any of them (`mail-deliverability.md`
+/// § Admin-pane Deliverability surface; `mail-mass-mailing.md` § Secret
+/// rotation). The arm lives in [`MailPolicyMachine`], not per app.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum MailPolicyConfirm {
+    /// `admin-mail-health-warmup-reset-button` → `outbound_warmup_reset`.
+    ResetWarmup,
+    /// `admin-mail-list-unsubscribe-secret-rotate-button` →
+    /// `rotate_list_unsubscribe_secret` (unsubscribe links in mail already
+    /// sent stop working).
+    RotateListUnsubscribeSecret,
+    /// `admin-mail-forward-srs-secret-rotate-button` → `rotate_srs_secret`
+    /// (the prior secret is honoured until in-flight bounces expire).
+    RotateSrsSecret,
+    /// `admin-mail-publish-spam-baseline-button` → `publish_spam_baseline`
+    /// (the deployment gets a model reflecting the training of the members who
+    /// opted in; `mail-spam.md` § Cold start step 1).
+    PublishSpamBaseline,
+}
+
+/// What the last secret rotation reported. The secrets themselves are never
+/// exposed — only that a rotation ran.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum SecretRotationView {
+    /// The newsletter unsubscribe secret, with how many subscriptions were
+    /// re-keyed under the new one.
+    ListUnsubscribe { members_retokenized: u64 },
+    /// The forwarding (SRS) secret, with when the new one was minted (epoch
+    /// seconds).
+    Srs { rotated_at: i64 },
+}
+
+/// The page's line for the last rotation's outcome, as [`LocalizedText`] each
+/// app resolves through its own string table.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn secret_rotation_text(view: &SecretRotationView) -> LocalizedText {
+    match view {
+        SecretRotationView::ListUnsubscribe {
+            members_retokenized,
+        } => LocalizedText::key_arg(
+            "admin.mail_page.list_unsubscribe_secret_rotated",
+            "count",
+            members_retokenized.to_string(),
+        ),
+        SecretRotationView::Srs { .. } => {
+            LocalizedText::key("admin.mail_page.forward_srs_secret_rotated")
+        }
+    }
 }
 
 impl MailPolicySnapshot {
@@ -725,6 +897,7 @@ impl MailPolicySnapshot {
             AliasPolicy::default(),
             DmarcReportingPolicy::default(),
             true,
+            None,
         )
     }
 
@@ -739,10 +912,16 @@ impl MailPolicySnapshot {
         alias: AliasPolicy,
         dmarc: DmarcReportingPolicy,
         auto_enable_mail_for_new_users: bool,
+        microsoft_registration: Option<MicrosoftRegistrationStatus>,
     ) -> Self {
         Self {
             mail_enabled: reply.mail_enabled,
             auto_enable_mail_for_new_users,
+            // Set by `refresh` beside the other setup.status reads.
+            mail_unavailable_here: false,
+            microsoft_registration: MicrosoftRegistrationView::from_status(
+                microsoft_registration.as_ref(),
+            ),
             spam: reply.spam.into(),
             auth: reply.auth.into(),
             submission: reply.submission.into(),
@@ -755,6 +934,8 @@ impl MailPolicySnapshot {
             baseline_state: None,
             health: None,
             error: None,
+            armed: None,
+            secret_rotation: None,
         }
     }
 }
@@ -771,6 +952,12 @@ pub enum MailPolicyAction {
     /// (`set_auto_enable_mail_for_new_users`). Persisted via `fauna.bridges`,
     /// re-read via `fauna.setup.status`.
     SetAutoEnableMailForNewUsers { enabled: bool },
+    /// Save the deployment's own Microsoft app registration from the two
+    /// fields' drafts (`admin-mail-microsoft-save-button`); both empty clears
+    /// it back to the project's. Checked first by
+    /// [`parse_microsoft_registration_draft`] — a refused draft sends nothing
+    /// and its sentence lands on [`MailPolicySnapshot::error`].
+    SetMicrosoftRegistration { client_id: String, tenant: String },
     /// Persist the whole Spam/Inbound sub-struct (full PUT). nest rejects an
     /// out-of-order pair (`spam_folder < reject` when both are non-zero).
     SaveSpam { policy: SpamPolicyView },
@@ -795,7 +982,10 @@ pub enum MailPolicyAction {
     /// (caller-scoped). Aggregate-only reply; the k-anonymity floor withholds
     /// below `BASELINE_MIN_CONTRIBUTORS` (`published = false`). The outcome
     /// lands in [`MailPolicySnapshot::baseline_publish_result`], not a re-read.
-    /// `mail-spam.md` § Cold start Path 2.
+    /// `mail-spam.md` § Cold start Path 2 — with NO confirm: the button
+    /// dispatches [`Self::Press`] with [`MailPolicyConfirm::PublishSpamBaseline`]
+    /// instead; this direct form stays only for the apps that still publish on
+    /// one click, and goes when they move to `Press`.
     PublishSpamBaseline,
     /// Flip standing baseline publish (`admin-mail-spam-baseline-standing-toggle`)
     /// on its own, outside the Spam group's Save: full-PUTs the PERSISTED spam
@@ -807,10 +997,16 @@ pub enum MailPolicyAction {
     /// (`blocklist_self_check_run`) and deliverability diagnostics
     /// (`run_deliverability_diagnostics`), then re-read the health readout.
     RecheckHealth,
-    /// `admin-mail-health-warmup-reset-button` (confirm-gated by the renderer):
-    /// restart the fresh-IP warm-up ramp at day 1 (`outbound_warmup_reset`), the
-    /// after-an-IP-change act, then re-read the health readout.
+    /// Restart the fresh-IP warm-up ramp at day 1 (`outbound_warmup_reset`),
+    /// the after-an-IP-change act, then re-read the health readout — with NO
+    /// confirm. The button dispatches [`Self::Press`] instead; this direct form
+    /// stays only for the apps that still arm `admin-mail-health-warmup-reset-button`
+    /// in their own renderer, and goes when they move to `Press`.
     ResetWarmup,
+    /// One press of a confirm button ([`MailPolicyConfirm`]): arms it when it
+    /// is not the armed one (nothing reaches the nest), else disarms and runs
+    /// its act — the same-button two-click confirm, held by the machine.
+    Press { button: MailPolicyConfirm },
 }
 
 /// WS-RPC seam to nest. Per-app glue implements this over `MailAdminClient`
@@ -822,13 +1018,28 @@ pub trait MailPolicyNest: MaybeSendSync {
     /// `fauna.bridges.get_mail_config` — the overlaid effective config (the admin
     /// read twin of the bridge's `fetch_config`).
     async fn get_mail_config(&self) -> Result<FetchConfigReply, NestError>;
-    /// `fauna.bridges.set_mail_enabled`.
-    async fn set_mail_enabled(&self, enabled: bool) -> Result<(), NestError>;
+    /// `fauna.bridges.set_mail_enabled` — the box's own refusal
+    /// (`fauna.bridges.mail_unavailable_here`) arrives typed.
+    async fn set_mail_enabled(&self, enabled: bool) -> Result<(), SetMailEnabledError>;
+    /// `fauna.setup.status` → whether this box cannot enable mail
+    /// (`SetupStatusReply::mail_unavailable_here`; `admin.md` § 6 Mail).
+    async fn get_mail_unavailable_here(&self) -> Result<bool, NestError>;
     /// `fauna.setup.status` → `auto_enable_mail_for_new_users` — the read twin of
     /// the new-user auto-enable policy (not in `FetchConfigReply`).
     async fn get_auto_enable_mail_for_new_users(&self) -> Result<bool, NestError>;
     /// `fauna.bridges.set_auto_enable_mail_for_new_users`.
     async fn set_auto_enable_mail_for_new_users(&self, enabled: bool) -> Result<(), NestError>;
+    /// `fauna.setup.status` → `microsoft_registration` — the read twin of the
+    /// deployment's own Microsoft app registration (`None` is the project's).
+    async fn get_microsoft_registration(
+        &self,
+    ) -> Result<Option<MicrosoftRegistrationStatus>, NestError>;
+    /// `fauna.bridges.set_microsoft_registration` — both empty clears.
+    async fn set_microsoft_registration(
+        &self,
+        client_id: String,
+        tenant: String,
+    ) -> Result<(), NestError>;
     /// `fauna.bridges.put_spam_policy`.
     async fn put_spam_policy(&self, req: PutSpamPolicyRequest) -> Result<(), NestError>;
     /// `fauna.bridges.put_auth_policy`.
@@ -866,6 +1077,12 @@ pub trait MailPolicyNest: MaybeSendSync {
     async fn run_deliverability_diagnostics(&self) -> Result<(), NestError>;
     /// `fauna.bridges.outbound_warmup_reset` — restart the warm-up at day 1.
     async fn outbound_warmup_reset(&self) -> Result<(), NestError>;
+    /// `fauna.bridges.rotate_list_unsubscribe_secret` — rotate the newsletter
+    /// unsubscribe secret; returns how many subscriptions were re-keyed.
+    async fn rotate_list_unsubscribe_secret(&self) -> Result<u64, NestError>;
+    /// `fauna.bridges.rotate_srs_secret` — rotate the forwarding secret;
+    /// returns when the new one was minted (epoch seconds).
+    async fn rotate_srs_secret(&self) -> Result<i64, NestError>;
 }
 
 /// One instance per admin client. Holds the rendered snapshot; drives the seam.
@@ -900,14 +1117,23 @@ impl MailPolicyMachine {
         let alias = self.nest.get_alias_policy().await?;
         let dmarc = self.nest.get_dmarc_policy().await?;
         let auto_enable = self.nest.get_auto_enable_mail_for_new_users().await?;
+        let microsoft_registration = self.nest.get_microsoft_registration().await?;
+        let mail_unavailable_here = self.nest.get_mail_unavailable_here().await?;
         // A fifth read for the baseline state text, a sixth for the health
         // readout.
         let baseline_state = Some(self.nest.get_spam_baseline_state().await?.into());
         let health = Some(self.nest.mail_health().await?.into());
         let mut snap = self.inner.lock().expect("snapshot mutex");
-        *snap = MailPolicySnapshot::from_config(reply, alias, dmarc, auto_enable);
+        *snap = MailPolicySnapshot::from_config(
+            reply,
+            alias,
+            dmarc,
+            auto_enable,
+            microsoft_registration,
+        );
         snap.baseline_state = baseline_state;
         snap.health = health;
+        snap.mail_unavailable_here = mail_unavailable_here;
         snap.status = MailPolicyStatus::Idle;
         Ok(())
     }
@@ -935,6 +1161,46 @@ impl MailPolicyMachine {
         self.refresh_health().await
     }
 
+    /// One press of a confirm button: arm it, or — when it is the armed one —
+    /// disarm and act. Disarming comes first, so a third press re-arms rather
+    /// than chaining a second act.
+    async fn press(&self, button: MailPolicyConfirm) -> Result<(), DispatchError> {
+        {
+            let mut snap = self.inner.lock().expect("snapshot mutex");
+            if snap.armed != Some(button) {
+                snap.armed = Some(button);
+                return Ok(());
+            }
+            snap.armed = None;
+        }
+        match button {
+            MailPolicyConfirm::ResetWarmup => self.reset_warmup().await,
+            MailPolicyConfirm::RotateListUnsubscribeSecret => {
+                self.set_status(MailPolicyStatus::Working);
+                let members_retokenized = self.nest.rotate_list_unsubscribe_secret().await?;
+                self.record_rotation(SecretRotationView::ListUnsubscribe {
+                    members_retokenized,
+                });
+                Ok(())
+            }
+            MailPolicyConfirm::RotateSrsSecret => {
+                self.set_status(MailPolicyStatus::Working);
+                let rotated_at = self.nest.rotate_srs_secret().await?;
+                self.record_rotation(SecretRotationView::Srs { rotated_at });
+                Ok(())
+            }
+            MailPolicyConfirm::PublishSpamBaseline => self.publish_spam_baseline().await,
+        }
+    }
+
+    /// A rotation moves nothing the page renders, so there is no re-read: the
+    /// outcome lands on the snapshot as it is.
+    fn record_rotation(&self, view: SecretRotationView) {
+        let mut snap = self.inner.lock().expect("snapshot mutex");
+        snap.secret_rotation = Some(view);
+        snap.status = MailPolicyStatus::Idle;
+    }
+
     async fn set_baseline_standing_publish(&self, enabled: bool) -> Result<(), DispatchError> {
         // The persisted group, not the form's drafts: the toggle is its own
         // gesture, and every other field must go back out as stored (an omitted
@@ -945,8 +1211,21 @@ impl MailPolicyMachine {
     }
 
     async fn set_mail_enabled(&self, enabled: bool) -> Result<(), DispatchError> {
+        // The enable is refused locally on a box that cannot enable mail; the
+        // disable never is (`admin.md` § 6 Mail).
+        if enabled && fauna_core::clone_locked(&self.inner, |s| &s.mail_unavailable_here) {
+            return Err(DispatchError::mail_unavailable_here());
+        }
         self.set_status(MailPolicyStatus::Working);
-        self.nest.set_mail_enabled(enabled).await?;
+        if let Err(e) = self.nest.set_mail_enabled(enabled).await {
+            if matches!(e, SetMailEnabledError::UnavailableHere) {
+                self.inner
+                    .lock()
+                    .expect("snapshot mutex")
+                    .mail_unavailable_here = true;
+            }
+            return Err(e.into());
+        }
         // Re-read so the toggle reflects persisted state.
         self.refresh().await
     }
@@ -957,6 +1236,22 @@ impl MailPolicyMachine {
             .set_auto_enable_mail_for_new_users(enabled)
             .await?;
         // Re-read so the toggle reflects persisted state (via setup.status).
+        self.refresh().await
+    }
+
+    async fn set_microsoft_registration(
+        &self,
+        client_id: String,
+        tenant: String,
+    ) -> Result<(), DispatchError> {
+        let normalized = parse_microsoft_registration_draft(&client_id, &tenant)
+            .map_err(|e| DispatchError::InvalidState(e.resolve(fauna_i18n::strings::lookup)))?;
+        self.set_status(MailPolicyStatus::Working);
+        let (client_id, tenant) = normalized.unwrap_or_default();
+        self.nest
+            .set_microsoft_registration(client_id, tenant)
+            .await?;
+        // Re-read so the fields reflect the stored pair (via setup.status).
         self.refresh().await
     }
 
@@ -1042,8 +1337,15 @@ impl MailPolicyMachine {
     }
 
     pub async fn dispatch(&self, action: MailPolicyAction) -> Result<(), DispatchError> {
-        // Clear any prior error before the new action runs.
-        self.inner.lock().expect("snapshot mutex").error = None;
+        // Clear any prior error before the new action runs; and any action but
+        // a confirm press disarms (a press decides for itself).
+        {
+            let mut snap = self.inner.lock().expect("snapshot mutex");
+            snap.error = None;
+            if !matches!(action, MailPolicyAction::Press { .. }) {
+                snap.armed = None;
+            }
+        }
         crate::dispatch_capturing_error!(
             self,
             MailPolicyStatus,
@@ -1054,6 +1356,9 @@ impl MailPolicyMachine {
                 }
                 MailPolicyAction::SetAutoEnableMailForNewUsers { enabled } => {
                     self.set_auto_enable_mail_for_new_users(enabled).await
+                }
+                MailPolicyAction::SetMicrosoftRegistration { client_id, tenant } => {
+                    self.set_microsoft_registration(client_id, tenant).await
                 }
                 MailPolicyAction::SaveSpam { policy } => self.save_spam(policy).await,
                 MailPolicyAction::SaveAuth { policy } => self.save_auth(policy).await,
@@ -1068,6 +1373,7 @@ impl MailPolicyMachine {
                 }
                 MailPolicyAction::RecheckHealth => self.recheck_health().await,
                 MailPolicyAction::ResetWarmup => self.reset_warmup().await,
+                MailPolicyAction::Press { button } => self.press(button).await,
             }
         )
     }
@@ -1305,6 +1611,16 @@ pub fn dmarc_forensic_mode_options() -> Vec<ReachPolicyOption> {
         .collect()
 }
 
+/// Whether a forensic-report retention of `days` earns the page's warning
+/// (`dmarc-reporting.md` § Forensic-report receive → *Retention*: the admin
+/// may extend past the 30-day default to the 90-day ceiling, but is warned
+/// in the UI — the payload is third-party PII). Exported over UniFFI — see
+/// [`fcrdns_mode_options`].
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn dmarc_forensic_retention_warns(days: u32) -> bool {
+    days > fauna_protocol::bridge_routing::DMARC_FORENSIC_RETENTION_DAYS_DEFAULT
+}
+
 /// The canonical IMAP `delete_nonempty` picker options, in render order.
 /// Exported over UniFFI — see [`fcrdns_mode_options`].
 #[cfg_attr(feature = "uniffi", uniffi::export)]
@@ -1351,6 +1667,25 @@ mod picker_vocabulary_tests {
             FcrdnsMode::Off,
             "falling back to Off would silently disable a check the admin enabled"
         );
+    }
+
+    /// The warning starts past the default, never at it — a fresh deployment's
+    /// own 30 days is not something to warn the admin about.
+    #[test]
+    fn the_forensic_retention_warning_starts_past_the_default() {
+        use fauna_protocol::bridge_routing::{
+            DMARC_FORENSIC_RETENTION_DAYS_DEFAULT, DMARC_FORENSIC_RETENTION_DAYS_MAX,
+        };
+        assert!(!dmarc_forensic_retention_warns(1));
+        assert!(!dmarc_forensic_retention_warns(
+            DMARC_FORENSIC_RETENTION_DAYS_DEFAULT
+        ));
+        assert!(dmarc_forensic_retention_warns(
+            DMARC_FORENSIC_RETENTION_DAYS_DEFAULT + 1
+        ));
+        assert!(dmarc_forensic_retention_warns(
+            DMARC_FORENSIC_RETENTION_DAYS_MAX
+        ));
     }
 
     #[test]
@@ -1455,6 +1790,16 @@ mod tests {
         /// `fauna.setup.status` and written by `set_auto_enable_mail_for_new_users`
         /// — also not in `FetchConfigReply`.
         auto_enable: StdMutex<bool>,
+        /// The box cannot enable mail (`fauna.setup.status`'s report): the stub
+        /// refuses `set_mail_enabled(true)` with the typed code, as the real
+        /// handler does, and never the disable.
+        unavailable: StdMutex<bool>,
+        /// The Microsoft registration singleton (`None` ⇒ the project's), on
+        /// `fauna.setup.status` like `auto_enable`; the set runs the nest's
+        /// own validation, as the real handler does.
+        microsoft: StdMutex<Option<MicrosoftRegistrationStatus>>,
+        /// Every `set_microsoft_registration` the machine sent.
+        microsoft_sets: StdMutex<Vec<(String, String)>>,
         /// The aggregate `publish_spam_baseline` reports: `(contributors,
         /// sample_count)`. The stub mirrors the real handler's k-anonymity floor
         /// — it publishes (`published = true`) only at or above
@@ -1494,6 +1839,9 @@ mod tests {
                 alias: StdMutex::new(AliasPolicy::default()),
                 dmarc: StdMutex::new(DmarcReportingPolicy::default()),
                 auto_enable: StdMutex::new(true),
+                unavailable: StdMutex::new(false),
+                microsoft: StdMutex::new(None),
+                microsoft_sets: StdMutex::new(Vec::new()),
                 baseline_agg: StdMutex::new((0, 0)),
                 baseline_skipped: StdMutex::new(0),
                 baseline_deferred: StdMutex::new(false),
@@ -1520,9 +1868,16 @@ mod tests {
             Ok(self.cfg.lock().unwrap().clone())
         }
 
-        async fn set_mail_enabled(&self, enabled: bool) -> Result<(), NestError> {
+        async fn set_mail_enabled(&self, enabled: bool) -> Result<(), SetMailEnabledError> {
+            if enabled && *self.unavailable.lock().unwrap() {
+                return Err(SetMailEnabledError::UnavailableHere);
+            }
             self.cfg.lock().unwrap().mail_enabled = enabled;
             Ok(())
+        }
+
+        async fn get_mail_unavailable_here(&self) -> Result<bool, NestError> {
+            Ok(*self.unavailable.lock().unwrap())
         }
 
         async fn get_auto_enable_mail_for_new_users(&self) -> Result<bool, NestError> {
@@ -1531,6 +1886,32 @@ mod tests {
 
         async fn set_auto_enable_mail_for_new_users(&self, enabled: bool) -> Result<(), NestError> {
             *self.auto_enable.lock().unwrap() = enabled;
+            Ok(())
+        }
+
+        async fn get_microsoft_registration(
+            &self,
+        ) -> Result<Option<MicrosoftRegistrationStatus>, NestError> {
+            Ok(self.microsoft.lock().unwrap().clone())
+        }
+
+        async fn set_microsoft_registration(
+            &self,
+            client_id: String,
+            tenant: String,
+        ) -> Result<(), NestError> {
+            self.microsoft_sets
+                .lock()
+                .unwrap()
+                .push((client_id.clone(), tenant.clone()));
+            let normalized = fauna_protocol::microsoft_registration::normalize(&client_id, &tenant)
+                .map_err(|e| NestError::Rejected(e.to_string()))?;
+            *self.microsoft.lock().unwrap() =
+                normalized.map(|(client_id, tenant)| MicrosoftRegistrationStatus {
+                    client_id,
+                    tenant,
+                    extra: Default::default(),
+                });
             Ok(())
         }
 
@@ -1708,6 +2089,7 @@ mod tests {
         }
 
         async fn publish_spam_baseline(&self) -> Result<PublishSpamBaselineReply, NestError> {
+            self.calls.lock().unwrap().push("publish_spam_baseline");
             let (contributors, agg_samples) = *self.baseline_agg.lock().unwrap();
             // Mirror the real handler's k-anonymity floor: withhold below
             // BASELINE_MIN_CONTRIBUTORS by publishing an EMPTY baseline
@@ -1777,6 +2159,19 @@ mod tests {
             }
             Ok(())
         }
+
+        async fn rotate_list_unsubscribe_secret(&self) -> Result<u64, NestError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push("rotate_list_unsubscribe_secret");
+            Ok(7)
+        }
+
+        async fn rotate_srs_secret(&self) -> Result<i64, NestError> {
+            self.calls.lock().unwrap().push("rotate_srs_secret");
+            Ok(1_700_000_123)
+        }
     }
 
     fn machine() -> MailPolicyMachine {
@@ -1818,6 +2213,140 @@ mod tests {
         let snap = m.snapshot();
         assert_eq!(snap.health.expect("re-read").state, "delivering");
         assert_eq!(snap.status, MailPolicyStatus::Idle);
+    }
+
+    /// The same-button two-click confirm lives in the machine: the first press
+    /// of a confirm button only arms it (nothing reaches the nest), the second
+    /// press of the SAME button disarms and runs its act.
+    #[tokio::test]
+    async fn a_confirm_button_arms_on_the_first_press_and_acts_on_the_second() {
+        for (button, call) in [
+            (MailPolicyConfirm::ResetWarmup, "outbound_warmup_reset"),
+            (
+                MailPolicyConfirm::RotateListUnsubscribeSecret,
+                "rotate_list_unsubscribe_secret",
+            ),
+            (MailPolicyConfirm::RotateSrsSecret, "rotate_srs_secret"),
+            (
+                MailPolicyConfirm::PublishSpamBaseline,
+                "publish_spam_baseline",
+            ),
+        ] {
+            let nest = Arc::new(FakeNest::new());
+            let m = MailPolicyMachine::new(nest.clone());
+            m.hydrate().await.unwrap();
+            m.dispatch(MailPolicyAction::Press { button })
+                .await
+                .unwrap();
+            assert_eq!(
+                m.snapshot().armed,
+                Some(button),
+                "{button:?}: first press arms"
+            );
+            assert!(
+                nest.calls.lock().unwrap().is_empty(),
+                "{button:?}: arming sent a call"
+            );
+            m.dispatch(MailPolicyAction::Press { button })
+                .await
+                .unwrap();
+            assert_eq!(*nest.calls.lock().unwrap(), vec![call], "{button:?}");
+            assert_eq!(m.snapshot().armed, None, "{button:?}: the confirm disarms");
+        }
+    }
+
+    /// Pressing another confirm button moves the arm to it (a second press
+    /// must mean "yes, this one"), and any other action disarms.
+    #[tokio::test]
+    async fn the_arm_moves_to_the_pressed_button_and_any_other_action_disarms() {
+        let nest = Arc::new(FakeNest::new());
+        let m = MailPolicyMachine::new(nest.clone());
+        m.hydrate().await.unwrap();
+        m.dispatch(MailPolicyAction::Press {
+            button: MailPolicyConfirm::RotateSrsSecret,
+        })
+        .await
+        .unwrap();
+        m.dispatch(MailPolicyAction::Press {
+            button: MailPolicyConfirm::RotateListUnsubscribeSecret,
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            m.snapshot().armed,
+            Some(MailPolicyConfirm::RotateListUnsubscribeSecret)
+        );
+        assert!(
+            nest.calls.lock().unwrap().is_empty(),
+            "moving the arm sent a call"
+        );
+
+        m.dispatch(MailPolicyAction::RecheckHealth).await.unwrap();
+        assert_eq!(m.snapshot().armed, None, "another action disarms");
+        m.dispatch(MailPolicyAction::Press {
+            button: MailPolicyConfirm::RotateListUnsubscribeSecret,
+        })
+        .await
+        .unwrap();
+        m.dispatch(MailPolicyAction::Refresh).await.unwrap();
+        assert_eq!(m.snapshot().armed, None, "a re-read disarms");
+        assert!(
+            !nest
+                .calls
+                .lock()
+                .unwrap()
+                .contains(&"rotate_list_unsubscribe_secret"),
+            "a stale arm must never rotate"
+        );
+    }
+
+    /// Each rotation's outcome lands on the snapshot (no re-read: nothing on
+    /// the page moved), and the page's next re-read clears it.
+    #[tokio::test]
+    async fn a_rotation_records_its_outcome_on_the_snapshot() {
+        let m = machine();
+        m.hydrate().await.unwrap();
+        for _ in 0..2 {
+            m.dispatch(MailPolicyAction::Press {
+                button: MailPolicyConfirm::RotateListUnsubscribeSecret,
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            m.snapshot().secret_rotation,
+            Some(SecretRotationView::ListUnsubscribe {
+                members_retokenized: 7
+            })
+        );
+        for _ in 0..2 {
+            m.dispatch(MailPolicyAction::Press {
+                button: MailPolicyConfirm::RotateSrsSecret,
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            m.snapshot().secret_rotation,
+            Some(SecretRotationView::Srs {
+                rotated_at: 1_700_000_123
+            })
+        );
+        assert_eq!(m.snapshot().status, MailPolicyStatus::Idle);
+        m.dispatch(MailPolicyAction::Refresh).await.unwrap();
+        assert_eq!(m.snapshot().secret_rotation, None);
+    }
+
+    #[test]
+    fn secret_rotation_text_names_what_was_rotated() {
+        let lookup = fauna_i18n::strings::lookup;
+        let unsub = secret_rotation_text(&SecretRotationView::ListUnsubscribe {
+            members_retokenized: 7,
+        })
+        .resolve(lookup);
+        assert!(unsub.contains('7'), "{unsub}");
+        let srs = secret_rotation_text(&SecretRotationView::Srs { rotated_at: 1 }).resolve(lookup);
+        assert!(!srs.is_empty() && srs != unsub, "{srs}");
     }
 
     #[tokio::test]
@@ -1880,6 +2409,66 @@ mod tests {
         );
     }
 
+    /// `admin.md` § 6 Mail: on a box that cannot enable mail the snapshot says
+    /// so, the enable is refused locally — the nest never asked — and the
+    /// disable is never refused.
+    #[tokio::test]
+    async fn an_unavailable_box_refuses_the_enable_locally_never_the_disable() {
+        let nest = Arc::new(FakeNest::new());
+        nest.cfg.lock().unwrap().mail_enabled = false;
+        *nest.unavailable.lock().unwrap() = true;
+        let m = MailPolicyMachine::new(nest.clone());
+        m.hydrate().await.unwrap();
+        assert!(m.snapshot().mail_unavailable_here);
+
+        // Locally refused: the stub would answer the typed refusal, so a
+        // reachable nest would still leave mail off — prove the local arm by
+        // making the nest willing.
+        *nest.unavailable.lock().unwrap() = false;
+        let err = m
+            .dispatch(MailPolicyAction::SetMailEnabled { enabled: true })
+            .await
+            .expect_err("the enable is refused on an unavailable box");
+        assert_eq!(
+            err.to_string(),
+            fauna_i18n::strings::error::bridges::MAIL_UNAVAILABLE_HERE
+        );
+        assert!(!nest.cfg.lock().unwrap().mail_enabled, "nothing was sent");
+        assert_eq!(
+            m.snapshot().error.as_deref(),
+            Some(fauna_i18n::strings::error::bridges::MAIL_UNAVAILABLE_HERE)
+        );
+
+        *nest.unavailable.lock().unwrap() = true;
+        m.dispatch(MailPolicyAction::SetMailEnabled { enabled: false })
+            .await
+            .expect("the disable is never refused");
+    }
+
+    /// A box that became unavailable after the page hydrated: the nest's typed
+    /// refusal is the page's error and flips the snapshot field, never a
+    /// generic `nest rejected:`.
+    #[tokio::test]
+    async fn the_nests_unavailable_refusal_is_the_page_error() {
+        let nest = Arc::new(FakeNest::new());
+        nest.cfg.lock().unwrap().mail_enabled = false;
+        let m = MailPolicyMachine::new(nest.clone());
+        m.hydrate().await.unwrap();
+        assert!(!m.snapshot().mail_unavailable_here);
+
+        *nest.unavailable.lock().unwrap() = true;
+        let err = m
+            .dispatch(MailPolicyAction::SetMailEnabled { enabled: true })
+            .await
+            .expect_err("the nest refuses");
+        assert_eq!(
+            err.to_string(),
+            fauna_i18n::strings::error::bridges::MAIL_UNAVAILABLE_HERE
+        );
+        assert!(m.snapshot().mail_unavailable_here);
+        assert!(!m.snapshot().mail_enabled);
+    }
+
     #[test]
     fn pre_hydrate_auto_enable_for_new_users_is_default_on() {
         // The pre-hydrate placeholder defaults ON (unset ⇒ ON, the works-out-of-
@@ -1921,6 +2510,101 @@ mod tests {
             .await
             .unwrap();
         assert!(m.snapshot().auto_enable_mail_for_new_users, "flips back ON");
+    }
+
+    /// § Microsoft sign-in, *An admin-supplied registration*: unset reads as
+    /// the default; a save stores the normalised pair and re-reads it; a draft
+    /// the shared rule refuses sends nothing and shows its sentence; both blank
+    /// clears back to the default.
+    #[tokio::test]
+    async fn the_microsoft_registration_saves_validates_and_clears() {
+        use fauna_i18n::strings::admin::mail_page as s;
+        let nest = Arc::new(FakeNest::new());
+        let m = MailPolicyMachine::new(nest.clone());
+        m.hydrate().await.unwrap();
+        assert_eq!(
+            m.snapshot().microsoft_registration,
+            MicrosoftRegistrationView {
+                is_default: true,
+                ..Default::default()
+            }
+        );
+
+        let id = "0b5c1a2e-3f4d-4e5a-8b6c-7d8e9f0a1b2c";
+        m.dispatch(MailPolicyAction::SetMicrosoftRegistration {
+            client_id: format!(" {} ", id.to_uppercase()),
+            tenant: String::new(),
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            m.snapshot().microsoft_registration,
+            MicrosoftRegistrationView {
+                client_id: id.into(),
+                tenant: "common".into(),
+                is_default: false,
+            }
+        );
+
+        let refused = m
+            .dispatch(MailPolicyAction::SetMicrosoftRegistration {
+                client_id: id.into(),
+                tenant: "not a tenant".into(),
+            })
+            .await;
+        assert!(refused.is_err());
+        assert_eq!(
+            m.snapshot().error.as_deref(),
+            Some(s::MICROSOFT_TENANT_INVALID)
+        );
+        assert_eq!(
+            nest.microsoft_sets.lock().unwrap().len(),
+            1,
+            "a refused draft sends nothing"
+        );
+        assert!(
+            !m.snapshot().microsoft_registration.is_default,
+            "and keeps the stored pair"
+        );
+
+        m.dispatch(MailPolicyAction::SetMicrosoftRegistration {
+            client_id: String::new(),
+            tenant: String::new(),
+        })
+        .await
+        .unwrap();
+        assert!(m.snapshot().microsoft_registration.is_default);
+        assert_eq!(
+            nest.microsoft_sets.lock().unwrap().last(),
+            Some(&(String::new(), String::new())),
+            "the clear is both strings empty"
+        );
+    }
+
+    #[test]
+    fn the_microsoft_draft_refusals_name_their_sentence() {
+        let id = "0b5c1a2e-3f4d-4e5a-8b6c-7d8e9f0a1b2c";
+        assert_eq!(parse_microsoft_registration_draft("", ""), Ok(None));
+        assert_eq!(
+            parse_microsoft_registration_draft(id, "contoso.example"),
+            Ok(Some((id.into(), "contoso.example".into())))
+        );
+        for (client_id, tenant, key) in [
+            ("nope", "", "admin.mail_page.microsoft_client_id_invalid"),
+            (id, "a b", "admin.mail_page.microsoft_tenant_invalid"),
+            (
+                "",
+                "common",
+                "admin.mail_page.microsoft_tenant_needs_client_id",
+            ),
+        ] {
+            let e = parse_microsoft_registration_draft(client_id, tenant).unwrap_err();
+            assert_eq!(e.key, key);
+            assert!(
+                fauna_i18n::strings::lookup(key).is_some(),
+                "{key} is a real string"
+            );
+        }
     }
 
     #[tokio::test]

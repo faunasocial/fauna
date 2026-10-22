@@ -107,58 +107,58 @@ Stamped 2026-10-12 at 670184dce8.
     - `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_offers_three_formats_with_mbox_chosen`
     - `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_strip_removes_transit_headers_and_keeps_the_senders`
 41. [app] When you go to delete your account, the confirmation reminds you to export your mail first — `docs/goal/ui/settings.md` § Layout & flow
-    - (none)
+    - `tests/e2e-unified/tests/test_delete_account.py::test_delete_account_via_confirm_field`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+765e666a.dirty standalone |
-| linux | ⚠ partial | 0.1.4-dev+670184dc.dirty standalone |
+| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
+| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
 | windows | ⚠ partial | 0.1.2-dev+15642c38.dirty standalone |
 | macos | ⚠ partial | 0.1.2-dev+05f6e2ef standalone |
 | ios | ⚠ partial | 0.1.2-dev+2924f9f9 standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.4-dev+d6e5448b.dirty standalone |
+| tui | ✅ full | 0.1.4-dev+d6e5448b.dirty standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_runs_to_done` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_runs_to_done` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_wizard_reachable` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_archive_is_sealed_to_its_owner` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_refuses_a_truncated_or_unfinished_archive` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_scope_starts_without_trash_and_junk_and_leaves_out_a_deselected_mailbox` | linux (linux): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_date_range_takes_whole_days_by_arrival_and_discard_removes_the_export` | linux (linux): failed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_refuses_a_date_that_is_not_a_day_or_a_range_that_runs_backwards` | linux (linux): passed, tui (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_strip_removes_transit_headers_and_keeps_the_senders` | linux (linux): failed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_strip_removes_transit_headers_and_keeps_the_senders` | linux (linux): failed, tui (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_confirm_estimates_size_and_time_before_anything_starts` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_progress_counts_and_times_it_then_pauses_resumes_and_finishes` | linux (linux): failed, tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_progress_counts_and_times_it_then_pauses_resumes_and_finishes` | linux (linux): failed, tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_failure_is_shown_with_its_reason_in_the_error_log` | linux (linux): passed, tui (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_progress_counts_and_times_it_then_pauses_resumes_and_finishes` | linux (linux): failed, tui (linux): passed |
-| 14 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_cancel_asks_first_and_leaves_no_partial_archive_from_any_app` | linux (linux): passed, tui (linux): passed |
-| 15 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_after_a_restart_returns_to_the_export_and_resume_restarts_it_here` | linux (linux): passed, tui (linux): passed |
-| 15 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_cancel_asks_first_and_leaves_no_partial_archive_from_any_app` | linux (linux): passed, tui (linux): passed |
-| 16 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_after_a_restart_returns_to_the_export_and_resume_restarts_it_here` | linux (linux): passed, tui (linux): passed |
-| 16 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_another_device_cannot_pause_it_and_resuming_there_restarts_it` | linux (linux): passed, tui (linux): passed |
-| 17 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_after_a_restart_returns_to_the_export_and_resume_restarts_it_here` | linux (linux): passed, tui (linux): passed |
-| 17 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_cancel_asks_first_and_leaves_no_partial_archive_from_any_app` | linux (linux): passed, tui (linux): passed |
-| 17 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_another_device_cannot_pause_it_and_resuming_there_restarts_it` | linux (linux): passed, tui (linux): passed |
-| 17 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_another_device_can_cancel_it_and_no_partial_archive_remains` | linux (linux): failed, tui (linux): passed |
-| 18 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_progress_counts_and_times_it_then_pauses_resumes_and_finishes` | linux (linux): failed, tui (linux): passed |
-| 19 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_date_range_takes_whole_days_by_arrival_and_discard_removes_the_export` | linux (linux): failed, tui (linux): passed |
-| 20 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_finished_on_one_device_downloads_and_opens_on_another` | linux (linux): failed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_archive_is_sealed_to_its_owner` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_refuses_a_truncated_or_unfinished_archive` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_scope_starts_without_trash_and_junk_and_leaves_out_a_deselected_mailbox` | web (linux): failed, linux (linux): passed, tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_date_range_takes_whole_days_by_arrival_and_discard_removes_the_export` | web (linux): failed, linux (linux): failed, tui (linux): passed |
+| 7 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_refuses_a_date_that_is_not_a_day_or_a_range_that_runs_backwards` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 8 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_strip_removes_transit_headers_and_keeps_the_senders` | web (linux): failed, linux (linux): failed, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_strip_removes_transit_headers_and_keeps_the_senders` | web (linux): failed, linux (linux): failed, tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_confirm_estimates_size_and_time_before_anything_starts` | web (linux): failed, linux (linux): passed, tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_progress_counts_and_times_it_then_pauses_resumes_and_finishes` | web (linux): failed, linux (linux): failed, tui (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_progress_counts_and_times_it_then_pauses_resumes_and_finishes` | web (linux): failed, linux (linux): failed, tui (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_failure_is_shown_with_its_reason_in_the_error_log` | web (linux): failed, linux (linux): passed, tui (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_progress_counts_and_times_it_then_pauses_resumes_and_finishes` | web (linux): failed, linux (linux): failed, tui (linux): passed |
+| 14 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_cancel_asks_first_and_leaves_no_partial_archive_from_any_app` | web (linux): failed, linux (linux): passed, tui (linux): passed |
+| 15 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_after_a_restart_returns_to_the_export_and_resume_restarts_it_here` | web (linux): failed, linux (linux): passed, tui (linux): passed |
+| 15 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_cancel_asks_first_and_leaves_no_partial_archive_from_any_app` | web (linux): failed, linux (linux): passed, tui (linux): passed |
+| 16 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_after_a_restart_returns_to_the_export_and_resume_restarts_it_here` | web (linux): failed, linux (linux): passed, tui (linux): passed |
+| 16 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_another_device_cannot_pause_it_and_resuming_there_restarts_it` | web (linux): failed, linux (linux): passed, tui (linux): passed |
+| 17 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_after_a_restart_returns_to_the_export_and_resume_restarts_it_here` | web (linux): failed, linux (linux): passed, tui (linux): passed |
+| 17 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_cancel_asks_first_and_leaves_no_partial_archive_from_any_app` | web (linux): failed, linux (linux): passed, tui (linux): passed |
+| 17 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_another_device_cannot_pause_it_and_resuming_there_restarts_it` | web (linux): failed, linux (linux): passed, tui (linux): passed |
+| 17 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_another_device_can_cancel_it_and_no_partial_archive_remains` | web (linux): failed, linux (linux): failed, tui (linux): passed |
+| 18 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_progress_counts_and_times_it_then_pauses_resumes_and_finishes` | web (linux): failed, linux (linux): failed, tui (linux): passed |
+| 19 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_date_range_takes_whole_days_by_arrival_and_discard_removes_the_export` | web (linux): failed, linux (linux): failed, tui (linux): passed |
+| 20 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_finished_on_one_device_downloads_and_opens_on_another` | web (linux): failed, linux (linux): failed, tui (linux): passed |
 | 21 | app | `tests/e2e-unified/tests/test_mail_export_archive.py::test_an_export_made_before_a_key_rotation_still_opens_after_it` | linux (linux): passed, tui (linux): passed |
-| 22 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_runs_to_done` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 22 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_runs_to_done` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 23 | app | `tests/e2e-unified/tests/test_mail_export_archive.py::test_every_format_keeps_each_mailbox_apart_with_its_marks_and_dates` | linux (linux): passed, tui (linux): passed |
 | 24 | app | `tests/e2e-unified/tests/test_mail_export_archive.py::test_the_same_export_twice_is_the_same_archive` | linux (linux): passed, tui (linux): passed |
 | 25 | app | `tests/e2e-unified/tests/test_mail_export_archive.py::test_every_format_keeps_each_mailbox_apart_with_its_marks_and_dates` | linux (linux): passed, tui (linux): passed |
 | 26 | app | `tests/e2e-unified/tests/test_mail_export_archive.py::test_every_format_keeps_each_mailbox_apart_with_its_marks_and_dates` | linux (linux): passed, tui (linux): passed |
 | 27 | app | `tests/e2e-unified/tests/test_mail_export_archive.py::test_every_format_keeps_each_mailbox_apart_with_its_marks_and_dates` | linux (linux): passed, tui (linux): passed |
-| 28 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_an_unopenable_message_fails_the_whole_export_naming_its_mailbox_and_message` | linux (linux): passed, tui (linux): passed |
-| 29 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_a_failed_export_shows_as_failed_after_a_restart_and_dismiss_clears_it` | web (linux): passed, linux (linux): failed, tui (linux): passed |
+| 28 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_an_unopenable_message_fails_the_whole_export_naming_its_mailbox_and_message` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 29 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_a_failed_export_shows_as_failed_after_a_restart_and_dismiss_clears_it` | web (linux): failed, linux (linux): failed, tui (linux): passed |
 | 30 | nest | `tests/e2e-unified/tests/api/test_mail_portability_hooks_api.py::test_a_finished_export_is_kept_thirty_days_then_gone` | nest (linux): passed |
 | 31 | nest | `tests/e2e-unified/tests/api/test_mail_portability_hooks_api.py::test_an_export_over_the_size_limit_is_refused` | nest (linux): passed |
 | 32 | nest | `tests/e2e-unified/tests/api/test_mail_export_nest_api.py::test_only_three_exports_run_at_once_and_another_is_refused_until_one_ends` | nest (linux): passed |
@@ -169,7 +169,7 @@ Stamped 2026-10-12 at 670184dce8.
 | 37 | nest | `tests/e2e-unified/tests/api/test_mail_export_nest_api.py::test_a_suspended_or_locked_out_account_cannot_download_an_export_with_a_sign_in_it_holds` | nest (linux): passed |
 | 38 | nest | `tests/e2e-unified/tests/api/test_mail_export_reclaim_api.py::test_deleting_your_account_deletes_your_exports_with_it` | nest (linux): passed |
 | 39 | nest | `tests/e2e-unified/tests/api/test_mail_export_reclaim_api.py::test_after_moving_to_a_new_identity_the_old_exports_are_gone_and_you_export_again` | nest (linux): passed |
-| 40 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_offers_three_formats_with_mbox_chosen` | linux (linux): passed, tui (linux): passed |
-| 40 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_strip_removes_transit_headers_and_keeps_the_senders` | linux (linux): failed, tui (linux): passed |
-| 41 | app | (none) | — |
+| 40 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_offers_three_formats_with_mbox_chosen` | web (linux): failed, linux (linux): passed, tui (linux): passed |
+| 40 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_strip_removes_transit_headers_and_keeps_the_senders` | web (linux): failed, linux (linux): failed, tui (linux): passed |
+| 41 | app | `tests/e2e-unified/tests/test_delete_account.py::test_delete_account_via_confirm_field` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 <!-- features-render:end -->

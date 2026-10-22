@@ -2,7 +2,7 @@
 
 Owns: room-model
 Status: ratified — the room model (TP8's four remaining decisions) ratified 2026-09-08 by the conversations owner; the package containing the four recommendations was accepted by the user 2026-09-05 ([`../architecture/third-party.md`](../architecture/third-party.md) § The rulings — TP8). One sub-decision was settled by the ratifying session rather than put to the user — the community class's key model, § The three classes → *Community* — and was refutable until the first community-room build; that build landed 2026-09-09 and did not refute it (§ Implementation status today, *The sealing lands*), so the window is closed.
-Authority: **the room model** — the one membership model every conversation shares regardless of transport: what a room is, who may be a member (principals with keys), the three confidentiality classes and the rule that derives a room's class from its member set, the per-class key model (the community class's own detail — its key model, who wrote a message, its attachment kind and what the home nest does with its read — together with the class's build record is [`community-rooms.md`](community-rooms.md)'s, split out 2026-09-10), roles and how each class enforces them, join rules and invites (the invitation's lifecycle once issued — its fate, its judgement at accept, its listing and withdrawal, and the cross-nest legs — is [`room-invitations.md`](room-invitations.md)'s, split out 2026-09-28), the home nest and its transfer, the per-room history-for-joiners policy, and the fate of the duplicate `fauna.conversations.group.*` plane. Defers the MLS channel protocol (Welcome, key packages, channel send/fetch, the N-member fork) to [`direct-messages.md`](direct-messages.md); the page UX, capability gating and the `Bridged` adapter to [`../ui/conversations.md`](../ui/conversations.md); the sequencing seat to [`p2p.md`](p2p.md) § Offline share initiation; the recipient-set key scheme to [`../architecture/recipient-set-scheme.md`](../architecture/recipient-set-scheme.md) § The recipient-set scheme (mechanics) and [`../architecture/key-material-hierarchy.md`](../architecture/key-material-hierarchy.md) § Audience: a storage group (key material); identity succession to [`identity-succession.md`](identity-succession.md) + [`succession-propagation.md`](succession-propagation.md); per-content-kind at-rest rows to [`../architecture/encryption-at-rest.md`](../architecture/encryption-at-rest.md); the custody serve door to [`../architecture/account-replica-posture.md`](../architecture/account-replica-posture.md) § Shared-audience carve-out; and the dormant group plane's as-built wire contract to [`groups.md`](groups.md).
+Authority: **the room model** — the one membership model every conversation shares regardless of transport: what a room is, who may be a member (principals with keys), the three confidentiality classes and the rule that derives a room's class from its member set, the per-class key model (the community class's own detail — its key model, who wrote a message, its attachment kind and what the home nest does with its read — together with the class's build record is [`community-rooms.md`](community-rooms.md)'s, split out 2026-09-10), roles and how each class enforces them, join rules and invites (the invitation's lifecycle once issued — its fate, its judgement at accept, its listing and withdrawal, and the cross-nest legs — is [`room-invitations.md`](room-invitations.md)'s, split out 2026-09-28), the home nest and its transfer, the per-room history-for-joiners policy, and the fate of the duplicate `fauna.conversations.group.*` plane. Defers the MLS channel protocol (Welcome, key packages, channel send/fetch, the N-member fork) to [`direct-messages.md`](direct-messages.md); the page UX and capability gating to [`../ui/conversations.md`](../ui/conversations.md); the `Bridged` adapter to [`bridged-adapter.md`](bridged-adapter.md); the sequencing seat to [`p2p.md`](p2p.md) § Offline share initiation; the recipient-set key scheme to [`../architecture/recipient-set-scheme.md`](../architecture/recipient-set-scheme.md) § The recipient-set scheme (mechanics) and [`../architecture/key-material-hierarchy.md`](../architecture/key-material-hierarchy.md) § Audience: a storage group (key material); identity succession to [`identity-succession.md`](identity-succession.md) + [`succession-propagation.md`](succession-propagation.md); per-content-kind at-rest rows to [`../architecture/encryption-at-rest.md`](../architecture/encryption-at-rest.md); the custody serve door to [`../architecture/account-replica-posture.md`](../architecture/account-replica-posture.md) § Shared-audience carve-out; and the dormant group plane's as-built wire contract to [`groups.md`](groups.md).
 
 Last verified: 2026-09-26 (three passes — the third: the group plane's retirement executed, steps 1–3 — § The group plane's fate, § Done definition; the second: the foreign-inviter leg ratified and built, a member homed elsewhere issuing through its own nest under `member-invite` — [`room-invitations.md`](room-invitations.md) § Join rules and invites → *A cross-nest invitation*, the closing paragraph; § The home nest, the issue relay; the first: the cross-nest invitation ratified and built — [`room-invitations.md`](room-invitations.md) § Join rules and invites → *A cross-nest invitation*; § The home nest, the admission relay; § Done definition, the community box's second-nest clause); 2026-09-23 (three passes — the third: the anchor store's failing read backed off, one read per 10 s — § Implementation status today, the *Delete any message* bullet; the second: every verified policy-name line, positive or empty, is asked again on the same bounded cadence and only ever grows, and a rank refusal parks whenever a witness is registered — § Roles and authorization → *A name designates its verified line* → *A verified line holds only so far*; § Implementation status today, the *Delete any message* bullet; residual *(g)* closed, *(h)* restated; the first: a policy name verified as never-succeeded is asked again on a bounded cadence and parks a rank refusal meanwhile — the same sections, residuals *(g)*–*(h)* declared); 2026-09-22 (every community policy version bound to its room, and a room born requiring the binding — § Roles and authorization → *A fetched version is anchored, never believed* and *A room is born requiring the room signature*; § Implementation status today, the *Delete any message* bullet, residual *(f)*); 2026-09-21 (what a device accepts as a joiner's history ruled and built — § History for joiners → *What a device accepts*; the floor's signature check pinned at last and the “each red-verified” claim made true — § Implementation status today, the *Delete any message* bullet; residual *(e)* closed, a retained policy version is no longer rewritable; what account deletion and succession do to a retained version ruled — § Roles and authorization → *Members verify what they paint*; an invitation's fate under account deletion and succession ruled and built — § Join rules and invites); 2026-09-20 (the tombstone-across-a-restart question SETTLED — § Implementation status today, the *Delete any message* bullet: the `history/<ch>` slice now carries the projection's tombstone outcome, so a cross-sender delete survives a relaunch on the role the rail recorded at fold; the succession chain/parked-set residual at § Implementation status today (d) was un-filed from that question, which no longer covers it); 2026-09-13 (the retirement of the succession-axis bullet's declared bound (2) — the successor's wrap target, built as `room.set_reception_key` and recorded in `community-rooms.md` § Implementation status today → *A seat gains or rotates its wrap target*; the community class's floor succession leg, the policy names' chain resolution and the owner's account-deletion rule — § Implementation status today, the succession-axis bullet; § Roles and authorization); 2026-09-10 (eight passes that day — the sixth built the invitation's delivery through the inbox plane, § Implementation status today → *An invitation reaches its invitee*, which also re-scoped the cross-nest-invite residue; the seventh the membership doors and the severance rotation, § Implementation status today → *A removal severs*; the eighth the two policy-authoring doors and the roster read's policy bytes they needed, → *The policy doors reach a client*; the fourth and fifth the design passes that ratified the home nest's read purposes, § The three classes → *What the home nest does with its read*, and then the room-restricted post arm its purpose 3 points at, `restricted-posts.md` § Encryption at rest; the first three: the id-keyed handle read and the roster's decided federation answer; the add's retained-generation backfill; and the foreign member's generation-read relay, whose remaining gap was re-scoped after `fauna.federation.channel.append` was found already inheriting the community floor gate through `channel_send_core`. § Implementation status today's room-plane bullets re-checked against the tree that day) | Sources: `libs/fauna-conversations/src/{address.rs,capabilities.rs,thread.rs,backend.rs}`, `libs/fauna-core/src/{group_content.rs,group_generation.rs}`, `libs/fauna-mls/src/{room_policy.rs,wrapped_blob/group_generation_wraps.rs}`, `bins/fauna-nest/src/{conversations_handlers.rs,custody_admission.rs,federation_handlers.rs,room_read_key.rs,db/rooms.rs,db/groups.rs,db/migrations.rs}`, `libs/fauna-protocol/src/{offline_class.rs,inbox.rs}`, `libs/fauna-client-inbox/src/lib.rs`
 
@@ -106,10 +106,8 @@ What exists, and the gap each ratified shape declares:
   sender match untouched); and `MessageSnapshot::can_delete` is the affordance
   (own, or `RoomSnapshot::viewer_deletes_any` — owner or admin of a governed
   end-to-end room), which `ConversationsManager::delete_message` re-checks
-  before any send. tui, linux, web, android and windows paint the delete button off that flag; **the other two
-  apps (macos, ios) still gate on `is_own`**, so an owner or admin there is offered nothing
-  new until the trickle-down lifts them (they already honour and paint the
-  tombstone — that half is shared Rust). Pinned by
+  before any send. all seven apps paint the delete button off that flag (macos and ios through the
+  shared FaunaKit bubble); the tombstone half is shared Rust. Pinned by
   `an_owners_delete_of_a_members_message_tombstones_it_and_a_members_does_not`
   (`fauna_mls_backend_tests.rs`, red-verified with the role check removed),
   the three `manager_integration_tests.rs` claim/affordance tests, and the
@@ -554,7 +552,7 @@ What exists, and the gap each ratified shape declares:
   home cannot join a handle it has no `users` row for, and no nest ever asks
   another what handle an actor wears — the reverse lookup was weighed and
   **refused**, and the reasoning is
-  [`../architecture/federation.md`](../architecture/federation.md) § Cross-nest
+  [`../architecture/federation-shared-folders.md`](../architecture/federation-shared-folders.md) § Cross-nest
   shared folders + channel append, the id→handle bullet, which **owns the
   rule**. In one sentence: the member's own home nest, the authority for
   handles at its domain, volunteers `handle@domain` on the `channel.fetch` it
@@ -746,6 +744,33 @@ What exists, and the gap each ratified shape declares:
   now records a succession only for a principal it outranks, and a group
   context that drops the policy's `required_capabilities` is refused, with
   the honest add path refusing an unadvertised leaf by name on its own.
+- **The attachment legs' trust of a self-signed home — RULED and BUILT
+  2026-10-19 for the native apps** (§ The home nest → *Attachment bytes*, the
+  read leg and the upload; the ruling is `../architecture/transport-trust.md` § Transport
+  trust's, the federation-granted row's post arm). The recipient's own nest
+  stamps `home_nest_actor_id` on every cross-nest Welcome it receives from the
+  identity it verified on the delivering channel (`federation_handlers.rs`,
+  the `welcome.deliver` handler, beside the `nest_url` it resolves from the
+  same origin — never the peer's field); `FaunaMlsBackend` records it beside
+  `ChannelHome::Foreign` (`record_channel_home_with_identity`,
+  `channel_home_actor_id`) and `ChannelHistorySlice.home_nest_actor_id`
+  carries it across a relaunch; `ConversationsRpc::blob_get` and `blob_put`
+  hand it to the plane, and the native `NestConversationsRpc` reads from and
+  uploads to a foreign home over
+  `fauna_client::post_blob::PinnedHomes` — the post plane's graduated
+  pin-or-WebPKI clients — so a home serving the self-signed floor answers.
+  Witnesses: `conformance_cross_nest_conversations_client.rs::cross_nest_attachment_bytes_rest_on_the_home_nest_and_survive_gc_through_client_stack`
+  (the Welcome's stamp is the home's identity, Bob records it, and the
+  production plane reads the bytes from the self-signed home and uploads
+  further bytes to it with that identity, and is refused without it),
+  `blob_get_hands_the_foreign_plane_the_homes_identity`,
+  `blob_put_hands_the_foreign_plane_the_homes_identity`, the seam case
+  `attachment_blob_put_and_get_route_to_the_channels_home_nest` (the foreign
+  upload carries the recorded identity) and
+  `a_foreign_homes_identity_survives_the_relaunch`. Unbuilt: the browser's
+  `blob_get` and `blob_put` have no pin plane, so a web member reaches a foreign
+  home on WebPKI alone (the web gap `transport-trust.md`'s post-arm bullet
+  names).
 - **Attachment bytes rest on the home nest — BUILT 2026-09-09** (§ The home
   nest → *Attachment bytes*): `fauna.federation.conversation.write_token.mint`
   + its client relay `fauna.conversations.blob.write_token.get`
@@ -922,7 +947,7 @@ nothing else about.
 |---|---|---|---|---|
 | **End-to-end** | User principals only — every member is a user's device fleet. | The members, on their own devices. Nests relay opaque bytes. | MLS — the `(FaunaMls, MlsGroup)` channel as built; owner [`direct-messages.md`](direct-messages.md). | Bounded — MLS's own operational limits; the page shows the number. |
 | **Community** | User principals **plus the room's home nest**. | The members, and the home nest — which searches and labels it, serving what it derives as metadata only (*What the home nest does with its read*, below). | The recipient-set scheme (R15), with the home nest as one wrap recipient under its room-read keypair. | Unbounded. |
-| **Transport-only** | Any member set containing a bridge principal or a mail transfer agent. | The far network and its bridge read it by construction; Fauna seals the legs it controls and labels the room honestly. | Per adapter: the mail perimeter's seal ([`../architecture/encryption-at-rest.md`](../architecture/encryption-at-rest.md) `Mail body` row); the bridged family's HPKE seal to the recipient key inbound and to the bridge key outbound (TP10, [`../ui/conversations.md`](../ui/conversations.md) § Where logic lives → *The `Bridged` adapter*). | Per adapter. |
+| **Transport-only** | Any member set containing a bridge principal or a mail transfer agent. | The far network and its bridge read it by construction; Fauna seals the legs it controls and labels the room honestly. | Per adapter: the mail perimeter's seal ([`../architecture/encryption-at-rest.md`](../architecture/encryption-at-rest.md) `Mail body` row); the bridged family's HPKE seal to the recipient key inbound and to the bridge key outbound (TP10, [`bridged-adapter.md`](bridged-adapter.md) § Where logic lives → *The `Bridged` adapter*). | Per adapter. |
 
 The derivation is total and ordered: any bridge/MTA member ⇒ transport-only;
 else the home nest a member ⇒ community; else end-to-end. `ThreadEncryption`
@@ -1185,7 +1210,7 @@ who; this says how, for both classes. Three rules are the classes' alike:
 - **A second admission beside the sender match, never a loosening of it.** A
   delete whose authenticated author is the target's own sender is honoured
   everywhere, as it always was
-  ([`../ui/conversations.md`](../ui/conversations.md) § Reactions & message
+  ([`message-reactions.md`](message-reactions.md) § Reactions & message
   delete owns that floor and the sender authentication under it). A
   *cross-sender* delete is honoured only in a governed room, only when its
   authenticated author — never a self-asserted field — holds owner or admin,
@@ -1629,7 +1654,7 @@ live*). A same-nest member uploads to its own nest under its session bearer, as
 before. A member homed elsewhere never uploads to its own nest — bytes there
 would be named by no record and served to no one — and never sends bytes over
 the nest↔nest channel: bulk bytes never ride federation
-([`../architecture/federation.md`](../architecture/federation.md) § Cross-nest
+([`../architecture/federation-shared-folders.md`](../architecture/federation-shared-folders.md) § Cross-nest
 shared folders + channel append). Instead the two byte legs mirror the
 cross-nest shared-folder plane one rail over. **Write:** the member's own nest
 relays a short-lived, write-only bulk token from the home nest
@@ -1639,14 +1664,21 @@ structural foreign-member gate — the `channel.fetch` gate verbatim, with no
 `access == 'writer'` arm because a room has no claimant and every member
 posts), and POSTs the sealed attachment DIRECT to the home nest's ordinary
 `POST /api/v1/blob`, which accepts the token on the same door a session bearer
-uses. **Read:** every member fetches by content address from the home nest's
-public `GET /api/v1/blob/{hash}` — a foreign home reached direct, plain WebPKI,
-integrity resting on the content address exactly as a cross-nest shared-folder
-download does. The client picks the leg by the channel's recorded home, the
-same `ChannelHome` signal that picks `channel.send` vs `send_remote`, in shared
-Rust for all 7 apps (`ConversationsRpc::blob_put` / `blob_get` carry the home
-URL). No metering or byte cap rides the token: a room carries no owner-pays
-policy (that is folder policy — `federation.md` § Cross-nest → *Substrate vs.
+uses — a foreign home reached over the same graduated plane, on the same stamp,
+as the read below. **Read:** every member fetches by content address from the home nest's
+public `GET /api/v1/blob/{hash}` — a foreign home reached direct, trusted as the
+federation-granted row's *post arm* rules (`../architecture/transport-trust.md`
+§ Transport trust: the room's Welcome carries its home's identity, stamped by
+the member's own nest from the identity it verified on the delivering channel,
+and the native plane graduates a per-process pin against it before the first
+byte; the browser has no pin plane and stays on WebPKI — § Implementation
+status today), integrity resting on
+the content address exactly as a cross-nest shared-folder download does. The
+client picks the leg by the channel's recorded home, the same `ChannelHome`
+signal that picks `channel.send` vs `send_remote`, in shared Rust for all 7 apps
+(`ConversationsRpc::blob_put` / `blob_get` carry the home URL and its identity
+beside it). No metering or byte cap rides the token: a room carries no owner-pays
+policy (that is folder policy — `federation-shared-folders.md` § Cross-nest → *Substrate vs.
 policy*), so the POST is bounded by the same-nest door's `BLOB_BODY_LIMIT`
 alone, and reclaim follows the record on the home nest
 ([`backup-restore.md`](backup-restore.md) § 9 step 2g). A re-home by transfer
@@ -1866,7 +1898,7 @@ adopts the room by declaring its bridge id
 ([`../architecture/apps/bridges.md`](../architecture/apps/bridges.md) § Bridge-kind
 catalogue → Phase G → *When the bridge stops serving* owns the fate). Everything
 else about the adapter — the one variant, the one backend, the blind sealed
-mailbox, the user-side kinds — is owned by [`../ui/conversations.md`](../ui/conversations.md)
+mailbox, the user-side kinds — is owned by [`bridged-adapter.md`](bridged-adapter.md)
 § Where logic lives → *The `Bridged` adapter*.
 
 ## The group plane's fate
@@ -2061,7 +2093,7 @@ room, and the post seal it uses is the `Posts` row's own.
 ## Reading list
 
 1. [`../architecture/third-party.md`](../architecture/third-party.md) § The rulings — TP8, TP10, TP12 (the ruling this doc executes).
-2. [`../ui/conversations.md`](../ui/conversations.md) — the page, capability gating, the `Bridged` adapter.
+2. [`../ui/conversations.md`](../ui/conversations.md) — the page, capability gating; [`bridged-adapter.md`](bridged-adapter.md) — the `Bridged` adapter.
 3. [`direct-messages.md`](direct-messages.md) — the MLS channel plane the end-to-end class rides.
 4. [`groups.md`](groups.md) — the retired plane's pointer stub (2026-09-26); the old contract is in git history.
 5. [`../architecture/recipient-set-scheme.md`](../architecture/recipient-set-scheme.md) § The recipient-set scheme; [`../architecture/account-data-plane.md`](../architecture/account-data-plane.md) § The ratified decisions → R15.

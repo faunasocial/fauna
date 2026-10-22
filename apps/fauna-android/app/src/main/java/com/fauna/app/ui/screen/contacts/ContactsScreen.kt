@@ -34,6 +34,7 @@ import com.fauna.app.data.db.Knock
 import com.fauna.app.ui.components.CopyButton
 import com.fauna.app.ui.components.GuardianAskPair
 import com.fauna.app.ui.navigation.LocalAppMessages
+import com.fauna.app.ui.navigation.profileRoute
 import com.fauna.app.ui.util.ValueFormat
 import com.fauna.app.ui.util.localized
 import com.fauna.ffi.FfiAddressbookRow
@@ -85,8 +86,12 @@ fun ContactsScreen(
     // list -> detail nav, profile.md § Relationship to Contacts; mirrors linux
     // app.rs open_profile). DM stays reachable via the search-result Message button
     // + the conversations compose flow.
-    val onOpenProfile: (String) -> Unit = { actorId ->
-        navController.navigate("profile/$actorId")
+    //
+    // The opener takes the target's home (`profile.md` § Layout & flow → *Reaching
+    // another actor's profile with their home carried*): the Find User result's
+    // lookup `nestUrl` and the row's `ContactItem.home_nest_url` — `null` = this nest.
+    val onOpenProfile: (String, String?) -> Unit = { actorId, home ->
+        navController.navigate(profileRoute(actorId, home))
     }
 
     var searchInput by remember { mutableStateOf("") }
@@ -257,6 +262,15 @@ fun ContactsScreen(
                                     onClick = { onMessageContact(resolved.actorId) }
                                 ) {
                                     Text(stringResource(R.string.contacts_message))
+                                }
+                                // `contact-actor-id-open-profile-button` — the found
+                                // actor's Profile, carrying the lookup's nest URL as
+                                // its home (`contacts.md` § Layout & flow region 3).
+                                OutlinedButton(
+                                    onClick = { onOpenProfile(resolved.actorId, resolved.nestUrl) },
+                                    modifier = Modifier.testTag(Ids.CONTACT_ACTOR_ID_OPEN_PROFILE_BUTTON)
+                                ) {
+                                    Text(stringResource(R.string.contacts_find_user_open_profile))
                                 }
                             }
                             // The pair belongs to the peer this lookup found
@@ -541,6 +555,11 @@ private fun VCardDetailRow(label: String, value: String, valueTestTag: String) {
 @Composable
 private fun KnockItem(knock: Knock, senderLabel: String, vm: ContactsVM) {
     val context = LocalContext.current
+    // While the account is supervised with contact approval on, every knock is
+    // the guardian's to decide, so each row says so (`knock-guardian-pending`,
+    // family-safety.md § App surface) — the shared rule over the ward's own
+    // status policy, no per-knock wire field.
+    val awaitsGuardian by vm.knocksAwaitGuardian.collectAsState()
     ListItem(
         headlineContent = {
             Text(senderLabel, maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -564,6 +583,14 @@ private fun KnockItem(knock: Knock, senderLabel: String, vm: ContactsVM) {
                     text = ValueFormat.relativeTime(context, knock.createdAt),
                     style = MaterialTheme.typography.labelSmall
                 )
+                if (awaitsGuardian) {
+                    Text(
+                        text = stringResource(R.string.contacts_knock_guardian_pending),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.testTag(Ids.KNOCK_GUARDIAN_PENDING),
+                    )
+                }
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.padding(top = 4.dp)
@@ -594,7 +621,7 @@ private fun ContactItem(
     publicName: String?,
     labelsLine: String?,
     vm: ContactsVM,
-    onOpenProfile: (String) -> Unit,
+    onOpenProfile: (String, String?) -> Unit,
 ) {
     // The post-succession review badge — the second of § Propagation's three
     // renderings of the one flag (the conversations-page member chip pair is
@@ -629,7 +656,7 @@ private fun ContactItem(
         primary = primary,
         publicName = publicName,
         labelsLine = labelsLine,
-        onClick = if (clickable) ({ onOpenProfile(contact.peerId) }) else null,
+        onClick = if (clickable) ({ onOpenProfile(contact.peerId, contact.homeNestUrl) }) else null,
         trailing = {
             Row(
                 verticalAlignment = Alignment.CenterVertically,

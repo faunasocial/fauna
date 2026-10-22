@@ -188,6 +188,7 @@ impl InboundMailSource for ScriptedMailbox {
                 mailbox: fauna_conversations::backend::MailFeed::Inbox,
                 suppress_from_view: false,
                 has_seen_flag: false,
+                warmup_hold: None,
             }],
             more: false,
         })
@@ -592,6 +593,7 @@ impl InboundMailSource for EnableableMailbox {
                 mailbox: fauna_conversations::backend::MailFeed::Inbox,
                 suppress_from_view: false,
                 has_seen_flag: false,
+                warmup_hold: None,
             }],
             more: false,
         })

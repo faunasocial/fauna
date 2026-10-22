@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"github.com/faunasocial/fauna/libs/fauna-mail-go/fauna_core"
 	"io"
 	"math"
 	"unsafe"
@@ -577,6 +578,15 @@ type QueueRow struct {
 	Action    *uint8
 	Timestamp int64
 	Source    QueueRowSource
+	// The handle domain of the nest whose admin decided, on a server row
+	// another nest delivered (`moderation.md` § Legal takedown → *The author
+	// homed on another nest*); **`None`** for this nest's own decision and for
+	// every local detection.
+	IssuerNest *string
+	// The row text's suffix naming that nest (`moderation.queue.issued_by`,
+	// `{nest}`), so every app says *where* the decision was made through the
+	// one key; `Some` exactly when [`Self::issuer_nest`] is.
+	IssuedBy *fauna_core.LocalizedText
 }
 
 func (r *QueueRow) Destroy() {
@@ -587,6 +597,8 @@ func (r *QueueRow) Destroy() {
 	FfiDestroyerOptionalUint8{}.Destroy(r.Action)
 	FfiDestroyerInt64{}.Destroy(r.Timestamp)
 	FfiDestroyerQueueRowSource{}.Destroy(r.Source)
+	FfiDestroyerOptionalString{}.Destroy(r.IssuerNest)
+	FfiDestroyerOptionalLocalizedText{}.Destroy(r.IssuedBy)
 }
 
 type FfiConverterQueueRow struct{}
@@ -606,6 +618,8 @@ func (c FfiConverterQueueRow) Read(reader io.Reader) QueueRow {
 		FfiConverterOptionalUint8INSTANCE.Read(reader),
 		FfiConverterInt64INSTANCE.Read(reader),
 		FfiConverterQueueRowSourceINSTANCE.Read(reader),
+		FfiConverterOptionalStringINSTANCE.Read(reader),
+		FfiConverterOptionalLocalizedTextINSTANCE.Read(reader),
 	}
 }
 
@@ -625,6 +639,8 @@ func (c FfiConverterQueueRow) Write(writer io.Writer, value QueueRow) {
 	FfiConverterOptionalUint8INSTANCE.Write(writer, value.Action)
 	FfiConverterInt64INSTANCE.Write(writer, value.Timestamp)
 	FfiConverterQueueRowSourceINSTANCE.Write(writer, value.Source)
+	FfiConverterOptionalStringINSTANCE.Write(writer, value.IssuerNest)
+	FfiConverterOptionalLocalizedTextINSTANCE.Write(writer, value.IssuedBy)
 }
 
 type FfiDestroyerQueueRow struct{}
@@ -713,5 +729,87 @@ type FfiDestroyerOptionalUint8 struct{}
 func (_ FfiDestroyerOptionalUint8) Destroy(value *uint8) {
 	if value != nil {
 		FfiDestroyerUint8{}.Destroy(*value)
+	}
+}
+
+type FfiConverterOptionalString struct{}
+
+var FfiConverterOptionalStringINSTANCE = FfiConverterOptionalString{}
+
+func (c FfiConverterOptionalString) Lift(rb RustBufferI) *string {
+	return LiftFromRustBuffer[*string](c, rb)
+}
+
+func (_ FfiConverterOptionalString) Read(reader io.Reader) *string {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterStringINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalString) Lower(value *string) C.RustBuffer {
+	return LowerIntoRustBuffer[*string](c, value)
+}
+
+func (c FfiConverterOptionalString) LowerExternal(value *string) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*string](c, value))
+}
+
+func (_ FfiConverterOptionalString) Write(writer io.Writer, value *string) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterStringINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalString struct{}
+
+func (_ FfiDestroyerOptionalString) Destroy(value *string) {
+	if value != nil {
+		FfiDestroyerString{}.Destroy(*value)
+	}
+}
+
+type FfiConverterOptionalLocalizedText struct{}
+
+var FfiConverterOptionalLocalizedTextINSTANCE = FfiConverterOptionalLocalizedText{}
+
+func (c FfiConverterOptionalLocalizedText) Lift(rb RustBufferI) *fauna_core.LocalizedText {
+	return LiftFromRustBuffer[*fauna_core.LocalizedText](c, rb)
+}
+
+func (_ FfiConverterOptionalLocalizedText) Read(reader io.Reader) *fauna_core.LocalizedText {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := fauna_core.FfiConverterLocalizedTextINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalLocalizedText) Lower(value *fauna_core.LocalizedText) C.RustBuffer {
+	return LowerIntoRustBuffer[*fauna_core.LocalizedText](c, value)
+}
+
+func (c FfiConverterOptionalLocalizedText) LowerExternal(value *fauna_core.LocalizedText) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*fauna_core.LocalizedText](c, value))
+}
+
+func (_ FfiConverterOptionalLocalizedText) Write(writer io.Writer, value *fauna_core.LocalizedText) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		fauna_core.FfiConverterLocalizedTextINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalLocalizedText struct{}
+
+func (_ FfiDestroyerOptionalLocalizedText) Destroy(value *fauna_core.LocalizedText) {
+	if value != nil {
+		fauna_core.FfiDestroyerLocalizedText{}.Destroy(*value)
 	}
 }

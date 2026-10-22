@@ -51,7 +51,7 @@
 //! [`PrincipalBundle`] is generic over the two things that differ per host —
 //! the secret store the attributes rest in ([`SecretStore`]: the native
 //! `fauna_credential_store::CredentialStore`, web's
-//! `LocalStorageSecretStore`) and the section its read-modify-writes
+//! `WebIdentityStore`) and the section its read-modify-writes
 //! serialize under ([`SlotSection`]: natively the store dir's
 //! `migration.lock`, on web the tab's own section). The attribute names,
 //! the encodings, the latch, the refusal, the staged removals and the

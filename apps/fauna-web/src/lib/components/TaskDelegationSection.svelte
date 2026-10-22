@@ -14,22 +14,22 @@
   // owns it (participants.md § The assignment picker). Web is `ViewerOnly` — a
   // browser tab runs no lease driver — so "This device" is never among them; an
   // existing pin made from another device still renders, so the user can escape it.
-  import { identity } from '$lib/store';
-  import { taskDelegationView, syncDevicesList } from '$lib/rpc';
-  import { getDeviceId } from '$lib/device-id';
-  import { ensureWasm } from '$lib/wasm';
-  import { resolveLocalized } from '$lib/i18n/localized';
+  import { identity } from '#lib/store';
+  import { taskDelegationView, syncDevicesList } from '#lib/rpc';
+  import { getDeviceId } from '#lib/device-id';
+  import { ensureWasm } from '#lib/wasm';
+  import { resolveLocalized } from '#lib/i18n/localized';
   import { onDestroy, onMount } from 'svelte';
-  import { onStoreChange } from '$lib/store-change';
-  import { t } from '$lib/i18n/strings';
+  import { onStoreChange } from '#lib/store-change';
+  import { t } from '#lib/i18n/strings';
   import {
     pinOptionKey,
     pinOptionLabel,
     runnerText,
     type TaskDelegationRow,
-  } from '$lib/task-delegation';
+  } from '#lib/task-delegation';
   import type { WasmTaskDelegationView } from '../../../static/fauna_wasm.js';
-  import { IDS } from '$lib/generated/uiIds';
+  import { IDS } from '#lib/generated/uiIds';
 
   // The parent settings page owns the single error surface (`error-message`).
   let { error = $bindable('') } = $props();
@@ -37,7 +37,7 @@
   let view: WasmTaskDelegationView | null = null;
   let rows = $state<TaskDelegationRow[]>([]);
   // hex `device_id` → display label, from the roster. Absent names fall back to
-  // the shared `short_id` (see `$lib/task-delegation`), so a missing roster only
+  // the shared `short_id` (see `#lib/task-delegation`), so a missing roster only
   // degrades the label, never the surface.
   let labels = $state<Map<string, string>>(new Map());
   let busy = $state(false);
@@ -50,7 +50,7 @@
     rows = (await view.load()) as TaskDelegationRow[];
   }
 
-  // The open page's re-read on a store-change notice (`$lib/store-change`): the
+  // The open page's re-read on a store-change notice (`#lib/store-change`): the
   // pins rest in the account store. A pick in flight re-loads by itself, and a
   // failed re-read leaves the rows on screen standing.
   onDestroy(

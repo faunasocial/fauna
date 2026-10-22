@@ -158,8 +158,9 @@ visible.
 
 ## Save-failure handling
 
-Every app follows the same convention: save failures are
-**best-effort + log**. A failed save means the user has to re-onboard
+**A failed moment-1 write is a loud error, and the wizard stays on the screen the person confirmed on (ruled 2026-10-21).** A freshly generated secret exists nowhere else, so a confirm whose write failed must not advance as if the key were saved: the person would reach handle entry holding a key stored nowhere, and the next launch would be back at identity choice with that key lost — silently. `common.md` § Credential storage states the platform half ("a keyring failure in a shipped linux build is a loud error, not a silent fallback"). The shape is one shared call on every app: the app's write (`persist_confirmed_identity`, whose read-back is what makes a store that silently kept nothing fail at all) returns its error, and the app hands it to the wizard machine's `OnboardingMachine::identity_commit_failed(message)`, which puts the wizard back on `identity_created`, `identity_import` or `recovery_entry` — whichever the confirm was made on — with the message on the shared `error-message` channel; confirming again is the retry, and the created screen re-shows the same key (it mints once per run, `../behavior/onboarding.md` § 1 Identity). The undo lives in the machine, not in each app, because the confirm transitions advance before the app writes (the machine holds no store, and some apps' writes are asynchronous), and only the machine knows which screen the confirm came from. The message is `onboarding.session_error.persist_successor` wrapping the error, or the shared refusal line where the registry refused the add. A crash, as opposed to a failed write, stays the case-2 resume of § Three-case launch routing. *Implementation status: the machine call is BUILT (pinned by `libs/fauna-onboarding-machine/tests/identity_commit_failed.rs`) and adopted on linux, tui, web and android (2026-10-21; android's three confirm screens share `ui/screen/onboarding/ConfirmCommit.kt`, pinned by the `failedWrite_*` / `aFailedCommit*` host tests; linux witnessed by `tests/e2e-unified/tests/test_identity_store_unreachable.py`'s linux arm; web's report lives in `apps/fauna-web/src/lib/onboarding/identity-commit.ts`, pinned by its deno unit test). Apple and windows still only log the failure, as in the table below.*
+
+Every other save failure is **best-effort + log**. A failed save means the user has to re-onboard
 on the next launch, which the wizard already handles. Crashing the UI
 on save failure (the pre-fix Windows behaviour) is the worst-of-both:
 the user loses their secret AND has to file a bug. Silent drop (the
@@ -169,10 +170,10 @@ behaviour) makes diagnostics impossible.
 | App     | Logging surface                                          |
 |---------|----------------------------------------------------------|
 | Apple   | `logMessage(level: .error, target: "fauna.onboarding", message: "[OnboardingVM] keychain save … failed: \(error)")` |
-| Linux   | `tracing::error!("[onboarding] committing the confirmed identity failed: {e:#}")` (append mode: `"[onboarding] persisting the appended identity failed: {e:#}"`) |
+| Linux   | `tracing::error!("[onboarding] committing the confirmed identity failed: {e:#}")`, then `identity_commit_failed` (above) (append mode: `"[onboarding] persisting the appended identity failed: {e:#}"`) |
 | Windows | `Debug.WriteLine($"[VaultSecretBackend] set {resource} failed: {ex.Message}")` + a twin `ShellLog.Error("SecretStore", …)` |
-| Web     | `console.warn('[onboarding] localStorage.setItem(fauna_secret) failed:', e)` |
-| Android | `ShellLog.w("IdentityCreatedVM", "persist_confirmed_identity (registry commit + read-back) failed: …")` (+ the import twin), and `ShellLog.w(TAG, "persistLoggedIn failed: …")` / `"persistAwaitingDns failed: …"` at the wizard terminals in `core/OnboardingHost.kt` |
+| Web     | `console.warn('[onboarding] persist_confirmed_identity failed:', e)` + `logMessage`, then `identityCommitFailed` (above) |
+| Android | `ShellLog.w(tag, "persist_confirmed_identity (registry commit + read-back) failed: …")` in `commitConfirmedIdentity` (created, import and recovery-entry screens), then `identityCommitFailed` (above); and `ShellLog.w(TAG, "persistLoggedIn failed: …")` / `"persistAwaitingDns failed: …"` at the wizard terminals in `core/OnboardingHost.kt` |
 
 ## Cleanup contract
 
@@ -584,8 +585,12 @@ layer out, still in the shared crate: `fauna_client_accounts::with_web_mutation_
 mutator entry runs inside it — the `WasmAccountRegistry` methods (the
 install-secret mint included), the launch chunk's slot writers and its
 `save_authenticated` (which the trait lets write asynchronously), the
-succession ceremony's successor persist and the supervision-snapshot write — so
-no TS caller can reach an unlocked mutator. Reads never take it. It degrades
+succession ceremony's successor persist and the supervision-snapshot write, the
+relaunch adoption's link write (`adoptHeldSuccessor`), the aftermath drain's
+compare-and-clear (`AccountRegistry::clear_aftermath_ceremony_if_serialized`,
+one critical section) and the own-profile read-prove-record's learned-link
+write (`AccountRegistry::record_predecessors_serialized`, which the sign-in hop
+and `loadProfileEditBase` both reach) — so no TS caller can reach an unlocked mutator. Reads never take it. It degrades
 open where `navigator.locks` is absent, as the file lock does on I/O failure.
 The name is the historical migration-lock name, kept so tabs of an older and a
 newer build still exclude each other; the web-side edges and witness are the
@@ -899,6 +904,7 @@ identity. The registry never learns admin-ness itself — that stays a nest
   `set_active_confirmed`, so nothing is mutated and no session is torn down —
   the user stays on the current account, with no error banner (they cancelled
   it themselves).
+- **No device lock reads as a decline on the native-prompt platforms (fail-closed; recorded 2026-10-19 from the code).** Where the confirm surface is the OS prompt, the app first asks the OS whether it can verify the device owner, and an answer of no is a decline, never a skipped prompt: apple's `canEvaluatePolicy(.deviceOwnerAuthentication)` (`apps/fauna-apple/FaunaKit/Sources/FaunaKit/Core/AccountReauth.swift`), windows' `UserConsentVerifier.CheckAvailabilityAsync` (`apps/fauna-windows/FaunaApp/FaunaApp/Services/AccountReauth.cs`) and android's `BiometricManager.canAuthenticate(BIOMETRIC_STRONG or DEVICE_CREDENTIAL)` (`apps/fauna-android/app/src/main/java/com/fauna/app/core/AccountReauth.kt`). So on macOS, iOS, Windows and Android a flagged account cannot be switched to on a device with no screen lock (no passcode, PIN, pattern or password; on Windows, no Windows Hello) until one is set or the flag is cleared; linux, web and tui are unaffected, their in-app confirmation needing no OS credential.
 - **Re-seating after a removal is not an activation, so it never lands on a flagged account** (landed 2026-10-12): when `remove` (or the provisional purge) takes the active account out of the index, the registry promotes the first **unflagged** survivor; with only flagged survivors it leaves `active` empty, and the flagged account is reachable solely through `set_active_confirmed`. **Open questions for this section's owner (raised, not decided):** (1) with `active` empty the launch routes to fresh onboarding (`launch_persistence.rs` `load_identity`), not an account chooser — which surface should let a user with only flagged accounts left activate one through the gate? (2) Clearing the flag, like setting it, never prompts, so switching to the flagged row and turning the toggle off is an equally cheap bypass — should clearing require re-auth?
 - **The admin auto-default** ("an app turns it on for its admin identity"),
   ratified + landed 2026-07-16: `AccountEntry` carries an additive
@@ -941,7 +947,7 @@ identity. The registry never learns admin-ness itself — that stays a nest
 
 ## Implementation status today
 
-**The index bound (§ Multi-account evolution → *The index is bounded*) is built (2026-10-05).** Every index write goes through `AccountRegistry::encode_index`, which refuses growth past `MAX_INDEX_VALUE_BYTES` with `AccountError::IndexFull`; the add encodes before its secret slot, and the removals encode before their deletes; `fauna-credential-store` pins the constant to `MAX_ITEM_VALUE_BYTES` at compile time. The five tests in `libs/fauna-client-accounts/src/index_bound_tests.rs` run over a store that drops over-cap writes: the refused add writes nothing, every growing mutator is refused, a full index still switches and removes, an index already past the cap shrinks but never grows, and the measured capacity is pinned. The refusal's painted line is shared copy: `fauna_client_accounts::add_refused_copy` (`add_refusal.rs`) selects the translated "account list is full" line for `IndexFull` and nothing for any other add error, which keeps the seat's own wrapper. **Built on tui (2026-10-05)** — onboarding's sign-in, the add-another-account sign-in and the successor adoption paint it (`session.rs::add_refusal_line`, pinned by `a_sign_in_on_a_full_account_list_paints_the_list_full_line`). **Built at the shared seams (2026-10-10):** `fauna-ffi`'s `add_account` and `persist_logged_in` return the resolved line as the `FfiError::General` message (`accounts_registry.rs::add_refusal`, pinned by `a_refused_add_carries_the_shared_list_full_line`), which windows and android already paint as-is on their "Add account" flows; `fauna-wasm`'s `addAccount` and `persistLoggedIn` reject with the `LocalizedText` `{ key, args }` (`accounts.rs::mutate_add`) and web's onboarding paints it (`localizedRejectionText`) instead of entering the app; linux calls `add_refused_copy` directly (`views/onboarding/mod.rs::add_refusal_line`). The successor adoption keeps the show-the-key branch above (no message to map). Not yet painted on apple (macos + ios), whose append flow (`PostAuthAccountFlows.swift::completeAppendedAccount`) logs the refusal and dismisses.
+**The index bound (§ Multi-account evolution → *The index is bounded*) is built (2026-10-05).** Every index write goes through `AccountRegistry::encode_index`, which refuses growth past `MAX_INDEX_VALUE_BYTES` with `AccountError::IndexFull`; the add encodes before its secret slot, and the removals encode before their deletes; `fauna-credential-store` pins the constant to `MAX_ITEM_VALUE_BYTES` at compile time. The five tests in `libs/fauna-client-accounts/src/index_bound_tests.rs` run over a store that drops over-cap writes: the refused add writes nothing, every growing mutator is refused, a full index still switches and removes, an index already past the cap shrinks but never grows, and the measured capacity is pinned. The refusal's painted line is shared copy: `fauna_client_accounts::add_refused_copy` (`add_refusal.rs`) selects the translated "account list is full" line for `IndexFull` and nothing for any other add error, which keeps the seat's own wrapper. **Built on tui (2026-10-05)** — onboarding's sign-in, the add-another-account sign-in and the successor adoption paint it (`session.rs::add_refusal_line`, pinned by `a_sign_in_on_a_full_account_list_paints_the_list_full_line`). **Built at the shared seams (2026-10-10):** `fauna-ffi`'s `add_account` and `persist_logged_in` return the resolved line as the `FfiError::General` message (`accounts_registry.rs::add_refusal`, pinned by `a_refused_add_carries_the_shared_list_full_line`), which windows and android already paint as-is on their "Add account" flows; `fauna-wasm`'s `addAccount` and `persistLoggedIn` reject with the `LocalizedText` `{ key, args }` (`accounts.rs::mutate_add`) and web's onboarding paints it (`localizedRejectionText`) instead of entering the app; linux calls `add_refused_copy` directly (`views/onboarding/mod.rs::add_refusal_line`). The successor adoption keeps the show-the-key branch above (no message to map). Apple (macos + ios) paints it too: the shared append flow (`PostAuthAccountFlows.swift::completeAppendedAccount`) dismisses the wizard, then hands the `addAccount` refusal to the switcher (`AccountSwitcherVM.postAddRefused` → the mounted section's `error-message`); the first-run `LoggedIn` terminal stays log-only. Built on all seven apps.
 
 **The legacy single slot is retired on all seven apps (the compat-remnant
 sweep's sub-tranche B1.1: web, linux and tui 2026-09-24; windows and apple
@@ -1384,7 +1390,7 @@ Gotchas that survive the compression:
   corruption rather than a test-only wart.
 - ⚠ **web reaches that seam through its OWN twin, not the Rust one (2026-08-17).**
   The sentence above is native-shaped: web builds its nest clients in TypeScript
-  from `$lib/api`'s `nodeUrl()`, so the Rust override cannot reach web's socket —
+  from `#lib/api`'s `nodeUrl()`, so the Rust override cannot reach web's socket —
   it lives in a `static` inside whichever wasm chunk wrote it, and wasm chunks
   share no linear memory, so the copy the harness writes (through the *onboarding*
   chunk's `set_provider_base_urls`) is never the copy a consumer would read. web's

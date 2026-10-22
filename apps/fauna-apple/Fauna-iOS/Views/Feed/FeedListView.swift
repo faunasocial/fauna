@@ -659,11 +659,13 @@ struct FeedListView: View {
             .task(id: vm.pendingPostOpen) {
                 guard let postId = vm.pendingPostOpen else { return }
                 vm.pendingPostOpen = nil
+                let home = vm.pendingPostOpenHome
+                vm.pendingPostOpenHome = nil
                 if let post = vm.findPost(postId: postId) {
                     selectedPost = post
                     return
                 }
-                await vm.resolvePost(postId)
+                await vm.resolvePost(postId, from: home)
                 if let post = vm.findPost(postId: postId) {
                     selectedPost = post
                 }

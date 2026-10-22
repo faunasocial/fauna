@@ -792,6 +792,17 @@ class Program
                 await WriteJson(ctx.Response, 200, new { });
                 break;
 
+            // Size the app window and capture it alone (Actions.CaptureWindow) — the
+            // store-listing screenshots' path; /screenshot above is the whole screen.
+            case "/window/capture" when method == "POST":
+                var wcReq = await ReadJson<WindowCaptureRequest>(ctx.Request);
+                var wc = RequireActions().CaptureWindow(wcReq.Name, wcReq.WidthDip, wcReq.HeightDip);
+                await WriteJson(ctx.Response, 200, new {
+                    path = wc.Path, width = wc.Width, height = wc.Height,
+                    scale = wc.Scale, settled = wc.Settled,
+                });
+                break;
+
             case "/debug/tree":
                 // ?anchor=<AutomationId|ClassName> roots the dump; ?raw=1 walks the UIA
                 // raw view (see Actions.DumpTree — the realized-vs-pruned discriminator).
@@ -1065,6 +1076,7 @@ record PhysicalTypeRequest(
 record SelectRequest(string Id, string Value, int Index = 0, List<ScopeStep>? Scope = null);
 record KeyRequest(string Id, string Key, int Index = 0, List<ScopeStep>? Scope = null);
 record ScreenshotRequest(string Name);
+record WindowCaptureRequest(string Name, int WidthDip, int HeightDip);
 record ScrollRequest(string? Direction = "down");
 record ScrollFractionRequest(
     string Id, double MinFraction, int Index = 0, List<ScopeStep>? Scope = null);

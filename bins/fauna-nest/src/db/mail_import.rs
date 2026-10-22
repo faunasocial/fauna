@@ -100,6 +100,12 @@ pub struct ImportSessionRow {
     /// a resumed walk re-apply the range rather than import everything the
     /// user excluded.
     pub date_from: String,
+    /// The scope step's "Import duplicates anyway" choice
+    /// (`mailbox-migration.md` § Opt-out per session) — recorded once beside
+    /// `date_from`, never mutated after. What lets a resume after a client
+    /// restart send every message's `skip_dedup` as the user chose it rather
+    /// than guess (§ Resume protocol step 3).
+    pub skip_dedup: bool,
     /// The client-minted sealed label over `source_descriptor`. `None` for a
     /// row a keyless client opened, which rests sealless by design.
     pub source_sealed: Option<Vec<u8>>,
@@ -115,6 +121,17 @@ pub struct ImportSessionRow {
 pub enum CreateImportSessionOutcome {
     Created,
     SourceLocked,
+}
+
+/// Outcome of `discard_import_session` — a failed import's Dismiss
+/// (`mailbox-migration.md` § A failed import is a record the wizard shows
+/// until the user moves on). `Live` carries the state of a row the discard
+/// refused: a running or paused import is cancelled, never discarded.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DiscardImportSessionOutcome {
+    Deleted,
+    Missing,
+    Live(String),
 }
 
 /// How one processed source message counts (`mailbox-migration.md`
@@ -293,12 +310,14 @@ fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImportSessionRow> {
         source_sealed: row.get(14)?,
         source_hash: row.get(15)?,
         date_from: row.get(16)?,
+        skip_dedup: row.get::<_, i64>(17)? != 0,
     })
 }
 
 const SELECT_COLS: &str = "session_id, actor_id, source_descriptor, state, started_at, \
      last_progress_at, total_count, imported_count, skipped_count, errored_count, \
-     cursors, error_reason, expires_at, scope, source_sealed, source_hash, date_from";
+     cursors, error_reason, expires_at, scope, source_sealed, source_hash, date_from, \
+     skip_dedup";
 
 impl crate::db::CacheDb {
     /// Open a fresh `running` session at the wizard's durable commit point.
@@ -324,8 +343,10 @@ impl crate::db::CacheDb {
     /// (`fauna_core::label_custody::seal_import_source`). The nest stores it
     /// verbatim and never opens it — it holds no root on this plane. `None` is
     /// the keyless writer's ratified degrade (bearer-only connection, web
-    /// arm): the row rests sealless and the scrub's never-sealed arm clears the
-    /// plaintext at the next boot.
+    /// arm): the row rests sealless, and its plaintext stays for the row's
+    /// life — the boot scrub clears only a row whose seal rests (the one-time
+    /// never-sealed clear was the S9 flip's, retired at the genesis), so this
+    /// is the named keyless-writer gap (`path-sealing.md`), not a scrubbed row.
     pub async fn create_import_session(
         &self,
         actor: &[u8; 32],
@@ -334,6 +355,7 @@ impl crate::db::CacheDb {
         total_count: u64,
         scope: &[String],
         date_from: &str,
+        skip_dedup: bool,
         source_sealed: Option<&[u8]>,
     ) -> Result<CreateImportSessionOutcome> {
         let total_count = import_counter_to_sql("total_count", total_count)?;
@@ -360,12 +382,24 @@ impl crate::db::CacheDb {
             return Ok(CreateImportSessionOutcome::SourceLocked);
         }
         let scope_json = serde_json::to_string(scope).context("encode import scope")?;
-        conn.execute(
+        // § A failed import is a record the wizard shows until the user moves
+        // on: a new start is the user's answer to a failure, so the caller's
+        // `errored` records go in the same write as the insert (the export
+        // twin's `create_export_session` rule).
+        let tx = conn
+            .unchecked_transaction()
+            .context("begin start import_session")?;
+        tx.execute(
+            "DELETE FROM import_sessions WHERE actor_id = ?1 AND state = 'errored'",
+            rusqlite::params![&actor[..]],
+        )
+        .context("retire errored import_sessions")?;
+        tx.execute(
             "INSERT INTO import_sessions
                (session_id, actor_id, source_descriptor, state, started_at,
                 last_progress_at, total_count, expires_at, source_hash, scope,
-                source_sealed, date_from)
-             VALUES (?1, ?2, ?3, 'running', ?4, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                source_sealed, date_from, skip_dedup)
+             VALUES (?1, ?2, ?3, 'running', ?4, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             rusqlite::params![
                 session_id,
                 &actor[..],
@@ -380,10 +414,47 @@ impl crate::db::CacheDb {
                 scope_json,
                 source_sealed,
                 date_from,
+                i64::from(skip_dedup),
             ],
         )
         .context("insert import_session")?;
+        tx.commit().context("commit start import_session")?;
         Ok(CreateImportSessionOutcome::Created)
+    }
+
+    /// Delete one of the caller's terminal sessions (`errored` / `completed` /
+    /// `cancelled`). One conditional `DELETE`, so a row that turned live again
+    /// between a read and this call can never be removed; a zero-row result is
+    /// then told apart by a read.
+    pub async fn discard_import_session(
+        &self,
+        actor: &[u8; 32],
+        session_id: &str,
+    ) -> Result<DiscardImportSessionOutcome> {
+        let conn = self.conn.lock().await;
+        let deleted = conn
+            .execute(
+                "DELETE FROM import_sessions
+                 WHERE actor_id = ?1 AND session_id = ?2
+                   AND state IN ('errored','completed','cancelled')",
+                rusqlite::params![&actor[..], session_id],
+            )
+            .context("discard import_session")?;
+        if deleted > 0 {
+            return Ok(DiscardImportSessionOutcome::Deleted);
+        }
+        let state: Option<String> = conn
+            .query_row(
+                "SELECT state FROM import_sessions WHERE actor_id = ?1 AND session_id = ?2",
+                rusqlite::params![&actor[..], session_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("reread import_session after discard")?;
+        Ok(match state {
+            None => DiscardImportSessionOutcome::Missing,
+            Some(state) => DiscardImportSessionOutcome::Live(state),
+        })
     }
 
     /// Fetch one of the caller's sessions.
@@ -709,6 +780,7 @@ mod tests {
                 100,
                 &["INBOX".to_string(), "Sent".to_string()],
                 "2023-11-14",
+                false,
                 Some(&client_seal(source)),
             )
             .await
@@ -747,11 +819,43 @@ mod tests {
         assert_eq!(listed[0].date_from, "2023-11-14");
     }
 
+    /// The duplicates choice is recorded beside the since date and read back
+    /// by both query paths; a session started without it kept dedup on
+    /// (`mailbox-migration.md` § Opt-out per session, § Resume protocol).
+    #[tokio::test]
+    async fn the_duplicates_choice_is_recorded_and_read_back_by_get_and_list() {
+        let db = CacheDb::open_in_memory().unwrap();
+        db.create_import_session(&ACTOR, "on", "src-a", 5, &[], "", true, None)
+            .await
+            .unwrap();
+        db.create_import_session(&ACTOR, "off", "src-b", 5, &[], "", false, None)
+            .await
+            .unwrap();
+        assert!(
+            db.get_import_session(&ACTOR, "on")
+                .await
+                .unwrap()
+                .unwrap()
+                .skip_dedup
+        );
+        assert!(
+            !db.get_import_session(&ACTOR, "off")
+                .await
+                .unwrap()
+                .unwrap()
+                .skip_dedup
+        );
+        let listed = db.list_import_sessions(&ACTOR).await.unwrap();
+        let on = listed.iter().find(|r| r.session_id == "on").unwrap();
+        let off = listed.iter().find(|r| r.session_id == "off").unwrap();
+        assert!(on.skip_dedup && !off.skip_dedup);
+    }
+
     /// An unbounded import reads back as the empty string, never an error.
     #[tokio::test]
     async fn an_unbounded_import_reads_back_an_empty_since_date() {
         let db = CacheDb::open_in_memory().unwrap();
-        db.create_import_session(&ACTOR, "s1", "src", 5, &[], "", None)
+        db.create_import_session(&ACTOR, "s1", "src", 5, &[], "", false, None)
             .await
             .unwrap();
         let row = db.get_import_session(&ACTOR, "s1").await.unwrap().unwrap();
@@ -761,7 +865,7 @@ mod tests {
     #[tokio::test]
     async fn an_old_clients_empty_scope_reads_back_empty_not_an_error() {
         let db = CacheDb::open_in_memory().unwrap();
-        db.create_import_session(&ACTOR, "s1", "src", 5, &[], "", None)
+        db.create_import_session(&ACTOR, "s1", "src", 5, &[], "", false, None)
             .await
             .unwrap();
         let row = db.get_import_session(&ACTOR, "s1").await.unwrap().unwrap();
@@ -784,8 +888,8 @@ mod tests {
         const SOURCE: &str = "gmail:imap.gmail.com:alice";
         let db = open_with_session("s1", SOURCE).await;
 
-        // (a) The seal rests. Without it the graduated scrub arm cannot fire
-        // and the never-sealed arm DESTROYS the label instead of migrating it.
+        // (a) The seal rests. Without it the scrub cannot fire, and the
+        // descriptor rests plaintext for the row's whole life.
         {
             let conn = db.conn().await;
             let sealed: Option<Vec<u8>> = conn
@@ -829,9 +933,18 @@ mod tests {
             );
         }
         assert_eq!(
-            db.create_import_session(&ACTOR, "s2", SOURCE, 5, &[], "", Some(&client_seal(SOURCE)))
-                .await
-                .unwrap(),
+            db.create_import_session(
+                &ACTOR,
+                "s2",
+                SOURCE,
+                5,
+                &[],
+                "",
+                false,
+                Some(&client_seal(SOURCE))
+            )
+            .await
+            .unwrap(),
             CreateImportSessionOutcome::SourceLocked,
             "the per-source lock must survive the scrub — reading it off the plaintext \
              silently degrades the typed SourceLocked into an opaque UNIQUE-index error"
@@ -858,6 +971,7 @@ mod tests {
                 5,
                 &[],
                 "",
+                false,
                 Some(&client_seal("gmail:imap.gmail.com:alice"))
             )
             .await
@@ -872,6 +986,7 @@ mod tests {
                 5,
                 &[],
                 "",
+                false,
                 Some(&client_seal("icloud:imap.mail.me.com:alice"))
             )
             .await
@@ -897,6 +1012,7 @@ mod tests {
                 5,
                 &[],
                 "",
+                false,
                 Some(&client_seal("gmail:imap.gmail.com:alice"))
             )
             .await
@@ -1009,6 +1125,138 @@ mod tests {
         assert_eq!(row.error_reason, "auth_failed");
     }
 
+    async fn fail(db: &CacheDb, id: &str) {
+        db.transition_import_session(
+            &ACTOR,
+            id,
+            ImportState::Errored,
+            &[ImportState::Running, ImportState::Paused],
+            Some("auth_failed"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
+
+    async fn create(db: &CacheDb, id: &str, source: &str) {
+        assert_eq!(
+            db.create_import_session(&ACTOR, id, source, 1, &[], "", false, None)
+                .await
+                .unwrap(),
+            CreateImportSessionOutcome::Created
+        );
+    }
+
+    /// § A failed import is a record …: a new start is the user's answer to a
+    /// failure, so the caller's `errored` rows go in the same write as the
+    /// insert — and only those: a finished or cancelled row, and another
+    /// actor's errored row, stay.
+    #[tokio::test]
+    async fn a_start_retires_the_callers_errored_rows_and_nothing_else() {
+        let db = open_with_session("failed", "src").await;
+        fail(&db, "failed").await;
+        create(&db, "done", "src2").await;
+        db.transition_import_session(
+            &ACTOR,
+            "done",
+            ImportState::Completed,
+            &[ImportState::Running],
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let other = [0xB2u8; 32];
+        db.create_import_session(&other, "theirs", "src", 1, &[], "", false, None)
+            .await
+            .unwrap();
+        db.transition_import_session(
+            &other,
+            "theirs",
+            ImportState::Errored,
+            &[ImportState::Running],
+            Some("x"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        create(&db, "next", "src3").await;
+
+        assert!(
+            db.get_import_session(&ACTOR, "failed")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.get_import_session(&ACTOR, "done")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            db.get_import_session(&ACTOR, "next")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            db.get_import_session(&other, "theirs")
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    /// A refused start (the source lock) is not an answer to anything: the
+    /// failure record stays.
+    #[tokio::test]
+    async fn a_locked_start_keeps_the_errored_record() {
+        let db = open_with_session("live", "b").await;
+        create(&db, "failed", "a").await;
+        fail(&db, "failed").await;
+        assert_eq!(
+            db.create_import_session(&ACTOR, "again", "b", 1, &[], "", false, None)
+                .await
+                .unwrap(),
+            CreateImportSessionOutcome::SourceLocked
+        );
+        assert!(
+            db.get_import_session(&ACTOR, "failed")
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn discard_deletes_a_terminal_row_and_refuses_a_live_one() {
+        let db = open_with_session("s1", "src").await;
+        assert_eq!(
+            db.discard_import_session(&ACTOR, "s1").await.unwrap(),
+            DiscardImportSessionOutcome::Live("running".into())
+        );
+        assert!(db.get_import_session(&ACTOR, "s1").await.unwrap().is_some());
+        fail(&db, "s1").await;
+        // Another actor cannot reach it: to them it is missing.
+        assert_eq!(
+            db.discard_import_session(&[0xB2u8; 32], "s1")
+                .await
+                .unwrap(),
+            DiscardImportSessionOutcome::Missing
+        );
+        assert_eq!(
+            db.discard_import_session(&ACTOR, "s1").await.unwrap(),
+            DiscardImportSessionOutcome::Deleted
+        );
+        assert!(db.get_import_session(&ACTOR, "s1").await.unwrap().is_none());
+        assert_eq!(
+            db.discard_import_session(&ACTOR, "s1").await.unwrap(),
+            DiscardImportSessionOutcome::Missing
+        );
+    }
+
     #[tokio::test]
     async fn progress_updates_counters_cursor_and_total() {
         use ImportFold::*;
@@ -1099,7 +1347,7 @@ mod tests {
         assert_eq!(row.imported_count, 0, "a refused fold moves nothing");
 
         let created = db
-            .create_import_session(&ACTOR, "s2", "other", u64::MAX, &[], "", None)
+            .create_import_session(&ACTOR, "s2", "other", u64::MAX, &[], "", false, None)
             .await;
         assert!(created.is_err(), "create refuses it too");
         assert!(db.get_import_session(&ACTOR, "s2").await.unwrap().is_none());
@@ -1340,9 +1588,18 @@ mod tests {
         assert!(db.list_import_sessions(&ACTOR).await.unwrap().is_empty());
         // ...and a new same-source session starts cleanly.
         assert_eq!(
-            db.create_import_session(&ACTOR, "s2", "src", 5, &[], "", Some(&client_seal("src")))
-                .await
-                .unwrap(),
+            db.create_import_session(
+                &ACTOR,
+                "s2",
+                "src",
+                5,
+                &[],
+                "",
+                false,
+                Some(&client_seal("src"))
+            )
+            .await
+            .unwrap(),
             CreateImportSessionOutcome::Created
         );
     }

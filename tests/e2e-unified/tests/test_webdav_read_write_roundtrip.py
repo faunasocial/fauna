@@ -74,7 +74,7 @@ pytestmark = [
     pytest.mark.ios,
     pytest.mark.tui,
     # web joined in its catalog trickle-down pass: `serve_enable_folder` runs
-    # over the conversations manager's folders author (`$lib/conversations`).
+    # over the conversations manager's folders author (`#lib/conversations`).
     pytest.mark.web,
     # android's (2026-10-05) answers through `ApiClient.serveSetFolder`, the face
     # its `folder-webdav-toggle` drives, over the live conversations session.

@@ -155,6 +155,7 @@ impl ReachPolicy {
                     spam: ContentFloor::Block,
                     phishing: ContentFloor::Block,
                     commercial: ContentFloor::Collapse,
+                    document: None,
                 }),
                 screen_time: None,
                 content_notify: Some(true),
@@ -172,6 +173,7 @@ impl ReachPolicy {
                     spam: ContentFloor::Collapse,
                     phishing: ContentFloor::Block,
                     commercial: ContentFloor::Inherit,
+                    document: None,
                 }),
                 screen_time: None,
                 content_notify: None,
@@ -189,6 +191,7 @@ impl ReachPolicy {
                     spam: ContentFloor::Inherit,
                     phishing: ContentFloor::Collapse,
                     commercial: ContentFloor::Inherit,
+                    document: None,
                 }),
                 screen_time: None,
                 content_notify: None,
@@ -233,6 +236,7 @@ impl ReachPolicy {
                     "family.policy_content_notify_label",
                 ),
                 value: fauna_core::localized::LocalizedText::key("common.enable"),
+                reason: None,
             });
         }
         lines
@@ -1276,6 +1280,7 @@ mod tests {
                 spam: ContentFloor::Collapse,
                 phishing: ContentFloor::Inherit,
                 commercial: ContentFloor::Inherit,
+                document: None,
             }),
             screen_time: Some(ScreenTimePolicy {
                 window_start: Some(1260),

@@ -4,10 +4,9 @@
 //!
 //! Two things every UniFFI shell needs whichever process runs the ceremony:
 //!
-//! * [`backup_reseed_rows`] — where `backup-destination-reseed-button` paints,
-//!   over the shared `fauna_client_backup::reseed::reseed_sources` filtered to
-//!   the legs this build can run (the rule linux's and tui's `reseed_rows`
-//!   apply);
+//! * [`backup_reseed_rows`] — where `backup-destination-reseed-button` paints:
+//!   the shared `fauna_client_backup::reseed::reseed_rows` over the legs the
+//!   UniFFI shells host (the rule linux and tui paint by too);
 //! * [`FfiReseedResult`] — what a finished (or stopped) ceremony hands back:
 //!   the shared `result_lines`, the `is_whole` verdict, and the post-ceremony
 //!   re-enrollment's failure.
@@ -18,10 +17,15 @@
 //! asks its sync agent (`FfiSyncAgentProvisioner::reseed_custodian_store`), a
 //! phone runs it in-process (`crate::reseed_custodian_store`). Both end in
 //! [`finish`], so the order after the verdict cannot drift per shell.
+//!
+//! The second restore source, a surviving nest-kind destination, has one
+//! entry point on every platform and lives here: the nest-held pull-back reads
+//! no custodian store, so it always runs in the app
+//! ([`backup_pull_back_from_destination`], over the shared host).
 
 use std::sync::Arc;
 
-use fauna_client_backup::reseed::{ReseedOutcome, reseed_sources, result_lines};
+use fauna_client_backup::reseed::{HostedLegs, ReseedOutcome, result_lines};
 use fauna_client_config::{load_backup_state, reenroll_custodian_after_reseed};
 use fauna_core::data::BackupDestination;
 use fauna_core::localized::LocalizedText;
@@ -131,26 +135,135 @@ async fn reenroll(
 
 /// Where `backup-destination-reseed-button` paints: `None` for the orphaned
 /// store's row (`backup-orphaned-store-row`), `Some(destination_id)` for a
-/// destination row. The shared `reseed_sources` decides which rows are sources
-/// at all; this keeps the ones whose delivery leg this build can run, so a
-/// nest-kind row joins by its leg becoming built, never by a change in a shell.
-/// linux's and tui's `reseed_rows` apply the same rule.
+/// destination row — the shared `reseed_rows`, the rule linux and tui paint by,
+/// over the legs the calling shell hosts.
 ///
 /// `this_device_id` is the stable sync device id, hex — the one a client-device
 /// row names its custodian by; blank claims no row. `orphaned_store` is the
-/// page's own cached orphaned-store verdict.
+/// page's own cached orphaned-store verdict. `hosts_pull_back` is the shell's
+/// own statement that its confirm runs [`backup_pull_back_from_destination`]
+/// on a nest-kind row; a shell that has not wired it passes `false` and paints
+/// no button there, so a nest row never carries one with nothing behind it.
 #[uniffi::export]
 pub fn backup_reseed_rows(
     destinations: Vec<FfiBackupDestinationView>,
     this_device_id: String,
     orphaned_store: bool,
+    hosts_pull_back: bool,
 ) -> Vec<Option<String>> {
     let rows: Vec<BackupDestination> = destinations.iter().map(source_row).collect();
-    reseed_sources(&rows, &this_device_id, orphaned_store)
-        .into_iter()
-        .filter(|s| s.leg.is_built())
-        .map(|s| s.destination_id)
-        .collect()
+    fauna_client_backup::reseed::reseed_rows(
+        &rows,
+        &this_device_id,
+        orphaned_store,
+        HostedLegs {
+            nest_pull_back: hosts_pull_back,
+        },
+    )
+}
+
+/// Whether the confirm armed on `destination_id`'s row runs the nest-held
+/// pull-back ([`backup_pull_back_from_destination`]) rather than the custodian
+/// ceremony — the leg the shared `reseed_sources` types that row with, read at
+/// press time so no shell re-derives it from the row's kind. `false` for an
+/// unknown id and for every row that is not a pull-back source.
+#[uniffi::export]
+pub fn backup_reseed_runs_pull_back(
+    destinations: Vec<FfiBackupDestinationView>,
+    destination_id: String,
+) -> bool {
+    let rows: Vec<BackupDestination> = destinations.iter().map(source_row).collect();
+    fauna_client_backup::reseed::reseed_runs_pull_back(&rows, &destination_id)
+}
+
+/// Restore the signed-in nest from a surviving **nest-kind** destination's
+/// copy — the confirm of `backup-destination-reseed-button` on that
+/// destination's `backup-destination-status-row` (`ui/backups.md` § Restore
+/// after losing the nest; the leg `client-device-custodian.md` § *The
+/// nest-held pull-back*).
+///
+/// A thin face over `fauna_sync_engine::reseed_pull::pull_back_from_destination`,
+/// the one native composition tui and linux call directly: this resolves its
+/// inputs and projects its result, and decides nothing — the order, the folder
+/// names, the post-ceremony re-enrollment and the verdict are all the host's.
+/// It runs in this process on every platform (no custodian store is involved).
+///
+/// * `nest` — the owner's keyed connection to the rebuilt nest, the target;
+/// * `owner_secret` — the owner's 32-byte identity seed;
+/// * `device_id` — this device's stable sync id (32 bytes), registered
+///   write-capable on the target;
+/// * `destination_id` — the pressed row, resolved against the client's **own
+///   pinned** destination list (as `backup_recover_from_destination` resolves
+///   it), never a URL the shell hands over.
+///
+/// A run that stopped before the driver's verdict comes back as
+/// [`FfiReseedResult::stopped`], as the custodian ceremony's does: nothing was
+/// made live, and a re-run resumes by content address. A whole outcome whose
+/// re-enrollment failed carries it in `reenroll_error` — the shell renders
+/// `backups.backup_reseed_pull_back_reenroll_failed` naming the destination.
+///
+/// # Errors
+///
+/// `FfiError::General` only for inputs that never reach the host: a secret or
+/// device id of the wrong length.
+#[cfg(feature = "sync-engine-host")]
+#[fauna_uniffi_async::export]
+pub async fn backup_pull_back_from_destination(
+    nest: Arc<FfiNestClient>,
+    owner_secret: Vec<u8>,
+    device_id: Vec<u8>,
+    destination_id: String,
+) -> Result<FfiReseedResult, crate::FfiError> {
+    let secret = crate::crypto::secret32(&owner_secret)?;
+    let device_id = crate::crypto::device32(&device_id)?;
+    let source_nest = match crate::deployment_seed::bound_nest_id(&nest).await {
+        Ok(id) => id.0,
+        Err(e) => return Ok(FfiReseedResult::stopped(e.to_string())),
+    };
+    let store = crate::backup_seam();
+    let state = match load_backup_state(store.as_ref(), source_nest).await {
+        Ok(state) => state,
+        Err(e) => return Ok(FfiReseedResult::stopped(e.to_string())),
+    };
+    let Some(destination) = state
+        .backup
+        .destinations
+        .iter()
+        .find(|d| d.destination_id == destination_id)
+    else {
+        return Ok(FfiReseedResult::stopped(format!(
+            "no backup destination {destination_id}"
+        )));
+    };
+    let ran = fauna_sync_engine::reseed_pull::pull_back_from_destination(
+        fauna_sync_engine::reseed_pull::NativePullBack {
+            target: nest.nest_arc(),
+            owner_secret: secret,
+            device_id,
+            destination,
+            store: store.as_ref(),
+            folder_keys: crate::account_runtime::folder_key_store(),
+        },
+    )
+    .await;
+    Ok(pull_back_result(ran))
+}
+
+/// Project the pull-back host's answer to the re-seed's FFI face. Split out so
+/// the projection is unit-testable without a nest.
+#[cfg(feature = "sync-engine-host")]
+pub(crate) fn pull_back_result(
+    ran: Result<fauna_sync_engine::reseed_pull::PullBackResult, String>,
+) -> FfiReseedResult {
+    match ran {
+        Err(reason) => FfiReseedResult::stopped(reason),
+        Ok(ran) => FfiReseedResult {
+            stopped: None,
+            result_lines: result_lines(&ran.outcome),
+            is_whole: ran.outcome.is_whole(),
+            reenroll_error: ran.reenroll_error,
+        },
+    }
 }
 
 /// The fields `reseed_sources` reads, rebuilt from the view record: the id and
@@ -188,8 +301,8 @@ mod tests {
     }
 
     /// The orphaned store first, then this device's own custodian row — and
-    /// neither another device's row (only the holder can push) nor a nest row
-    /// (no app hosts its pull-back leg yet).
+    /// never another device's row (only the holder can push). A nest row
+    /// carries the button only for a shell that hosts its pull-back.
     #[test]
     fn the_rows_are_the_orphaned_store_and_this_devices_own_row_only() {
         let rows = vec![
@@ -198,15 +311,80 @@ mod tests {
             view("off-site", DESTINATION_KIND_NEST, None),
         ];
         assert_eq!(
-            backup_reseed_rows(rows.clone(), ME.into(), true),
+            backup_reseed_rows(rows.clone(), ME.into(), true, false),
             vec![None, Some("mine".to_string())]
         );
         assert_eq!(
-            backup_reseed_rows(rows.clone(), ME.into(), false),
+            backup_reseed_rows(rows.clone(), ME.into(), false, false),
             vec![Some("mine".to_string())]
         );
         // A device that cannot name itself offers only an orphaned store.
-        assert!(backup_reseed_rows(rows, String::new(), false).is_empty());
+        assert!(backup_reseed_rows(rows, String::new(), false, false).is_empty());
+    }
+
+    /// The shell's own `hosts_pull_back` is what puts the button on a nest
+    /// row: stated, the nest row joins in row order; withheld, it never does.
+    ///
+    /// Mutation check: passing `HostedLegs::CUSTODIAN_ONLY` regardless reds the
+    /// first assertion.
+    #[test]
+    fn a_nest_row_carries_the_button_only_for_a_shell_hosting_the_pull_back() {
+        let rows = vec![
+            view("mine", DESTINATION_KIND_CLIENT_DEVICE, Some(ME)),
+            view("off-site", DESTINATION_KIND_NEST, None),
+        ];
+        assert_eq!(
+            backup_reseed_rows(rows.clone(), ME.into(), false, true),
+            vec![Some("mine".to_string()), Some("off-site".to_string())]
+        );
+        assert_eq!(
+            backup_reseed_rows(rows, ME.into(), false, false),
+            vec![Some("mine".to_string())]
+        );
+    }
+
+    /// A nest row's confirm runs the pull-back; a custodian row's, an unknown
+    /// id's and an inert row's never do.
+    #[test]
+    fn only_a_nest_rows_confirm_runs_the_pull_back() {
+        let rows = vec![
+            view("mine", DESTINATION_KIND_CLIENT_DEVICE, Some(ME)),
+            view("off-site", DESTINATION_KIND_NEST, None),
+            view("odd", "something-else", None),
+        ];
+        assert!(backup_reseed_runs_pull_back(
+            rows.clone(),
+            "off-site".into()
+        ));
+        assert!(!backup_reseed_runs_pull_back(rows.clone(), "mine".into()));
+        assert!(!backup_reseed_runs_pull_back(rows.clone(), "odd".into()));
+        assert!(!backup_reseed_runs_pull_back(rows, "gone".into()));
+    }
+
+    /// The pull-back's projection: a stop before the verdict is `stopped`
+    /// with every other field empty; a verdict carries the shared lines, the
+    /// outcome's own `is_whole` and the host's re-enrollment failure as given.
+    #[cfg(feature = "sync-engine-host")]
+    #[test]
+    fn the_pull_back_projects_a_stop_and_a_verdict() {
+        let stopped = pull_back_result(Err("unreachable".into()));
+        assert_eq!(stopped.stopped.as_deref(), Some("unreachable"));
+        assert!(stopped.result_lines.is_empty() && !stopped.is_whole);
+        assert!(stopped.reenroll_error.is_none());
+
+        let partial = outcome(SetOutcome::Refused {
+            refusal: fauna_client_backup::reseed::SetRefusal::FolderUnnamed,
+            detail: String::new(),
+        });
+        let expected = result_lines(&partial);
+        let ran = pull_back_result(Ok(fauna_sync_engine::reseed_pull::PullBackResult {
+            outcome: partial,
+            reenroll_error: Some("seat".into()),
+        }));
+        assert!(ran.stopped.is_none());
+        assert_eq!(ran.result_lines, expected);
+        assert!(!ran.is_whole);
+        assert_eq!(ran.reenroll_error.as_deref(), Some("seat"));
     }
 
     use fauna_client_backup::reseed::{

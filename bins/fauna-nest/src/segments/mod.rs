@@ -25,7 +25,7 @@ use fauna_cbor::Cid;
 use fauna_mail::segments::bucket_for;
 use fauna_segment_store::{
     CompactionPlan, FramedSegment, FramedSegmentStore, KindManifest, ManagerError, SegmentManager,
-    SegmentStoreError, VersionedManifest,
+    SegmentStoreError, TailReconcile, TailRecovery, VersionedManifest,
 };
 use tokio::sync::Mutex;
 
@@ -54,6 +54,61 @@ pub use mail::{AppendOutcome, BucketCompactionOutcome, SegmentBackupMeta};
 pub use mail_placement::MailPlacementSegmentManager;
 pub use post::PostAppendOutcome;
 pub use records_db::{SegmentRecordRef, SegmentRecordRow};
+
+/// A content-kind [`fauna_segment_store::SegmentManager`] (mail, conv, post,
+/// calendar, card) that logs every crash tail it reconciles on a scope's first
+/// touch ([`log_tail_reconcile`]).
+pub(crate) fn content_segment_manager(
+    data_dir: PathBuf,
+    kind: &'static str,
+) -> fauna_segment_store::SegmentManager {
+    fauna_segment_store::SegmentManager::new(data_dir, kind)
+        .with_tail_reconcile_observer(move |r| log_tail_reconcile(kind, r))
+}
+
+/// Log one crash tail a segment store reconciled on a scope's first touch —
+/// a content store or a placement journal alike (`message-segment-store.md`
+/// § Segment size). A rebuild that kept every acknowledged record is `info`;
+/// one that found an acknowledged record missing, or a tail it could only
+/// retire, is `error`.
+pub(crate) fn log_tail_reconcile(kind: &str, r: &TailReconcile) {
+    match r.recovery {
+        TailRecovery::Rebuilt {
+            records,
+            unjournaled_blocks_dropped,
+            journaled_blocks_missing: 0,
+        } => tracing::info!(
+            kind,
+            scope = %hex::encode(r.scope_id),
+            segment_id = r.segment_id,
+            records,
+            unjournaled_blocks_dropped,
+            "rebuilt a segment a crash left open; every acknowledged record kept"
+        ),
+        TailRecovery::Rebuilt {
+            records,
+            journaled_blocks_missing,
+            ..
+        } => tracing::error!(
+            kind,
+            scope = %hex::encode(r.scope_id),
+            segment_id = r.segment_id,
+            records,
+            journaled_blocks_missing,
+            "rebuilt a segment a crash left open, but acknowledged records were missing \
+             from its data file"
+        ),
+        TailRecovery::NoJournal { blocks } => tracing::error!(
+            kind,
+            scope = %hex::encode(r.scope_id),
+            segment_id = r.segment_id,
+            blocks,
+            "a segment a crash left open has no append journal and cannot be rebuilt; \
+             its id is retired"
+        ),
+        TailRecovery::AlreadyFinalized => {}
+    }
+}
 
 /// `seg-NNNNNNNN.dat` files under `root`, sorted ascending by id.
 /// Missing/empty directory → empty vec (fresh actor).
@@ -88,12 +143,16 @@ pub(crate) fn list_segment_files_for_replay(root: &Path) -> Result<Vec<(u32, Pat
 /// Open one finalized journal segment during a placement-manifest rebuild,
 /// deciding what a refusal to open *means*.
 ///
-/// `Ok(None)` — a skip — is returned for exactly one case, the one the
-/// best-effort rebuild was reasoned for: the **crash tail**. A crash between
-/// the last append and its `finalize()` leaves a `.dat` with no `.meta`
-/// sidecar, and those records cannot be replayed. Segment ids are monotonic
-/// and [`list_segment_files_for_replay`] sorts ascending, so that segment is
-/// always the *highest id present* — `is_highest_id` is the whole of the case.
+/// The **crash tail** is the one segment this tolerates. A crash between the
+/// last append and its `finalize()` leaves a `.dat` with no `.meta` sidecar.
+/// Segment ids are monotonic and [`list_segment_files_for_replay`] sorts
+/// ascending, so that segment is always the *highest id present* —
+/// `is_highest_id` is the whole of the case. It is rebuilt from its `.tail`
+/// append journal ([`FramedSegment::recover_unfinalized`],
+/// `message-segment-store.md` § Segment size) and replayed whole; only a tail
+/// that cannot be rebuilt — no journal, or one that will not read — is
+/// skipped (`Ok(None)`), costing the records appended after the last
+/// finalize.
 ///
 /// Every other refusal is corruption of a segment the manifest is supposed to
 /// describe, and it **fails closed**, matching the `?` the record-level decode
@@ -133,15 +192,45 @@ pub(crate) fn open_replay_segment(
             path.display()
         )),
         Err(e) if is_highest_id && e.is_unfinalized_crash_tail() => {
-            tracing::warn!(
-                segment = %path.display(),
-                error = %e,
-                kind,
-                "skipping the unreadable NEWEST placement segment during manifest rebuild \
-                 (crashed before finalize); only records appended after the last finalize \
-                 are lost"
-            );
-            Ok(None)
+            let rebuilt =
+                FramedSegment::recover_unfinalized(path).and_then(|recovery| match recovery {
+                    TailRecovery::NoJournal { .. } => Ok((recovery, None)),
+                    _ => FramedSegment::open(path).map(|seg| (recovery, Some(seg))),
+                });
+            match rebuilt {
+                Ok((recovery, Some(seg))) => {
+                    tracing::info!(
+                        segment = %path.display(),
+                        ?recovery,
+                        kind,
+                        "rebuilt the NEWEST placement segment a crash left open from its append \
+                         journal during manifest rebuild"
+                    );
+                    Ok(Some(seg))
+                }
+                Ok((recovery, None)) => {
+                    tracing::error!(
+                        segment = %path.display(),
+                        ?recovery,
+                        kind,
+                        "skipping the NEWEST placement segment during manifest rebuild: a crash \
+                         left it open and it has no append journal; only records appended after \
+                         the last finalize are lost"
+                    );
+                    Ok(None)
+                }
+                Err(rebuild_err) => {
+                    tracing::error!(
+                        segment = %path.display(),
+                        error = %rebuild_err,
+                        kind,
+                        "skipping the NEWEST placement segment during manifest rebuild: a crash \
+                         left it open and its append journal could not rebuild it; only records \
+                         appended after the last finalize are lost"
+                    );
+                    Ok(None)
+                }
+            }
         }
         Err(e) if is_highest_id => {
             tracing::warn!(
@@ -348,6 +437,10 @@ struct PlacementActorState<K: PlacementKind> {
 pub struct PlacementJournal<K: PlacementKind> {
     data_dir: PathBuf,
     actors: DashMap<[u8; 32], Arc<Mutex<PlacementActorState<K>>>>,
+    /// Serializes an actor's first-touch load, so two callers racing to load
+    /// one actor never both run its crash-tail reconcile over the same files —
+    /// the twin of `SegmentManager`'s own.
+    first_touch: std::sync::Mutex<()>,
 }
 
 impl<K: PlacementKind> PlacementJournal<K> {
@@ -355,6 +448,7 @@ impl<K: PlacementKind> PlacementJournal<K> {
         Self {
             data_dir,
             actors: DashMap::new(),
+            first_touch: std::sync::Mutex::new(()),
         }
     }
 
@@ -374,14 +468,28 @@ impl<K: PlacementKind> PlacementJournal<K> {
     /// durable source of truth (restore-design spec § D3) — bricking the
     /// actor's writes forever is the worse answer. The replay's own
     /// fail-closed rules are [`open_replay_segment`]'s.
+    ///
+    /// The first touch also reconciles a crash tail — a segment a crash left
+    /// open — exactly as the content stores do
+    /// ([`FramedSegmentStore::reconcile_crash_tail`]): rebuilt from its append
+    /// journal, or retired when it has none, so the backup listing reads it and
+    /// a later replay keeps its records. One caller only, under `first_touch`.
     async fn actor_state(&self, actor_id: &[u8; 32]) -> Result<Arc<Mutex<PlacementActorState<K>>>> {
+        if let Some(existing) = self.actors.get(actor_id) {
+            return Ok(existing.clone());
+        }
+        // No await while held: a std mutex, never across a suspension point.
+        let _first_touch = self
+            .first_touch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(existing) = self.actors.get(actor_id) {
             return Ok(existing.clone());
         }
         let label = K::Manifest::LABEL;
         let root = K::segments_root(&self.data_dir, actor_id);
         let manifest_path = K::manifest_path(&self.data_dir, actor_id);
-        let manifest = match K::Manifest::load(&manifest_path) {
+        let mut manifest = match K::Manifest::load(&manifest_path) {
             Ok(m) => m.unwrap_or_default(),
             Err(e @ SegmentStoreError::SchemaMismatch(_)) => {
                 return Err(e).with_context(|| {
@@ -405,6 +513,24 @@ impl<K: PlacementKind> PlacementJournal<K> {
         };
         let store = FramedSegmentStore::new(root, label, *actor_id)
             .with_context(|| format!("construct FramedSegmentStore for {label}"))?;
+        if let Some((segment_id, recovery)) = store
+            .reconcile_crash_tail(K::kind_manifest_mut(&mut manifest))
+            .with_context(|| format!("reconcile the {label} crash tail"))?
+        {
+            if let TailRecovery::NoJournal { .. } = recovery {
+                manifest
+                    .save_atomic(&manifest_path)
+                    .map_err(|e| anyhow::anyhow!("persist reconciled {label} manifest: {e}"))?;
+            }
+            log_tail_reconcile(
+                K::SCOPE_KIND,
+                &TailReconcile {
+                    scope_id: *actor_id,
+                    segment_id,
+                    recovery,
+                },
+            );
+        }
         let state = Arc::new(Mutex::new(PlacementActorState::<K> {
             store,
             manifest,
@@ -500,13 +626,36 @@ impl<K: PlacementKind> PlacementJournal<K> {
         Ok(())
     }
 
+    /// Finalize the open segment of every actor this journal has loaded — the
+    /// shutdown door, twin of `SegmentManager::finalize_all_open` (which says
+    /// why an orderly exit must never leave a segment open). Every actor is
+    /// attempted; the failures come back with their actor ids.
+    pub async fn finalize_all_open(&self) -> Vec<([u8; 32], anyhow::Error)> {
+        let actors: Vec<([u8; 32], Arc<Mutex<PlacementActorState<K>>>)> = self
+            .actors
+            .iter()
+            .map(|e| (*e.key(), e.value().clone()))
+            .collect();
+        let mut failures = Vec::new();
+        for (actor_id, actor_state) in actors {
+            if let Err(e) = actor_state.lock().await.store.finalize_open() {
+                failures.push((
+                    actor_id,
+                    anyhow::Error::new(e)
+                        .context(format!("finalize open {} segment", K::Manifest::LABEL)),
+                ));
+            }
+        }
+        failures
+    }
+
     // ── The backup read surface ───────────────────────────────────────────
     //
     // A backed-up message kind's corpus is its content segments AND its
     // placement journal (`backup-destinations.md` § *Where restored mail
     // lands*), so the journal needs the three reads the content store's
     // `SegmentManager` already gives the backup arms. They mirror that
-    // manager's own (`describe_segment_for_backup`, `read_segment_pair`) one
+    // manager's own (`describe_segment_for_backup`, `open_segment_pair`) one
     // for one, finalize-on-read and under the per-actor lock, so a journal
     // pair is observed exactly as a content pair is: the two files together,
     // with no append able to rotate between them.
@@ -562,13 +711,13 @@ impl<K: PlacementKind> PlacementJournal<K> {
         })
     }
 
-    /// A finalized journal segment's pair, both files read under the lock.
-    /// The journal twin of `SegmentManager::read_segment_pair`.
-    pub async fn read_segment_pair(
+    /// A finalized journal segment's pair, both files opened under the lock.
+    /// The journal twin of `SegmentManager::open_segment_pair`.
+    pub async fn open_segment_pair(
         &self,
         actor_id: &[u8; 32],
         segment_id: u32,
-    ) -> Result<fauna_segment_store::SegmentPairBytes> {
+    ) -> Result<fauna_segment_store::SegmentPairFiles> {
         let actor_state = self.actor_state(actor_id).await?;
         let mut state = actor_state.lock().await;
         state
@@ -579,11 +728,11 @@ impl<K: PlacementKind> PlacementJournal<K> {
             .store
             .open_segment(segment_id)
             .with_context(|| format!("open {} segment {segment_id}", K::Manifest::LABEL))?;
-        let dat = std::fs::read(segment.path())
-            .with_context(|| format!("read {}", segment.path().display()))?;
-        let meta = std::fs::read(segment.meta_path())
-            .with_context(|| format!("read {}", segment.meta_path().display()))?;
-        Ok(fauna_segment_store::SegmentPairBytes { dat, meta })
+        let dat = std::fs::File::open(segment.path())
+            .with_context(|| format!("open {}", segment.path().display()))?;
+        let meta = std::fs::File::open(segment.meta_path())
+            .with_context(|| format!("open {}", segment.meta_path().display()))?;
+        Ok(fauna_segment_store::SegmentPairFiles { dat, meta })
     }
 
     /// On-disk path of a journal segment's `.dat`.
@@ -793,33 +942,31 @@ fn segment_file_names(segment_id: u32) -> [String; 2] {
     ]
 }
 
-/// Write `bytes` to a new file at `path` and flush it to disk.
-fn write_new_synced(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write as _;
-    let mut file = std::fs::OpenOptions::new()
+/// Copy `src` to a **new** file at `dst` and flush it to disk, a buffer at a
+/// time — never the file in memory (`message-segment-store.md` § Segment
+/// size). `create_new`: an existing `dst` is `AlreadyExists`, never replaced.
+pub(crate) fn copy_new_synced(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let mut from = std::fs::File::open(src)?;
+    let mut to = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(path)
-        .with_context(|| format!("create {}", path.display()))?;
-    file.write_all(bytes)
-        .with_context(|| format!("write {}", path.display()))?;
-    file.sync_all()
-        .with_context(|| format!("sync {}", path.display()))?;
-    Ok(())
+        .open(dst)?;
+    std::io::copy(&mut from, &mut to)?;
+    to.sync_all()
 }
 
 impl<K: AdoptableJournal> PlacementJournal<K> {
-    /// Stage a corpus's journal: write its segment pairs into a staging
+    /// Stage a corpus's journal: copy its segment pairs into a staging
     /// directory inside the journal's root, prove each one reopens, and fold
     /// them.
     ///
-    /// `pairs` are `(segment_id, dat, meta)`, already verified by the caller
-    /// against the corpus's own mirror. Nothing of the live journal is read or
-    /// touched here.
-    pub async fn stage_corpus(
+    /// `pairs` are `(segment_id, dat, meta)` files, already verified by the
+    /// caller against the corpus's own mirror. Nothing of the live journal is
+    /// read or touched here.
+    pub async fn stage_corpus<'p>(
         &self,
         actor_id: &[u8; 32],
-        pairs: &[(u32, Vec<u8>, Vec<u8>)],
+        pairs: impl IntoIterator<Item = (u32, &'p Path, &'p Path)>,
     ) -> Result<StagedJournal<K>> {
         let root = K::segments_root(&self.data_dir, actor_id);
         std::fs::create_dir_all(&root)
@@ -848,15 +995,18 @@ impl<K: AdoptableJournal> PlacementJournal<K> {
         // below removes it.
         let mut staged = StagedJournal::<K> {
             dir,
-            ids: Vec::with_capacity(pairs.len()),
+            ids: Vec::new(),
             fold: K::Manifest::default(),
         };
 
         for (segment_id, dat, meta) in pairs {
-            let [meta_name, dat_name] = segment_file_names(*segment_id);
-            write_new_synced(&staged.dir.join(meta_name), meta)?;
+            let [meta_name, dat_name] = segment_file_names(segment_id);
+            let meta_path = staged.dir.join(meta_name);
+            copy_new_synced(meta, &meta_path)
+                .with_context(|| format!("stage {}", meta_path.display()))?;
             let dat_path = staged.dir.join(dat_name);
-            write_new_synced(&dat_path, dat)?;
+            copy_new_synced(dat, &dat_path)
+                .with_context(|| format!("stage {}", dat_path.display()))?;
             // The replay skips an unopenable HIGHEST segment as a crash tail.
             // That is right for a live journal and wrong for a corpus, where
             // every segment the mirror names must be there — so each one is
@@ -864,7 +1014,7 @@ impl<K: AdoptableJournal> PlacementJournal<K> {
             FramedSegment::open(&dat_path).map_err(|e| {
                 anyhow::anyhow!("the corpus's journal segment {segment_id} does not reopen: {e}")
             })?;
-            staged.ids.push(*segment_id);
+            staged.ids.push(segment_id);
         }
         staged.ids.sort_unstable();
         staged.fold = K::rebuild_from_segments(&staged.dir)

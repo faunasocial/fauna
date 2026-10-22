@@ -601,6 +601,24 @@ pub enum MutedKeywordLevel {
 }
 
 impl MutedKeywordLevel {
+    /// Both levels, in the picker's order.
+    pub const ALL: [Self; 2] = [Self::Hide, Self::ShowLess];
+
+    /// The level's own spelling — the serde form, and the picker's option
+    /// value (`muted-word-level-select`: `hide` | `show-less`), so a
+    /// Rust-native app never spells it itself.
+    pub const fn value(self) -> &'static str {
+        match self {
+            Self::Hide => "hide",
+            Self::ShowLess => "show-less",
+        }
+    }
+
+    /// The level a picker value names, the inverse of [`Self::value`].
+    pub fn from_value(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|level| level.value() == value)
+    }
+
     /// The weight this level stores.
     pub const fn weight(self) -> i64 {
         match self {
@@ -1911,11 +1929,12 @@ fn is_valid_ngram_shape(ngram: &str) -> bool {
 ///
 /// [`TEXT_MODEL_PUBLISH_MIN_DOCS`] is checked structurally (`more + less ≥
 /// floor`), because `more`/`less` **are** the per-class distinct-document
-/// counts — so the anti-quote floor is a property of the artifact rather than
-/// of the publishing client's diligence. That is the whole posture of the v2
-/// design: a buggy or hostile client must not be able to put a
-/// single-document quote on a public registry, and the nest gate is the one
-/// boundary that can refuse it.
+/// counts — so an artifact that *asserts* a below-floor count is refused at
+/// the nest gate. What this cannot do is verify a count: the per-document
+/// truth of `more`/`less` rests with the publisher's scrub, so a client that
+/// miscounts is not caught here (and a hostile one can sign anything under its
+/// own key). The guarantee is the asserted counts plus, below, the
+/// known-version shape — no more.
 ///
 /// # The version-1 n-gram shape is enforced HERE too, at a known version only
 ///
@@ -2330,6 +2349,15 @@ mod composition_tests {
             "\"show-less\"",
             "the wasm face and the ui.yaml option value spell a level the same way"
         );
+        for level in MutedKeywordLevel::ALL {
+            assert_eq!(
+                serde_json::to_string(&level).unwrap(),
+                format!("\"{}\"", level.value()),
+                "value() is the serde spelling"
+            );
+            assert_eq!(MutedKeywordLevel::from_value(level.value()), Some(level));
+        }
+        assert_eq!(MutedKeywordLevel::from_value("show_less"), None);
     }
 
     /// The per-keyword weight is the factor value a match contributes; a soft
@@ -3553,9 +3581,9 @@ mod topic_factor_tests {
         // only in the scrub: `more`/`less` ARE the per-class distinct-document
         // counts, so `more + less` is exactly the quantity
         // `TEXT_MODEL_PUBLISH_MIN_DOCS` bounds. Checking it at the nest publish
-        // gate turns "the publisher pruned honestly" into a property of the
-        // artifact — a buggy or hostile client cannot put a single-document
-        // quote of someone's marked post on a public registry.
+        // gate refuses any artifact that *asserts* a below-floor count. It
+        // cannot verify that an asserted count is true — that rests with the
+        // publisher's scrub.
         assert_eq!(
             validate_text_model_artifact(&tm_bytes(1, 9, 9, vec![("a", 2, 0)])),
             Err(TextModelArtifactError::BelowPruneFloor { index: 0, docs: 2 }),
@@ -3675,7 +3703,7 @@ mod topic_factor_tests {
                 3,
                 3,
                 vec![(
-                    "this is a fourteen token sentence that leaks the marked post text",
+                    "i am quietly planning to leave my job at the end of the month",
                     3,
                     0
                 )]
@@ -3705,6 +3733,21 @@ mod topic_factor_tests {
             validate_text_model_artifact(&tm_bytes(1, 3, 3, vec![("a b ", 3, 0)])),
             Err(TextModelArtifactError::InvalidNgramShape(0)),
             "trailing space"
+        );
+        assert_eq!(
+            validate_text_model_artifact(&tm_bytes(1, 3, 3, vec![("a\u{7}b", 3, 0)])),
+            Err(TextModelArtifactError::InvalidNgramShape(0)),
+            "an embedded control character"
+        );
+        assert_eq!(
+            validate_text_model_artifact(&tm_bytes(1, 3, 3, vec![("a\tb", 3, 0)])),
+            Err(TextModelArtifactError::InvalidNgramShape(0)),
+            "a non-space whitespace token boundary"
+        );
+        assert_eq!(
+            validate_text_model_artifact(&tm_bytes(1, 3, 3, vec![("", 3, 0)])),
+            Err(TextModelArtifactError::InvalidNgramShape(0)),
+            "an empty n-gram"
         );
     }
 

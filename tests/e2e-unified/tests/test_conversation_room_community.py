@@ -63,6 +63,8 @@ pytestmark = [
     pytest.mark.tui,
     pytest.mark.linux,
     pytest.mark.windows,
+    pytest.mark.macos,
+    pytest.mark.ios,
 ]
 
 SEARCH_BUDGET_S = MESSAGE_BUDGET_S

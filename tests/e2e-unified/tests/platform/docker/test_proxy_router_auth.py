@@ -56,6 +56,7 @@ from .helpers import (
     register_primary_domain as _register_primary_domain,
     remove_container,
     restart_service as _restart_service,
+    scanner_wired_network,
     start_container_with_ports,
     svstat as _svstat,
     wait_for_health,
@@ -129,7 +130,7 @@ def booted_nest(docker_image):
     name = f"fauna-proxy-auth-{http_port}"
     start_container_with_ports(
         name,
-        {3000: http_port},
+        {443: http_port},
         env={"FAUNA_CLAIM_CODE": CLAIM_CODE, "FAUNA_PORT": "3000"},
     )
     try:
@@ -247,52 +248,54 @@ def booted_nest_mail_enabled(docker_image):
     http_port, *mail = find_free_ports(5)
     mail_ports = dict(zip((25, 465, 587, 993), mail))
     name = f"fauna-proxy-auth-mail-{http_port}"
-    start_container_with_ports(
-        name,
-        {3000: http_port, **mail_ports},
-        env={"FAUNA_CLAIM_CODE": CLAIM_CODE, "FAUNA_PORT": "3000"},
-    )
-    try:
-        wait_for_health(http_port, name)
-        admin = claim_admin_api(http_port, CLAIM_CODE, handle="admin")
-        nest = {
-            "name": name,
-            "port": http_port,
-            "url": f"https://127.0.0.1:{http_port}",
-            "admin": admin,
-            "mail_ports": mail_ports,
-        }
-        # Domain BEFORE enable — mta/mda stay idle with no listeners until
-        # LocalDomains is non-empty at their post-approval cold boot.
-        _register_primary_domain(nest, DOMAIN)
-        with _admin_ws(nest) as admin_conn:
-            assert admin_conn.call("fauna.bridges.set_mail_enabled", {"enabled": True}).get("ok") is True
-            deadline = time.monotonic() + 30
+    with scanner_wired_network("fauna-proxy-auth-mail") as (network, scan_env):
+        start_container_with_ports(
+            name,
+            {443: http_port, **mail_ports},
+            env={"FAUNA_CLAIM_CODE": CLAIM_CODE, "FAUNA_PORT": "3000", **scan_env},
+            network=network,
+        )
+        try:
+            wait_for_health(http_port, name)
+            admin = claim_admin_api(http_port, CLAIM_CODE, handle="admin")
+            nest = {
+                "name": name,
+                "port": http_port,
+                "url": f"https://127.0.0.1:{http_port}",
+                "admin": admin,
+                "mail_ports": mail_ports,
+            }
+            # Domain BEFORE enable — mta/mda stay idle with no listeners until
+            # LocalDomains is non-empty at their post-approval cold boot.
+            _register_primary_domain(nest, DOMAIN)
+            with _admin_ws(nest) as admin_conn:
+                assert admin_conn.call("fauna.bridges.set_mail_enabled", {"enabled": True}).get("ok") is True
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline:
+                    if _flag_present(name) and all(
+                        _is_commanded_up(_svstat(name, f"fauna-mail-bridge-{r}")) for r in ROLES
+                    ):
+                        break
+                    time.sleep(0.5)
+                assert _flag_present(name), "/data/imap-enabled must materialize on set_mail_enabled(true)"
+                _await_keypairs(name)
+                approved = _await_approved_bridges(admin_conn)
+                for r in ROLES:
+                    assert r in approved, f"{r} bridge must auto-approve; got {list(approved)}"
+                # Restart so each cold-boots as approved and re-binds under its own UID.
+                for r in ROLES:
+                    _restart_service(name, f"fauna-mail-bridge-{r}")
+            services = ("fauna-nest", "fauna-sni-router",
+                        "fauna-mail-bridge-mta", "fauna-mail-bridge-mda")
+            deadline = time.monotonic() + 60
             while time.monotonic() < deadline:
-                if _flag_present(name) and all(
-                    _is_commanded_up(_svstat(name, f"fauna-mail-bridge-{r}")) for r in ROLES
-                ):
+                if all(re.search(r"\(pid \d+\)", _svstat(name, s)) for s in services):
                     break
                 time.sleep(0.5)
-            assert _flag_present(name), "/data/imap-enabled must materialize on set_mail_enabled(true)"
-            _await_keypairs(name)
-            approved = _await_approved_bridges(admin_conn)
-            for r in ROLES:
-                assert r in approved, f"{r} bridge must auto-approve; got {list(approved)}"
-            # Restart so each cold-boots as approved and re-binds under its own UID.
-            for r in ROLES:
-                _restart_service(name, f"fauna-mail-bridge-{r}")
-        services = ("fauna-nest", "fauna-sni-router",
-                    "fauna-mail-bridge-mta", "fauna-mail-bridge-mda")
-        deadline = time.monotonic() + 60
-        while time.monotonic() < deadline:
-            if all(re.search(r"\(pid \d+\)", _svstat(name, s)) for s in services):
-                break
-            time.sleep(0.5)
-        wait_for_smtp_banner("127.0.0.1", mail_ports[25], timeout=60)
-        yield nest
-    finally:
-        remove_container(name)
+            wait_for_smtp_banner("127.0.0.1", mail_ports[25], timeout=60)
+            yield nest
+        finally:
+            remove_container(name)
 
 
 @pytest.mark.feature("nest-hardening")

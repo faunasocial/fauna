@@ -11,10 +11,10 @@
 // re-check points (the third, an SPKI-pin mismatch on the bearer connection, is
 // native-only — the browser owns TLS):
 //
-//   1. **Bearer re-mint** — `$lib/api`'s `getAuthToken`, whose wasm
+//   1. **Bearer re-mint** — `#lib/api`'s `getAuthToken`, whose wasm
 //      `challengeVerify` possession-verifies its `cert_binding` against the
 //      TOFU pin.
-//   2. **Background silent challenge** — `$lib/store`'s `refreshFromServer`,
+//   2. **Background silent challenge** — `#lib/store`'s `refreshFromServer`,
 //      whose `challengeVerify` runs the same check on the verify path.
 //
 // Either can produce a terminal verdict. This module is the ONE thing both do
@@ -61,7 +61,7 @@
 // A raw `location.assign` and not a `goto`: the wasm WS-RPC/MLS session must be
 // rebuilt, exactly as the account switcher's teardown does it.
 
-import { base } from '$app/paths';
+import { resolve } from '$app/paths';
 
 import { clearTokenCache } from './api';
 import {
@@ -130,7 +130,7 @@ function escalateToLaunchSurface(log: string): boolean {
   // before the account exists (a bearer mint refused `not_registered`
   // mid-wizard) would silence every later escalation for the rest of the
   // signed-in session.
-  if (window.location.pathname.startsWith(`${base}/onboarding`)) {
+  if (window.location.pathname.startsWith(resolve('/onboarding'))) {
     console.warn('[identity] already on the launch route — the LaunchMachine owns the surface');
     return true;
   }
@@ -139,7 +139,7 @@ function escalateToLaunchSurface(log: string): boolean {
   // Count the teardown at its initiation point, synchronously, in the same job
   // as the navigation below (convention 14's negative-assert observable). Same
   // hook-not-import shape as the account switcher's bump, so a production build
-  // never bundles the module: see `$lib/generation-e2e`.
+  // never bundles the module: see `#lib/generation-e2e`.
   if (__FAUNA_E2E_AUTOMATION__) {
     (window as unknown as { __fauna_recordSessionTeardown?: () => void })
       .__fauna_recordSessionTeardown?.();
@@ -149,7 +149,7 @@ function escalateToLaunchSurface(log: string): boolean {
   // nest) both need the identity in hand — and a succeeded device's seed is
   // still the user's own, the thing a successor ceremony and any later re-import
   // reason about. The account moved; the person did not.
-  window.location.assign(`${base}/onboarding`);
+  window.location.assign(resolve('/onboarding'));
   return true;
 }
 

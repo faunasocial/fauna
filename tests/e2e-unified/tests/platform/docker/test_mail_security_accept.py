@@ -214,7 +214,7 @@ def accepting_nest(docker_image, dkim_keypair):
         )
         start_container_with_ports(
             name,
-            {3000: http_port, **mail_ports},
+            {443: http_port, **mail_ports},
             env={
                 "FAUNA_CLAIM_CODE": CLAIM_CODE,
                 "FAUNA_PORT": "3000",

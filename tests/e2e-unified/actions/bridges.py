@@ -274,6 +274,212 @@ class BridgesActions:
             if t
         ]
 
+    # --- The linked card: identity, settings, follows (bridges.md § Link modes,
+    # § Bridge settings, § Follows) ---
+    #
+    # A setting row is `bridge-setting[<key>]`, keyed by the setting itself, so
+    # a test names the setting it means and never its position in the list. A
+    # change saves on the spot: a checkbox on its click, a number or text field
+    # on type-then-click (the agent's click on an editable is its commit).
+
+    def identity_text(self, bridge_id: str) -> str:
+        scope = self._card_scope(bridge_id, self._card_index(bridge_id))
+        self.driver.wait_for("bridge-identity", scope=scope)
+        return self.driver.get_text("bridge-identity", scope=scope)
+
+    def has_setting(self, bridge_id: str, key: str) -> bool:
+        scope = self._card_scope(bridge_id, self._card_index(bridge_id))
+        return self.driver.count(f"bridge-setting[{key}]", scope=scope) > 0
+
+    def setting_checked(self, bridge_id: str, key: str) -> str | None:
+        """A boolean setting's `checked` attr ("true"/"false")."""
+        scope = self._card_scope(bridge_id, self._card_index(bridge_id))
+        return self.driver.get_attr(f"bridge-setting[{key}]", "checked", scope=scope)
+
+    def setting_text(self, bridge_id: str, key: str) -> str:
+        scope = self._card_scope(bridge_id, self._card_index(bridge_id))
+        return self.driver.get_text(f"bridge-setting[{key}]", scope=scope)
+
+    def toggle_setting(self, bridge_id: str, key: str) -> None:
+        scope = self._card_scope(bridge_id, self._card_index(bridge_id))
+        self.driver.click(f"bridge-setting[{key}]", scope=scope)
+
+    def commit_setting(self, bridge_id: str, key: str, value: str) -> None:
+        scope = self._card_scope(bridge_id, self._card_index(bridge_id))
+        self.driver.clear_and_type(f"bridge-setting[{key}]", value, scope=scope)
+        self.driver.click(f"bridge-setting[{key}]", scope=scope)
+
+    def add_follow(self, bridge_id: str, external_id: str, petname: str = "") -> None:
+        scope = self._card_scope(bridge_id, self._card_index(bridge_id))
+        self.driver.clear_and_type("bridge-follow-id-input", external_id, scope=scope)
+        if petname:
+            self.driver.clear_and_type(
+                "bridge-follow-petname-input", petname, scope=scope)
+        self.driver.click("bridge-add-follow-button", scope=scope)
+
+    def follow_rows(self, bridge_id: str) -> list[str]:
+        """Every follow's row text, in order (the nickname, else the id)."""
+        return self.driver.get_texts(
+            "bridge-follow-item",
+            scope=self._card_scope(bridge_id, self._card_index(bridge_id)))
+
+    def remove_follow(self, bridge_id: str, index: int = 0) -> None:
+        scope = self._card_scope(bridge_id, self._card_index(bridge_id))
+        # Opening a card can rebuild it (linux) and read its follows again, so
+        # the row is not there until that reply lands: wait for it, never click
+        # into the gap (convention 14).
+        self.driver.wait_for("bridge-follow-remove", scope=scope)
+        self.driver.click("bridge-follow-remove", index, scope=scope)
+
+    # --- Fediverse follow requests (bridges.md § Follow requests) ---
+    #
+    # The list sits on the linked card under the follows list, for a provider
+    # declaring `supports_follow_requests` (ActivityPub). Its heading carries
+    # the count; each row is the requester's address and name with Approve and
+    # Refuse (no confirm). Native apps render the card inline, so the card is
+    # `bridge-card[0]` — the sole card (`_card_index`).
+
+    def follow_requests_heading(self, bridge_id: str) -> str:
+        return self.driver.get_text(
+            "bridge-follow-requests-list", scope=self._card_scope(bridge_id, 0))
+
+    def follow_request_rows(self, bridge_id: str) -> list[str]:
+        """Every waiting request's row text, in order."""
+        return self.driver.get_texts(
+            "bridge-follow-request-item", scope=self._card_scope(bridge_id, 0))
+
+    def approve_follow_request(self, bridge_id: str, index: int = 0) -> None:
+        self.driver.click(
+            "bridge-follow-request-approve", index,
+            scope=self._card_scope(bridge_id, 0))
+
+    def refuse_follow_request(self, bridge_id: str, index: int = 0) -> None:
+        self.driver.click(
+            "bridge-follow-request-refuse", index,
+            scope=self._card_scope(bridge_id, 0))
+
+    # --- Hosted plugins (ADMIN ONLY; bridges.md § Hosted plugins on this page) ---
+
+    def install_plugin(self, document_url: str) -> None:
+        """Type the plugin's document URL and press Install — the nest opens
+        the install card in Connected apps → Requests."""
+        self.driver.wait_for("bridge-plugin-install-url", timeout=10.0)
+        self.driver.clear_and_type("bridge-plugin-install-url", document_url)
+        self.driver.click("bridge-plugin-install-submit")
+
+    def plugin_count(self) -> int:
+        """Counted by the name leaf, one per item on every app: tui's
+        `bridge-plugin-item` is a scope container only (the `bridge-card`
+        shape), which an unscoped count does not see."""
+        return self.driver.count("bridge-plugin-name")
+
+    def _plugin_scope(self, index: int) -> str:
+        return f"bridge-plugin-item[{index}]"
+
+    def plugin_name(self, index: int) -> str:
+        return self.driver.get_text("bridge-plugin-name", scope=self._plugin_scope(index)) or ""
+
+    def plugin_publisher(self, index: int) -> str:
+        return (
+            self.driver.get_text("bridge-plugin-publisher", scope=self._plugin_scope(index))
+            or ""
+        )
+
+    def plugin_state(self, index: int) -> str:
+        """The runner's state VALUE — the status leaf's `state` attr."""
+        return (
+            self.driver.get_attr(
+                "bridge-plugin-status", "state", scope=self._plugin_scope(index)
+            )
+            or ""
+        )
+
+    def plugin_index_named(self, name: str) -> int | None:
+        for i in range(self.plugin_count()):
+            if self.plugin_name(i) == name:
+                return i
+        return None
+
+    def wait_for_plugin(
+        self, name: str, state: str | None = None, timeout: float = 30.0
+    ) -> int | None:
+        """Wait for the list to show `name` (in `state`, when given),
+        re-reading by revisiting the page; its index or None. Deadline-polled
+        (convention 14)."""
+        deadline = time.monotonic() + timeout
+        while True:
+            i = self.plugin_index_named(name)
+            if i is not None and (state is None or self.plugin_state(i) == state):
+                return i
+            if time.monotonic() >= deadline:
+                return None
+            self.navigate()
+
+    def wait_for_no_plugin(self, name: str, timeout: float = 30.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while True:
+            if self.plugin_index_named(name) is None:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            self.navigate()
+
+    def uninstall_plugin(self, index: int) -> None:
+        """Uninstall: the first press arms the inline confirm, the second
+        uninstalls."""
+        scope = self._plugin_scope(index)
+        self.driver.click("bridge-plugin-uninstall", scope=scope)
+        self.driver.click("bridge-plugin-uninstall", scope=scope)
+
+    # --- A plugin's settings card (EVERY account; third-party.md § Hosted
+    # principals). Each installed plugin is one more `bridge-card` (owner-ruled
+    # 2026-10-16: no card family of its own); its `bridge-action-button`
+    # carries the plugin's `client_id` and a `bound` value, which is how a
+    # reader tells the cards apart — `bridge-card` has no per-card identity.
+    # Built on tui; the other apps ride the trickle-down. ---
+
+    def plugin_card_index(self, client_id: str) -> int | None:
+        """The `bridge-card` index of `client_id`'s settings card, read off the
+        action button the page renders, or None."""
+        for i, cid in enumerate(self.driver.get_attrs("bridge-action-button", "client_id")):
+            if cid == client_id:
+                return i
+        return None
+
+    def plugin_bound(self, client_id: str) -> bool | None:
+        """Whether this account has bound the plugin (its card's button reads
+        Disconnect), or None when no card names it."""
+        i = self.plugin_card_index(client_id)
+        if i is None:
+            return None
+        return self.driver.get_attr("bridge-action-button", "bound", i) == "true"
+
+    def wait_for_plugin_bound(
+        self, client_id: str, bound: bool, timeout: float = 30.0
+    ) -> bool:
+        """Wait for `client_id`'s card to read `bound`, re-reading by revisiting
+        the page (a bind approved on Connected apps pushes nothing here).
+        Deadline-polled (convention 14)."""
+        deadline = time.monotonic() + timeout
+        while True:
+            if self.plugin_bound(client_id) is bound:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            self.navigate()
+
+    def press_plugin_card(self, client_id: str) -> None:
+        """Press the plugin card's action button — Connect while unbound (the
+        bind card then waits in Connected apps → Requests), Disconnect while
+        bound."""
+        i = self.plugin_card_index(client_id)
+        if i is None:
+            raise AssertionError(
+                f"no settings card names {client_id!r}; "
+                f"diagnose={self.driver.diagnose('bridge-action-button', attrs=('client_id',))}"
+            )
+        self.driver.click("bridge-action-button", scope=f"bridge-card[{i}]")
+
     # --- Errors ---
 
     def page_error_text(self, timeout: float = 8.0) -> str:

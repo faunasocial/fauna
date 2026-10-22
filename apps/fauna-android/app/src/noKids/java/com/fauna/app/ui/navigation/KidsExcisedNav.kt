@@ -117,6 +117,11 @@ fun NavGraphBuilder.kidsExcisedDestinations(navController: NavHostController) {
     composable("settings/admin-mail") {
         com.fauna.app.ui.screen.settings.AdminMailScreen(navController)
     }
+    // admin-mail-reports: the DMARC aggregate-report summary sub-page
+    // (dmarc-reporting.md § Admin pane summary surface), after admin-mail.
+    composable("settings/admin-mail-reports") {
+        com.fauna.app.ui.screen.settings.AdminMailReportsScreen(navController)
+    }
     // Flat admin-calendar page (admin.md § 8 Calendar): the
     // CalDAV-enable sibling of admin-mail. Email + calendar are two
     // independently enableable features of one MDA bridge
@@ -163,17 +168,21 @@ fun NavGraphBuilder.kidsExcisedDestinations(navController: NavHostController) {
     // New Phase 2 detail routes
     composable("feed/compose") { FeedComposeScreen(navController) }
     composable(
-        "feed/post/{postId}?source={source}",
+        "feed/post/{postId}?source={source}&home={home}",
         arguments = listOf(
             navArgument("postId") { type = NavType.StringType },
-            navArgument("source") { type = NavType.StringType; defaultValue = "" }
+            navArgument("source") { type = NavType.StringType; defaultValue = "" },
+            navArgument("home") { type = NavType.StringType; defaultValue = "" }
         )
     ) { entry ->
         val postId = java.net.URLDecoder.decode(
             entry.arguments?.getString("postId") ?: "", "UTF-8"
         )
         val source = entry.arguments?.getString("source") ?: ""
-        PostDetailScreen(navController, postId, source)
+        val home = java.net.URLDecoder.decode(
+            entry.arguments?.getString("home") ?: "", "UTF-8"
+        )
+        PostDetailScreen(navController, postId, source, home)
     }
     // The Bluesky thread page (ui.yaml `feed.sub_pages.thread`), pushed over
     // the post detail it was opened from, so back returns there.

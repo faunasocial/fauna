@@ -15,18 +15,32 @@
 //! cannot happen by construction. Element nesting is capped at [`MAX_DEPTH`].
 //!
 //! Pure (no I/O): the nest calls it from `ingest_dmarc_report`.
+//!
+//! The admin-read half — [`WindowSummary`], [`share_percent`] and
+//! [`gunzip_xml`] — is what the apps' reports page takes; it compiles alone
+//! under the `dmarc-report-view` feature, without the receive half's MIME
+//! parser and zip reader (`dmarc-reporting.md` § Where logic lives).
 
+#[cfg(feature = "dmarc-report")]
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::io::{Cursor, Read, Write};
+#[cfg(feature = "dmarc-report")]
+use std::io::Cursor;
+use std::io::{Read, Write};
+#[cfg(feature = "dmarc-report")]
 use std::net::IpAddr;
 
-use fauna_protocol::bridge_routing::{DmarcAggregateSummary, ReportCountEntry};
+#[cfg(feature = "dmarc-report")]
+use fauna_protocol::bridge_routing::DmarcAggregateSummary;
+use fauna_protocol::bridge_routing::{DmarcAggregateReportEntry, ReportCountEntry};
 
 /// Largest compressed report attachment accepted (§ XML validation step 1).
-pub const MAX_COMPRESSED_BYTES: usize = 50 * 1024 * 1024;
+/// Real aggregate reports are kilobytes to a few megabytes; the attachment is a
+/// stranger's, inflated in memory once per message on port 25, so the bounds
+/// are TLSRPT's (`tlsrpt_report.rs`), not ten times them.
+pub const MAX_COMPRESSED_BYTES: usize = 16 * 1024 * 1024;
 /// Largest decompressed XML accepted (§ XML validation step 1).
-pub const MAX_DECOMPRESSED_BYTES: usize = 500 * 1024 * 1024;
+pub const MAX_DECOMPRESSED_BYTES: usize = 64 * 1024 * 1024;
 /// Deepest element nesting the reader accepts. An aggregate report nests five
 /// deep (`feedback/record/row/policy_evaluated/reason`); the margin covers
 /// reporters' extension elements.
@@ -64,6 +78,7 @@ pub(crate) fn malformed(why: impl Into<String>) -> ReportError {
 
 /// The evaluated disposition of one `<record>` row (RFC 7489 §A.1
 /// `DispositionType`).
+#[cfg(feature = "dmarc-report")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Disposition {
     None,
@@ -72,6 +87,7 @@ pub enum Disposition {
 }
 
 /// One `<record>` row.
+#[cfg(feature = "dmarc-report")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AggregateRecord {
     pub source_ip: IpAddr,
@@ -86,6 +102,7 @@ pub struct AggregateRecord {
 }
 
 /// The parsed fields of one aggregate report.
+#[cfg(feature = "dmarc-report")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AggregateReport {
     pub org_name: String,
@@ -98,6 +115,7 @@ pub struct AggregateReport {
     pub records: Vec<AggregateRecord>,
 }
 
+#[cfg(feature = "dmarc-report")]
 impl AggregateReport {
     /// The storage key's submitter: `report_metadata.org_name` and `email`
     /// joined (§ Storage).
@@ -162,12 +180,86 @@ pub(crate) fn top_n(counts: HashMap<String, u64>) -> Vec<ReportCountEntry> {
     v
 }
 
+/// The admin page's window totals (`dmarc-reporting.md` § What the page shows):
+/// a pure fold over the reports `list_dmarc_aggregate_reports` returned for one
+/// window and domain filter. Every app renders this, none re-derives it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct WindowSummary {
+    /// Reports in the window.
+    pub report_count: u64,
+    /// Distinct `submitter`s — the reporting peers.
+    pub submitter_count: u64,
+    /// Σ `message_count` — the messages peers saw claiming our domains.
+    pub message_count: u64,
+    pub dmarc_pass: u64,
+    pub dkim_pass: u64,
+    pub spf_pass: u64,
+    pub disposition_none: u64,
+    pub disposition_quarantine: u64,
+    pub disposition_reject: u64,
+    /// Per-value sums over each report's own top lists, the
+    /// [`SUMMARY_TOP_N`] largest. Approximate at the margin: a report carries
+    /// only its own top ten, so a value outside one report's ten is missing
+    /// from that report's share.
+    pub top_source_ips: Vec<ReportCountEntry>,
+    pub top_header_from: Vec<ReportCountEntry>,
+}
+
+impl WindowSummary {
+    pub fn fold(entries: &[DmarcAggregateReportEntry]) -> Self {
+        let mut w = WindowSummary {
+            report_count: entries.len() as u64,
+            ..Default::default()
+        };
+        let mut submitters = std::collections::HashSet::new();
+        let mut by_ip: HashMap<String, u64> = HashMap::new();
+        let mut by_from: HashMap<String, u64> = HashMap::new();
+        for e in entries {
+            submitters.insert(e.submitter.as_str());
+            let s = &e.summary;
+            w.message_count = w.message_count.saturating_add(s.message_count);
+            w.dmarc_pass = w.dmarc_pass.saturating_add(s.dmarc_pass);
+            w.dkim_pass = w.dkim_pass.saturating_add(s.dkim_pass);
+            w.spf_pass = w.spf_pass.saturating_add(s.spf_pass);
+            w.disposition_none = w.disposition_none.saturating_add(s.disposition_none);
+            w.disposition_quarantine = w
+                .disposition_quarantine
+                .saturating_add(s.disposition_quarantine);
+            w.disposition_reject = w.disposition_reject.saturating_add(s.disposition_reject);
+            for (lists, into) in [
+                (&s.top_source_ips, &mut by_ip),
+                (&s.top_header_from, &mut by_from),
+            ] {
+                for c in lists {
+                    let n = into.entry(c.value.clone()).or_default();
+                    *n = n.saturating_add(c.count);
+                }
+            }
+        }
+        w.submitter_count = submitters.len() as u64;
+        w.top_source_ips = top_n(by_ip);
+        w.top_header_from = top_n(by_from);
+        w
+    }
+}
+
+/// `part` as a whole-number percentage of `whole`, rounded half up; `0` when
+/// `whole` is `0` (an empty window has no shares, not a division by zero).
+pub fn share_percent(part: u64, whole: u64) -> u32 {
+    if whole == 0 {
+        return 0;
+    }
+    let pct = (u128::from(part) * 100 + u128::from(whole) / 2) / u128::from(whole);
+    pct.min(u128::from(u32::MAX)) as u32
+}
+
 /// Find the aggregate report in an RFC 5322 message and return its XML,
 /// decompressed and bounded. Each MIME part is considered whose content type
 /// or file name marks it as a report container (`application/gzip`,
 /// `application/zip`, their `x-` aliases, `application/octet-stream`, XML
 /// types, or a `.gz` / `.zip` / `.xml` name); the container is recognised by
 /// its magic bytes, not its label. The first part that yields XML wins.
+#[cfg(feature = "dmarc-report")]
 pub fn extract_report_xml(raw_message: &[u8]) -> Result<Vec<u8>, ReportError> {
     use mail_parser::{MessageParser, MimeHeaders, PartType};
 
@@ -193,6 +285,7 @@ pub fn extract_report_xml(raw_message: &[u8]) -> Result<Vec<u8>, ReportError> {
     Err(last_err)
 }
 
+#[cfg(feature = "dmarc-report")]
 fn is_report_candidate(ct: Option<&mail_parser::ContentType<'_>>, name: Option<&str>) -> bool {
     let name_hit = name.is_some_and(|n| {
         let n = n.to_ascii_lowercase();
@@ -217,10 +310,12 @@ fn is_report_candidate(ct: Option<&mail_parser::ContentType<'_>>, name: Option<&
 
 /// Decompress one report container — gzip, zip (the first `.xml` entry, else
 /// the first file) or bare XML — under the size bounds.
+#[cfg(feature = "dmarc-report")]
 pub fn unpack(body: &[u8]) -> Result<Vec<u8>, ReportError> {
     unpack_bounded(body, MAX_COMPRESSED_BYTES, MAX_DECOMPRESSED_BYTES)
 }
 
+#[cfg(feature = "dmarc-report")]
 fn unpack_bounded(
     body: &[u8],
     max_compressed: usize,
@@ -244,7 +339,10 @@ fn unpack_bounded(
             if !entry.is_file() {
                 continue;
             }
-            if entry.name().to_ascii_lowercase().ends_with(".xml") {
+            let name = entry
+                .name()
+                .map_err(|e| malformed(format!("zip entry name: {e}")))?;
+            if name.to_ascii_lowercase().ends_with(".xml") {
                 pick = Some(i);
                 break;
             }
@@ -301,6 +399,7 @@ pub fn gunzip_xml(gz: &[u8]) -> Result<Vec<u8>, ReportError> {
 
 /// Parse an aggregate report's XML and check the required fields
 /// (§ XML validation steps 2–3).
+#[cfg(feature = "dmarc-report")]
 pub fn parse_aggregate_xml(xml: &[u8]) -> Result<AggregateReport, ReportError> {
     let text = std::str::from_utf8(xml).map_err(|_| malformed("report XML is not UTF-8"))?;
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
@@ -360,6 +459,7 @@ pub fn parse_aggregate_xml(xml: &[u8]) -> Result<AggregateReport, ReportError> {
     meta.validate(records)
 }
 
+#[cfg(feature = "dmarc-report")]
 #[derive(Default)]
 struct MetaFields {
     org_name: String,
@@ -370,6 +470,7 @@ struct MetaFields {
     domain: String,
 }
 
+#[cfg(feature = "dmarc-report")]
 impl MetaFields {
     fn validate(self, records: Vec<AggregateRecord>) -> Result<AggregateReport, ReportError> {
         if self.report_id.is_empty() {
@@ -399,6 +500,7 @@ impl MetaFields {
     }
 }
 
+#[cfg(feature = "dmarc-report")]
 fn parse_epoch(v: Option<&str>, field: &str) -> Result<i64, ReportError> {
     let v = v.ok_or_else(|| malformed(format!("report_metadata.{field} missing")))?;
     v.parse::<u32>()
@@ -406,6 +508,7 @@ fn parse_epoch(v: Option<&str>, field: &str) -> Result<i64, ReportError> {
         .map_err(|_| malformed(format!("report_metadata.{field} is not a timestamp")))
 }
 
+#[cfg(feature = "dmarc-report")]
 #[derive(Default)]
 struct RecordFields {
     source_ip: Option<String>,
@@ -416,6 +519,7 @@ struct RecordFields {
     header_from: String,
 }
 
+#[cfg(feature = "dmarc-report")]
 impl RecordFields {
     fn set(&mut self, rest: &[&str], value: String) {
         match rest {
@@ -459,6 +563,7 @@ impl RecordFields {
 
 // ── The strict XML reader ────────────────────────────────────────
 
+#[cfg(feature = "dmarc-report")]
 enum XmlEvent<'a> {
     /// An element opened; the local name (any `prefix:` stripped).
     Start(&'a str),
@@ -468,6 +573,7 @@ enum XmlEvent<'a> {
     End,
 }
 
+#[cfg(feature = "dmarc-report")]
 struct XmlReader<'a> {
     s: &'a str,
     pos: usize,
@@ -478,6 +584,7 @@ struct XmlReader<'a> {
     pending_end: bool,
 }
 
+#[cfg(feature = "dmarc-report")]
 impl<'a> XmlReader<'a> {
     fn new(s: &'a str) -> Self {
         Self {
@@ -637,10 +744,12 @@ impl<'a> XmlReader<'a> {
     }
 }
 
+#[cfg(feature = "dmarc-report")]
 fn local_name(qname: &str) -> &str {
     qname.rsplit(':').next().unwrap_or(qname)
 }
 
+#[cfg(feature = "dmarc-report")]
 fn is_name(s: &str) -> bool {
     let mut chars = s.chars();
     chars
@@ -651,6 +760,7 @@ fn is_name(s: &str) -> bool {
 
 /// Decode the five predefined entities and character references; any other
 /// `&name;` is refused (no DTD can declare one).
+#[cfg(feature = "dmarc-report")]
 fn decode_entities(raw: &str) -> Result<Cow<'_, str>, ReportError> {
     if !raw.contains('&') {
         return Ok(Cow::Borrowed(raw));
@@ -690,7 +800,7 @@ fn decode_entities(raw: &str) -> Result<Cow<'_, str>, ReportError> {
     Ok(Cow::Owned(out))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "dmarc-report"))]
 mod tests {
     use super::*;
 
@@ -841,10 +951,20 @@ mod tests {
         ));
     }
 
+    // A stranger's attachment is inflated in memory once per port-25 message:
+    // the bounds are TLSRPT's 16 MiB / 64 MiB, not the 50 MiB / 500 MiB that let
+    // one message hold half a gigabyte (deployment-threat-model.md § Concern 1a, L4).
+    #[test]
+    fn the_report_bounds_are_the_tlsrpt_bounds() {
+        assert_eq!(MAX_COMPRESSED_BYTES, 16 * 1024 * 1024);
+        assert_eq!(MAX_DECOMPRESSED_BYTES, 64 * 1024 * 1024);
+    }
+
     #[test]
     fn a_decompression_bomb_is_oversize() {
-        // The production bounds scaled down 1000x: a 512 KiB run of zeros
-        // gzips to under a kilobyte and must be refused past the 500 KiB cap,
+        // The production bounds scaled down 1000x: a run of zeros one byte past
+        // the decompressed cap gzips far under the compressed cap and must be
+        // refused,
         // and an over-cap compressed body is refused before it is read.
         let (max_c, max_d) = (MAX_COMPRESSED_BYTES / 1000, MAX_DECOMPRESSED_BYTES / 1000);
         let bomb = gzip_xml(&vec![0u8; max_d + 1]);
@@ -887,6 +1007,127 @@ mod tests {
         let plain = "From: someone@sender.test\r\nTo: dmarc-report@example.org\r\nSubject: hi\r\n\r\nhello\r\n";
         assert!(matches!(
             extract_report_xml(plain.as_bytes()),
+            Err(ReportError::Malformed(_))
+        ));
+    }
+}
+
+/// The admin-read half, tested under `dmarc-report-view` alone.
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+    use fauna_protocol::bridge_routing::DmarcAggregateSummary;
+
+    fn count(value: &str, count: u64) -> ReportCountEntry {
+        ReportCountEntry {
+            value: value.into(),
+            count,
+            extra: Default::default(),
+        }
+    }
+
+    fn entry(submitter: &str, summary: DmarcAggregateSummary) -> DmarcAggregateReportEntry {
+        DmarcAggregateReportEntry {
+            our_domain: "example.test".into(),
+            submitter: submitter.into(),
+            report_id: format!("{submitter}-1"),
+            summary,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn fold_sums_counts_distinct_submitters_and_merges_top_lists() {
+        let a = entry(
+            "Peer A <reports@peer-a.test>",
+            DmarcAggregateSummary {
+                message_count: 10,
+                dmarc_pass: 8,
+                dkim_pass: 8,
+                spf_pass: 6,
+                disposition_none: 8,
+                disposition_reject: 2,
+                top_source_ips: vec![count("192.0.2.1", 8), count("198.51.100.7", 2)],
+                top_header_from: vec![count("example.test", 10)],
+                ..Default::default()
+            },
+        );
+        let b = entry(
+            "Peer B <reports@peer-b.test>",
+            DmarcAggregateSummary {
+                message_count: 5,
+                dmarc_pass: 5,
+                dkim_pass: 4,
+                spf_pass: 5,
+                disposition_none: 4,
+                disposition_quarantine: 1,
+                top_source_ips: vec![count("198.51.100.7", 5)],
+                top_header_from: vec![count("example.test", 5)],
+                ..Default::default()
+            },
+        );
+        // A second report from the first peer: one more report, no new peer.
+        let mut c = a.clone();
+        c.report_id = "peer-a-2".into();
+        let w = WindowSummary::fold(&[a, b, c]);
+        assert_eq!(w.report_count, 3);
+        assert_eq!(w.submitter_count, 2);
+        assert_eq!(w.message_count, 25);
+        assert_eq!((w.dmarc_pass, w.dkim_pass, w.spf_pass), (21, 20, 17));
+        assert_eq!(
+            (
+                w.disposition_none,
+                w.disposition_quarantine,
+                w.disposition_reject
+            ),
+            (20, 1, 4)
+        );
+        assert_eq!(
+            w.top_source_ips,
+            vec![count("192.0.2.1", 16), count("198.51.100.7", 9)]
+        );
+        assert_eq!(w.top_header_from, vec![count("example.test", 25)]);
+    }
+
+    #[test]
+    fn fold_of_nothing_is_the_empty_window() {
+        assert_eq!(WindowSummary::fold(&[]), WindowSummary::default());
+    }
+
+    #[test]
+    fn merged_top_lists_keep_the_ten_largest() {
+        let entries: Vec<_> = (0..12u64)
+            .map(|i| {
+                entry(
+                    &format!("peer{i}"),
+                    DmarcAggregateSummary {
+                        top_source_ips: vec![count(&format!("192.0.2.{i}"), i + 1)],
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        let w = WindowSummary::fold(&entries);
+        assert_eq!(w.top_source_ips.len(), SUMMARY_TOP_N);
+        assert_eq!(w.top_source_ips[0], count("192.0.2.11", 12));
+        assert_eq!(w.top_source_ips[9], count("192.0.2.2", 3));
+    }
+
+    #[test]
+    fn share_percent_rounds_and_survives_an_empty_window() {
+        assert_eq!(share_percent(0, 0), 0);
+        assert_eq!(share_percent(21, 25), 84);
+        assert_eq!(share_percent(1, 3), 33);
+        assert_eq!(share_percent(2, 3), 67);
+        assert_eq!(share_percent(5, 5), 100);
+    }
+
+    #[test]
+    fn gunzip_reads_back_what_gzip_wrote() {
+        let xml = b"<feedback><report_metadata/></feedback>";
+        assert_eq!(gunzip_xml(&gzip_xml(xml)).unwrap(), xml);
+        assert!(matches!(
+            gunzip_xml(b"not gzip"),
             Err(ReportError::Malformed(_))
         ));
     }

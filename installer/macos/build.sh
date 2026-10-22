@@ -112,9 +112,12 @@ echo "==> Compiling Rust binaries..."
 # terminal app, the .pkg's fifth component (social.fauna.tui → /usr/local/bin):
 # the same binary the per-OS release archive carries, here Developer ID-signed
 # with the rest (installers/tui.md § The ratified channel, user ruling 2026-09-26).
+# fauna-cli (package fauna-cli-device) = the cli app's device shell, the
+# archive's third member (installers/tui.md § Decisions, decision 4), riding the
+# same component so it shares the terminal app's signature and Keychain identity.
 cargo build --profile "$PROFILE" --target aarch64-apple-darwin \
     -p fauna-nest-daemon -p fauna-sync-agent -p fauna-bridge-supervisor \
-    -p fauna-tui
+    -p fauna-tui -p fauna-cli-device
 
 TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
 RUST_BIN="$TARGET_DIR/aarch64-apple-darwin/$PROFILE"
@@ -163,8 +166,8 @@ APP_BUNDLE="$REPO_ROOT/build/Release/Fauna.app"
 # signed AFTER staging in Step 3b — `install_name_tool` rewrites the MDA's dylib
 # link paths there, which invalidates any prior signature, so they sign last.
 if [ "$SIGN" = true ]; then
-    echo "==> Signing nest-daemon + sync + tui binaries..."
-    for bin in "$RUST_BIN/fauna-nest-daemon" "$RUST_BIN/fauna-tui"; do
+    echo "==> Signing nest-daemon + sync + tui + cli binaries..."
+    for bin in "$RUST_BIN/fauna-nest-daemon" "$RUST_BIN/fauna-tui" "$RUST_BIN/fauna-cli"; do
         codesign --sign "$FAUNA_SIGN_IDENTITY" \
             --options runtime --timestamp "$bin"
     done
@@ -199,8 +202,10 @@ cp "$RUST_BIN/fauna-sync-agent" "$BUILD_DIR/payloads/sync/"
 cp "$INSTALLER_DIR/fauna-uninstall" "$BUILD_DIR/payloads/sync/"
 
 # Terminal app component: fauna-tui → /usr/local/bin, beside the sync
-# component's fauna-sync-agent (the app resolves the agent as its sibling).
+# component's fauna-sync-agent (the app resolves the agent as its sibling), and
+# fauna-cli beside it (the cli app's device shell, the archive's third member).
 cp "$RUST_BIN/fauna-tui" "$BUILD_DIR/payloads/tui/"
+cp "$RUST_BIN/fauna-cli" "$BUILD_DIR/payloads/tui/"
 cp "$INSTALLER_DIR/fauna-uninstall" "$BUILD_DIR/payloads/tui/"
 
 # Bridge component: the macOS MDA supervisor + the Go fauna-mail-bridge MDA + its

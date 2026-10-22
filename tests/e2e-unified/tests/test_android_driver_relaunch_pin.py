@@ -108,3 +108,15 @@ def test_a_pinned_relaunch_withholds_the_seed():
     driver.preserve_state_across_relaunch()
     assert driver.recover() is True
     assert "seed_credentials" not in calls[-1][2]
+
+
+def test_a_drivers_first_launch_is_a_fresh_install_and_its_relaunches_are_not():
+    # The bridge clears install-scoped state (the push intent file) only on a
+    # fresh install, so a test's own relaunch — pinned or re-seeded, as the
+    # sign-out journey re-seeds — reads back the install it left
+    # (`test_push_settings.py`, `AppLauncher.launchApp`).
+    driver = _launched(cold_relaunch=True)
+    assert driver._session_body(driver._launch_config)["fresh_install"] is True
+    assert driver._session_body(driver._launch_config)["fresh_install"] is False
+    driver.preserve_state_across_relaunch()
+    assert driver._session_body(driver._launch_config)["fresh_install"] is False

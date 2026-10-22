@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { t } from '$lib/i18n/strings';
-  import { IDS } from '$lib/generated/uiIds';
+  import { t } from '#lib/i18n/strings';
+  import { IDS } from '#lib/generated/uiIds';
 
   // The "via connected app" badge (`delegated-origin-badge`), rendered **iff** an
   // EXTERNAL APP authored this post as the account, through the D10 delegated

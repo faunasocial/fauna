@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { identity, reconnectTick, knocks as knocksStore, contacts as contactsStore } from '$lib/store';
+  import { identity, reconnectTick, knocks as knocksStore, contacts as contactsStore } from '#lib/store';
   import {
     fetchKnocks,
     fetchContacts,
@@ -9,26 +9,27 @@
     dismissKnock,
     confirmContact,
     sendKnock,
-  } from '$lib/api';
-  import { parseRecipient } from '$lib/resolve';
+  } from '#lib/api';
+  import { parseRecipient } from '#lib/resolve';
   import { goto } from '$app/navigation';
-  import type { Knock, Contact } from '$lib/types';
-  import MessageBanner from '$lib/components/MessageBanner.svelte';
-  import { t } from '$lib/i18n/strings';
-  import { relativeTime } from '$lib/value-format';
-  import { contactStatusLabel, wardAskRules } from '$lib/wasm';
-  import { contactOverlays, contactsRevision } from '$lib/conversations';
-  import { carddavListAddressbooks, carddavQueryCardsDecoded, carddavLocateCardByUidHash, onPushEvent, staleSurfacesForPushKind } from '$lib/rpc';
-  import { resolveLocalized } from '$lib/i18n/localized';
-  import { consumePendingSearchNav } from '$lib/search';
-  import { IDS } from '$lib/generated/uiIds';
-  import { memberReviewRoster } from '$lib/member-reviews';
-  import { familyContactRequest } from '$lib/rpc';
-  import { hexToBytes } from '$lib/hex';
-  import { refusalText } from '$lib/guardian-refusal';
+  import type { Knock, Contact } from '#lib/types';
+  import MessageBanner from '#lib/components/MessageBanner.svelte';
+  import { t } from '#lib/i18n/strings';
+  import { relativeTime } from '#lib/value-format';
+  import { contactStatusLabel, wardAskRules } from '#lib/wasm';
+  import { contactOverlays, contactsRevision } from '#lib/conversations';
+  import { carddavListAddressbooks, carddavQueryCardsDecoded, carddavLocateCardByUidHash, onPushEvent, staleSurfacesForPushKind } from '#lib/rpc';
+  import { resolveLocalized } from '#lib/i18n/localized';
+  import { consumePendingSearchNav } from '#lib/search';
+  import { IDS } from '#lib/generated/uiIds';
+  import { memberReviewRoster } from '#lib/member-reviews';
+  import { familyContactRequest } from '#lib/rpc';
+  import { hexToBytes } from '#lib/hex';
+  import { refusalText } from '#lib/guardian-refusal';
   import {
     classifyKnockFailure,
     contactAskRender,
+    knocksAwaitGuardian,
     foldContactAsked,
     foldKnockReply,
     KNOCK_SENT,
@@ -36,8 +37,8 @@
     type KnockAskState,
     type KnockErrorEffect,
     type KnockSendResult,
-  } from '$lib/ward-asks';
-  import { wardAsks, refreshWardAsks, rereadAfterAsk } from '$lib/wardAsks.svelte';
+  } from '#lib/ward-asks';
+  import { wardAsks, refreshWardAsks, rereadAfterAsk } from '#lib/wardAsks.svelte';
 
   let unsubPush: (() => void) | null = null;
   let unsubReconnect: (() => void) | null = null;
@@ -54,7 +55,7 @@
   // refused by the guardian gate, asked (family-safety.md § Child-initiated
   // contact requests → App affordance). Owned by the peer it names: every new
   // lookup starts a fresh one, so a refusal is never carried over to somebody
-  // the ward did not name (`$lib/ward-asks`).
+  // the ward did not name (`#lib/ward-asks`).
   let knockAsk = $state<KnockAskState>(knockStateFor(null));
   let askingGuardian = $state(false);
   let contactsSearch = $state('');
@@ -136,10 +137,10 @@
   }
 
   /** `SearchNav::Contact` deep-link (`../search/+page.svelte`'s `openResult`,
-   *  via `$lib/search`'s pending-nav handoff) — resolves the row's `uid_hash`
+   *  via `#lib/search`'s pending-nav handoff) — resolves the row's `uid_hash`
    *  to its `card_id` over the wire (`carddavLocateCardByUidHash`), since the
    *  two are different id spaces of the same width and a naive cast would
-   *  open nothing (`$lib/search`'s doc comment). Lands on the Address Book
+   *  open nothing (`#lib/search`'s doc comment). Lands on the Address Book
    *  segment with the found book selected and its cards loaded off the SAME
    *  response (no second `carddavQueryCardsDecoded` round trip). A vanished
    *  card (deleted since it was indexed) surfaces the shared "not found"
@@ -188,7 +189,7 @@
     await refresh(id.secretHex);
 
     // A `SearchNav::Contact` deep-link left by the Search page
-    // (`$lib/search`'s `consumePendingSearchNav`) — after the ordinary refresh
+    // (`#lib/search`'s `consumePendingSearchNav`) — after the ordinary refresh
     // above so the social-contact list is already current when the Address
     // Book segment takes over.
     const pendingNav = consumePendingSearchNav();
@@ -535,6 +536,13 @@
               <span class="muted small">{knock.sender_node}</span>
               {#if knock.summary}
                 <span class="summary">{knock.summary}</span>
+              {/if}
+              <!-- While the account is supervised with contact approval on, every
+                   knock is the guardian's to decide, so each row says so
+                   (`knock-guardian-pending`, family-safety.md § App surface) — the
+                   shared rule over the ward's own status policy, no per-knock field. -->
+              {#if knocksAwaitGuardian(wardAskRules, wardAsks())}
+                <span data-testid={IDS.KNOCK_GUARDIAN_PENDING} class="muted small">{t.contacts.knock_guardian_pending}</span>
               {/if}
               <!-- knock.created_at is epoch millis (KnockItem) → as-is -->
               <span class="muted small">{relativeTime(knock.created_at)}</span>

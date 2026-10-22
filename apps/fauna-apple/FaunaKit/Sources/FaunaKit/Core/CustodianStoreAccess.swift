@@ -45,4 +45,11 @@ public protocol CustodianStoreAccess: AnyObject {
     /// A ceremony that stopped comes back as the result's `stopped` reason, not
     /// as a throw.
     func reseedCustodianStore() async throws -> FfiReseedResult
+
+    /// Recover the nest from this device's own store — the confirmed
+    /// `backup-audit-recover-button` on this device's own custodian row
+    /// (`client-device-custodian.md` § Restore → *Recovery from this device's
+    /// own store*). Run by whichever side hosts the store, like the reseed; the
+    /// shared composition or the agent's job grants the key, never the app.
+    func recoverCustodianStore() async throws -> FfiRecoveryResult
 }

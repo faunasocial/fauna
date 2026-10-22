@@ -61,6 +61,10 @@ pub struct ModerationPage {
     status: gtk::Label,
     rows: RefCell<Vec<QueueRow>>,
     draft: RefCell<Option<AppealDraft>>,
+    /// The queue row a `dm-message-withheld-badge` tap asked to appeal, by `content_id`:
+    /// the next queue read opens its draft ([`queue_appeal`]), so the badge reaches the
+    /// one appeal flow.
+    pending_appeal: RefCell<Option<String>>,
     client: Rc<FaunaClient>,
 }
 
@@ -134,6 +138,7 @@ pub fn build_moderation_view(client: &Rc<FaunaClient>) -> (gtk::Box, ModerationV
             status: appeal_status,
             rows: RefCell::new(Vec::new()),
             draft: RefCell::new(None),
+            pending_appeal: RefCell::new(None),
             client: Rc::clone(client),
         }),
     };
@@ -287,7 +292,38 @@ fn paint_ledger(
 /// entry (or shows the empty placeholder).
 pub fn update_moderation_queue(page: &Rc<ModerationPage>, rows: &[QueueRow]) {
     *page.rows.borrow_mut() = rows.to_vec();
+    open_pending_appeal(page);
     repaint(page);
+}
+
+/// Ask for the appeal of the queue row `content_id` names — the
+/// `dm-message-withheld-badge` tap (`moderation.md` § Legal takedown → *App render*). The
+/// caller then enters the page, whose arrival re-reads the queue;
+/// [`update_moderation_queue`] opens the draft on the matching row once it is loaded, so
+/// the appeal is the queue's own (one flow, the `appeal-*` ids).
+pub fn queue_appeal(page: &Rc<ModerationPage>, content_id: &str) {
+    *page.pending_appeal.borrow_mut() = Some(content_id.to_string());
+    *page.draft.borrow_mut() = None;
+    page.status.set_visible(false);
+}
+
+/// Open the draft a badge tap asked for, on the loaded row it names — behind the same
+/// `row_is_appealable` gate as the row's own `appeal-button`. A row the queue no longer
+/// carries opens nothing.
+fn open_pending_appeal(page: &Rc<ModerationPage>) {
+    let Some(content_id) = page.pending_appeal.borrow_mut().take() else {
+        return;
+    };
+    let appealable =
+        page.rows.borrow().iter().any(|row| {
+            row.content_id == content_id && fauna_client_moderation::row_is_appealable(row)
+        });
+    if appealable {
+        *page.draft.borrow_mut() = Some(AppealDraft {
+            content_id,
+            reason: String::new(),
+        });
+    }
 }
 
 /// Rebuild the queue list from the retained rows, painting the open appeal form
@@ -591,9 +627,23 @@ fn build_queue_row(row: &QueueRow, on_correct: OnCorrect, on_appeal: OnAppeal) -
     if let Some(text) = &action_text {
         crate::testid::set_test_attr_text(&badge, "action", text);
     }
+    // A row another nest delivered names where the decision was made — the
+    // shared `issued_by` suffix on the action line, and the `issuer` fact on
+    // the badge (`moderation.md` § Legal takedown → *The author homed on
+    // another nest*).
+    if let Some(nest) = &row.issuer_nest {
+        crate::testid::set_test_attr_text(&badge, "issuer", nest);
+    }
     top_line.append(&badge_box);
 
     if let Some(action_text) = action_text {
+        let action_text = match &row.issued_by {
+            Some(issued_by) => format!(
+                "{action_text} · {}",
+                issued_by.resolve(crate::i18n::strings::lookup)
+            ),
+            None => action_text,
+        };
         let action_label = gtk::Label::new(Some(&action_text));
         action_label.add_css_class("caption");
         action_label.add_css_class("dim-label");
@@ -674,6 +724,8 @@ mod tests {
             } else {
                 QueueRowSource::Local
             },
+            issuer_nest: None,
+            issued_by: None,
         }
     }
 
@@ -851,6 +903,67 @@ mod tests {
         });
     }
 
+    /// A row another nest delivered names its issuer (`moderation.md` § Legal
+    /// takedown → *The author homed on another nest*): the shared `issued_by`
+    /// suffix rides on the action line (no id of its own), and the badge
+    /// publishes the issuer's domain as the `issuer` fact; this nest's own
+    /// decision names none.
+    #[test]
+    fn a_delivered_row_names_its_issuer() {
+        fn badge_of(w: &gtk::Widget) -> Option<gtk::Widget> {
+            if w.widget_name() == "content-label-badge" {
+                return Some(w.clone());
+            }
+            let mut child = w.first_child();
+            while let Some(c) = child {
+                if let Some(b) = badge_of(&c) {
+                    return Some(b);
+                }
+                child = c.next_sibling();
+            }
+            None
+        }
+        crate::testid::run_on_gtk_thread(|| {
+            let taken_down = fauna_core::obligation::ObligationAction::TakenDown as u8;
+            let label = fauna_core::obligation::obligation_action_label(taken_down)
+                .resolve(crate::i18n::strings::lookup);
+            let mut delivered = sample("illegal", Some(taken_down), 880);
+            delivered.issuer_nest = Some("issuer.example".into());
+            delivered.issued_by = Some(fauna_core::localized::LocalizedText::key_arg(
+                fauna_client_moderation::detections::ISSUED_BY_KEY,
+                "nest",
+                "issuer.example",
+            ));
+            let row = build_queue_row(&delivered, Rc::new(|_, _| {}), Rc::new(|_| {}));
+            let suffix = delivered
+                .issued_by
+                .as_ref()
+                .unwrap()
+                .resolve(crate::i18n::strings::lookup);
+            assert!(suffix.contains("issuer.example"), "{suffix:?}");
+            let mut texts = Vec::new();
+            collect_all_label_texts(row.upcast_ref::<gtk::Widget>(), &mut texts);
+            let line = format!("{label} · {suffix}");
+            assert!(texts.contains(&line), "{line:?} not in {texts:?}");
+            let badge = badge_of(row.upcast_ref()).expect("content-label-badge present");
+            assert_eq!(
+                crate::testid::test_attr_text(&badge, "issuer").as_deref(),
+                Some("issuer.example")
+            );
+
+            let own = build_queue_row(
+                &sample("illegal", Some(taken_down), 880),
+                Rc::new(|_, _| {}),
+                Rc::new(|_| {}),
+            );
+            let badge = badge_of(own.upcast_ref()).expect("content-label-badge present");
+            assert_eq!(crate::testid::test_attr_text(&badge, "issuer"), None);
+            let mut texts = Vec::new();
+            collect_all_label_texts(own.upcast_ref::<gtk::Widget>(), &mut texts);
+            assert!(texts.contains(&label), "{label:?} not in {texts:?}");
+        });
+    }
+
     #[test]
     fn local_detection_row_has_blank_action_and_train_button() {
         crate::testid::run_on_gtk_thread(|| {
@@ -1006,6 +1119,47 @@ mod tests {
             assert_eq!(entry.text().as_str(), "seeded");
             entry.set_text("edited");
             assert_eq!(typed.borrow().as_str(), "edited");
+        });
+    }
+
+    /// A withheld badge's tap opens the appeal on the queue row it names once the
+    /// queue is loaded — under the matched row, once — and a row the queue no longer
+    /// carries (or a local detection) opens nothing.
+    #[test]
+    fn a_withheld_badge_tap_opens_the_appeal_on_its_queue_row_once_loaded() {
+        crate::testid::run_on_gtk_thread(|| {
+            let (tx, _rx) = crate::client::ui_channel();
+            let machine = fauna_launch_machine::LaunchMachine::new(
+                std::sync::Arc::new(fauna_launch_machine::NullObserver),
+                std::sync::Arc::new(fauna_launch_machine::InMemoryPersistence::new()),
+            );
+            let client = Rc::new(FaunaClient::new(
+                "http://127.0.0.1:1".to_string(),
+                "11".repeat(32),
+                tx,
+                machine,
+            ));
+            let (_view, handles) = build_moderation_view(&client);
+            let page = handles.page;
+            let mut other = sample("spam", Some(1), 900);
+            other.content_id = "cd".repeat(32);
+            let withheld = sample("illegal", Some(7), 1000);
+
+            queue_appeal(&page, &withheld.content_id);
+            assert!(
+                page.draft.borrow().is_none(),
+                "nothing opens before the read"
+            );
+            update_moderation_queue(&page, &[other.clone(), withheld.clone()]);
+            let draft = page.draft.borrow().clone().expect("the appeal opens");
+            assert_eq!(draft.content_id, withheld.content_id);
+            assert!(page.pending_appeal.borrow().is_none(), "asked once");
+
+            // A row the queue no longer carries opens nothing.
+            *page.draft.borrow_mut() = None;
+            queue_appeal(&page, &"ef".repeat(32));
+            update_moderation_queue(&page, &[withheld]);
+            assert!(page.draft.borrow().is_none());
         });
     }
 }

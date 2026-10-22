@@ -8,11 +8,17 @@
 //! ("as the CardDAV and WebDAV siblings already do"; "the CalDAV and CardDAV
 //! apexes were aligned to it on 2026-07-12"), they just never shared the gate
 //! itself. [`well_known_dav_gate`] is that shared gate.
+//!
+//! On a box whose DAV listener is direct (`AppState.dav_direct_listener ==
+//! Some(true)`) there is no `mail.<primary>:443` route, so the redirect names
+//! the host the request arrived on, at the admin-set DAV port — the address
+//! the member's own mail settings page shows (`caldav-server.md` § Network
+//! exposure).
 
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
 use crate::api_error::ApiError;
@@ -58,20 +64,47 @@ impl DavProtocol {
         }
     }
 
-    fn location(self, primary_domain: &str) -> String {
+    /// The redirect target on the DAV listener at `origin` (`host` or
+    /// `host:port`, from [`dav_origin`]).
+    fn location(self, origin: &str) -> String {
         match self {
-            DavProtocol::CalDav => format!("https://mail.{primary_domain}/.well-known/caldav"),
-            DavProtocol::CardDav => format!("https://mail.{primary_domain}/.well-known/carddav"),
-            DavProtocol::WebDav => format!("https://mail.{primary_domain}/webdav/"),
+            DavProtocol::CalDav => format!("https://{origin}/.well-known/caldav"),
+            DavProtocol::CardDav => format!("https://{origin}/.well-known/carddav"),
+            DavProtocol::WebDav => format!("https://{origin}/webdav/"),
         }
     }
+}
+
+/// Where the DAV listener answers: `mail.<primary>` (the router's `443`) on a
+/// routed or undeclared box; on a direct listener, the host the request
+/// arrived on (its `Host` header, port dropped) at the admin-set DAV `port`.
+/// `None` when a direct listener's request carries no plain host — the nest
+/// knows no other name for its LAN listener.
+fn dav_origin(
+    primary_domain: &str,
+    direct_listener: Option<bool>,
+    request_host: Option<&str>,
+    port: u16,
+) -> Option<String> {
+    if direct_listener != Some(true) {
+        return Some(format!("mail.{primary_domain}"));
+    }
+    let authority: axum::http::uri::Authority = request_host?.trim().parse().ok()?;
+    if authority.host().is_empty() || authority.as_str().contains('@') {
+        return None;
+    }
+    Some(format!("{}:{port}", authority.host()))
 }
 
 /// The shared gate: `503` unless `protocol` is live (its own toggle, or an
 /// unset toggle following `effective_mail_enabled` — Stage-5 default-off
 /// means an unset toggle is OFF, not proof of enablement), `301` to the
-/// bridge host when it is.
-pub async fn well_known_dav_gate(state: &Arc<AppState>, protocol: DavProtocol) -> Response {
+/// DAV listener when it is ([`dav_origin`] picks the host).
+pub async fn well_known_dav_gate(
+    state: &Arc<AppState>,
+    protocol: DavProtocol,
+    headers: &HeaderMap,
+) -> Response {
     let state: &AppState = state;
 
     // Explicitly-disabled short-circuits to `503`; `None` (unset) follows the
@@ -108,7 +141,27 @@ pub async fn well_known_dav_gate(state: &Arc<AppState>, protocol: DavProtocol) -
 
     match state.db.lookup_primary_mail_domain().await {
         Ok(Some(primary)) => {
-            let location = protocol.location(&primary.domain_name);
+            // The port the member's page shows (`fauna.bridges.get_caldav_port`).
+            let port = match state.db.get_caldav_port().await {
+                Ok(p) => p.unwrap_or(fauna_protocol::bridge_routing::DEFAULT_CALDAV_PORT),
+                Err(e) => {
+                    return ApiError::internal(format!("read caldav_port: {e}")).into_response();
+                }
+            };
+            let request_host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
+            let Some(origin) = dav_origin(
+                &primary.domain_name,
+                state.dav_direct_listener,
+                request_host,
+                port,
+            ) else {
+                return ApiError::service_unavailable(format!(
+                    "{} is served on this nest's own address; the request named no host",
+                    protocol.display_name()
+                ))
+                .into_response();
+            };
+            let location = protocol.location(&origin);
             Response::builder()
                 .status(StatusCode::MOVED_PERMANENTLY)
                 .header("Location", location)
@@ -138,17 +191,104 @@ mod tests {
     #[test]
     fn location_shape_diverges_between_caldav_carddav_and_webdav() {
         assert_eq!(
-            DavProtocol::CalDav.location("example.com"),
+            DavProtocol::CalDav.location("mail.example.com"),
             "https://mail.example.com/.well-known/caldav"
         );
         assert_eq!(
-            DavProtocol::CardDav.location("example.com"),
+            DavProtocol::CardDav.location("mail.example.com"),
             "https://mail.example.com/.well-known/carddav"
         );
         assert_eq!(
-            DavProtocol::WebDav.location("example.com"),
+            DavProtocol::WebDav.location("mail.example.com"),
             "https://mail.example.com/webdav/"
         );
+    }
+
+    /// A routed or undeclared box keeps `mail.<primary>`; a direct listener
+    /// names the request's own host at the admin port (dropping any port the
+    /// `Host` header carried) and has no origin without a plain host.
+    #[test]
+    fn dav_origin_follows_the_listener_shape() {
+        for direct in [Some(false), None] {
+            assert_eq!(
+                dav_origin("fauna.example", direct, Some("fauna.example"), 8443).as_deref(),
+                Some("mail.fauna.example")
+            );
+        }
+        let direct = Some(true);
+        assert_eq!(
+            dav_origin("fauna.example", direct, Some("fauna.example"), 8443).as_deref(),
+            Some("fauna.example:8443")
+        );
+        assert_eq!(
+            dav_origin("fauna.example", direct, Some("home.lan:3000"), 9443).as_deref(),
+            Some("home.lan:9443")
+        );
+        assert_eq!(
+            dav_origin("fauna.example", direct, Some("[fd00::5]:443"), 8443).as_deref(),
+            Some("[fd00::5]:8443")
+        );
+        for bad in [
+            None,
+            Some(""),
+            Some("a b"),
+            Some("u@evil.example"),
+            Some("x/y"),
+        ] {
+            assert_eq!(
+                dav_origin("fauna.example", direct, bad, 8443),
+                None,
+                "{bad:?}"
+            );
+        }
+    }
+
+    /// Through the gate: CalDAV and CardDAV on a direct listener never name
+    /// `mail.<primary>`; routed and undeclared boxes keep the `301` to it.
+    #[tokio::test]
+    async fn apex_redirect_follows_the_dav_listener_shape() {
+        for (direct, expect) in [
+            (Some(true), "https://fauna.example:9443"),
+            (Some(false), "https://mail.fauna.example"),
+            (None, "https://mail.fauna.example"),
+        ] {
+            let mut state = crate::test_support::fixture_state();
+            Arc::get_mut(&mut state).unwrap().dav_direct_listener = direct;
+            state
+                .db
+                .add_mail_domain(
+                    "fauna.example",
+                    true,
+                    "enforce",
+                    "expand_primary",
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            state.db.set_caldav_enabled(true).await.unwrap();
+            state.db.set_carddav_enabled(true).await.unwrap();
+            state.db.set_caldav_port(9443).await.unwrap();
+            let mut headers = HeaderMap::new();
+            headers.insert(header::HOST, "fauna.example".parse().unwrap());
+            for (protocol, path) in [
+                (DavProtocol::CalDav, "/.well-known/caldav"),
+                (DavProtocol::CardDav, "/.well-known/carddav"),
+            ] {
+                let resp = well_known_dav_gate(&state, protocol, &headers).await;
+                assert_eq!(resp.status(), StatusCode::MOVED_PERMANENTLY, "{direct:?}");
+                assert_eq!(
+                    resp.headers()[header::LOCATION].to_str().unwrap(),
+                    format!("{expect}{path}"),
+                    "{direct:?}"
+                );
+            }
+            if direct == Some(true) {
+                let resp =
+                    well_known_dav_gate(&state, DavProtocol::CalDav, &HeaderMap::new()).await;
+                assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+            }
+        }
     }
 
     #[test]

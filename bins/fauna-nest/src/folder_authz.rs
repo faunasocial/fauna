@@ -79,7 +79,7 @@ pub(crate) enum FolderReadGrant {
     /// chunks stay sealed under the group key, and so do the labels.
     AdminDiscovery,
     /// **The world**, reading a `audience='public'` folder over the public read
-    /// plane (`federation.md` § The public folder read plane; phase 4 slice
+    /// plane (`federation-shared-folders.md` § The public folder read plane; phase 4 slice
     /// 4f-i). A public folder rests unsealed by the ratified exception, so this
     /// reader opens the bytes — but holds no *key*, and is nobody's roster
     /// member.
@@ -316,7 +316,7 @@ pub(crate) async fn resolve_foreign_readable_folder_by_ref(
 
 /// Resolve the hinted folder for a caller named by a **federated byte-plane
 /// token** — a member whose account lives on another nest (`file-sync.md`
-/// § Relay serving → *A member on another nest*, step (5); `federation.md`
+/// § Relay serving → *A member on another nest*, step (5); `federation-shared-folders.md`
 /// § Cross-nest shared folders + channel append → *Relay serving across
 /// nests*).
 ///

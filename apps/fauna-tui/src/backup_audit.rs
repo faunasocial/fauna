@@ -87,18 +87,28 @@ static OBSERVED: Mutex<Option<(String, i64)>> = Mutex::new(None);
 
 #[cfg(test)]
 thread_local! {
-    /// The actor this thread's last [`observe_thread_activity`] call was handed.
-    /// Thread-local, unlike [`OBSERVED`], so parallel tests never overwrite each
-    /// other's reading — a pin can ask "which actor did the sink actually
-    /// receive?" instead of re-deriving it from the sink's echoed return.
-    static LAST_FORWARDED_ACTOR: std::cell::RefCell<Option<String>> =
-        const { std::cell::RefCell::new(None) };
+    /// Every actor this thread's [`observe_thread_activity`] calls were handed,
+    /// in order, until [`clear_forwarded_actors`]. Thread-local, unlike
+    /// [`OBSERVED`], so parallel tests never overwrite each other's reading — a
+    /// pin can ask "which actors did the sink actually receive during this
+    /// call?" instead of re-deriving it from the sink's echoed return. A list,
+    /// not a last-writer cell, so an extra forward cannot hide behind a later one.
+    static FORWARDED_ACTORS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// The actor the calling thread last forwarded to [`observe_thread_activity`].
+/// Every actor the calling thread forwarded to [`observe_thread_activity`]
+/// since the last [`clear_forwarded_actors`], in call order.
 #[cfg(test)]
-pub(crate) fn last_forwarded_actor() -> Option<String> {
-    LAST_FORWARDED_ACTOR.with(|a| a.borrow().clone())
+pub(crate) fn forwarded_actors() -> Vec<String> {
+    FORWARDED_ACTORS.with(|a| a.borrow().clone())
+}
+
+/// Forget the calling thread's forwarded-actor record, so a pin can scope it to
+/// the one call under test.
+#[cfg(test)]
+pub(crate) fn clear_forwarded_actors() {
+    FORWARDED_ACTORS.with(|a| a.borrow_mut().clear());
 }
 
 /// Record that `actor_id_hex`'s client has displayed conversation activity
@@ -115,7 +125,7 @@ pub(crate) fn last_forwarded_actor() -> Option<String> {
 /// Returns the `(actor, last_activity_ms)` pair this call actually consumed —
 /// built from its own parameters, never a binding a caller held separately.
 /// That echo cannot by itself tell a caller's forwarded value from a binding it
-/// held elsewhere; the test-only [`last_forwarded_actor`] records what the sink
+/// held elsewhere; the test-only [`forwarded_actors`] records what the sink
 /// was really handed. Kept in
 /// **milliseconds**, the caller's own unit: the store's committed high-water is
 /// in **seconds** and is a monotonic, process-wide value shared across every
@@ -128,7 +138,7 @@ pub(crate) fn last_forwarded_actor() -> Option<String> {
 /// could do about it.
 pub fn observe_thread_activity(actor_id_hex: &str, last_activity_ms: i64) -> Option<(String, i64)> {
     #[cfg(test)]
-    LAST_FORWARDED_ACTOR.with(|a| *a.borrow_mut() = Some(actor_id_hex.to_string()));
+    FORWARDED_ACTORS.with(|a| a.borrow_mut().push(actor_id_hex.to_string()));
     let secs = audit::activity_secs(last_activity_ms);
     let mut observed = match OBSERVED.lock() {
         Ok(o) => o,

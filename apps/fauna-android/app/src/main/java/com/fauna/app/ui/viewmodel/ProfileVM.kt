@@ -16,9 +16,10 @@ import com.fauna.app.core.contactAskRender
 import com.fauna.app.core.foldContactAskFailed
 import com.fauna.app.core.foldContactAsked
 import com.fauna.app.core.foldKnockReply
+import com.fauna.app.ui.navigation.decodeProfileHome
 import com.fauna.ffi.accountDisplayHandle
+import com.fauna.ffi.actorHome
 import com.fauna.ffi.actorIdFromSecret
-import com.fauna.ffi.knockRecipientNestUrl
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -98,6 +99,27 @@ class ProfileVM @Inject constructor(
      */
     val publishedName: StateFlow<String?> = _publishedName.asStateFlow()
 
+    /**
+     * One header picture (`profile-avatar` / `profile-banner`): the hex blob hash
+     * the profile names, and its fetched bytes — `null` while loading or after a
+     * failed fetch, when the element paints empty (`profile.md` § Layout & flow).
+     */
+    class HeaderPicture(val hashHex: String, val bytes: ByteArray? = null)
+
+    private val _avatar = MutableStateFlow<HeaderPicture?>(null)
+
+    /** The stored avatar — `null` when the profile names none (no element). */
+    val avatar: StateFlow<HeaderPicture?> = _avatar.asStateFlow()
+
+    private val _banner = MutableStateFlow<HeaderPicture?>(null)
+
+    /** The stored banner — `null` when the profile names none (no element). */
+    val banner: StateFlow<HeaderPicture?> = _banner.asStateFlow()
+
+    /** Bumped by every header read, so a picture an older read fetched (a save
+     *  refetches both) never paints over a newer profile's. */
+    private var pictureEpoch = 0
+
     /** True once the viewer has followed this actor (OTHER only) — flips the button label. */
     private val _following = MutableStateFlow(false)
     val following: StateFlow<Boolean> = _following.asStateFlow()
@@ -144,35 +166,82 @@ class ProfileVM @Inject constructor(
     val wardContactRequests = api.wardAsks.contactRequests
 
     /**
-     * Where this open's knock goes: the shared `knockRecipientNestUrl` over the
-     * profile [refreshHeader] already fetched (`profile.md` § Where logic lives
-     * → *Request contact routing*). `null` until that read lands, and whenever
-     * the profile gives no better answer — the knock then goes to this nest.
+     * The home nest the open target carried (a Find User result's lookup, a post
+     * author's `home_nest_url`, a contact row's, or the state-protocol entry's),
+     * decoded off the route's `home` arg — `null` = none carried.
      */
-    @Volatile
-    private var knockRoute: String? = null
+    private val carriedHome: String? = decodeProfileHome(savedStateHandle.get<String>("home"))
+
+    private val _actorHomeSlot = MutableStateFlow<String?>(null)
 
     /**
-     * Re-read the viewed actor's published `display_name` (`fauna.profile.get`)
-     * and render it into the header, falling back to the handle/actor_id on
-     * `not_found`/error. Called on mount and after a successful SELF edit-form
-     * publish. Mirrors linux `mod.rs::refresh_header_name` (works for any actor).
+     * The page's **actor-home slot** (OTHER only; `profile.md` § Where logic lives →
+     * *The actor's home*): the other actor's home nest, `null` = this nest. The
+     * follow, the knock and the remote header read all read this one slot. Seeded at
+     * open from the carried home alone, replaced after the header read by the shared
+     * `actorHome` over the profile it fetched — never a per-gesture re-derivation.
+     */
+    val actorHomeSlot: StateFlow<String?> = _actorHomeSlot.asStateFlow()
+
+    /** The shared `actorHome(carried, actor, body, own)` rule for this page's actor. */
+    private fun actorHomeOver(body: ByteArray?): String? =
+        targetActorId?.let {
+            runCatching { actorHome(carriedHome, HexUtil.hexToBytes(it), body, api.nodeUrl) }.getOrNull()
+        }
+
+    /** What this VM last published to [ProfileTestState]; cleared only while it is still the published one. */
+    private var publishedView: ProfileTestState.Viewed? = null
+
+    private fun setActorHomeSlot(home: String?) {
+        _actorHomeSlot.value = home
+        publishedView = profileActorIdHex?.let { ProfileTestState.Viewed(it, home) }
+        ProfileTestState.viewed = publishedView
+    }
+
+    init {
+        setActorHomeSlot(actorHomeOver(null))
+    }
+
+    override fun onCleared() {
+        if (ProfileTestState.viewed === publishedView) ProfileTestState.viewed = null
+    }
+
+    /**
+     * Re-read the viewed actor's published profile (the shared
+     * `profile_header_read`) and render its `display_name` into the header,
+     * falling back to the handle/actor_id on `not_found`/error. Called on mount
+     * and after a successful SELF edit-form publish. Mirrors linux
+     * `mod.rs::refresh_header_name` (works for any actor).
      *
-     * OTHER: the same read fills [knockRoute] — the profile the header renders
-     * is the one whose home nest a knock from this page goes to.
+     * OTHER: the read goes to the actor-home slot as the open seeded it (this
+     * nest first, then the relay to that home), and the profile it returns
+     * replaces the slot through the shared `actorHome` rule — the profile the
+     * header renders is the one whose home nest a follow or a knock from this
+     * page goes to.
+     *
+     * The pictures the profile names ([avatar], [banner]) render at once, empty,
+     * and paint as their bytes arrive from the nest that served the profile
+     * (`relayedFrom`, pinned to the stamped `homeNestActorId`; `profile.md`
+     * § Where logic lives → *Bytes direct, as for a relayed post*) — tui's
+     * `fetch_pictures`. Every read refetches both.
      */
     fun refreshHeader() {
         val hex = profileActorIdHex ?: return
         viewModelScope.launch {
-            val body = api.profileGet(hex)
-            val published = body
-                ?.let { runCatching { api.decodeProfileDisplay(it).displayName }.getOrNull() }
-                ?.takeIf { it.isNotBlank() }
+            val read = api.profileHeaderRead(hex, if (targetActorId != null) _actorHomeSlot.value else null)
+            val body = read?.body
+            val display = body?.let { runCatching { api.decodeProfileDisplay(it) }.getOrNull() }
+            val published = display?.displayName?.takeIf { it.isNotBlank() }
             _publishedName.value = published
             _displayName.value = published ?: fallbackName()
-            if (targetActorId != null) {
-                knockRoute = body?.let {
-                    runCatching { knockRecipientNestUrl(HexUtil.hexToBytes(targetActorId), it, api.nodeUrl) }.getOrNull()
+            if (targetActorId != null) setActorHomeSlot(actorHomeOver(body))
+            val epoch = ++pictureEpoch
+            for ((flow, hash) in listOf(_avatar to display?.avatarHashHex, _banner to display?.bannerHashHex)) {
+                flow.value = hash?.let { HeaderPicture(it) }
+                if (hash == null) continue
+                launch {
+                    val bytes = api.fetchProfilePicture(read?.relayedFrom, read?.homeNestActorId, hash)
+                    if (bytes != null && epoch == pictureEpoch) flow.value = HeaderPicture(hash, bytes)
                 }
             }
         }
@@ -186,7 +255,7 @@ class ProfileVM @Inject constructor(
 
     /**
      * `profile-request-contact-button` — knock the viewed actor on the route the
-     * open-time read took from its own profile. Reads "Request sent" and stays
+     * page's actor-home slot holds ([actorHomeSlot]). Reads "Request sent" and stays
      * disabled once the nest accepted it; the TYPED guardian refusal
      * re-enables it, offers the ask, and STAYS on `error-message` (rules (a),
      * (b)). Mirrors tui's `Action::RequestContact`.
@@ -197,7 +266,7 @@ class ProfileVM @Inject constructor(
         if (before.knockSent || before.knockInFlight) return
         val actorId = ownActorIdHex ?: return
         _knockAsk.value = before.copy(knockInFlight = true)
-        val route = knockRoute
+        val route = _actorHomeSlot.value
         viewModelScope.launch {
             val result = classifyKnock { api.sendKnock(actorId, peer, route) }
             val (next, effect) = foldKnockReply(_knockAsk.value, peer, result)
@@ -235,14 +304,19 @@ class ProfileVM @Inject constructor(
      * Follow = subscribe to the free "followers" tier (OTHER only; `profile.md`
      * § Where logic lives → *Follow / unfollow*). On success the button flips to
      * "Following". Mirrors linux `mod.rs::follow`.
+     *
+     * The follow carries the page's actor-home slot: an author homed on another
+     * nest is followed across nests (`federated-follow.md` § Decision 2), and a
+     * `null` slot is today's local follow. Mirrors tui's follow.
      */
     fun follow() {
         val hex = targetActorId ?: return
+        val home = _actorHomeSlot.value
         viewModelScope.launch {
             errorMessage.value = null
             _followWorking.value = true
             try {
-                api.subscriptionSubscribe(hex, ProfileOffersVM.FOLLOWERS_TIER)
+                api.subscriptionSubscribe(hex, ProfileOffersVM.FOLLOWERS_TIER, home)
                 _following.value = true
             } catch (e: Exception) {
                 errorMessage.value = e.message ?: "error"
@@ -311,6 +385,19 @@ class ProfileVM @Inject constructor(
             }
         }
     }
+}
+
+/**
+ * The open profile's viewed actor and actor-home slot, published for the e2e
+ * agent's `data.profile` state (`actor_id`, `home_nest_url` — the keys every
+ * app answers from the page it painted; `actions/profile.py::wait_for_viewed_actor`
+ * / `wait_for_home_nest_url`). Null while no profile page is open.
+ */
+object ProfileTestState {
+    class Viewed(val actorId: String, val homeNestUrl: String?)
+
+    @Volatile
+    var viewed: Viewed? = null
 }
 
 /**

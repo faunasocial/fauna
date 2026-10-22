@@ -297,8 +297,10 @@ impl<T: ImapTransport> ImapSession<T> {
         self.refresh_capabilities().await
     }
 
-    /// SASL `XOAUTH2` — the OAuth path § Credential handling names for
-    /// Microsoft Graph, and what Gmail wants too.
+    /// SASL `XOAUTH2` — the Outlook source's sign-in, with a token for the
+    /// Outlook IMAP resource (never Microsoft Graph, whose token this command
+    /// refuses; `mailbox-migration.md` § Microsoft sign-in — the device-code
+    /// grant), and what Gmail wants too.
     ///
     /// The bearer token lives in client memory only and never reaches nest.
     pub async fn authenticate_xoauth2(

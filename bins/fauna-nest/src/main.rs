@@ -81,6 +81,19 @@ fn resolve_cors_origins_seed(cli_origins: Vec<String>, config_origins: Vec<Strin
     }
 }
 
+/// The blob directory the nest serves from: `--blob-dir` when the deployment
+/// artifact passed it, else the artifact-written config file's `[nest] blob_dir`
+/// (bucket 1 of `principles.md` § One configuration surface — no person writes
+/// either). `None` means no `BackupService`: no snapshot scheduler, no blob GC.
+/// `install.sh`'s systemd unit runs `--config` alone (`installers/linux-nest.md`),
+/// so the config fallback is what gives a native install its blob store.
+fn resolve_blob_dir(
+    cli_blob_dir: Option<String>,
+    config: &fauna_nest::config::NestConfig,
+) -> Option<String> {
+    cli_blob_dir.or_else(|| config.nest.blob_dir.clone())
+}
+
 /// The nest server for Fauna — open-source software for social communication.
 ///
 /// When invoked without a subcommand, runs the nest server (equivalent to
@@ -434,7 +447,6 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
             submission: None,
             acme: None,
             email: None,
-            update: Default::default(),
         })
     };
 
@@ -579,8 +591,8 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
     // before opening the DB — preserving the host identity + ACME cert. The
     // claim code staged in the marker is installed so the fresh nest is
     // re-claimable with it. No marker → no-op. See `factory_reset.rs`.
-    let factory_reset_blob_dir = args
-        .blob_dir
+    let blob_dir = resolve_blob_dir(args.blob_dir.clone(), &nest_config);
+    let factory_reset_blob_dir = blob_dir
         .clone()
         .unwrap_or_else(|| data_dir.join("blobs").to_string_lossy().into_owned());
     match fauna_nest::factory_reset::maybe_run_factory_reset(&db_path, &factory_reset_blob_dir) {
@@ -757,7 +769,6 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
         .unwrap_or(std::path::Path::new("."))
         .join("bluesky_oauth_key.json");
 
-    let blob_dir = args.blob_dir;
     let backup_service = match blob_dir.as_ref() {
         Some(dir) => Some(Arc::new(fauna_nest::backup::service::BackupService::new(
             db.clone(),
@@ -827,11 +838,14 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
             acme_config.directory_url.clone(),
         );
 
-        // Start the HTTP listener for ACME challenges (port 8080, mapped to 80 by Docker)
+        // Start the HTTP listener for ACME challenges (port 8080, mapped to 80 by
+        // Docker). The cert resolver is its redirect allow-list: port 80
+        // redirects only to a host one of this nest's certificates names.
         match fauna_nest::acme_http01::start_http01_listener(
             challenge_state.clone(),
             acme_config.domain.clone(),
             http01_config.http_port,
+            cert_resolver.clone(),
         )
         .await
         {
@@ -916,9 +930,7 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
     // generation is torn down (server task, WS connections, every scoped
     // worker) and `start_server` is re-entered, rebuilding the whole graph
     // from the rotated DB — in-process, so no supervisor is required.
-    // (`_app_state` keeps the final generation's graph alive through the
-    // graceful drain below; the drain itself needs only `handle` + `ws_state`.)
-    let (handle, _app_state, ws_state) = 'serve: loop {
+    let (handle, app_state) = 'serve: loop {
         let (addr, handle, app_state) = fauna_nest::start_server(
             bind,
             // The standalone `fauna-nest` binary binds its own `--bind` listener; the
@@ -1142,6 +1154,12 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
             app_state.spawn_scoped(async move {
                 fauna_nest::nest_sync_worker::run_sync_worker(state3).await;
             });
+            // The federated follow's purge: delivered envelopes nobody here
+            // follows the author of any more (`federated-follow.md` § Decision 3).
+            let state4 = app_state.clone();
+            app_state.spawn_scoped(async move {
+                fauna_nest::follow_delivery::run_follow_purge(state4).await;
+            });
             tracing::info!("Outbox and namespace sync + mail relay workers started");
         }
 
@@ -1224,6 +1242,8 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
                 loop {
                     interval.tick().await;
                     let evicted = sweep_state.federation_rate_limit.sweep()
+                        + sweep_state.keypackage_fetch_target_limit.sweep()
+                        + sweep_state.federation_target_budget.sweep()
                         + sweep_state.bridge_rate_limit.sweep()
                         + sweep_state.anonymous_rate_limit.sweep()
                         + sweep_state.claim_rate_limit.sweep()
@@ -1494,11 +1514,16 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
             // Cadence + nest-wide quiet period live on the scheduler module, so
             // the `test-hooks` run-now route builds the SAME scheduler this
             // does rather than a second, drifting copy of the numbers.
-            let scheduler = Arc::new(fauna_nest::backup::scheduler::SnapshotScheduler::new(
-                svc.clone(),
-                fauna_nest::backup::scheduler::CHECK_INTERVAL,
-                fauna_nest::backup::scheduler::DEFAULT_QUIET_SECS,
-            ));
+            let scheduler = Arc::new(
+                fauna_nest::backup::scheduler::SnapshotScheduler::new(
+                    svc.clone(),
+                    fauna_nest::backup::scheduler::CHECK_INTERVAL,
+                    fauna_nest::backup::scheduler::DEFAULT_QUIET_SECS,
+                )
+                .with_message_kinds(
+                    fauna_nest::backup::message_kind::MessageKindStores::of(&app_state),
+                ),
+            );
             app_state.scope_handle(scheduler.spawn());
 
             let gc_scheduler = Arc::new(fauna_nest::backup::gc_scheduler::GcScheduler::new(
@@ -1545,7 +1570,7 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
 
         let restart = app_state.serve_restart.clone();
         tokio::select! {
-            _ = shutdown => break 'serve (handle, app_state, ws_state),
+            _ = shutdown => break 'serve (handle, app_state),
             _ = restart.notified() => {
                 tracing::info!(
                     "serving-generation restart requested (deployment-seed rotation) — \
@@ -1564,7 +1589,7 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
     // Lifted lib-side so
     // `bins/fauna-nest/tests/` (which links the lib, never this bin) can
     // drive the exact sequence and mutation-test it.
-    fauna_nest::graceful_shutdown(handle, &ws_state, &db).await;
+    fauna_nest::graceful_shutdown(handle, &app_state).await;
     Ok(())
 }
 
@@ -1718,6 +1743,57 @@ mod tests {
         // Neither ⇒ empty, which `origin_allowed` collapses to the built-in
         // default-origin-only posture. The fresh-nest default is untouched.
         assert!(resolve_cors_origins_seed(vec![], vec![]).is_empty());
+    }
+
+    /// A nest started `--config` alone takes its blob dir from the config file's
+    /// `[nest] blob_dir` — the shape `install.sh`'s systemd unit runs
+    /// (`installers/linux-nest.md`: "DB/blob/bind come from `nest.toml`, not
+    /// ExecStart flags"). Before this the flag was the only source, so a native
+    /// install built no `BackupService`: no snapshot scheduler, no blob GC.
+    #[test]
+    fn blob_dir_falls_back_to_config_when_flag_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("nest.toml");
+        std::fs::write(
+            &config_path,
+            "[nest]\nmode = \"public\"\nlisten = \"127.0.0.1:0\"\n\
+             db_path = \"/var/lib/fauna/nest.db\"\nblob_dir = \"/var/lib/fauna/blobs\"\n",
+        )
+        .unwrap();
+        let config =
+            fauna_nest::config::NestConfig::from_file(config_path.to_str().unwrap()).unwrap();
+
+        // The install.sh unit: `--config` and nothing else.
+        let cli =
+            Cli::try_parse_from(["fauna-nest", "--config", config_path.to_str().unwrap()]).unwrap();
+        assert_eq!(
+            resolve_blob_dir(cli.serve.blob_dir, &config).as_deref(),
+            Some("/var/lib/fauna/blobs")
+        );
+
+        // An explicit flag still wins (the Docker run script's form).
+        let cli = Cli::try_parse_from([
+            "fauna-nest",
+            "--config",
+            config_path.to_str().unwrap(),
+            "--blob-dir",
+            "/data/blobs",
+        ])
+        .unwrap();
+        assert_eq!(
+            resolve_blob_dir(cli.serve.blob_dir, &config).as_deref(),
+            Some("/data/blobs")
+        );
+
+        // Neither ⇒ no blob dir, and no `BackupService`.
+        let bare = fauna_nest::config::NestConfig {
+            nest: fauna_nest::config::NestSection::default(),
+            bridges: None,
+            submission: None,
+            acme: None,
+            email: None,
+        };
+        assert_eq!(resolve_blob_dir(None, &bare), None);
     }
 
     #[test]

@@ -253,12 +253,24 @@ providers:
       - { id: app-key,      type: secret, label_key: provisioning.ovh.app_key,      required: true }
       - { id: app-secret,   type: secret, label_key: provisioning.ovh.app_secret,   required: true }
       - { id: consumer-key, type: secret, label_key: provisioning.ovh.consumer_key, required: true }
+    # A location id is `<project>/<region>` (registry.md § Server offers
+    # follow the location → OVH), so the project needs no select stage of
+    # its own.
     post_verify_select:
-      id:        project-select
-      label_key: provisioning.ovh.project
-      source:    projects
+      id:        location-select
+      label_key: provisioning.ovh.location
+      source:    regions
       required:  true
     pricing_source: null
+    # Flavor *names*, resolved per region and priced from the public order
+    # catalogue. Candidates read off OVH's published lists 2026-10-21: the live
+    # witness run confirms each against a real flavor list and removes any the
+    # list lacks. d2-2 = 1 vCPU / 2 GB / 25 GB (passes the mail RAM gate).
+    curated_offers:
+      - d2-2
+      - d2-4
+      - d2-8
+      - b2-7
 
   linode:
     display_name_key: provisioning.linode.name

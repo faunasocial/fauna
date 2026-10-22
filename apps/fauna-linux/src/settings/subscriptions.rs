@@ -256,15 +256,20 @@ fn redeem_claim(ctx: &Rc<Ctx>) {
 /// Dispatch an unsubscribe for `author_id` (`fauna.subscriptions.unsubscribe`),
 /// then re-read so the list reflects the nest's state. Encrypted mode returns
 /// `Queued` (the row stays until the author commits), so a successful click is
-/// *not* an immediate removal.
-fn unsubscribe(ctx: &Rc<Ctx>, author_id: ActorId) {
+/// *not* an immediate removal. `tier` and `home_nest_url` are the `mine.list`
+/// row's: a creator homed on another nest is left with the subscriber's own
+/// signed intent (`SubscriptionsClient::unsubscribe_across_nests`), `None` is
+/// the plain local leave.
+fn unsubscribe(ctx: &Rc<Ctx>, author_id: ActorId, tier: String, home_nest_url: Option<String>) {
     let nest = ctx.client.nest_rpc().clone();
+    let subscriber_secret = ctx.client.secret_bytes();
     let ctx_render = Rc::clone(ctx);
     spawn_with_snapshot(
         &ctx.rt,
         move || async move {
             let subs = SubscriptionsClient::new(nest);
-            subs.unsubscribe(author_id)
+            let subscriber = fauna_core::identity::ActorKeypair::from_secret(subscriber_secret);
+            subs.unsubscribe_across_nests(author_id, tier, &subscriber, home_nest_url)
                 .await
                 .map(|_| ())
                 .map_err(|e| e.to_string())
@@ -330,7 +335,11 @@ fn build_row(ctx: &Rc<Ctx>, sub: &MineSubscription) -> gtk::Box {
     {
         let ctx = Rc::clone(ctx);
         let author_id = sub.author_id;
-        unsubscribe_btn.connect_clicked(move |_| unsubscribe(&ctx, author_id));
+        let tier = sub.tier.clone();
+        let home_nest_url = sub.home_nest_url.clone();
+        unsubscribe_btn.connect_clicked(move |_| {
+            unsubscribe(&ctx, author_id, tier.clone(), home_nest_url.clone())
+        });
     }
     row.append(&unsubscribe_btn);
 

@@ -11,9 +11,11 @@ use crate::state::SyncServiceState;
 /// "service loop" implied SCM/Windows-Service mode (removed in Task 3.2a).
 pub async fn run_agent(pipe_name: &str, data_dir: Option<&std::path::Path>) -> anyhow::Result<()> {
     // The per-user credential store the capability persists in (sync-agent.md
-    // § Credential model). Env-routed (`FAUNA_E2E_CREDENTIAL_DIR` /
+    // § Credential model), over the agent's unscoped state base — where its
+    // headless `0600` file rests. Env-routed (`FAUNA_E2E_CREDENTIAL_DIR` /
     // `FAUNA_KEYRING_APP`) so e2e harnesses stay off the real keyring.
-    let credentials = std::sync::Arc::new(crate::credentials::production_store());
+    let state_base = SyncPaths::new(data_dir.map(|d| d.to_path_buf()))?.flat_base_dir();
+    let credentials = std::sync::Arc::new(crate::credentials::production_store(state_base));
     run_agent_with_store(pipe_name, data_dir, credentials).await
 }
 
@@ -107,6 +109,10 @@ pub(crate) async fn run_agent_with_store(
         && let Some(actor) = cap.actor_id_array()
     {
         apply_actor_scope(&paths, &actor);
+        // The succession carry (`sync-agent.md` § The per-actor scope follows
+        // the account across a succession), before any engine exists — this
+        // boot completes a carry a crash or a failed rename left half done.
+        carry_predecessor_scope(&paths, &actor, &cap.predecessor_actor_ids());
     }
 
     // Load sync config from the resolved (scoped, on macOS) data-root.
@@ -439,6 +445,295 @@ pub(crate) fn apply_actor_scope(paths: &SyncPaths, actor_id: &[u8; 32]) -> bool 
     }
     paths.set_actor_scope(Some(hex));
     true
+}
+
+/// What [`carry_predecessor_scope`] did — returned for the pins, logged inside.
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ScopeCarry {
+    /// No attested predecessor's scope holds a `config.toml`: nothing to carry.
+    Nothing,
+    /// The successor's scope already holds a `config.toml` — it is past its
+    /// first provision, so the predecessor's state stays where it is.
+    SuccessorBound,
+    /// The carry completed from the predecessor `hop` hops back (0 = nearest),
+    /// moving `moved` entries, `config.toml` included.
+    Carried { hop: usize, moved: usize },
+    /// A rename failed; the carry stopped there with `config.toml` unmoved, so
+    /// the next start or provision re-runs it.
+    Failed,
+}
+
+/// The two scope entries a succession never carries: the retired identity's
+/// replica, and the device-id cache of a derivation the successor never repeats.
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+const SCOPE_CARRY_EXCLUDED: [&str; 2] = [fauna_sync_engine::root::STORE_SUBDIR, "device.db"];
+
+/// SQLite's sidecar suffixes: a sidecar belongs to (and is excluded or moved
+/// with) the DB its name extends.
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+const SQLITE_SIDECARS: [&str; 3] = ["-wal", "-shm", "-journal"];
+
+/// Carry the nearest attested predecessor's per-actor scope into `successor`'s
+/// (`docs/goal/architecture/apps/sync-agent.md` § The per-actor scope follows
+/// the account across a succession): every entry but `account-store/` and
+/// `device.db` moves, one `rename` each, sidecars before their DB and
+/// `config.toml` last — the single decision point, so a crash anywhere leaves a
+/// state the next run of this same idempotent carry completes. The caller runs
+/// it with no engine up. Only `predecessors` (the capability's attested ids,
+/// nearest hop first) are ever read; the source is the nearest whose scope
+/// holds a `config.toml`, one hop, never a merge. A successor already holding a
+/// `config.toml` is past its first provision and carries nothing.
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+pub(crate) fn carry_predecessor_scope(
+    paths: &SyncPaths,
+    successor: &[u8; 32],
+    predecessors: &[[u8; 32]],
+) -> ScopeCarry {
+    use fauna_core::log_redact::{log_hash_prefix, log_path};
+    use fauna_sync_engine::db::actor_state_dir;
+
+    const CONFIG: &str = "config.toml";
+    let flat = paths.flat_base_dir();
+    let Some((hop, source)) = predecessors.iter().enumerate().find_map(|(hop, pred)| {
+        actor_state_dir(&flat, &hex::encode(pred))
+            .ok()
+            .filter(|dir| dir.join(CONFIG).is_file())
+            .map(|dir| (hop, dir))
+    }) else {
+        return ScopeCarry::Nothing;
+    };
+    let successor_log = log_hash_prefix("actor", successor);
+    let Ok(target) = actor_state_dir(&flat, &hex::encode(successor)) else {
+        return ScopeCarry::Nothing;
+    };
+    if target.join(CONFIG).exists() {
+        tracing::warn!(
+            successor = %successor_log,
+            hop,
+            "scope carry skipped: the successor's scope already holds a config; \
+             the predecessor's state stays where it is"
+        );
+        return ScopeCarry::SuccessorBound;
+    }
+
+    let failed = |entry: &str, e: &dyn std::fmt::Display| {
+        tracing::warn!(
+            successor = %successor_log,
+            hop,
+            entry = %log_path(entry),
+            error = %e,
+            "scope carry stopped at a failed move; the next start or provision retries it"
+        );
+        ScopeCarry::Failed
+    };
+    if let Err(e) = std::fs::create_dir_all(&target) {
+        return failed(CONFIG, &e);
+    }
+    let names: Vec<String> = match std::fs::read_dir(&source) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .collect(),
+        Err(e) => return failed(CONFIG, &e),
+    };
+    let sidecar_of = |name: &str| {
+        SQLITE_SIDECARS
+            .iter()
+            .find_map(|s| name.strip_suffix(s))
+            .map(str::to_owned)
+    };
+    let mut entries: Vec<(bool, String)> = names
+        .into_iter()
+        .filter(|n| n != CONFIG)
+        .filter(|n| {
+            let owner = sidecar_of(n).unwrap_or_else(|| n.clone());
+            !SCOPE_CARRY_EXCLUDED.contains(&owner.as_str())
+        })
+        .map(|n| (sidecar_of(&n).is_none(), n))
+        .collect();
+    // Sidecars (`false`) first: a sidecar that arrives before its DB is
+    // recovered the moment the DB arrives; a DB that left its WAL behind
+    // would open without that WAL's transactions.
+    entries.sort();
+    entries.push((true, CONFIG.to_owned()));
+
+    let mut moved = 0;
+    for (is_main, name) in &entries {
+        let dest = target.join(name);
+        // Never overwrite what the successor holds: its own entry of the same
+        // name stays, and so does a sidecar whose DB it already holds.
+        let owner_dest = sidecar_of(name).map(|owner| target.join(owner));
+        if dest.exists() || (!is_main && owner_dest.is_some_and(|d| d.exists())) {
+            tracing::warn!(
+                successor = %successor_log,
+                entry = %log_path(name),
+                "scope carry left an entry behind: the successor's scope already holds it"
+            );
+            continue;
+        }
+        if let Err(e) = std::fs::rename(source.join(name), &dest) {
+            return failed(name, &e);
+        }
+        moved += 1;
+    }
+    tracing::info!(
+        successor = %successor_log,
+        hop,
+        moved,
+        "carried the attested predecessor's per-actor scope into the successor's"
+    );
+    ScopeCarry::Carried { hop, moved }
+}
+
+#[cfg(all(test, any(target_os = "macos", windows, target_os = "linux")))]
+mod carry_tests {
+    use super::{ScopeCarry, carry_predecessor_scope};
+    use crate::config::SyncPaths;
+    use std::path::Path;
+
+    const PRED: [u8; 32] = [0x11; 32];
+    const SUCC: [u8; 32] = [0x22; 32];
+
+    fn scope(root: &Path, actor: &[u8; 32]) -> std::path::PathBuf {
+        root.join(hex::encode(actor))
+    }
+
+    /// A predecessor scope as a device that bound one folder leaves it: the
+    /// binding, the set's engine DB with a WAL sidecar, and the two entries
+    /// that never carry.
+    fn seed_predecessor(root: &Path) -> std::path::PathBuf {
+        let dir = scope(root, &PRED);
+        std::fs::create_dir_all(dir.join("account-store")).unwrap();
+        std::fs::write(dir.join("account-store").join("replica.db"), b"store").unwrap();
+        std::fs::write(dir.join("device.db"), b"device").unwrap();
+        std::fs::write(
+            dir.join("config.toml"),
+            b"[[locations]]\npath = \"/home/u/Docs\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("fsid-local-1.db"), b"db").unwrap();
+        std::fs::write(dir.join("fsid-local-1.db-wal"), b"wal").unwrap();
+        dir
+    }
+
+    fn names(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        v.sort();
+        v
+    }
+
+    /// The carry moves the binding, the engine DB and its sidecar into the
+    /// successor's scope, and leaves exactly `account-store/` and `device.db`
+    /// behind.
+    #[test]
+    fn carry_moves_the_attested_predecessors_scope_except_store_and_device_db() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = SyncPaths::at(tmp.path().to_path_buf());
+        let pred = seed_predecessor(tmp.path());
+
+        let out = carry_predecessor_scope(&paths, &SUCC, &[PRED]);
+
+        assert_eq!(out, ScopeCarry::Carried { hop: 0, moved: 3 });
+        let succ = scope(tmp.path(), &SUCC);
+        assert_eq!(
+            names(&succ),
+            ["config.toml", "fsid-local-1.db", "fsid-local-1.db-wal"]
+        );
+        assert_eq!(
+            std::fs::read(succ.join("fsid-local-1.db-wal")).unwrap(),
+            b"wal"
+        );
+        assert_eq!(names(&pred), ["account-store", "device.db"]);
+        assert_eq!(names(&pred.join("account-store")), ["replica.db"]);
+    }
+
+    /// Isolation: a sibling scope the capability does not attest is never
+    /// read as a predecessor's, however much it looks like one.
+    #[test]
+    fn carry_leaves_an_unattested_scope_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = SyncPaths::at(tmp.path().to_path_buf());
+        let pred = seed_predecessor(tmp.path());
+        let before = names(&pred);
+
+        assert_eq!(
+            carry_predecessor_scope(&paths, &SUCC, &[]),
+            ScopeCarry::Nothing
+        );
+        assert_eq!(
+            carry_predecessor_scope(&paths, &SUCC, &[[0x33; 32]]),
+            ScopeCarry::Nothing
+        );
+        assert_eq!(names(&pred), before);
+        assert!(!scope(tmp.path(), &SUCC).join("config.toml").exists());
+    }
+
+    /// A successor that already bound something on this device is past its
+    /// first provision: the carry is skipped and nothing moves either way.
+    #[test]
+    fn carry_skips_when_the_successor_already_holds_a_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = SyncPaths::at(tmp.path().to_path_buf());
+        let pred = seed_predecessor(tmp.path());
+        let succ = scope(tmp.path(), &SUCC);
+        std::fs::create_dir_all(&succ).unwrap();
+        std::fs::write(succ.join("config.toml"), b"own").unwrap();
+        let before = names(&pred);
+
+        assert_eq!(
+            carry_predecessor_scope(&paths, &SUCC, &[PRED]),
+            ScopeCarry::SuccessorBound
+        );
+        assert_eq!(names(&pred), before);
+        assert_eq!(names(&succ), ["config.toml"]);
+        assert_eq!(std::fs::read(succ.join("config.toml")).unwrap(), b"own");
+    }
+
+    /// The crash rule: a carry interrupted after the DB moved but before
+    /// `config.toml` (the decision point) completes on the next run.
+    #[test]
+    fn a_half_done_carry_completes_on_rerun() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = SyncPaths::at(tmp.path().to_path_buf());
+        let pred = seed_predecessor(tmp.path());
+        let succ = scope(tmp.path(), &SUCC);
+        std::fs::create_dir_all(&succ).unwrap();
+        for f in ["fsid-local-1.db-wal", "fsid-local-1.db"] {
+            std::fs::rename(pred.join(f), succ.join(f)).unwrap();
+        }
+
+        assert_eq!(
+            carry_predecessor_scope(&paths, &SUCC, &[PRED]),
+            ScopeCarry::Carried { hop: 0, moved: 1 }
+        );
+        assert_eq!(
+            names(&succ),
+            ["config.toml", "fsid-local-1.db", "fsid-local-1.db-wal"]
+        );
+        assert_eq!(names(&pred), ["account-store", "device.db"]);
+    }
+
+    /// The source is the nearest hop whose scope holds a config — one hop,
+    /// never a merge: a nearer hop that bound nothing is passed over.
+    #[test]
+    fn carry_takes_the_nearest_hop_that_holds_a_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = SyncPaths::at(tmp.path().to_path_buf());
+        let nearer = [0x44; 32];
+        std::fs::create_dir_all(scope(tmp.path(), &nearer).join("account-store")).unwrap();
+        seed_predecessor(tmp.path());
+
+        assert_eq!(
+            carry_predecessor_scope(&paths, &SUCC, &[nearer, PRED]),
+            ScopeCarry::Carried { hop: 1, moved: 3 }
+        );
+        assert_eq!(names(&scope(tmp.path(), &nearer)), ["account-store"]);
+    }
 }
 
 #[cfg(all(test, any(target_os = "macos", windows, target_os = "linux")))]

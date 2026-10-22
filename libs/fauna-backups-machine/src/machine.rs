@@ -18,8 +18,9 @@ use fauna_protocol::folders::FolderSummary as WireFolderSummary;
 use crate::nest_api::BackupsNestApi;
 use crate::observer::BackupsObserver;
 use crate::snapshots::{
-    BackupFolderRow, BackupOp, BackupsSnapshot, CheckOutcome, PolicyState, PruneCandidate,
-    PrunePreview, RowIntegrity, SnapshotDetail, SnapshotFileRow, SnapshotRow, SnapshotState,
+    BackupFolderRow, BackupOp, BackupsSnapshot, CheckOutcome, KIND_ENTRIES, PolicyState,
+    PruneCandidate, PrunePreview, RowIntegrity, SnapshotDetail, SnapshotFileRow, SnapshotRow,
+    SnapshotState,
 };
 
 /// i18n key for a page-load failure.
@@ -44,6 +45,32 @@ const DETAIL_ERROR_KEY: &str = "backups.error_detail";
 
 fn error_text(key: &str, detail: &str) -> LocalizedText {
     LocalizedText::key_arg(key, "message", detail.to_string())
+}
+
+/// What the selected selector row addresses on the wire: a folder by name, or
+/// a kind entry by its message kind (§ Snapshot-list shape → *Kind entries*).
+/// Every set-addressed verb dispatches on this, so no gesture can send a kind
+/// entry's label key to the nest as a folder name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SetTarget {
+    Folder(String),
+    Kind(String),
+}
+
+impl SetTarget {
+    /// Resolve a selector key against the rows it was picked from. A name no
+    /// row carries (a pick before the first load) is read as a folder — the
+    /// same thing the page did before kind entries existed. Folder rows come
+    /// first, so a folder that happens to share a label key keeps its name.
+    fn resolve(name: &str, folders: &[BackupFolderRow]) -> Self {
+        match folders.iter().find(|row| row.name == name) {
+            Some(BackupFolderRow {
+                message_kind: Some(kind),
+                ..
+            }) => Self::Kind(kind.clone()),
+            _ => Self::Folder(name.to_string()),
+        }
+    }
 }
 
 /// Internal page state. In-memory only; clients read snapshots via the getter.
@@ -274,14 +301,20 @@ impl BackupsMachine {
     ///
     /// Untagged, per the *Create* ruling (a tag is a retention shield).
     pub async fn create_snapshot(&self) {
-        let Some(folder) = self.selected() else {
+        let Some(target) = self.selected() else {
             return;
         };
         if !self.begin_op(BackupOp::Create) {
             return;
         }
-        let device_id = self.device_id.lock().unwrap().clone();
-        let outcome = match self.nest_api.create_snapshot(&folder, device_id).await {
+        let created = match &target {
+            SetTarget::Folder(folder) => {
+                let device_id = self.device_id.lock().unwrap().clone();
+                self.nest_api.create_snapshot(folder, device_id).await
+            }
+            SetTarget::Kind(kind) => self.nest_api.create_kind_snapshot(kind).await,
+        };
+        let outcome = match created {
             Ok(()) => self.load().await,
             Err(e) => Err(error_text(CREATE_ERROR_KEY, e.detail())),
         };
@@ -369,13 +402,13 @@ impl BackupsMachine {
     ///
     /// Never carries a client-chosen policy (§ Architectural rules, rule 5).
     pub async fn prune_preview(&self) {
-        let Some(folder) = self.selected() else {
+        let Some(target) = self.selected() else {
             return;
         };
         if !self.begin_op(BackupOp::Prune) {
             return;
         }
-        let outcome = match self.nest_api.prune_set_policy(&folder, true).await {
+        let outcome = match self.prune(&target, true).await {
             Ok(reply) => {
                 self.state.lock().unwrap().prune_preview = Some(transcribe_preview(&reply));
                 Ok(())
@@ -389,7 +422,7 @@ impl BackupsMachine {
     /// with no `prune_preview` standing is a no-op, which is what makes the
     /// preview-first flow structural rather than a per-app UI convention.
     pub async fn prune_execute(&self) {
-        let Some(folder) = self.selected() else {
+        let Some(target) = self.selected() else {
             return;
         };
         if self.state.lock().unwrap().prune_preview.is_none() {
@@ -398,7 +431,7 @@ impl BackupsMachine {
         if !self.begin_op(BackupOp::Prune) {
             return;
         }
-        let outcome = match self.nest_api.prune_set_policy(&folder, false).await {
+        let outcome = match self.prune(&target, false).await {
             Ok(_) => {
                 self.state.lock().unwrap().prune_preview = None;
                 self.load().await
@@ -422,13 +455,17 @@ impl BackupsMachine {
     /// lands in `check_result` and implicates its rows, and `error-message`
     /// stays clear (§ Architectural rules, rule 6).
     pub async fn check(&self) {
-        let Some(folder) = self.selected() else {
+        let Some(target) = self.selected() else {
             return;
         };
         if !self.begin_op(BackupOp::Check) {
             return;
         }
-        let outcome = match self.nest_api.check(&folder, false).await {
+        let checked = match &target {
+            SetTarget::Folder(folder) => self.nest_api.check(folder, false).await,
+            SetTarget::Kind(kind) => self.nest_api.check_kind(kind).await,
+        };
+        let outcome = match checked {
             Ok(reply) => {
                 let outcome = transcribe_check(&reply);
                 let mut state = self.state.lock().unwrap();
@@ -450,8 +487,22 @@ impl BackupsMachine {
     /// `SnapshotsClient::get`"). Single-flight like every other gesture: opening
     /// a detail while a create is running would paint a list read against a
     /// pre-create population.
+    ///
+    /// A kind entry's row has no `snapshot_files`, so its detail is composed
+    /// without a round trip: no files, and the kind the app names in its
+    /// pointer at the Restore section (§ Snapshot-list shape → *Kind entries*).
     pub async fn open_snapshot(&self, snapshot_id: i64) {
+        let target = self.selected();
         if !self.begin_op(BackupOp::Detail) {
+            return;
+        }
+        if let Some(SetTarget::Kind(kind)) = target {
+            self.state.lock().unwrap().detail = Some(SnapshotDetail {
+                snapshot_id,
+                message_kind: Some(kind),
+                ..Default::default()
+            });
+            self.finish_op(None).await;
             return;
         }
         let outcome = match self.nest_api.get_snapshot(snapshot_id).await {
@@ -474,8 +525,22 @@ impl BackupsMachine {
 // ── Internals ───────────────────────────────────────────────────
 
 impl BackupsMachine {
-    fn selected(&self) -> Option<String> {
-        self.state.lock().unwrap().selected_folder.clone()
+    fn selected(&self) -> Option<SetTarget> {
+        let state = self.state.lock().unwrap();
+        let name = state.selected_folder.as_deref()?;
+        Some(SetTarget::resolve(name, &state.folders))
+    }
+
+    /// The prune verb on whichever kind of set is selected.
+    async fn prune(
+        &self,
+        target: &SetTarget,
+        dry_run: bool,
+    ) -> Result<SnapshotPruneSetPolicyReply, crate::nest_api::BackupsApiError> {
+        match target {
+            SetTarget::Folder(folder) => self.nest_api.prune_set_policy(folder, dry_run).await,
+            SetTarget::Kind(kind) => self.nest_api.prune_kind_policy(kind, dry_run).await,
+        }
     }
 
     /// Claim the single-flight slot. `false` ⇒ another op is in flight and the
@@ -584,23 +649,27 @@ impl BackupsMachine {
                 state.prune_preview = None;
                 state.detail = None;
             }
+            let selected = state
+                .selected_folder
+                .clone()
+                .map(|name| (name.clone(), SetTarget::resolve(&name, &folders)));
             state.folders = folders;
-            state.selected_folder.clone()
+            selected
         };
 
-        let Some(folder) = selected else {
-            // No sets at all — nothing to list, and `last_backed_up` correctly
-            // renders "never".
+        let Some((folder, target)) = selected else {
+            // Nothing selected — unreachable once the kind entries are listed,
+            // kept so an empty selector can never index into nothing.
             let mut state = self.state.lock().unwrap();
             state.snapshots.clear();
             return Ok(());
         };
 
-        let wire_rows = self
-            .nest_api
-            .list_snapshots(&folder)
-            .await
-            .map_err(|e| error_text(REFRESH_ERROR_KEY, e.detail()))?;
+        let wire_rows = match &target {
+            SetTarget::Folder(name) => self.nest_api.list_snapshots(name).await,
+            SetTarget::Kind(kind) => self.nest_api.list_kind_snapshots(kind).await,
+        }
+        .map_err(|e| error_text(REFRESH_ERROR_KEY, e.detail()))?;
 
         let mut state = self.state.lock().unwrap();
         if state.selected_folder.as_deref() != Some(folder.as_str()) {
@@ -611,6 +680,17 @@ impl BackupsMachine {
             return Ok(());
         }
         state.snapshots = wire_rows.iter().map(transcribe_row).collect();
+        // A kind entry has no `cached_*` columns to fill its selector row, so
+        // the row is filled from the list just read — the same derivation
+        // `last_backed_up` uses.
+        if let SetTarget::Kind(_) = &target {
+            let count = i64::try_from(state.snapshots.len()).unwrap_or(i64::MAX);
+            let last = state.last_backed_up();
+            if let Some(row) = state.folders.iter_mut().find(|row| row.name == folder) {
+                row.snapshot_count = count;
+                row.last_snapshot_at = last;
+            }
+        }
         // Re-apply this session's check verdict to the freshly-read rows, so a
         // create or delete does not silently reset every row to `Unknown`.
         if let Some(outcome) = state.check_result.clone() {
@@ -652,6 +732,7 @@ fn transcribe_detail(snapshot_id: i64, reply: &SnapshotGetReply) -> SnapshotDeta
                 manifest_hash: hex::encode(f.manifest_hash.as_ref()),
             })
             .collect(),
+        message_kind: None,
     }
 }
 
@@ -659,6 +740,12 @@ fn transcribe_detail(snapshot_id: i64, reply: &SnapshotGetReply) -> SnapshotDeta
 ///
 /// The filter and the ordering live here rather than on the seam so a fake can
 /// feed the machine an unfiltered, unordered list and prove both rulings.
+///
+/// The kind entries follow, in [`KIND_ENTRIES`] order — composed here from the
+/// kind table, never from `fauna.folders.list`, whose reserved `__<kind>` rows
+/// stay filtered (§ Snapshot-list shape → *Kind entries*). Their counts start
+/// empty; the selected one's are filled from its own list read
+/// ([`BackupsMachine::load`]).
 fn transcribe_folders(wire: Vec<WireFolderSummary>) -> Vec<BackupFolderRow> {
     let mut rows: Vec<BackupFolderRow> = wire
         .into_iter()
@@ -667,9 +754,19 @@ fn transcribe_folders(wire: Vec<WireFolderSummary>) -> Vec<BackupFolderRow> {
             name: fs.name,
             snapshot_count: fs.cached_snapshot_count,
             last_snapshot_at: fs.cached_last_snapshot_at,
+            message_kind: None,
         })
         .collect();
     rows.sort_by(|a, b| a.name.cmp(&b.name));
+    rows.extend(
+        KIND_ENTRIES
+            .iter()
+            .map(|(kind, label_key)| BackupFolderRow {
+                name: label_key.to_string(),
+                message_kind: Some(kind.to_string()),
+                ..Default::default()
+            }),
+    );
     rows
 }
 

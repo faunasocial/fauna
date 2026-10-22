@@ -27,6 +27,9 @@ pub mod registrar;
 /// The DNS-cleanup plan for retiring a box (`behavior/nest-retirement.md`
 /// § DNS cleanup) — the inverse of `orchestrator::build_records`.
 pub mod retire_dns;
+/// The SSH door's admin-device half: the door key and its `~/.ssh` install
+/// (`installers/vps.md` § The SSH door → *The key*).
+pub mod ssh_door;
 /// Fauna's marker-scoped `TXT` slots, shared by the publish-time converge and
 /// the retire cleanup (`behavior/dns-management.md` § Fauna-managed).
 pub mod txt_slots;

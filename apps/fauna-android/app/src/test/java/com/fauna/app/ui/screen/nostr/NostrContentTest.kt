@@ -67,6 +67,7 @@ class NostrContentTest {
             boolSetting("inbound_to_feed", inboundToFeed),
         ),
         supportsFollows = true,
+        supportsFollowRequests = false,
         linkModes = null,
         error = null,
     )
@@ -80,6 +81,7 @@ class NostrContentTest {
         mode = null,
         settings = emptyList(),
         supportsFollows = true,
+        supportsFollowRequests = false,
         linkModes = null,
         error = null,
     )

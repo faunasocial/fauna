@@ -71,6 +71,9 @@ pub(crate) trait PlaybackResolver {
 pub(crate) struct LivePlayback {
     pub manager: Arc<LinuxFeedManager>,
     pub client: Rc<FaunaClient>,
+    /// The post's [`blob_home`](fauna_feed::PostSummary::blob_home), handed to
+    /// the shared plane unchanged — `None` for a post this nest holds.
+    pub home: Option<fauna_client::ForeignHome>,
 }
 
 /// The off-main-thread half of a resolve: everything that awaits the network.
@@ -78,6 +81,13 @@ enum Fetched {
     Reader {
         path: String,
         reader: RangedNestReader,
+    },
+    /// A foreign-homed post's clip, fetched whole from its home over the
+    /// shared post-blob plane (anonymous, pinned, capped, content-verified) —
+    /// the ranged reader dials only this nest.
+    Home {
+        path: String,
+        bytes: Vec<u8>,
     },
     Sealed {
         hash: String,
@@ -94,14 +104,27 @@ impl PlaybackResolver for LivePlayback {
         // The string the WS login minted on, so the reader's pinned client
         // keys the same SPKI pin the content API's does.
         let nest_url = self.client.node_url().to_string();
+        let blobs = self.client.post_blob_hosts();
+        let home = self.home.clone();
         rt.spawn(async move {
             let fetched = match manager.playback_source(&block).await {
-                PlaybackSource::Url { url } => {
-                    match RangedNestReader::open(&nest_url, &url).await {
+                PlaybackSource::Url { url } => match (&home, &block) {
+                    // A blob video of a post homed elsewhere: the bytes rest on
+                    // its home, which this nest's reader cannot dial.
+                    (Some(home), RenderBlock::Video { hash, .. }) => {
+                        match blobs.get(Some(home), hash).await {
+                            Ok(bytes) => Fetched::Home {
+                                path: url,
+                                bytes: bytes.to_vec(),
+                            },
+                            Err(e) => Fetched::Failed(format!("home video {hash}: {e}")),
+                        }
+                    }
+                    _ => match RangedNestReader::open(&nest_url, &url).await {
                         Ok(reader) => Fetched::Reader { path: url, reader },
                         Err(e) => Fetched::Failed(format!("ranged reader open {url}: {e}")),
-                    }
-                }
+                    },
+                },
                 PlaybackSource::Sealed { hash } => Fetched::Sealed { hash },
                 PlaybackSource::Unplayable { reason } => Fetched::Failed(reason),
             };
@@ -109,15 +132,21 @@ impl PlaybackResolver for LivePlayback {
         });
         let manager = Arc::clone(&self.manager);
         let client = Rc::clone(&self.client);
+        let home = self.home.clone();
         glib::spawn_future_local(async move {
             let resolved = match fetched_rx.recv().await {
                 Ok(Fetched::Reader { path, reader }) => {
                     let stream = RangedNestStream::new(Arc::new(reader), client.runtime_handle());
                     Ok((path, stream.upcast()))
                 }
+                Ok(Fetched::Home { path, bytes }) => {
+                    let stream =
+                        gio::MemoryInputStream::from_bytes(&glib::Bytes::from_owned(bytes));
+                    Ok((path, stream.upcast()))
+                }
                 Ok(Fetched::Sealed { hash }) => {
                     let fetched = client
-                        .fetch_blob_bytes(&hash)
+                        .fetch_post_blob_bytes(&hash, home)
                         .recv()
                         .await
                         .unwrap_or_else(|e| Err(ApiError::Transport(e.to_string())));
@@ -219,6 +248,7 @@ fn video_of(block: &RenderBlock) -> &str {
 pub(crate) fn build_post_video(
     post_id: &str,
     block: RenderBlock,
+    home: Option<fauna_client::ForeignHome>,
     manager: &Arc<LinuxFeedManager>,
     client: &Rc<FaunaClient>,
 ) -> gtk::Box {
@@ -228,6 +258,7 @@ pub(crate) fn build_post_video(
         Rc::new(LivePlayback {
             manager: Arc::clone(manager),
             client: Rc::clone(client),
+            home,
         }),
     )
 }

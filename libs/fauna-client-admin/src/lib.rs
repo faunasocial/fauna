@@ -23,42 +23,68 @@
 //! **Surface covered today:** the user-administration cluster (C1 users +
 //! evictions), the C2 tiers / invite-codes / invite-requests groups, and the
 //! services toggle — i.e. everything the `admin-users`, `admin-settings`
-//! (tiers), and `admin-services` pages need (`admin.md`). The remaining admin
-//! clusters — C3 stats / audit / ops, C5 wireguard / folders, C4 pairings,
-//! and `admins.*` — are not yet wrapped here; add them when those pages migrate
-//! off their HTTP twins (the protocol payloads already exist in
-//! `fauna_protocol::admin`).
+//! (tiers), and `admin-services` pages need (`admin.md`) — plus, since, the C3
+//! stats and audit-log reads, the logs ring and `admins.*`. The remaining admin
+//! clusters — C3 ops, C5 wireguard / folders, C4 pairings — are not yet wrapped
+//! here; add them when those pages migrate off their HTTP twins (the protocol
+//! payloads already exist in `fauna_protocol::admin`).
 
 // The dashboard's one card set — the fold and the five-read snapshot
 // (`admin.md` § 1. Dashboard → *The card set*).
 mod dashboard;
 pub use dashboard::{AdminDashboardReads, AdminDashboardSnapshot, StatCard, admin_dashboard_cards};
 
+// The admin audit log section on `admin-logs` — row text and the chain check
+// (`admin.md` § The admin audit log on `admin-logs`).
+mod audit;
+pub use audit::{
+    AUDIT_PAGE_SIZE, AuditIntegrity, AuditLog, AuditLogPage, AuditLogRow, AuditLogView,
+    audit_log_page, audit_log_view,
+};
+
 use fauna_core::localized::LocalizedText;
 use fauna_protocol::ByteBuf;
 use fauna_protocol::RpcRequester;
 use fauna_protocol::admin::{
     AdminAdminAddRequest, AdminAdminRemoveRequest, AdminAdminsListReply, AdminAdminsListRequest,
-    AdminEvictionsListReply, AdminEvictionsListRequest, AdminInviteCodeCreateReply,
-    AdminInviteCodeCreateRequest, AdminInviteCodeDeleteRequest, AdminInviteCodesListReply,
-    AdminInviteCodesListRequest, AdminInviteRequestApproveReply, AdminInviteRequestApproveRequest,
-    AdminInviteRequestDenyRequest, AdminInviteRequestsListReply, AdminInviteRequestsListRequest,
-    AdminLogsReply, AdminLogsRequest, AdminMembershipTierClearRequest,
-    AdminMembershipTierSetRequest, AdminMembershipTiersListReply, AdminMembershipTiersListRequest,
-    AdminOkReply, AdminPendingActionReply, AdminServiceUpdateRequest, AdminServicesListReply,
-    AdminServicesListRequest, AdminStatsReply, AdminStatsRequest, AdminStatusReply,
-    AdminStatusRequest, AdminTierCreateRequest, AdminTierUpdateRequest, AdminTiersListReply,
-    AdminTiersListRequest, AdminUserCancelEvictionRequest, AdminUserClearHandleRequest,
-    AdminUserCreateRequest, AdminUserDeleteRequest, AdminUserEvictRequest, AdminUserGetReply,
-    AdminUserGetRequest, AdminUserSuspendRequest, AdminUserUpdateRequest, AdminUsersListReply,
-    AdminUsersListRequest,
+    AdminAuditIntegrityReply, AdminAuditIntegrityRequest, AdminAuditListReply,
+    AdminAuditListRequest, AdminEvictionsListReply, AdminEvictionsListRequest,
+    AdminInviteCodeCreateReply, AdminInviteCodeCreateRequest, AdminInviteCodeDeleteRequest,
+    AdminInviteCodesListReply, AdminInviteCodesListRequest, AdminInviteRequestApproveReply,
+    AdminInviteRequestApproveRequest, AdminInviteRequestDenyRequest, AdminInviteRequestsListReply,
+    AdminInviteRequestsListRequest, AdminLogsReply, AdminLogsRequest,
+    AdminMembershipTierClearRequest, AdminMembershipTierSetRequest, AdminMembershipTiersListReply,
+    AdminMembershipTiersListRequest, AdminOkReply, AdminPendingActionReply,
+    AdminServiceUpdateRequest, AdminServicesListReply, AdminServicesListRequest, AdminStatsReply,
+    AdminStatsRequest, AdminStatusReply, AdminStatusRequest, AdminTierCreateRequest,
+    AdminTierDeleteRequest, AdminTierUpdateRequest, AdminTiersListReply, AdminTiersListRequest,
+    AdminUserCancelEvictionRequest, AdminUserClearHandleRequest, AdminUserCreateRequest,
+    AdminUserDeleteRequest, AdminUserEvictRequest, AdminUserGetReply, AdminUserGetRequest,
+    AdminUserSuspendRequest, AdminUserUpdateRequest, AdminUsersListReply, AdminUsersListRequest,
 };
 // Node-policy singletons (the admin's deployment-wide choices) live in a sibling
 // protocol module; the kinds are still `fauna.admin.set_*` (Admin-class).
 use fauna_protocol::age::AgeBand;
 use fauna_protocol::node_policy::{
-    SetAgeVerificationRequiredReply, SetAgeVerificationRequiredRequest, SetRegistrationModeReply,
-    SetRegistrationModeRequest, SetServingPortReply, SetServingPortRequest,
+    SetAgeVerificationRequiredReply, SetAgeVerificationRequiredRequest, SetCorsOriginsReply,
+    SetCorsOriginsRequest, SetMaxStorageBytesReply, SetMaxStorageBytesRequest,
+    SetRegistrationModeReply, SetRegistrationModeRequest, SetServingPortReply,
+    SetServingPortRequest, SetSubhandlesReply, SetSubhandlesRequest,
+};
+// The nest-wide rules document and the transport policy ride their own protocol
+// modules; the kinds are Admin-class, so the call surface is this crate's.
+use fauna_core::content_policy::ContentPolicyDocument;
+use fauna_protocol::admin::{
+    AdminClusterStatusReply, AdminClusterStatusRequest, AdminGcReply, AdminGcRequest,
+    AdminWorkerStatusReply, AdminWorkerStatusRequest,
+};
+use fauna_protocol::content_policy::{
+    AdminContentPolicyGetReply, AdminContentPolicyGetRequest, AdminContentPolicySetReply,
+    AdminContentPolicySetRequest,
+};
+use fauna_protocol::transport::{
+    GetTransportPolicyRequest, KIND_GET_TRANSPORT_POLICY, KIND_PUT_TRANSPORT_POLICY,
+    PutTransportPolicyReply, PutTransportPolicyRequest, TransportPolicyView,
 };
 // The declared region rides its own protocol module (it serves two planes —
 // `region-blocking.md` owns the shared plumbing), but the kinds are
@@ -77,6 +103,16 @@ pub use fauna_protocol::web_app_origin::{
 use fauna_protocol::web_app_origin::{
     AdminWebAppOriginGetRequest, AdminWebAppOriginSetRequest, CENTRAL_APP_ORIGIN,
 };
+// The update channel: the wire carries the channel as its id string (the
+// protocol crate sits below `fauna-provisioning`), the enum and the
+// never-downgrade decision are `fauna-provisioning`'s, and the call surface and
+// the one render fold are this crate's (`nest/update-channel.md` § The UI).
+pub use fauna_protocol::update_channel::AdminUpdateChannelGetReply as UpdateChannelStatus;
+use fauna_protocol::update_channel::{
+    AdminUpdateChannelGetReply, AdminUpdateChannelGetRequest, AdminUpdateChannelSetReply,
+    AdminUpdateChannelSetRequest,
+};
+pub use fauna_provisioning::update_channel::UpdateChannel;
 // The nest-held OAuth issuer key set is deployment crypto material whose
 // controls `authorization-server.md` § The issuer places "beside
 // `rotate_srs_secret` and `force_rotate_dkim` in the admin shell" — the
@@ -93,8 +129,8 @@ use fauna_protocol::oauth_issuer::{
 // (mirrors `fauna-client-bridges`).
 pub use fauna_protocol::admin;
 pub use fauna_protocol::admin::{
-    AdminEviction, AdminInviteCode, AdminInviteRequest, AdminLogEntry, AdminLogLevel,
-    AdminServiceFlags, AdminServiceUpdateReply, AdminTier, AdminUser,
+    AdminAuditEntry, AdminEviction, AdminInviteCode, AdminInviteRequest, AdminLogEntry,
+    AdminLogLevel, AdminServiceFlags, AdminServiceUpdateReply, AdminTier, AdminUser,
 };
 // The registration posture is an enum, not a string, everywhere above the wire:
 // re-exported so a client picks a variant rather than spelling `"invite_required"`
@@ -377,6 +413,24 @@ impl<R: RpcRequester> AdminClient<R> {
         Ok(())
     }
 
+    /// `fauna.admin.tiers.delete` — remove a tier nobody is on. A missing tier
+    /// is `fauna.admin.not_found`; one a member, an invite code or a membership
+    /// link still names — or the nest's default `free` — is
+    /// `fauna.admin.conflict`. The `{ ok: true }` reply is discarded.
+    pub async fn tiers_delete(&self, name: impl Into<String>) -> Result<(), R::Error> {
+        let _: AdminOkReply = self
+            .nest
+            .request(
+                "fauna.admin.tiers.delete",
+                AdminTierDeleteRequest {
+                    name: name.into(),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
     // ── C2 — membership tiers (monetization.md § Pillar 4) ───────────────────
 
     /// `fauna.admin.membership_tiers.list` — every membership designation the
@@ -628,9 +682,9 @@ impl<R: RpcRequester> AdminClient<R> {
     /// `fauna.admin.set_serving_port` — set the deployment-wide client-facing API
     /// serving port (the nest's own HTTPS listener: the WS-RPC transport + the
     /// served SPA; `nest/common.md` § Serving ports). One of two written members
-    /// of the node-policy `set_*` family (with `set_registration_mode` below);
-    /// the rest (cors / max-storage) are read back on `fauna.setup.status` but
-    /// not yet written from any client. Admin-class; applies on the next nest
+    /// of the node-policy `set_*` family (with `set_registration_mode`,
+    /// `set_subhandles`, `set_max_storage_bytes` and `set_cors_origins` below).
+    /// Admin-class; applies on the next nest
     /// (re)start (the nest cannot hot-rebind its own listener), but the chosen
     /// value is persisted to the `serving_port` singleton and read back on
     /// `fauna.setup.status` (`SetupStatusReply.serving_port`) immediately. The
@@ -715,6 +769,160 @@ impl<R: RpcRequester> AdminClient<R> {
             )
             .await?;
         Ok(())
+    }
+
+    /// `fauna.admin.set_subhandles` — flip whether the nest advertises the
+    /// subhandle address forms (`handle@domain` / `@handle.domain`). Admin-class;
+    /// read back on `fauna.setup.status` (`SetupStatusReply.subhandles`). The
+    /// `{ ok: true }` reply is discarded.
+    pub async fn set_subhandles(&self, enabled: bool) -> Result<(), R::Error> {
+        let _: SetSubhandlesReply = self
+            .nest
+            .request(
+                "fauna.admin.set_subhandles",
+                SetSubhandlesRequest {
+                    enabled,
+                    extra: Default::default(),
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// `fauna.admin.set_max_storage_bytes` — set (`Some`) or clear (`None`, no
+    /// limit) the deployment-wide storage cap. Admin-class; read back on
+    /// `fauna.setup.status` (`SetupStatusReply.max_storage_bytes`). The
+    /// `{ ok: true }` reply is discarded.
+    pub async fn set_max_storage_bytes(&self, max_bytes: Option<u64>) -> Result<(), R::Error> {
+        let _: SetMaxStorageBytesReply = self
+            .nest
+            .request(
+                "fauna.admin.set_max_storage_bytes",
+                SetMaxStorageBytesRequest {
+                    max_bytes,
+                    extra: Default::default(),
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// `fauna.admin.set_cors_origins` — replace the whole list of browser
+    /// origins the nest's client-facing HTTP API trusts for credentialed
+    /// cross-origin requests (an empty list trusts only the built-in default).
+    /// Admin-class; read back on `fauna.setup.status`
+    /// (`SetupStatusReply.cors_origins`). The `{ ok: true }` reply is discarded.
+    pub async fn set_cors_origins(&self, origins: Vec<String>) -> Result<(), R::Error> {
+        let _: SetCorsOriginsReply = self
+            .nest
+            .request(
+                "fauna.admin.set_cors_origins",
+                SetCorsOriginsRequest {
+                    origins,
+                    extra: Default::default(),
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// `fauna.admin.gc` — sweep blobs no live snapshot or record references
+    /// (`backup-restore.md` § 9). `grace_period_secs` `None` takes the nest's
+    /// 30-minute default; `dry_run` reports what would go and removes nothing.
+    pub async fn gc(
+        &self,
+        grace_period_secs: Option<i64>,
+        dry_run: bool,
+    ) -> Result<AdminGcReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.admin.gc",
+                AdminGcRequest {
+                    grace_period_secs,
+                    dry_run,
+                    extra: Default::default(),
+                },
+            )
+            .await
+    }
+
+    /// `fauna.admin.worker.status` — whether a nest-link worker is connected,
+    /// its authorized key and its storage figures. Parameterless pure read.
+    pub async fn worker_status(&self) -> Result<AdminWorkerStatusReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.admin.worker.status",
+                AdminWorkerStatusRequest::default(),
+            )
+            .await
+    }
+
+    /// `fauna.admin.cluster.status` — the blob-storage breakdown (total, local
+    /// and S3 blobs and bytes). Parameterless pure read.
+    pub async fn cluster_status(&self) -> Result<AdminClusterStatusReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.admin.cluster.status",
+                AdminClusterStatusRequest::default(),
+            )
+            .await
+    }
+
+    /// `fauna.transport.get_policy` — the resolved transport/abuse policy the
+    /// TLS accept loop enforces (each field the override or the catalog default).
+    pub async fn transport_policy(&self) -> Result<TransportPolicyView, R::Error> {
+        self.nest
+            .request(KIND_GET_TRANSPORT_POLICY, GetTransportPolicyRequest {})
+            .await
+    }
+
+    /// `fauna.transport.put_policy` — a full PUT: each `Some` sets that
+    /// override, each `None` returns the field to the catalog default. The
+    /// `{ ok: true }` reply is discarded.
+    pub async fn set_transport_policy(
+        &self,
+        max_conns_per_ip: Option<u32>,
+    ) -> Result<(), R::Error> {
+        let _: PutTransportPolicyReply = self
+            .nest
+            .request(
+                KIND_PUT_TRANSPORT_POLICY,
+                PutTransportPolicyRequest {
+                    max_conns_per_ip,
+                    extra: Default::default(),
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// `fauna.admin.content_policy.get` — this nest's rules as last accepted
+    /// (`policy` is absent on a fresh install).
+    pub async fn content_policy(&self) -> Result<AdminContentPolicyGetReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.admin.content_policy.get",
+                AdminContentPolicyGetRequest::default(),
+            )
+            .await
+    }
+
+    /// `fauna.admin.content_policy.set` — replace the nest's whole rules
+    /// document (an empty document withdraws every rule). A refused document
+    /// comes back as `reply.defect`, the shared validator's sentence.
+    pub async fn set_content_policy(
+        &self,
+        document: ContentPolicyDocument,
+    ) -> Result<AdminContentPolicySetReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.admin.content_policy.set",
+                AdminContentPolicySetRequest {
+                    document,
+                    extra: Default::default(),
+                },
+            )
+            .await
     }
 
     /// `fauna.admin.request_host_restart` — the admin's "restart now" affordance
@@ -958,6 +1166,49 @@ impl<R: RpcRequester> AdminClient<R> {
             .await
     }
 
+    // ── The update channel — which builds this box's updater follows ─────────
+
+    /// `fauna.admin.update_channel.get` — the channel in force, the running
+    /// version and the channel head's (`nest/update-channel.md` § The channel
+    /// as nest state → *What the nest reports*).
+    ///
+    /// `Ok(None)` is a nest that **predates the choice** (unknown-kind, the
+    /// [`Self::web_app_origin`] shape); [`admin_update_channel_view`] words it.
+    pub async fn update_channel(&self) -> Result<Option<AdminUpdateChannelGetReply>, R::Error>
+    where
+        R::Error: fauna_protocol::RpcErrorClass,
+    {
+        match self
+            .nest
+            .request(
+                "fauna.admin.update_channel.get",
+                AdminUpdateChannelGetRequest::default(),
+            )
+            .await
+        {
+            Ok(reply) => Ok(Some(reply)),
+            Err(e) if is_unknown_kind(&e) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// `fauna.admin.update_channel.set` — a whole-value replace of the admin's
+    /// choice. Admin-class, `OnlineOnly` nest-side. The reply carries no
+    /// projection, so a caller re-reads [`Self::update_channel`] to repaint.
+    pub async fn set_update_channel(&self, channel: UpdateChannel) -> Result<(), R::Error> {
+        let _: AdminUpdateChannelSetReply = self
+            .nest
+            .request(
+                "fauna.admin.update_channel.set",
+                AdminUpdateChannelSetRequest {
+                    channel: channel.id().to_string(),
+                    extra: Default::default(),
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
     // ── Admins (the roster) ──────────────────────────────────────────────────
 
     /// `fauna.admin.admins.list` — every actor holding the admin role
@@ -1110,6 +1361,41 @@ impl<R: RpcRequester> AdminClient<R> {
     pub async fn logs(&self) -> Result<AdminLogsReply, R::Error> {
         self.nest
             .request("fauna.admin.logs", AdminLogsRequest::default())
+            .await
+    }
+
+    // ── C3 — the admin audit log ──────────────────────────────────────────────
+
+    /// `fauna.admin.audit.list` — one page of the hash-chained record of admin
+    /// actions, newest first. `before_id` pages back from the oldest entry
+    /// already shown; `limit` is clamped nest-side to `1..=1000` (default
+    /// 100). Replay-safe pure read. Folded by [`audit_log_view`].
+    pub async fn audit_list(
+        &self,
+        limit: Option<i64>,
+        before_id: Option<i64>,
+    ) -> Result<AdminAuditListReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.admin.audit.list",
+                AdminAuditListRequest {
+                    limit,
+                    before_id,
+                    ..Default::default()
+                },
+            )
+            .await
+    }
+
+    /// `fauna.admin.audit.integrity` — the chain's head and length, which
+    /// [`audit_log_view`] checks the fetched entries against. Replay-safe pure
+    /// read.
+    pub async fn audit_integrity(&self) -> Result<AdminAuditIntegrityReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.admin.audit.integrity",
+                AdminAuditIntegrityRequest::default(),
+            )
             .await
     }
 
@@ -1661,6 +1947,19 @@ pub fn tier_create_request(
     })
 }
 
+/// The sentence a `fauna.admin.tiers.delete` failure shows inside
+/// `admin.settings_page.delete_tier_error`'s `{message}`, when it is the nest's
+/// in-use refusal (`admin.md` § 3 → *Removing a tier*): on this kind
+/// `fauna.admin.conflict` means exactly that a member, an invite code or a
+/// membership link still names the tier, or that it is `free` — a meaning the
+/// shared conflict family cannot word. `None` for any other failure, which
+/// keeps the error's own text.
+pub fn tier_delete_refusal<E: fauna_protocol::RpcErrorClass>(e: &E) -> Option<&'static str> {
+    e.as_rpc_error()
+        .is_some_and(|r| r.code == "fauna.admin.conflict")
+        .then_some(fauna_i18n::strings::admin::settings_page::DELETE_TIER_ERROR_IN_USE)
+}
+
 // ── The web-app origin: the wire→render decisions, made once ─────────────────
 
 /// `true` when a transport error is the nest's typed "I don't know this kind"
@@ -1773,6 +2072,178 @@ pub fn admin_web_app_origin_view(
         scope,
         can_set: true,
         central_label,
+    }
+}
+
+// ── The update channel: the wire→render decisions, made once ─────────────────
+
+/// One `admin-nest-update-channel-{stable,test,dev}-radio`: the channel and the
+/// wizard's own label and description (`UpdateChannel::label_key` /
+/// `description_key`), so the compat line the wizard shows while the product
+/// owes no compatibility shows here too and goes at 0.2.0 with no app change.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct UpdateChannelOption {
+    pub channel: UpdateChannel,
+    pub label: LocalizedText,
+    pub description: LocalizedText,
+}
+
+/// Everything the `admin-nest-update-channel-*` section paints, derived from
+/// one [`AdminClient::update_channel`] read (`nest/update-channel.md` § The UI;
+/// placement `admin.md` § N Nest → *Update channel*).
+///
+/// Shared rather than per-app (priority #1): the status runs the updater's own
+/// never-downgrade [`fauna_provisioning::update_channel::decide`], so what the
+/// admin is told the box will do is what the updater does — no app computes a
+/// channel sentence.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AdminUpdateChannelView {
+    /// The radio to pre-select. `None` on a pinned box (it follows no channel),
+    /// on a nest the image does not run (no channel applies), on a nest that
+    /// predates the choice, and on a channel this build cannot name.
+    pub selected: Option<UpdateChannel>,
+    /// `admin-nest-update-channel-status` — what the box follows now and when a
+    /// change takes effect, with the running version.
+    pub status: LocalizedText,
+    /// Whether the radios and `-save-button` are live: `false` on a nest the
+    /// image does not run (the nest refuses `set` there), on a nest that
+    /// predates the choice and on a channel this build cannot name (read-only
+    /// rather than overwrite a choice it does not understand). A pinned box can
+    /// be set — choosing a channel is how it starts following one.
+    pub can_set: bool,
+    /// The three radios, in [`UpdateChannel::ALL`] order.
+    pub options: Vec<UpdateChannelOption>,
+}
+
+/// The conservative state — nothing selected, nothing settable — **not** a
+/// derived `Default`, which would paint a blank status line.
+impl Default for AdminUpdateChannelView {
+    fn default() -> Self {
+        admin_update_channel_view(None)
+    }
+}
+
+/// The "Following X" sentence key. Its timing wording ("within about a
+/// minute" / "within the hour") states the channel's
+/// [`UpdateChannel::registry_check_interval`]; the
+/// `the_following_sentence_states_the_check_interval` test pins the two
+/// together, so a changed interval reds until the strings follow.
+fn update_channel_following_key(channel: UpdateChannel) -> &'static str {
+    match channel {
+        UpdateChannel::Stable => "admin.nest_page.update_channel_status_following_stable",
+        UpdateChannel::Test => "admin.nest_page.update_channel_status_following_test",
+        UpdateChannel::Dev => "admin.nest_page.update_channel_status_following_dev",
+    }
+}
+
+/// The Hold sentence key (`update-channel.md` § The decision): the channel is
+/// followed, but the box stays on its build until the channel reaches it.
+fn update_channel_hold_key(channel: UpdateChannel) -> &'static str {
+    match channel {
+        UpdateChannel::Stable => "admin.nest_page.update_channel_status_hold_stable",
+        UpdateChannel::Test => "admin.nest_page.update_channel_status_hold_test",
+        UpdateChannel::Dev => "admin.nest_page.update_channel_status_hold_dev",
+    }
+}
+
+/// Fold the read into what a screen renders. `None` is a nest that predates
+/// the choice ([`AdminClient::update_channel`]'s `Ok(None)`).
+pub fn admin_update_channel_view(
+    reply: Option<&AdminUpdateChannelGetReply>,
+) -> AdminUpdateChannelView {
+    use fauna_provisioning::update_channel::{ImageIdentity, UpdateDecision, decide};
+    let options = UpdateChannel::ALL
+        .into_iter()
+        .map(|channel| UpdateChannelOption {
+            channel,
+            label: LocalizedText::key(channel.label_key()),
+            description: LocalizedText::key(channel.description_key()),
+        })
+        .collect();
+    let Some(reply) = reply else {
+        return AdminUpdateChannelView {
+            selected: None,
+            status: LocalizedText::key("admin.nest_page.update_channel_status_predates"),
+            can_set: false,
+            options,
+        };
+    };
+    let version = reply.running_version.clone();
+    // A nest the image does not run (a Windows service, a macOS daemon, a
+    // Linux package): no updater holds the socket, so no channel applies and
+    // the nest refuses `set` — read-only, like a nest that predates the choice
+    // (`nest/update-channel.md` § The channel as nest state → *Where the
+    // channel applies*).
+    if !reply.enactable {
+        return AdminUpdateChannelView {
+            selected: None,
+            status: LocalizedText::key_arg(
+                "admin.nest_page.update_channel_status_not_from_image",
+                "version",
+                version,
+            ),
+            can_set: false,
+            options,
+        };
+    }
+    let Some(id) = reply.channel.as_deref() else {
+        return AdminUpdateChannelView {
+            selected: None,
+            status: LocalizedText::key_arg(
+                "admin.nest_page.update_channel_status_pinned",
+                "version",
+                version,
+            ),
+            can_set: true,
+            options,
+        };
+    };
+    let Some(channel) = UpdateChannel::from_id(id) else {
+        return AdminUpdateChannelView {
+            selected: None,
+            status: LocalizedText::key_arg(
+                "admin.nest_page.update_channel_status_unknown",
+                "channel",
+                id,
+            ),
+            can_set: false,
+            options,
+        };
+    };
+    // The decision on versions alone: the reply carries no digests, so a
+    // shared build reads as Apply — "following", which it is. A head the nest
+    // could not resolve (or that does not parse) says nothing about holding,
+    // so the box is following.
+    let head = ImageIdentity::parse_version_label(reply.channel_head_version.as_deref());
+    let status = match head {
+        Some(head) => {
+            let running = ImageIdentity {
+                version: ImageIdentity::parse_version_label(Some(&reply.running_version)),
+                digests: Vec::new(),
+            };
+            let candidate = ImageIdentity {
+                version: Some(head),
+                digests: Vec::new(),
+            };
+            match decide(&running, &candidate) {
+                UpdateDecision::Hold { running, head } => LocalizedText::key_args(
+                    update_channel_hold_key(channel),
+                    [("running", running.to_string()), ("head", head.to_string())],
+                ),
+                UpdateDecision::Current | UpdateDecision::Apply => LocalizedText::key_arg(
+                    update_channel_following_key(channel),
+                    "version",
+                    version,
+                ),
+            }
+        }
+        None => LocalizedText::key_arg(update_channel_following_key(channel), "version", version),
+    };
+    AdminUpdateChannelView {
+        selected: Some(channel),
+        status,
+        can_set: true,
+        options,
     }
 }
 
@@ -2233,6 +2704,12 @@ mod tests {
             "fauna.admin.web_app_origin.set" => fauna_protocol::encode_canonical(
                 &AdminWebAppOriginGetReply::project(WebAppOrigin::Central, Some("example.org")),
             ),
+            "fauna.admin.update_channel.set" => {
+                fauna_protocol::encode_canonical(&AdminUpdateChannelSetReply {
+                    ok: true,
+                    extra: Default::default(),
+                })
+            }
             "fauna.admin.invite_codes.create" => {
                 fauna_protocol::encode_canonical(&AdminInviteCodeCreateReply {
                     code: "MINTED1234".into(),
@@ -2275,6 +2752,22 @@ mod tests {
                 total: 0,
                 ..Default::default()
             }),
+            "fauna.admin.audit.list" => fauna_protocol::encode_canonical(&AdminAuditListReply {
+                entries: vec![AdminAuditEntry {
+                    id: 5,
+                    action: "user.update".into(),
+                    entry_hash_version: 2,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            "fauna.admin.audit.integrity" => {
+                fauna_protocol::encode_canonical(&AdminAuditIntegrityReply {
+                    head_id: 5,
+                    chain_length: 5,
+                    ..Default::default()
+                })
+            }
             "fauna.admin.logs" => fauna_protocol::encode_canonical(&AdminLogsReply {
                 entries: vec![admin::AdminLogEntry {
                     timestamp_ms: 42,
@@ -2360,7 +2853,7 @@ mod tests {
             }
             // Every other kind wrapped here decodes an `AdminOkReply`
             // (update / evict / cancel_eviction / clear_handle / tiers
-            // create+update / invite_codes.delete / invite_requests.deny).
+            // create+update+delete / invite_codes.delete / invite_requests.deny).
             _ => fauna_protocol::encode_canonical(&AdminOkReply {
                 ok: true,
                 ..Default::default()
@@ -2866,6 +3359,20 @@ mod tests {
     }
 
     #[test]
+    fn tiers_delete_composes_the_removal_kind() {
+        let rec = Arc::new(RecordingRequester::new(reply));
+        let client = AdminClient::new(rec.clone());
+
+        block_on(client.tiers_delete("mistake")).expect("infallible");
+
+        let (kind, payload) = rec.recorded();
+        assert_eq!(kind, "fauna.admin.tiers.delete");
+        let req: AdminTierDeleteRequest =
+            fauna_protocol::decode_strict(&payload).expect("payload decodes as the request type");
+        assert_eq!(req.name, "mistake");
+    }
+
+    #[test]
     fn admins_remove_composes_the_revoke_kind() {
         let rec = Arc::new(RecordingRequester::new(reply));
         let client = AdminClient::new(rec.clone());
@@ -3185,6 +3692,36 @@ mod tests {
         // The request is parameterless (the client filters severity in its own
         // widget); it must still decode as the request type.
         let _req: AdminLogsRequest =
+            fauna_protocol::decode_strict(&payload).expect("payload decodes as the request type");
+    }
+
+    #[test]
+    fn audit_list_composes_kind_and_paging_params() {
+        let rec = Arc::new(RecordingRequester::new(reply));
+        let client = AdminClient::new(rec.clone());
+
+        let reply = block_on(client.audit_list(Some(50), Some(9))).expect("infallible");
+        assert_eq!(reply.entries.len(), 1);
+        assert_eq!(reply.entries[0].action, "user.update");
+
+        let (kind, payload) = rec.recorded();
+        assert_eq!(kind, "fauna.admin.audit.list");
+        let req: AdminAuditListRequest =
+            fauna_protocol::decode_strict(&payload).expect("payload decodes as the request type");
+        assert_eq!((req.limit, req.before_id), (Some(50), Some(9)));
+    }
+
+    #[test]
+    fn audit_integrity_composes_kind_and_returns_head() {
+        let rec = Arc::new(RecordingRequester::new(reply));
+        let client = AdminClient::new(rec.clone());
+
+        let reply = block_on(client.audit_integrity()).expect("infallible");
+        assert_eq!((reply.head_id, reply.chain_length), (5, 5));
+
+        let (kind, payload) = rec.recorded();
+        assert_eq!(kind, "fauna.admin.audit.integrity");
+        let _req: AdminAuditIntegrityRequest =
             fauna_protocol::decode_strict(&payload).expect("payload decodes as the request type");
     }
 
@@ -3620,6 +4157,26 @@ mod tests {
         }
     }
 
+    /// `tiers.delete`'s conflict is the in-use refusal and gets its sentence;
+    /// any other failure keeps the error's own text.
+    #[test]
+    fn a_tier_delete_conflict_is_worded_as_in_use() {
+        use fauna_client_testkit::RejectingRequester;
+        use fauna_protocol::RpcError;
+        let refuse = |code: &str| {
+            let r = RejectingRequester::new().reject(
+                "fauna.admin.tiers.delete",
+                RpcError::new(code, "error.unexpected"),
+            );
+            block_on(AdminClient::new(r).tiers_delete("family")).expect_err("refused")
+        };
+        assert_eq!(
+            tier_delete_refusal(&refuse("fauna.admin.conflict")),
+            Some(fauna_i18n::strings::admin::settings_page::DELETE_TIER_ERROR_IN_USE)
+        );
+        assert_eq!(tier_delete_refusal(&refuse("fauna.admin.not_found")), None);
+    }
+
     #[test]
     fn the_read_maps_unknown_kind_to_predates_and_keeps_other_refusals() {
         use fauna_client_testkit::RejectingRequester;
@@ -3656,6 +4213,190 @@ mod tests {
         assert_eq!(kind, "fauna.admin.web_app_origin.set");
         let sent: AdminWebAppOriginSetRequest = fauna_protocol::decode_strict(&bytes).unwrap();
         assert_eq!(sent.mode, WebAppOrigin::Central);
+    }
+
+    // ── The update channel ────────────────────────────────────────────────────
+
+    fn channel_reply(
+        channel: Option<&str>,
+        running: &str,
+        head: Option<&str>,
+    ) -> AdminUpdateChannelGetReply {
+        AdminUpdateChannelGetReply {
+            channel: channel.map(str::to_string),
+            running_version: running.into(),
+            channel_head_version: head.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    fn arg<'a>(text: &'a LocalizedText, name: &str) -> Option<&'a str> {
+        text.args.get(name).map(String::as_str)
+    }
+
+    /// A nest the image does not run reports `enactable: false`: no radio,
+    /// nothing settable, and the sentence that says it is updated the way it
+    /// was installed — whatever `channel` says beside it.
+    #[test]
+    fn a_nest_the_image_does_not_run_reads_as_not_from_image_and_unsettable() {
+        for channel in [None, Some("stable")] {
+            let reply = AdminUpdateChannelGetReply {
+                enactable: false,
+                ..channel_reply(channel, "0.1.4", None)
+            };
+            let view = admin_update_channel_view(Some(&reply));
+            assert_eq!(view.selected, None);
+            assert!(!view.can_set);
+            assert_eq!(
+                view.status.key,
+                "admin.nest_page.update_channel_status_not_from_image"
+            );
+            assert_eq!(arg(&view.status, "version"), Some("0.1.4"));
+        }
+    }
+
+    /// A followed channel whose head is at least the running build: selected,
+    /// settable, the Following sentence with the running version.
+    #[test]
+    fn a_channel_at_or_ahead_of_the_box_reads_as_following() {
+        for head in [Some("0.1.5"), Some("0.1.4"), None, Some("not-a-version")] {
+            let view = admin_update_channel_view(Some(&channel_reply(Some("test"), "0.1.4", head)));
+            assert_eq!(view.selected, Some(UpdateChannel::Test), "{head:?}");
+            assert!(view.can_set);
+            assert_eq!(
+                view.status.key, "admin.nest_page.update_channel_status_following_test",
+                "{head:?}"
+            );
+            assert_eq!(arg(&view.status, "version"), Some("0.1.4"));
+        }
+    }
+
+    /// A channel behind the running build — the move toward Stable while Stable
+    /// trails — is the Hold sentence with both versions: the updater's own
+    /// never-downgrade rule, run here.
+    #[test]
+    fn a_channel_behind_the_box_reads_as_hold_with_both_versions() {
+        let view =
+            admin_update_channel_view(Some(&channel_reply(Some("stable"), "0.3.1", Some("0.2.0"))));
+        assert_eq!(view.selected, Some(UpdateChannel::Stable));
+        assert!(view.can_set);
+        assert_eq!(
+            view.status.key,
+            "admin.nest_page.update_channel_status_hold_stable"
+        );
+        assert_eq!(arg(&view.status, "running"), Some("0.3.1"));
+        assert_eq!(arg(&view.status, "head"), Some("0.2.0"));
+    }
+
+    /// A pinned box follows no channel: nothing selected, but settable —
+    /// choosing a channel is how it starts following one.
+    #[test]
+    fn a_pinned_box_selects_nothing_and_can_be_set() {
+        let view = admin_update_channel_view(Some(&channel_reply(None, "0.1.4", None)));
+        assert_eq!(view.selected, None);
+        assert!(view.can_set);
+        assert_eq!(
+            view.status.key,
+            "admin.nest_page.update_channel_status_pinned"
+        );
+        assert_eq!(arg(&view.status, "version"), Some("0.1.4"));
+    }
+
+    /// A nest predating the choice, and a channel this build cannot name:
+    /// read-only, nothing selected.
+    #[test]
+    fn a_predating_nest_and_an_unknown_channel_are_read_only() {
+        let predates = admin_update_channel_view(None);
+        assert_eq!(predates.selected, None);
+        assert!(!predates.can_set);
+        assert_eq!(
+            predates.status.key,
+            "admin.nest_page.update_channel_status_predates"
+        );
+        assert_eq!(AdminUpdateChannelView::default(), predates);
+
+        let unknown =
+            admin_update_channel_view(Some(&channel_reply(Some("nightly"), "0.1.4", None)));
+        assert_eq!(unknown.selected, None);
+        assert!(!unknown.can_set);
+        assert_eq!(
+            unknown.status.key,
+            "admin.nest_page.update_channel_status_unknown"
+        );
+        assert_eq!(arg(&unknown.status, "channel"), Some("nightly"));
+    }
+
+    /// The radios carry the wizard's own label and description keys, in the
+    /// wizard's order, whatever the read says.
+    #[test]
+    fn the_radios_reuse_the_wizards_strings() {
+        for reply in [None, Some(channel_reply(Some("dev"), "0.1.4", None))] {
+            let view = admin_update_channel_view(reply.as_ref());
+            let channels: Vec<_> = view.options.iter().map(|o| o.channel).collect();
+            assert_eq!(channels, UpdateChannel::ALL.to_vec());
+            for o in &view.options {
+                assert_eq!(o.label.key, o.channel.label_key());
+                assert_eq!(o.description.key, o.channel.description_key());
+            }
+        }
+    }
+
+    /// The Following sentences state each channel's check interval in words
+    /// ("within about a minute" on Dev and Test, "within the hour" on Stable);
+    /// a changed interval reds here until `en.yaml`'s
+    /// `update_channel_status_following_*` strings follow it.
+    #[test]
+    fn the_following_sentence_states_the_check_interval() {
+        use std::time::Duration;
+        for channel in UpdateChannel::ALL {
+            let (key, want) = (
+                update_channel_following_key(channel),
+                match channel {
+                    UpdateChannel::Stable => Duration::from_secs(60 * 60),
+                    UpdateChannel::Test | UpdateChannel::Dev => Duration::from_secs(60),
+                },
+            );
+            assert_eq!(
+                channel.registry_check_interval(),
+                want,
+                "{key}'s wording assumes this interval"
+            );
+        }
+    }
+
+    #[test]
+    fn the_channel_read_maps_unknown_kind_to_predates_and_keeps_other_refusals() {
+        use fauna_client_testkit::RejectingRequester;
+        use fauna_protocol::RpcError;
+        let old = RejectingRequester::new().reject(
+            "fauna.admin.update_channel.get",
+            RpcError::new("fauna.protocol.unknown_kind", "error.protocol.unknown_kind"),
+        );
+        assert_eq!(block_on(AdminClient::new(old).update_channel()), Ok(None));
+
+        let refused = RejectingRequester::new().reject(
+            "fauna.admin.update_channel.get",
+            RpcError::new("fauna.auth.forbidden", "error.auth.forbidden"),
+        );
+        assert!(block_on(AdminClient::new(refused).update_channel()).is_err());
+
+        let reply = channel_reply(Some("dev"), "0.1.4", Some("0.1.4"));
+        let current = RejectingRequester::new().reply("fauna.admin.update_channel.get", &reply);
+        assert_eq!(
+            block_on(AdminClient::new(current).update_channel()),
+            Ok(Some(reply))
+        );
+    }
+
+    #[test]
+    fn the_channel_set_sends_the_channel_id() {
+        let rec = Arc::new(RecordingRequester::new(reply));
+        let client = AdminClient::new(rec.clone());
+        block_on(client.set_update_channel(UpdateChannel::Dev)).expect("infallible");
+        let (kind, bytes) = rec.recorded();
+        assert_eq!(kind, "fauna.admin.update_channel.set");
+        let sent: AdminUpdateChannelSetRequest = fauna_protocol::decode_strict(&bytes).unwrap();
+        assert_eq!(sent.channel, "dev");
     }
 
     // ── The declared region ───────────────────────────────────────────────────

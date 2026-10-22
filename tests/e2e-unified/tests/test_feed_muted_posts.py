@@ -31,11 +31,11 @@ import pytest
 
 pytestmark = pytest.mark.tier_3
 
-# Distinctive enough that no other module's post can collide with it — the
-# actor is session-scoped, so a term left muted would follow the suite around
-# (the test removes it again in `finally`, but the term is inert regardless).
-MUTED_TERM = "zzspoiler"
-MUTED_BODY = f"the finale twist {MUTED_TERM} everyone dies at the end"
+# The muted term is per run (`_unique`, below): the actor is session-scoped and
+# keeps its posts, so in a run naming two apps the second would otherwise see
+# the first app's matching post collapse beside its own (`muted=2`). The test
+# removes the term again in `finally` for the modules that run after it.
+MUTED_TERM_PREFIX = "zzspoiler"
 CLEAN_BODY = "sourdough starter finally doubled overnight"
 
 
@@ -75,6 +75,8 @@ def test_muted_post_collapses_behind_reveal(logged_in_app):
     the reveal button un-collapses it for the session (the mute itself stays)."""
     app = logged_in_app
     d = app.driver
+    muted_term = _unique(MUTED_TERM_PREFIX).replace("-", "")
+    muted_body = f"the finale twist {muted_term} everyone dies at the end"
 
     try:
         # ── 1. Seed two real posts (one matching, one clean) BEFORE the mute,
@@ -83,7 +85,7 @@ def test_muted_post_collapses_behind_reveal(logged_in_app):
         d.set_state({"nav": {"stack": [{"view": "feed"}]}})
         clean_body = f"{CLEAN_BODY} {_unique('loaf')}"
         app.feed.create_post(text=clean_body)
-        app.feed.create_post(text=MUTED_BODY)
+        app.feed.create_post(text=muted_body)
         assert app.feed.wait_post_count(2) >= 2, (
             f"both seeded posts should render pre-mute; error={app.error_text()!r}"
         )
@@ -94,8 +96,8 @@ def test_muted_post_collapses_behind_reveal(logged_in_app):
         # ── 2. Mute the term through the real Settings UI (the mutation under
         # test goes through the client — e2e point 8) ──────────────────────
         app.muted_words.navigate()
-        app.muted_words.add(MUTED_TERM)
-        assert app.muted_words.wait_for_word(MUTED_TERM), (
+        app.muted_words.add(muted_term)
+        assert app.muted_words.wait_for_word(muted_term), (
             f"muted term did not persist; words={app.muted_words.words()!r}"
         )
 
@@ -115,7 +117,7 @@ def test_muted_post_collapses_behind_reveal(logged_in_app):
         assert any(clean_body in (t or "") for t in texts), (
             f"the non-matching post must stay visible; texts={texts!r}"
         )
-        assert not any(MUTED_TERM in (t or "") for t in texts), (
+        assert not any(muted_term in (t or "") for t in texts), (
             f"the collapsed post must not leak its body; texts={texts!r}"
         )
 
@@ -126,7 +128,7 @@ def test_muted_post_collapses_behind_reveal(logged_in_app):
             "the placeholder should be gone after reveal"
         )
         revealed = [app.feed.post_text(i) for i in range(app.feed.post_count())]
-        assert any(MUTED_TERM in (t or "") for t in revealed), (
+        assert any(muted_term in (t or "") for t in revealed), (
             f"reveal should show the muted body; texts={revealed!r}"
         )
         app.muted_words.navigate()
@@ -149,6 +151,8 @@ def test_muted_post_collapses_behind_reveal(logged_in_app):
 @pytest.mark.tui
 @pytest.mark.windows
 @pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
 @pytest.mark.feature("muted-words")
 def test_a_word_inside_a_longer_word_collapses_and_removing_it_brings_the_post_back(
     logged_in_app,

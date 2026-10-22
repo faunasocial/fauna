@@ -112,6 +112,21 @@ impl RailBackend for SmtpBackend {
         ))
     }
 
+    async fn message_scan_result(
+        &self,
+        nest_message_id: Vec<u8>,
+    ) -> Result<Option<Vec<fauna_core::localized::LocalizedText>>, String> {
+        self.sink.message_scan_result(nest_message_id).await
+    }
+
+    async fn scan_result_visible(&self) -> Result<bool, String> {
+        self.sink.scan_result_visible().await
+    }
+
+    async fn account_alias_labels(&self) -> Result<Vec<crate::backend::AliasLabelRow>, String> {
+        self.sink.account_alias_labels().await
+    }
+
     async fn resolve_address(&self, raw: &str) -> ResolveResult {
         // Any well-formed user@host resolves syntactically; real MX check deferred.
         if raw.contains('@') && !raw.starts_with('@') && !raw.ends_with('@') {
@@ -537,6 +552,9 @@ pub fn ingest_inbound_record(
             // can stamp it as the doc's secondary identity — the spelling the
             // MDA's `SEARCH` coverage asks in (`content-index.md` § Where the
             // index is built → the 2026-08-10 carrier ruling).
+            // The delivery stamps ride beside it too: the "Delivered to" tag
+            // resolves from them once the alias rows are read
+            // (`mail-aliases.md` § Label), and the snapshot keeps no raw bytes.
             manager.ingest_inbound_identified(
                 msg,
                 Some(rec.message_id.as_slice()),
@@ -544,7 +562,9 @@ pub fn ingest_inbound_record(
                     mailbox: rec.mailbox,
                     uid: rec.uid,
                     has_seen_flag: rec.has_seen_flag,
+                    warmup_hold: rec.warmup_hold,
                 }),
+                fauna_mail::aliases::delivered::delivery_stamps(&rec.rfc5322),
             )?;
             Ok(true)
         }
@@ -738,6 +758,7 @@ fn inbound_record_to_message(
             attachments,
             badges: MessageBadges::default(),
             legal_takedown_ref: None,
+            admin_block_reason: None,
             // Not on the account data plane — see the rail note on `SendOutcome`.
             plane_ref: None,
         },

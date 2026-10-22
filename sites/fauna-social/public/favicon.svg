@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Fauna's one brand mark: the beaver head (replaced the owl 2026-08-04,
+       user direction; the owl had replaced the drawn fox 2026-08-03). This
+       file is the SOURCE for the platform app icons
+       (macOS
+       AppIcon.icns, Windows AppIcon.ico + MSIX logos) and is what the site
+       serves as favicon and header mark. Palette matches the site's critter
+       illustrations (components/critters/Beaver.astro). Keep every shape
+       within circle / ellipse / paths of M L H V C Q Z —
+       tests/scripts/test_svg_flat_render.py pins that contract for the
+       rasterizer that derives the app icons. -->
+  <circle cx="6.8" cy="7.8" r="3" fill="#7a5340" />
+  <circle cx="25.2" cy="7.8" r="3" fill="#7a5340" />
+  <circle cx="16" cy="17.5" r="12" fill="#7a5340" />
+  <circle cx="6.8" cy="7.8" r="1.5" fill="#4f3527" />
+  <circle cx="25.2" cy="7.8" r="1.5" fill="#4f3527" />
+  <ellipse cx="16" cy="22.5" rx="7" ry="5.4" fill="#a5825f" />
+  <circle cx="11.4" cy="14.4" r="1.8" fill="#2b2a24" />
+  <circle cx="20.6" cy="14.4" r="1.8" fill="#2b2a24" />
+  <ellipse cx="16" cy="19.4" rx="2.5" ry="1.9" fill="#2b2a24" />
+  <path d="M13.5 22.4 L15.7 22.4 L15.7 26.6 Q15.7 27.4 14.9 27.4 L14.3 27.4 Q13.5 27.4 13.5 26.6 Z" fill="#fffdf5" />
+  <path d="M16.3 22.4 L18.5 22.4 L18.5 26.6 Q18.5 27.4 17.7 27.4 L17.1 27.4 Q16.3 27.4 16.3 26.6 Z" fill="#fffdf5" />
+</svg>

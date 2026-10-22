@@ -1,10 +1,10 @@
 """tier_4 (live-remote, OPT-IN, NON-DESTRUCTIVE): bootstrap a claim-fresh
-deployed nest (example.com) to a serving production box — claimed by the fleet's
+deployed nest to a serving production box — claimed by the fleet's
 live admin identity, its Let's Encrypt cert served, its mail ports up — through
 the linux app UI and release-artifact surfaces only.
 
 Why this exists (user ruling 2026-09-26: *"use the dedicated e2e tests against
-example.com for that (or add a new such test if needed)"*): a genesis-fresh box
+[the live nest] for that (or add a new such test if needed)"*): a genesis-fresh box
 boots UNCLAIMED on the self-signed floor cert with its mail bridges parked at
 "await bridge approval", so strict TLS fails and the release pipeline's serving
 gate (health + the TLS mail ports) cannot pass. Nothing
@@ -49,7 +49,7 @@ carve-out — required on every non-destructive ``live_box`` test):
     all, and none must be added.
 
 Preconditions (env):
-  FAUNA_LIVE_NEST_URL       e.g. https://example.com — or the run's own box on a
+  FAUNA_LIVE_NEST_URL       e.g. https://example.net — or the run's own box on a
                             `--nest live:URL` run (``live_box_door.live_box_url``)
   FAUNA_LIVE_SECRET_HEX     the fleet admin's ed25519 32-byte seed hex — an
                             OVERRIDE: by default the seed is resolved per box
@@ -62,7 +62,7 @@ Preconditions (env):
                             (``--nest live`` / ``FAUNA_E2E_LIVE=1``) is what
                             selects it.
 Needed only for the step that consumes it (failed with a named reason there):
-  FAUNA_LIVE_HANDLE         the handle to CLAIM under, e.g. test@example.com — an
+  FAUNA_LIVE_HANDLE         the handle to CLAIM under, e.g. test@example.net — an
                             unclaimed box only; claiming bakes it in as the
                             admin's real handle and its suffix as the domain, so
                             it is never a probe. On a claimed box the handle is

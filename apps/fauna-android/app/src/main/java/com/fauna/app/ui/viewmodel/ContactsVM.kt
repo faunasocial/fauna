@@ -70,6 +70,10 @@ class ContactsVM @Inject constructor(
      *  lands (rule (c)). */
     val wardContactRequests = api.wardAsks.contactRequests
 
+    /** Whether every knock row carries `knock-guardian-pending` — the ward's
+     *  own policy has contact approval on ([com.fauna.app.core.WardAsks]). */
+    val knocksAwaitGuardian = api.wardAsks.knocksAwaitGuardian
+
     /** What the knock / ask put on `error-message` — the guardian refusal stays
      *  a real error there (rule (b)); `null` clears it. */
     val knockError = MutableStateFlow<String?>(null)

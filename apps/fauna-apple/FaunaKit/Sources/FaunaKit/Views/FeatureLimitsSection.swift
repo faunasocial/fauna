@@ -18,9 +18,15 @@ import SwiftUI
 /// `update_features` / tui's `feature_limits_elements` field-for-field).
 public struct FeatureLimitsSection: View {
     let rows: [FfiFeatureRow]
+    /// The self host of the shared `feature-policy-editor`: each row gains the
+    /// user's own authored document in words and an edit button
+    /// (`feature-limits-own-summary` / `-own-edit-button`), and the editor opens
+    /// under the row it is over. nil paints the read-only rows alone.
+    let host: FeatureAuthoringHost?
 
-    public init(rows: [FfiFeatureRow]) {
+    public init(rows: [FfiFeatureRow], host: FeatureAuthoringHost? = nil) {
         self.rows = rows
+        self.host = host
     }
 
     /// A `hidden` row means this nest build does not carry the feature at all
@@ -72,6 +78,24 @@ public struct FeatureLimitsSection: View {
                     .accessibilityIdentifier(Ids.featureLimitsQuota)
                     .automationValue(Ids.featureLimitsQuota, text: { ValueFormat.cellValueText(cell) })
                     .automationScope(Ids.featureLimitsQuota, index: cellIndex)
+            }
+
+            // The user's own authored document and its editor (self host).
+            if let host, let own = host.row(for: row.feature) {
+                HStack(alignment: .center, spacing: 8) {
+                    automationText(Ids.featureLimitsOwnSummary, renderLocalizedText(own.summary))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 8)
+                    Button(L.features.ownEdit) { Task { await host.open(row.feature) } }
+                        .accessibilityIdentifier(Ids.featureLimitsOwnEditButton)
+                        .automationActivate(Ids.featureLimitsOwnEditButton) {
+                            Task { await host.open(row.feature) }
+                        }
+                }
+                if host.openFeature == row.feature {
+                    FeaturePolicyEditorView(host: host)
+                }
             }
         }
         .padding(.vertical, 4)

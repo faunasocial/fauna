@@ -715,6 +715,32 @@ fn a_ratified_removed_field_never_comes_back() {
     );
 }
 
+/// A revival is the LIST's invariant: `struct_revivals` carries it (always
+/// refused by `main`) and `diff_struct_breaks` (window-softened) does not.
+#[test]
+fn a_struct_revival_belongs_to_the_revivals_half_not_the_window_softened_breaks() {
+    let allow = ratified(&[("Foo.note", Transition::Removed)]);
+    let (base, head) = (parse(""), parse(BASE));
+    let revivals = struct_revivals(&head, &allow);
+    assert!(
+        revivals.len() == 1 && revivals[0].message.contains("revives wire field `note`"),
+        "{revivals:?}"
+    );
+    assert!(diff_struct_breaks(&base, &head, &allow).is_empty());
+}
+
+#[test]
+fn parse_ratified_breaks_lenient_skips_bad_lines_and_keeps_good_ones() {
+    let text = "rsut Foo.note removed 2026-09-24 typo'd gate\n\
+                rust Foo.note removed 2026-09-24 well-formed\n\
+                rust Foo.id 2026-09-24 no transition\n";
+    let (entries, skipped) = parse_ratified_breaks_lenient(text);
+    assert_eq!(entries, ratified(&[("Foo.note", Transition::Removed)]));
+    assert_eq!(skipped.len(), 2, "{skipped:?}");
+    assert!(skipped[0].contains("line 1"), "{skipped:?}");
+    assert!(parse_ratified_breaks(text).is_err());
+}
+
 #[test]
 fn ratified_break_is_excused_and_nothing_else_is() {
     let head = r#"

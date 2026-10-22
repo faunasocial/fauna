@@ -118,7 +118,8 @@ def domained_claim_stack():
     pebble_name = "pebble"  # must match the pebble directory-cert SAN + the URL
     clamd_name = f"fauna-dmclaim-clamd-{os.getpid()}"
     rspamd_name = f"fauna-dmclaim-rspamd-{os.getpid()}"
-    (api_port, router_port, pebble_host_port, p25, p465, p587, p993) = find_free_ports(7)
+    (api_port, pebble_host_port, p25, p465, p587, p993) = find_free_ports(6)
+    router_port = api_port
     nest_name = f"fauna-dmclaim-nest-{api_port}"
     mail_ports = {25: p25, 465: p465, 587: p587, 993: p993}
 
@@ -159,7 +160,7 @@ def domained_claim_stack():
 
         start_container_with_ports(
             nest_name,
-            {3000: api_port, 443: router_port, **mail_ports},
+            {443: api_port, **mail_ports},
             env={
                 # NO FAUNA_DOMAIN — the box boots domainless; the CLAIM (not an
                 # env var, not an add-domain call) introduces the domain.

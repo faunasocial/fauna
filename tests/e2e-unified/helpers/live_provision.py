@@ -21,8 +21,8 @@ import requests
 #: The box→cloud-project map and the per-project token files live in
 #: ``scripts/_cloud_project.py``, shared with the fleet's cloud scripts, so the
 #: live suite and the firewall gate can never disagree about which token a box
-#: takes (``deployment-threat-model.md`` § Concern 2, path 5). Never print or
-#: log a token's value.
+#: takes for which purpose (``deployment-threat-model.md`` § Concern 2, path 5).
+#: Never print or log a token's value.
 def _load_cloud_project():
     import importlib.util
     from pathlib import Path
@@ -51,21 +51,39 @@ def live_target_host() -> str | None:
     return None
 
 
-def hetzner_token(host: str | None = None) -> str:
-    """The live suite's Cloud R/W token for ``host`` (default
-    :func:`live_target_host`): ``HETZNER_API_TOKEN`` when set and non-blank,
-    else the box's project token file — ``cloud_project.token_for`` — else
-    ``""``, an honest empty string the gate turns into a skip, never an error.
+def _token_host(host: str | None, purpose: str) -> str | None:
+    """The name ``purpose``'s project is resolved for: ``host`` when given, else
+    :func:`live_target_host` — save that a run naming only the zone its
+    throwaway boxes go UNDER (``FAUNA_E2E_ZONE``) resolves its *cloud* token for
+    a box below that zone, never for the zone's apex: under ``fauna.build`` the
+    apex is the acceptance box, and a throwaway box must never be made with
+    its token."""
+    if host is not None:
+        return host
+    target = live_target_host()
+    zone = os.environ.get("FAUNA_E2E_ZONE", "").strip()
+    if purpose == cloud_project.CLOUD and zone and target == zone:
+        return f"e2e-box.{cloud_project.normalize_host(zone)}"
+    return target
+
+
+def hetzner_token(host: str | None = None, purpose: str = "cloud") -> str:
+    """The live suite's Cloud R/W token for ``host`` (default: the run's
+    target, :func:`_token_host`) and ``purpose`` — ``"cloud"`` for the box's
+    server and firewall, ``"dns"`` for the zone its records go in:
+    ``HETZNER_API_TOKEN`` when set and non-blank, else that purpose's project
+    token file — ``cloud_project.token_for`` — else ``""``, an honest empty
+    string the gate turns into a skip, never an error.
 
     tier_1 proofs: ``tests/test_live_token_resolution.py``,
     ``tests/test_cloud_project.py``.
     """
-    return cloud_project.token_for(host if host is not None else live_target_host())
+    return cloud_project.token_for(_token_host(host, purpose), purpose=purpose)
 
 
-def hetzner_token_hint(host: str | None = None) -> str:
+def hetzner_token_hint(host: str | None = None, purpose: str = "cloud") -> str:
     """Where :func:`hetzner_token` looks, for a skip message."""
-    return cloud_project.where_to_put(host if host is not None else live_target_host())
+    return cloud_project.where_to_put(_token_host(host, purpose), purpose=purpose)
 
 
 # Hetzner curated offer + region. cx23 = 2 vCPU / 4 GB (the entry curated_offer;
@@ -269,6 +287,7 @@ def skip_unless_fresh_box_reach_app(driver, *, surface: str) -> None:
 
 # ── Driving the shared provisioning path via the onboarding bridge ──────────
 def drive_provisioning(app, box, token: str, *,
+                       dns_token: str,
                        server_type: str = SERVER_TYPE,
                        location: str = LOCATION,
                        labels: list[list[str]] | None = None,
@@ -278,15 +297,20 @@ def drive_provisioning(app, box, token: str, *,
     real token and NO fake-cloud override, so ``fauna-provisioning`` hits real
     ``api.hetzner.cloud``. Injects the verified VPS config, runs real
     ``verify_dns`` (lists the token's zones), then fires ``start_provisioning``
-    (fire-and-forget; poll with :func:`await_provisioning`)."""
+    (fire-and-forget; poll with :func:`await_provisioning`).
+
+    Two tokens, as the wizard's two credential forms take them: ``dns_token``
+    (the zone's project) for the DNS stage, ``token`` (the box's cloud project)
+    for the server — :func:`hetzner_token`'s two purposes
+    (``deployment-threat-model.md`` § Concern 2, path 5)."""
     drv = app.driver
     # Identity + handle: set_current_handle's domain part becomes the box's FQDN.
     drv.call_machine_method("seed_identity", json.dumps(box.identity_secret_hex))
     drv.call_machine_method("set_current_handle", json.dumps(box.handle))
-    # DNS stage: Hetzner, single token, REAL verify_dns (lists the token's zones,
-    # sets the zone id the orchestrator publishes A/MX/SPF/DMARC into).
+    # DNS stage: Hetzner, the zone's token, REAL verify_dns (lists the token's
+    # zones, sets the zone id the orchestrator publishes A/MX/SPF/DMARC into).
     drv.call_machine_method("select_dns_provider", json.dumps("hetzner"))
-    drv.call_machine_method("set_dns_cred", json.dumps(["api-token", token]))
+    drv.call_machine_method("set_dns_cred", json.dumps(["api-token", dns_token]))
     drv.call_machine_method("verify_dns")  # async, driven to completion by the bridge
     # VPS stage: inject a verified Hetzner config (the real create_server still
     # runs during provisioning). server_types must contain the selected id —

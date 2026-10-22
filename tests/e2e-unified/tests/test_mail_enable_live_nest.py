@@ -1,5 +1,5 @@
 """tier_4 (live-remote, OPT-IN): the **believable, 100%-client-driven** mail
-round-trip against a LIVE nest (e.g. example.com), using ONLY the linux Fauna
+round-trip against a LIVE nest (e.g. example.net), using ONLY the linux Fauna
 app UI + a Python IMAP client — no nest-API *config* calls, no `set_state`
 session shortcut.
 
@@ -12,13 +12,13 @@ Flow (everything a real operator/user would do, in order):
      preserves the host identity + the real ACME cert (so it stays reachable
      over TLS). See `docs/goal/architecture/nest/common.md` § Factory reset.
   1. **Onboard from scratch through the linux UI**: import the identity, type the
-     handle `test@example.com` (the client resolves the domain to the nest via
-     real DoH — `resolve_handle_domain("example.com") → https://example.com`), run the
+     handle `test@example.net` (the client resolves the domain to the nest via
+     real DoH — `resolve_handle_domain("example.net") → https://example.net`), run the
      handle check (discovers the unclaimed nest), submit, enter the claim code on
      the claim-code page, and confirm the terminal nat_mode_choice step — all UI
      (no-modes retirement, ratified 2026-07-12: claim lands directly on
      nat_mode_choice, no intervening storage-mode question). The handle binds
-     the admin's `test@example.com` recipient identity (`mail_domain` auto-registered
+     the admin's `test@example.net` recipient identity (`mail_domain` auto-registered
      at claim). Now logged in as admin.
   1b. **T3 — factory reset through the UI button.** Click "Factory reset this
      nest" on the admin-settings Danger zone (`admin-factory-reset-button`),
@@ -31,7 +31,7 @@ Flow (everything a real operator/user would do, in order):
   2. **Enable mail** (PLAIN password) through the mail-settings UI.
   3. **Approve the co-located mail bridge** through the admin UI. With the real
      ACME cert on disk, the bridge serves the publicly-trusted cert on
-     `mail.example.com:993` (seal-on-read `fetch_tls_cert_blob`), so the Python
+     `mail.example.net:993` (seal-on-read `fetch_tls_cert_blob`), so the Python
      IMAP client verifies it normally — no insecure-TLS escape hatch.
   4. **Receive a mail via Python IMAP** (`LOGIN` over TLS — the command the MDA
      now supports — then `APPEND`). The MDA seals the appended body to the
@@ -168,7 +168,7 @@ def _wait_nest_fresh(timeout: float = 120.0) -> None:
 def _onboard_and_claim(app, claim_code: str) -> None:
     """Drive the linux onboarding wizard from identity import to logged-in.
 
-    identity import → handle entry (`test@example.com`, resolved to the nest by
+    identity import → handle entry (`test@example.net`, resolved to the nest by
     real DoH) → handle check → submit → claim-code page → nat_mode_choice
     → logged in. All UI; the handle binds the recipient identity.
     """
@@ -358,7 +358,7 @@ def test_believable_live_mail_roundtrip(app):
     #    run, so the UI onboard below has a code to claim with.
     claim_code = _factory_reset_and_wait()
 
-    # 1) Onboard from scratch through the UI and claim test@example.com → admin.
+    # 1) Onboard from scratch through the UI and claim test@example.net → admin.
     _onboard_and_claim(app, claim_code)
 
     # 1b) T3 — exercise the human-facing "Factory reset this nest" button on the

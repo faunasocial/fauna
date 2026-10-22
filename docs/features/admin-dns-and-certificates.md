@@ -89,11 +89,11 @@ Stamped 2026-10-01 at 308c995169.
 28. [app] The list marks the primary domain, and the primary cannot be removed: its remove control is unavailable and the nest refuses — `docs/goal/behavior/mail-multidomain.md` § Primary domain cannot be removed
     - `tests/e2e-unified/tests/test_admin_dns_domain_lifecycle.py::test_primary_domain_is_marked_and_cannot_be_removed`
 29. [app] Before the first domain is added the admin is warned that it becomes the permanent primary, with a rename as the only way out — `docs/goal/behavior/mail-multidomain.md` § Wizard steps
-    - (none)
+    - `tests/e2e-unified/tests/test_admin_dns_domain_lifecycle.py::test_the_first_domain_add_warns_it_becomes_the_permanent_primary`
 30. [nest] Adding a domain that was recently removed is refused, pointing at its restore instead — `docs/goal/behavior/mail-multidomain.md` § Wizard steps
     - `tests/e2e-unified/tests/api/test_admin_domain_lifecycle.py::test_adding_a_recently_removed_domain_is_refused_toward_restore`
 31. [app] Removing a domain asks the admin to confirm first, saying what stops working, how long a restore stays possible and what is lost after that — `docs/goal/behavior/mail-multidomain.md` § Removing a local domain
-    - (none)
+    - `tests/e2e-unified/tests/test_admin_dns_domain_lifecycle.py::test_removing_a_domain_asks_to_confirm_first`
 32. [nest] Once a domain is removed, mail sent to it is refused — `docs/goal/behavior/mail-multidomain.md` § On confirm
     - `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_mta_local_domains_hot_reloads_without_restart`
 33. [nest] While a domain is removed, members' addresses on it stop receiving mail, and restoring it brings them and its catch-all back untouched — `docs/goal/behavior/mail-multidomain.md` § Re-add within 30 days
@@ -170,6 +170,8 @@ Stamped 2026-10-01 at 308c995169.
     - `tests/e2e-unified/tests/test_mail_admin_local_domains.py::test_admin_softens_one_domains_dmarc_policy_over_wire`
 67. [app] An admin softens one domain's DMARC policy from its row on the Domains page, sees it held after reopening the page, and setting it back to reject clears it — `docs/goal/behavior/dmarc-reporting.md` § Multi-domain deployments
     - `tests/e2e-unified/tests/test_admin_dns.py::test_admin_softens_one_domains_dmarc_policy_from_its_row`
+68. [app] When the nest's own certificate request fails, the page says so once, above the domains: which request, when, and the certificate authority's own explanation, shown as plain text; the line goes once that request succeeds — `docs/goal/architecture/nest/tls-certificates.md` § Keeping the cert alive
+    - `tests/e2e-unified/tests/test_admin_dns_cert_issuance_error.py::test_admin_dns_shows_the_cas_error_for_a_failing_order`
 
 ## Status
 
@@ -188,7 +190,7 @@ Stamped 2026-10-01 at 308c995169.
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_lists_domain_records` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_ptr_row_shows_provider_note` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_add_remove_restore_domain` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_add_remove_restore_domain` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_credentials_list_and_refresh` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_add_credential_shows_provider_error` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_toggle_managed_without_credential_shows_error` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
@@ -199,7 +201,7 @@ Stamped 2026-10-01 at 308c995169.
 | 5 | app | `tests/e2e-unified/tests/test_admin_dns_cert_issue.py::test_admin_dns_cert_issue_button_renders_per_domain` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_admin_dns_cert_auto_renew.py::test_admin_dns_auto_renew_default_on_and_toggles` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_admin_dns_cert_delegate.py::test_admin_dns_cert_delegate_and_remove` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/live/test_dns01_cert_renewal_hetzner.py::test_dns01_reissues_the_nest_certificate_through_the_client_ui` | — |
+| 6 | app | `tests/e2e-unified/tests/live/test_dns01_cert_renewal_hetzner.py::test_dns01_reissues_the_nest_certificate_through_the_client_ui` | tui (linux): failed |
 | 7 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_rename_sheet_opens_and_cancels` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 8 | nest | `tests/e2e-unified/tests/test_mail_admin_local_domains.py::test_admin_adds_and_lists_local_domain_over_wire` | nest (linux): passed, nest (windows): passed |
 | 8 | nest | `tests/e2e-unified/tests/test_mail_admin_local_domains.py::test_non_admin_denied_on_local_domain_kind` | nest (linux): passed, nest (windows): passed |
@@ -226,9 +228,9 @@ Stamped 2026-10-01 at 308c995169.
 | 26 | nest | `tests/e2e-unified/tests/platform/docker/test_iroh_relay.py::test_a_connected_relay_adds_its_address_record_to_the_primary` | nest (linux): passed |
 | 27 | nest | `tests/e2e-unified/tests/api/test_admin_domain_lifecycle.py::test_each_domain_publishes_a_strict_reject_dmarc_policy_reporting_to_the_nest` | nest (linux): passed |
 | 28 | app | `tests/e2e-unified/tests/test_admin_dns_domain_lifecycle.py::test_primary_domain_is_marked_and_cannot_be_removed` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 29 | app | (none) | — |
+| 29 | app | `tests/e2e-unified/tests/test_admin_dns_domain_lifecycle.py::test_the_first_domain_add_warns_it_becomes_the_permanent_primary` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 30 | nest | `tests/e2e-unified/tests/api/test_admin_domain_lifecycle.py::test_adding_a_recently_removed_domain_is_refused_toward_restore` | nest (linux): passed |
-| 31 | app | (none) | — |
+| 31 | app | `tests/e2e-unified/tests/test_admin_dns_domain_lifecycle.py::test_removing_a_domain_asks_to_confirm_first` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 32 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_mta_local_domains_hot_reloads_without_restart` | nest (linux): passed |
 | 33 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_removed_domain_addresses_stop_receiving_and_restore_brings_them_back` | nest (linux): passed |
 | 34 | nest | `tests/e2e-unified/tests/api/test_admin_domain_lifecycle.py::test_a_restored_domain_publishes_the_same_signing_key` | nest (linux): passed |
@@ -268,5 +270,6 @@ Stamped 2026-10-01 at 308c995169.
 | 64 | app | `tests/e2e-unified/tests/test_admin_dns_domain_lifecycle.py::test_the_primary_row_is_the_one_that_offers_the_rename` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 65 | nest | `tests/e2e-unified/tests/platform/docker/test_domainless_add_domain_acme_serves_mail.py::test_a_domain_added_after_install_receives_mail_once_its_certificate_is_in_place` | nest (linux): passed |
 | 66 | nest | `tests/e2e-unified/tests/test_mail_admin_local_domains.py::test_admin_softens_one_domains_dmarc_policy_over_wire` | nest (linux): passed |
-| 67 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_softens_one_domains_dmarc_policy_from_its_row` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 67 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_softens_one_domains_dmarc_policy_from_its_row` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 68 | app | `tests/e2e-unified/tests/test_admin_dns_cert_issuance_error.py::test_admin_dns_shows_the_cas_error_for_a_failing_order` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 <!-- features-render:end -->

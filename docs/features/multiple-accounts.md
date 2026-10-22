@@ -104,6 +104,7 @@ Stamped 2026-09-25 at efcea449ea.
    - `tests/e2e-unified/tests/test_push_settings.py::test_windows_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting`
    - `tests/e2e-unified/tests/test_push_settings.py::test_linux_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting`
    - `tests/e2e-unified/tests/test_push_settings.py::test_web_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting`
+   - `tests/e2e-unified/tests/test_push_settings.py::test_android_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting`
 12. [app] An identity another Fauna window on this device is using cannot be removed — nothing is erased and you are told to close that window first — and the identity this window is using is never offered for removal — `docs/goal/architecture/apps/account-scoping.md` § Concurrent instances
    - `tests/e2e-unified/tests/test_remove_account_refused_other_tab_web.py::test_web_remove_account_refuses_an_account_another_tab_serves`
    - `tests/e2e-unified/tests/test_erase_refused_other_instance.py::test_remove_account_refuses_while_another_instance_serves_it`
@@ -112,6 +113,7 @@ Stamped 2026-09-25 at efcea449ea.
    - `tests/e2e-unified/tests/test_add_account_provisioning.py::test_an_add_account_deferred_dns_exit_switches_to_the_appended_identity_and_survives_a_relaunch`
 14. [app] Two Fauna windows on this device changing your identities at the same time never lose each other's change — one waits for the other — `docs/goal/architecture/apps/account-scoping.md` § Concurrent instances
    - `tests/e2e-unified/tests/test_account_registry_mutation_lock_web.py::test_a_registry_write_queues_behind_a_sibling_tabs_mutation_lock`
+   - `tests/e2e-unified/tests/test_account_registry_mutation_lock_relaunch_web.py::test_the_aftermath_drains_clear_waits_for_a_sibling_tabs_registry_lock`
 15. [app] Removing an identity from this device also signs this device out of it — your other devices list it as they would after a sign-out — and your other identities stay signed in here — `docs/goal/architecture/apps/account-scoping.md` § The scoping taxonomy (iron-clad for new app state)
    - `tests/e2e-unified/tests/test_account_switcher_tui.py::test_tui_removing_an_identity_retires_this_machine_from_it`
    - `tests/e2e-unified/tests/test_account_switcher_linux.py::test_linux_removing_an_identity_deletes_its_data_and_leaves_the_others`
@@ -123,7 +125,7 @@ Stamped 2026-09-25 at efcea449ea.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | |
+| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
 | linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
 | windows | ⚠ partial | 0.1.2-dev+a3582c8b.dirty standalone |
 | macos | ⚠ partial | 0.1.2-dev+4bba6f8f standalone |
@@ -172,7 +174,7 @@ Stamped 2026-09-25 at efcea449ea.
 | 5 | app | `tests/e2e-unified/tests/test_account_switcher_apple.py::test_apple_mls_store_is_account_scoped_and_never_adopts_a_flat_store` | — |
 | 5 | app | `tests/e2e-unified/tests/test_account_switcher_windows.py::test_windows_account_switch_isolates_scoped_state_on_disk` | windows (windows): passed |
 | 5 | app | `tests/e2e-unified/tests/test_conversations_actor_switch.py::test_actor_switch_on_the_conversations_route_rebinds_the_page` | web (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_media_actor_switch.py::test_actor_switch_on_the_media_route_rebinds_the_page` | web (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_media_actor_switch.py::test_actor_switch_on_the_media_route_rebinds_the_page` | web (linux): failed |
 | 5 | app | `tests/e2e-unified/tests/test_content_policy_actor_switch.py::test_actor_switch_on_the_feed_route_does_not_leak_the_outgoing_wards_content_floor` | web (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_account_switcher_android.py::test_android_account_switch_isolates_scoped_state_on_disk` | — |
 | 6 | app | `tests/e2e-unified/tests/test_account_switcher_tui.py::test_tui_removing_an_identity_deletes_its_data_and_leaves_the_others` | tui (linux): passed, tui (windows): passed |
@@ -204,15 +206,17 @@ Stamped 2026-09-25 at efcea449ea.
 | 10 | app | `tests/e2e-unified/tests/test_account_switcher_windows.py::test_windows_switching_identity_keeps_device_settings_and_moves_drafts` | windows (windows): passed |
 | 10 | app | `tests/e2e-unified/tests/test_account_switcher_web.py::test_web_switching_identity_keeps_device_settings_and_moves_drafts` | web (linux): passed |
 | 10 | app | `tests/e2e-unified/tests/test_account_switcher_android.py::test_android_switching_identity_keeps_device_settings_and_moves_drafts` | — |
-| 11 | app | `tests/e2e-unified/tests/test_push_settings.py::test_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting` | tui (linux): passed, tui (windows): passed |
+| 11 | app | `tests/e2e-unified/tests/test_push_settings.py::test_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting` | tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 11 | app | `tests/e2e-unified/tests/test_push_settings.py::test_windows_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting` | windows (windows): passed |
 | 11 | app | `tests/e2e-unified/tests/test_push_settings.py::test_linux_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting` | linux (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_push_settings.py::test_web_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting` | web (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_push_settings.py::test_android_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting` | — |
 | 12 | app | `tests/e2e-unified/tests/test_remove_account_refused_other_tab_web.py::test_web_remove_account_refuses_an_account_another_tab_serves` | web (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_erase_refused_other_instance.py::test_remove_account_refuses_while_another_instance_serves_it` | linux (linux): passed, tui (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_add_account_provisioning.py::test_an_add_account_provisioning_run_holds_custody_without_hijacking_the_live_session` | linux (linux): passed, tui (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_add_account_provisioning.py::test_an_add_account_deferred_dns_exit_switches_to_the_appended_identity_and_survives_a_relaunch` | linux (linux): passed, tui (linux): passed |
-| 14 | app | `tests/e2e-unified/tests/test_account_registry_mutation_lock_web.py::test_a_registry_write_queues_behind_a_sibling_tabs_mutation_lock` | — |
+| 13 | app | `tests/e2e-unified/tests/test_add_account_provisioning.py::test_an_add_account_provisioning_run_holds_custody_without_hijacking_the_live_session` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_add_account_provisioning.py::test_an_add_account_deferred_dns_exit_switches_to_the_appended_identity_and_survives_a_relaunch` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 14 | app | `tests/e2e-unified/tests/test_account_registry_mutation_lock_web.py::test_a_registry_write_queues_behind_a_sibling_tabs_mutation_lock` | web (linux): passed |
+| 14 | app | `tests/e2e-unified/tests/test_account_registry_mutation_lock_relaunch_web.py::test_the_aftermath_drains_clear_waits_for_a_sibling_tabs_registry_lock` | web (linux): passed |
 | 15 | app | `tests/e2e-unified/tests/test_account_switcher_tui.py::test_tui_removing_an_identity_retires_this_machine_from_it` | tui (linux): passed |
 | 15 | app | `tests/e2e-unified/tests/test_account_switcher_linux.py::test_linux_removing_an_identity_deletes_its_data_and_leaves_the_others` | linux (linux): passed |
 | 15 | app | `tests/e2e-unified/tests/test_account_switcher_web.py::test_web_removing_an_identity_deletes_its_data_and_leaves_the_others` | web (linux): passed |

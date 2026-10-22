@@ -89,7 +89,16 @@ pub fn build_snapshot_list(
     // The folder selector. Its model is rebuilt from the machine's
     // `folders` on every render — never seeded with a placeholder name, which
     // is what made `"default"` look like a real set the actions could act on.
+    // A kind entry's name is its i18n label key (§ Snapshot-list shape →
+    // *Kind entries*): the model keeps the key — the locale-stable value
+    // `select` takes and `get_text` reads back — and the expression paints
+    // the resolved label, the same value/label split as every keyed picker.
     let folder_dropdown = gtk::DropDown::from_strings(&[]);
+    let label_expr = gtk::ClosureExpression::new::<String>(
+        &[] as &[gtk::Expression],
+        gtk::glib::closure!(|item: gtk::StringObject| folder_row_label(item.string().as_str())),
+    );
+    folder_dropdown.set_expression(Some(&label_expr));
     crate::testid::set_test_id(&folder_dropdown, ids::BACKUP_FOLDER_SELECTOR);
 
     let create_btn = gtk::Button::with_label(backups_strings::CREATE_SNAPSHOT);
@@ -123,10 +132,10 @@ pub fn build_snapshot_list(
     // `in_progress_op` is the single-flight gate for all of them.
     {
         let m = std::sync::Arc::clone(machine);
-        let rt = client.runtime_handle();
+        let spawn = MutatingGesture::new(client);
         create_btn.connect_clicked(move |_| {
             let m = std::sync::Arc::clone(&m);
-            rt.spawn(async move { m.create_snapshot().await });
+            spawn.run(async move { m.create_snapshot().await });
         });
     }
     {
@@ -244,6 +253,53 @@ pub fn build_snapshot_list(
         immediate_delete_target,
     };
     (outer, handles)
+}
+
+/// A selector row's label: a folder's own name, or a kind entry's label key
+/// resolved through the shared string table (§ Snapshot-list shape → *Kind
+/// entries*). Paint-only — the model string stays the value.
+fn folder_row_label(name: &str) -> String {
+    let is_kind_entry = fauna_backups_machine::KIND_ENTRIES
+        .iter()
+        .any(|(_, key)| *key == name);
+    if is_kind_entry {
+        crate::i18n::strings::lookup(name).map_or_else(|| name.to_string(), str::to_string)
+    } else {
+        name.to_string()
+    }
+}
+
+/// Dispatches a gesture that changes which snapshots exist, then re-reads the
+/// Restore section's local picker: a kind entry's snapshot restores from that
+/// picker, so one just taken must be listed there without a page re-entry
+/// (§ Snapshot-list shape → *Kind entries*). The machine owns the snapshot
+/// list; the picker is this page's own read, so the gesture site re-reads it.
+#[derive(Clone)]
+struct MutatingGesture {
+    rt: tokio::runtime::Handle,
+    nest_rpc: std::sync::Arc<fauna_client::NestClient>,
+    tx: crate::client::UiSender,
+}
+
+impl MutatingGesture {
+    fn new(client: &Rc<FaunaClient>) -> Self {
+        Self {
+            rt: client.runtime_handle(),
+            nest_rpc: std::sync::Arc::clone(client.nest_rpc()),
+            tx: client.ui_sender(),
+        }
+    }
+
+    fn run(&self, gesture: impl std::future::Future<Output = ()> + Send + 'static) {
+        let reread = super::restore::reread_snapshot_select(
+            std::sync::Arc::clone(&self.nest_rpc),
+            self.tx.clone(),
+        );
+        self.rt.spawn(async move {
+            gesture.await;
+            reread.await;
+        });
+    }
 }
 
 /// A dim caption line, hidden until it has something to say.
@@ -499,10 +555,10 @@ fn render_prune_preview(
             "fauna.filesync.snapshot.prune_set_policy",
         );
         let m = std::sync::Arc::clone(machine);
-        let rt = client.runtime_handle();
+        let spawn = MutatingGesture::new(client);
         execute.connect_clicked(move |_| {
             let m = std::sync::Arc::clone(&m);
-            rt.spawn(async move { m.prune_execute().await });
+            spawn.run(async move { m.prune_execute().await });
         });
         button_row.append(&execute);
     }
@@ -616,10 +672,10 @@ fn build_snapshot_row(
     // action; the row comes back as `DeletionPending`.
     {
         let m = std::sync::Arc::clone(machine);
-        let rt = client.runtime_handle();
+        let spawn = MutatingGesture::new(client);
         delete_btn.connect_clicked(move |btn| {
             let m = std::sync::Arc::clone(&m);
-            let rt = rt.clone();
+            let spawn = spawn.clone();
             // No wire kind here — it is declared on the ENTRY button above, the
             // same convention factory reset and mail-disable follow. No test ids
             // either: `ui.yaml` names none for this confirm, and minting one is
@@ -637,7 +693,7 @@ fn build_snapshot_row(
                 ),
                 move || {
                     let m = std::sync::Arc::clone(&m);
-                    rt.spawn(async move { m.delete_snapshot(snapshot_id).await });
+                    spawn.run(async move { m.delete_snapshot(snapshot_id).await });
                 },
             );
         });
@@ -718,10 +774,10 @@ fn build_snapshot_row(
         crate::testid::set_test_id(&btn, ids::SNAPSHOT_UNDELETE_BUTTON);
         crate::offline_gate::declare_wire_kind(&btn, "fauna.filesync.snapshot.undelete");
         let m = std::sync::Arc::clone(machine);
-        let rt = client.runtime_handle();
+        let spawn = MutatingGesture::new(client);
         btn.connect_clicked(move |_| {
             let m = std::sync::Arc::clone(&m);
-            rt.spawn(async move { m.undelete_snapshot(snapshot_id).await });
+            spawn.run(async move { m.undelete_snapshot(snapshot_id).await });
         });
         btn
     });
@@ -882,14 +938,14 @@ fn open_immediate_delete_modal(
     // failure path leaves it up, with the machine's error on `error-message`).
     {
         let m = std::sync::Arc::clone(machine);
-        let rt = client.runtime_handle();
+        let spawn = MutatingGesture::new(client);
         let confirm_input = confirm_input.clone();
         let acknowledge_input = acknowledge_input.clone();
         confirm_btn.connect_clicked(move |_| {
             let m = std::sync::Arc::clone(&m);
             let confirm = confirm_input.text().to_string();
             let ack = acknowledge_input.text().to_string();
-            rt.spawn(async move { m.delete_snapshot_immediate(snapshot_id, confirm, ack).await });
+            spawn.run(async move { m.delete_snapshot_immediate(snapshot_id, confirm, ack).await });
         });
     }
 

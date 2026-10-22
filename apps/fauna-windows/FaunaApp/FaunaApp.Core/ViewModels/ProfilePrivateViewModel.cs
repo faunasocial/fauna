@@ -101,6 +101,17 @@ public sealed class ProfilePrivateViewModel
         return refusal is null;
     }
 
+    /// <summary>The completion rows under the add field (<c>profile-label-suggestion</c>):
+    /// nothing until something is typed; otherwise the shared <c>label_suggestions</c>
+    /// over the derived vocabulary, minus the labels already staged. A pick stages
+    /// through <see cref="AddLabel"/> exactly as if typed.</summary>
+    public IReadOnlyList<string> LabelSuggestions(string typed)
+    {
+        if (_editor is null || string.IsNullOrWhiteSpace(typed)) return Array.Empty<string>();
+        using var names = ContactOverlayNames.Open();
+        return names.LabelSuggestions(typed, _form.labels);
+    }
+
     public void RemoveLabel(int index)
     {
         if (index < 0) return;

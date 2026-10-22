@@ -330,6 +330,32 @@ impl SecurityEvent {
         }
     }
 
+    /// Whether the event's English [`body`](Self::body) tells the owner what to
+    /// do if it was not them. The localized row sentence must then say the same
+    /// call to action (`behavior/notifications.md` § Security notices). An
+    /// exhaustive `match` with no wildcard: a new variant must answer this to
+    /// compile, and the parity test pins the answer against the body's text.
+    pub fn warns_if_not_you(&self) -> bool {
+        match self {
+            Self::PendingActionCreated { .. }
+            | Self::ActionExecuted { .. }
+            | Self::NewTokenIssued { .. }
+            | Self::AdminChange { .. }
+            | Self::RecoveryReplacementPending { .. }
+            | Self::RecoveryReplacementLanded { .. }
+            | Self::IdentitySucceeded { .. }
+            | Self::ArchiveExported { .. }
+            | Self::MailboxExportDownloaded { .. } => true,
+            Self::ActionCancelled { .. }
+            | Self::ActionExpired { .. }
+            | Self::PendingActionAgainstYou { .. }
+            | Self::AdminActionPending { .. }
+            | Self::AdminActionCancelled { .. }
+            | Self::AdminActionExpired { .. }
+            | Self::RecoveryReplacementCancelled { .. } => false,
+        }
+    }
+
     /// Human-readable body for the inbox message.
     pub fn body(&self) -> String {
         match self {
@@ -906,9 +932,11 @@ impl SecurityNotifier {
 #[cfg(test)]
 mod tests {
     /// Every event's row body names a catalog sentence and fills it. A new
-    /// variant fails to compile in `row_body` until it has a key, and fails
-    /// here until that key is in `en.yaml` with its args
-    /// (`behavior/notifications.md` § Localized body → *Security notices*).
+    /// variant fails to compile in `row_body` until it has a key; it then fails
+    /// here until it is sampled in `events` (the coverage assertion below counts
+    /// the enum's variants from its own source) and until that key is in
+    /// `en.yaml` with its args (`behavior/notifications.md` § Localized body →
+    /// *Security notices*).
     #[test]
     fn every_security_event_row_body_is_a_complete_catalog_sentence() {
         use super::SecurityEvent as E;
@@ -985,13 +1013,42 @@ mod tests {
                 format: s("mbox"),
             },
         ];
+        // Coverage by construction: the variant count is read off the enum's own
+        // source, so a variant left out of `events` (its declaration and row
+        // sentence then go unchecked) fails here, not silently.
+        let src = include_str!("security_notify.rs");
+        let enum_body = src
+            .split_once("pub enum SecurityEvent {\n")
+            .and_then(|(_, rest)| rest.split_once("\n}\n"))
+            .map(|(body, _)| body)
+            .expect("the SecurityEvent enum source");
+        let declared = enum_body
+            .lines()
+            .filter(|l| {
+                l.strip_prefix("    ")
+                    .and_then(|r| r.chars().next())
+                    .is_some_and(|c| c.is_ascii_uppercase())
+            })
+            .count();
+        let sampled: std::collections::HashSet<_> =
+            events.iter().map(std::mem::discriminant).collect();
+        assert!(declared > 0, "found no variants in the enum source");
+        assert_eq!(
+            sampled.len(),
+            declared,
+            "`events` samples {} of the {declared} SecurityEvent variants",
+            sampled.len()
+        );
         for event in &events {
             crate::db::notifications::assert_body_is_catalog_complete(&event.row_body());
         }
         // Clause parity: the localized row is the only place the actionable
         // warning reaches a user on a mailless nest, so any event whose
         // English `body()` tells the owner what to do if it was not them must
-        // say it in the row's sentence too. A new event cannot drift.
+        // say it in the row's sentence too. `warns_if_not_you` is the
+        // exhaustive per-variant declaration (a new variant must answer it);
+        // the marker scan only pins that declaration against the body's text,
+        // in both directions, so an unknown wording cannot skip an event.
         let has_warning = |text: &str| {
             let t = text.to_lowercase();
             [
@@ -999,13 +1056,20 @@ mod tests {
                 "did not request",
                 "did not authorize",
                 "did not perform",
+                "did not sign in",
             ]
             .iter()
             .any(|marker| t.contains(marker))
         };
         let mut warned = 0;
         for event in &events {
-            if !has_warning(&event.body()) {
+            assert_eq!(
+                event.warns_if_not_you(),
+                has_warning(&event.body()),
+                "warns_if_not_you disagrees with the body of {:?}",
+                event.row_body().key
+            );
+            if !event.warns_if_not_you() {
                 continue;
             }
             warned += 1;

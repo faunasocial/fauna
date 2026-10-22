@@ -15,8 +15,8 @@
 use std::sync::Arc;
 
 use fauna_backups_machine::{
-    BackupOp, BackupsMachine, BackupsNestApi, FakeBackupsNestApi, FakeCall, NullObserver,
-    PolicyState, RowIntegrity, SnapshotState,
+    BackupOp, BackupsMachine, BackupsNestApi, FakeBackupsNestApi, FakeCall, KIND_ENTRIES,
+    NullObserver, PolicyState, RowIntegrity, SnapshotState,
 };
 use fauna_protocol::filesync::{
     IMMEDIATE_DELETE_ACK_TEXT, PrunableSnapshot, SnapshotCheckError, SnapshotCheckReply,
@@ -74,7 +74,12 @@ async fn refresh_excludes_reserved_sets_orders_by_name_and_defaults_to_the_first
 
     // Reserved excluded; every other folder kept (snapshot create refuses
     // only custody copies).
-    let names: Vec<&str> = snap.folders.iter().map(|r| r.name.as_str()).collect();
+    let names: Vec<&str> = snap
+        .folders
+        .iter()
+        .filter(|r| r.message_kind.is_none())
+        .map(|r| r.name.as_str())
+        .collect();
     assert_eq!(
         names,
         vec!["alpha", "mike", "zulu"],
@@ -202,6 +207,7 @@ async fn a_refresh_asked_for_while_an_op_is_in_flight_re_reads_when_it_ends() {
     assert_eq!(
         snap.folders
             .iter()
+            .filter(|f| f.message_kind.is_none())
             .map(|f| f.name.as_str())
             .collect::<Vec<_>>(),
         vec!["alpha", "bravo"],
@@ -240,14 +246,21 @@ async fn a_refresh_queued_behind_an_op_keeps_that_ops_result() {
 }
 
 #[tokio::test]
-async fn no_folders_at_all_selects_nothing_and_lists_nothing() {
-    let (machine, _fake) = machine_with(vec![], vec![]);
+async fn no_folders_at_all_still_offers_the_kind_entries_and_selects_the_first() {
+    // An account with no folders still has mail, posts and the rest to back
+    // up, so the selector is never empty (§ Snapshot-list shape → *Kind
+    // entries*); the deterministic default is then the first kind entry.
+    let (machine, fake) = machine_with(vec![], vec![]);
     machine.refresh().await;
     let snap = machine.snapshot();
-    assert_eq!(snap.selected_folder, None);
+    assert_eq!(snap.folders.len(), KIND_ENTRIES.len());
+    assert_eq!(snap.selected_folder.as_deref(), Some(KIND_ENTRIES[0].1));
     assert!(snap.snapshots.is_empty());
-    assert_eq!(snap.last_backed_up, None, "no sets renders \"never\"");
+    assert_eq!(snap.last_backed_up, None, "an empty kind renders \"never\"");
     assert!(snap.error.is_none(), "an empty account is not an error");
+    assert!(fake.calls().contains(&FakeCall::ListKindSnapshots {
+        kind: "mail".to_string()
+    }));
 }
 
 // ── `last-backed-up` derivation ─────────────────────────────────
@@ -727,9 +740,9 @@ async fn a_manual_create_carries_the_device_id_and_no_tags() {
 
 #[tokio::test]
 async fn a_create_with_no_selection_asks_the_nest_nothing() {
+    // Before the page's first load nothing is selected — after it, the kind
+    // entries guarantee a selection.
     let (machine, fake) = machine_with(vec![], vec![]);
-    machine.refresh().await;
-    fake.clear_calls();
     machine.create_snapshot().await;
     assert!(fake.calls().is_empty());
 }
@@ -1230,4 +1243,206 @@ async fn a_failed_undelete_surfaces_on_the_error_element() {
         "a failed undelete leaves the row as the nest last served it"
     );
     assert!(machine.snapshot().in_progress_op.is_none(), "slot released");
+}
+
+// ── Kind entries (§ Snapshot-list shape → *Kind entries*) ───────
+
+/// The selector key of the kind entry for `kind` — the label key the app
+/// renders, which is also what `select_folder` takes.
+fn kind_key(kind: &str) -> String {
+    KIND_ENTRIES
+        .iter()
+        .find(|(k, _)| *k == kind)
+        .map(|(_, key)| key.to_string())
+        .expect("a kind the table carries")
+}
+
+#[test]
+fn the_kind_table_covers_exactly_the_kinds_the_nest_snapshots() {
+    let mut ours: Vec<&str> = KIND_ENTRIES.iter().map(|(k, _)| *k).collect();
+    let mut nest: Vec<&str> = fauna_protocol::segments::BACKUP_SET_KINDS.to_vec();
+    ours.sort_unstable();
+    nest.sort_unstable();
+    assert_eq!(ours, nest);
+    let keys: Vec<&str> = KIND_ENTRIES.iter().map(|(_, key)| *key).collect();
+    assert_eq!(
+        keys,
+        vec![
+            "backups.reseed_set_mail",
+            "events.calendar",
+            "common.contacts",
+            "common.posts",
+            "conversations.list.title",
+        ],
+        "Mail, Calendar, Contacts, Posts, Conversations — existing labels, no new string"
+    );
+}
+
+#[tokio::test]
+async fn the_kind_entries_follow_the_folders_in_table_order() {
+    let (machine, _fake) = machine_with(vec![set("zulu"), set("alpha")], vec![]);
+    machine.refresh().await;
+    let snap = machine.snapshot();
+    let rows: Vec<(&str, Option<&str>)> = snap
+        .folders
+        .iter()
+        .map(|r| (r.name.as_str(), r.message_kind.as_deref()))
+        .collect();
+    let mut want = vec![("alpha", None), ("zulu", None)];
+    want.extend(KIND_ENTRIES.iter().map(|(k, key)| (*key, Some(*k))));
+    assert_eq!(rows, want);
+    assert_eq!(
+        snap.selected_folder.as_deref(),
+        Some("alpha"),
+        "a folder stays the default when one exists"
+    );
+}
+
+#[tokio::test]
+async fn a_kind_entry_lists_by_kind_and_derives_last_backed_up_the_same_way() {
+    let (machine, fake) = machine_with(vec![set("alpha")], vec![]);
+    fake.set_kind_snapshots("mail", vec![row(5, 500), row(4, 400)]);
+    machine.refresh().await;
+    fake.clear_calls();
+
+    machine.select_folder(kind_key("mail")).await;
+
+    let calls = fake.calls();
+    assert!(calls.contains(&FakeCall::ListKindSnapshots {
+        kind: "mail".to_string()
+    }));
+    assert!(
+        !calls
+            .iter()
+            .any(|c| matches!(c, FakeCall::ListSnapshots { .. })),
+        "a kind entry is never read as a folder: {calls:?}"
+    );
+    let snap = machine.snapshot();
+    assert_eq!(
+        snap.snapshots.iter().map(|r| r.id).collect::<Vec<_>>(),
+        vec![5, 4]
+    );
+    assert_eq!(snap.last_backed_up, Some(500));
+    let entry = snap
+        .folders
+        .iter()
+        .find(|r| r.message_kind.as_deref() == Some("mail"))
+        .unwrap();
+    assert_eq!(
+        (entry.snapshot_count, entry.last_snapshot_at),
+        (2, Some(500)),
+        "a kind row has no cached column — its selector row is filled from its own list"
+    );
+}
+
+#[tokio::test]
+async fn create_on_a_kind_entry_takes_a_message_kind_snapshot() {
+    let (machine, fake) = machine_with(vec![set("alpha")], vec![]);
+    machine.refresh().await;
+    machine.select_folder(kind_key("conv")).await;
+    fake.clear_calls();
+
+    machine.create_snapshot().await;
+
+    let calls = fake.calls();
+    assert_eq!(
+        calls.first(),
+        Some(&FakeCall::CreateKindSnapshot {
+            kind: "conv".to_string()
+        }),
+        "conv: the batched all-my-channels form, one op"
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|c| matches!(c, FakeCall::CreateSnapshot { .. })),
+        "never a folder create named after the label key"
+    );
+    assert!(
+        calls.contains(&FakeCall::ListKindSnapshots {
+            kind: "conv".to_string()
+        }),
+        "the create ends with the re-read like every mutation"
+    );
+    assert!(machine.snapshot().in_progress_op.is_none());
+}
+
+#[tokio::test]
+async fn prune_and_check_on_a_kind_entry_address_the_kind() {
+    let (machine, fake) = machine_with(vec![], vec![]);
+    fake.set_kind_snapshots("post", vec![row(8, 800)]);
+    fake.set_check_reply(SnapshotCheckReply {
+        structured_errors: vec![SnapshotCheckError {
+            snapshot_id: Some(8),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    machine.refresh().await;
+    machine.select_folder(kind_key("post")).await;
+    fake.clear_calls();
+
+    machine.prune_preview().await;
+    assert!(machine.snapshot().prune_preview.is_some());
+    machine.prune_execute().await;
+    machine.check().await;
+
+    let calls = fake.calls();
+    assert!(calls.contains(&FakeCall::PruneKindPolicy {
+        kind: "post".to_string(),
+        dry_run: true,
+    }));
+    assert!(calls.contains(&FakeCall::PruneKindPolicy {
+        kind: "post".to_string(),
+        dry_run: false,
+    }));
+    assert!(calls.contains(&FakeCall::CheckKind {
+        kind: "post".to_string()
+    }));
+    assert!(
+        !calls
+            .iter()
+            .any(|c| matches!(c, FakeCall::PruneSetPolicy { .. } | FakeCall::Check { .. })),
+        "{calls:?}"
+    );
+    assert_eq!(
+        machine.snapshot().snapshots[0].integrity,
+        RowIntegrity::Implicated
+    );
+}
+
+#[tokio::test]
+async fn a_kind_rows_detail_lists_no_files_and_names_its_kind() {
+    let (machine, fake) = machine_with(vec![], vec![]);
+    fake.set_kind_snapshots("calendar", vec![row(3, 300)]);
+    machine.refresh().await;
+    machine.select_folder(kind_key("calendar")).await;
+    fake.clear_calls();
+
+    machine.open_snapshot(3).await;
+
+    assert!(
+        fake.calls().is_empty(),
+        "a kind row has no snapshot_files — there is nothing to read"
+    );
+    let detail = machine.snapshot().detail.expect("detail is open");
+    assert_eq!(detail.snapshot_id, 3);
+    assert!(detail.files.is_empty());
+    assert_eq!(detail.message_kind.as_deref(), Some("calendar"));
+}
+
+#[tokio::test]
+async fn row_gestures_on_a_kind_entry_are_unchanged() {
+    let (machine, fake) = machine_with(vec![], vec![]);
+    fake.set_kind_snapshots("card", vec![row(6, 600)]);
+    machine.refresh().await;
+    machine.select_folder(kind_key("card")).await;
+    fake.clear_calls();
+
+    machine.delete_snapshot(6).await;
+
+    assert_eq!(
+        fake.calls().first(),
+        Some(&FakeCall::DeleteSnapshot { snapshot_id: 6 })
+    );
 }

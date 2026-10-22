@@ -14,28 +14,23 @@ moving it between them (a `[nest]` witness for
 from __future__ import annotations
 
 import urllib.error
-import urllib.request
 
 import pytest
 
 from helpers import budgets
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
+from common.auth import no_redirect_opener
 
 pytestmark = pytest.mark.tier_3
 
 DOMAIN = "files-apex.test"
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args, **kwargs):
-        return None
-
-
 def _apex(nest) -> tuple[int, str | None]:
     """GET the apex well-known the way a file app's first probe does; return
     (status, Location)."""
-    opener = urllib.request.build_opener(_NoRedirect)
+    opener = no_redirect_opener()
     try:
         resp = opener.open(f"{nest['url']}/.well-known/webdav", timeout=budgets.RPC_ROUNDTRIP_S)
         return resp.status, resp.headers.get("Location")

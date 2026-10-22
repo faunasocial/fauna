@@ -3,15 +3,16 @@ import Foundation
 @testable import FaunaKit
 
 /// FaunaKit recipient resolution runs entirely through the shared UniFFI seam
-/// (`classifyRecipient` + the anonymous `resolveNest`/`resolveHandle` discovery
-/// kinds) — no Swift `64-hex` regex, `@`-split, or HTTP to the deleted
+/// (`classifyRecipient` + the shared `findUser` lookup) — no Swift `64-hex`
+/// regex, `@`-split, foreign-domain comparison, or HTTP to the deleted
 /// `/api/v1/{resolve-node,actor/by-handle}` twins remains (priority #2/#4).
 /// Mirrors android `ResolveService` (`core/ResolveService.kt`).
 ///
 /// The `actor_id` and `invalid` paths short-circuit in `classify_recipient`
 /// before any network call, so they unit-test offline here; the cross-nest
-/// `handle` path (`resolveNest` → `resolveHandle`, both anonymous WS-RPC) is
-/// covered by tier_3 e2e against a live nest.
+/// `handle` path (`findUser`, anonymous WS-RPC, `nestUrl` = the peer for a
+/// foreign domain) is covered by tier_3 e2e against a live nest
+/// (`test_contacts_cross_nest_knock.py`).
 
 @Test func resolveRecipientClassifiesActorIdOffline() async throws {
     let api = APIClient(nodeUrl: URL(string: "https://nest.example")!)
@@ -22,6 +23,8 @@ import Foundation
     #expect(r.nodeUrl == "https://nest.example")
     #expect(r.handle == nil)
     #expect(r.domain == nil)
+    // A raw actor id is home-nest: no peer URL, and compose's `nodeUrl` stays local.
+    #expect(r.nestUrl == nil)
 }
 
 @Test func resolveRecipientRejectsGarbageOffline() async {

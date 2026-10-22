@@ -71,6 +71,9 @@ fn auth_error_to_rpc(e: AuthError) -> RpcError {
         // hitting it is normally the succeeded user's own device and its next
         // step is to import that identity (`identity-succession.md` § Propagation).
         AuthError::Superseded { new_actor_id } => RpcError::superseded(&new_actor_id),
+        AuthError::RateLimited => {
+            RpcError::new("fauna.protocol.rate_limited", "error.protocol.rate_limited")
+        }
         AuthError::Internal(msg) => {
             let mut r = RpcError::new("fauna.protocol.internal", "error.protocol.internal");
             r.details = Some(Box::new(Value::String(msg)));
@@ -81,14 +84,30 @@ fn auth_error_to_rpc(e: AuthError) -> RpcError {
 
 // ── fauna.auth.handshake (≡ POST /auth/token, direct auth) ──────────────────
 
+/// The SPKI every channel-binding producer signs: the cert the nest served
+/// **this connection** — read live off `state.served_cert_spki` for the server
+/// name the connection was accepted under
+/// ([`crate::dispatch_core::current_served_name`], the nest's own TLS state
+/// carried in by `served_name.rs`), the no-SNI cert when it carried none
+/// (`acme::ServedCertSpki::spki_for_served_name`). Never a client-reported
+/// value — the load-bearing subtlety of `transport-trust.md` § Two independent
+/// axes → Axis 1 (signing a client SPKI would let a MITM get its own cert's
+/// SPKI signed), and the reason the name is read from the TLS layer rather
+/// than a wire field: a client cannot name a cert it was not served. `None`
+/// on a nest serving no cert it can read (a plain-HTTP dev nest, a pending
+/// resolver).
+fn served_spki(state: &AppState) -> Option<[u8; 32]> {
+    let resolver = state.served_cert_spki.as_ref()?;
+    let served_name = crate::dispatch_core::current_served_name();
+    resolver.spki_for_served_name(served_name.as_deref())
+}
+
 /// Build the TLS channel-binding proof for a handshake reply
-/// (`docs/goal/architecture/security.md` § Transport trust, Axis 1). Returns
-/// `Some` only when **all three** preconditions hold: the request carried a
-/// `client_nonce`, the nest holds a deployment signing key, and it is serving a
-/// cert whose SPKI it can read. The nest signs the SPKI of the cert **it itself
-/// serves** (`state.served_cert_spki`, read live) — never a client-reported
-/// value (the load-bearing subtlety: signing a client SPKI would let a MITM get
-/// its own cert's SPKI signed and the binding would be worthless).
+/// (`transport-trust.md` § Two independent axes → Axis 1). Returns `Some`
+/// only when **all three** preconditions hold: the request carried a
+/// `client_nonce`, the nest holds a deployment signing key, and it is serving
+/// a cert whose SPKI it can read. The nest signs the SPKI of the cert **it
+/// served this connection** ([`served_spki`]) — never a client-reported value.
 fn build_cert_binding(
     state: &AppState,
     client_nonce: Option<&[u8]>,
@@ -96,7 +115,7 @@ fn build_cert_binding(
 ) -> Option<CertBinding> {
     let nonce = client_nonce?;
     let signing_key = state.nest_signing_key.as_ref()?;
-    let spki = state.served_cert_spki.as_ref()?.current_spki_sha256()?;
+    let spki = served_spki(state)?;
     sign_channel_binding(signing_key, &spki, nonce, kind)
 }
 
@@ -200,11 +219,12 @@ fn sign_channel_binding(
 ///   key (`box-recovery.md` § Single-identity unification), so the emitted
 ///   binding is byte-identical to what [`build_cert_binding`] produced; the
 ///   fallback only adds capability for a keyless (test-harness) nest.
-/// - **SPKI:** the served cert's SPKI when present, else empty — so the message
-///   is `SPKI ‖ nonce` on TLS (relay-defeating, the caller SPKI-compares) and
-///   `nonce` alone on plaintext (possession-only, which is all a loopback nest
-///   with no cert can offer). The reported `nest_actor_id` is always the key's,
-///   which equals the id `nest.info` reports and residue records.
+/// - **SPKI:** the SPKI of the cert served *this connection* when present
+///   ([`served_spki`]), else empty — so the message is `SPKI ‖ nonce` on TLS
+///   (relay-defeating, the caller SPKI-compares) and `nonce` alone on
+///   plaintext (possession-only, which is all a loopback nest with no cert can
+///   offer). The reported `nest_actor_id` is always the key's, which equals
+///   the id `nest.info` reports and residue records.
 ///
 /// `None` only when the request carried no `client_nonce`.
 fn build_identity_binding(state: &AppState, client_nonce: Option<&[u8]>) -> Option<CertBinding> {
@@ -213,12 +233,7 @@ fn build_identity_binding(state: &AppState, client_nonce: Option<&[u8]>) -> Opti
         .nest_signing_key
         .clone()
         .unwrap_or_else(|| state.nest_identity.signing_key.clone());
-    let spki: Vec<u8> = state
-        .served_cert_spki
-        .as_ref()
-        .and_then(|s| s.current_spki_sha256())
-        .map(|s| s.to_vec())
-        .unwrap_or_default();
+    let spki: Vec<u8> = served_spki(state).map(|s| s.to_vec()).unwrap_or_default();
     sign_channel_binding(&signing_key, &spki, nonce, BindingKind::Handshake)
 }
 
@@ -488,10 +503,11 @@ fn rotation_chain_handler() -> RpcHandler {
 // ── fauna.auth.challenge (≡ POST /auth/challenge, nonce issuance) ────────────
 
 fn challenge_handler() -> RpcHandler {
-    Box::new(|state, _actor, payload| {
+    Box::new(|state, caller, payload| {
         Box::pin(async move {
             let req: ChallengeRequest = decode(&payload).map_err(malformed)?;
-            let issued = auth_core::issue_challenge_core(&state, &req.actor_id)
+            let source = crate::challenge_auth::IssueSource::of_current_caller(&caller);
+            let issued = auth_core::issue_challenge_core(&state, &req.actor_id, source)
                 .await
                 .map_err(auth_error_to_rpc)?;
             encode_reply(&ChallengeReply {
@@ -553,6 +569,7 @@ fn verify_handler() -> RpcHandler {
                 expires_at: mint.expires_at,
                 expires_in: mint.expires_in,
                 cert_binding,
+                first_sign_in: mint.first_sign_in,
                 extra: Default::default(),
             })
         })

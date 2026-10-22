@@ -557,7 +557,9 @@ public partial class AtprotoViewModel : ViewModelBase
             {
                 CredentialId = c.@credentialId,
                 Revealable = c.@revealable,
-                Display = c.@label,
+                Display = c.@dmAllowed
+                    ? $"{c.@label} · {Strings.Get("atproto_settings/credential_dm_access")}"
+                    : c.@label,
                 RevealedSecret = revealed,
             });
         }
@@ -778,14 +780,16 @@ public partial class AtprotoViewModel : ViewModelBase
     /// <c>mintCredential</c>'s pattern — <c>mint()</c> already refreshes the machine
     /// before returning, so the post-mint snapshot carries the new row). The row's own
     /// <see cref="CredentialRowVm.RevealText"/> then shows the secret immediately —
-    /// there is no separate one-time-reveal surface in F1.</summary>
-    public async Task MintCredentialAsync(string label)
+    /// there is no separate one-time-reveal surface in F1.
+    /// <paramref name="dmAllowed"/> is the page's <c>atproto-app-credential-dm-access</c>
+    /// toggle, read at the moment the mint button is pressed.</summary>
+    public async Task MintCredentialAsync(string label, bool dmAllowed)
     {
         if (_machine is null) return;
         try
         {
             var before = _machine.Snapshot().@credentials.Select(c => c.@credentialId).ToHashSet();
-            var secret = await _machine.Mint(label, false);
+            var secret = await _machine.Mint(label, dmAllowed);
             var newId = _machine.Snapshot().@credentials
                 .Select(c => c.@credentialId)
                 .FirstOrDefault(id => !before.Contains(id));

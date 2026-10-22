@@ -1,7 +1,8 @@
-import { base } from '$app/paths';
+import { asset } from '$app/paths';
+import { adoptStoreKey, announceStartOver, forgetStoreKey, registerIdentityStoreChunk } from './identity-store';
 
 // Re-exported so existing call sites keep importing the snapshot type and its
-// accessors from `$lib/wasm-launch`; they live in their own module only so
+// accessors from `#lib/wasm-launch`; they live in their own module only so
 // `deno test` can reach them (see `launch-snapshot.ts`).
 export {
   wizardEntryOf,
@@ -31,7 +32,10 @@ export function ensureLaunchWasm(): Promise<void> {
   if (!wasmInit) {
     wasmInit = (async () => {
       const mod = await import('../../static/fauna_wasm_launch.js');
-      await mod.default(`${base}/fauna_wasm_launch_bg.wasm`);
+      await mod.default(asset('fauna_wasm_launch_bg.wasm'));
+      // The identity store's key, if this page holds it, goes in before
+      // anything reads the registry through this chunk (identity-store.ts).
+      registerIdentityStoreChunk(mod);
       wasmModule = mod;
     })().catch((e) => {
       wasmInit = null;
@@ -133,7 +137,7 @@ export interface LaunchMachine {
  * The launch clock this tab signs in on — `{offset_secs, now_secs}`, the web
  * leg of the cross-app `clock` state key (`fauna_e2e_agent::CLOCK_KEY` owns
  * the shape) the wrong-clock launch witness reads. Test builds only: its sole
- * caller is `$lib/e2e-automation`, and the two getters exist only in the
+ * caller is `#lib/e2e-automation`, and the two getters exist only in the
  * launch chunk's `test-helpers` flavor (`libs/fauna-wasm-launch`), which also
  * seeds the offset from localStorage in the `LaunchMachine` constructor.
  *
@@ -194,18 +198,22 @@ export async function mintAndPersistPendingFactoryResetWasm(
 // Thin typed wrappers over the `registry*` wasm exports. Reads are sync on
 // the wasm side; every WRITER is a Promise, because it runs inside the
 // cross-tab registry mutation lock (`fauna_client_accounts::with_web_mutation_lock`
-// — tabs share one `localStorage`; `$lib/accounts` has the same shape).
+// — tabs share one `localStorage`; `#lib/accounts` has the same shape).
 // Callers must have awaited `ensureLaunchWasm()` (the async wrappers below do
 // it). Records cross the boundary as serde JSON strings.
 
 function registryFns() {
   return wasm() as unknown as {
     registryHasIdentity(): boolean;
+    registryIndexBlob(): string | undefined;
+    registryHasSecretRow(actorId: string): boolean;
+    identityStoreHasHeader(): boolean;
+    identityStoreIsLocked(): boolean;
     registryLoadPendingInvite(): string | undefined;
     registrySavePendingInvite(json: string): Promise<boolean>;
     registryDeletePendingInvite(): Promise<void>;
     registryLoadAwaitingDns(): string | undefined;
-    registrySaveAwaitingDns(json: string): Promise<boolean>;
+    registryPersistAwaitingDns(secretHex: string, json: string): Promise<string | undefined>;
     registryClearAwaitingDns(): Promise<void>;
     registryLoadPendingFactoryReset(): string | undefined;
     registryDeletePendingFactoryReset(): Promise<void>;
@@ -248,11 +256,15 @@ export async function registryHasIdentity(): Promise<boolean> {
  * left the index behind — so a session that cannot tell them apart is guessing.
  * `registryHasIdentity()` is `persistence().load_identity().is_some()` over the
  * SAME adapter the machine routes on, so it is the authoritative verdict; the
- * rest is read straight out of localStorage with no wasm, which is what makes
- * the report available even when the two disagree.
+ * rest is the identity store's raw rows (`registryIndexBlob` /
+ * `registryHasSecretRow`, opened by the store when it rests sealed —
+ * `web.md` § Identity store at rest), read with none of the registry's
+ * parsing, which is what makes the report useful when the two disagree. `seal`
+ * names the store's arm: `plain`, `unlocked`, or `LOCKED` — a locked store
+ * reads nothing, a fourth cause of `None` that unlock-before-routing rules out.
  *
  * Values are never logged — only presence, counts, versions, and 8-char actor
- * prefixes for correlation. Costs one localStorage scan on the launch path.
+ * prefixes for correlation.
  */
 interface IndexBlobShape {
   active?: string | null;
@@ -262,8 +274,15 @@ interface IndexBlobShape {
 }
 
 export async function launchIdentityInputs(): Promise<Record<string, unknown>> {
-  const raw = typeof localStorage === 'undefined' ? null : localStorage.getItem('fauna/index');
+  await ensureLaunchWasm();
+  const fns = registryFns();
+  const raw = fns.registryIndexBlob() ?? null;
   const report: Record<string, unknown> = {};
+  report.seal = !fns.identityStoreHasHeader()
+    ? 'plain'
+    : fns.identityStoreIsLocked()
+      ? 'LOCKED'
+      : 'unlocked';
 
   if (raw === null) {
     report.index = 'absent';
@@ -288,13 +307,9 @@ export async function launchIdentityInputs(): Promise<Record<string, unknown>> {
       report.accounts = Array.isArray(parsed.accounts) ? parsed.accounts.length : 'malformed';
       report.active = active ? active.slice(0, 8) : 'NONE';
       if (active) {
-        const secretRow =
-          typeof localStorage === 'undefined'
-            ? null
-            : localStorage.getItem(`fauna/${active}/secret`);
         // Cause (3) reads off this line: `active_secret_row: 'absent'` is the
         // index naming an account the store has no secret for.
-        report.active_secret_row = secretRow ? 'present' : 'absent';
+        report.active_secret_row = fns.registryHasSecretRow(active) ? 'present' : 'absent';
       }
     }
   }
@@ -336,10 +351,15 @@ export async function registryLoadAwaitingDnsJson(): Promise<string | null> {
   return registryFns().registryLoadAwaitingDns() ?? null;
 }
 
-/** `false` means the write was refused (no active identity / unparseable). */
-export async function registrySaveAwaitingDns(rec: AwaitingDnsJson): Promise<boolean> {
+/** The deferred-DNS exit through the shared `persist_awaiting_dns`: registers
+ *  and activates the identity `secretHex` names and completes its slot.
+ *  Resolves to its actor id, `null` when the write was refused. */
+export async function registryPersistAwaitingDns(
+  secretHex: string,
+  rec: AwaitingDnsJson,
+): Promise<string | null> {
   await ensureLaunchWasm();
-  return registryFns().registrySaveAwaitingDns(JSON.stringify(rec));
+  return (await registryFns().registryPersistAwaitingDns(secretHex, JSON.stringify(rec))) ?? null;
 }
 
 export async function registryClearAwaitingDns(): Promise<void> {
@@ -355,4 +375,157 @@ export async function registryLoadPendingFactoryReset(): Promise<PendingFactoryR
 export async function registryDeletePendingFactoryReset(): Promise<void> {
   await ensureLaunchWasm();
   await registryFns().registryDeletePendingFactoryReset();
+}
+
+// ── The identity store's unlock gate ───────────────────────────────────
+//
+// `web.md` § Identity store at rest → *Unlock comes before launch routing*:
+// nothing reads the registry until the store serves reads. The launch chunk is
+// the one that creates or unlocks (it is small and loads first); the key it
+// then holds is adopted by the page (`identity-store.ts`) and installed into
+// every other chunk. Errors reject with the stable code strings of
+// `web_store.rs` (`wrong_passphrase_or_corrupt`, `newer_header`, …).
+
+/** The localStorage key a test-capable build reads to opt a journey into the
+ *  sealed arm when there is no header yet — the web twin of a native launch
+ *  variable, under the variable's own name. Only `__FAUNA_E2E_AUTOMATION__`
+ *  builds read it; a shipped build has no plain arm and always creates. */
+export const SEALED_IDENTITY_STORE_OPT_IN_KEY = 'FAUNA_E2E_SEALED_IDENTITY_STORE';
+
+/** `open`: the store serves reads now (unlocked, or the test build's plain
+ *  arm). `create`: no header — choose a passphrase. `unlock`: a header and no
+ *  key in this page. */
+export type IdentityStoreGate = 'open' | 'create' | 'unlock';
+
+function identityStoreFns() {
+  return wasm() as unknown as {
+    identityStoreHasHeader(): boolean;
+    identityStoreIsLocked(): boolean;
+    identityStoreCreate(passphrase: string): void;
+    identityStoreUnlock(passphrase: string): void;
+    identityStoreChangePassphrase(current: string, next: string): void;
+    identityStoreKey(): string | undefined;
+    identityStoreInstallKey(keyHex: string): void;
+    identityStoreStartOver(): void;
+    identityStorePasskeys(): PasskeyWrapInfo[];
+    identityStoreNewPasskeySalt(): Uint8Array<ArrayBuffer>;
+    identityStoreAddPasskey(credentialId: Uint8Array, prfSalt: Uint8Array, prfOutput: Uint8Array): void;
+    identityStoreUnlockWithPasskey(credentialId: Uint8Array, prfOutput: Uint8Array): void;
+    identityStoreRemovePasskey(credentialId: Uint8Array): boolean;
+  };
+}
+
+/** One passkey wrap in the seal header — readable while locked (neither field
+ *  is secret): the credential to ask for and its PRF eval input. */
+export interface PasskeyWrapInfo {
+  credentialId: Uint8Array<ArrayBuffer>;
+  prfSalt: Uint8Array<ArrayBuffer>;
+}
+
+function sealedArmOptedOut(): boolean {
+  if (!__FAUNA_E2E_AUTOMATION__) return false;
+  try {
+    return localStorage.getItem(SEALED_IDENTITY_STORE_OPT_IN_KEY) !== '1';
+  } catch {
+    return true;
+  }
+}
+
+export async function identityStoreGate(): Promise<IdentityStoreGate> {
+  await ensureLaunchWasm();
+  const fns = identityStoreFns();
+  if (fns.identityStoreHasHeader()) return fns.identityStoreIsLocked() ? 'unlock' : 'open';
+  return sealedArmOptedOut() ? 'open' : 'create';
+}
+
+/** Whether Settings offers the credential-store section: the sealed arm is
+ *  active (a header exists) and this page holds its key. */
+export async function identityStoreSealedAndOpen(): Promise<boolean> {
+  await ensureLaunchWasm();
+  const fns = identityStoreFns();
+  return fns.identityStoreHasHeader() && !fns.identityStoreIsLocked();
+}
+
+function adoptLaunchKey(): void {
+  const key = identityStoreFns().identityStoreKey();
+  if (key) adoptStoreKey(key);
+}
+
+/** Write the header under `passphrase` and seal every row this browser holds. */
+export async function identityStoreCreateWith(passphrase: string): Promise<void> {
+  await ensureLaunchWasm();
+  identityStoreFns().identityStoreCreate(passphrase);
+  adoptLaunchKey();
+}
+
+/** Open the header under `passphrase`. */
+export async function identityStoreUnlockWith(passphrase: string): Promise<void> {
+  await ensureLaunchWasm();
+  identityStoreFns().identityStoreUnlock(passphrase);
+  adoptLaunchKey();
+}
+
+/** Install a key another tab handed over; rejects `wrong_store_key` when it
+ *  does not open the header's check (a stale key), installing nothing. */
+export async function identityStoreInstallHandedKey(keyHex: string): Promise<void> {
+  await ensureLaunchWasm();
+  identityStoreFns().identityStoreInstallKey(keyHex);
+  adoptLaunchKey();
+}
+
+/** Re-wrap the store key under `next` — one header write; other tabs keep
+ *  working on the unchanged key. */
+export async function identityStoreChangePassphraseWith(current: string, next: string): Promise<void> {
+  await ensureLaunchWasm();
+  identityStoreFns().identityStoreChangePassphrase(current, next);
+}
+
+/** The header's passkey wraps (`web.md` § Identity store at rest → *A passkey
+ *  wrap*); empty with no header. */
+export async function identityStorePasskeyWraps(): Promise<PasskeyWrapInfo[]> {
+  await ensureLaunchWasm();
+  return identityStoreFns().identityStorePasskeys();
+}
+
+/** A fresh 32-byte PRF salt for a passkey wrap about to be added. */
+export async function identityStoreNewPasskeySalt(): Promise<Uint8Array<ArrayBuffer>> {
+  await ensureLaunchWasm();
+  return identityStoreFns().identityStoreNewPasskeySalt();
+}
+
+/** Wrap the held store key under a passkey's PRF output — one header write. */
+export async function identityStoreAddPasskeyWrap(
+  credentialId: Uint8Array,
+  prfSalt: Uint8Array,
+  prfOutput: Uint8Array,
+): Promise<void> {
+  await ensureLaunchWasm();
+  identityStoreFns().identityStoreAddPasskey(credentialId, prfSalt, prfOutput);
+}
+
+/** Open the header with a passkey's PRF output; rejects `passkey_did_not_open`
+ *  and leaves the store locked when it does not. */
+export async function identityStoreUnlockWithPasskeyOutput(
+  credentialId: Uint8Array,
+  prfOutput: Uint8Array,
+): Promise<void> {
+  await ensureLaunchWasm();
+  identityStoreFns().identityStoreUnlockWithPasskey(credentialId, prfOutput);
+  adoptLaunchKey();
+}
+
+/** Remove the passkey wrap for `credentialId` — one header write; the
+ *  passphrase still opens the store. */
+export async function identityStoreRemovePasskeyWrap(credentialId: Uint8Array): Promise<boolean> {
+  await ensureLaunchWasm();
+  return identityStoreFns().identityStoreRemovePasskey(credentialId);
+}
+
+/** Start over: erase this browser's identity store and lock every chunk. The
+ *  caller has the user's explicit confirmation and returns to create mode. */
+export async function identityStoreStartOverNow(): Promise<void> {
+  await ensureLaunchWasm();
+  identityStoreFns().identityStoreStartOver();
+  forgetStoreKey();
+  announceStartOver();
 }

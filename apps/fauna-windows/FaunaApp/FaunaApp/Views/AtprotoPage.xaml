@@ -249,6 +249,11 @@
                         AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoAppCredentialMint}"
                         Click="Mint_Click"
                         Content="{loc:Localize Key=atproto_settings/mint_button}" />
+                <!-- atproto-app-credential-dm-access: page-local, off by default
+                     (least privilege), read when MintBtn is pressed. -->
+                <CheckBox x:Name="MintDmAccess"
+                          AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoAppCredentialDmAccess}"
+                          Content="{loc:Localize Key=atproto_settings/mint_dm_access_label}" />
 
                 <!-- atproto-app-credentials-list. Each row carries an
                      AutomationProperties.Name: without one FlaUI reports a

@@ -199,6 +199,12 @@ pub struct ConnectedAppsSnapshot {
     pub principals: Vec<ConnectedAppRow>,
     /// The per-client blocks, oldest first.
     pub blocked: Vec<BlockedAppRow>,
+    /// The account's external-apps switch is OFF, as the last read that
+    /// answered said — what the page's toggle (`atproto-external-apps-enable`)
+    /// paints. Stated as "off" so the type's own zero value is the flag's own
+    /// default, ON (`ui/README.md` § a shared machine's default is part of its
+    /// contract).
+    pub external_apps_off: bool,
     /// The open per-operation record, if any.
     #[cfg_attr(feature = "uniffi", uniffi(default = None))]
     pub record: Option<OracleRecord>,

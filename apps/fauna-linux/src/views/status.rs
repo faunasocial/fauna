@@ -377,6 +377,13 @@ pub fn build_status_view() -> (gtk::Box, StatusHandles) {
     let region_rows_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
     region_group.add(&region_rows_box);
     crate::region::paint_settings(&region_rows_box);
+    // `settings-nest-rules-*` — the session nest's rules in force
+    // (`nest-rules.md` § The rules surface), directly under the region's
+    // transparency surface it mirrors, as on tui and web. Painted only while
+    // the nest has published rules; showing it reads the changed notice.
+    let nest_rules_rows_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    region_group.add(&nest_rules_rows_box);
+    crate::nest_rules::bind_settings(&nest_rules_rows_box);
     page.add(&region_group);
 
     // --- Node info group ---

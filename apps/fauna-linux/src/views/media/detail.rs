@@ -74,13 +74,15 @@ struct DetailCtx {
 
 /// Open the modal `media-item-detail` window for `item`. `parent` is the main
 /// window (transient-for + the sign-out close-all sweep, the lightbox idiom).
+/// Returns the window, for a surface opened over it (the share-link route's
+/// create surface).
 pub fn open_item_detail(
     parent: Option<&gtk::Window>,
     item: &MediaItemSummary,
     machine: &Arc<MediaMachine>,
     backup_key: &[u8],
     runtime: &tokio::runtime::Handle,
-) {
+) -> adw::Window {
     // The machine says whether this item belongs to a followed browse scope —
     // asked at open, never parsed (tui's `followed_scope_value` idiom).
     let followed_scope = machine.snapshot().followed_scope.map(|s| s.value);
@@ -255,6 +257,7 @@ pub fn open_item_detail(
     if !followed {
         load_versions(&ctx);
     }
+    window
 }
 
 /// The save file name for `name`: its last path component, so a name that

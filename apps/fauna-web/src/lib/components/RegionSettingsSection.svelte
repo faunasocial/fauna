@@ -5,14 +5,14 @@
   // in-app override), each policy on the chain, when it was last checked, and
   // the staleness warning. A paint of the shared `RegionPlane::view`, never an
   // app-side fold — tui `region::settings_elements`, linux `region::paint_settings`.
-  import { t } from '$lib/i18n/strings';
-  import { IDS } from '$lib/generated/uiIds';
-  import { regionView } from '$lib/region.svelte';
+  import { t } from '#lib/i18n/strings';
+  import { IDS } from '#lib/generated/uiIds';
+  import { regionView } from '#lib/region.svelte';
 
   let view = $derived(regionView());
 
   // Web formats times in JS: `format_unix_local` needs the OS timezone
-  // database, which wasm lacks (`$lib/custody.ts`).
+  // database, which wasm lacks (`#lib/custody.ts`).
   function when(secs: number): string {
     return new Date(secs * 1000).toLocaleString();
   }

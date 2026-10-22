@@ -56,9 +56,9 @@ from actions import ActionLayer
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from common.auth import register_handled_actor
 from conftest import MAIL_PRIMARY_DOMAIN
+from common.accounts import single_account_seed
 from drivers import create_driver
 from helpers.connection import ConnectionBarrierTimeout, wait_until_online
-from helpers import web_store
 from tests.api import ws_api
 
 pytestmark = [pytest.mark.tier_3, pytest.mark.web]
@@ -72,12 +72,6 @@ def _text_or_absent(driver, element_id: str) -> str:
         return driver.get_text(element_id)
     except Exception:
         return "<absent>"
-
-
-def _seed_registry_identity(driver, *, secret_hex: str, node_url: str) -> None:
-    """Write one signed-in identity in the registry shape `identity.init()`
-    reads (`helpers/web_store.seed_identity`)."""
-    web_store.seed_identity(driver, secret_hex, nest_url=node_url)
 
 
 def _mint_invite_code(nest) -> str:
@@ -228,7 +222,10 @@ def test_web_sign_out_then_new_identity_rebuilds_feed_manager(
     post_b_body = "manager-singleton B-probe " + secrets.token_hex(4)
 
     driver = create_driver("web")
-    driver.launch({"url": spa + "/app/"})
+    driver.launch({
+        "url": spa + "/app/",
+        "seed_credentials": single_account_seed(secret_a, nest_url=spa),
+    })
     try:
         actions = ActionLayer(driver)
 
@@ -236,8 +233,6 @@ def test_web_sign_out_then_new_identity_rebuilds_feed_manager(
         #    the only thing that calls getFeedManager() (feed/+page.svelte's
         #    onMount) — the SPA's root route defaults to /app/conversations, so
         #    a bare hard_reload never constructs it on its own. ──
-        _seed_registry_identity(driver, secret_hex=secret_a, node_url=spa)
-        driver.hard_reload()
         driver.wait_for("feed-tab", timeout=30)
         driver.click("feed-tab")
         _wait_connected(actions)
@@ -326,15 +321,16 @@ def test_web_add_account_rebuilds_feed_manager(
     post_b_body = "add-account manager-singleton B-probe " + secrets.token_hex(4)
 
     driver = create_driver("web")
-    driver.launch({"url": spa + "/app/"})
+    driver.launch({
+        "url": spa + "/app/",
+        "seed_credentials": single_account_seed(secret_a, nest_url=spa),
+    })
     try:
         actions = ActionLayer(driver)
 
         # ── A signs in and BUILDS the FeedManager singleton (same recipe as the
         #    sign-out-door test above: visiting Feed + composing is the only way
         #    `getFeedManager()` gets called). ──
-        _seed_registry_identity(driver, secret_hex=secret_a, node_url=spa)
-        driver.hard_reload()
         driver.wait_for("feed-tab", timeout=30)
         driver.click("feed-tab")
         _wait_connected(actions)

@@ -70,6 +70,7 @@ class ProfileTiersContentTest {
         createdAt = 0uL,
         mlkemEncapsKey = null,
         paymentEntitled = paymentEntitled,
+        home = null,
     )
 
     private fun subscriber() = FfiSubscriberEntry(
@@ -144,6 +145,7 @@ class ProfileTiersContentTest {
         onRemoveProvider: (String) -> Unit = {},
         onMintClaim: (String) -> Unit = {},
         webhookUrl: (String) -> String = { kind -> "https://example.test/webhook/$kind" },
+        returnUrl: (String) -> String? = { null },
         // FFI-free stand-in for `com.fauna.ffi.parseCount`, mirroring
         // `fauna_core::format::parse_count` exactly (`input.trim().parse::<u32>().ok()`)
         // — the TRIM is the whole point of the swap this stub covers.
@@ -177,6 +179,7 @@ class ProfileTiersContentTest {
                 // off the native path (the real screen injects `com.fauna.ffi.hexFull`).
                 hexFull = { HexUtil.bytesToHex(it) },
                 webhookUrl = webhookUrl,
+                returnUrl = returnUrl,
                 claimStatusLabel = ::testClaimStatusLabel,
                 providerStatusLabel = ::testProviderStatusLabel,
                 parseRank = parseRank,
@@ -455,6 +458,38 @@ class ProfileTiersContentTest {
             .assert(hasText("https://example.test/webhook/fake"))
         composeTestRule.onNodeWithTag("subscription-provider-form-webhook-url-copy-button")
             .assertExists()
+    }
+
+    @Test
+    fun returnUrlDisplay_showsTheSiteOriginUrl_andCopyButtonIsLive() {
+        render(
+            tiers = listOf(tier(name = "gold")),
+            providerKinds = listOf("fake", "stripe"),
+            returnUrl = { kind -> "https://alice.test/return/$kind" },
+        )
+        composeTestRule.onNodeWithTag("subscription-provider-add-button")
+            .performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("subscription-provider-form-return-url")
+            .performScrollTo()
+            .assert(hasText("https://alice.test/return/fake"))
+        composeTestRule.onNodeWithTag("subscription-provider-form-return-url-copy-button")
+            .assertExists().assertIsEnabled()
+    }
+
+    @Test
+    fun returnUrlDisplay_namesTheMissingWebAddress_andCopyButtonIsInert() {
+        render(
+            tiers = listOf(tier(name = "gold")),
+            providerKinds = listOf("fake"),
+            returnUrl = { null },
+        )
+        composeTestRule.onNodeWithTag("subscription-provider-add-button")
+            .performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("subscription-provider-form-return-url")
+            .performScrollTo()
+            .assert(hasText("public web address", substring = true))
+        composeTestRule.onNodeWithTag("subscription-provider-form-return-url-copy-button")
+            .assertExists().assertIsNotEnabled()
     }
 
     @Test

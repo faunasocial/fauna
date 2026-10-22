@@ -40,6 +40,7 @@
 use fauna_client_dns::{CertStatusRow, DelegationView, DomainView, PendingCertIssue};
 use fauna_client_mail_settings::local_domains::{
     LocalDomainView, LocalDomainsSnapshot, RoleAddressKind, dmarc_policy_options,
+    remove_confirm_body, remove_confirm_title,
 };
 use fauna_i18n::strings::admin as t_admin;
 use fauna_i18n::strings::admin::dns as t;
@@ -116,8 +117,9 @@ fn record_status_text(row: &fauna_client_dns::DnsRecordRow) -> String {
 
 /// The per-domain served-cert health badge (`tls-certificates.md` § C.4).
 /// Owned by `fauna_client_dns::cert_status_text` — see its doc comment for
-/// the shared decision + text-assembly split.
-use fauna_client_dns::cert_status_text;
+/// the shared decision + text-assembly split. Its deployment-level sibling, the
+/// failing-order line, is `fauna_client_dns::cert_issuance_error_text`.
+use fauna_client_dns::{cert_issuance_error_text, cert_status_text};
 
 /// The actor-picker options for a per-domain designation: the clear sentinel
 /// first (index 0 — the localized "None" / "Admin (default)", which is what
@@ -356,7 +358,10 @@ pub(super) fn dns_elements(state: &AdminState) -> Vec<Element> {
         // not this client, is authority on whether the add is actually first —
         // `adding_first_domain` is a UX hint off the already-fetched domain list.
         if domains.is_some_and(|s| s.adding_first_domain) {
-            els.push(Element::chrome(t::ADD_DOMAIN_PRIMARY_WARNING));
+            els.push(Element::label(
+                ids::ADMIN_DNS_ADD_DOMAIN_PRIMARY_WARNING,
+                t::ADD_DOMAIN_PRIMARY_WARNING,
+            ));
         }
         els.push(Element::gesture_button(
             ids::ADMIN_DNS_ADD_DOMAIN_SUBMIT_BUTTON,
@@ -387,6 +392,26 @@ pub(super) fn dns_elements(state: &AdminState) -> Vec<Element> {
     // ── The start-a-rename wizard sheet (inline reveal) ─────────────────────
     if state.dns_rename_sheet_open {
         els.extend(rename_sheet_elements(state, domains));
+    }
+
+    // ── The remove-confirm dialog (inline reveal) ───────────────────────────
+    if let Some(domain) = domains.and_then(|s| s.remove_confirm_domain.as_deref()) {
+        els.extend(remove_confirm_elements(domain));
+    }
+
+    // ── Why the nest's own certificate requests are failing ─────────────────
+    // Deployment-level, once, above the domain rows: one order covers every SAN,
+    // so a per-domain copy would repeat one error on every row
+    // (`tls-certificates.md` § Keeping the cert alive, *The admin sees why
+    // issuance is failing*).
+    for e in dns
+        .map(|s| s.cert_issuance_errors.as_slice())
+        .unwrap_or_default()
+    {
+        els.push(Element::label(
+            ids::ADMIN_DNS_CERT_ISSUANCE_ERROR,
+            cert_issuance_error_text(e),
+        ));
     }
 
     // ── One section per active domain ───────────────────────────────────────
@@ -632,11 +657,12 @@ fn domain_section(
     // the primary — that is what keeps its index aligned with
     // `admin-dns-domain-name`, which the driver's `remove_domain` relies on. The
     // nest is still the authority (it refuses `cannot_remove_primary_domain`).
+    // It only opens the confirm; the confirm removes.
     els.push(scope(Element::gesture_button(
         ids::ADMIN_DNS_DOMAIN_REMOVE_BUTTON,
         t::REMOVE,
         !row.is_primary,
-        Gesture::Admin(Action::RemoveDnsDomain {
+        Gesture::Admin(Action::OpenDnsRemoveConfirm {
             domain: row.domain.clone(),
         }),
     )));
@@ -870,6 +896,37 @@ fn record_elements(record: &fauna_client_dns::DnsRecordRow) -> Vec<Element> {
     els
 }
 
+/// The remove-confirm dialog — painted only while the shared machine holds a
+/// domain armed (`LocalDomainsSnapshot::remove_confirm_domain`;
+/// `mail-multidomain.md` § Removing a local domain). Its title names the domain
+/// (the shared `remove_confirm_title`) and is followed by the ratified body
+/// (`remove_confirm_body`) in the modal's own text — no new id; only its
+/// confirm removes, and cancel closes it with nothing removed.
+fn remove_confirm_elements(domain: &str) -> Vec<Element> {
+    let title = remove_confirm_title(domain.to_string()).resolve(fauna_i18n::strings::lookup);
+    let body = remove_confirm_body(domain.to_string()).resolve(fauna_i18n::strings::lookup);
+    vec![
+        Element::label(
+            ids::ADMIN_DNS_DOMAIN_REMOVE_CONFIRM_MODAL,
+            format!("{title} {body}"),
+        ),
+        Element::gesture_button(
+            ids::ADMIN_DNS_DOMAIN_REMOVE_CONFIRM_BUTTON,
+            t::REMOVE_CONFIRM,
+            true,
+            Gesture::Admin(Action::ConfirmDnsRemoveDomain),
+        )
+        .within(ids::ADMIN_DNS_DOMAIN_REMOVE_CONFIRM_MODAL, 0),
+        Element::gesture_button(
+            ids::ADMIN_DNS_DOMAIN_REMOVE_CANCEL_BUTTON,
+            common::CANCEL,
+            true,
+            Gesture::Admin(Action::CancelDnsRemoveDomain),
+        )
+        .within(ids::ADMIN_DNS_DOMAIN_REMOVE_CONFIRM_MODAL, 0),
+    ]
+}
+
 /// The start-a-rename wizard sheet (`mail-primary-domain-rename.md` § UX
 /// surface): pick a promotion target from the existing active non-primary
 /// domains (the wizard never *adds* a domain — the two-step rule), optionally
@@ -1006,7 +1063,8 @@ pub(crate) mod tests {
     use super::*;
     use crate::admin::AdminPage;
     use fauna_client_dns::{
-        CertHealthState, CredentialSummary, DnsRecordRow, DnsStatus, RecordVerdict, VerifyStatus,
+        CertHealthState, CertIssuanceErrorRow, CertIssuanceOrder, CredentialSummary, DnsRecordRow,
+        DnsStatus, RecordVerdict, VerifyStatus,
     };
     use fauna_client_mail_settings::local_domains::{
         DomainDmarcPolicy, LocalDomainStatus, RoleAddressOverrideView,
@@ -1142,6 +1200,7 @@ pub(crate) mod tests {
             active_rename: None,
             rename_available: false,
             adding_first_domain,
+            remove_confirm_domain: None,
         }
     }
 
@@ -1469,18 +1528,17 @@ pub(crate) mod tests {
 
     /// A domainless nest's first add is a one-way door (`deployment-home-with-
     /// public-relay.md` § MUA reach): the primary it becomes can never be
-    /// removed from any app. The warning is untagged chrome, not a ui.yaml id
-    /// (`Element::chrome` — no rule-A approval needed), and only appears when
-    /// `adding_first_domain` says the next add really would be the first —
-    /// never once a primary already exists.
+    /// removed from any app. The warning is the `admin-dns-add-domain-primary-
+    /// warning` element, and only appears when `adding_first_domain` says the
+    /// next add really would be the first — never once a primary already exists.
     #[test]
     fn first_domain_add_warns_of_irreversibility_only_when_domainless() {
         let mut domainless = app_with(None, Some(domains_snapshot(vec![], vec![])));
         domainless.admin.dns_add_domain_open = true;
         let els = dns_elements(&domainless.admin);
         assert!(
-            els.iter()
-                .any(|e| e.id.is_empty() && e.text == t::ADD_DOMAIN_PRIMARY_WARNING),
+            texts(&els, "admin-dns-add-domain-primary-warning")
+                == vec![t::ADD_DOMAIN_PRIMARY_WARNING],
             "a domainless nest's add-domain form must warn before the submit \
              that makes the add irreversible"
         );
@@ -1495,10 +1553,43 @@ pub(crate) mod tests {
         already_has_one.admin.dns_add_domain_open = true;
         let els = dns_elements(&already_has_one.admin);
         assert!(
-            !els.iter()
-                .any(|e| e.id.is_empty() && e.text == t::ADD_DOMAIN_PRIMARY_WARNING),
+            texts(&els, "admin-dns-add-domain-primary-warning").is_empty(),
             "a second-or-later add is ordinary and must not warn"
         );
+    }
+
+    /// The remove-confirm dialog paints only while the shared snapshot holds a
+    /// domain armed, names that domain, and carries its confirm and cancel
+    /// inside it (`mail-multidomain.md` § Removing a local domain).
+    #[test]
+    fn remove_confirm_paints_only_while_armed_and_names_the_domain() {
+        let rows = vec![
+            domain_row("primary.example", true),
+            domain_row("two.example", false),
+        ];
+        let app = app_with(None, Some(domains_snapshot(rows.clone(), vec![])));
+        let els = dns_elements(&app.admin);
+        assert!(texts(&els, "admin-dns-domain-remove-confirm-modal").is_empty());
+        assert!(texts(&els, "admin-dns-domain-remove-confirm-button").is_empty());
+
+        let mut armed = domains_snapshot(rows, vec![]);
+        armed.remove_confirm_domain = Some("two.example".to_string());
+        let app = app_with(None, Some(armed));
+        let els = dns_elements(&app.admin);
+        let title = texts(&els, "admin-dns-domain-remove-confirm-modal");
+        assert_eq!(title.len(), 1);
+        assert!(title[0].contains("two.example"), "title: {title:?}");
+        for id in [
+            "admin-dns-domain-remove-confirm-button",
+            "admin-dns-domain-remove-cancel-button",
+        ] {
+            let el = els.iter().find(|e| e.id == id).expect(id);
+            assert_eq!(
+                el.path.first().map(|(p, _)| p.as_str()),
+                Some("admin-dns-domain-remove-confirm-modal"),
+                "{id} sits inside the dialog"
+            );
+        }
     }
 
     /// The provider buttons are keyed `[<provider_id>]` (a literal bracket in the
@@ -1916,6 +2007,66 @@ pub(crate) mod tests {
             "got {badge:?}"
         );
         assert!(!badge.contains(t::cert::SELF_SIGNED));
+    }
+
+    /// The nest's failing ACME orders paint once, deployment-level, above the
+    /// per-domain rows — one `admin-dns-cert-issuance-error` line per order,
+    /// worded by the shared formatter — and nothing paints when none fails.
+    #[test]
+    fn issuance_errors_paint_once_per_failing_order_above_the_domain_rows() {
+        let domains = || {
+            Some(domains_snapshot(
+                vec![domain_row("a.test", true), domain_row("b.test", false)],
+                Vec::new(),
+            ))
+        };
+        let snap = dns_snapshot(vec![
+            matrix("a.test", Vec::new()),
+            matrix("b.test", Vec::new()),
+        ]);
+        let app = app_with(Some(snap.clone()), domains());
+        assert!(
+            texts(&dns_elements(&app.admin), "admin-dns-cert-issuance-error").is_empty(),
+            "no failing order → no error line"
+        );
+
+        let mut failing = snap;
+        failing.cert_issuance_errors = vec![
+            CertIssuanceErrorRow {
+                order: Some(CertIssuanceOrder::Domain),
+                detail: "mail.a.test: <i>connection refused</i>".to_string(),
+                failed_at_unix: 1_784_678_400,
+            },
+            CertIssuanceErrorRow {
+                order: Some(CertIssuanceOrder::IpBridge),
+                detail: "ip refused".to_string(),
+                failed_at_unix: 1_784_678_400,
+            },
+        ];
+        let app = app_with(Some(failing.clone()), domains());
+        let els = dns_elements(&app.admin);
+        let expected: Vec<String> = failing
+            .cert_issuance_errors
+            .iter()
+            .map(fauna_client_dns::cert_issuance_error_text)
+            .collect();
+        assert_eq!(
+            texts(&els, "admin-dns-cert-issuance-error"),
+            expected.iter().map(String::as_str).collect::<Vec<_>>(),
+            "one line per order, two domains notwithstanding"
+        );
+        let first_error = els
+            .iter()
+            .position(|e| e.id == "admin-dns-cert-issuance-error")
+            .unwrap();
+        let first_badge = els
+            .iter()
+            .position(|e| e.id == "admin-dns-cert-status")
+            .unwrap();
+        assert!(
+            first_error < first_badge,
+            "the errors sit above the domain rows"
+        );
     }
 
     /// Auto-renew is shown ONLY for a managed or delegated domain — the only kinds

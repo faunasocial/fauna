@@ -15,7 +15,9 @@ import com.fauna.app.core.feed.PostMediaOpen
 import com.fauna.app.payments.resolvePostTipsIfBuilt
 import com.fauna.ffi.FfiCueTracker
 import com.fauna.ffi.FfiFeedManager
+import com.fauna.ffi.FfiPostBlobHome
 import com.fauna.ffi.actorIdFromSecret
+import com.fauna.ffi.postBlobHome
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -64,6 +66,65 @@ class FeedVM @Inject constructor(
 
     /** The whole renderable Feed page (shared across the list/compose/detail routes). */
     val snapshot: StateFlow<FeedSnapshot?> get() = host.snapshot
+
+    // ── The author window (`feed.md` § State & data shape → *The author
+    // window*; `profile.md` § Layout & flow → *The Posts tab*) ───────────────
+    //
+    // The profile page's Posts tab is a SECOND manager over the same seams,
+    // minted off the timeline's by `FfiFeedManager.authorWindow` and paging
+    // `fauna.feed.author.posts`. A `FeedVM` the profile page holds binds one
+    // ([openAuthorWindow]); from then on every per-post verb the feed's own
+    // card fires — like / repost / reply / quote, the ⋯ menu's train / delete,
+    // the buy, the lazy resolves, the reveals — runs on the window, so the
+    // counts and rows it paints move ([manager]). The timeline-only surfaces
+    // (the selector, search, compose, bridges, cues, the detail door's
+    // `resolvePost`, the thread page) stay on the timeline's manager.
+
+    /** The bound author window, or null on the feed's own routes. */
+    @Volatile
+    private var window: FfiFeedManager? = null
+
+    /** The actor the bound window lists, kept so a reconnect re-mints it. */
+    private var windowActor: String? = null
+
+    private val _windowSnapshot = MutableStateFlow<FeedSnapshot?>(null)
+
+    /** The bound author window's snapshot (`posts`, `status`, `has_more`,
+     *  `error`) — null until [openAuthorWindow] mints one. */
+    val windowSnapshot: StateFlow<FeedSnapshot?> = _windowSnapshot.asStateFlow()
+
+    /** The manager the per-post verbs act on: the bound author window, else
+     *  the timeline's. */
+    private fun manager(): FfiFeedManager? = window ?: host.manager()
+
+    /**
+     * Mint an author window for [actorIdHex] off the timeline's manager and read
+     * its first page — called on EVERY open of the profile's Posts tab (no client
+     * cache, `profile.md` § Persistence), so each open reads afresh. A previous
+     * window is dropped (its observers cleared). No timeline manager yet (nest not
+     * connected) leaves the tab empty; the reconnect tick re-mints.
+     */
+    fun openAuthorWindow(actorIdHex: String) {
+        windowActor = actorIdHex
+        val timeline = host.manager() ?: return
+        val w = timeline.authorWindow(actorIdHex)
+        window?.clearObservers()
+        w.addObserver(object : uniffi.fauna_feed.FeedSnapshotObserver {
+            override fun onChanged() {
+                if (window === w) _windowSnapshot.value = w.snapshot()
+            }
+        })
+        window = w
+        _windowSnapshot.value = w.snapshot()
+        contentPolicyStore.refresh()
+        viewModelScope.launch { w.refreshCurrentFeed() }
+    }
+
+    override fun onCleared() {
+        window?.clearObservers()
+        window = null
+        super.onCleared()
+    }
 
     /**
      * The shared content-policy render inputs (guardian floor + the viewer's own
@@ -222,6 +283,9 @@ class FeedVM @Inject constructor(
     fun start() = reload()
 
     private fun reload() {
+        // A profile's Posts tab: a reconnect re-mints its window over the
+        // (possibly rebuilt) timeline manager; nothing timeline-side to load.
+        windowActor?.let { openAuthorWindow(it); return }
         // Re-pull the ward's guardian floor + own spam thresholds on entry and on
         // reconnect, so a guardian's policy change (or a just-completed login)
         // reaches the feed's render enforcement (family-safety.md § Content policy).
@@ -263,7 +327,8 @@ class FeedVM @Inject constructor(
     /** Re-select the current source (Trending or a feed) — the pull-to-refresh
      *  entry point; see [reselectCurrent] for why Trending needs its own branch. */
     fun refreshCurrent() {
-        val m = host.manager() ?: return
+        // On a profile's Posts tab the store-change tick re-reads the window.
+        val m = manager() ?: return
         viewModelScope.launch { reselectCurrent(m) }
     }
 
@@ -296,15 +361,30 @@ class FeedVM @Inject constructor(
     }
 
     fun loadMore() {
-        val m = host.manager() ?: return
+        val m = manager() ?: return
         viewModelScope.launch { m.loadMore() }
     }
 
     /** Resolve the first media blob hash for a `has_media` post (lazy; the
      *  feed-index projection never reads the body, so the hash is per-post). */
     fun resolveMedia(postId: String) {
-        val m = host.manager() ?: return
+        val m = manager() ?: return
         viewModelScope.launch { m.resolveMedia(postId) }
+    }
+
+    /**
+     * Resolve the remote author's byline for [postId] (`feed.md` § The read model →
+     * *The remote author's byline*): the shared manager reads the author's profile
+     * through its home and writes the opted-in display face onto
+     * `PostSummary.authorDisplay`, which the card already hands to the shared
+     * label resolver. Fire-once by construction — every outcome writes a face (an
+     * empty one when the author did not opt in), so the caller's guard (a post
+     * whose `homeNestUrl` is set and whose `authorDisplay` is still unset) closes.
+     * The card's label changes nowhere.
+     */
+    fun resolveAuthorFace(postId: String) {
+        val m = manager() ?: return
+        viewModelScope.launch { m.resolveAuthorFace(postId) }
     }
 
     /** Opt [postId]'s remote images into loading (`load-remote-content-button`,
@@ -314,7 +394,7 @@ class FeedVM @Inject constructor(
      *  its list card and the detail) and the feed screens recompose to paint the
      *  images. No client-side reveal state. */
     fun revealRemoteImages(postId: String) {
-        host.manager()?.revealRemoteImages(postId)
+        manager()?.revealRemoteImages(postId)
     }
 
     /** Project the embedded quoted-post card for `quotedPostId` (from the loaded
@@ -322,7 +402,7 @@ class FeedVM @Inject constructor(
      *  `RenderBlock.QuotedPost` into the post `document` (idempotently re-emitting),
      *  which the feed screens paint. */
     suspend fun resolveQuotedPost(quotedPostId: String): QuotedPostView? =
-        host.manager()?.resolveQuotedPost(quotedPostId)
+        manager()?.resolveQuotedPost(quotedPostId)
 
     /**
      * Make [postId] renderable through `find_post`'s union even when the
@@ -340,6 +420,32 @@ class FeedVM @Inject constructor(
      */
     suspend fun resolvePost(postId: String) {
         host.manager()?.resolvePost(postId)
+    }
+
+    /**
+     * [resolvePost] for a link that names the post's home nest (`feed.md` § The
+     * read model → *A post homed on another nest*): this nest first, and on its
+     * not-found the home through this nest's relay — the room search's post hit
+     * on a foreign-homed room. The relayed post carries its home, where
+     * [fetchPostBlobBytes] and the other byte legs read it.
+     */
+    suspend fun resolvePostFrom(postId: String, homeNestUrl: String) {
+        host.manager()?.resolvePostFrom(postId, homeNestUrl)
+    }
+
+    /**
+     * The nest [postId]'s own bytes rest on, off the post the snapshots hold
+     * (the author window first, then the timeline's list and deep-link slot):
+     * the shared `postBlobHome`, handed to the plane unchanged — `null` for a
+     * post of this nest, or one no snapshot holds (this nest answers).
+     */
+    private fun blobHomeOf(postId: String): FfiPostBlobHome? {
+        val post = windowSnapshot.value?.posts?.firstOrNull { it.postId == postId }
+            ?: snapshot.value?.let { s ->
+                s.posts.firstOrNull { it.postId == postId }
+                    ?: s.deepLinkedPost?.takeIf { it.postId == postId }
+            }
+        return post?.let { postBlobHome(it) }
     }
 
     /** `feed-post-view-thread-button` — open the Bluesky thread page for
@@ -363,7 +469,7 @@ class FeedVM @Inject constructor(
      *  `hasMedia` data trigger). Every outcome writes a view, including "no
      *  tips", so the guard closes and the caller's pump settles. */
     fun resolvePostTips(postId: String) {
-        val m = host.manager() ?: return
+        val m = manager() ?: return
         // Through the payments variant seam, not `m.resolvePostTips` directly:
         // it is the one `payments`-gated member of `FfiFeedManager`, so a
         // store-safe build's bindings do not carry it and this shared file
@@ -381,7 +487,7 @@ class FeedVM @Inject constructor(
      *  (including "no offer") writes through `PostSummary.unlock_offer` and
      *  re-emits, so the guard closes. */
     fun resolvePostUnlockOffer(postId: String) {
-        val m = host.manager() ?: return
+        val m = manager() ?: return
         viewModelScope.launch { m.resolvePostUnlockOffer(postId) }
     }
 
@@ -391,7 +497,7 @@ class FeedVM @Inject constructor(
      *  `null`, the completion signal the teaser's re-render reads; a failure
      *  surfaces on [buyUnlockError], never swallowed (mirrors [deletePost]). */
     fun buyUnlockOffer(postId: String) {
-        val m = host.manager() ?: return
+        val m = manager() ?: return
         viewModelScope.launch {
             runCatching { m.buyUnlockOffer(postId) }
                 .onFailure { _buyUnlockError.value = it.message ?: "buy failed" }
@@ -404,7 +510,7 @@ class FeedVM @Inject constructor(
      *  screens paint the card. Fire-once: the screen triggers this only while the block
      *  is still `Resolving`, the same discipline as [resolveMedia] / [resolveQuotedPost]. */
     fun resolveLinkPreview(url: String) {
-        val m = host.manager() ?: return
+        val m = manager() ?: return
         viewModelScope.launch { m.resolveLinkPreview(url) }
     }
 
@@ -414,16 +520,23 @@ class FeedVM @Inject constructor(
      *  sealed photo opens under its per-post key, anything else passes through
      *  unchanged ([PostMediaOpen], `media.md` § Encryption at rest). Client glue
      *  (async byte load stays per-platform, render-model.md § boundary). */
+    suspend fun fetchPostBlobBytes(postId: String, hash: String): ByteArray? =
+        PostMediaOpen.fetchAndOpen(host.postBlobHosts(), manager(), blobHomeOf(postId), hash)
+
+    /** A blob of THIS nest rather than of a post — a link-preview og:image, which
+     *  stays this nest's whoever homes the post carrying it (`feed.md` § The read
+     *  model → *A post homed on another nest*). */
     suspend fun fetchBlobBytes(hash: String): ByteArray? =
-        PostMediaOpen.fetchAndOpen(api, host.manager(), hash)
+        PostMediaOpen.fetchAndOpen(host.postBlobHosts(), manager(), null, hash)
 
     /** What a tapped `video-thumbnail` plays (render-model.md § D6c → *Inline
      *  playback*): the shared `playbackSource` projection, then the pinned ranged
-     *  reader or the sealed-media open ([InlineVideoPlayback]); `null` when nothing
-     *  plays, or before a manager exists. */
-    suspend fun resolvePlayback(block: RenderBlock, cacheDir: java.io.File): InlineVideoPlayback.Media? {
-        val m = host.manager() ?: return null
-        return InlineVideoPlayback.resolve(m, api, block, api.nodeUrl, cacheDir)
+     *  reader or the sealed-media open ([InlineVideoPlayback]), a foreign-homed
+     *  post's through its home; `null` when nothing plays, or before a manager
+     *  exists. */
+    suspend fun resolvePlayback(postId: String, block: RenderBlock, cacheDir: java.io.File): InlineVideoPlayback.Media? {
+        val m = manager() ?: return null
+        return InlineVideoPlayback.resolve(m, host.postBlobHosts(), blobHomeOf(postId), block, api.nodeUrl, cacheDir)
     }
 
     /** Fetch a bridged post's `ProxiedImage` bytes from its nest-relative path
@@ -436,8 +549,10 @@ class FeedVM @Inject constructor(
      *  drives the `c2pa-badge` on post_detail. The `x-c2pa` server header is only
      *  the pre-filter; the verdict is the shared `detect_media_c2pa` over the
      *  opened bytes ([PostMediaOpen.verifiedC2pa], `media.md` § C2PA provenance). */
-    suspend fun checkBlobC2pa(hash: String): Boolean =
-        runCatching { PostMediaOpen.verifiedC2pa(api, host.manager(), hash) }.getOrDefault(false)
+    suspend fun checkBlobC2pa(postId: String, hash: String): Boolean =
+        runCatching {
+            PostMediaOpen.verifiedC2pa(host.postBlobHosts(), manager(), blobHomeOf(postId), hash)
+        }.getOrDefault(false)
 
     // ── Engagement cues (engagement-cues.md § Cue vocabulary & derivation) ────
     // The capture shell (ui/screen/feed/CueViewport.kt) measures honest viewport
@@ -540,7 +655,7 @@ class FeedVM @Inject constructor(
      * data loss to the next debugger.
      */
     fun deletePost(postId: String) {
-        val m = host.manager() ?: return
+        val m = manager() ?: return
         viewModelScope.launch {
             runCatching { m.deletePost(postId) }
                 .onFailure { _deleteError.value = it.message ?: "delete failed" }
@@ -555,18 +670,18 @@ class FeedVM @Inject constructor(
      *  fresh on every call (recomputed at card-build time, mirrors linux
      *  `build_post_actions_button`'s `manager.train_target_factor()`) since it
      *  can change when the user switches feeds. */
-    fun trainTargetFactor(): String? = host.manager()?.trainTargetFactor()
+    fun trainTargetFactor(): String? = manager()?.trainTargetFactor()
 
     /** This post's current toggle state for [factor] — what paints the
      *  more/less-like-this menu items as active; survives restarts (the
      *  markers live inside the sealed model, reaching every device). */
     fun exampleLabelFor(postId: String, factor: String): TrainVerb? =
-        host.manager()?.exampleLabelFor(postId, factor)
+        manager()?.exampleLabelFor(postId, factor)
 
     /** Does [postId] match one of the user's muted words (topic-factors.md
      *  § Scoring) — the canonical per-post collapse signal, applying even in
      *  a chronological feed where a mute cannot sink a post. */
-    fun isMuted(postId: String): Boolean = host.manager()?.isMuted(postId) ?: false
+    fun isMuted(postId: String): Boolean = manager()?.isMuted(postId) ?: false
 
     /**
      * Run a training gesture (`feed-post-more-like-this` / `-less-like-this`):
@@ -579,7 +694,7 @@ class FeedVM @Inject constructor(
      * [trainError] → the page `error-message`, mirroring [deletePost].
      */
     fun dispatchTrain(postId: String, factor: String, verb: TrainVerb, alreadyMarked: Boolean) {
-        val m = host.manager() ?: return
+        val m = manager() ?: return
         viewModelScope.launch {
             runCatching {
                 if (alreadyMarked) m.untrainPost(postId, factor) else m.trainPost(postId, factor, verb)
@@ -874,10 +989,14 @@ class FeedVM @Inject constructor(
      * painters).
      */
     fun unlockGatedPost(postId: String) {
-        val m = host.manager() ?: return
+        val m = manager() ?: return
         viewModelScope.launch {
             val hash = m.gatedBlobHash(postId) ?: return@launch
-            val bytes = runCatching { api.fetchBlobBytes(hash) }.getOrNull() ?: return@launch
+            // The sealed body rests where the post does: its home when another
+            // nest is its home (the KeyBlob that opens it still comes through
+            // this nest, inside `unlockGatedPost`).
+            val bytes = runCatching { host.postBlobHosts()?.get(blobHomeOf(postId), hash) }
+                .getOrNull() ?: return@launch
             runCatching { m.unlockGatedPost(postId, bytes) }
         }
     }
@@ -902,7 +1021,7 @@ class FeedVM @Inject constructor(
     // like but never take it back — call the manager's own toggle verb, which
     // rides the same interact door on the same post id in both directions.
     fun like(postId: String) {
-        val m = host.manager() ?: return
+        val m = manager() ?: return
         viewModelScope.launch {
             runCatching { m.like(postId) }
                 .onFailure { android.util.Log.w("FeedVM", "like failed: ${it.message}") }
@@ -917,7 +1036,7 @@ class FeedVM @Inject constructor(
     // raw `interact(id, "repost")` this used to call creates nothing on a
     // native post, exactly the bug reply/quote were already fixed for above.
     fun repost(postId: String) {
-        val m = host.manager() ?: return
+        val m = manager() ?: return
         viewModelScope.launch {
             runCatching { m.repost(postId) }
                 .onFailure {
@@ -945,7 +1064,7 @@ class FeedVM @Inject constructor(
     // restricted target is `replyPublicConfirmed`. The audience is the
     // manager's; this glue never decides it.
     fun reply(postId: String, text: String, publicConfirmed: Boolean = false) {
-        val m = host.manager() ?: return
+        val m = manager() ?: return
         viewModelScope.launch {
             runCatching {
                 if (publicConfirmed) {
@@ -973,7 +1092,7 @@ class FeedVM @Inject constructor(
     }
 
     fun quote(postId: String, text: String) {
-        val m = host.manager() ?: return
+        val m = manager() ?: return
         viewModelScope.launch {
             runCatching { m.quote(postId, text) }
                 .onFailure {

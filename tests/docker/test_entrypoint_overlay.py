@@ -287,6 +287,47 @@ def test_dockerfile_ships_the_overlay_script():
     )
 
 
+# ── The internal listeners bind container loopback ────────────────────
+# `deployment-threat-model.md` § Concern 1a, the container-hardening paragraph:
+# a fallen sidecar shares the compose network with the nest container, so every
+# listener nothing outside the container dials binds 127.0.0.1 in the image.
+
+
+def test_listen_reconcile_moves_the_default_to_loopback(tmp_path):
+    nest_toml = _fresh_nest_toml(tmp_path)
+    assert _keys(nest_toml.read_text()).get("listen") == '"0.0.0.0:3000"', (
+        "config/default.toml's listen moved — re-read the image's bind contract"
+    )
+    for _ in range(2):  # idempotent: the second boot rewrites nothing new
+        proc = _run("ensure-listen", str(nest_toml), "127.0.0.1:3000")
+        assert proc.returncode == 0, f"overlay failed:\n{proc.stderr}"
+    text = nest_toml.read_text()
+    assert _keys(text).get("listen") == '"127.0.0.1:3000"'
+    assert text.count("listen = ") == 1
+
+
+def test_entrypoint_binds_the_nest_on_loopback_on_every_boot():
+    """The default is loopback, and the reconcile runs AFTER the first-run block:
+    a box first-booted on an all-interfaces image is narrowed on its next pull."""
+    text = _ENTRYPOINT.read_text()
+    assert 'BIND_ADDR="${FAUNA_BIND_ADDR:-127.0.0.1}"' in text
+    assert "s/listen = " not in text, "the first-run-only listen sed is retired"
+    block_end = text.index('echo "=== Starting nest (existing config) ==="')
+    reconcile = text.index('nest-toml-overlay.sh ensure-listen /data/nest.toml "${BIND_ADDR}:${PORT}"')
+    assert reconcile > block_end
+
+
+def test_entrypoint_pins_plaintext_imap_to_loopback_without_a_lan_bind():
+    """No LAN bind: CalDAV and the unpublished plaintext :143 sit on loopback;
+    :993 stays on every interface because the compose bundle publishes it."""
+    text = _ENTRYPOINT.read_text()
+    branch = text[text.index('if [ -n "$LAN_BIND_IP" ]; then'):]
+    no_lan = branch[branch.index("else"):branch.index("fi")]
+    assert 'caldav_listen_https = "127.0.0.1:8444"' in no_lan
+    assert 'imap_listen_starttls = "127.0.0.1:143"' in no_lan
+    assert "imap_listen_implicit_tls" not in no_lan
+
+
 # ── Artifact shell smoke checks ───────────────────────────────────────
 # (Absorbed from tests/docker/test_entrypoint.sh, which was wired to no gate and
 # therefore never ran; these now execute on the merge path.)

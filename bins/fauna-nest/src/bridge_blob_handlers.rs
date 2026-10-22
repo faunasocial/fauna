@@ -8,6 +8,9 @@ use std::time::Duration;
 
 use serde_bytes::ByteBuf;
 
+use fauna_protocol::microsoft_registration::{
+    SetMicrosoftRegistrationReply, SetMicrosoftRegistrationRequest,
+};
 use fauna_protocol::{
     RpcError, Value,
     bridge_atproto::{
@@ -1139,6 +1142,24 @@ fn set_mail_enabled_handler() -> RpcHandler {
         Box::pin(async move {
             require_class(&state, &actor_id, "fauna.bridges.set_mail_enabled").await?;
             let req: SetMailEnabledRequest = decode(&payload).map_err(malformed)?;
+            // (0) A public box whose deployment wired no content scanners
+            // cannot run the MTA, so an enable would publish MX and DKIM for a
+            // box that cannot accept mail: refuse it before any write — no
+            // toggle, no flag, no domain safety net. A disable is never
+            // refused. Per `mail-bridge-lifecycle.md` § Default-off on first
+            // claim → *A box with no content scanners cannot enable mail*.
+            if req.enabled {
+                let node_mode = *state.node_mode.read().await;
+                if fauna_core::mail_availability::mail_unavailable_here(
+                    node_mode,
+                    state.content_scanners,
+                ) {
+                    return Err(RpcError::new(
+                        RpcError::CODE_BRIDGES_MAIL_UNAVAILABLE_HERE,
+                        "error.bridges.mail_unavailable_here",
+                    ));
+                }
+            }
             // (1) Persist the authoritative DB toggle first — `fetch_config`
             // reads it, and the reconciliation tick treats it as ground truth.
             state
@@ -1217,6 +1238,7 @@ fn set_mail_enabled_handler() -> RpcHandler {
             let node_mode = *state.node_mode.read().await;
             crate::mail_enable::reconcile_supervisor(
                 node_mode,
+                state.content_scanners,
                 req.enabled,
                 caldav_enabled,
                 carddav_enabled,
@@ -1292,6 +1314,7 @@ fn set_caldav_enabled_handler() -> RpcHandler {
             let node_mode = *state.node_mode.read().await;
             crate::mail_enable::reconcile_supervisor(
                 node_mode,
+                state.content_scanners,
                 toggles.mail,
                 req.enabled,
                 toggles.carddav,
@@ -1367,6 +1390,7 @@ fn set_carddav_enabled_handler() -> RpcHandler {
             let node_mode = *state.node_mode.read().await;
             crate::mail_enable::reconcile_supervisor(
                 node_mode,
+                state.content_scanners,
                 toggles.mail,
                 toggles.caldav,
                 req.enabled,
@@ -1443,6 +1467,7 @@ fn set_webdav_enabled_handler() -> RpcHandler {
             let node_mode = *state.node_mode.read().await;
             crate::mail_enable::reconcile_supervisor(
                 node_mode,
+                state.content_scanners,
                 toggles.mail,
                 toggles.caldav,
                 toggles.carddav,
@@ -1546,6 +1571,7 @@ fn get_caldav_port_handler() -> RpcHandler {
                 .unwrap_or(fauna_protocol::bridge_routing::DEFAULT_CALDAV_PORT);
             encode_reply(&GetCaldavPortReply {
                 port,
+                direct_listener: state.dav_direct_listener,
                 extra: Default::default(),
             })
         })
@@ -1582,6 +1608,44 @@ fn set_auto_enable_mail_for_new_users_handler() -> RpcHandler {
                     ))
                 })?;
             encode_reply(&SetAutoEnableMailForNewUsersReply {
+                ok: true,
+                extra: Default::default(),
+            })
+        })
+    })
+}
+
+// Set (or clear) the deployment's own Microsoft app registration for the
+// Outlook import (`mailbox-migration.md` § Microsoft sign-in, *An
+// admin-supplied registration*). A single DB write, like the auto-enable policy
+// above: the bridge never reads it; every app reads it back from
+// `fauna.setup.status`. The pair is validated by the same shared rule the
+// admin's app runs (`fauna_protocol::microsoft_registration::normalize`), so a
+// value the app would refuse never rests here; both empty clears back to the
+// project's registration. Admin-only.
+fn set_microsoft_registration_handler() -> RpcHandler {
+    Box::new(|state, actor_id, payload| {
+        Box::pin(async move {
+            require_class(
+                &state,
+                &actor_id,
+                "fauna.bridges.set_microsoft_registration",
+            )
+            .await?;
+            let req: SetMicrosoftRegistrationRequest = decode(&payload).map_err(malformed)?;
+            let normalized =
+                fauna_protocol::microsoft_registration::normalize(&req.client_id, &req.tenant)
+                    .map_err(malformed)?;
+            state
+                .db
+                .set_microsoft_registration(
+                    normalized
+                        .as_ref()
+                        .map(|(client_id, tenant)| (client_id.as_str(), tenant.as_str())),
+                )
+                .await
+                .map_err(|e| internal(format!("persist microsoft registration: {e:#}")))?;
+            encode_reply(&SetMicrosoftRegistrationReply {
                 ok: true,
                 extra: Default::default(),
             })
@@ -1948,7 +2012,7 @@ fn mint_bulk_byte_token_handler() -> RpcHandler {
                 }
                 // A bridge is never a cross-nest folder writer — that purpose is
                 // minted solely by the `write_token.mint` federation handler after
-                // its foreign-member + writer gate (`federation.md` § Cross-nest…).
+                // its foreign-member + writer gate (`federation-shared-folders.md` § Cross-nest…).
                 // Refuse it here so a caller-set value can never open the byte
                 // plane under this bridge's identity (defense in depth; the byte
                 // routes never branch on purpose, so the mint gate is the only
@@ -1998,7 +2062,7 @@ fn mint_bulk_byte_token_handler() -> RpcHandler {
                 }
                 // Nor a cross-nest folder reader — minted solely by the
                 // `read_token.mint` federation handler after its foreign-member
-                // gate (`federation.md` § Cross-nest… → *Relay serving across
+                // gate (`federation-shared-folders.md` § Cross-nest… → *Relay serving across
                 // nests*). The chunk route's relay arm reads this purpose, so
                 // a bridge-minted one would be a door, not just a mislabel.
                 BulkByteMintPurpose::ForeignFolderRead => {
@@ -3237,6 +3301,23 @@ fn mint_grant_handler() -> RpcHandler {
             if blob.holder.len() != 32 {
                 return Err(malformed("grant holder must be a 32-byte x25519 pubkey"));
             }
+            // The form gate (TP4, `encryption-at-rest.md` § Capability tiering
+            // → *Third-party holders*): a key a `remote`-form row of the
+            // owner's attests holds no key-bearing tuple over a kind it did
+            // not create. Read off the row the key is wrapped to, never off
+            // the scope string, so a wrongly planned grant stores nothing.
+            if grant_scope_is_reserved(&blob.scope)
+                && state
+                    .db
+                    .principal_form_for_holder(&owner, blob.holder.as_ref())
+                    .await
+                    .map_err(internal)?
+                    == Some(crate::db::third_party_principals::ExecutionForm::Remote)
+            {
+                return Err(permission_denied(
+                    "a remote principal is grantable only over the kinds it created",
+                ));
+            }
             let grant_id = blob.index.1.clone();
             // epoch_end (u64 on the wire) → the i64 storage column / expiry
             // filter; clamp a never-expires sentinel to i64::MAX.
@@ -3319,7 +3400,7 @@ pub(crate) fn principal_fetch_grants_handler() -> crate::principal_handlers::Pri
     Box::new(|state, caller, payload| {
         Box::pin(async move {
             let _req: FetchGrantsRequest = decode(&payload).map_err(malformed)?;
-            let grants = match caller.holder_x25519 {
+            let mut grants = match caller.holder_x25519 {
                 None => Vec::new(),
                 Some(holder) => state
                     .db
@@ -3331,12 +3412,31 @@ pub(crate) fn principal_fetch_grants_handler() -> crate::principal_handlers::Pri
                     .await
                     .map_err(internal)?,
             };
+            // The form gate's fetch door (TP4): a `remote` caller is served
+            // no blob carrying a reserved tuple — the mint gate cannot see a
+            // grant deposited before the principal's row existed. A blob that
+            // does not decode is served as before; it opens nothing.
+            // window-ok(filter: the decode only withholds a blob, it authorizes
+            // nothing; the fetch above already reads only open windows).
+            if caller.execution_form == crate::db::third_party_principals::ExecutionForm::Remote {
+                grants.retain(|bytes| {
+                    fauna_mls::wrapped_blob::format::GrantBlob::from_canonical_bytes(bytes)
+                        .map_or(true, |blob| !grant_scope_is_reserved(&blob.scope))
+                });
+            }
             encode_reply(&FetchGrantsReply {
                 grants: grants.into_iter().map(ByteBuf::from).collect(),
                 extra: Default::default(),
             })
         })
     })
+}
+
+/// Does a grant's scope carry a tuple only a device app or nest-hosted code
+/// may hold (`ScopeTuple::reserved_for_device_or_hosted`)? The form gate's one
+/// question at the mint and the principal fetch alike.
+fn grant_scope_is_reserved(scope: &[fauna_mls::wrapped_blob::format::ScopeTuple]) -> bool {
+    scope.iter().any(|t| t.reserved_for_device_or_hosted())
 }
 
 /// `fauna.capabilities.renew` — the owner extends a grant's window and, for an
@@ -4183,6 +4283,54 @@ pub fn register_capability_handlers(b: &mut RpcRouterBuilder) {
     );
 }
 
+/// This module's admin-plane kinds for an admin-consented principal —
+/// the DNS page's DKIM selector read (revoking a DKIM blob is sovereign and absent), the mail switch and its new-user default, the CalDAV, CardDAV and WebDAV switches and the CalDAV port, and the pending-bridge roster's two reads — each its actor handler behind
+/// [`crate::principal_handlers::admin_twin`] (`apps/bridges.md`
+/// § Capability-allowlist enforcement → rule (e); `authorization-server.md`
+/// § Scope grammar → *The admin arms* names the sets, the sovereign kinds
+/// absent).
+pub(crate) fn principal_admin_handlers()
+-> Vec<(&'static str, crate::principal_handlers::PrincipalHandler)> {
+    use crate::principal_handlers::admin_twin;
+    let kinds: [(&'static str, RpcHandler); 10] = [
+        (
+            "fauna.bridges.list_dkim_selectors",
+            list_dkim_selectors_handler(),
+        ),
+        ("fauna.bridges.set_mail_enabled", set_mail_enabled_handler()),
+        (
+            "fauna.bridges.set_auto_enable_mail_for_new_users",
+            set_auto_enable_mail_for_new_users_handler(),
+        ),
+        (
+            "fauna.bridges.set_caldav_enabled",
+            set_caldav_enabled_handler(),
+        ),
+        ("fauna.bridges.set_caldav_port", set_caldav_port_handler()),
+        ("fauna.bridges.get_caldav_port", get_caldav_port_handler()),
+        (
+            "fauna.bridges.set_carddav_enabled",
+            set_carddav_enabled_handler(),
+        ),
+        (
+            "fauna.bridges.set_webdav_enabled",
+            set_webdav_enabled_handler(),
+        ),
+        (
+            "fauna.bridges.list_pending_bridges",
+            list_pending_bridges_handler(),
+        ),
+        (
+            "fauna.bridges.list_service_users",
+            list_service_users_handler(),
+        ),
+    ];
+    kinds
+        .into_iter()
+        .map(|(kind, actor)| (kind, admin_twin(kind, actor)))
+        .collect()
+}
+
 pub fn register_bridge_blob_handlers(b: &mut RpcRouterBuilder) {
     b.add(
         "fauna.bridges.provision_wrapped_mls_blob",
@@ -4334,6 +4482,14 @@ pub fn register_bridge_blob_handlers(b: &mut RpcRouterBuilder) {
             forbid_replay: false,
             default_deadline: Duration::from_secs(5),
             handler: set_auto_enable_mail_for_new_users_handler(),
+        },
+    );
+    b.add(
+        "fauna.bridges.set_microsoft_registration",
+        RpcKindMeta {
+            forbid_replay: false,
+            default_deadline: Duration::from_secs(5),
+            handler: set_microsoft_registration_handler(),
         },
     );
     b.add(
@@ -5976,6 +6132,72 @@ mod tests {
         assert_eq!(err.code, "fauna.bridges.permission_denied");
     }
 
+    /// A public box whose deployment declared no content scanners refuses the
+    /// enable with the typed code and persists nothing; the disable still
+    /// answers ok; the private axis (MDA-only enable) and an undeclared box are
+    /// never refused (`mail-bridge-lifecycle.md` § Default-off on first claim →
+    /// *A box with no content scanners cannot enable mail*).
+    #[tokio::test]
+    async fn set_mail_enabled_refused_on_a_public_box_without_content_scanners() {
+        use fauna_core::mail_availability::ContentScanners;
+        let set = |state: Arc<AppState>, enabled: bool| async move {
+            let payload = Bytes::from(
+                encode_canonical(&SetMailEnabledRequest {
+                    enabled,
+                    extra: Default::default(),
+                })
+                .unwrap()
+                .to_vec(),
+            );
+            set_mail_enabled_handler()(state, [7u8; 32], payload).await
+        };
+        let with_scanners = |scanners: ContentScanners| async move {
+            let mut state = fixture_state().await;
+            Arc::get_mut(&mut state)
+                .expect("a fresh fixture is uniquely owned")
+                .content_scanners = scanners;
+            state.db.add_admin_actor(&[7u8; 32]).await.unwrap();
+            state
+        };
+
+        let state = with_scanners(ContentScanners::Absent).await;
+        let err = set(state.clone(), true).await.unwrap_err();
+        assert_eq!(err.code, RpcError::CODE_BRIDGES_MAIL_UNAVAILABLE_HERE);
+        assert_eq!(err.action(), fauna_protocol::RpcErrorAction::Rejected);
+        assert_eq!(
+            state.db.get_mail_enabled().await.unwrap(),
+            None,
+            "the refusal comes before any write"
+        );
+        assert!(
+            state
+                .db
+                .list_active_mail_domains()
+                .await
+                .unwrap()
+                .is_empty(),
+            "and before the enable-time domain safety net"
+        );
+        // A disable is never refused.
+        set(state.clone(), false).await.expect("disable ok");
+        assert_eq!(state.db.get_mail_enabled().await.unwrap(), Some(false));
+
+        // The private axis: the enable brings up the MDA alone — never refused.
+        *state.node_mode.write().await = crate::config::NodeMode::Private;
+        set(state.clone(), true)
+            .await
+            .expect("private-axis enable ok");
+        assert_eq!(state.db.get_mail_enabled().await.unwrap(), Some(true));
+        *state.node_mode.write().await = crate::config::NodeMode::Public;
+
+        // A public box that declared scanners, or declared nothing: unchanged.
+        for scanners in [ContentScanners::Wired, ContentScanners::Unknown] {
+            set(with_scanners(scanners).await, true)
+                .await
+                .unwrap_or_else(|e| panic!("{scanners:?} enable refused: {}", e.code));
+        }
+    }
+
     /// The deployment-wide "auto-enable mail for new users" policy
     /// (`mail-policy-config.md` § Tier-2 new-user mail defaults): unset reads as
     /// ON via `setup_status` (works-out-of-box default), the Admin set persists
@@ -6033,6 +6255,79 @@ mod tests {
             .to_vec(),
         );
         let err = set_auto_enable_mail_for_new_users_handler()(state, [99u8; 32], payload)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "fauna.bridges.permission_denied");
+    }
+
+    /// The deployment's own Microsoft app registration (`mailbox-migration.md`
+    /// § Microsoft sign-in, *An admin-supplied registration*): unset reads
+    /// absent on `setup_status`; the Admin set stores the normalised pair (an
+    /// ID alone gets the `common` tenant) and `setup_status` carries it; both
+    /// empty clears it; a value the shared rule refuses is refused here too
+    /// and stores nothing; a non-admin is denied.
+    #[tokio::test]
+    async fn admin_set_microsoft_registration_round_trips_validates_and_denies_non_admin() {
+        let state = fixture_state().await;
+        let admin = [7u8; 32];
+        state.db.add_admin_actor(&admin).await.unwrap();
+        let id = "0b5c1a2e-3f4d-4e5a-8b6c-7d8e9f0a1b2c";
+        let set = |client_id: &str, tenant: &str| {
+            Bytes::from(
+                encode_canonical(&SetMicrosoftRegistrationRequest {
+                    client_id: client_id.into(),
+                    tenant: tenant.into(),
+                    extra: Default::default(),
+                })
+                .unwrap()
+                .to_vec(),
+            )
+        };
+        let reported = || async {
+            crate::discovery_core::setup_status_core(&state, false)
+                .await
+                .microsoft_registration
+                .map(|r| (r.client_id, r.tenant))
+        };
+
+        assert_eq!(
+            reported().await,
+            None,
+            "unset is the project's registration"
+        );
+
+        let reply_bytes =
+            set_microsoft_registration_handler()(state.clone(), admin, set(&id.to_uppercase(), ""))
+                .await
+                .expect("set_microsoft_registration ok");
+        let reply: SetMicrosoftRegistrationReply = decode(&reply_bytes).unwrap();
+        assert!(reply.ok);
+        assert_eq!(reported().await, Some((id.into(), "common".into())));
+
+        set_microsoft_registration_handler()(state.clone(), admin, set(id, "contoso.example"))
+            .await
+            .expect("replace ok");
+        assert_eq!(
+            reported().await,
+            Some((id.into(), "contoso.example".into()))
+        );
+
+        let err = set_microsoft_registration_handler()(state.clone(), admin, set("nope", ""))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "fauna.protocol.malformed");
+        assert_eq!(
+            reported().await,
+            Some((id.into(), "contoso.example".into())),
+            "a refused value stores nothing"
+        );
+
+        set_microsoft_registration_handler()(state.clone(), admin, set("", ""))
+            .await
+            .expect("clear ok");
+        assert_eq!(reported().await, None, "both empty clears to the default");
+
+        let err = set_microsoft_registration_handler()(state, [99u8; 32], set(id, ""))
             .await
             .unwrap_err();
         assert_eq!(err.code, "fauna.bridges.permission_denied");
@@ -7187,7 +7482,7 @@ mod tests {
         assert!(
             state
                 .db
-                .land_spam_baseline_publish(&landing, departures)
+                .land_spam_baseline_publish(&landing, departures, false)
                 .await
                 .unwrap()
         );
@@ -7271,6 +7566,120 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, "fauna.bridges.permission_denied");
+    }
+
+    /// Consent a principal of `form` for `owner` under `client_id`,
+    /// attesting `holder` — the roster row the mint's form gate reads.
+    async fn consent_principal(
+        db: &crate::db::CacheDb,
+        owner: &[u8; 32],
+        client_id: &str,
+        holder: [u8; 32],
+        form: crate::db::third_party_principals::ExecutionForm,
+    ) {
+        use crate::db::third_party_principals::{AttestedKeys, PrincipalAttestation};
+        db.record_atproto_oauth_grant(
+            owner,
+            client_id.as_bytes(),
+            client_id,
+            None,
+            "fauna:personalization:rw",
+            &[],
+            "jkt",
+            i64::MAX,
+            None,
+            crate::db::atproto_pds::OAUTH_GRANT_ISSUER_NEST,
+            &PrincipalAttestation {
+                keys: AttestedKeys {
+                    holder_x25519: Some(holder),
+                    writer_ed25519: None,
+                },
+                execution_form: form,
+                manifest: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// The form gate at the mint (TP4, `encryption-at-rest.md` § Capability
+    /// tiering → *Third-party holders*): a key-bearing tuple over a kind the
+    /// principal did not create is refused to a `remote` row's holder and
+    /// nothing is stored; the same blob to a `device` row's holder, an
+    /// `ext.*` blob to the remote holder, and a reserved blob to a holder no
+    /// row attests (a bridge's) are minted.
+    #[tokio::test]
+    async fn the_mint_refuses_a_reserved_tuple_to_a_remote_principals_holder() {
+        use crate::db::third_party_principals::ExecutionForm;
+        use fauna_mls::wrapped_blob::ScopeTuple;
+        let state = fixture_state().await;
+        let owner = [7u8; 32];
+        state.db.create_user(&owner, "free", "test").await.unwrap();
+        let (remote, device, bridge) = ([0x41u8; 32], [0x42u8; 32], [0x43u8; 32]);
+        consent_principal(
+            &state.db,
+            &owner,
+            "https://remote.example/c.json",
+            remote,
+            ExecutionForm::Remote,
+        )
+        .await;
+        consent_principal(
+            &state.db,
+            &owner,
+            "https://device.example/c.json",
+            device,
+            ExecutionForm::Device,
+        )
+        .await;
+        let personalization = || {
+            vec![ScopeTuple::delegable_kind_read(
+                "fauna.state.personalization",
+            )]
+        };
+        let mint = |grant_id: u8, holder: [u8; 32], scope: Vec<ScopeTuple>| {
+            let blob = build_grant_blob_with_scope(&owner, &[grant_id; 16], &holder, scope);
+            let req = MintGrantRequest {
+                grant_blob: ByteBuf::from(blob),
+                extra: Default::default(),
+            };
+            mint_grant_handler()(
+                state.clone(),
+                owner,
+                Bytes::from(encode_canonical(&req).unwrap().to_vec()),
+            )
+        };
+
+        let err = mint(1, remote, personalization()).await.unwrap_err();
+        assert_eq!(err.code, "fauna.bridges.permission_denied");
+        assert!(
+            state
+                .db
+                .get_capability_grant(&owner, &[1; 16])
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        mint(
+            2,
+            remote,
+            vec![ScopeTuple::ext_kind_read("ext.remote.example.notes")],
+        )
+        .await
+        .unwrap();
+        mint(3, device, personalization()).await.unwrap();
+        mint(4, bridge, vec![ScopeTuple::mail()]).await.unwrap();
+        for id in [2u8, 3, 4] {
+            assert!(
+                state
+                    .db
+                    .get_capability_grant(&owner, &[id; 16])
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
     }
 
     #[tokio::test]

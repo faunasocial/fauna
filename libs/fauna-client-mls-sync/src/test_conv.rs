@@ -73,7 +73,7 @@ pub(crate) struct FakeConvNest {
     stall_next_fetch: Mutex<bool>,
     // When set, every `Commit` send is refused with a terminal `Rejected` —
     // the shape a member's takeover meets when the nest refuses its Commit
-    // (`federation.md` § Cross-nest shared
+    // (`federation-shared-folders.md` § Cross-nest shared
     // folders + channel append; current nests admit rostered members'
     // commits, but a terminal refusal stays a live shape, and any terminal
     // rejection must unstage). Application sends are
@@ -460,6 +460,7 @@ impl ConversationsRpc for ConvNest {
         &self,
         _channel_id_hex: String,
         _home_nest_url: Option<String>,
+        _home_nest_actor_id: Option<String>,
         _sealed_cid_hex: String,
         _bytes: Vec<u8>,
     ) -> Result<(), ConvRpcError> {
@@ -469,6 +470,7 @@ impl ConversationsRpc for ConvNest {
         &self,
         _channel_id_hex: String,
         _home_nest_url: Option<String>,
+        _home_nest_actor_id: Option<String>,
         _sealed_cid_hex: String,
     ) -> Result<Option<Vec<u8>>, ConvRpcError> {
         unimplemented!("gate tests never call blob_get")

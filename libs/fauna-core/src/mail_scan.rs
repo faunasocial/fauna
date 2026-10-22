@@ -64,6 +64,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::localized::LocalizedText;
+
 /// ClamAV malware-scan verdict for one message.
 ///
 /// Decoded by hand (below): a kind a newer build adds — unit or carrying
@@ -187,9 +189,178 @@ pub struct RspamdScore {
     pub breakdown: Vec<RspamdRuleContribution>,
 }
 
+/// What the nest did with a scanned message — the `message_scan_results.
+/// action_taken` column as a type (`mail-content-scanning.md` § Per-message
+/// scan-result storage). `RejectedMalware` appears only on reject-at-perimeter
+/// forensic rows, which belong to no recipient, so a user's own read never
+/// returns it.
+///
+/// Here rather than in `fauna_protocol::bridge_routing` (which re-exports it)
+/// so [`scan_result_lines`] — the app-facing projection every shell paints —
+/// can take it without the L3 transport crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanActionTaken {
+    Delivered,
+    RejectedMalware,
+    Junked,
+    Tagged,
+    /// An action a newer nest added that this app does not know: shown as a
+    /// neutral verdict. Never written.
+    #[serde(other, skip_serializing)]
+    Unknown,
+}
+
+impl ScanActionTaken {
+    /// The column spelling — identical to the serde name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Delivered => "delivered",
+            Self::RejectedMalware => "rejected_malware",
+            Self::Junked => "junked",
+            Self::Tagged => "tagged",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Parse the column spelling; `None` for anything else.
+    pub fn from_column(s: &str) -> Option<Self> {
+        [
+            Self::Delivered,
+            Self::RejectedMalware,
+            Self::Junked,
+            Self::Tagged,
+        ]
+        .into_iter()
+        .find(|a| a.as_str() == s)
+    }
+}
+
+/// The lines a user's received mail message shows about its own perimeter
+/// scan — the `dm-message-scan-result` row on the message bubble
+/// (`mail-content-scanning.md` § User sees their own message's row): the
+/// ClamAV verdict, the rspamd score with the rules that fired, and what the
+/// nest did with the message, in that order. Keys, not English, so every app
+/// resolves them through its own i18n pipeline and no app re-derives the
+/// wording (the shared `conversations.scan_result.*` strings).
+///
+/// The `Delivered to:` line the goal's example opens with is NOT here: the
+/// bubble's own `dm-message-delivered-to-alias` paints it.
+pub fn scan_result_lines(
+    clamav: &ClamavVerdict,
+    rspamd: Option<&RspamdScore>,
+    action: ScanActionTaken,
+) -> Vec<LocalizedText> {
+    let clamav = match clamav {
+        ClamavVerdict::Clean => LocalizedText::key("conversations.scan_result.clamav_clean"),
+        ClamavVerdict::Infected { signature } => LocalizedText::key_arg(
+            "conversations.scan_result.clamav_infected",
+            "signature",
+            signature,
+        ),
+        ClamavVerdict::Error { .. } => LocalizedText::key("conversations.scan_result.clamav_error"),
+        ClamavVerdict::BypassedOversize => {
+            LocalizedText::key("conversations.scan_result.clamav_bypassed_oversize")
+        }
+        ClamavVerdict::NotScanned => {
+            LocalizedText::key("conversations.scan_result.clamav_not_scanned")
+        }
+        ClamavVerdict::Unknown => LocalizedText::key("conversations.scan_result.clamav_unknown"),
+    };
+    let rspamd = match rspamd {
+        None => LocalizedText::key("conversations.scan_result.rspamd_not_scanned"),
+        Some(score) if score.flagged_rules.is_empty() => LocalizedText::key_arg(
+            "conversations.scan_result.rspamd_score",
+            "score",
+            milli_to_decimal(score.raw_milli),
+        ),
+        Some(score) => {
+            let mut text = LocalizedText::key_arg(
+                "conversations.scan_result.rspamd_score_rules",
+                "score",
+                milli_to_decimal(score.raw_milli),
+            );
+            text.args
+                .insert("rules".into(), score.flagged_rules.join(", "));
+            text
+        }
+    };
+    let action = LocalizedText::key(match action {
+        ScanActionTaken::Delivered => "conversations.scan_result.action_delivered",
+        ScanActionTaken::RejectedMalware => "conversations.scan_result.action_rejected_malware",
+        ScanActionTaken::Junked => "conversations.scan_result.action_junked",
+        ScanActionTaken::Tagged => "conversations.scan_result.action_tagged",
+        ScanActionTaken::Unknown => "conversations.scan_result.action_unknown",
+    });
+    vec![clamav, rspamd, action]
+}
+
+/// A milli-int score as the decimal rspamd prints, one place: `1200` → `1.2`,
+/// `-450` → `-0.5` (rounded half away from zero), `0` → `0.0`.
+fn milli_to_decimal(milli: i32) -> String {
+    let tenths = (i64::from(milli) * 10 + if milli < 0 { -500 } else { 500 }) / 1000;
+    let sign = if tenths < 0 { "-" } else { "" };
+    let tenths = tenths.abs();
+    format!("{sign}{}.{}", tenths / 10, tenths % 10)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scan_result_lines_are_clamav_then_rspamd_then_action() {
+        let score = RspamdScore {
+            raw_milli: 1200,
+            flagged_rules: vec!["BAYES_HAM".into(), "MIME_GOOD".into()],
+            ..Default::default()
+        };
+        let lines = scan_result_lines(
+            &ClamavVerdict::Clean,
+            Some(&score),
+            ScanActionTaken::Delivered,
+        );
+        let keys: Vec<&str> = lines.iter().map(|l| l.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "conversations.scan_result.clamav_clean",
+                "conversations.scan_result.rspamd_score_rules",
+                "conversations.scan_result.action_delivered",
+            ]
+        );
+        assert_eq!(lines[1].args["score"], "1.2");
+        assert_eq!(lines[1].args["rules"], "BAYES_HAM, MIME_GOOD");
+    }
+
+    #[test]
+    fn scan_result_lines_name_the_signature_and_a_missing_rspamd_run() {
+        let lines = scan_result_lines(
+            &ClamavVerdict::Infected {
+                signature: "Eicar-Test-Signature".into(),
+            },
+            None,
+            ScanActionTaken::Junked,
+        );
+        assert_eq!(lines[0].key, "conversations.scan_result.clamav_infected");
+        assert_eq!(lines[0].args["signature"], "Eicar-Test-Signature");
+        assert_eq!(lines[1].key, "conversations.scan_result.rspamd_not_scanned");
+        assert_eq!(lines[2].key, "conversations.scan_result.action_junked");
+    }
+
+    #[test]
+    fn milli_scores_print_as_rspamd_does() {
+        for (milli, want) in [
+            (1200, "1.2"),
+            (0, "0.0"),
+            (-450, "-0.5"),
+            (15_049, "15.0"),
+            (15_050, "15.1"),
+            (-3000, "-3.0"),
+        ] {
+            assert_eq!(milli_to_decimal(milli), want, "{milli}");
+        }
+    }
 
     fn known() -> Vec<ClamavVerdict> {
         vec![

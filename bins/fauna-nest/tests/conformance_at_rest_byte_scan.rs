@@ -23,9 +23,10 @@
 //!   boot-time upsert D1 relies on for device-label convergence).
 //! - **Keyless-writer shapes that legally still rest plaintext** (each a
 //!   ratified class, each converged by the stamp-at-bind pattern + the boot
-//!   scrub): `fauna.folders.update` with plaintext retention, plus raw-seeded
-//!   dual-write custody / import rows (the import descriptor overflow-sized, so
-//!   the `VACUUM` is pinned). Keyless include/exclude lists are refused at the
+//!   scrub): `fauna.folders.update` with plaintext retention, a dual-write
+//!   import row through its production writer (`create_import_session`, the
+//!   descriptor overflow-sized, so the `VACUUM` is pinned), plus a raw-seeded
+//!   dual-write custody row. Keyless include/exclude lists are refused at the
 //!   wire and never rest.
 //! - **The D1 backfill pass**, via the real shared client
 //!   (`FoldersClient::backfill_sealed_fields`) — the keyed stamp that
@@ -77,6 +78,7 @@ use fauna_core::label_custody::{self, LabelCustody};
 use fauna_core::path_crypto::{LabelField, LabelRoot, seal_convergent};
 use fauna_nest::blob_store::{BlobStoreBackend, DiskBlobStore};
 use fauna_nest::db::CacheDb;
+use fauna_nest::db::mail_import::CreateImportSessionOutcome;
 use fauna_nest::routes::AppState;
 use fauna_nest::rpc_router::RpcRouter;
 use fauna_protocol::filesync::SnapshotCreateFolderRequest;
@@ -412,8 +414,30 @@ async fn no_sealed_plane_plaintext_ever_rests() {
     )
     .await;
 
-    // Custody + import rows seeded raw with plaintext beside their seal — the
-    // dual-write shape the boot scrub converges.
+    // The import row through its production writer — the funnel
+    // `fauna.bridges.start_import_session` passes the wire request to
+    // unchanged — in the dual-write shape the boot scrub converges: plaintext
+    // descriptor beside the client-minted seal. Overflow-sized, so this is the
+    // row that pins the `VACUUM`.
+    let descriptor = import_descriptor();
+    let source_sealed = label_custody::seal_import_source(&owner_root(), &descriptor).unwrap();
+    assert_eq!(
+        db.create_import_session(
+            &actor(),
+            "s1",
+            &descriptor,
+            0,
+            &[],
+            "",
+            false,
+            Some(&source_sealed)
+        )
+        .await
+        .unwrap(),
+        CreateImportSessionOutcome::Created
+    );
+    // The custody row seeded raw with plaintext beside its seal — the same
+    // dual-write shape.
     {
         let conn = db.conn().await;
         conn.execute(
@@ -427,13 +451,6 @@ async fn no_sealed_plane_plaintext_ever_rests() {
                 format!("vault/{FRAG_CUSTODY}.tiff"),
                 owner_seal(&format!("vault/{FRAG_CUSTODY}.tiff")),
             ],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO import_sessions (session_id, actor_id, source_descriptor, state,
-                    started_at, last_progress_at, expires_at, source_sealed)
-             VALUES ('s1', ?1, ?2, 'completed', 1, 1, 9999999999, x'33')",
-            rusqlite::params![&actor()[..], import_descriptor()],
         )
         .unwrap();
     }
@@ -469,7 +486,7 @@ async fn no_sealed_plane_plaintext_ever_rests() {
         (FRAG_CUSTODY, "backup_custody.path (dual-write seed)"),
         (
             FRAG_IMPORT,
-            "import_sessions.source_descriptor (dual-write seed)",
+            "import_sessions.source_descriptor (dual-write writer)",
         ),
     ] {
         assert!(

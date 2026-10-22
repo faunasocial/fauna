@@ -4,7 +4,7 @@
 // (`tests/e2e-unified/drivers/web.py`).
 //
 // This module exists ONLY in builds made for testing (testing.md § convention 15):
-// its sole importer is `$lib/e2e-automation`, itself reached only through
+// its sole importer is `#lib/e2e-automation`, itself reached only through
 // `+layout.svelte`'s `if (__FAUNA_E2E_AUTOMATION__)` branch, which a production
 // `vite build` constant-folds away.
 //
@@ -14,7 +14,7 @@
 // its own hook would silently clobber the first — the exact "a command is quietly
 // dropped" failure convention 11 exists to prevent, and one that reads downstream
 // as a real product bug. Before this module the whole table lived inside
-// `$lib/conversations` (already hosting `feed_inject_posts`, which is not a
+// `#lib/conversations` (already hosting `feed_inject_posts`, which is not a
 // conversations command at all), so the second domain to need a command had no
 // honest home. Now each domain declares the action names it owns and hands over a
 // handler; the registry rejects a duplicate registration at install time instead of
@@ -38,7 +38,7 @@ const table = new Map<string, E2eCommandHandler>();
 
 /**
  * Claim `actions` for `handler`. Called once per domain from
- * `$lib/e2e-automation`'s install, before the hook goes up.
+ * `#lib/e2e-automation`'s install, before the hook goes up.
  *
  * Throws on a duplicate name — two domains claiming one action is a wiring bug
  * whose runtime symptom (whichever registered last wins) is invisible.

@@ -1,18 +1,18 @@
 <script lang="ts">
-  import { connectionStatus, identity } from '$lib/store';
-  import { makeOfflineGate } from '$lib/offline-gate';
+  import { connectionStatus, identity } from '#lib/store';
+  import { makeOfflineGate } from '#lib/offline-gate';
   import {
-    adminTiersList, adminTiersUpdate, adminTiersCreate, type AdminTier,
+    adminTiersList, adminTiersUpdate, adminTiersCreate, adminTiersDelete, type AdminTier,
     adminMembershipTiersList, adminMembershipTiersSet, adminMembershipTiersClear,
     type AdminMembershipTier,
     subscriptionsTiersList,
-  } from '$lib/rpc';
+  } from '#lib/rpc';
   import { onMount } from 'svelte';
-  import MessageBanner from '$lib/components/MessageBanner.svelte';
-  import { t } from '$lib/i18n/strings';
-  import { byteSize } from '$lib/value-format';
-  import { defaultLapseTier, offlineAffordance, parseCap } from '$lib/wasm';
-  import { IDS } from '$lib/generated/uiIds';
+  import MessageBanner from '#lib/components/MessageBanner.svelte';
+  import { t } from '#lib/i18n/strings';
+  import { byteSize } from '#lib/value-format';
+  import { defaultLapseTier, offlineAffordance, parseCap } from '#lib/wasm';
+  import { IDS } from '#lib/generated/uiIds';
 
   // admin-settings — renamed "Tiers" (admin.md § Admin IA redesign, 2026-06-04).
   // After the per-page-services redesign this page holds only tier *definitions*
@@ -36,6 +36,7 @@
   type TierDraft = { inbox: string; storage: string; devices: string; blobSize: string; feeds: string };
   let drafts = $state<Record<string, TierDraft>>({});
   let savingTier = $state<string | null>(null);
+  let deletingTier = $state<string | null>(null);
 
   // `fauna.admin.tiers.create` is OnlineOnly (`fauna_protocol::offline_class`):
   // the shared verdict greys the add button while the nest is unreachable.
@@ -214,6 +215,25 @@
     }
   }
 
+  // Remove a tier via `fauna.admin.tiers.delete` (admin.md § 3 → *Removing a
+  // tier*): no confirm, non-optimistic — refetch so the row disappears only once
+  // the nest removed it. The wasm face words the in-use refusal itself, so the
+  // caught text rides `{message}` as is.
+  async function deleteTier(name: string) {
+    const id = $identity;
+    if (!id?.secretHex) return;
+    deletingTier = name;
+    error = '';
+    try {
+      await adminTiersDelete(id.secretHex, name);
+      await loadTiers();
+    } catch (e) {
+      error = t.admin.settings_page.delete_tier_error({ message: detail(e) });
+    } finally {
+      deletingTier = null;
+    }
+  }
+
   // Define a new tier via `fauna.admin.tiers.create`. Name-trim + every cap
   // through the shared `parse_cap` (a blank or fractional cap is refused, a
   // negative clamps to 0) — refused locally on the banner; a nest refusal
@@ -313,6 +333,12 @@
                 onclick={() => saveTier(tier.name)}
                 disabled={savingTier === tier.name}
               >{savingTier === tier.name ? t.common.loading : t.common.save}</button>
+              <button
+                class="tier-save-btn"
+                data-testid={IDS.ADMIN_SETTINGS_TIER_DELETE_BUTTON}
+                onclick={() => deleteTier(tier.name)}
+                disabled={deletingTier === tier.name}
+              >{deletingTier === tier.name ? t.common.loading : t.admin.settings_page.delete_tier}</button>
             {/if}
           </div>
         {/each}

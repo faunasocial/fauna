@@ -5,8 +5,10 @@ import com.fauna.ffi.FfiFamilyBlockedPeer
 import com.fauna.ffi.FfiFamilyContactRequest
 import com.fauna.ffi.FfiFamilyFeedRequest
 import com.fauna.ffi.FfiFeedRequestState
+import com.fauna.ffi.FfiReachPolicy
 import com.fauna.ffi.wardContactAskPending
 import com.fauna.ffi.wardFeedRequestState
+import com.fauna.ffi.wardKnocksAwaitGuardian
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -62,6 +64,7 @@ class WardAsks {
     private val _contactRequests = MutableStateFlow<List<FfiFamilyContactRequest>>(emptyList())
     private val _feedRequests = MutableStateFlow<List<FfiFamilyFeedRequest>>(emptyList())
     private val _refusedFeed = MutableStateFlow<List<FeedTriple>>(emptyList())
+    private val _knocksAwaitGuardian = MutableStateFlow(false)
 
     /** The ward's own outstanding contact asks (durable, rule (c)). */
     val contactRequests: StateFlow<List<FfiFamilyContactRequest>> = _contactRequests.asStateFlow()
@@ -79,18 +82,30 @@ class WardAsks {
     val refusedFeed: StateFlow<List<FeedTriple>> = _refusedFeed.asStateFlow()
 
     /**
+     * Whether every knock waiting on this account waits on its guardian — what
+     * each knock row's `knock-guardian-pending` paints from (`family-safety.md`
+     * § App surface). The shared `fauna_client_family::knocks_await_guardian`
+     * over the caller's own status policy, folded at the same read; tui reads
+     * `FamilyState::own_policy` at its knock loop.
+     */
+    val knocksAwaitGuardian: StateFlow<Boolean> = _knocksAwaitGuardian.asStateFlow()
+
+    /**
      * Fold one successful `fauna.family.status` read. [supervised] is whether it
      * named a guardian: a graduated account has no guardian to be waiting on,
      * so a stale ask from an earlier read must not keep painting "asked —
      * waiting" (the client half of the nest's own graduation drop).
+     * [ownPolicy] is the reply's own `policy`.
      */
     fun setFromStatus(
         supervised: Boolean,
+        ownPolicy: FfiReachPolicy?,
         contact: List<FfiFamilyContactRequest>,
         feed: List<FfiFamilyFeedRequest>,
     ) {
         _contactRequests.value = if (supervised) contact else emptyList()
         _feedRequests.value = if (supervised) feed else emptyList()
+        _knocksAwaitGuardian.value = supervised && wardKnocksAwaitGuardian(ownPolicy)
     }
 
     /** A landed contact ask's re-read. Empty = the re-read FAILED (the ask
@@ -121,6 +136,7 @@ class WardAsks {
         _contactRequests.value = emptyList()
         _feedRequests.value = emptyList()
         _refusedFeed.value = emptyList()
+        _knocksAwaitGuardian.value = false
     }
 }
 

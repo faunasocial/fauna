@@ -60,6 +60,7 @@ async fn submit_handle_check_continue_routes_unclaimed_nest_to_claim_code() {
         continue_enabled: true,
         control_checkbox_visible: false,
         control_checkbox_checked: false,
+        ..Default::default()
     });
 
     let next = m.submit_handle_check_continue().await;
@@ -88,7 +89,7 @@ async fn wizard_submit_claim_code_2xx_yields_nat_mode_choice() {
         token: Some("tok".into()),
         expires_at: Some(1234),
         domain: Some("example.com".into()),
-        deployment_seed: None,
+        ..Default::default()
     }));
     m.seed_identity(fixture_secret_hex());
     m.set_current_handle("alice@example.com".into());
@@ -124,6 +125,7 @@ async fn wizard_submit_claim_code_does_not_consume_the_deployment_seed() {
         expires_at: Some(1234),
         domain: Some("example.com".into()),
         deployment_seed: Some(seed_hex.clone().into()),
+        ..Default::default()
     }));
     m.seed_identity(fixture_secret_hex());
     m.set_current_handle("alice@example.com".into());
@@ -144,7 +146,7 @@ async fn wizard_submit_claim_code_no_seed_leaves_channel_empty() {
         token: Some("tok".into()),
         expires_at: Some(1234),
         domain: Some("example.com".into()),
-        deployment_seed: None,
+        ..Default::default()
     }));
     m.seed_identity(fixture_secret_hex());
     m.set_current_handle("alice@example.com".into());
@@ -365,7 +367,7 @@ async fn re_entering_claim_code_after_a_successful_claim_reseeds_the_snapshot() 
         token: Some("tok".into()),
         expires_at: Some(1234),
         domain: Some("example.com".into()),
-        deployment_seed: None,
+        ..Default::default()
     }));
     m.seed_identity(fixture_secret_hex());
     m.set_current_handle("alice@example.com".into());
@@ -395,6 +397,7 @@ async fn re_entering_claim_code_after_a_successful_claim_reseeds_the_snapshot() 
         continue_enabled: true,
         control_checkbox_visible: false,
         control_checkbox_checked: false,
+        ..Default::default()
     });
     assert_eq!(
         m.submit_handle_check_continue().await,

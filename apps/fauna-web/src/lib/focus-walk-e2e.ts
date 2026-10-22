@@ -3,7 +3,7 @@
 // § convention 17; `fauna_e2e_agent::{FOCUS_MOVE, SWITCH_PANE}`).
 //
 // This module exists ONLY in builds made for testing (convention 15): its
-// sole importer is `$lib/e2e-automation`, itself reached only through
+// sole importer is `#lib/e2e-automation`, itself reached only through
 // `+layout.svelte`'s `if (__FAUNA_E2E_AUTOMATION__)` branch, which a
 // production `vite build` constant-folds away.
 //
@@ -36,7 +36,7 @@ import { registerE2eCommands } from './e2e-commands';
 const FOCUS_WALK_COMMANDS = ['focus_move', 'switch_pane'] as const;
 
 /** Register the named refusals for `focus_move` / `switch_pane`. Called once
- *  from `$lib/e2e-automation`, before `installCommandHook()` goes up. */
+ *  from `#lib/e2e-automation`, before `installCommandHook()` goes up. */
 export function registerFocusWalkCommands(): void {
   registerE2eCommands(FOCUS_WALK_COMMANDS, async (action) => {
     throw new Error(

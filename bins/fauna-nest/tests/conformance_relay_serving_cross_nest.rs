@@ -2,7 +2,7 @@
 //! binary plays for a member whose account lives on another nest
 //! (`docs/goal/behavior/file-sync.md` § Relay serving → *A member on another
 //! nest*, steps (2) Announce, (3) Ask, (4) Answer and (6) Verdict; the kinds and
-//! gates are `docs/goal/architecture/federation.md` § Cross-nest shared folders
+//! gates are `docs/goal/architecture/federation-shared-folders.md` § Cross-nest shared folders
 //! + channel append → *Relay serving across nests*).
 //!
 //! Two real in-process nests over loopback: **H**, the folder's home, and
@@ -84,9 +84,8 @@ async fn start_nest() -> Nest {
     let signing_key = SigningKey::from_bytes(&secret);
     let verifying_key = signing_key.verifying_key();
 
-    let blob_dir = tempfile::tempdir().unwrap();
-    let blob_path = blob_dir.path().to_path_buf();
-    std::mem::forget(blob_dir);
+    let base = AppState::for_test(db.clone());
+    let blob_path = base.test_scratch_path("blobs");
     let backup_svc =
         Arc::new(BackupService::new(db.clone(), None, false, blob_path, None).unwrap());
     let resolver = Arc::new(fauna_nest::chunk_relay::ChunkResolver::new(
@@ -118,7 +117,7 @@ async fn start_nest() -> Nest {
         sync: fauna_nest::state::SyncState {
             chunk_resolver: resolver,
         },
-        ..AppState::for_test(db)
+        ..base
     });
     let app = fauna_nest::build_router(Arc::clone(&state));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

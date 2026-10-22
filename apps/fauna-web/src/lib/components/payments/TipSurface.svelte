@@ -13,9 +13,9 @@
   // `strings`-grep. Both shipped Rust shells (tui 2026-08-13, linux 2026-08-14)
   // were bitten in exactly this place. So the gate lives on the RENDER, at the
   // importing branch, not on the data feeding it.
-  import { t } from '$lib/i18n/strings';
-  import { tipAmount, tipCount, tipMore } from '$lib/payments';
-  import { PAYMENTS_IDS } from '$lib/components/payments/generatedIds';
+  import { t } from '#lib/i18n/strings';
+  import { tipAmount, tipCount, tipMore } from '#lib/payments';
+  import { PAYMENTS_IDS } from '#lib/components/payments/generatedIds';
 
   interface Props {
     /** The post's `tips` record — the shared `fauna_feed` tip summary, resolved

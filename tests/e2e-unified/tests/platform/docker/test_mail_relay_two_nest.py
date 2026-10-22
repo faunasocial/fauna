@@ -223,7 +223,7 @@ def _bring_up_topology(relay_net, *, one_admin: bool):
     lan = f"fauna-relay-lan-{pub_http}"
     start_container_with_ports(
         pub_name,
-        {3000: pub_http, 25: p25, 465: p465, 587: p587, 993: p993},
+        {443: pub_http, 25: p25, 465: p465, 587: p587, 993: p993},
         env={
             "FAUNA_CLAIM_CODE": PUBLIC_CLAIM_CODE,
             "FAUNA_PORT": "3000",
@@ -240,7 +240,7 @@ def _bring_up_topology(relay_net, *, one_admin: bool):
         # The home box reaches the public nest's federation WS at its on-network
         # IP : the nest's internal port (3000), NOT the published host port —
         # the URL the home-side pairing row records.
-        federation_url = f"https://{container_ip(pub_name)}:3000"
+        federation_url = f"https://{container_ip(pub_name)}:443"
 
         # ── Private/home box: FAUNA_MODE=private (the pre-claim NAT seed) on its
         # own LAN network, FAUNA_LAN_BIND_IP = its pinned LAN address. No MTA
@@ -256,7 +256,7 @@ def _bring_up_topology(relay_net, *, one_admin: bool):
         priv_name = f"fauna-relay-private-{priv_http}"
         start_container_with_ports(
             priv_name,
-            {3000: priv_http, 993: priv_993},
+            {443: priv_http, 993: priv_993},
             env={
                 "FAUNA_MODE": "private",
                 "FAUNA_LAN_BIND_IP": home_lan_ip,

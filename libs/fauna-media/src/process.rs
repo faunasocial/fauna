@@ -78,6 +78,27 @@ pub enum KnownPrefix {
     Pdf,
 }
 
+impl KnownPrefix {
+    /// The MIME type this container family is labelled with — the one map,
+    /// unconditionally compiled: the upload pipeline's sniffed `mime`
+    /// (`Container::mime`) delegates here, and the tui feed-video handoff names
+    /// its temp file's extension from it (`apps/tui.md` § External media
+    /// handoff — the render block carries no media type, the plaintext does).
+    pub fn mime(self) -> &'static str {
+        match self {
+            KnownPrefix::Jpeg => "image/jpeg",
+            KnownPrefix::Png => "image/png",
+            KnownPrefix::Webp => "image/webp",
+            KnownPrefix::Gif => "image/gif",
+            KnownPrefix::Heif => "image/heic",
+            KnownPrefix::Avif => "image/avif",
+            KnownPrefix::IsoBmffVideo => "video/mp4",
+            KnownPrefix::Matroska => "video/webm",
+            KnownPrefix::Pdf => "application/pdf",
+        }
+    }
+}
+
 /// Sniff `body`'s leading bytes against every plaintext container this crate
 /// recognizes. `None` means unrecognized, not "not plaintext" — an unrecognized
 /// prefix (a TIFF/DNG, arbitrary binary, or genuine AEAD-sealed ciphertext) is
@@ -282,19 +303,21 @@ mod real {
             }
         }
 
+        /// The label is [`super::KnownPrefix::mime`]'s — one map for both.
         fn mime(self) -> &'static str {
-            match self {
-                Container::Jpeg => "image/jpeg",
-                Container::Png => "image/png",
-                Container::Webp => "image/webp",
-                Container::Gif => "image/gif",
-                Container::Heif => "image/heic",
-                Container::Avif => "image/avif",
-                Container::IsoBmffVideo => "video/mp4",
-                Container::Matroska => "video/webm",
-                Container::Pdf => "application/pdf",
-                Container::Unknown => "application/octet-stream",
-            }
+            let known = match self {
+                Container::Jpeg => super::KnownPrefix::Jpeg,
+                Container::Png => super::KnownPrefix::Png,
+                Container::Webp => super::KnownPrefix::Webp,
+                Container::Gif => super::KnownPrefix::Gif,
+                Container::Heif => super::KnownPrefix::Heif,
+                Container::Avif => super::KnownPrefix::Avif,
+                Container::IsoBmffVideo => super::KnownPrefix::IsoBmffVideo,
+                Container::Matroska => super::KnownPrefix::Matroska,
+                Container::Pdf => super::KnownPrefix::Pdf,
+                Container::Unknown => return "application/octet-stream",
+            };
+            known.mime()
         }
 
         /// The exhaustive coverage decision. **Adding a `Container` variant

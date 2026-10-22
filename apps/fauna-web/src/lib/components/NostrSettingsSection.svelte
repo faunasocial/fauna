@@ -13,7 +13,7 @@
   // (`bridge_id:"nostr"`, served by `NostrProvider`). DMs are not listed here:
   // a Nostr DM is a bridged room on the unified Conversations page
   // (`nostr.md` § Implementation status today → DMs). NIP-07 (browser-extension
-  // signing) / publish-signed go through `$lib/nostr`. The page is gated on the S8.9
+  // signing) / publish-signed go through `#lib/nostr`. The page is gated on the S8.9
   // nsec-deposit gate (`nostr.md` § The bridging gate): on a box where no
   // actor has ever deposited an nsec — or a nest built without the `nostr`
   // cargo feature, so `NostrProvider` is absent — `available` is false and
@@ -24,7 +24,7 @@
   // The parent surface owns the single `error-message` (no duplicate IDs); link /
   // settings / relay / follow errors flow into it via the bindable `error`
   // (mirrors MailSettingsSection / SubscriptionsSection).
-  import { identity } from '$lib/store';
+  import { identity } from '#lib/store';
   import {
     listBridges,
     linkBridge,
@@ -35,7 +35,7 @@
     removeBridgeFollow,
     type BridgeSetting,
     type BridgeFollow,
-  } from '$lib/bridges';
+  } from '#lib/bridges';
   import {
     hasNip07,
     nip07LinkFields,
@@ -45,14 +45,14 @@
     nostrZapSignersRemove,
     type BunkerInvite,
     type ZapSignerEntry,
-  } from '$lib/nostr';
-  import { npubConfirmationOwed, confirmNostrNpub } from '$lib/conversations';
-  import { fetchFeatures } from '$lib/api';
+  } from '#lib/nostr';
+  import { npubConfirmationOwed, confirmNostrNpub } from '#lib/conversations';
+  import { fetchFeatures } from '#lib/api';
   import { onMount } from 'svelte';
-  import { t } from '$lib/i18n/strings';
-  import { nostrKeySourceLabel, nostrLinkModeLabel, relayUrlError, trimmedRelayInput, relayListAppending, shortNestId, shortId, qrMatrix, qrQuietZoneModules, ensureWasm, nostrContentToggleOptions, type BridgeToggleOption } from '$lib/wasm';
-  import { resolveLocalized, resolveLocalizedNested } from '$lib/i18n/localized';
-  import { IDS } from '$lib/generated/uiIds';
+  import { t } from '#lib/i18n/strings';
+  import { nostrKeySourceLabel, nostrLinkModeLabel, relayUrlError, trimmedRelayInput, relayListAppending, shortNestId, shortId, qrMatrix, qrQuietZoneModules, ensureWasm, nostrContentToggleOptions, type BridgeToggleOption } from '#lib/wasm';
+  import { resolveLocalized, resolveLocalizedNested } from '#lib/i18n/localized';
+  import { IDS } from '#lib/generated/uiIds';
 
   const BRIDGE_ID = 'nostr';
 
@@ -587,7 +587,7 @@
     </div>
     <div class="info-row">
       <span class="label">{t.common.mode}</span>
-      <span class="value">{resolveLocalized(nostrKeySourceLabel(mode))}</span>
+      <span class="value" data-testid={IDS.NOSTR_SIGNING_MODE}>{resolveLocalized(nostrKeySourceLabel(mode))}</span>
     </div>
     <button class="btn danger" data-testid={IDS.NOSTR_UNLINK_BUTTON} onclick={unlinkAccount}>{t.nostr.account.unlink}</button>
   </section>

@@ -62,6 +62,7 @@ func TestIMAPBodyDecryptEpochSealedRoundTrip(t *testing.T) {
 		fixtureActorID,
 		fixtureCredentialID,
 		mailfauna.KdfKindArgon2id,
+		"",
 	)
 	if err != nil {
 		t.Fatalf("UnwrapMLSBlob: %v", err)
@@ -135,6 +136,7 @@ func TestIMAPBodyDecryptEpochSealedStaysDarkPastHorizon(t *testing.T) {
 		fixtureActorID,
 		fixtureCredentialID,
 		mailfauna.KdfKindArgon2id,
+		"",
 	)
 	if err != nil {
 		t.Fatalf("UnwrapMLSBlob: %v", err)
@@ -202,6 +204,7 @@ func TestIMAPBodyDecryptGraceRootOpensPreRotationEpochMail(t *testing.T) {
 		fixtureActorID,
 		fixtureCredentialID,
 		mailfauna.KdfKindArgon2id,
+		"",
 	)
 	if err != nil {
 		t.Fatalf("UnwrapMLSBlob: %v", err)
@@ -274,6 +277,7 @@ func TestBodySearchOpensEpochSealedIndexHint(t *testing.T) {
 		fixtureActorID,
 		fixtureCredentialID,
 		mailfauna.KdfKindArgon2id,
+		"",
 	)
 	if err != nil {
 		t.Fatalf("UnwrapMLSBlob: %v", err)

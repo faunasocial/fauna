@@ -15,7 +15,7 @@ namespace FaunaApp.Tests;
 /// (defined in <see cref="WebSettingsViewModelTests"/>) + a canned actor list.
 ///
 /// <para>[Collection("StringsGlobal")] because the not-loaded fallback option resolves
-/// <c>admin/actor_id_fallback_label</c> through the process-global <see cref="Strings"/> —
+/// <c>admin/actor_id_fallback_label</c> (and the apex-info line, <c>admin/web_page/apex_info</c>) through the process-global <see cref="Strings"/> —
 /// see <c>AdminCustodyHostingViewModelTests</c>. This class installs its own
 /// <see cref="FakeLocalizer"/> in its constructor.</para></summary>
 [Collection("StringsGlobal")]
@@ -26,6 +26,7 @@ public class AdminWebViewModelTests
         private static readonly Dictionary<string, string> Map = new()
         {
             ["admin/web_page/apex_none"] = "None",
+            ["admin/web_page/apex_info"] = "The main address serves at {url}.",
             ["admin/actor_id_fallback_label"] = "actor {short}…",
         };
         public string Get(string key) => Map.TryGetValue(key, out var v) ? v : key;

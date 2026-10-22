@@ -29,6 +29,10 @@ use fauna_protocol::moderation::{
     ModerationSignalShareStatusReply, ModerationSignalShareStatusRequest, ModerationTrainReply,
     ModerationTrainRequest,
 };
+use fauna_protocol::moderation::{
+    ModerationAdminBlockListReply, ModerationAdminBlockListRequest, ModerationAdminBlockReply,
+    ModerationAdminBlockRequest,
+};
 use fauna_protocol::moderation::{ModerationAppealReply, ModerationAppealRequest};
 
 pub use fauna_protocol::moderation;
@@ -46,7 +50,8 @@ uniffi::setup_scaffolding!();
 /// helper — the encrypted-mode social-content signal the server queue can't carry.
 pub mod detections;
 pub use detections::{
-    DetectionLabel, LocalDetection, LocalDetectionStore, QueueRow, QueueRowSource, merge_queue,
+    DetectionLabel, ISSUED_BY_KEY, LocalDetection, LocalDetectionStore, QueueRow, QueueRowSource,
+    merge_queue,
 };
 
 /// The legal-takedown console's shared form/confirm/verdict decisions
@@ -54,6 +59,14 @@ pub use detections::{
 pub mod takedown;
 pub use takedown::{
     TakedownContentType, TakedownForm, TakedownFormView, takedown_form_view, takedown_verdict,
+};
+
+/// The admin block's shared verb/confirm/verdict/list decisions
+/// (`moderation.md` § Admin block of a reported item).
+pub mod block;
+pub use block::{
+    BlockFormView, BlockedRowView, block_confirm_summary, block_content_type, block_form_view,
+    block_verdict, blocked_row_view,
 };
 
 /// The moderation queue's shared appeal decisions — which rows offer an appeal,
@@ -149,6 +162,42 @@ impl<R: RpcRequester> ModerationClient<R> {
                     restore,
                     extra: Default::default(),
                 },
+            )
+            .await
+    }
+
+    /// `fauna.moderation.admin_block` — Admin: block the item an open report
+    /// names, or with `restore == true` unblock it (`moderation.md` § Admin
+    /// block of a reported item). The report is the citation: the nest
+    /// resolves the subject from the report row and refuses an `actor`
+    /// subject (`fauna.moderation.invalid_params`) — gate the verb through
+    /// [`block_form_view`] so that refusal happens before dispatch. The reply's
+    /// `status` echoes `"blocked"` / `"restored"`.
+    pub async fn admin_block(
+        &self,
+        report_id: impl Into<String>,
+        restore: bool,
+    ) -> Result<ModerationAdminBlockReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.moderation.admin_block",
+                ModerationAdminBlockRequest {
+                    report_id: report_id.into(),
+                    restore,
+                    extra: Default::default(),
+                },
+            )
+            .await
+    }
+
+    /// `fauna.moderation.admin_block.list` — Admin: every item this nest
+    /// currently blocks, newest first (the blocked list Unblock acts from;
+    /// word each row through [`blocked_row_view`]).
+    pub async fn admin_block_list(&self) -> Result<ModerationAdminBlockListReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.moderation.admin_block.list",
+                ModerationAdminBlockListRequest::default(),
             )
             .await
     }
@@ -371,7 +420,7 @@ mod tests {
                         confidence_per_mille: 880,
                         action: 2,
                         timestamp: 1_700_000_000_000,
-                        extra: Default::default(),
+                        ..Default::default()
                     }],
                     extra: Default::default(),
                 })

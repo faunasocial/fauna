@@ -32,6 +32,41 @@ use crate::ws::{FatalCloseReason, WsState};
 /// finding F-CL1.
 pub(crate) const MAX_WS_MESSAGE_SIZE: usize = fauna_core::transport::MAX_RPC_WS_MESSAGE_SIZE;
 
+/// Sustained frames per second an anonymous (pre-identity) WS connection may
+/// send; past [`PRE_IDENTITY_FRAME_BURST`] at this rate the nest closes it 1008
+/// (`ws::FatalCloseReason::PreIdentityFrameBudget`). A resource bound nobody
+/// chooses, so a constant.
+///
+/// The per-kind throttles meter the oracles and the nonce mints, but the auth
+/// ceremony's signature kinds (`auth.verify`, `auth.handshake`, the device /
+/// custody / custodied-fleet handshakes — one Ed25519 verify each — and
+/// `auth.nest_handshake`, one sign) carry none by design: an attempt-counting
+/// throttle could lock a legitimate actor out of bootstrap. Without a frame
+/// budget the only bounds were the HTTP governor on the *upgrade* and 256
+/// connections per address, so one connection bought unmetered CPU
+/// (`deployment-threat-model.md` § Concern 1a, finding H2). A frame budget
+/// counts frames, never attempts, so it cannot lock anyone out: a real client's
+/// bootstrap is a handful of frames, and one that trips it reconnects with
+/// backoff like any other close.
+pub const PRE_IDENTITY_FRAMES_PER_SECOND: u32 = 10;
+
+/// The burst an anonymous connection may send before the sustained rate binds —
+/// room for a client that opens with its whole bootstrap pipelined (the
+/// identity read, the challenge, discovery reads) plus a typed handle checked
+/// per keystroke.
+pub const PRE_IDENTITY_FRAME_BURST: u32 = 30;
+
+/// A fresh per-connection pre-identity frame budget
+/// ([`PRE_IDENTITY_FRAMES_PER_SECOND`], [`PRE_IDENTITY_FRAME_BURST`]).
+fn pre_identity_frame_budget() -> governor::DefaultDirectRateLimiter {
+    governor::RateLimiter::direct(
+        governor::Quota::per_second(
+            std::num::NonZeroU32::new(PRE_IDENTITY_FRAMES_PER_SECOND).expect("non-zero"),
+        )
+        .allow_burst(std::num::NonZeroU32::new(PRE_IDENTITY_FRAME_BURST).expect("non-zero")),
+    )
+}
+
 /// Events sent from route handlers to the discovery polling task.
 #[derive(Debug)]
 pub enum FeedEvent {
@@ -203,12 +238,12 @@ pub struct AppState {
     /// the one place every change — an ACME issue or renewal, a self-signed
     /// provision, a client-issued install — passes through). The relay sidecar's
     /// channel watches it and tells the relay to fetch its cert again
-    /// (`sidecar_channel::serve_relay_channel`, `tls-certificates.md` § Keeping
+    /// (`sidecar_channel::serve_sidecar_channel`, `tls-certificates.md` § Keeping
     /// the cert alive). A `watch`, not a `Notify`: a channel busy answering a
     /// request when the bump lands still sees it afterwards.
     pub relay_cert_changed: tokio::sync::watch::Sender<u64>,
     /// How many relay sidecars hold an authenticated channel to this nest right
-    /// now (`sidecar_channel::serve_relay_channel` counts itself in and out) —
+    /// now (`sidecar_channel::serve_sidecar_channel` counts itself in and out) —
     /// zero or one in the image, always zero where no relay binary runs beside
     /// the nest. This is the whole of "does this deployment run its relay": no
     /// flag, no file, nothing a person or an RPC can set (`p2p.md` § The relay).
@@ -232,6 +267,12 @@ pub struct AppState {
     /// `desktop_serve::run_serve_loop`).
     pub serve_restart: Arc<tokio::sync::Notify>,
     pub http_client: reqwest::Client,
+    /// The client a nest-to-nest byte fetch dials a loopback-literal peer with
+    /// (`crate::ssrf::peer_fetch_get`). `Some` only on test state — the test
+    /// constructor [`AppState::for_test`] sets one, a test whose peer serves a
+    /// self-signed cert passes its own; the production state is always `None`,
+    /// so a shipped nest refuses a loopback peer.
+    pub peer_fetch_loopback: Option<reqwest::Client>,
     pub tls_enabled: bool,
     /// Client-set CORS allow-list — the trusted browser origins for nest's own
     /// HTTP API. Boot-resolved from the `nest_cors_origins` DB row when present,
@@ -254,7 +295,8 @@ pub struct AppState {
     pub web_app_origin: Arc<arc_swap::ArcSwap<fauna_protocol::web_app_origin::WebAppOrigin>>,
     /// The update channel in force (`nest/update-channel.md` § The channel as
     /// nest state) — the `nest_update_channel` row, else the `FAUNA_IMAGE_TAG`
-    /// seed; `None` is a pinned box. Boot-resolved
+    /// seed; `None` is a pinned box, or one the image does not run
+    /// (`update_channel::enactable`). Boot-resolved
     /// (`update_channel::resolve_update_channel`), swapped live by
     /// `fauna.admin.update_channel.set`. `ArcSwap` so `/api/v1/health` reads it
     /// without a lock or a DB query.
@@ -382,7 +424,7 @@ pub struct AppState {
     pub spam_train_rate_limit: Arc<crate::bridge_rate_limit::Limiter>,
 
     /// Per-(actor, channel) throttle on a non-claimant rostered member's MLS
-    /// Commit into a claimed folder channel (`federation.md` § Cross-nest
+    /// Commit into a claimed folder channel (`federation-shared-folders.md` § Cross-nest
     /// shared folders + channel append, residual (a); bucket key `(actor,
     /// channel, "commit")`). Checked in `conversations_handlers::
     /// channel_send_core`, which the federation `channel.append` relay shares
@@ -412,6 +454,20 @@ pub struct AppState {
     /// signature is attribution, not authorization
     /// (`docs/goal/architecture/federation.md` § Security).
     pub federation_rate_limit: Arc<crate::bridge_rate_limit::Limiter>,
+
+    /// Per-TARGET budget on the one-time key packages federation peers take
+    /// from one local user, over every originating nest and source
+    /// (`bridge_rate_limit::KEYPACKAGE_FETCH_TARGET_LIMITER_CONFIG`; consulted
+    /// by `federation_handlers::keypackage_fetch_handler`). The one federation
+    /// key a stranger minting fresh keypairs cannot multiply.
+    pub keypackage_fetch_target_limit: Arc<crate::bridge_rate_limit::Limiter>,
+
+    /// The per-TARGET budgets on the other open-federation kinds a stranger
+    /// reaches without pairing — `post.forward`, the federated follow's intents,
+    /// `abuse_report.deliver` — one limiter, one bucket family per kind
+    /// (`bridge_rate_limit::FEDERATION_TARGET_LIMITER_CONFIG` and the
+    /// `*_TARGET_MAX` beside it).
+    pub federation_target_budget: Arc<crate::bridge_rate_limit::Limiter>,
 
     /// Global cap on concurrently-executing RPC handlers (F5). Every dispatch
     /// (`dispatch_core::spawn_dispatch`, both the per-actor and federation paths)
@@ -537,6 +593,29 @@ pub struct AppState {
     /// ACME/STUN are restart-applied (the boot reconcile enforces them —
     /// `2026-06-15-nest-nat-mode-client-set-design.md` §§ 3,6).
     pub node_mode: std::sync::Arc<tokio::sync::RwLock<crate::config::NodeMode>>,
+
+    /// The artifact's content-scanner declaration (`content_scanners` on
+    /// `{data_dir}/operator-hatch.toml`), read once at boot by
+    /// `mail_enable::read_content_scanners` — `Unknown` for a nest with no
+    /// hatch (outside the image, or an in-memory test nest). Fixed for the
+    /// process's life: the entrypoint regenerates the hatch on every container
+    /// start, so a re-provisioned box re-reads it on its next boot. With
+    /// `node_mode`, the input to `fauna_core::mail_availability`'s two
+    /// predicates — the MTA supervisor gate and the `set_mail_enabled(true)`
+    /// refusal — and reported on `fauna.setup.status` (`mail-bridge-lifecycle.md`
+    /// § Default-off on first claim → *A box with no content scanners cannot
+    /// enable mail*). `pub` so a test can seed `Absent` on a test state.
+    pub content_scanners: fauna_core::mail_availability::ContentScanners,
+
+    /// Whether the artifact binds the MDA's DAV listener directly on the box's
+    /// own interface (`Some(true)`, the hatch's `caldav_bind_host` or a
+    /// non-loopback `caldav_listen_https` pin) or behind the SNI router
+    /// (`Some(false)`, a loopback pin), read once at boot by
+    /// `mail_enable::read_dav_direct_listener` — `None` with no hatch.
+    /// Reported on `fauna.bridges.get_caldav_port` so each member's mail
+    /// settings page shows the DAV address that answers (`caldav-server.md`
+    /// § Network exposure — Any-locator serving).
+    pub dav_direct_listener: Option<bool>,
 
     /// Whether this deployment enforces the actor's **tier quota** — the inbox
     /// byte cap (`routes::deliver_to_inbox`), the per-tier feed ceiling
@@ -908,6 +987,13 @@ pub struct AppState {
     #[cfg(feature = "test-hooks")]
     pub region_status_registry_override:
         std::sync::Arc<std::sync::Mutex<Option<fauna_core::region_authority::RegionRegistry>>>,
+
+    /// The scratch root [`AppState::for_test`] puts its segment, acme and
+    /// services dirs under, removed with the state (`testing.md` § Test
+    /// temp-dir hygiene). `None` in production: a real nest's dirs live under
+    /// its data dir and are never deleted. Declared last so it drops after
+    /// every field that may hold a file inside it.
+    pub test_scratch: Option<crate::state::TestScratch>,
 }
 
 impl AppState {
@@ -987,6 +1073,52 @@ impl AppState {
         {
             tracing::warn!(
                 "serving-generation teardown: tasks did not drain within 5s; re-entering anyway"
+            );
+        }
+        // The next generation builds its segment stores afresh over the same
+        // directories, exactly as a new process would.
+        self.finalize_open_segments().await;
+    }
+
+    /// Finalize the open segment of every scope of every segment store this
+    /// state holds — the five content kinds and the three placement journals.
+    /// An open segment's `.meta` sidecar exists only in memory, so a store
+    /// dropped with one open leaves a manifest-live `.dat` that the next
+    /// store over the same directory cannot open, and every listing of that
+    /// scope fails (`fauna_segment_store::SegmentManager::finalize_all_open`).
+    /// Called when a serving generation ends: process shutdown
+    /// ([`crate::graceful_shutdown`]) and the in-process re-entry
+    /// ([`Self::teardown_serving_generation`]). A write landing after it opens
+    /// a fresh segment, which is no worse than before; a failure is logged per
+    /// scope and the rest still finalize.
+    pub async fn finalize_open_segments(&self) {
+        let content = [
+            &self.mail_segments,
+            &self.post_segments,
+            &self.cal_segments,
+            &self.card_segments,
+            &self.conv_segments,
+        ];
+        for mgr in content {
+            for (scope, e) in mgr.finalize_all_open().await {
+                tracing::error!(
+                    kind = mgr.kind(),
+                    scope = %hex::encode(scope),
+                    error = %e,
+                    "could not finalize an open segment at the end of a serving generation"
+                );
+            }
+        }
+        let journals = [
+            self.mail_placement.finalize_all_open().await,
+            self.cal_placement.finalize_all_open().await,
+            self.card_placement.finalize_all_open().await,
+        ];
+        for (scope, e) in journals.into_iter().flatten() {
+            tracing::error!(
+                scope = %hex::encode(scope),
+                error = format!("{e:#}"),
+                "could not finalize an open placement segment at the end of a serving generation"
             );
         }
     }
@@ -1260,6 +1392,7 @@ impl AppState {
         token_id: Option<String>,
         bound_device_key: Option<[u8; 32]>,
         loopback_peer: bool,
+        served_name: Option<std::sync::Arc<str>>,
     ) -> (
         Arc<crate::ws::RpcConnection>,
         tokio::sync::mpsc::Receiver<Bytes>,
@@ -1285,9 +1418,13 @@ impl AppState {
             }
             None => None,
         };
-        let (conn, rx) =
-            self.ws
-                .subscribe_with_session(actor_id, token_id, bound_device_key, loopback_peer);
+        let (conn, rx) = self.ws.subscribe_with_session(
+            actor_id,
+            token_id,
+            bound_device_key,
+            loopback_peer,
+            served_name,
+        );
         if let Some(token_id) = conn.token_id.as_deref()
             && !self
                 .auth
@@ -1582,6 +1719,38 @@ impl InboxRejection {
 /// (priority #3). `federation_contact` gates federation-origin *initiation* only.
 pub(crate) use fauna_core::data::ArrivalOrigin;
 
+/// An inbox arrival's ingress, with what that ingress verified about it — the
+/// argument [`deliver_inbox_payload_core`] takes. The routing floor reads only
+/// its [`ArrivalOrigin`]; a federation arrival also carries the peer nest the
+/// channel authenticated (`fauna.federation.inbox.deliver`'s `origin_nest_id`),
+/// which `store_knock` records on the pending edge as `contacts.peer_nest_id`
+/// so the contact row can later carry the peer's home
+/// (`docs/goal/ui/contacts.md` § State & data shape). Kept beside the shared
+/// enum rather than inside it: the reach gate and the room-invite paths have
+/// no use for the id. The knock's own `sender_node` is the knocker's unverified
+/// word and is never this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InboxArrival {
+    Local,
+    Federation { origin_nest_id: [u8; 32] },
+}
+
+impl InboxArrival {
+    fn origin(self) -> ArrivalOrigin {
+        match self {
+            Self::Local => ArrivalOrigin::Local,
+            Self::Federation { .. } => ArrivalOrigin::Federation,
+        }
+    }
+
+    fn origin_nest_id(self) -> Option<[u8; 32]> {
+        match self {
+            Self::Local => None,
+            Self::Federation { origin_nest_id } => Some(origin_nest_id),
+        }
+    }
+}
+
 /// The nest-side composition of the shared routing floor: read the two facts the
 /// **recipient's own nest** owns — the stored contact edge and the stored
 /// guardian policy — and hand them to `fauna_core::data::supervised_reach_verdict`.
@@ -1632,9 +1801,10 @@ pub(crate) async fn deliver_inbox_payload_core(
     state: &Arc<AppState>,
     actor_id: &[u8; 32],
     body: &Bytes,
-    origin: ArrivalOrigin,
+    arrival: InboxArrival,
 ) -> InboxDeliveryOutcome {
     use fauna_core::encoding::{EmbedAsBytes, decode_signed_bytes};
+    let origin = arrival.origin();
     let (cr_wire, post_wire): (EmbedAsBytes, EmbedAsBytes) = match canonical_decode(body) {
         Ok(pair) => pair,
         Err(e) => {
@@ -1706,29 +1876,53 @@ pub(crate) async fn deliver_inbox_payload_core(
     // notification on an identity nobody can sign in as. Not a wire change:
     // only the `inbox_id` the reply carries is the successor's row.
     //
-    // Fails closed, like the sender consult.
-    let recipient: [u8; 32] = match state.db.succession_path(&actor_id[..]).await {
-        Ok(path) => match path.last() {
-            None => *actor_id,
-            Some(terminal) => match <[u8; 32]>::try_from(terminal.new_actor_id.as_slice()) {
-                Ok(successor) => {
-                    tracing::info!(
-                        target: "recovery",
-                        successor = %hex::encode(successor),
-                        "re-pointed an inbox arrival addressed to a superseded recipient"
-                    );
-                    successor
-                }
-                Err(_) => {
-                    tracing::error!("inbox recipient succession consult: malformed successor id");
-                    return InboxDeliveryOutcome::Rejected(InboxRejection::Storage);
-                }
-            },
-        },
+    // Fails closed, like the sender consult — and that includes a walk the
+    // bound cut short: `succession_path` stops at `MAX_SUCCESSION_PATH` links,
+    // and on a longer chain its last element names an identity that is itself
+    // superseded and still registered (the ceremony keeps the row), so landing
+    // there would be the very misdelivery this re-point ends. Unreachable for an
+    // honest account; refused rather than trusted all the same.
+    let path = match state.db.succession_path(&actor_id[..]).await {
+        Ok(path) => path,
         Err(e) => {
             tracing::error!("inbox recipient succession consult failed: {e}");
             return InboxDeliveryOutcome::Rejected(InboxRejection::Storage);
         }
+    };
+    if path.len() >= crate::db::successions::MAX_SUCCESSION_PATH {
+        let last = path
+            .last()
+            .map_or(&[][..], |row| row.new_actor_id.as_slice());
+        match state.db.succession_for(last).await {
+            Ok(None) => {}
+            Ok(Some(_)) => {
+                tracing::error!(
+                    "inbox recipient succession consult: chain longer than the walk bound"
+                );
+                return InboxDeliveryOutcome::Rejected(InboxRejection::Storage);
+            }
+            Err(e) => {
+                tracing::error!("inbox recipient succession consult failed: {e}");
+                return InboxDeliveryOutcome::Rejected(InboxRejection::Storage);
+            }
+        }
+    }
+    let recipient: [u8; 32] = match path.last() {
+        None => *actor_id,
+        Some(terminal) => match <[u8; 32]>::try_from(terminal.new_actor_id.as_slice()) {
+            Ok(successor) => {
+                tracing::info!(
+                    target: "recovery",
+                    successor = %hex::encode(successor),
+                    "re-pointed an inbox arrival addressed to a superseded recipient"
+                );
+                successor
+            }
+            Err(_) => {
+                tracing::error!("inbox recipient succession consult: malformed successor id");
+                return InboxDeliveryOutcome::Rejected(InboxRejection::Storage);
+            }
+        },
     };
     let actor_id = &recipient;
 
@@ -1785,7 +1979,7 @@ pub(crate) async fn deliver_inbox_payload_core(
             }
             return match state.db.has_pending_knock(actor_id, &sender_id).await {
                 Ok(true) => InboxDeliveryOutcome::Rejected(InboxRejection::KnockPending),
-                Ok(false) => store_knock(state, actor_id, &sender_id, &cr, body).await,
+                Ok(false) => store_knock(state, actor_id, &sender_id, &cr, body, arrival).await,
                 Err(e) => {
                     tracing::error!("has_pending_knock error: {e}");
                     InboxDeliveryOutcome::Rejected(InboxRejection::Storage)
@@ -1822,11 +2016,11 @@ pub(crate) async fn deliver_inbox_payload_core(
                 "blocked" => InboxDeliveryOutcome::Rejected(InboxRejection::Blocked),
                 "pending" => InboxDeliveryOutcome::Rejected(InboxRejection::KnockPending),
                 // Unknown status, treat as no contact.
-                _ => store_knock(state, actor_id, &sender_id, &cr, body).await,
+                _ => store_knock(state, actor_id, &sender_id, &cr, body, arrival).await,
             },
             Ok(None) => match state.db.has_pending_knock(actor_id, &sender_id).await {
                 Ok(true) => InboxDeliveryOutcome::Rejected(InboxRejection::KnockPending),
-                Ok(false) => store_knock(state, actor_id, &sender_id, &cr, body).await,
+                Ok(false) => store_knock(state, actor_id, &sender_id, &cr, body, arrival).await,
                 Err(e) => {
                     tracing::error!("has_pending_knock error: {e}");
                     InboxDeliveryOutcome::Rejected(InboxRejection::Storage)
@@ -1915,6 +2109,7 @@ async fn store_knock(
     sender_id: &[u8; 32],
     cr: &ContactRequest,
     body: &Bytes,
+    arrival: InboxArrival,
 ) -> InboxDeliveryOutcome {
     // The knocker-written columns, bounded before anything is written — the
     // knock row, the pending edge and the notification row all or nothing.
@@ -1959,9 +2154,19 @@ async fn store_knock(
             return InboxDeliveryOutcome::Rejected(InboxRejection::Storage);
         }
     }
+    // The pending edge records the VERIFIED origin nest of a federation
+    // arrival (never `cr.sender_node`, the knocker's own claim), so the contact
+    // row can later resolve the peer's home through `nest_addresses`
+    // (`docs/goal/ui/contacts.md` § State & data shape). A local knock records
+    // nothing.
     if let Err(e) = state
         .db
-        .upsert_contact(actor_id, sender_id, "pending")
+        .upsert_contact_from(
+            actor_id,
+            sender_id,
+            "pending",
+            arrival.origin_nest_id().as_ref(),
+        )
         .await
     {
         tracing::error!("upsert_contact error: {e}");
@@ -2063,6 +2268,18 @@ async fn deliver_to_inbox(
             return InboxDeliveryOutcome::Rejected(InboxRejection::Storage);
         }
     };
+    // Tier-quota enforcement (off on the single-user desktop nest), checked
+    // before the payload spills, so a refusal leaves no blob behind for the
+    // sweep's grace to carry.
+    let enforce_quota = *state.enforce_tier_quotas.read().await;
+    if enforce_quota && let Err(e) = state.db.check_quota(actor_id, envelope_bytes.len()).await {
+        let msg = e.to_string();
+        if msg.contains("not registered") || msg.contains("suspended") {
+            return InboxDeliveryOutcome::Rejected(InboxRejection::QuotaForbidden(msg));
+        }
+        return InboxDeliveryOutcome::Rejected(InboxRejection::QuotaTooLarge(msg));
+    }
+
     let blob_hash = if let Some(ps) = &state.payload_store {
         match ps.store(&envelope_bytes).await {
             Ok((_, hash)) => hash.map(|h| h.digest()),
@@ -2075,19 +2292,7 @@ async fn deliver_to_inbox(
         None
     };
 
-    // Tier-quota enforcement (off on the single-user desktop nest).
-    if *state.enforce_tier_quotas.read().await {
-        match state.db.check_quota(actor_id, envelope_bytes.len()).await {
-            Ok(()) => {}
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("not registered") || msg.contains("suspended") {
-                    return InboxDeliveryOutcome::Rejected(InboxRejection::QuotaForbidden(msg));
-                }
-                return InboxDeliveryOutcome::Rejected(InboxRejection::QuotaTooLarge(msg));
-            }
-        }
-
+    if enforce_quota {
         match state
             .db
             .push_inbox_with_quota(actor_id, &envelope_bytes, blob_hash.as_ref())
@@ -2265,6 +2470,7 @@ pub async fn ws_handler(
     Path(actor_id_hex): Path<String>,
     headers: axum::http::HeaderMap,
     crate::registration::OptionalConnectInfo(peer_addr): crate::registration::OptionalConnectInfo,
+    crate::served_name::OptionalServedName(served_name): crate::served_name::OptionalServedName,
     ws: WebSocketUpgrade,
 ) -> Response {
     let actor_id = match parse_actor_id(&actor_id_hex) {
@@ -2379,6 +2585,7 @@ pub async fn ws_handler(
                 token_id,
                 bound_device_key,
                 loopback_peer,
+                served_name,
                 socket,
             )
         })
@@ -2393,6 +2600,7 @@ pub async fn ws_anonymous_handler(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
     crate::registration::OptionalConnectInfo(peer_addr): crate::registration::OptionalConnectInfo,
+    crate::served_name::OptionalServedName(served_name): crate::served_name::OptionalServedName,
     ws: WebSocketUpgrade,
 ) -> Response {
     match classify_client_subprotocol(offered_subprotocols(&headers)) {
@@ -2415,11 +2623,13 @@ pub async fn ws_anonymous_handler(
     // `WithConnectInfo` — the real client IP when the SNI router conveys it with
     // a PROXY-v2 header, else the direct loopback peer). The dispatcher uses it
     // for per-source throttling and to gate loopback-only pre-identity kinds
-    // (bridge self-enrollment).
+    // (bridge self-enrollment). `served_name` is the accept loop's other
+    // record of this connection — the SNI its cert was served for — which the
+    // channel-binding producers scope their SPKI read by (`served_name.rs`).
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
         .max_frame_size(MAX_WS_MESSAGE_SIZE)
         .protocols(["fauna.v1"])
-        .on_upgrade(move |socket| handle_ws_anonymous(state, socket, peer_addr))
+        .on_upgrade(move |socket| handle_ws_anonymous(state, socket, peer_addr, served_name))
 }
 
 /// The subprotocol an app's WebSocket upgrade must offer — `fauna.v1`, the
@@ -2554,11 +2764,18 @@ async fn handle_ws(
     token_id: String,
     bound_device_key: Option<[u8; 32]>,
     loopback_peer: bool,
+    served_name: Option<std::sync::Arc<str>>,
     socket: axum::extract::ws::WebSocket,
 ) {
     use std::sync::Arc;
     let (conn, rx) = state
-        .register_upgraded_connection(actor_id, Some(token_id), bound_device_key, loopback_peer)
+        .register_upgraded_connection(
+            actor_id,
+            Some(token_id),
+            bound_device_key,
+            loopback_peer,
+            served_name,
+        )
         .await;
     run_connection(Arc::clone(&state), Arc::clone(&conn), rx, socket).await;
     state.ws.remove(&actor_id, conn.conn_id);
@@ -2671,8 +2888,9 @@ async fn handle_ws_anonymous(
     state: Arc<AppState>,
     socket: axum::extract::ws::WebSocket,
     peer_addr: Option<std::net::SocketAddr>,
+    served_name: Option<std::sync::Arc<str>>,
 ) {
-    let (conn, rx) = state.ws.subscribe_anonymous(peer_addr);
+    let (conn, rx) = state.ws.subscribe_anonymous(peer_addr, served_name);
     run_connection(state, conn, rx, socket).await;
 }
 
@@ -2842,6 +3060,10 @@ pub(crate) async fn run_connection(
     let mut dispatch_shutdown = state.ws.subscribe_shutdown();
     let mut dispatch_revoked = conn.subscribe_revoked();
     let mut dispatch_fatal = conn.subscribe_fatal();
+    // An anonymous connection never acquires an identity (a minted bearer opens
+    // a second, authenticated connection — `transport.md` § Pre-identity), so
+    // "no identity bound" is the connection's class for its whole life.
+    let pre_identity_budget = conn.anonymous.then(pre_identity_frame_budget);
     // spawn-ok(connection-scoped): subscribes `dispatch_shutdown` and stops
     // reading the moment `begin_shutdown` flips, which is what lets the send
     // task's drain converge. Same named mechanism as the send task above.
@@ -2908,7 +3130,25 @@ pub(crate) async fn run_connection(
             let Some(Ok(msg)) = msg else { break };
             match msg {
                 Message::Binary(bytes) => {
-                    match fauna_protocol::decode_frame(&bytes) {
+                    let decoded = fauna_protocol::decode_frame(&bytes);
+                    // The pre-identity frame budget: after decode (whose cost the
+                    // 2 MiB transport cap already bounds), before the allowlist
+                    // and every per-kind gate, so no frame past it reaches a
+                    // handler's signature work. An undecodable frame closes 4400
+                    // just below whatever the budget says.
+                    if decoded.is_ok()
+                        && let Some(budget) = &pre_identity_budget
+                        && budget.check().is_err()
+                    {
+                        tracing::warn!(
+                            peer = ?dispatch_conn.peer_addr,
+                            per_second = PRE_IDENTITY_FRAMES_PER_SECOND,
+                            "pre-identity WS connection exceeded its frame budget; closing 1008"
+                        );
+                        dispatch_conn.signal_fatal(FatalCloseReason::PreIdentityFrameBudget);
+                        break;
+                    }
+                    match decoded {
                         // A connection under the one-frame grace has already lost
                         // its authority — the grace buys the answer to the request
                         // that took it away, never the right to ask another. Same
@@ -3257,7 +3497,9 @@ async fn dispatch_request(
     // directory-enumeration defense (`federation.md` § Security); the
     // signature-bound recovery ceremonies (escrow / veto / succession / the
     // emergency `account.lockout`) ride it because *being* signature-gated is
-    // what makes the unmetered Ed25519 verify conscriptable. Keyed on
+    // what makes the unmetered Ed25519 verify conscriptable, and the nonce
+    // mints (`auth.challenge`, the escrow / veto challenges, `age_nonce`)
+    // because each is an unauthenticated in-memory write. Keyed on
     // `conn.peer_addr` (the real client IP: the SNI router fronting :443 conveys
     // it via a PROXY-v2 header, parsed by `serve_tls` into `WithConnectInfo`) +
     // the kind class. A trip returns a `rate_limited`
@@ -3268,7 +3510,7 @@ async fn dispatch_request(
     // refuted 180 lines below by gate (1d), which exempts pre-identity kinds
     // from the class allowlist in its own words: "an authed connection may still
     // call them". Every kind this gate guards is pre-identity (mechanically:
-    // `is_throttled_anonymous_kind`'s 14 members are a strict subset of
+    // `is_throttled_anonymous_kind`'s 15 members are a strict subset of
     // `is_pre_identity_kind`'s 30), so while this gate was also scoped
     // `conn.anonymous &&`, one account converted all of them to unlimited. The
     // gate now binds the KIND on every connection class; `check_conn` picks the
@@ -3747,6 +3989,10 @@ pub(crate) async fn ingest_post_core(
     // relay. Sits with the other outbound paths above and, like them, is not
     // gated on the quarantine/suppress decision.
     maybe_enqueue_outbox(state, &author, body).await;
+    // The federated follow's delivery (`federated-follow.md` § Decision 1):
+    // one entry per distinct home nest of the author's remote subscribers.
+    // Awaited for the same reason — a few INSERTs.
+    crate::follow_delivery::enqueue_follow_deliveries(state, &author, body).await;
 
     // ATProto PDS projection nudge (S3, `atproto-pds-bridge.md` § Where logic
     // lives): a freshly-landed post may need projecting to the author's
@@ -3771,6 +4017,16 @@ pub(crate) enum GetPostOutcome {
     /// under legal obligation [reference]") in its place. `reference` is the
     /// legal-obligation reference the tombstone cites.
     LegalTakedown { reference: String },
+    /// Blocked by this nest's admin after a report (`moderation.md` § Admin
+    /// block of a reported item). `reason` is the report's reason token the
+    /// notice names. `body` is `Some` for the post's **author** alone — the
+    /// author keeps their own view (decision 4) — and `None` for every other
+    /// caller, admins and peer nests included, whose read is withheld (the HTTP
+    /// twin's `403`).
+    AdminBlocked {
+        reason: String,
+        body: Option<Vec<u8>>,
+    },
     /// Quarantine-gated-or-absent (the HTTP twin's `404`).
     NotFound,
     /// Storage error (the HTTP twin's `500`).
@@ -3801,6 +4057,28 @@ pub(crate) async fn get_post_core(
             if let Ok(Some(reference)) = state.db.get_post_legal_takedown(&post_id).await {
                 return GetPostOutcome::LegalTakedown { reference };
             }
+            // The admin's block of a reported item — the second ground, checked
+            // next and, like the takedown, before the body is read. Unlike the
+            // takedown it exempts the AUTHOR (`moderation.md` § Admin block of
+            // a reported item, decision 4): every other caller gets the notice
+            // and no body; the author's read falls through and carries the
+            // notice beside their bytes. A flag read error serves, matching the
+            // takedown read's fail-open posture above.
+            let blocked = match state.db.get_post_admin_block(&post_id).await {
+                Ok(Some(reason)) => {
+                    let is_author = match caller {
+                        Some(c) => {
+                            state.db.get_content_author(&post_id).await.ok().flatten() == Some(c)
+                        }
+                        None => false,
+                    };
+                    if !is_author {
+                        return GetPostOutcome::AdminBlocked { reason, body: None };
+                    }
+                    Some(reason)
+                }
+                _ => None,
+            };
             // Quarantined posts: visible only to author and admins (spec §4.5).
             // The single read-authz gate, shared with `fauna.moderation.train`
             // (`CacheDb::caller_may_read_content` — same quarantine-visibility
@@ -3825,9 +4103,23 @@ pub(crate) async fn get_post_core(
                 Ok(Some(seg_body)) => seg_body,
                 _ => data,
             };
-            GetPostOutcome::Found(resolved)
+            match blocked {
+                Some(reason) => GetPostOutcome::AdminBlocked {
+                    reason,
+                    body: Some(resolved),
+                },
+                None => GetPostOutcome::Found(resolved),
+            }
         }
         Ok(None) => {
+            // A post this nest has seen deleted is a local miss too, and the
+            // replica's delete is fire-and-forget — so re-caching what the
+            // worker still holds would undo the delete (clearing the witness
+            // predicate that closes the forward and trends doors). Fails
+            // closed: an erroring check serves nothing (feed.md § Post deletion).
+            if state.db.post_was_deleted(&post_id).await.unwrap_or(true) {
+                return GetPostOutcome::NotFound;
+            }
             // Read-fallback: try fetching from worker
             if let Some(handle) = state.bridge.worker.get_handle().await {
                 let post_id_hex = hex::encode(post_id);
@@ -4316,6 +4608,26 @@ pub async fn get_post(
         GetPostOutcome::LegalTakedown { .. } => {
             StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS.into_response()
         }
+        // Blocked by this nest's admin after a report: the author's own read
+        // keeps their bytes (decision 4); everyone else — every peer nest
+        // included — gets 403 with the ground in the body, never 404 (the
+        // quarantine's existence-hiding shape) and never 451, which stays the
+        // legal takedown's alone (`moderation.md` § Admin block of a reported
+        // item, decision 3).
+        GetPostOutcome::AdminBlocked {
+            body: Some(bytes), ..
+        } => (
+            StatusCode::OK,
+            [("content-type", "application/octet-stream")],
+            bytes,
+        )
+            .into_response(),
+        GetPostOutcome::AdminBlocked { reason, body: None } => (
+            StatusCode::FORBIDDEN,
+            [("content-type", "text/plain; charset=utf-8")],
+            format!("blocked by this nest's admin after a report: {reason}"),
+        )
+            .into_response(),
         GetPostOutcome::NotFound => StatusCode::NOT_FOUND.into_response(),
         GetPostOutcome::Error => ApiError::internal("storage error").into_response(),
     }
@@ -4834,6 +5146,10 @@ pub(crate) async fn maybe_enqueue_delete_outbox(
     author: &[u8; 32],
     signed_tombstone: &[u8],
 ) {
+    // The delete leg of the federated follow (`federated-follow.md`
+    // § Decision 5) — every door that queues the paired relay of a deletion
+    // queues this one, and it does not wait on a pairing.
+    crate::follow_delivery::enqueue_follow_deletes(state, author, signed_tombstone).await;
     if !author_forwards_posts(state, author).await {
         return;
     }
@@ -5209,7 +5525,7 @@ mod loopback_gate_tests {
     async fn request_enrollment_refused_from_non_loopback_peer() {
         let state = anon_state().await;
         let remote: std::net::SocketAddr = "203.0.113.7:9999".parse().unwrap();
-        let (conn, mut rx) = state.ws.subscribe_anonymous(Some(remote));
+        let (conn, mut rx) = state.ws.subscribe_anonymous(Some(remote), None);
 
         dispatch_request(
             Arc::clone(&state),
@@ -5228,7 +5544,7 @@ mod loopback_gate_tests {
         // populate it in production, so this is the test-only / unknown case) ⇒
         // treated as non-loopback ⇒ refused.
         let state = anon_state().await;
-        let (conn, mut rx) = state.ws.subscribe_anonymous(None);
+        let (conn, mut rx) = state.ws.subscribe_anonymous(None, None);
 
         dispatch_request(
             Arc::clone(&state),
@@ -5250,7 +5566,7 @@ mod loopback_gate_tests {
         // handler itself is covered by the `bridge_blob_handlers` tests.)
         let state = anon_state().await;
         let local: std::net::SocketAddr = "127.0.0.1:5555".parse().unwrap();
-        let (conn, mut rx) = state.ws.subscribe_anonymous(Some(local));
+        let (conn, mut rx) = state.ws.subscribe_anonymous(Some(local), None);
 
         dispatch_request(
             Arc::clone(&state),
@@ -5304,9 +5620,10 @@ mod loopback_gate_tests {
         });
 
         for loopback_peer in [true, false] {
-            let (conn, mut rx) = state
-                .ws
-                .subscribe_with_session(actor, None, None, loopback_peer);
+            let (conn, mut rx) =
+                state
+                    .ws
+                    .subscribe_with_session(actor, None, None, loopback_peer, None);
             assert_eq!(conn.peer_addr, None, "never a peer_addr when authenticated");
 
             dispatch_request(
@@ -5388,7 +5705,7 @@ mod new_sign_in_notice_tests {
         req: &Req,
     ) -> Rep {
         let peer: std::net::SocketAddr = peer.parse().unwrap();
-        let (conn, mut rx) = state.ws.subscribe_anonymous(Some(peer));
+        let (conn, mut rx) = state.ws.subscribe_anonymous(Some(peer), None);
         dispatch_request(
             Arc::clone(state),
             conn,
@@ -5719,6 +6036,9 @@ mod family_reach_gate_tests {
     use fauna_core::identity::ActorKeypair;
     use std::sync::Arc;
 
+    /// The peer nest a federation arrival's channel authenticated.
+    const PEER_NEST: [u8; 32] = [0x0e; 32];
+
     fn signed_payload(sender: &ActorKeypair, recipient: &[u8; 32]) -> Bytes {
         super::knock_bound_tests::signed_knock_payload(
             sender,
@@ -5759,7 +6079,9 @@ mod family_reach_gate_tests {
             &state,
             &ward,
             &signed_payload(&stranger, &ward),
-            ArrivalOrigin::Federation,
+            InboxArrival::Federation {
+                origin_nest_id: PEER_NEST,
+            },
         )
         .await;
         assert!(
@@ -5779,7 +6101,7 @@ mod family_reach_gate_tests {
             &state,
             &ward,
             &signed_payload(&stranger, &ward),
-            ArrivalOrigin::Local,
+            InboxArrival::Local,
         )
         .await;
         assert!(
@@ -5797,7 +6119,9 @@ mod family_reach_gate_tests {
             &state,
             &ward,
             &signed_payload(&friend, &ward),
-            ArrivalOrigin::Federation,
+            InboxArrival::Federation {
+                origin_nest_id: PEER_NEST,
+            },
         )
         .await;
         assert!(
@@ -5827,7 +6151,7 @@ mod family_reach_gate_tests {
             &state,
             &ward,
             &signed_payload(&stranger, &ward),
-            ArrivalOrigin::Local,
+            InboxArrival::Local,
         )
         .await;
         assert!(
@@ -5878,7 +6202,7 @@ mod family_reach_gate_tests {
             &state,
             &ward,
             &signed_payload(&stranger, &ward),
-            ArrivalOrigin::Local,
+            InboxArrival::Local,
         )
         .await;
         assert!(
@@ -5890,7 +6214,7 @@ mod family_reach_gate_tests {
             &state,
             &ward,
             &signed_payload(&stranger, &ward),
-            ArrivalOrigin::Local,
+            InboxArrival::Local,
         )
         .await;
         assert!(matches!(
@@ -5909,6 +6233,9 @@ mod knock_bound_tests {
     use super::*;
     use fauna_core::identity::ActorKeypair;
     use std::sync::Arc;
+
+    /// The peer nest a federation arrival's channel authenticated.
+    const PEER_NEST: [u8; 32] = [0x0e; 32];
 
     pub(super) fn signed_knock_payload(
         sender: &ActorKeypair,
@@ -5970,6 +6297,82 @@ mod knock_bound_tests {
             .len()
     }
 
+    /// The pending edge a knock forms records the arrival's VERIFIED origin
+    /// nest — the channel's `origin_nest_id`, never the knock's own
+    /// `sender_node` — and a local knock records none
+    /// (`docs/goal/ui/contacts.md` § State & data shape).
+    #[tokio::test]
+    async fn a_knocks_pending_edge_records_the_verified_origin_nest_only() {
+        let db = Arc::new(crate::db::CacheDb::open_in_memory().unwrap());
+        let state = Arc::new(AppState::for_test(db.clone()));
+        let bob = recipient(&db).await;
+
+        let remote = ActorKeypair::generate();
+        let outcome = deliver_inbox_payload_core(
+            &state,
+            &bob,
+            &signed_knock_payload(&remote, &bob, b"http://claimed.example", "hi"),
+            InboxArrival::Federation {
+                origin_nest_id: PEER_NEST,
+            },
+        )
+        .await;
+        assert!(
+            matches!(outcome, InboxDeliveryOutcome::KnockStored),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            db.contact_peer_nest_id(&bob, &remote.actor_id().0)
+                .await
+                .unwrap(),
+            Some(PEER_NEST),
+            "the federation knock's edge carries the verified origin"
+        );
+
+        let local = ActorKeypair::generate();
+        let outcome = deliver_inbox_payload_core(
+            &state,
+            &bob,
+            &signed_knock_payload(&local, &bob, b"http://claimed.example", "hi"),
+            InboxArrival::Local,
+        )
+        .await;
+        assert!(
+            matches!(outcome, InboxDeliveryOutcome::KnockStored),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            db.get_contact_status(&bob, &local.actor_id().0)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("pending"),
+            "a local knock forms the pending edge"
+        );
+        assert_eq!(
+            db.contact_peer_nest_id(&bob, &local.actor_id().0)
+                .await
+                .unwrap(),
+            None,
+            "a local knock's edge carries no origin nest"
+        );
+
+        // Accepting keeps the recorded origin: the status changes, the home
+        // stays.
+        assert!(
+            crate::contacts_handlers::accept_contact_core(&state, &bob, &remote.actor_id().0)
+                .await
+                .is_ok()
+        );
+        assert_eq!(
+            db.contact_peer_nest_id(&bob, &remote.actor_id().0)
+                .await
+                .unwrap(),
+            Some(PEER_NEST),
+            "accepting the knock keeps the edge's origin nest"
+        );
+    }
+
     #[tokio::test]
     async fn an_over_cap_knock_summary_is_refused_and_stores_nothing() {
         let db = Arc::new(crate::db::CacheDb::open_in_memory().unwrap());
@@ -5982,7 +6385,7 @@ mod knock_bound_tests {
             &state,
             &bob,
             &signed_knock_payload(&stranger, &bob, b"http://peer.example", &summary),
-            ArrivalOrigin::Local,
+            InboxArrival::Local,
         )
         .await;
         assert!(
@@ -6015,7 +6418,7 @@ mod knock_bound_tests {
             &state,
             &bob,
             &signed_knock_payload(&stranger, &bob, b"http://peer.example", &summary),
-            ArrivalOrigin::Local,
+            InboxArrival::Local,
         )
         .await;
         assert!(
@@ -6039,7 +6442,7 @@ mod knock_bound_tests {
             &state,
             &bob,
             &signed_knock_payload(&stranger, &bob, &node, "hi"),
-            ArrivalOrigin::Local,
+            InboxArrival::Local,
         )
         .await;
         assert!(
@@ -6084,7 +6487,9 @@ mod knock_bound_tests {
             &state,
             &bob,
             &signed_knock_payload(&stranger, &bob, b"http://peer.example", "hi"),
-            ArrivalOrigin::Federation,
+            InboxArrival::Federation {
+                origin_nest_id: PEER_NEST,
+            },
         )
         .await;
         assert!(
@@ -6111,7 +6516,9 @@ mod knock_bound_tests {
             &state,
             &bob,
             &signed_knock_payload(&stranger, &bob, b"http://peer.example", "hi"),
-            ArrivalOrigin::Federation,
+            InboxArrival::Federation {
+                origin_nest_id: PEER_NEST,
+            },
         )
         .await;
         assert!(
@@ -6138,9 +6545,15 @@ mod knock_bound_tests {
         let knock =
             |summary: &str| signed_knock_payload(&stranger, &bob, b"http://peer.example", summary);
 
-        let outcome =
-            deliver_inbox_payload_core(&state, &bob, &knock("first"), ArrivalOrigin::Federation)
-                .await;
+        let outcome = deliver_inbox_payload_core(
+            &state,
+            &bob,
+            &knock("first"),
+            InboxArrival::Federation {
+                origin_nest_id: PEER_NEST,
+            },
+        )
+        .await;
         assert!(
             matches!(outcome, InboxDeliveryOutcome::KnockStored),
             "{outcome:?}"
@@ -6161,9 +6574,15 @@ mod knock_bound_tests {
             "accept keeps the doorbell"
         );
         db.delete_contact(&bob, &sender).await.unwrap();
-        let outcome =
-            deliver_inbox_payload_core(&state, &bob, &knock("second"), ArrivalOrigin::Federation)
-                .await;
+        let outcome = deliver_inbox_payload_core(
+            &state,
+            &bob,
+            &knock("second"),
+            InboxArrival::Federation {
+                origin_nest_id: PEER_NEST,
+            },
+        )
+        .await;
         assert!(
             matches!(outcome, InboxDeliveryOutcome::KnockStored),
             "{outcome:?}"
@@ -6664,7 +7083,7 @@ mod upgrade_revocation_race_tests {
         );
 
         let (untracked, _rx) = state
-            .register_upgraded_connection(actor, None, None, false)
+            .register_upgraded_connection(actor, None, None, false, None)
             .await;
         assert!(
             !untracked.is_revoked(),
@@ -6672,7 +7091,7 @@ mod upgrade_revocation_race_tests {
         );
 
         let (gone, _rx) = state
-            .register_upgraded_connection(actor, Some("0123456789abcdef".into()), None, false)
+            .register_upgraded_connection(actor, Some("0123456789abcdef".into()), None, false, None)
             .await;
         assert!(
             gone.is_revoked(),
@@ -6717,5 +7136,120 @@ mod client_subprotocol_offer_tests {
                 "{token}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod post_read_fallback_tests {
+    use super::*;
+    use crate::db::CacheDb;
+    use crate::nest_link::proxy::WorkerHandle;
+
+    const AUTHOR: [u8; 32] = [0x11; 32];
+    const BODY: &[u8] = b"replica-body";
+
+    async fn test_state() -> Arc<AppState> {
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        #[cfg(feature = "bluesky")]
+        crate::bluesky::init_db(&db).await.unwrap();
+        Arc::new(AppState::for_test(db))
+    }
+
+    /// Finding: a post its author deleted is a local miss, and the worker
+    /// replica may still hold its bytes (the replica delete is fire-and-forget).
+    /// The read-fallback must not re-store them: that would clear
+    /// `post_was_deleted` and reopen every door that gate closes
+    /// (`feed.md` § Post deletion).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_deleted_post_is_not_re_cached_from_the_worker_replica() {
+        let state = test_state().await;
+        let post_id = [0x51; 32];
+        state.db.put_post(&post_id, BODY, None).await.unwrap();
+        let tombstone = fauna_core::data::Tombstone {
+            author: fauna_core::identity::ActorId(AUTHOR),
+            post_id: fauna_cbor::Cid::from_digest_dag_cbor(post_id),
+            created_at: fauna_core::data::Timestamp(1_710_000_000_000_000),
+        };
+        let witness = fauna_core::encoding::canonical_encode(&tombstone).unwrap();
+        state
+            .db
+            .delete_post_projection_with_witness(
+                &post_id,
+                Some((&AUTHOR, witness.as_slice(), 1_710_000_000_000_000)),
+            )
+            .await
+            .unwrap();
+        assert!(state.db.post_was_deleted(&post_id).await.unwrap());
+
+        let handle = WorkerHandle::fake_serving_fetch(hex::encode(post_id), BODY.to_vec());
+        state.bridge.worker.connect_for_test(handle).await;
+
+        assert!(matches!(
+            get_post_core(&state, None, post_id).await,
+            GetPostOutcome::NotFound
+        ));
+        assert!(!state.db.post_exists(&post_id).await.unwrap());
+        assert!(state.db.post_was_deleted(&post_id).await.unwrap());
+    }
+
+    /// The control: the fallback itself survives — an id this nest never held
+    /// is served from the replica and cached.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_never_stored_post_is_still_served_and_cached_from_the_worker_replica() {
+        let state = test_state().await;
+        let post_id = [0x52; 32];
+        let handle = WorkerHandle::fake_serving_fetch(hex::encode(post_id), BODY.to_vec());
+        state.bridge.worker.connect_for_test(handle).await;
+
+        match get_post_core(&state, None, post_id).await {
+            GetPostOutcome::Found(data) => assert_eq!(data, BODY),
+            _ => panic!("the replica's post must be served"),
+        }
+        assert!(state.db.post_exists(&post_id).await.unwrap());
+    }
+}
+
+#[cfg(test)]
+mod inbox_quota_order_tests {
+    //! A delivery the recipient's quota refuses spills nothing: the quota is
+    //! checked before the payload store writes the envelope, so a refused
+    //! flood leaves no blob behind for the sweep's creation grace to carry.
+    use super::*;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn a_quota_refused_delivery_spills_no_blob() {
+        let db = Arc::new(crate::db::CacheDb::open_in_memory().unwrap());
+        let tmp = tempfile::tempdir().unwrap();
+        let store: Arc<dyn crate::blob_store::BlobStoreBackend> =
+            Arc::new(crate::blob_store::DiskBlobStore::new(tmp.path()).unwrap());
+        let state = Arc::new(AppState {
+            payload_store: Some(Arc::new(crate::payload_store::PayloadStore::new(
+                store,
+                db.clone(),
+                1024,
+            ))),
+            enforce_tier_quotas: Arc::new(tokio::sync::RwLock::new(true)),
+            ..AppState::for_test(db.clone())
+        });
+        let recipient = [7u8; 32];
+        db.create_user(&recipient, "free", "recipient")
+            .await
+            .unwrap();
+        db.suspend_user_now(&recipient, "test", "other")
+            .await
+            .unwrap();
+
+        // Over the spill threshold, so the old order wrote a blob first.
+        let body = Bytes::from(vec![0x5Au8; 4096]);
+        let outcome = deliver_to_inbox(&state, &recipient, &[8u8; 32], &body, false).await;
+        assert!(matches!(
+            outcome,
+            InboxDeliveryOutcome::Rejected(InboxRejection::QuotaForbidden(_))
+        ));
+        assert!(
+            db.list_all_blob_hashes().await.unwrap().is_empty(),
+            "a refused delivery writes no blob_metadata row"
+        );
     }
 }

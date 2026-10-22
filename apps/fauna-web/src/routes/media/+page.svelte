@@ -1,26 +1,26 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import { connectionStatus, identity, onActorChange } from "$lib/store";
-  import { registerActorScopedReset } from "$lib/actorScope";
-  import { sharedRpcPort } from "$lib/rpc";
-  import { ensureWasm, mediaSortLabel, offlineAffordance } from "$lib/wasm";
+  import { connectionStatus, identity, onActorChange } from "#lib/store";
+  import { registerActorScopedReset } from "#lib/actorScope";
+  import { sharedRpcPort } from "#lib/rpc";
+  import { ensureWasm, mediaSortLabel, offlineAffordance } from "#lib/wasm";
   import {
     createMediaMachine,
     shareLinkExpiryLabel,
     shareLinkStateLabel,
     syncedStateBadgeLabel,
     type MediaMachine,
-  } from "$lib/wasm-media";
-  import { makeOfflineGate } from "$lib/offline-gate";
-  import type { MediaPageSnapshot, MediaItemSummary, FileVersionSummary } from "$lib/media-machine";
-  import { resolveLocalized } from "$lib/i18n/localized";
-  import MessageBanner from "$lib/components/MessageBanner.svelte";
-  import { getDeviceId } from "$lib/device-id";
-  import { t } from "$lib/i18n/strings";
-  import { byteSize, relativeTime } from "$lib/value-format";
-  import { toArrayBufferView } from "$lib/bytes";
-  import { consumePendingSearchNav } from "$lib/search";
-  import { IDS } from '$lib/generated/uiIds';
+  } from "#lib/wasm-media";
+  import { makeOfflineGate } from "#lib/offline-gate";
+  import type { MediaPageSnapshot, MediaItemSummary, FileVersionSummary } from "#lib/media-machine";
+  import { resolveLocalized } from "#lib/i18n/localized";
+  import MessageBanner from "#lib/components/MessageBanner.svelte";
+  import { getDeviceId } from "#lib/device-id";
+  import { t } from "#lib/i18n/strings";
+  import { byteSize, relativeTime } from "#lib/value-format";
+  import { toArrayBufferView } from "#lib/bytes";
+  import { consumePendingSearchNav } from "#lib/search";
+  import { IDS } from '#lib/generated/uiIds';
 
   // The all-media sentinel — the `media-folder-filter` value for "every readable
   // set" (the default view). Mirrors linux's `FILTER_ALL_VALUE` (mod.rs).
@@ -119,7 +119,7 @@
     mediaError = snap?.error ? resolveLocalized(snap.error) : "";
   }
 
-  /** Drop this page's actor-scoped state (`$lib/actorScope`).
+  /** Drop this page's actor-scoped state (`#lib/actorScope`).
    *
    *  `thumbUrls` holds blob URLs over thumbnail bytes decrypted under THIS actor's
    *  owner key, so under the switch/sign-out isolation contract
@@ -149,7 +149,7 @@
     // this page's `machine` is built around one actor's id + auth-token getter,
     // and an in-app switch is a same-route `goto` that does NOT remount the
     // component, so a one-shot `onMount` build would keep serving (and polling
-    // as) the outgoing actor. See `$lib/actorScope`.
+    // as) the outgoing actor. See `#lib/actorScope`.
     const offActor = onActorChange(async (id) => {
       try {
         await ensureWasm();
@@ -170,7 +170,7 @@
         ready = true;
         await machine.refresh(id.secretHex);
         applySnapshot();
-        // A `SearchNav::File` deep-link left by the Search page (`$lib/search`'s
+        // A `SearchNav::File` deep-link left by the Search page (`#lib/search`'s
         // `consumePendingSearchNav`) — after the refresh above so the raw
         // aggregate `locateFileJson` reads over is already loaded.
         const pendingNav = consumePendingSearchNav();
@@ -300,7 +300,7 @@
   }
 
   /** `SearchNav::File` deep-link (`../search/+page.svelte`'s `openResult`, via
-   *  `$lib/search`'s pending-nav handoff) — resolves the row's durable
+   *  `#lib/search`'s pending-nav handoff) — resolves the row's durable
    *  `(folder_id, path_hash)` pair to the item this page's rows are keyed on
    *  (`MediaMachine::locateFileJson`), since a rename moves the rendered
    *  `name`/`path` but not the pair (`ui/search.md` § Where logic lives →

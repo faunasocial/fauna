@@ -241,7 +241,7 @@ func Run(ctx context.Context, deps Deps) error {
 		// shed sits below the global cap (mirroring nest serve_tls: global
 		// semaphore first, then per-IP), so a per-IP-shed conn never consumes a
 		// global slot.
-		port465 = tls.NewListener(capSubmission(perIPSubmission(port465Raw, perIPLimiter, "465"), "465"), tlsConfig)
+		port465 = tls.NewListener(preAuthSubmission(capSubmission(perIPSubmission(port465Raw, perIPLimiter, "465"), "465"), logger, "465"), tlsConfig)
 		port587Raw, err := net.Listen("tcp", deps.MTABindAddr587)
 		if err != nil {
 			_ = port465.Close()
@@ -249,8 +249,10 @@ func Run(ctx context.Context, deps Deps) error {
 			logplane.ListenerBindFailed("submission", logplane.PortOf(deps.MTABindAddr587))
 			return fmt.Errorf("submission(587) listen %s: %w", deps.MTABindAddr587, err)
 		}
-		// 587 is STARTTLS, so the cap wraps the raw listener directly.
-		port587 = capSubmission(perIPSubmission(port587Raw, perIPLimiter, "587"), "587")
+		// 587 is STARTTLS, so the cap wraps the raw listener directly. The
+		// pre-auth connection deadline (preAuthSubmission) is outermost below
+		// TLS on both ports, above the cap so a Close still releases the slot.
+		port587 = preAuthSubmission(capSubmission(perIPSubmission(port587Raw, perIPLimiter, "587"), "587"), logger, "587")
 	}
 
 	// Per-listener drain trackers (T2.6). Port 25 (inbound) and 465/587
@@ -282,6 +284,8 @@ func Run(ctx context.Context, deps Deps) error {
 		// Process-wide content-scan runtime guards (D7): in-flight cap +
 		// per-scanner circuit breakers, shared across all inbound sessions.
 		scanGate: newScanGate(),
+		// Process-wide in-flight DATA byte budget (port-25 memory bound).
+		dataBudget: newDataBudget(maxInFlightDataBytes),
 		// InboundTLSMode=required: when TLS is wired, port 25 advertises
 		// STARTTLS and Mail rejects pre-STARTTLS envelopes (530 5.7.10).
 		// Same condition as the listener's tlsConfig below.

@@ -231,6 +231,53 @@ impl CacheDb {
         Ok(changed > 0)
     }
 
+    /// Enforce the table-wide cap ([`MAX_PEER_TREND_ROWS_TOTAL`]) over every
+    /// peer: evict the oldest-updated rows past it, returning each evicted
+    /// content id so the caller recomputes its trend row. The per-peer cap is
+    /// keyed on a `nest_id` the peer mints for free, so only this bounds the
+    /// table against a flood of fresh identities (`trending.md` § Peer storage
+    /// is bounded). Run once per imported batch, not per row.
+    pub async fn trim_peer_trends(&self) -> Result<Vec<[u8; 32]>> {
+        let conn = self.conn.lock().await;
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM peer_content_trends", [], |row| {
+                row.get(0)
+            })
+            .context("count peer trends")?;
+        let excess = total - MAX_PEER_TREND_ROWS_TOTAL;
+        if excess <= 0 {
+            return Ok(Vec::new());
+        }
+        let mut stmt = conn
+            .prepare(
+                "DELETE FROM peer_content_trends
+                 WHERE rowid IN (
+                     SELECT rowid FROM peer_content_trends
+                     ORDER BY updated_at ASC, rowid ASC
+                     LIMIT ?1)
+                 RETURNING content_id",
+            )
+            .context("prepare peer trend trim")?;
+        let evicted = stmt
+            .query_map(rusqlite::params![excess], |row| row.get::<_, Vec<u8>>(0))
+            .context("trim peer trends")?
+            .filter_map(|r| r.ok())
+            .filter_map(|id| id.as_slice().try_into().ok())
+            .collect::<std::collections::BTreeSet<[u8; 32]>>();
+        Ok(evicted.into_iter().collect())
+    }
+
+    /// Rows in `peer_content_trends`, over every peer.
+    pub async fn count_peer_trends(&self) -> Result<u64> {
+        let conn = self.conn.lock().await;
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM peer_content_trends", [], |row| {
+                row.get(0)
+            })
+            .context("count peer trends")?;
+        Ok(n.max(0) as u64)
+    }
+
     /// The federation-export view (`trending.md` § Federation exchange): this
     /// nest's LOCAL trend entries only, each re-derived fresh from the event log
     /// at `now_us` so the wire `score_pm` is the exporter's un-composed `local_pm`
@@ -331,6 +378,12 @@ pub const MAX_TREND_EXCHANGE_ENTRIES: usize = 256;
 /// content-id universe is unbounded, so a hostile peer must not grow the DB
 /// without bound (`trending.md` § Peer storage is bounded).
 pub const MAX_PEER_TREND_ROWS: i64 = 1024;
+
+/// Table-wide stored-row cap on `peer_content_trends`, over every peer
+/// (oldest-updated evicted, [`CacheDb::trim_peer_trends`]): a peer's `nest_id`
+/// is self-minted, so the per-peer cap alone bounds nothing. 64 full per-peer
+/// stores.
+pub const MAX_PEER_TREND_ROWS_TOTAL: i64 = 64 * MAX_PEER_TREND_ROWS;
 
 /// Age TTL on a `peer_content_trends` row: a trend entry older than the decay
 /// horizon is dead weight (`trending.md` § Peer storage is bounded). Expiry

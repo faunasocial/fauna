@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
 using FaunaApp.Core.Services;
@@ -30,6 +31,7 @@ public sealed partial class AdminShellPage : Page
     public AdminShellPage()
     {
         this.InitializeComponent();
+        TagRailRows();
         _itemsByTag = new Dictionary<string, NavigationViewItem>
         {
             [AdminNavigation.Dashboard] = SubDashboard,
@@ -47,6 +49,34 @@ public sealed partial class AdminShellPage : Page
             [AdminNavigation.CustodyHosting] = SubCustodyHosting,
             [AdminNavigation.Logs] = SubLogs,
         };
+    }
+
+    /// <summary>
+    /// The three rail tags that are not their ui.yaml page key (every other admin
+    /// tag already is: <c>admin-nest</c>, <c>admin-dns</c>, …).
+    /// </summary>
+    private static readonly Dictionary<string, string> PageKeyByTag = new()
+    {
+        [AdminNavigation.Dashboard] = "admin-dashboard",
+        [AdminNavigation.Users] = "admin-users",
+        [AdminNavigation.Settings] = "admin-settings",
+    };
+
+    /// <summary>
+    /// Give every rail row its <c>admin-nav-row[&lt;page key&gt;]</c> id (ui.yaml
+    /// <c>navigation.sub_page_nav_rows</c>) so a test reaches any admin sub-page by
+    /// clicking the rail, as a person does.
+    /// </summary>
+    private void TagRailRows()
+    {
+        foreach (var entry in AdminNav.MenuItems)
+        {
+            if (entry is NavigationViewItem { Tag: string tag } item)
+            {
+                var key = PageKeyByTag.TryGetValue(tag, out var mapped) ? mapped : tag;
+                AutomationProperties.SetAutomationId(item, $"{FaunaApp.UiIds.Ids.AdminNavRow}[{key}]");
+            }
+        }
     }
 
     /// <summary>

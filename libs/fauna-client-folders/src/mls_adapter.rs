@@ -63,7 +63,7 @@ impl FolderGroupCrypto for Arc<MlsEngine> {
         // claimant — `share_set_first_binder` binds this same group next), so
         // the owner's engine refuses any other member's proposal-carrying
         // commit while merging their legitimate self-`Update` takeovers
-        // (`federation.md` § Cross-nest shared folders + channel append). The
+        // (`federation-shared-folders.md` § Cross-nest shared folders + channel append). The
         // member seats stamp the same marker at `join_folder_welcome`.
         MlsEngine::mark_folder_channel_owner(self, &channel_id, &self.identity_actor_id());
         let raw_group_id = self

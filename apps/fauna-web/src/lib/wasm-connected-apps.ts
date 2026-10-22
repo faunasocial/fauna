@@ -1,5 +1,5 @@
 import type { SharedRpcPort } from '../../static/fauna_wasm_connected_apps.js';
-import { base } from '$app/paths';
+import { asset } from '$app/paths';
 import type { ConnectedAppsMachine } from '../../static/fauna_wasm_connected_apps.js';
 import { hexToBytes } from './hex';
 import { sharedAccountPort } from './account-runtime';
@@ -7,7 +7,7 @@ import { nodeUrl } from './api';
 import { localTimestamp } from './value-format';
 
 // Re-export so route/component files consume the machine type via
-// `$lib/wasm-connected-apps` rather than a fragile relative path into
+// `#lib/wasm-connected-apps` rather than a fragile relative path into
 // `static/` (mirrors `wasm-labeler-catalog.ts`).
 export type { ConnectedAppsMachine };
 
@@ -34,7 +34,7 @@ export function ensureConnectedAppsWasm(): Promise<void> {
   if (!wasmInit) {
     wasmInit = (async () => {
       const mod = await import('../../static/fauna_wasm_connected_apps.js');
-      await mod.default(`${base}/fauna_wasm_connected_apps_bg.wasm`);
+      await mod.default(asset('fauna_wasm_connected_apps_bg.wasm'));
       wasmModule = mod;
     })().catch((e) => {
       wasmInit = null;
@@ -59,7 +59,7 @@ export interface ConnectedAppsMachineObserver {
 
 /**
  * Build the page-level `ConnectedAppsMachine` over the SPA singleton's socket —
- * `port` is `sharedRpcPort(secretHex)` from `$lib/rpc`. `secretHex` is the
+ * `port` is `sharedRpcPort(secretHex)` from `#lib/rpc`. `secretHex` is the
  * actor's 32-byte seed: the chunk builds its own mail-settings machine for the
  * mail app-password rows (the one Mail & Calendar builds, with the same
  * `nodeUrl()`), reading the account's mail custody and succession ledger
@@ -88,6 +88,10 @@ export async function createConnectedAppsMachine(
 export interface RosterRowText {
   lines: ComposedText[];
   facts: ComposedText[];
+  /** Whether the row links to its plugin's settings card
+   *  (`connected-apps-item-settings-link`) — a hosted plugin's row, decided in
+   *  shared Rust (`opens_settings_card`), never by a class test here. */
+  opens_settings_card: boolean;
 }
 
 /** Compose one snapshot row's text. Needs the chunk initialized (it is: a row
@@ -101,6 +105,31 @@ export function composeRequestCard(card: ConsentCardRow): ComposedText[] {
   return JSON.parse(wasm().requestCardLinesJson(JSON.stringify(card))) as ComposedText[];
 }
 
+/** An admin's hosted-plugin install card's install section, composed once in
+ *  shared Rust (`compose::request_install_text`): one `ComposedText` (or a list
+ *  of them, joined with `lineSeparator()`) per `connected-apps-request-install-*`
+ *  leaf. */
+export interface InstallSectionText {
+  heading: ComposedText;
+  form: ComposedText;
+  publisher: ComposedText;
+  digest: ComposedText;
+  kinds: ComposedText[];
+  hosts: ComposedText[];
+  settings: ComposedText[];
+}
+
+/** Compose one request card's install section; `null` on every card but a
+ *  hosted-plugin install card. */
+export function composeRequestInstall(card: ConsentCardRow): InstallSectionText | null {
+  return JSON.parse(wasm().requestInstallTextJson(JSON.stringify(card))) as InstallSectionText | null;
+}
+
+/** What the install section's multi-line leaves put between their lines. */
+export function lineSeparator(): string {
+  return wasm().lineSeparator();
+}
+
 /** What a roster row's facts line puts between its facts. */
 export function factsSeparator(): string {
   return wasm().factsSeparator();
@@ -110,8 +139,8 @@ export function factsSeparator(): string {
 // src/snapshots.rs) as `snapshotJson()` serializes it. The web page renders off
 // these verbatim: roster composition, scope words, the class key and which verb
 // revokes a row are all the shared machine's.
-import type { ComposedText, LocalizedText } from '$lib/i18n/localized';
-import type { ConsentCardRow, ConsentSetRow } from '$lib/atproto-settings-machine';
+import type { ComposedText, LocalizedText } from '#lib/i18n/localized';
+import type { ConsentCardRow, ConsentSetRow } from '#lib/atproto-settings-machine';
 
 export type { ConsentCardRow };
 
@@ -174,5 +203,9 @@ export interface ConnectedAppsSnapshot {
   requests: ConsentCardRow[];
   principals: ConnectedAppRow[];
   blocked: BlockedAppRow[];
+  /** The account's external-apps switch is OFF, as the last read that answered
+   *  said — what the toggle (`atproto-external-apps-enable`) paints. ON is the
+   *  zero value. */
+  external_apps_off: boolean;
   error: LocalizedText | null;
 }

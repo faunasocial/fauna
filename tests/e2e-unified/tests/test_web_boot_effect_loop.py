@@ -21,7 +21,7 @@ That is exactly how it presented: two of these fired on EVERY boot of the SPA
 residual — "self-limited, boot settles, renderer 99% idle" — while sibling
 sessions chased the resulting page failures in the admin hub and the composer.
 
-The owner was `$lib/screenTime.svelte.ts`'s `usageEpoch += 1`: a read-modify-write
+The owner was `#lib/screenTime.svelte.ts`'s `usageEpoch += 1`: a read-modify-write
 of a `$state`, reached synchronously from the root layout's screen-time `$effect`.
 Svelte 5 tracks reads *dynamically* — through called functions, not just the
 effect body — so the `+=`'s read enrolled `usageEpoch` as a dependency of the very
@@ -53,8 +53,8 @@ from helpers.waiting import wait_until
 
 pytestmark = [pytest.mark.tier_3, pytest.mark.web]
 
-# The launch folder pass's three terminal lines (`$lib/conversations` and
-# `$lib/launch-pass`) and the runtime's own started line
+# The launch folder pass's three terminal lines (`#lib/conversations` and
+# `#lib/launch-pass`) and the runtime's own started line
 # (`fauna-wasm`'s `account_runtime::start`).
 _PASS_RAN = "folders: launch pass ran"
 _PASS_FAILED = "folders: resume pending removals failed at launch"
@@ -104,7 +104,7 @@ def test_boot_has_no_svelte_reactivity_loop(logged_in_app):
         f"else that flush had queued (typically the layout's post-auth effects: "
         f"deployment-seed custody leg, mail-epoch refresh, host-address report, critical-alert "
         f"sweep). Find the offending effect by the frames in these lines, then make "
-        f"its write not read — see `$lib/screenTime.svelte.ts`'s `bumpUsageEpoch()` "
+        f"its write not read — see `#lib/screenTime.svelte.ts`'s `bumpUsageEpoch()` "
         f"for the shape. Offending lines: {offenders!r}"
     )
 
@@ -152,7 +152,7 @@ def test_boot_drops_every_actor_scoped_reset_without_throwing(logged_in_app):
         f"success while the state those drops own stayed live for the incoming "
         f"actor (account-scoping.md § The scoping taxonomy, in-memory corollary). "
         f"A drop must be pure module/component state: no wasm face, no lazy "
-        f"constructor, no round trip — see `$lib/screenTime.svelte.ts`'s "
+        f"constructor, no round trip — see `#lib/screenTime.svelte.ts`'s "
         f"`heartbeat?.reset()` for the shape (it read `usage()`, which BUILDS the "
         f"handle through wasm). Offending lines: {offenders!r}"
     )
@@ -210,7 +210,7 @@ def test_boot_runs_the_launch_folder_pass_once_the_account_runtime_has_started(
         "the launch folder pass did not complete on a normal boot — a staged member "
         "removal would stay un-resumed until a later launch. `not running` in the "
         "line means the pass ran before the account runtime had started "
-        "(`$lib/launch-pass` is what orders them); a skip means the runtime's start "
+        "(`#lib/launch-pass` is what orders them); a skip means the runtime's start "
         f"failed. Offending lines: {failed!r}"
     )
 

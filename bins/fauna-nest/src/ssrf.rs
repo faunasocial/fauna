@@ -150,7 +150,44 @@ pub async fn ssrf_safe_https_streaming_client(
     Ok((client, url))
 }
 
-/// The guard both clients above share: validate `url_str`, resolve and verify
+/// The dial a nest makes to **another nest** for bytes by content address — a
+/// video segment's cache-on-fetch (`video_routes::download_segment`) and a
+/// follow-delivered room post's sealed body (`room_post_view`). The peer's base
+/// URL is one this nest recorded for a delivery, so a remote party chose it:
+/// the target is guarded exactly as [`ssrf_safe_https_client`] guards a
+/// caller-supplied URL — https only, every resolved address global and pinned,
+/// no redirect followed — and sends no `User-Agent`.
+///
+/// Returns the `GET` itself, its deadline set, so the caller sends exactly the
+/// URL the guard parsed.
+///
+/// `loopback` admits a loopback-literal peer (`http(s)://127.0.0.1:…`,
+/// `[::1]`), dialled with that client: the in-process conformance suites' two
+/// nests on one host, whose self-signed floor certs only a test's own client
+/// accepts. Only test state carries one (the state's `peer_fetch_loopback`,
+/// set by `AppState::for_test`); the production state's is `None`, so a shipped
+/// nest refuses a loopback peer like any other non-global target.
+pub async fn peer_fetch_get(
+    url_str: &str,
+    timeout: std::time::Duration,
+    loopback: Option<&reqwest::Client>,
+) -> Result<reqwest::RequestBuilder, SsrfError> {
+    if let Some(client) = loopback {
+        let url = url::Url::parse(url_str).map_err(|_| SsrfError::InvalidUrl)?;
+        let is_loopback = match url.host() {
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            _ => false,
+        };
+        if is_loopback && matches!(url.scheme(), "http" | "https") {
+            return Ok(client.get(url).timeout(timeout));
+        }
+    }
+    let (client, url) = ssrf_safe_https_client(url_str, timeout, None).await?;
+    Ok(client.get(url))
+}
+
+/// The guard the https clients above share: validate `url_str`, resolve and verify
 /// its host, and return a builder with redirects disabled and DNS pinned to the
 /// verified addresses — the caller adds only its timeouts.
 async fn guarded_builder(
@@ -476,6 +513,62 @@ mod tests {
                 .unwrap_err(),
             SsrfError::NonGlobal
         );
+    }
+
+    /// A peer nest's URL is remote-chosen: a shipped nest refuses loopback and
+    /// the metadata service, and plain http to anything.
+    #[tokio::test]
+    async fn peer_fetch_refuses_loopback_and_imds() {
+        let t = std::time::Duration::from_secs(5);
+        for url in [
+            "https://127.0.0.1:8443/api/v1/blob/00",
+            "https://169.254.169.254/latest/meta-data/",
+            "https://[::1]/api/v1/blob/00",
+        ] {
+            assert_eq!(
+                peer_fetch_get(url, t, None).await.unwrap_err(),
+                SsrfError::NonGlobal,
+                "{url}"
+            );
+        }
+        // The scheme is judged first: plain http is refused whatever the host.
+        for url in [
+            "http://127.0.0.1:8080/api/v1/video/segments/00",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://8.8.8.8/api/v1/blob/00",
+        ] {
+            assert_eq!(
+                peer_fetch_get(url, t, None).await.unwrap_err(),
+                SsrfError::BadScheme,
+                "{url}"
+            );
+        }
+    }
+
+    /// The test-state exemption is loopback LITERALS only: the metadata
+    /// service and private ranges stay refused with it open.
+    #[tokio::test]
+    async fn peer_fetch_loopback_exemption_admits_loopback_only() {
+        let t = std::time::Duration::from_secs(5);
+        let test_client = reqwest::Client::new();
+        let lo = Some(&test_client);
+        assert!(
+            peer_fetch_get("http://127.0.0.1:8080/x", t, lo)
+                .await
+                .is_ok()
+        );
+        assert!(peer_fetch_get("https://[::1]:8443/x", t, lo).await.is_ok());
+        for url in [
+            "http://169.254.169.254/latest/meta-data/",
+            "https://169.254.169.254/latest/meta-data/",
+            "https://10.0.0.7/x",
+            "http://localhost:8080/x",
+        ] {
+            assert!(
+                peer_fetch_get(url, t, lo).await.is_err(),
+                "{url} must stay refused"
+            );
+        }
     }
 
     use super::test_server::{get, head_with_length, head_without_length, serve_once, within};

@@ -1,8 +1,9 @@
 package com.fauna.app.core.feed
 
 import android.media.MediaDataSource
-import com.fauna.app.core.ApiClient
 import com.fauna.ffi.FfiFeedManager
+import com.fauna.ffi.FfiPostBlobHome
+import com.fauna.ffi.FfiPostBlobHostsInterface
 import com.fauna.ffi.FfiRangedNestReader
 import com.fauna.ffi.FfiRangedNestReaderInterface
 import java.io.File
@@ -64,30 +65,52 @@ object InlineVideoPlayback {
      * unplayable, the reader could not open (an unreachable nest, a refused cert), or
      * a sealed item did not open — the element shows `error`, and a tap retries.
      *
-     * [nestUrl] is the string the WS login minted on ([ApiClient.nodeUrl]), so the
+     * [nestUrl] is the string the WS login minted on (`ApiClient.nodeUrl`), so the
      * reader's pinned client keys the same SPKI pin.
+     *
+     * A post homed on another nest ([home] non-null) is never streamed: the ranged
+     * reader dials only this nest, so its bytes come through the shared plane
+     * ([hosts], the post's own home, capped and content-address checked) and play
+     * from a file, like a sealed item. That is the "no app re-derives the host" rule
+     * for the video leg (`feed.md` § The read model → *A post homed on another nest*).
      */
     suspend fun resolve(
         manager: FfiFeedManager,
-        api: ApiClient,
+        hosts: FfiPostBlobHostsInterface?,
+        home: FfiPostBlobHome?,
         block: RenderBlock,
         nestUrl: String,
         cacheDir: File,
         opener: ReaderOpener = ffiReaderOpener,
     ): Media? = when (val source = manager.playbackSource(block)) {
-        is PlaybackSource.Url -> withContext(Dispatchers.IO) {
-            runCatching { Media.Streamed(source.url, opener.open(nestUrl, source.url)) }.getOrNull()
-        }
-        is PlaybackSource.Sealed -> PostMediaOpen.fetchAndOpen(api, manager, source.hash)?.let { bytes ->
-            withContext(Dispatchers.IO) {
-                runCatching {
-                    val file = File.createTempFile("inline-video-", ".bin", cacheDir)
-                    file.writeBytes(bytes)
-                    Media.Opened("sealed:${source.hash}", file)
-                }.getOrNull()
+        is PlaybackSource.Url ->
+            if (home != null && block is RenderBlock.Video) {
+                openFromPlane(manager, hosts, home, block.hash, cacheDir)
+            } else {
+                withContext(Dispatchers.IO) {
+                    runCatching { Media.Streamed(source.url, opener.open(nestUrl, source.url)) }.getOrNull()
+                }
             }
-        }
+        is PlaybackSource.Sealed -> openFromPlane(manager, hosts, home, source.hash, cacheDir)
         is PlaybackSource.Unplayable -> null
+    }
+
+    /** The blob [hash] from [home] through the plane, opened under the post's key
+     *  when it is sealed, written to a temp file the player reads. */
+    private suspend fun openFromPlane(
+        manager: FfiFeedManager,
+        hosts: FfiPostBlobHostsInterface?,
+        home: FfiPostBlobHome?,
+        hash: String,
+        cacheDir: File,
+    ): Media? = PostMediaOpen.fetchAndOpen(hosts, manager, home, hash)?.let { bytes ->
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val file = File.createTempFile("inline-video-", ".bin", cacheDir)
+                file.writeBytes(bytes)
+                Media.Opened("sealed:$hash", file)
+            }.getOrNull()
+        }
     }
 
     /** Free what [media] owns, once, with the player that read it: the reader's FFI

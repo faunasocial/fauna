@@ -80,6 +80,15 @@ public sealed partial class ModerationPage : Page
                 LoadingRing.IsActive = _viewModel.IsLoading;
                 LoadingRing.Visibility = _viewModel.IsLoading ? Visibility.Visible : Visibility.Collapsed;
                 break;
+            case nameof(ModerationViewModel.AppealOpen):
+            case nameof(ModerationViewModel.AppealReason):
+            case nameof(ModerationViewModel.AppealCanSubmit):
+            case nameof(ModerationViewModel.AppealBlockedReason):
+            case nameof(ModerationViewModel.AppealSubmitLabel):
+            case nameof(ModerationViewModel.AppealSummary):
+            case nameof(ModerationViewModel.AppealStatus):
+                RenderAppeal();
+                break;
             case nameof(ModerationViewModel.ReportsLoaded):
                 UpdateReportsState();
                 break;
@@ -124,6 +133,51 @@ public sealed partial class ModerationPage : Page
     {
         if (_viewModel is null || sender is not Button { Tag: ReportLedgerRowView row }) return;
         await _viewModel.WithdrawReportCommand.ExecuteAsync(row);
+    }
+
+    // ── Appeal (moderation.md § Legal takedown) ──────────────────────────────
+
+    /// <summary>appeal-button → open the form on this row; the VM captures the row's
+    /// content id now, not at submit.</summary>
+    private void Appeal_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel is null || sender is not Button { Tag: ModerationRow row }) return;
+        _viewModel.OpenAppeal(row);
+    }
+
+    private void AppealReasonInput_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_viewModel is null) return;
+        _viewModel.AppealReason = AppealReasonInput.Text;
+    }
+
+    private async void AppealSubmit_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel is null) return;
+        await _viewModel.SubmitAppealAsync();
+    }
+
+    private void AppealCancel_Click(object sender, RoutedEventArgs e)
+        => _viewModel?.CancelAppeal();
+
+    /// <summary>Paint the form from the VM: present only while open; the submit
+    /// control's label and enabled state are the shared fold's verbatim; the status
+    /// line shows only once an attempt (or its cancel) has left one.</summary>
+    private void RenderAppeal()
+    {
+        if (_viewModel is null) return;
+        AppealForm.Visibility = _viewModel.AppealOpen ? Visibility.Visible : Visibility.Collapsed;
+        AppealSummaryText.Text = _viewModel.AppealSummary;
+        if (AppealReasonInput.Text != _viewModel.AppealReason)
+            AppealReasonInput.Text = _viewModel.AppealReason;
+        AppealBlockedText.Text = _viewModel.AppealBlockedReason ?? string.Empty;
+        AppealBlockedText.Visibility = _viewModel.AppealBlockedReason is null
+            ? Visibility.Collapsed : Visibility.Visible;
+        AppealSubmitButton.Content = _viewModel.AppealSubmitLabel;
+        AppealSubmitButton.IsEnabled = _viewModel.AppealCanSubmit;
+        AppealStatusText.Text = _viewModel.AppealStatus ?? string.Empty;
+        AppealStatusText.Visibility = _viewModel.AppealStatus is null
+            ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private async void TrainCorrection_Click(object sender, RoutedEventArgs e)

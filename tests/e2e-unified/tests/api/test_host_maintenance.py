@@ -73,6 +73,8 @@ def test_host_maintenance_status_and_restart(nest_instance):
         with _admin_client(nest_instance) as admin:
             # (1) No channel → defaults + restart-now rejected.
             status = admin.call("fauna.setup.status", {})
+            # No host-status file read → the flag the apps key "not reported" on.
+            assert not status.get("os_host_status_present")
             assert status["os_security_updates_pending"] == 0
             assert status["os_reboot_pending"] is False
             # Optionals stay unset when no reboot has been deferred and nothing has
@@ -94,6 +96,7 @@ def test_host_maintenance_status_and_restart(nest_instance):
                 "last_patched_at=1719400000\n"
             )
             status = admin.call("fauna.setup.status", {})
+            assert status["os_host_status_present"] is True
             assert status["os_security_updates_pending"] == 3
             assert status["os_reboot_pending"] is True
             assert status["os_reboot_deferred_since"] == 1719500000
@@ -142,6 +145,7 @@ def test_os_fields_admin_gated_off_anonymous(nest_instance):
         # Admin (authenticated) sees the real values.
         with _admin_client(nest_instance) as admin:
             status = admin.call("fauna.setup.status", {})
+            assert status["os_host_status_present"] is True
             assert status["os_security_updates_pending"] == 7
             assert status["os_reboot_pending"] is True
             assert status["os_reboot_deferred_since"] == 1719500000
@@ -151,6 +155,9 @@ def test_os_fields_admin_gated_off_anonymous(nest_instance):
         # posture is NOT disclosed pre-auth.
         with WsRpcAnonClient(nest_instance["url"]) as anon:
             status = anon.call("fauna.setup.status", {})
+            assert not status.get("os_host_status_present"), (
+                "anonymous setup.status must not disclose whether the host reports"
+            )
             assert status["os_security_updates_pending"] == 0, (
                 "anonymous setup.status must not disclose host security-update counts"
             )

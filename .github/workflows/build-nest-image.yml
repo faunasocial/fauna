@@ -45,8 +45,10 @@ name: Build, stage and verify the nest Docker image
 #                copies the verified digest to :latest.
 #
 # `dry_run` builds and smokes the repository's arches (both on the public one,
-# amd64 on the private one) and stops there: nothing is logged in to, pushed,
-# staged or verified.
+# amd64 on the private one). On the public repository it stops there: nothing
+# is logged in to, pushed, staged or verified. On the private one a green build
+# is kept: the stage job pushes :sha-<sha> and the mirrors, and moves no :dev,
+# deploys nothing and verifies nothing (restage-nest.yml stages it later).
 
 on:
   # A release is a MANUAL gate: dispatched on `main` when a build should reach
@@ -65,7 +67,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Build and smoke only (amd64 on the private repository, both arches on the public one) — no login, no push, no stage, no verify"
+        description: "Build and smoke, no :dev/:test move, no deploy, no verify. Private repository: amd64, and a green build is still pushed as :sha-<sha> + mirrors for a later restage-nest.yml. Public repository: both arches, nothing pushed"
         type: boolean
         default: false
       runner:
@@ -73,6 +75,15 @@ on:
         type: choice
         options: [auto, self-hosted, hosted]
         default: auto
+      arches:
+        description: "PRIVATE repository only (the public one always builds both): amd64 = the staged image dev.fauna.build runs (default); arm64 = a native image for the arm64 dev VMs' tier_4 suites, pushed as :sha-<sha>-arm64 alone — no :sha-<sha>, no :dev, no verify; both = amd64 and arm64 merged into :sha-<sha>"
+        type: choice
+        options: [amd64, arm64, both]
+        default: amd64
+      hang_test:
+        description: "PRIVATE repository, self-hosted leg, dry run only: the build's first pass sleeps past a 5-minute bound instead of compiling, proving the bound stops a hung build and leaves nothing behind. The run fails by design"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -95,6 +106,10 @@ env:
   VERIFY_HOST: ${{ github.repository == 'faunasocial/fauna' && 'test.fauna.build' || 'dev.fauna.build' }}
   # The front door: a cloud token that can list it must never be used here.
   REFUSE: fauna.social
+  # The acceptance box: CI holds no token that reaches it, and a cloud token
+  # that can list it would lift its firewall (deployment-threat-model.md
+  # § Concern 2, path 5).
+  REFUSE_ACCEPTANCE: fauna.build
   # The leg this run's jobs are on — the same condition every `runs-on` below
   # spells out (runs-on cannot read env): self-hosted only on the organisation's
   # private repository, and only when not dispatched `hosted`.
@@ -115,13 +130,19 @@ jobs:
         # itself is chosen by repository.
         # The private entry's `runner` is its hosted leg's; on the self-hosted
         # leg the job's `runs-on` replaces it.
-        include: ${{ fromJSON(github.repository == 'faunasocial/fauna' && '[{"arch":"amd64","runner":"ubuntu-latest"},{"arch":"arm64","runner":"ubuntu-24.04-arm"}]' || '[{"arch":"amd64","runner":"ubuntu-latest"}]') }}
+        include: ${{ fromJSON(github.repository == 'faunasocial/fauna' && '[{"arch":"amd64","runner":"ubuntu-latest"},{"arch":"arm64","runner":"ubuntu-24.04-arm"}]' || inputs.arches == 'arm64' && '[{"arch":"arm64","runner":"ubuntu-24.04-arm"}]' || inputs.arches == 'both' && '[{"arch":"amd64","runner":"ubuntu-latest"},{"arch":"arm64","runner":"ubuntu-24.04-arm"}]' || '[{"arch":"amd64","runner":"ubuntu-latest"}]') }}
     runs-on: ${{ (github.repository_owner == 'faunasocial' && github.event.repository.private && inputs.runner != 'hosted') && fromJSON('["self-hosted","linux","arm64","fauna"]') || matrix.runner }}
     # A hosted runner has no compile cache to carry between runs, so the Rust
     # compile is cold every time; the ceiling is the hosted-runner maximum.
     # The self-hosted runner keeps the daemon-resident compile caches between
     # runs.
     timeout-minutes: 360
+    permissions:
+      contents: read
+      # the private repository's upgrade smoke pulls its pinned previous
+      # build from the registry, which refuses an anonymous token for a
+      # package that is not public
+      packages: read
     outputs:
       version: ${{ steps.version.outputs.version }}
       build_id: ${{ env.BUILD_ID }}
@@ -141,6 +162,14 @@ jobs:
         if: inputs.runner == 'self-hosted' && !(github.repository_owner == 'faunasocial' && github.event.repository.private)
         run: |
           echo "::error::runner=self-hosted is honoured only on the private repository; dispatch this repository's build with runner=auto or runner=hosted"
+          exit 1
+
+      # The hang test exercises the self-hosted leg's bound (the Build step),
+      # which only a dry run may spend a run on.
+      - name: The hang test is a self-hosted dry run's alone
+        if: inputs.hang_test && (env.RUNNER_LEG != 'self-hosted' || !inputs.dry_run)
+        run: |
+          echo "::error::hang_test is honoured only on a dry run of the private repository's self-hosted leg"
           exit 1
 
       # Full history: the upgrade smoke decides its expected-incompatible window
@@ -236,8 +265,25 @@ jobs:
 
       # Self-hosted leg: the daemon-resident build, unchanged (no container
       # builder, no layer cache action — see the comment above).
+      #
+      # Each build is bounded by its own `timeout`, a process-local clock: when
+      # the runner loses its job, the step's timeout never fires and a hung
+      # build lives on (a looping rustc's build outlived its failed job by
+      # 18.5 h and filled the disk, 2026-10-19). SIGINT makes the buildx
+      # client drop the session, which cancels the solve in the daemon (no
+      # container is left); a client that does not exit after the cancel is
+      # SIGKILLed by `--kill-after`. Either way a bounded build ends in exit
+      # 137, which fails the step as intended — the hang test of 2026-10-20
+      # saw the solve CANCELED and exit 137 in the bound's own second, with
+      # no build process or stage image left behind. A `hang_test` dispatch shortens the bound to 5 min and
+      # makes the first pass sleep past it, so that run proves the bound. Each
+      # `--target` pass writes its untagged result to the daemon; its image id
+      # goes to an iid file so the drop step below removes exactly those.
       - name: Build
         if: env.RUNNER_LEG == 'self-hosted'
+        timeout-minutes: 330
+        env:
+          HANG_TEST: ${{ inputs.hang_test }}
         run: |
           args=(
             --builder default
@@ -247,21 +293,34 @@ jobs:
             --build-arg FAUNA_BUILD_ID="$BUILD_ID"
             --build-arg FAUNA_VERSION=${{ steps.version.outputs.version }}
           )
+          bound=180m
+          if [ "$HANG_TEST" = true ]; then
+            bound=5m
+            args+=(--build-arg HANG_SECONDS=3600)
+          fi
+          bounded() { timeout --signal=INT --kill-after=60s "$bound" "$@"; }
           for stage in rust-wasm rust-native; do
             echo "::group::stage $stage"
-            docker buildx build "${args[@]}" --target "$stage" .
+            bounded docker buildx build "${args[@]}" --target "$stage" \
+              --iidfile "$RUNNER_TEMP/nest-iid-$stage" .
             echo "::endgroup::"
             free -h
             df -h /
           done
-          docker buildx build "${args[@]}" --load -t "$IMAGE:$ARCH_TAG" .
+          bounded docker buildx build "${args[@]}" --load -t "$IMAGE:$ARCH_TAG" .
 
       # Hosted leg: a docker-container builder, so the `type=gha` layer cache
       # works (image-pipeline.md § Image tags & channels, part 3). It caches LAYERS
       # only — the Rust compile stays cold. The same three stages run serially as
-      # separate steps (memory, above); all three share one cache scope per arch,
-      # so each reads the layers the step before it exported. The BuildKit image
-      # is pinned by digest, never the floating default (bump round 7).
+      # separate steps (memory, above), each exporting to a scope of its own per
+      # arch: a `cache-to` REPLACES its scope's manifest with the layers of that
+      # one build, so with one shared scope the rust-native export dropped the
+      # rust-wasm layers and the final step recompiled the whole wasm stage, then
+      # ran the disk out (run 39177465596, 2026-10-19). The final step reads all
+      # three scopes. Between the steps the stage's compile-cache mounts are
+      # pruned: a later step needs the stage's layers, never its target dir, and
+      # those mounts are the disk the next compile needs. The BuildKit image is
+      # pinned by digest, never the floating default (bump round 7).
       - name: Set up Docker Buildx
         if: env.RUNNER_LEG == 'hosted'
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
@@ -279,8 +338,19 @@ jobs:
             BUILD_JOBS=${{ steps.jobs.outputs.jobs }}
             FAUNA_BUILD_COMMIT=${{ github.sha }}
             FAUNA_BUILD_ID=${{ env.BUILD_ID }}
-          cache-from: type=gha,scope=nest-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=nest-${{ matrix.arch }}
+          cache-from: type=gha,scope=nest-${{ matrix.arch }}-rust-wasm
+          cache-to: type=gha,mode=max,scope=nest-${{ matrix.arch }}-rust-wasm
+
+      - name: Prune the rust-wasm compile caches
+        if: env.RUNNER_LEG == 'hosted'
+        run: |
+          df -h /
+          docker buildx du
+          # A lever on disk, not on correctness (the per-stage scopes are): a
+          # refused prune leaves the build to run as before, warned.
+          docker buildx prune --force --filter type=exec.cachemount \
+            || echo "::warning::compile-cache prune refused; the next stage builds without the disk it would free"
+          df -h /
 
       - name: Build — rust-native stage
         if: env.RUNNER_LEG == 'hosted'
@@ -293,8 +363,17 @@ jobs:
             BUILD_JOBS=${{ steps.jobs.outputs.jobs }}
             FAUNA_BUILD_COMMIT=${{ github.sha }}
             FAUNA_BUILD_ID=${{ env.BUILD_ID }}
-          cache-from: type=gha,scope=nest-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=nest-${{ matrix.arch }}
+          cache-from: type=gha,scope=nest-${{ matrix.arch }}-rust-native
+          cache-to: type=gha,mode=max,scope=nest-${{ matrix.arch }}-rust-native
+
+      - name: Prune the rust-native compile caches
+        if: env.RUNNER_LEG == 'hosted'
+        run: |
+          df -h /
+          docker buildx du
+          docker buildx prune --force --filter type=exec.cachemount \
+            || echo "::warning::compile-cache prune refused; the next stage builds without the disk it would free"
+          df -h /
 
       - name: Build — final image
         if: env.RUNNER_LEG == 'hosted'
@@ -309,19 +388,23 @@ jobs:
             FAUNA_BUILD_COMMIT=${{ github.sha }}
             FAUNA_BUILD_ID=${{ env.BUILD_ID }}
             FAUNA_VERSION=${{ steps.version.outputs.version }}
-          cache-from: type=gha,scope=nest-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=nest-${{ matrix.arch }}
+          cache-from: |
+            type=gha,scope=nest-${{ matrix.arch }}-rust-wasm
+            type=gha,scope=nest-${{ matrix.arch }}-rust-native
+            type=gha,scope=nest-${{ matrix.arch }}-final
+          cache-to: type=gha,mode=max,scope=nest-${{ matrix.arch }}-final
 
       - name: Smoke test — the image fresh-boots and health responds
         run: |
-          # FAUNA_PORT=8443: bind the in-container nest to the port this step
-          # maps and curls. The entrypoint defaults FAUNA_PORT to 3000, so an
-          # image smoke test MUST set it explicitly. The box boots domainless
+          # The nest's internal listener (FAUNA_PORT, default 3000) binds
+          # container loopback, so no publish can reach it: this step maps and
+          # curls the SNI router's :443, the production path to the nest
+          # (deployment-threat-model.md § Concern 1a). The box boots domainless
           # and serves HTTPS on a self-signed floor certificate, so probe https
           # (-k) and fall back to http, as the image's own HEALTHCHECK does.
           docker run -d --name nest-smoke \
-            -p 127.0.0.1:18443:8443 \
-            -e FAUNA_PORT=8443 \
+            -p 127.0.0.1:18443:443 \
+            -e FAUNA_PORT=3000 \
             -e FAUNA_MODE=public \
             "$IMAGE:$ARCH_TAG"
 
@@ -369,6 +452,12 @@ jobs:
       # current :latest every production box runs, resolved to its digest now;
       # on the private one the pinned previous verified build. Either absent is
       # "no previous build", printed.
+      - name: Log in to the registry to read the pinned previous build
+        if: matrix.arch == 'amd64' && github.event.repository.private
+        env:
+          TOKEN: ${{ github.token }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
       - name: Upgrade smoke — the candidate boots healthy on the previous build's /data
         if: matrix.arch == 'amd64'
         run: |
@@ -383,11 +472,11 @@ jobs:
       # on the self-hosted runner the stage job runs on the same docker daemon,
       # which still holds it under its per-arch tag.
       - name: Save the image for the stage job
-        if: ${{ !inputs.dry_run && env.RUNNER_LEG == 'hosted' }}
+        if: ${{ (!inputs.dry_run || github.repository != 'faunasocial/fauna') && env.RUNNER_LEG == 'hosted' }}
         run: docker save -o "nest-${{ matrix.arch }}.tar" "$IMAGE:$ARCH_TAG"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
-        if: ${{ !inputs.dry_run && env.RUNNER_LEG == 'hosted' }}
+        if: ${{ (!inputs.dry_run || github.repository != 'faunasocial/fauna') && env.RUNNER_LEG == 'hosted' }}
         with:
           name: nest-${{ matrix.arch }}
           path: nest-${{ matrix.arch }}.tar
@@ -396,16 +485,30 @@ jobs:
 
       # The self-hosted runner's daemon keeps what a run loads, and its own GC
       # caps the build cache but never touches image refs (image-pipeline.md
-      # § Disk rationing on the runner). A run that stops here — a dry run, or
-      # a red — drops its own per-arch image; otherwise the stage job does,
-      # once it has pushed it. Never fails the job.
+      # § Disk rationing on the runner). A red build drops its own per-arch
+      # image; a green one, dry or not, leaves it to the stage job, which drops
+      # it once it has pushed it. Never fails the job.
       - name: Drop this run's image from the self-hosted daemon
-        if: always() && env.RUNNER_LEG == 'self-hosted' && (inputs.dry_run || failure())
+        if: failure() && env.RUNNER_LEG == 'self-hosted'
         run: docker image rm "$IMAGE:$ARCH_TAG" || true
+
+      # The two `--target` passes leave untagged stage images in the daemon,
+      # on every run, green or red (12 of them, 18 GB, on 2026-10-19). Removed
+      # by the ids the Build step recorded, never by a daemon-wide prune: other
+      # workflows share this daemon. Their layers stay in the build cache.
+      # Never fails the job.
+      - name: Drop this run's stage images from the self-hosted daemon
+        if: always() && env.RUNNER_LEG == 'self-hosted'
+        run: |
+          for stage in rust-wasm rust-native; do
+            f="$RUNNER_TEMP/nest-iid-$stage"
+            [ -s "$f" ] && docker image rm "$(cat "$f")" || true
+            rm -f "$f"
+          done
 
   stage:
     needs: build
-    if: ${{ !inputs.dry_run }}
+    if: ${{ !inputs.dry_run || github.repository != 'faunasocial/fauna' }}
     runs-on: ${{ (github.repository_owner == 'faunasocial' && github.event.repository.private && inputs.runner != 'hosted') && fromJSON('["self-hosted","linux","arm64","fauna"]') || 'ubuntu-latest' }}
     timeout-minutes: 30
     permissions:
@@ -446,17 +549,28 @@ jobs:
       - name: Push the per-arch tags
         run: |
           arches="amd64"
-          if [ "$GITHUB_REPOSITORY" = "faunasocial/fauna" ]; then arches="amd64 arm64"; fi
+          if [ "$GITHUB_REPOSITORY" = "faunasocial/fauna" ] || [ "${{ inputs.arches }}" = "both" ]; then arches="amd64 arm64"; fi
+          # An arm64-only private run publishes the per-arch tag and nothing
+          # else: no :sha-<sha> manifest, no mirrors, no :dev, no verify. It is
+          # for the arm64 dev VMs' tier_4 suites, and moving the stage tag to an
+          # image the amd64 staging box cannot run would break its deploy.
+          stage_tags=true
+          if [ "$GITHUB_REPOSITORY" != "faunasocial/fauna" ] && [ "${{ inputs.arches }}" = "arm64" ]; then
+            arches="arm64"
+            stage_tags=false
+          fi
           for arch in $arches; do
             if [ "$RUNNER_LEG" = hosted ]; then docker load -i "nest-$arch.tar"; fi
             docker push "$IMAGE:$SHA_TAG-$arch"
           done
           echo "ARCHES=$arches" >> "$GITHUB_ENV"
+          echo "STAGE_TAGS=$stage_tags" >> "$GITHUB_ENV"
 
       # Merge the per-arch images into the immutable :sha-<sha>. No channel
       # tag moves yet: the next steps move it, signed first on the public
       # repository. :latest belongs to `promote` alone.
       - name: Stage — :sha-<sha>
+        if: env.STAGE_TAGS == 'true'
         run: |
           refs=()
           for arch in $ARCHES; do refs+=("$IMAGE:$SHA_TAG-$arch"); done
@@ -470,12 +584,15 @@ jobs:
       # on the nest image's tags. A manifest copy from the `@sha256:` ref in the
       # vetted table, never a floating tag.
       - name: Mirror the vetted third-party images — :sha-<sha>
+        if: env.STAGE_TAGS == 'true'
         run: ./scripts/mirror-third-party-images.sh "$SHA_TAG"
 
       # The private repository's stage tag (:dev): unsigned, a development
-      # channel.
+      # channel. A private dry run stops before it: its build is pushed as
+      # :sha-<sha> (restage-nest.yml stages it later, no rebuild), and :dev,
+      # the staging box and verify stay where they were.
       - name: Move the stage tag — nest + mirrors
-        if: github.repository != 'faunasocial/fauna'
+        if: github.repository != 'faunasocial/fauna' && env.STAGE_TAGS == 'true' && !inputs.dry_run
         run: |
           docker buildx imagetools create -t "$IMAGE:$STAGE_TAG" "$IMAGE:$SHA_TAG"
           ./scripts/mirror-third-party-images.sh "$STAGE_TAG" "$SHA_TAG"
@@ -501,7 +618,8 @@ jobs:
 
   verify:
     needs: [build, stage]
-    if: ${{ !inputs.dry_run }}
+    # An arm64-only private run stages nothing, so there is nothing to verify.
+    if: ${{ !inputs.dry_run && (github.repository == 'faunasocial/fauna' || inputs.arches != 'arm64') }}
     runs-on: ${{ (github.repository_owner == 'faunasocial' && github.event.repository.private && inputs.runner != 'hosted') && fromJSON('["self-hosted","linux","arm64","fauna"]') || 'ubuntu-latest' }}
     # The cloud token lives in this Environment (deployment branches `main`
     # only), so no fork and no pull request ever reaches it.
@@ -552,11 +670,11 @@ jobs:
       # part).
       - name: Sweep admissions left by earlier runs
         if: env.RUNNER_LEG == 'hosted'
-        run: uv run --no-project python scripts/box-firewall-admit.py sweep "$VERIFY_HOST" --refuse-if-lists "$REFUSE" --run-id "$GITHUB_RUN_ID"
+        run: uv run --no-project python scripts/box-firewall-admit.py sweep "$VERIFY_HOST" --refuse-if-lists "$REFUSE" --refuse-if-lists "$REFUSE_ACCEPTANCE" --run-id "$GITHUB_RUN_ID"
 
       - name: Admit this run
         if: env.RUNNER_LEG == 'hosted'
-        run: uv run --no-project python scripts/box-firewall-admit.py admit "$VERIFY_HOST" --refuse-if-lists "$REFUSE" --run-id "$GITHUB_RUN_ID"
+        run: uv run --no-project python scripts/box-firewall-admit.py admit "$VERIFY_HOST" --refuse-if-lists "$REFUSE" --refuse-if-lists "$REFUSE_ACCEPTANCE" --run-id "$GITHUB_RUN_ID"
 
       # The staging box's Watchtower polls the stage tag and repulls; the gate's
       # own timeout covers the wait. --expect-build-id makes this a gate on the
@@ -573,11 +691,11 @@ jobs:
 
       - name: Revoke this run
         if: always() && env.RUNNER_LEG == 'hosted'
-        run: uv run --no-project python scripts/box-firewall-admit.py revoke "$VERIFY_HOST" --refuse-if-lists "$REFUSE" --run-id "$GITHUB_RUN_ID"
+        run: uv run --no-project python scripts/box-firewall-admit.py revoke "$VERIFY_HOST" --refuse-if-lists "$REFUSE" --refuse-if-lists "$REFUSE_ACCEPTANCE" --run-id "$GITHUB_RUN_ID"
 
       - name: Nothing of this run is left open
         if: always() && env.RUNNER_LEG == 'hosted'
-        run: uv run --no-project python scripts/box-firewall-admit.py held "$VERIFY_HOST" --refuse-if-lists "$REFUSE" --run-id "$GITHUB_RUN_ID"
+        run: uv run --no-project python scripts/box-firewall-admit.py held "$VERIFY_HOST" --refuse-if-lists "$REFUSE" --refuse-if-lists "$REFUSE_ACCEPTANCE" --run-id "$GITHUB_RUN_ID"
 
   # The release: the SAME verified digest copied to :latest, the mirrors with
   # it, each one's stage-time signature verified first — an unsigned digest is

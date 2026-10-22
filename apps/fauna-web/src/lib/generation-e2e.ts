@@ -26,7 +26,7 @@
 // dies with the tab rather than leaking into the next run.
 //
 // This module exists ONLY in builds made for testing (convention 15): its
-// importers are `$lib/e2e-automation` (the state projection) and the settings
+// importers are `#lib/e2e-automation` (the state projection) and the settings
 // account switcher, which calls the bump behind `__FAUNA_E2E_AUTOMATION__` so a
 // production `vite build` constant-folds it away.
 

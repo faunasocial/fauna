@@ -145,6 +145,14 @@ impl LocalizedText {
     }
 }
 
+/// Fill `{name}` placeholders of an already-resolved `template` with `args`
+/// verbatim, in one pass (see [`substitute`]). The public face the apps' own
+/// renderers call (over UniFFI) once they have looked the template up, so every
+/// app shares this single fill instead of a per-arg replace loop.
+pub fn fill_placeholders(template: &str, args: &HashMap<String, String>) -> String {
+    substitute(template, args, |v| v.to_string())
+}
+
 /// Fill `{name}` placeholders in one left-to-right pass over `template`.
 ///
 /// A sequential `str::replace` per arg re-scans text an earlier arg already
@@ -256,6 +264,17 @@ mod tests {
             let lt = LocalizedText::key_args("t", [("a", "{b}"), ("b", "second")]);
             assert_eq!(lt.resolve(lookup), "{b} / second");
             assert_eq!(lt.resolve_nested(lookup), "{b} / second");
+        }
+    }
+
+    #[test]
+    fn fill_placeholders_is_single_pass() {
+        for _ in 0..64 {
+            let args: HashMap<String, String> = [("a", "{b}"), ("b", "second")]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            assert_eq!(fill_placeholders("{a} / {b}", &args), "{b} / second");
         }
     }
 

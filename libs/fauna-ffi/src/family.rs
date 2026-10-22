@@ -256,24 +256,79 @@ pub fn content_render_composed(
     own_phishing_permille: Option<u16>,
     region_policies: Vec<FfiRegionRuleSet>,
 ) -> FfiComposedVerdict {
-    use fauna_core::obligation::{ViewerThresholds, render_verdict_composed};
-    let policy = render_guardian_policy(content_policy);
-    let own = own_spam_permille
-        .zip(own_phishing_permille)
-        .map(|(s, p)| ViewerThresholds {
-            spam_permille: s,
-            phishing_permille: p,
-        });
-    let regions: Vec<fauna_core::region_policy::RegionRuleSet> = region_policies
-        .into_iter()
-        .filter_map(FfiRegionRuleSet::into_shared)
-        .collect();
+    content_render_composed_with_nest(
+        labels,
+        content_policy,
+        own_spam_permille,
+        own_phishing_permille,
+        region_policies,
+        Vec::new(),
+    )
+}
+
+/// [`content_render_composed`] with the FOURTH source: the published rules of
+/// the nest the item was **read through** (`nest-rules.md` § The nest source in
+/// the engine) — ordinarily one set, from `FfiNestRulesBook::rule_sets_for`
+/// for the connection the item arrived on; empty for a nest that published no
+/// rules. A new face beside the old one for the reason that one gives (no
+/// defaulted function parameters); an app moves to it when it paints the nest
+/// placeholder, the same swap on every app.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn content_render_composed_with_nest(
+    labels: Vec<fauna_core::content_category::ContentLabelEntry>,
+    content_policy: Option<FfiContentPolicy>,
+    own_spam_permille: Option<u16>,
+    own_phishing_permille: Option<u16>,
+    region_policies: Vec<FfiRegionRuleSet>,
+    nest_policies: Vec<FfiNestRuleSet>,
+) -> FfiComposedVerdict {
+    use fauna_core::obligation::render_verdict_composed;
+    let (policy, own, regions, nests) = render_sources(
+        content_policy,
+        own_spam_permille,
+        own_phishing_permille,
+        region_policies,
+        nest_policies,
+    );
     ffi_composed(&render_verdict_composed(
         &labels,
         policy.as_ref(),
         own,
         &regions,
+        &nests,
     ))
+}
+
+/// The four render sources a composed face folds, from their FFI forms.
+#[cfg(feature = "value-format")]
+fn render_sources(
+    content_policy: Option<FfiContentPolicy>,
+    own_spam_permille: Option<u16>,
+    own_phishing_permille: Option<u16>,
+    region_policies: Vec<FfiRegionRuleSet>,
+    nest_policies: Vec<FfiNestRuleSet>,
+) -> (
+    Option<ContentPolicy>,
+    Option<fauna_core::obligation::ViewerThresholds>,
+    Vec<fauna_core::region_policy::RegionRuleSet>,
+    Vec<fauna_core::obligation::NestRuleSet>,
+) {
+    let own = own_spam_permille.zip(own_phishing_permille).map(|(s, p)| {
+        fauna_core::obligation::ViewerThresholds {
+            spam_permille: s,
+            phishing_permille: p,
+        }
+    });
+    let regions = region_policies
+        .into_iter()
+        .filter_map(FfiRegionRuleSet::into_shared)
+        .collect();
+    let nests = nest_policies
+        .into_iter()
+        .map(FfiNestRuleSet::into_shared)
+        .collect();
+    (render_guardian_policy(content_policy), own, regions, nests)
 }
 
 /// [`content_render_composed`] for one identified item, honouring the viewer's
@@ -298,18 +353,43 @@ pub fn content_render_for_item(
     own_phishing_permille: Option<u16>,
     region_policies: Vec<FfiRegionRuleSet>,
 ) -> FfiComposedVerdict {
-    use fauna_core::obligation::{ViewerThresholds, render_verdict_for_item};
-    let policy = render_guardian_policy(content_policy);
-    let own = own_spam_permille
-        .zip(own_phishing_permille)
-        .map(|(s, p)| ViewerThresholds {
-            spam_permille: s,
-            phishing_permille: p,
-        });
-    let regions: Vec<fauna_core::region_policy::RegionRuleSet> = region_policies
-        .into_iter()
-        .filter_map(FfiRegionRuleSet::into_shared)
-        .collect();
+    content_render_for_item_with_nest(
+        hidden_content,
+        item_id,
+        author_id,
+        labels,
+        content_policy,
+        own_spam_permille,
+        own_phishing_permille,
+        region_policies,
+        Vec::new(),
+    )
+}
+
+/// [`content_render_for_item`] with the nest source, as
+/// [`content_render_composed_with_nest`] adds it to [`content_render_composed`].
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+#[allow(clippy::too_many_arguments)]
+pub fn content_render_for_item_with_nest(
+    hidden_content: Vec<String>,
+    item_id: String,
+    author_id: Option<String>,
+    labels: Vec<fauna_core::content_category::ContentLabelEntry>,
+    content_policy: Option<FfiContentPolicy>,
+    own_spam_permille: Option<u16>,
+    own_phishing_permille: Option<u16>,
+    region_policies: Vec<FfiRegionRuleSet>,
+    nest_policies: Vec<FfiNestRuleSet>,
+) -> FfiComposedVerdict {
+    use fauna_core::obligation::render_verdict_for_item;
+    let (policy, own, regions, nests) = render_sources(
+        content_policy,
+        own_spam_permille,
+        own_phishing_permille,
+        region_policies,
+        nest_policies,
+    );
     ffi_composed(&render_verdict_for_item(
         &hidden_content,
         &item_id,
@@ -318,6 +398,7 @@ pub fn content_render_for_item(
         policy.as_ref(),
         own,
         &regions,
+        &nests,
     ))
 }
 
@@ -376,6 +457,18 @@ fn ffi_composed(composed: &fauna_core::obligation::ComposedVerdict) -> FfiCompos
             reason: a.reason.clone().into_iter().collect(),
         }),
         reported: composed.reported(),
+        nest: composed.nest().map(|a| FfiNestAttribution {
+            domain: a.domain.clone(),
+            reason_code: a.reason_code.clone(),
+            reason: a.reason.clone().into_iter().collect(),
+        }),
+        guardian: composed.guardian().map(|a| FfiGuardianAttribution {
+            reason_code: a.rule.as_ref().map(|r| r.reason_code.clone()),
+            reason: a
+                .rule
+                .as_ref()
+                .map(|r| r.reason.clone().into_iter().collect()),
+        }),
     }
 }
 
@@ -987,6 +1080,14 @@ pub struct FfiContentPolicy {
     pub spam: String,
     pub phishing: String,
     pub commercial: String,
+    /// The guardian's rule document (`ContentPolicy.document`), as its
+    /// canonical dag-cbor — what the shared rule editor reads
+    /// (`FfiRuleEditor::for_guardian`) and writes back
+    /// (`FfiRuleEditor::document_bytes`). `None`: the guardian has authored
+    /// none. Bytes this build cannot read render fail-closed, as an unknown
+    /// floor does (`nest-rules.md` § Implementation status today).
+    #[uniffi(default = None)]
+    pub document: Option<Vec<u8>>,
 }
 
 /// FFI mirror of one region's assembled rule set
@@ -1044,6 +1145,126 @@ pub struct FfiComposedVerdict {
     /// [`content_render_for_item`] can set it.
     #[uniffi(default = false)]
     pub reported: bool,
+    /// Set when a rule of the nest the item was read through drove this
+    /// verdict — paint `nest_rules.blocked_notice` / `.collapsed_notice`
+    /// naming the domain, with the admin's reason verbatim beside it
+    /// (`nest-rules.md` § The nest source in the engine).
+    #[uniffi(default = None)]
+    pub nest: Option<FfiNestAttribution>,
+    /// Set when the guardian's policy drove this verdict — paint the
+    /// family-policy placeholder, with the guardian rule's reason verbatim
+    /// beside it when one drove it (`nest-rules.md` § The shared rule editor →
+    /// *The reason is the member's to read*).
+    #[uniffi(default = None)]
+    pub guardian: Option<FfiGuardianAttribution>,
+}
+
+/// FFI mirror of `fauna_core::obligation::GuardianAttribution`. Both fields
+/// are `None` when a floor drove the verdict — a floor never invents a reason,
+/// so the frame paints alone.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiGuardianAttribution {
+    pub reason_code: Option<String>,
+    /// `{ lang → text }`, with a required `default` entry. The guardian's own
+    /// words, shown verbatim under the app's frame.
+    pub reason: Option<std::collections::HashMap<String, String>>,
+}
+
+/// FFI mirror of `fauna_core::obligation::NestAttribution`.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiNestAttribution {
+    pub domain: String,
+    pub reason_code: String,
+    /// `{ lang → text }`, with a required `default` entry. The admin's own
+    /// words, shown verbatim under the app's frame.
+    pub reason: std::collections::HashMap<String, String>,
+}
+
+/// FFI mirror of `fauna_core::obligation::NestRuleSet` — what the published
+/// rules of the nest an item was read through contribute to its render decision
+/// (`nest-rules.md` § The nest source in the engine).
+///
+/// The app never *builds* one: the nest-rules book hands it out from the
+/// verified document (`FfiNestRulesBook::rule_sets_for`), and it crosses back
+/// to [`content_render_composed_with_nest`] to be folded. Like
+/// [`FfiRegionRuleSet`] it carries only the rules that apply; the document's
+/// status and its inert rules are the rules surface's, read through the book's
+/// summary.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiNestRuleSet {
+    /// The nest's domain, as its self-description names it.
+    pub domain: String,
+    pub rules: Vec<FfiNestRule>,
+}
+
+/// FFI mirror of one `fauna_core::obligation::NestRule`.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiNestRule {
+    /// A canonical label category, or a `nest:<domain>/<name>` scorer factor.
+    pub factor: String,
+    pub min_permille: u16,
+    /// `collapse` | `block`, as [`FfiRegionRule::verdict`].
+    pub verdict: String,
+    pub reason_code: String,
+    /// `{ lang → text }`, with a required `default` entry. The admin's own
+    /// words, shown verbatim under the app's frame.
+    pub reason: std::collections::HashMap<String, String>,
+}
+
+impl From<fauna_core::obligation::NestRuleSet> for FfiNestRuleSet {
+    fn from(set: fauna_core::obligation::NestRuleSet) -> Self {
+        FfiNestRuleSet {
+            domain: set.domain,
+            rules: set
+                .rules
+                .into_iter()
+                .map(|r| FfiNestRule {
+                    factor: r.rule.category,
+                    min_permille: r.rule.min_confidence_permille,
+                    verdict: match r.rule.action {
+                        fauna_core::obligation::ObligationAction::Block => "block".into(),
+                        _ => "collapse".into(),
+                    },
+                    reason_code: r.reason_code,
+                    reason: r.reason.into_iter().collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl FfiNestRuleSet {
+    /// Back into the shared type the engine folds. Gated with its callers for
+    /// the reason [`FfiRegionRuleSet`]'s twin gives.
+    #[cfg(feature = "value-format")]
+    fn into_shared(self) -> fauna_core::obligation::NestRuleSet {
+        use fauna_core::obligation::{AttestationLevel, ObligationAction, ObligationRule};
+        fauna_core::obligation::NestRuleSet {
+            domain: self.domain,
+            // Whatever rules crossed are the ones that apply, as for a region.
+            status: fauna_core::content_policy::PolicyStatus::Applied,
+            rules: self
+                .rules
+                .into_iter()
+                .map(|r| fauna_core::obligation::NestRule {
+                    rule: ObligationRule {
+                        category: r.factor,
+                        min_confidence_permille: r.min_permille,
+                        // Never escalate on a verb this build cannot name.
+                        action: if r.verdict == "block" {
+                            ObligationAction::Block
+                        } else {
+                            ObligationAction::Collapse
+                        },
+                        requires_attestation: AttestationLevel::Any,
+                    },
+                    reason_code: r.reason_code,
+                    reason: r.reason.into_iter().collect(),
+                })
+                .collect(),
+            inert_rules: Vec::new(),
+        }
+    }
 }
 
 /// FFI mirror of `fauna_core::obligation::RegionAttribution`.
@@ -1124,6 +1345,9 @@ impl FfiRegionRuleSet {
                     reason: r.reason.into_iter().collect(),
                 })
                 .collect(),
+            // Only the rules that apply cross the boundary; the inert ones are
+            // the transparency surface's, which reads them elsewhere.
+            inert_rules: Vec::new(),
         })
     }
 }
@@ -1135,12 +1359,18 @@ impl From<ContentPolicy> for FfiContentPolicy {
             spam,
             phishing,
             commercial,
+            document,
         } = p;
         FfiContentPolicy {
             nsfw: nsfw.as_str().to_string(),
             spam: spam.as_str().to_string(),
             phishing: phishing.as_str().to_string(),
             commercial: commercial.as_str().to_string(),
+            // A document the canonical encoder refuses (a float in a catch-all,
+            // which no decoded document carries) crosses as bytes no build
+            // reads, so it fails closed rather than vanishing.
+            document: document
+                .map(|d| fauna_core::content_policy::encode_document(&d).unwrap_or_default()),
         }
     }
 }
@@ -1152,8 +1382,26 @@ impl From<FfiContentPolicy> for ContentPolicy {
             spam: ContentFloor::from_wire(&p.spam),
             phishing: ContentFloor::from_wire(&p.phishing),
             commercial: ContentFloor::from_wire(&p.commercial),
+            document: p.document.as_deref().map(guardian_document_from_bytes),
         }
     }
+}
+
+/// The guardian document back from the bytes [`FfiContentPolicy`] carries.
+///
+/// Decoded in full first, so a document a newer build wrote keeps every rule
+/// when the app writes the policy back; then version first, so a newer grammar
+/// this build cannot even decode is inert-and-says-so; and bytes that do not
+/// decode at all are [`ContentPolicyDocument::unreadable`] — inert, so the
+/// guardian's renders fail closed on them.
+///
+/// [`ContentPolicyDocument::unreadable`]: fauna_core::content_policy::ContentPolicyDocument::unreadable
+fn guardian_document_from_bytes(bytes: &[u8]) -> fauna_core::content_policy::ContentPolicyDocument {
+    use fauna_core::content_policy::{ContentPolicyDocument, decode_document};
+    fauna_protocol::decode_strict::<ContentPolicyDocument>(bytes)
+        .ok()
+        .or_else(|| decode_document(bytes).ok())
+        .unwrap_or_else(ContentPolicyDocument::unreadable)
 }
 
 /// FFI mirror of [`fauna_core::screen_time::ScreenTimePolicy`] — the guardian's
@@ -1776,6 +2024,16 @@ pub fn ward_contact_ask_pending(
     fauna_client_family::contact_ask_pending(&asks, &peer_actor_id_hex)
 }
 
+/// Whether every knock waiting on the caller waits on their guardian — what
+/// `knock-guardian-pending` renders from, on each knock row. `own_policy` is
+/// the caller's own `FfiFamilyStatus::policy`. Over the shared
+/// [`fauna_client_family::knocks_await_guardian`].
+#[uniffi::export]
+pub fn ward_knocks_await_guardian(own_policy: Option<FfiReachPolicy>) -> bool {
+    let own_policy: Option<ReachPolicy> = own_policy.map(Into::into);
+    fauna_client_family::knocks_await_guardian(own_policy.as_ref())
+}
+
 /// The live state of the ward's feed-source ask for one
 /// `(bridge_id, operation, target)` triple, or `None` when no live ask covers
 /// it. Over the shared [`fauna_client_family::feed_request_state`], keyed on the
@@ -1889,6 +2147,31 @@ impl FfiFamilyClient {
 
     fn client(&self) -> FamilyClient<Arc<NestClient>> {
         FamilyClient::new(Arc::clone(&self.nest))
+    }
+}
+
+/// The guardian mounting's save (`nest-rules.md` § The shared rule editor
+/// (b)); gated `rule-editor` with the editor whose bytes it takes.
+#[cfg(feature = "rule-editor")]
+#[fauna_uniffi_async::export]
+impl FfiFamilyClient {
+    /// Save a ward's content rules — `FfiRuleEditor::document_bytes()` of a
+    /// guardian editor. Re-reads the ward, writes the reach knobs as reported
+    /// plus the content pillar, every other optional pillar absent, and
+    /// returns the ward's fresh entry; `None` when the caller no longer
+    /// guards `ward`, in which case nothing was written.
+    pub async fn save_content_rules(
+        &self,
+        ward: Vec<u8>,
+        document: Vec<u8>,
+    ) -> Result<Option<FfiFamilyWardInfo>, FfiError> {
+        let document = crate::rule_editor::decode(&document)?;
+        let entry = self
+            .client()
+            .save_content_rules(&ward, document)
+            .await
+            .map_err(stringify)?;
+        Ok(entry.map(Into::into))
     }
 }
 
@@ -2166,6 +2449,7 @@ mod content_policy_tests {
             spam: spam.into(),
             phishing: phishing.into(),
             commercial: commercial.into(),
+            document: None,
         }
     }
 
@@ -2235,6 +2519,66 @@ mod content_policy_tests {
     }
 
     #[test]
+    fn the_nest_face_folds_the_nest_source_and_names_the_nest() {
+        // nest-rules.md § The nest source in the engine: the rules of the nest
+        // the item was read through are the fourth source, attributed to it.
+        let nest = FfiNestRuleSet {
+            domain: "example.test".into(),
+            rules: vec![FfiNestRule {
+                factor: "spam".into(),
+                min_permille: 350,
+                verdict: "block".into(),
+                reason_code: "rule-1".into(),
+                reason: std::collections::HashMap::from([(
+                    "default".to_string(),
+                    "No spam here".to_string(),
+                )]),
+            }],
+        };
+        let composed = content_render_composed_with_nest(
+            vec![label("spam", 400)],
+            None,
+            None,
+            None,
+            Vec::new(),
+            vec![nest.clone()],
+        );
+        assert_eq!(composed.verdict, "block");
+        let attribution = composed.nest.expect("attributed to the nest");
+        assert_eq!(attribution.domain, "example.test");
+        assert_eq!(attribution.reason_code, "rule-1");
+
+        // The item face folds it too, and a set with no rules adds nothing.
+        let item = content_render_for_item_with_nest(
+            Vec::new(),
+            "item".into(),
+            None,
+            vec![label("spam", 400)],
+            None,
+            None,
+            None,
+            Vec::new(),
+            vec![nest.clone()],
+        );
+        assert_eq!(item.verdict, "block");
+        let empty = FfiNestRuleSet {
+            rules: Vec::new(),
+            ..nest
+        };
+        assert_eq!(
+            content_render_composed_with_nest(
+                vec![label("spam", 400)],
+                None,
+                None,
+                None,
+                Vec::new(),
+                vec![empty],
+            ),
+            content_render_composed(vec![label("spam", 400)], None, None, None, Vec::new()),
+        );
+    }
+
+    #[test]
     fn the_composed_face_with_no_region_matches_the_verdict_only_face() {
         // The two faces must never disagree — the verdict-only one is exactly
         // this one with an empty chain, which is what keeps an app that has not
@@ -2244,6 +2588,7 @@ mod content_policy_tests {
             spam: "block".into(),
             phishing: "inherit".into(),
             commercial: "inherit".into(),
+            document: None,
         };
         for labels in [
             vec![],
@@ -2400,6 +2745,7 @@ mod kids_floor_tests {
             spam: "inherit".into(),
             phishing: "inherit".into(),
             commercial: "collapse".into(),
+            document: None,
         }
     }
 
@@ -2472,6 +2818,7 @@ mod notify_accumulator_tests {
             spam: spam.into(),
             phishing: phishing.into(),
             commercial: commercial.into(),
+            document: None,
         }
     }
 
@@ -2832,6 +3179,12 @@ mod ward_ask_face_tests {
             "CD".repeat(32)
         ));
         assert!(!ward_contact_ask_pending(vec![contact], "ab".repeat(32)));
+        assert!(!ward_knocks_await_guardian(None));
+        let approval_on = FfiReachPolicy::from(ReachPolicy {
+            contact_approval: true,
+            ..Default::default()
+        });
+        assert!(ward_knocks_await_guardian(Some(approval_on)));
 
         let feed = |approved: Option<i64>| FfiFamilyFeedRequest {
             bridge_id: "activitypub".into(),

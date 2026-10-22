@@ -48,10 +48,11 @@ called from the Go MTA — the perimeter-scorer split, like
 `filter_is_editable`; PascalCase variant-name tags), so every app emits the
 same wire shape and never opens a stored filter in a form that would silently
 narrow it on save — `ui/settings.md` § Where logic lives owns the seam's shape
-and the per-app rollout status. The form covers the single-value conditions
-and the `Allow` / `Discard` / `Reject` / `Forward` actions; a filter with any
-other condition or action, or more than one rule, is one only a raw API call
-could have produced, and is listed but not editable.
+and the per-app rollout status. The full form covers every v1 condition and
+action, the rule's order and its `continue` flag; a filter with no condition or
+more than one is one only a raw API call (or the auto-respond setting below)
+could have produced, and is listed but not editable. A form that does not yet
+collect some inputs gates its edit affordance on the kinds it does collect.
 
 | WS-RPC kind                     | Purpose               |
 |---------------------------------|-----------------------|
@@ -207,7 +208,7 @@ The per-account auto-respond toggle and message (`mail-policy-config.md` § Tier
 
 **Recognised by shape, not by name.** Any rule with zero conditions under `all` and an `AutoReply` action IS the setting — it does exactly what the toggle means, whoever built it. Read reports on, with the body of the first such rule in evaluation order (`priority ASC, id ASC`), else off with an empty message. Setting a message creates the rule when none exists; otherwise it rewrites the first one to the canonical shape above (keeping its id) and deletes any further ones, so the account ends with exactly one. Turning it off deletes every such rule — a filter has no disabled state, so the message goes with the rule and an app re-collects it the next time the toggle is turned on. An `AutoReply` rule *with* conditions (a reply only to certain senders, built by a raw `fauna.email.filters.*` call) is the user's own rule: the facade neither reads nor touches it.
 
-**In the filter list.** The rule is listed like any other — hiding a rule that acts on the user's mail would hide what their mail does — with its name and the `Auto-reply` action label (`filter_action_label`), and, like every rule the shared form cannot represent (`filter_is_editable` is false for an `AutoReply` action), without an edit affordance on any app; the toggle and message on `mail-settings` are where it is edited. Deleting it from the list is turning auto-respond off. A distinct "managed by auto-respond" treatment in the list would need new ui.yaml ids and is not ruled.
+**In the filter list.** The rule is listed like any other — hiding a rule that acts on the user's mail would hide what their mail does — with its name and the `Auto-reply` action label (`filter_action_label`), and, like every rule the shared form cannot represent (`filter_is_editable` is false for a rule with no condition), without an edit affordance on any app; the toggle and message on `mail-settings` are where it is edited. Deleting it from the list is turning auto-respond off. A distinct "managed by auto-respond" treatment in the list would need new ui.yaml ids and is not ruled.
 
 **Implementation status today.** The CRUD surface (`fauna.email.filters.*`,
 `email_filters` table, `fauna-client-email`) is live and conformance-tested;
@@ -265,18 +266,27 @@ terminal). **`Allow` holds past delivery** (2026-09-28): the MTA's
 `recipientSealedCopy` seals an Allowed recipient's copy through
 `stamp_filter_allow`, so the MDA's SELECT-time pass and the shared on-device
 INBOX scorer both read threshold `0`; proof: `filter_allow_test.go` and the
-tier_3 `test_mail_spam_threshold_override.py::test_allow_rule_keeps_a_senders_mail_in_the_inbox_past_every_scoring_pass`. The typed `fauna-client-email` wrapper + the app filter UIs do not
-yet expose the `continue` flag (a raw `fauna.email.filters.create` can set it) —
-surfacing it client-side is the remaining app-area follow-up, waiting on the editor's ui.yaml ids for rule order and
-`continue` (none exist yet).
+tier_3 `test_mail_spam_threshold_override.py::test_allow_rule_keeps_a_senders_mail_in_the_inbox_past_every_scoring_pass`. The typed `fauna-client-email`
+`filters_{create,update}` carry the rule's order and its `continue` flag
+(2026-10-18), and the tui, linux, web and android rule editors set both
+(`filter-priority-input`, `filter-continue-toggle`) beside every v1 condition
+and action, gated on the shared `filter_is_editable`; witnessed by
+`test_settings.py::test_email_filter_{files_labels_and_replies_from_the_form,matches_a_header_value_or_the_spam_score,order_and_continue_are_set_from_the_form}`.
+The FFI face carries every input (`FfiFilterRuleInputs`, the grown
+`FfiFilterActionInputs`, `FfiEmailFilter.continue_on_match`, the
+`continue_on_match` argument of `filters_{create,update}`) and so does the wasm
+face. Apple and Windows still offer the single-value conditions and the
+`Allow`/`Discard`/`Reject`/`Forward` actions and save every rule
+first-match-wins at order 0, so an edit there resets both.
 
 **`FileInto` targets are enforced** (2026-09-15). `validate_action` refuses a
 `Sent`, `Drafts`, held-mailbox or malformed target on `create` and `update`,
 and ingest placement falls back to the spam disposition for such a target
 already stored, so no rule places inbound mail in any of the three. Proof: the
 in-crate placement test beside the custom-folder one, and
-`conformance_email_filters.rs`. No app dialog collects a `FileInto` yet
-(`describe_filter_action` returns `None` for it), so only a raw
-`fauna.email.filters.*` call could ever have stored such a rule.
+`conformance_email_filters.rs`. The tui rule editor collects a `FileInto`
+(2026-10-18) and checks the target with the same
+`validate_file_into_mailbox` before sending, so the form refuses `Sent`,
+`Drafts` and the held mailbox on the page.
 
-**The auto-respond facade is built** (2026-10-12): `fauna_client_email::autorespond` implements § The auto-respond setting, crate-tested for on, off, editing the message, read-back, a hand-built conditional `AutoReply` left alone and hand-built match-all rules adopted and collapsed to one. It is not yet exposed over UniFFI or wasm, and no app renders the toggle: the `mail-settings` ids for it wait on the user's approval.
+**The auto-respond facade is built** (2026-10-12): `fauna_client_email::autorespond` implements § The auto-respond setting, crate-tested for on, off, editing the message, read-back, a hand-built conditional `AutoReply` left alone and hand-built match-all rules adopted and collapsed to one. Since 2026-10-18 it is exposed over UniFFI as `FfiEmailClient::autorespond_{get,set,clear}` and over wasm as `emailAutorespond{Get,Set,Clear}`, beside the draft check `autorespond_message_draft_outcome` (wasm `autorespondMessageDraftOutcome`). tui renders it (2026-10-17): `mail-settings-autorespond-toggle` and `mail-settings-autorespond-message-input`, the blank-message check the shared `fauna_client_mail_settings::parse_autorespond_message_draft`; web follows (2026-10-18) over the wasm facade and `autorespondMessageDraftOutcome`; linux renders them too (2026-10-18); the other four apps follow.

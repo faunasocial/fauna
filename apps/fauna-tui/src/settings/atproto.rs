@@ -18,8 +18,9 @@
 //!   `behavior/bridges.md`.
 //! - **hosted panel** — pre-mint: the DID-method radio + the either-way handle
 //!   line; post-mint: the identity summary (`atproto-hosted-handle`).
-//! - **full-PDS panel** — the F1 login-plane surface (app credentials, the
-//!   connected-apps list, the external-apps kill-switch), gated on level =
+//! - **full-PDS panel** — the F1 login-plane surface (app credentials; the
+//!   connected-apps list and the external-apps switch live on the Connected
+//!   apps page), gated on level =
 //!   `hosted_full`, plus the **D10 authoring-delegation row**
 //!   (`atproto-delegation-*`). That row answers a different question from the
 //!   rest of the panel and the two must not blur: everything above it governs
@@ -41,12 +42,13 @@
 //! are applied synchronously in `apply_local` itself, mirroring linux's direct
 //! `ctx.machine.cancel_transition()` calls.
 //!
-//! F1 collects no label/dm_allowed input at mint time — no such ui.yaml IDs
-//! were approved, only `atproto-app-credential-mint` (a single button). The
-//! client auto-labels ("App credential N") and defaults `dm_allowed` to
-//! `false` (least privilege, matching the doc's default-closed posture); a
-//! labeled/dm_allowed-choosing mint form is a follow-on needing its own ID
-//! approval.
+//! Mint collects no label input — the client auto-labels ("App credential N").
+//! Whether the credential carries direct-message access is the one mint-time
+//! choice: the `atproto-app-credential-dm-access` toggle beside the mint
+//! button, staged in [`AtprotoState::mint_dm_access`] and read when the button
+//! is pressed. It defaults to off (least privilege, matching the doc's
+//! default-closed posture), and a credential row says in its own text when it
+//! carries the access.
 
 use fauna_ui_ids as ids;
 use std::collections::HashMap;
@@ -100,6 +102,10 @@ pub struct AtprotoState {
     /// purely local UI state so a revealed secret survives an unrelated
     /// re-render. Mirrors linux's `AtprotoPageCtx::revealed`.
     pub revealed: HashMap<String, String>,
+    /// The staged `atproto-app-credential-dm-access` choice — read by the next
+    /// mint. Page-local (never persisted, never sent until the mint press), off
+    /// by default.
+    pub mint_dm_access: bool,
 }
 
 impl AtprotoState {
@@ -141,6 +147,7 @@ impl AtprotoState {
             machine,
             snapshot: None,
             revealed: HashMap::new(),
+            mint_dm_access: false,
         }
     }
 }
@@ -424,27 +431,12 @@ pub(super) fn atproto_elements(app: &App, state: &AtprotoState) -> Vec<Element> 
         // The consent cards and the connected-apps rows that used to lead and
         // close this panel moved to the Connected apps sub-page on tui (a lift,
         // never a duplication — `ui/connected-apps.md` § Architectural rules).
-        els.push(
-            Element::checkbox_gesture(
-                ids::ATPROTO_EXTERNAL_APPS_ENABLE,
-                t::EXTERNAL_APPS_TOGGLE,
-                snap.external_apps_enabled,
-                Gesture::Settings(Action::AtprotoToggleExternalApps),
-            )
-            .attr(
-                "state",
-                if snap.external_apps_enabled {
-                    "on"
-                } else {
-                    "off"
-                },
-            ),
-        );
-        // What OFF pauses — every connected app, principals included
-        // (`atproto-pds-full.md` § F1 detail). Untagged: ui.yaml gives the
-        // hint no id of its own.
-        els.push(Element::chrome(t::EXTERNAL_APPS_HINT));
-
+        els.push(Element::checkbox_gesture(
+            ids::ATPROTO_APP_CREDENTIAL_DM_ACCESS,
+            t::MINT_DM_ACCESS_LABEL,
+            state.mint_dm_access,
+            Gesture::Settings(Action::AtprotoSetMintDmAccess(!state.mint_dm_access)),
+        ));
         els.push(Element::gesture_button(
             ids::ATPROTO_APP_CREDENTIAL_MINT,
             t::MINT_BUTTON,
@@ -613,7 +605,15 @@ fn credential_row_elements(
             t::CREDENTIAL_NEVER_USED
         ),
     };
-    els.push(Element::label(ITEM, format!("{} — {subtitle}", cred.label)));
+    let row = format!("{} — {subtitle}", cred.label);
+    els.push(Element::label(
+        ITEM,
+        if cred.dm_allowed {
+            format!("{row} · {}", t::CREDENTIAL_DM_ACCESS)
+        } else {
+            row
+        },
+    ));
 
     let already_revealed = state.revealed.get(&cred.credential_id).cloned();
     if cred.revealable || already_revealed.is_some() {
@@ -1329,7 +1329,8 @@ mod tests {
         let at_full = app_with_snapshot(snap(|s| s.level = "hosted_full".to_string()));
         let els2 = atproto_elements(&at_full, &at_full.settings.atproto);
         assert!(els2.iter().any(|e| e.id == "atproto-app-credential-mint"));
-        assert!(els2.iter().any(|e| e.id == "atproto-external-apps-enable"));
+        // The external-apps switch left the panel for the Connected apps page.
+        assert!(!els2.iter().any(|e| e.id == "atproto-external-apps-enable"));
     }
 
     /// A `DelegationRow` fixture. Micros, not millis — these come from the
@@ -1535,6 +1536,68 @@ mod tests {
     }
 
     #[test]
+    fn the_mint_dm_access_toggle_is_off_by_default_and_flips_to_its_opposite() {
+        let mut app = app_with_snapshot(snap(|s| s.level = "hosted_full".to_string()));
+        let toggle = |app: &App| {
+            atproto_elements(app, &app.settings.atproto)
+                .into_iter()
+                .find(|e| e.id == "atproto-app-credential-dm-access")
+                .expect("dm-access toggle at hosted_full")
+        };
+        let off = toggle(&app);
+        assert_eq!(off.text, t::MINT_DM_ACCESS_LABEL);
+        match off.role {
+            Role::Checkbox { checked, gesture } => {
+                assert!(!checked, "least privilege: off until the user opts in");
+                assert!(matches!(
+                    gesture,
+                    Gesture::Settings(Action::AtprotoSetMintDmAccess(true))
+                ));
+            }
+            other => panic!("expected a checkbox, got {other:?}"),
+        }
+        app.settings.atproto.mint_dm_access = true;
+        match toggle(&app).role {
+            Role::Checkbox { checked, gesture } => {
+                assert!(checked);
+                assert!(matches!(
+                    gesture,
+                    Gesture::Settings(Action::AtprotoSetMintDmAccess(false))
+                ));
+            }
+            other => panic!("expected a checkbox, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_mint_dm_access_toggle_is_gated_with_the_rest_of_the_full_pds_panel() {
+        let app = app_with_snapshot(snap(|s| s.level = "hosted_visible".to_string()));
+        let els = atproto_elements(&app, &app.settings.atproto);
+        assert!(
+            !els.iter()
+                .any(|e| e.id == "atproto-app-credential-dm-access")
+        );
+    }
+
+    #[test]
+    fn a_credential_row_says_so_only_when_it_carries_dm_access() {
+        let app = app_with_snapshot(snap(|s| {
+            s.level = "hosted_full".to_string();
+            let mut with_dm = credential("onyx", "Onyx", false, None);
+            with_dm.dm_allowed = true;
+            s.credentials = vec![credential("ivory", "Ivory", false, None), with_dm];
+        }));
+        let els = atproto_elements(&app, &app.settings.atproto);
+        let rows: Vec<&Element> = els
+            .iter()
+            .filter(|e| e.id == "atproto-app-credential-item")
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert!(!rows[0].text.contains(t::CREDENTIAL_DM_ACCESS));
+        assert!(rows[1].text.contains(t::CREDENTIAL_DM_ACCESS));
+    }
+
+    #[test]
     fn a_revealable_credential_renders_the_reveal_button_enabled() {
         let app = app_with_snapshot(snap(|s| {
             s.level = "hosted_full".to_string();
@@ -1607,39 +1670,15 @@ mod tests {
         assert!(row.text.contains(&t::CREDENTIAL_NEVER_USED.to_string()));
     }
 
+    /// The external-apps switch moved to the Connected apps page (owner-ruled
+    /// 2026-10-16): the full-PDS panel no longer paints it, nor its hint.
     #[test]
-    fn the_kill_switch_carries_the_state_attr_off_the_snapshot() {
-        let app = app_with_snapshot(snap(|s| {
-            s.level = "hosted_full".to_string();
-            s.external_apps_enabled = false;
-        }));
-        let els = atproto_elements(&app, &app.settings.atproto);
-        let toggle = els
-            .iter()
-            .find(|e| e.id == "atproto-external-apps-enable")
-            .unwrap();
-        assert_eq!(
-            toggle
-                .attrs
-                .iter()
-                .find(|(k, _)| k == "state")
-                .map(|(_, v)| v.as_str()),
-            Some("off")
-        );
-    }
-
-    /// The hint under the switch says what OFF pauses: every connected app,
-    /// the ones using Fauna directly included.
-    #[test]
-    fn the_kill_switch_hint_says_what_off_pauses() {
+    fn the_external_apps_switch_lives_on_the_connected_apps_page_not_here() {
         let app = app_with_snapshot(snap(|s| {
             s.level = "hosted_full".to_string();
         }));
         let els = atproto_elements(&app, &app.settings.atproto);
-        let toggle = els
-            .iter()
-            .position(|e| e.id == "atproto-external-apps-enable")
-            .unwrap();
-        assert_eq!(els[toggle + 1].text, t::EXTERNAL_APPS_HINT);
+        assert!(!els.iter().any(|e| e.id == "atproto-external-apps-enable"));
+        assert!(!els.iter().any(|e| e.text == t::EXTERNAL_APPS_HINT));
     }
 }

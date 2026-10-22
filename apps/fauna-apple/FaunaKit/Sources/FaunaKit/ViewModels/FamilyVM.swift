@@ -159,6 +159,13 @@ public final class FamilyVM {
 
     public init() {}
 
+    /// The guardian host of the shared `feature-policy-editor`
+    /// (family-safety.md § App surface → *Feature limits*): the ward-keyed arm
+    /// of the same seam, read live from ``selectedWardId``. Built at
+    /// ``configure(api:)``, nil before it; reset and re-read on every ward
+    /// change, because an editor is one ward's.
+    public private(set) var featureAuthoring: FeatureAuthoringHost?
+
     public var selectedWard: FfiFamilyWardInfo? {
         guard let selectedWardId else { return nil }
         return wards.first { $0.actorId == selectedWardId }
@@ -192,6 +199,7 @@ public final class FamilyVM {
         isSaving = false
         errorMessage = nil
         selectedWardId = nil
+        featureAuthoring = nil
         draftContactApproval = false
         draftUnknownSender = "allow"
         draftFederation = true
@@ -226,6 +234,17 @@ public final class FamilyVM {
                 errorMessage = DisplayError.message(error)
                 return
             }
+        }
+        if featureAuthoring == nil {
+            featureAuthoring = FeatureAuthoringHost(
+                readRows: { [weak self] in
+                    guard let ward = self?.selectedWardId else { return [] }
+                    return try await api.featuresClient().wardAuthoredRows(ward: ward)
+                },
+                openEditor: { [weak self] feature in
+                    guard let ward = self?.selectedWardId else { throw CancellationError() }
+                    return try await api.featuresClient().openEditorForWard(ward: ward, feature: feature)
+                })
         }
         await load()
     }
@@ -280,7 +299,12 @@ public final class FamilyVM {
     /// — and saves back — as the strictest option, never `allow`.
     public func loadEditor(wardId: Data) {
         guard let ward = wards.first(where: { $0.actorId == wardId }) else { return }
+        // A ward change drops the previous ward's rows and open editor before
+        // the re-read; a reload of the SAME ward keeps its open editor.
+        let wardChanged = selectedWardId != wardId
         selectedWardId = wardId
+        if wardChanged { featureAuthoring?.reset() }
+        if let host = featureAuthoring { Task { await host.refresh() } }
         graduateConfirmVisible = false
         transferInput = ""
         draftContactApproval = ward.policy.contactApproval

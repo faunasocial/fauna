@@ -34,11 +34,13 @@ Stamped 2026-09-23 at 039e9619ca.
    - `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_srs_bounce_routes_to_forwarder`
    - `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_forward_rate_cap_suppresses_over_cap_forward_and_notifies`
 4. [app] In the rule editor you can make a rule that files matching mail into a folder, adds a label, forwards it or replies for you — `docs/goal/behavior/email-filters.md` § Email filter rules
-   - (none)
+   - `tests/e2e-unified/tests/test_settings.py::test_email_filter_files_labels_and_replies_from_the_form`
+   - `tests/e2e-unified/tests/test_settings.py::test_email_filter_forward_keeps_its_copy_mode_through_an_edit`
 5. [app] A rule can match on the spam score or on what a header says, as well as on the sender, the subject, the body and whether a header is present — `docs/goal/behavior/email-filters.md` § Email filter rules
-   - (none)
+   - `tests/e2e-unified/tests/test_settings.py::test_email_filter_matches_a_header_value_or_the_spam_score`
+   - `tests/e2e-unified/tests/test_settings.py::test_email_filter_edit`
 6. [app] You can order your rules and mark one to let later rules apply too — `docs/goal/behavior/email-filters.md` § Email filter rules
-   - (none)
+   - `tests/e2e-unified/tests/test_settings.py::test_email_filter_order_and_continue_are_set_from_the_form`
 7. [app] A rule the editor cannot fully show is still listed, but never opens in a form that would lose part of it when saved — `docs/goal/behavior/email-filters.md` § Email filter rules
    - `tests/e2e-unified/tests/test_settings.py::test_email_filter_the_form_cannot_show_is_listed_but_never_opens`
    - `tests/e2e-unified/tests/test_settings.py::test_email_filter_forward_keeps_its_copy_mode_through_an_edit`
@@ -49,7 +51,7 @@ Stamped 2026-09-23 at 039e9619ca.
 10. [app] You can set your own hourly forwarding limit — `docs/goal/behavior/mail-forwarding.md` § Per-account forward rate-limit
    - `tests/e2e-unified/tests/test_mail_forwarding_settings.py::test_your_own_hourly_forwarding_limit_is_set_from_settings`
 11. [app] You can turn on an automatic reply and write its message — `docs/goal/behavior/mail-policy-config.md` § Tier 3 — per-account (user)
-   - (none)
+   - `tests/e2e-unified/tests/test_mail_account_settings.py::test_an_automatic_reply_is_turned_on_with_its_message_and_off_again`
 12. [nest] A rule can match on the spam score, on words in the body or on a header — `docs/goal/behavior/email-filters.md` § Email filter rules
    - `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_delivery_time_filters_route_to_folders`
 13. [nest] A rule can add a label that your mail app shows as a keyword — `docs/goal/behavior/email-filters.md` § Email filter rules
@@ -91,12 +93,12 @@ Stamped 2026-09-23 at 039e9619ca.
 | macos | ⚠ partial | 0.1.2-dev+74e26248 standalone |
 | ios | ⚠ partial | 0.1.2-dev+74e26248 standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.2-dev+74e26248 standalone |
+| tui | ✅ full | 0.1.2-dev+74e26248 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_crud` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_edit` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_edit` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/platform/bridge/test_email_filter_crud.py::test_email_filter_create_and_delete` | — |
 | 1 | app | `tests/e2e-unified/tests/test_email_filter_nav_readiness.py::test_filter_edit_visible_correct_under_slow_load` | windows (windows): failed |
 | 2 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_delivery_time_filters_route_to_folders` | nest (linux): passed |
@@ -109,15 +111,17 @@ Stamped 2026-09-23 at 039e9619ca.
 | 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_forward_all_dispatches_under_srs` | nest (linux): passed |
 | 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_srs_bounce_routes_to_forwarder` | nest (linux): passed |
 | 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_forward_rate_cap_suppresses_over_cap_forward_and_notifies` | nest (linux): passed |
-| 4 | app | (none) | — |
-| 5 | app | (none) | — |
-| 6 | app | (none) | — |
+| 4 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_files_labels_and_replies_from_the_form` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_forward_keeps_its_copy_mode_through_an_edit` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_matches_a_header_value_or_the_spam_score` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_edit` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_order_and_continue_are_set_from_the_form` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_the_form_cannot_show_is_listed_but_never_opens` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_forward_keeps_its_copy_mode_through_an_edit` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_forward_keeps_its_copy_mode_through_an_edit` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_mail_forwarding_settings.py::test_forward_all_mail_is_set_and_stopped_from_settings` | web (linux): passed, linux (linux): failed, tui (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_mail_forwarding_settings.py::test_your_own_hourly_forwarding_limit_is_set_from_settings` | web (linux): passed, linux (linux): failed, tui (linux): failed |
-| 11 | app | (none) | — |
+| 9 | app | `tests/e2e-unified/tests/test_mail_forwarding_settings.py::test_forward_all_mail_is_set_and_stopped_from_settings` | web (linux): passed, linux (linux): failed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_mail_forwarding_settings.py::test_your_own_hourly_forwarding_limit_is_set_from_settings` | web (linux): passed, linux (linux): failed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_mail_account_settings.py::test_an_automatic_reply_is_turned_on_with_its_message_and_off_again` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 12 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_delivery_time_filters_route_to_folders` | nest (linux): passed |
 | 13 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_delivery_time_filters_route_to_folders` | nest (linux): passed |
 | 14 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_delivery_time_filters_route_to_folders` | nest (linux): passed |

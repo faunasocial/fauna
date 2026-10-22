@@ -1,0 +1,53 @@
+---
+interface Props { size?: number; delay?: string; call?: boolean; }
+const { size = 110, delay = '0s', call = false } = Astro.props;
+---
+{/* The Fediverse's mammoth. A muted purple-grey coat rather than another
+    brown (the row already has four) or the network's own violet (off the
+    meadow's palette); the trunk, the tusks and the shaggy fringe are what
+    say "mammoth" at meadow size. */}
+<svg viewBox="0 0 120 140" width={size} height={Math.round((size * 140) / 120)}
+  class="critter" style={`--wave-delay:${delay}`} aria-hidden="true">
+  <ellipse cx="60" cy="134" rx="30" ry="5" class="critter-shadow" />
+  <!-- waving arm (behind body) -->
+  <g class="wave" style="transform-origin: 82px 96px;">
+    <ellipse cx="88" cy="86" rx="6" ry="14" transform="rotate(-30 88 86)" fill="#66556f" />
+    <circle cx="93" cy="74" r="5" fill="#7d6b8a" />
+  </g>
+  <!-- shaggy body -->
+  <ellipse cx="60" cy="102" rx="29" ry="28" fill="#7d6b8a" />
+  <path d="M34 112 L38 128 L44 114 L48 130 L54 116 L60 132 L66 116 L72 130 L76 114 L82 128 L86 112 Z" fill="#66556f" />
+  <ellipse cx="60" cy="106" rx="15" ry="14" fill="#b3a4bd" />
+  <ellipse cx="40" cy="100" rx="6" ry="12" transform="rotate(20 40 100)" fill="#66556f" />
+  <ellipse cx="46" cy="131" rx="8" ry="4.5" fill="#66556f" />
+  <ellipse cx="74" cy="131" rx="8" ry="4.5" fill="#66556f" />
+  <!-- head: a tuft on top, small ears -->
+  <path d="M46 36 L52 22 L58 34 L64 20 L70 34 L76 26 L78 40 Z" fill="#66556f" />
+  <circle cx="36" cy="52" r="8" fill="#7d6b8a" />
+  <circle cx="84" cy="52" r="8" fill="#7d6b8a" />
+  <circle cx="36" cy="52" r="4" fill="#b3a4bd" />
+  <circle cx="84" cy="52" r="4" fill="#b3a4bd" />
+  <circle cx="60" cy="56" r="24" fill="#7d6b8a" />
+  <circle cx="51" cy="52" r="3" fill="#2b2a24" />
+  <circle cx="69" cy="52" r="3" fill="#2b2a24" />
+  <!-- tusks, then the trunk over them. `call` raises the trunk to trumpet —
+       the sound arcs make it a broadcast, not a sneeze. -->
+  <path d="M50 70 Q36 78 42 92" stroke="#fffdf5" stroke-width="4.5" fill="none" stroke-linecap="round" />
+  <path d="M70 70 Q84 78 78 92" stroke="#fffdf5" stroke-width="4.5" fill="none" stroke-linecap="round" />
+  {call ? (
+    <g>
+      <path d="M60 62 Q54 76 46 78 Q36 79 32 68" stroke="#66556f" stroke-width="10" fill="none" stroke-linecap="round" />
+      <path d="M60 64 Q55 74 48 76" stroke="#7d6b8a" stroke-width="4" fill="none" stroke-linecap="round" />
+      <g fill="none" stroke="#66556f" stroke-width="1.8" stroke-linecap="round">
+        <path d="M24 70 A6 6 0 0 1 24 58" />
+        <path d="M19 73 A10 10 0 0 1 19 55" />
+        <path d="M14 76 A15 15 0 0 1 14 52" />
+      </g>
+    </g>
+  ) : (
+    <g>
+      <path d="M60 62 Q62 76 58 88 Q55 97 63 99" stroke="#66556f" stroke-width="10" fill="none" stroke-linecap="round" />
+      <path d="M60 64 Q61.5 76 58 87" stroke="#7d6b8a" stroke-width="4" fill="none" stroke-linecap="round" />
+    </g>
+  )}
+</svg>

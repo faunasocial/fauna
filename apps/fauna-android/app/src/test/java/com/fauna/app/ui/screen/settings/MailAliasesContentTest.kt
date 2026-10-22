@@ -37,6 +37,7 @@ class MailAliasesContentTest {
         isCanonical: Boolean = false,
         hitCount: ULong = 3u,
         lastHitAtMs: Long? = null,
+        expiresAtMs: Long? = null,
     ) = AliasView(
         aliasIdHex = id,
         localDomain = "example.com",
@@ -52,7 +53,7 @@ class MailAliasesContentTest {
         rateLimitPerHour = null,
         rateLimitPerDay = null,
         usesRemaining = null,
-        expiresAtMs = null,
+        expiresAtMs = expiresAtMs,
     )
 
     private fun render(
@@ -80,6 +81,10 @@ class MailAliasesContentTest {
         onDelete: (String) -> Unit = {},
         lastImportResult: ImportResultView? = null,
         onImport: (List<String>) -> Unit = {},
+        // Pure stubs for the shared `alias_expiry_label` / `alias_is_extendable`.
+        expiresAtLabel: (AliasView) -> String? = { null },
+        isExtendable: (AliasView) -> Boolean = { false },
+        onExtend: (String) -> Unit = {},
     ) {
         composeTestRule.setContent {
             MailAliasesContent(
@@ -90,6 +95,9 @@ class MailAliasesContentTest {
                 lastImportResult = lastImportResult,
                 kindLabel = kindLabel,
                 hitsLabel = hitsLabel,
+                expiresAtLabel = expiresAtLabel,
+                isExtendable = isExtendable,
+                onExtend = onExtend,
                 parseCount = parseCount,
                 parseCountI64 = parseCountI64,
                 onBack = {},
@@ -103,6 +111,40 @@ class MailAliasesContentTest {
                 onImport = onImport,
             )
         }
+    }
+
+    @Test
+    fun aliasWithNoExpiryShowsNeitherTheExpiryNorTheExtend() {
+        render(aliases = listOf(alias()))
+        composeTestRule.onAllNodesWithTag("mail-aliases-list-item-expires-at").assertCountEquals(0)
+        composeTestRule.onAllNodesWithTag("mail-aliases-list-item-extend-button").assertCountEquals(0)
+    }
+
+    @Test
+    fun disposableShowsItsExpiryAndExtendDispatchesTheAliasId() {
+        val extended = mutableListOf<String>()
+        val disposable = alias(id = "dd", kind = AliasKind.DISPOSABLE, expiresAtMs = 4_000_000_000_000L)
+        render(
+            aliases = listOf(disposable),
+            expiresAtLabel = { "Expires Mar 1, 2096" },
+            isExtendable = { true },
+            onExtend = { extended += it },
+        )
+        composeTestRule.onNodeWithTag("mail-aliases-list-item-expires-at").performScrollTo()
+            .assertTextEquals("Expires Mar 1, 2096")
+        composeTestRule.onNodeWithTag("mail-aliases-list-item-extend-button").performScrollTo().performClick()
+        assertEquals(listOf("dd"), extended)
+    }
+
+    @Test
+    fun lapsedAliasShowsTheExpiryTextButNoExtend() {
+        render(
+            aliases = listOf(alias(kind = AliasKind.DISPOSABLE, expiresAtMs = 1L)),
+            expiresAtLabel = { "Expired" },
+            isExtendable = { false },
+        )
+        composeTestRule.onNodeWithTag("mail-aliases-list-item-expires-at").performScrollTo().assertTextEquals("Expired")
+        composeTestRule.onAllNodesWithTag("mail-aliases-list-item-extend-button").assertCountEquals(0)
     }
 
     @Test

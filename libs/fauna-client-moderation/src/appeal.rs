@@ -119,6 +119,8 @@ mod tests {
             action,
             timestamp: 1,
             source,
+            issuer_nest: None,
+            issued_by: None,
         }
     }
 

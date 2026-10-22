@@ -55,7 +55,7 @@ wasm binary fails the boot row loudly.
 
 ## Files
 
-- `harness-entry.ts` — bundle entry; imports the real `$lib` Notes modules + real
+- `harness-entry.ts` — bundle entry; imports the real `#lib` Notes modules + real
   `ensureWasm`, mounts the view, exposes `window.__harness` (model + revealed-text
   DOM view) for the driver.
 - `app-paths-stub.ts` — esbuild alias for SvelteKit's `$app/paths` (`base=''`), the

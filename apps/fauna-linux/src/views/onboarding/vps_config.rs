@@ -20,7 +20,7 @@
 //! Replaces the legacy `nest_server.rs` and `nest_provision.rs`.
 
 use fauna_ui_ids as ids;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -181,7 +181,7 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
         let error_label = error_label.clone();
         let hosted_auth_buttons = hosted_auth_buttons.clone();
         move || {
-            sync_update_channel_rows(&channel_radios, m.provision_update_channel());
+            sync_update_channel_rows(&m, &channel_radios, m.provision_update_channel());
             let cfg = m.vps_config();
             if *last_pid.borrow() != cfg.selected_provider_id {
                 *hosted_auth_buttons.borrow_mut() =
@@ -216,9 +216,7 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
 /// `UpdateChannel::ALL` order. Each radio shows its label and one-line
 /// description; a click calls the shared setter. Returns the radios so the
 /// refresh closure can repaint the selection.
-fn build_update_channel_rows(
-    m: Arc<OnboardingMachine>,
-) -> (gtk::Box, Vec<(UpdateChannel, CheckButton)>) {
+fn build_update_channel_rows(m: Arc<OnboardingMachine>) -> (gtk::Box, ChannelRows) {
     let container = gtk::Box::builder()
         .orientation(Orientation::Vertical)
         .spacing(4)
@@ -234,20 +232,14 @@ fn build_update_channel_rows(
     container.append(&heading);
 
     let selected = m.provision_update_channel();
+    let syncing = Rc::new(Cell::new(false));
     let mut radios: Vec<(UpdateChannel, CheckButton)> = Vec::new();
     for c in UpdateChannel::ALL {
-        // The shared getters pick the keys (the compat-line wording for Test /
-        // Dev while the product major is 0); the app only resolves them.
-        let (label_key, desc_key) = (c.label_key(), c.description_key());
         let radio = match radios.first() {
             None => CheckButton::new(),
             Some((_, first)) => CheckButton::builder().group(first).build(),
         };
-        radio.set_label(Some(&format!(
-            "{} — {}",
-            resolve(label_key),
-            resolve(desc_key)
-        )));
+        radio.set_label(Some(&channel_row_label(&m, c)));
         set_test_id(
             &radio,
             &format!("vps-config-update-channel-row[{}]", c.id()),
@@ -258,28 +250,59 @@ fn build_update_channel_rows(
         mark_channel_state(&radio, c == selected);
         {
             let m = m.clone();
+            let syncing = syncing.clone();
             radio.connect_toggled(move |r| {
-                if r.is_active() {
-                    m.set_provision_update_channel(c);
+                if syncing.get() || !r.is_active() {
+                    return;
                 }
+                m.set_provision_update_channel(c);
             });
         }
         container.append(&radio);
         radios.push((c, radio));
     }
-    (container, radios)
+    (container, ChannelRows { radios, syncing })
 }
 
-/// Repaint the channel radios from the machine's selection (the shared getter
-/// is the only source; nothing is cached here).
-fn sync_update_channel_rows(radios: &[(UpdateChannel, CheckButton)], selected: UpdateChannel) {
-    for (c, radio) in radios {
+/// The channel radios, and the guard that keeps a repaint from reading as a
+/// click: `set_active` on a grouped `CheckButton` fires `toggled`, and an
+/// unguarded handler would record the repainted default as the user's
+/// explicit choice — which no later registry reading can move again.
+struct ChannelRows {
+    radios: Vec<(UpdateChannel, CheckButton)>,
+    syncing: Rc<Cell<bool>>,
+}
+
+/// One channel row's text. The shared getters pick the keys (the label's, and
+/// the description's — the no-build wording when the registry has no build on
+/// the channel, else the compat-line wording at the product major); the app
+/// only resolves them.
+fn channel_row_label(m: &OnboardingMachine, c: UpdateChannel) -> String {
+    format!(
+        "{} — {}",
+        resolve(c.label_key()),
+        resolve(&m.update_channel_description_key_for_row(c))
+    )
+}
+
+/// Repaint the channel radios from the machine's selection and descriptions
+/// (the shared getters are the only source; nothing is cached here — the
+/// registry probe lands after the page is built, so the text follows it). A
+/// repaint records nothing: the toggled handlers stand down while it runs.
+fn sync_update_channel_rows(m: &OnboardingMachine, rows: &ChannelRows, selected: UpdateChannel) {
+    rows.syncing.set(true);
+    for (c, radio) in &rows.radios {
+        let label = channel_row_label(m, *c);
+        if radio.label().as_deref() != Some(label.as_str()) {
+            radio.set_label(Some(&label));
+        }
         let on = *c == selected;
         if radio.is_active() != on {
             radio.set_active(on);
         }
         mark_channel_state(radio, on);
     }
+    rows.syncing.set(false);
 }
 
 /// Carry the row's `on`/`off` on an explicit `state` marker class —
@@ -372,7 +395,10 @@ fn rebuild_provider_section(
     // map, so the selected index maps back to `loc.id` via the machine's
     // own `cfg.locations` order, which the reseed below keeps 1:1 with
     // the model. `select_vps_location` is idempotent, so the notify that
-    // fires while the reseed restores the selection is harmless.
+    // fires while the reseed restores the selection is harmless. A change
+    // re-lists the offers for the new location; the machine starts that
+    // refresh only where a tokio runtime is current, which the GTK thread's
+    // is not, so it is awaited here (a no-op for an already-listed location).
     let location_picker = gtk::DropDown::from_strings(&[]);
     set_test_id(&location_picker, ids::VPS_LOCATION_PICKER);
     location_picker.set_visible(false);
@@ -381,6 +407,8 @@ fn rebuild_provider_section(
         location_picker.connect_selected_notify(move |d| {
             if let Some(loc) = m.vps_config().locations.get(d.selected() as usize) {
                 m.select_vps_location(loc.id.clone());
+                let m = m.clone();
+                async_helper::run_on_tokio(m.refresh_vps_offers(), |()| {});
             }
         });
     }
@@ -408,6 +436,30 @@ fn rebuild_provider_section(
     mail_mode_desc.set_halign(gtk::Align::Start);
     mail_mode_desc.add_css_class("dim-label");
     section.append(&mail_mode_desc);
+
+    // The SSH door, beside the mail mode and default off; its warning shows
+    // only while it is on, directly under it (`onboarding-provisioning.md`
+    // § 5). Same no-resync reasoning as the mail toggle: the machine holds the
+    // choice, the toggle writes it, and the warning follows the toggle.
+    let ssh_door_toggle = CheckButton::with_label(&resolve("onboarding.vps_config.ssh_door_label"));
+    ssh_door_toggle.set_active(m.provision_ssh_door_enabled());
+    set_test_id(&ssh_door_toggle, ids::VPS_CONFIG_SSH_DOOR_TOGGLE);
+    let ssh_door_warning = Label::new(Some(&resolve("onboarding.vps_config.ssh_door_warning")));
+    ssh_door_warning.set_wrap(true);
+    ssh_door_warning.set_halign(gtk::Align::Start);
+    ssh_door_warning.add_css_class("warning");
+    set_test_id(&ssh_door_warning, ids::VPS_CONFIG_SSH_DOOR_WARNING);
+    ssh_door_warning.set_visible(m.provision_ssh_door_enabled());
+    {
+        let m = m.clone();
+        let ssh_door_warning = ssh_door_warning.clone();
+        ssh_door_toggle.connect_toggled(move |c| {
+            m.set_provision_ssh_door(c.is_active());
+            ssh_door_warning.set_visible(c.is_active());
+        });
+    }
+    section.append(&ssh_door_toggle);
+    section.append(&ssh_door_warning);
 
     // Server-type radio container (≤5; indexed by position).
     let server_types_box = gtk::Box::builder()
@@ -537,5 +589,46 @@ where
         if group.is_none() {
             group = Some(radio);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fauna_onboarding_machine::OnboardingObserver;
+
+    struct NopObs;
+    impl OnboardingObserver for NopObs {
+        fn on_changed(&self) {}
+    }
+
+    /// Repainting the channel radios never records a choice: a page built once
+    /// and shown again after a wizard reset (a radio other than the default
+    /// still active) moves the selection back to the default without turning
+    /// it into an explicit pick, so a later registry reading still moves the
+    /// default (`onboarding-provisioning.md` § 5 → *What exists decides the
+    /// default*).
+    #[test]
+    fn repainting_the_channel_rows_records_no_choice() {
+        crate::testid::run_on_gtk_thread(|| {
+            let m = OnboardingMachine::new(Arc::new(NopObs));
+            let (_root, refresh) = build(m.clone());
+            m.set_provision_update_channel(UpdateChannel::Dev);
+            refresh();
+            m.reset();
+            refresh();
+            assert_eq!(
+                m.vps_config().update_channel,
+                None,
+                "the repaint to the default recorded an explicit choice"
+            );
+            m.call_machine_method(
+                "set_channel_availability_for_test".into(),
+                r#"[{"channel":"stable","build":{"build":"no_build"}},{"channel":"test","build":{"build":"unknown"}},{"channel":"dev","build":{"build":"unknown"}}]"#.into(),
+            );
+            refresh();
+            assert_eq!(m.provision_update_channel(), UpdateChannel::Test);
+            assert!(m.vps_config().update_channel.is_none());
+        });
     }
 }

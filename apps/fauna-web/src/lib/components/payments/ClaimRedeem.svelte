@@ -9,9 +9,9 @@
   // leg. The section around it is Pillar 1 (the user's own subscriptions) and
   // stays in every flavor; only this input is a money gesture, so only this
   // piece excises — matching tui's and linux's split exactly.
-  import { t } from '$lib/i18n/strings';
-  import { paymentsClaimsRedeem } from '$lib/payments';
-  import { PAYMENTS_IDS } from '$lib/components/payments/generatedIds';
+  import { t } from '#lib/i18n/strings';
+  import { paymentsClaimsRedeem } from '#lib/payments';
+  import { PAYMENTS_IDS } from '#lib/components/payments/generatedIds';
 
   interface Props {
     /** The logged-in actor's secret, or null before identity resolves. */

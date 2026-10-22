@@ -105,6 +105,16 @@ def _rule_1(pages: list, repo: Path) -> list:
             if why:
                 problems.append(
                     f"{page.path.name}:{outcome.line}: outcome {outcome.number}: {why}")
+    ui_yaml = repo / "tests" / "e2e-unified" / "ui.yaml"
+    if any(page.ui_pages for page in pages):
+        known = (fc.ui_page_ranges(ui_yaml.read_text(encoding="utf-8"))
+                 if ui_yaml.is_file() else {})
+        for page in pages:
+            for key in page.ui_pages:
+                if key not in known:
+                    problems.append(
+                        f"{page.path.name}: ui-pages: `{key}` names no page in "
+                        "tests/e2e-unified/ui.yaml (`just ui-show pages` lists them)")
     return problems
 
 

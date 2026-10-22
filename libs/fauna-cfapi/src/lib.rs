@@ -818,27 +818,6 @@ pub fn create_placeholder(parent: &Path, entry: &PlaceholderInfo) -> Result<()> 
     Ok(())
 }
 
-/// Convert an existing file to a Cloud Files placeholder.
-///
-/// The file must already exist on disk. After conversion it can be dehydrated.
-pub fn convert_to_placeholder(path: &Path) -> Result<()> {
-    let handle = open_file_handle(path)?;
-    let result = unsafe {
-        CfConvertToPlaceholder(
-            handle,
-            None, // no file identity
-            0,    // identity length
-            CF_CONVERT_FLAG_MARK_IN_SYNC,
-            None, // no USN output
-            None, // no overlapped
-        )
-    };
-    unsafe { close_handle(handle) };
-    result.context("CfConvertToPlaceholder failed")?;
-    tracing::debug!(path = %path.display(), "converted to placeholder");
-    Ok(())
-}
-
 /// Re-anchor an ordinary **directory** under a sync root as a cloud placeholder marked
 /// in-sync — `CfConvertToPlaceholder(MARK_IN_SYNC)` with `rel_identity` as its
 /// `FileIdentity`; Explorer's Status column flips the folder to ✅. Opens with

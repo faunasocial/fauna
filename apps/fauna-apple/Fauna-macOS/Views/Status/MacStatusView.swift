@@ -106,7 +106,7 @@ struct MacStatusView: View {
                 // `.contain` mirrors the quota-section container-clobber rule.
                 if let featureRows = vm.featureRows {
                     GroupBox(L.features.sectionTitle) {
-                        FeatureLimitsSection(rows: featureRows)
+                        FeatureLimitsSection(rows: featureRows, host: vm.selfAuthoring)
                             .padding(8)
                     }
                     .accessibilityElement(children: .contain)

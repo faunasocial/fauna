@@ -346,6 +346,14 @@ pub fn mail_store() -> Arc<dyn fauna_client_config::MailStore> {
     ))
 }
 
+/// The mail import's remembered source (`fauna.state.mail-import-source`)
+/// over this seat's runtime, waiting for the runtime when it is not up yet.
+pub fn mail_import_source_store() -> Arc<dyn fauna_client_config::MailImportSourceStore> {
+    Arc::new(
+        fauna_sync_engine::account_runtime::AccountMailImportSourceStore::new(Arc::new(handle)),
+    )
+}
+
 /// The succession-ledger seam (`fauna_client_config::SuccessionLedgerStore`,
 /// implemented on the handle) the two review surfaces read and write through,
 /// or the sentence they show while the account store is not up yet.

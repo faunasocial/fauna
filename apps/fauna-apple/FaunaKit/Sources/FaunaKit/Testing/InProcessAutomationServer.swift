@@ -591,7 +591,7 @@ public final class InProcessAutomationServer: @unchecked Sendable {
                 // message shape).
                 if let options = e.options {
                     let painted = options()
-                    if !painted.contains(value) {
+                    if !painted.contains(value), !(e.optionKeys?().contains(value) ?? false) {
                         let message = "select target \(value.debugDescription) is not offered by "
                             + "\(id) — this frame painted [\(painted.joined(separator: ", "))]"
                         return (409, ["error": message, "id": id, "index": leafIndex])

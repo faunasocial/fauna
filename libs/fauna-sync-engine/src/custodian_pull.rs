@@ -2361,6 +2361,36 @@ mod tests {
         );
     }
 
+    /// **A pass sweeps what a crashed pass staged, and only once it is a day
+    /// old** (`message-segment-store.md` § Segment size). Pins the call in the
+    /// pass, not just `sweep_stale_staging`: without it every crash's staged
+    /// pair (plaintext halves, sealed bodies) stays in the custodian's root.
+    #[tokio::test]
+    async fn a_pass_sweeps_a_crashed_passs_stale_staging_and_keeps_a_fresh_one() {
+        let rig = Rig::new(&[(1, body(1, 9_000))]);
+        let staging = rig.store.staging_dir();
+        let stale = staging.join("crashed-long-ago");
+        let fresh = staging.join("transferring-now");
+        for dir in [&stale, &fresh] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("half.dat"), b"staged").unwrap();
+        }
+        let old = std::time::SystemTime::now()
+            - std::time::Duration::from_secs(crate::segment_backup::STALE_STAGING_SECS + 3_600);
+        std::fs::File::open(&stale)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        rig.pull(None).run_once("mail", 0).await.unwrap();
+
+        assert!(
+            !stale.exists(),
+            "a day-old crashed pair is swept by the pass"
+        );
+        assert!(fresh.exists(), "a fresh pair may be a live transfer");
+    }
+
     // ── the kind's other family: the placement journal (2026-09-26) ──────────
 
     /// **The journal is pulled beside the content, and the two never collide.**

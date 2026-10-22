@@ -373,8 +373,10 @@ impl HostResolver {
 // ==================== serve_web_content ====================
 
 /// Built-in 404 page returned when no 404.html is found in the site.
+// public-text: nest-not-found
 const BUILTIN_404: &str = "<!DOCTYPE html><html><head><title>404 Not Found</title></head>\
 <body><h1>404 Not Found</h1><p>The requested page does not exist.</p></body></html>";
+// public-text-end: nest-not-found
 
 /// Serve a web content response for the given actor and request path.
 ///

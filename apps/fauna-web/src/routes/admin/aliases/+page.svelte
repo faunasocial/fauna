@@ -19,13 +19,13 @@
   // error before each action, so the page just re-reads snapshot() after dispatch.
   // UX/IDs: tests/e2e-unified/ui.yaml `admin-aliases` page +
   // `admin-aliases-forwarder-list` component.
-  import { identity } from '$lib/store';
-  import { forwarderMachine } from '$lib/rpc';
-  import { ensureWasm } from '$lib/wasm';
+  import { identity } from '#lib/store';
+  import { forwarderMachine } from '#lib/rpc';
+  import { ensureWasm } from '#lib/wasm';
   import { onMount } from 'svelte';
-  import MessageBanner from '$lib/components/MessageBanner.svelte';
-  import { t } from '$lib/i18n/strings';
-  import { IDS } from '$lib/generated/uiIds';
+  import MessageBanner from '#lib/components/MessageBanner.svelte';
+  import { t } from '#lib/i18n/strings';
+  import { IDS } from '#lib/generated/uiIds';
 
   // Shapes mirror the shared serde JSON (snake_case across the serde_wasm_bindgen
   // boundary; the status enum serializes as its variant-name string).

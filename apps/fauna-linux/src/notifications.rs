@@ -62,6 +62,26 @@ fn escape_body_markup(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// The one place a toast gets its body: every `build_*` below starts here, so
+/// no notifier can hand the daemon a body it forgot to escape. The summary is
+/// plain text by the freedesktop spec and needs no escaping.
+fn toast(summary: &str, body: &str) -> Notification {
+    let mut notif = Notification::new();
+    notif
+        .summary(summary)
+        .body(&escape_body_markup(body))
+        .icon("fauna")
+        .appname("Fauna");
+    notif
+}
+
+/// Show `notif` and raise the main window when the user clicks it.
+fn show_with_action(notif: Notification) {
+    if let Ok(handle) = notif.show() {
+        spawn_action_listener(handle);
+    }
+}
+
 fn spawn_action_listener(handle: notify_rust::NotificationHandle) {
     thread::spawn(move || {
         handle.wait_for_action(|action| {
@@ -99,21 +119,18 @@ fn spawn_action_listener(handle: notify_rust::NotificationHandle) {
 /// no ratified outcome covers them, so narrowing this to the message banner is
 /// the conformance fix and not a sweep.
 pub fn notify_message(sender: &str, body_preview: &str) {
-    let mut notif = Notification::new();
+    show_with_action(build_message(sender, body_preview));
+}
+
+fn build_message(sender: &str, body_preview: &str) -> Notification {
+    let mut notif = toast(&notif_text::message_from(sender), body_preview);
     notif
-        .summary(&notif_text::message_from(sender))
-        .body(&escape_body_markup(body_preview))
-        .icon("fauna")
-        .appname("Fauna")
         .urgency(Urgency::Normal)
         .id(NOTIF_ID_MESSAGE)
         .action("default", common::OPEN)
         .timeout(5000);
     maybe_add_sound(&mut notif);
-
-    if let Ok(handle) = notif.show() {
-        spawn_action_listener(handle);
-    }
+    notif
 }
 
 /// Show a desktop notification for a new group message.
@@ -124,22 +141,19 @@ pub fn notify_group_message(group_name: &str, sender: &str, body_preview: &str) 
     if !should_show_notifications() {
         return;
     }
+    show_with_action(build_group_message(group_name, sender, body_preview));
+}
 
-    let mut notif = Notification::new();
+#[allow(dead_code)]
+fn build_group_message(group_name: &str, sender: &str, body_preview: &str) -> Notification {
+    let mut notif = toast(&notif_text::group_message(sender, group_name), body_preview);
     notif
-        .summary(&notif_text::group_message(sender, group_name))
-        .body(&escape_body_markup(body_preview))
-        .icon("fauna")
-        .appname("Fauna")
         .urgency(Urgency::Normal)
         .id(NOTIF_ID_GROUP_MESSAGE)
         .action("default", common::OPEN)
         .timeout(5000);
     maybe_add_sound(&mut notif);
-
-    if let Ok(handle) = notif.show() {
-        spawn_action_listener(handle);
-    }
+    notif
 }
 
 /// Show a desktop notification for a new knock (contact request).
@@ -150,22 +164,18 @@ pub fn notify_knock(body: &str) {
     if !should_show_notifications() {
         return;
     }
+    show_with_action(build_knock(body));
+}
 
-    let mut notif = Notification::new();
+fn build_knock(body: &str) -> Notification {
+    let mut notif = toast(notif_text::KNOCK_TITLE, body);
     notif
-        .summary(notif_text::KNOCK_TITLE)
-        .body(&escape_body_markup(body))
-        .icon("fauna")
-        .appname("Fauna")
         .urgency(Urgency::Normal)
         .id(NOTIF_ID_KNOCK)
         .action("default", common::OPEN)
         .timeout(5000);
     maybe_add_sound(&mut notif);
-
-    if let Ok(handle) = notif.show() {
-        spawn_action_listener(handle);
-    }
+    notif
 }
 
 /// Show a desktop notification when a file has been successfully uploaded.
@@ -177,35 +187,34 @@ pub fn notify_sync_complete(filename: &str) {
     if !should_show_notifications() {
         return;
     }
+    let _ = build_sync_complete(filename).show();
+}
 
-    let _ = Notification::new()
-        .summary(notif_text::SYNC_COMPLETE_TITLE)
-        .body(&notif_text::sync_complete_body(filename))
-        .icon("fauna")
-        .appname("Fauna")
-        .urgency(Urgency::Low)
-        .id(1005)
-        .timeout(3000)
-        .show();
+fn build_sync_complete(filename: &str) -> Notification {
+    let mut notif = toast(
+        notif_text::SYNC_COMPLETE_TITLE,
+        &notif_text::sync_complete_body(filename),
+    );
+    notif.urgency(Urgency::Low).id(1005).timeout(3000);
+    notif
 }
 
 /// Show a persistent desktop notification for an event starting soon.
 ///
 /// Uses replace-ID `1006` so repeated polls for the same event replace the
-/// previous reminder rather than stacking.
+/// previous reminder rather than stacking. The event's name can come from an
+/// invitation, so it is remote-authored text like any other.
 pub fn notify_event_reminder(event_name: &str, minutes: u64) {
-    let _ = Notification::new()
-        .summary(notif_text::EVENT_REMINDER_TITLE)
-        .body(&notif_text::event_reminder_body(
-            event_name,
-            &minutes.to_string(),
-        ))
-        .icon("fauna")
-        .appname("Fauna")
-        .urgency(Urgency::Normal)
-        .id(1006)
-        .timeout(0) // persistent until dismissed
-        .show();
+    let _ = build_event_reminder(event_name, minutes).show();
+}
+
+fn build_event_reminder(event_name: &str, minutes: u64) -> Notification {
+    let mut notif = toast(
+        notif_text::EVENT_REMINDER_TITLE,
+        &notif_text::event_reminder_body(event_name, &minutes.to_string()),
+    );
+    notif.urgency(Urgency::Normal).id(1006).timeout(0); // persistent until dismissed
+    notif
 }
 
 /// Show a desktop notification for a group invite with Accept/Decline actions.
@@ -223,30 +232,31 @@ pub fn notify_group_invite(from: &str, group_name: &str) {
     if !should_show_notifications() {
         return;
     }
+    show_with_action(build_group_invite(from, group_name));
+}
 
-    let mut notif = Notification::new();
+#[allow(dead_code)]
+fn build_group_invite(from: &str, group_name: &str) -> Notification {
+    let mut notif = toast(
+        notif_text::GROUP_INVITE_TITLE,
+        &notif_text::group_invite_body(from, group_name),
+    );
     notif
-        .summary(notif_text::GROUP_INVITE_TITLE)
-        .body(&notif_text::group_invite_body(from, group_name))
-        .icon("fauna")
-        .appname("Fauna")
         .urgency(Urgency::Critical)
         .id(NOTIF_ID_GROUP_INVITE)
         .action("default", &format!("{} Fauna", common::OPEN))
         .timeout(0); // persistent until user acts
     maybe_add_sound(&mut notif);
-
-    if let Ok(handle) = notif.show() {
-        spawn_action_listener(handle);
-    }
+    notif
 }
 
 /// Show a desktop notification for unified activity (likes, replies, follows,
 /// reposts, mentions, quotes — across fauna, bluesky, nostr, AP).
 ///
 /// `notif_type` is the typed action (`like` / `reply` / `follow` / etc.) used
-/// to pick a title; `summary` is the localised body text the nest already
-/// produced (e.g. "@alice liked your post").
+/// to pick a title; `summary` is the shared decision's text
+/// (`notification_push_text`), whose `{sender}` arg on a bridged row is the
+/// remote author's self-chosen display name.
 ///
 /// Uses replace-ID `NOTIF_ID_UNIFIED` so rapid notifications collapse into a
 /// single desktop popup.
@@ -254,7 +264,13 @@ pub fn notify_unified(notif_type: &fauna_protocol::notifications::NotifType, sum
     if !should_show_notifications() {
         return;
     }
+    show_with_action(build_unified(notif_type, summary));
+}
 
+fn build_unified(
+    notif_type: &fauna_protocol::notifications::NotifType,
+    summary: &str,
+) -> Notification {
     let title = match notif_type {
         fauna_protocol::notifications::NotifType::Like => notif_text::TYPE_LIKE,
         fauna_protocol::notifications::NotifType::Reply => common::REPLY,
@@ -265,26 +281,20 @@ pub fn notify_unified(notif_type: &fauna_protocol::notifications::NotifType, sum
         _ => notif_text::TYPE_DEFAULT,
     };
 
-    let mut notif = Notification::new();
+    let mut notif = toast(title, summary);
     notif
-        .summary(title)
-        .body(summary)
-        .icon("fauna")
-        .appname("Fauna")
         .urgency(Urgency::Normal)
         .id(NOTIF_ID_UNIFIED)
         .action("default", common::OPEN)
         .timeout(5000);
     maybe_add_sound(&mut notif);
-
-    if let Ok(handle) = notif.show() {
-        spawn_action_listener(handle);
-    }
+    notif
 }
 
 #[cfg(test)]
 mod escape_tests {
-    use super::escape_body_markup;
+    use super::*;
+    use fauna_protocol::notifications::NotifType;
 
     #[test]
     fn body_markup_is_escaped_ampersand_first() {
@@ -292,5 +302,37 @@ mod escape_tests {
             escape_body_markup("<a href=\"x\">go</a> & <b>"),
             "&lt;a href=\"x\"&gt;go&lt;/a&gt; &amp; &lt;b&gt;"
         );
+    }
+
+    /// A bridged author's self-chosen display name, as the shared decision
+    /// hands it to the shell.
+    const HOSTILE: &str = "<a href=\"https://x\">Alice (your contact)</a> & co";
+
+    fn assert_escaped(notif: &Notification, which: &str) {
+        assert!(
+            !notif.body.contains('<') && !notif.body.contains('>'),
+            "{which} hands the daemon raw markup: {:?}",
+            notif.body
+        );
+        assert!(
+            notif.body.contains("&lt;a href=\"https://x\"&gt;"),
+            "{which} lost the text instead of escaping it: {:?}",
+            notif.body
+        );
+    }
+
+    /// Every notifier that can carry remote text escapes it at its call site —
+    /// dropping the escape from any one builder reddens this.
+    #[test]
+    fn every_toast_body_reaches_the_daemon_escaped() {
+        assert_escaped(&build_message("bob", HOSTILE), "message");
+        assert_escaped(&build_group_message("g", "bob", HOSTILE), "group message");
+        assert_escaped(&build_knock(HOSTILE), "knock");
+        assert_escaped(&build_sync_complete(HOSTILE), "sync complete");
+        assert_escaped(&build_event_reminder(HOSTILE, 5), "event reminder");
+        assert_escaped(&build_group_invite(HOSTILE, "g"), "group invite");
+        for kind in [NotifType::Like, NotifType::Follow, NotifType::Reply] {
+            assert_escaped(&build_unified(&kind, HOSTILE), "unified");
+        }
     }
 }

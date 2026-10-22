@@ -1,5 +1,6 @@
 package com.fauna.app.testing
 
+import com.fauna.app.ui.util.getStringFmt
 import android.content.Context
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.ui.text.AnnotatedString
@@ -17,6 +18,7 @@ import com.fauna.app.data.db.SyncFile
 import com.fauna.app.ui.components.ComposeFieldStyling
 import com.fauna.app.ui.components.appliedRuns
 import com.fauna.app.ui.navigation.navigateToDrawerRoute
+import com.fauna.app.ui.navigation.profileRoute
 import com.fauna.ffi.connectionIsOnline
 import com.fauna.ffi.connectionStateWord
 import com.fauna.ffi.contentTypeForFilename
@@ -24,6 +26,7 @@ import com.fauna.ffi.dialBudgetClearForTest
 import com.fauna.ffi.launchClockNowSecsForTest
 import com.fauna.ffi.launchClockOffsetSecsForTest
 import com.fauna.ffi.setDelegationClockOffsetSecs
+import com.fauna.ffi.setMailTokenRefreshClockOffsetSecs
 import com.fauna.ffi.setTrustClockOffsetSecs
 import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn
@@ -53,6 +56,10 @@ interface TestAgentEntryPoint {
     fun feedManagerHost(): FeedManagerHost
     fun apiClient(): com.fauna.app.core.ApiClient
     fun screenTimeStore(): com.fauna.app.core.ScreenTimeStore
+    /** The guardian policy the engine renders under — read for the
+     *  `ward_rule_document_rules` state key. */
+    fun contentPolicyStore(): com.fauna.app.core.ContentPolicyStore
+    fun storeConsentStore(): com.fauna.app.core.StoreConsentStore
     fun atprotoSettingsHost(): com.fauna.app.core.atproto.AtprotoSettingsHost
     fun secureStorage(): SecureStorage
 
@@ -150,6 +157,8 @@ object TestAgent {
     @Volatile private var feedManagerHost: FeedManagerHost? = null
     @Volatile private var apiClient: com.fauna.app.core.ApiClient? = null
     @Volatile private var screenTimeStore: com.fauna.app.core.ScreenTimeStore? = null
+    @Volatile private var contentPolicyStore: com.fauna.app.core.ContentPolicyStore? = null
+    @Volatile private var storeConsentStore: com.fauna.app.core.StoreConsentStore? = null
     @Volatile private var atprotoSettingsHost: com.fauna.app.core.atproto.AtprotoSettingsHost? = null
     @Volatile private var actorScope: com.fauna.app.core.ActorScope? = null
     @Volatile private var accountStores: com.fauna.app.core.AccountStores? = null
@@ -234,6 +243,15 @@ object TestAgent {
     var calendarImportPick: ((path: String) -> Unit)? = null
 
     /**
+     * The distributor `PushHost` asks for a Web Push endpoint: under e2e, the
+     * in-process stand-in ([E2ePushDistributor]) — the harness installs no
+     * distributor app — and otherwise `null`, the real UnifiedPush one, so a
+     * developer's debug build on a phone with ntfy pushes for real.
+     */
+    val pushDistributor: com.fauna.app.core.push.PushDistributor?
+        get() = if (isE2EActive) E2ePushDistributor else null
+
+    /**
      * Last `call_machine_method` result — the JSON-serialized return value for a
      * reader method (`provisioning_snapshot`, `provider_base_url`), or null for a
      * setter. Read back by [serializeState] into `machine_method_result`, which
@@ -311,6 +329,10 @@ object TestAgent {
         // The same Hilt @Singleton the real app UI drives — `screen_time_heartbeat`
         // must poke the same store the ward's screen-time-lock overlay reads.
         screenTimeStore = entryPoint.screenTimeStore()
+        contentPolicyStore = entryPoint.contentPolicyStore()
+        // The same @Singleton the global store-consent lock reads —
+        // `store_consent_inject` must drive THAT round.
+        storeConsentStore = entryPoint.storeConsentStore()
         // The same Hilt @Singleton the AT Protocol page observes — the D10
         // `atproto_delegation_advance_clock` command must repaint THAT
         // machine's snapshot, not a throwaway one.
@@ -877,6 +899,17 @@ object TestAgent {
             put("contacts", contacts)
             put("knocks", knocks)
             put("feed", JSONObject().put("posts", feedPosts))
+            // `data.profile` — the open profile page's viewed actor and its
+            // actor-home slot (`profile.md` § Layout & flow → *Reaching another
+            // actor's profile with their home carried*; ui.yaml `profile.actor_id`
+            // / `profile.home_nest_url`). `home_nest_url` is null = this nest.
+            // Absent while no profile page is open, like the page it describes.
+            com.fauna.app.ui.viewmodel.ProfileTestState.viewed?.let { v ->
+                put("profile", JSONObject().apply {
+                    put("actor_id", v.actorId)
+                    put("home_nest_url", v.homeNestUrl ?: JSONObject.NULL)
+                })
+            }
             // Events and notifications stay unpopulated: neither has a Room-backed
             // (or otherwise process-global) cache TestAgent can read synchronously
             // today — EventsVM/NotificationsVM are per-screen Hilt ViewModels, not
@@ -1078,6 +1111,29 @@ object TestAgent {
             put("region_block_render", com.fauna.app.core.RegionPlaneHost.blockRenderState().let { (blocked, painted) ->
                 JSONObject().put("blocked", blocked).put("placeholders", painted)
             })
+            // The nest's twin (`nest-block-never-silent`), and the changed
+            // notice as painted — the frame naming the nest — or null (tui's and
+            // web's `nest_rules_changed_notice`).
+            put("nest_block_render", com.fauna.app.core.NestRulesHost.blockRenderState().let { (blocked, painted) ->
+                JSONObject().put("blocked", blocked).put("placeholders", painted)
+            })
+            put(
+                "nest_rules_changed_notice",
+                com.fauna.app.core.NestRulesHost.changedNotice.value?.let { nest ->
+                    appContext?.getStringFmt(com.fauna.app.R.string.nest_rules_changed_notice, nest)
+                } ?: JSONObject.NULL,
+            )
+            // How many rules the guardian's document holds on this device, read
+            // through the shared editor's own view (never counted here); null
+            // for an unsupervised viewer or a policy with no document.
+            put(
+                "ward_rule_document_rules",
+                contentPolicyStore?.inputs?.value?.contentPolicy?.takeIf { it.document != null }?.let { policy ->
+                    runCatching {
+                        com.fauna.ffi.FfiRuleEditor.forGuardian(policy).use { it.view().rows.size }
+                    }.getOrNull()
+                } ?: JSONObject.NULL,
+            )
             put("serving_enablement", servingEnablement ?: JSONObject.NULL)
             // `fauna_e2e_agent::WIDGET_REFRESH_KEY` — bumped by the widget
             // worker's pass and nothing else, so the poke below has a barrier.
@@ -1660,7 +1716,7 @@ object TestAgent {
                 // tracker's seam, `fauna_feed::CueTracker` § The test clock,
                 // through `FfiCueTracker`'s test-helpers faces). Twins of tui's,
                 // linux's (`feed::viewport::test_clock`) and web's
-                // (`$lib/feed-cues-e2e`) arms, with their reply shapes: `{ok}`
+                // (`#lib/feed-cues-e2e`) arms, with their reply shapes: `{ok}`
                 // for a step, the `CueProbe` for the probe, `{ok, moved, probe}`
                 // for the pixel step, and `{error}` for a refusal — which is
                 // also reported on `error-message` (convention 11).
@@ -1918,7 +1974,7 @@ object TestAgent {
                 // testing.md convention 14's fake clock + `run_now` poke for the
                 // screen-time usage heartbeat (family-safety.md § Screen time,
                 // Slice E) — the android twin of linux `screen_time_heartbeat`
-                // (main.rs) / web `$lib/screen-time-e2e.ts`. Advances the ward
+                // (main.rs) / web `#lib/screen-time-e2e.ts`. Advances the ward
                 // client's clock by `minutes` of foreground use and runs one
                 // production heartbeat step, so a tier_3 journey can prove the
                 // budget half WITHOUT waiting on wall-clock time — a test that
@@ -1934,11 +1990,49 @@ object TestAgent {
                         "ScreenTimeStore was wired (TestAgent.start has not run yet)"
                 store.advanceTestClockAndTick(minutes)
             }
+            "store_consent_inject" -> {
+                // The store-consent lock journey's platform seam
+                // (account-age-band.md, the store-law developer duties
+                // bullet's tests; the `set_age_claim` precedent): stand in
+                // for Play Age Signals' significant-change answer and run one
+                // real round — the shared `store_consent_round`, the
+                // device-local write-back and the lock's own message are all
+                // production. `{"clear": true}` returns to the real Play read.
+                val store = storeConsentStore
+                    ?: return "store_consent_inject arrived before the " +
+                        "StoreConsentStore was wired (TestAgent.start has not run yet)"
+                if (cmd.optBoolean("clear", false)) {
+                    store.injectTestSignal(null)
+                } else {
+                    val play = cmd.optJSONObject("play")
+                        ?: return "store_consent_inject needs a `play` object or `clear: true`"
+                    val status = when (val s = if (play.isNull("status")) null else play.optString("status")) {
+                        null -> null
+                        "APPROVED" -> com.fauna.ffi.FfiPlayChangeStatus.APPROVED
+                        "PENDING" -> com.fauna.ffi.FfiPlayChangeStatus.PENDING
+                        "DECLINED" -> com.fauna.ffi.FfiPlayChangeStatus.DECLINED
+                        else -> return "store_consent_inject: unknown play status `$s`"
+                    }
+                    val date = if (play.isNull("approval_date")) {
+                        null
+                    } else {
+                        val raw = play.optString("approval_date")
+                        val parsed = runCatching { java.time.LocalDate.parse(raw) }.getOrNull()
+                            ?: return "store_consent_inject: approval_date `$raw` is not YYYY-MM-DD"
+                        com.fauna.app.age.StoreConsentRound.utcDate(parsed)
+                    }
+                    store.injectTestSignal(
+                        com.fauna.app.core.StoreConsentStore.TestSignal(
+                            com.fauna.ffi.FfiStoreSignal.Play(status = status, approvalDate = date),
+                        ),
+                    )
+                }
+            }
             "atproto_delegation_advance_clock" -> {
                 // The D10 lapse journey's fake RENDER clock (convention 14) —
                 // android's twin of linux `main.rs` / tui `automation.rs` /
                 // apple `DelegationClockTestCommand.swift` / web
-                // `$lib/atproto-delegation-e2e.ts`. All five drive the same
+                // `#lib/atproto-delegation-e2e.ts`. All five drive the same
                 // shared seam, `fauna_atproto_settings_machine::delegation_clock`.
                 //
                 // Needed because `expiring_soon`/`expired` sit ~76 and ~90 days
@@ -1965,13 +2059,24 @@ object TestAgent {
             "trust_facet_advance_clock" -> {
                 // The Nests trust facet's RENDER clock (convention 14) —
                 // android's twin of tui `automation.rs` / linux `main.rs` / web
-                // `$lib/trust-clock-e2e.ts`, all over the shared seam
+                // `#lib/trust-clock-e2e.ts`, all over the shared seam
                 // `fauna_client_capabilities::trust_clock`: grant liveness, the
                 // auto-renew due decision and custody receipt freshness, never
                 // the mint clock. `0` resets; nothing auto-resets it. Nothing to
                 // repaint here: the Nests page folds against the clock on its
                 // hydrate, and the driver's wait re-navigates on every poll.
                 setTrustClockOffsetSecs(cmd.optLong("now_offset_secs", 0L))
+            }
+            "mail_token_refresh_advance_clock" -> {
+                // The submission-token refresh's clock (convention 14) —
+                // android's twin of tui `automation.rs` / linux `main.rs` / web
+                // `#lib/mail-token-refresh-e2e.ts`, all over the shared seam
+                // `fauna_client_mail_settings::token_refresh`: the 7-day re-mint
+                // cadence and each re-minted token's `issued_at`, never the
+                // bearer clock. `0` resets; nothing auto-resets it. Nothing runs
+                // here: the shared connect-time loop reads the clock on its next
+                // pass (a reconnect or the daily tick).
+                setMailTokenRefreshClockOffsetSecs(cmd.optLong("now_offset_secs", 0L))
             }
             "focus_move" -> {
                 // Convention 17 layer (c) — `e2e-systematic-ui-walks.md` § The
@@ -2386,7 +2491,12 @@ object TestAgent {
         val route = if (view == "profile") {
             val actorId = first.optString("actor_id").ifEmpty { null }
             val target = actorId?.let { profileNavTarget(it, appState.session.actorId) }
-            target?.let { "profile/$it" } ?: view
+            // The entry's optional `home_nest_url` is the open target's carried
+            // home, passed into the SAME opener the real doors use
+            // ([profileRoute]); the page's actor-home slot (`actor_home`) then
+            // decides whether it names this nest.
+            val home = first.optString("home_nest_url").ifEmpty { null }
+            target?.let { profileRoute(it, home) } ?: view
         } else {
             // The sub-page rides the SECOND stack entry's `id`
             // (`[{"view":"settings"},{"view":"settings","id":"muted-words"}]`) —

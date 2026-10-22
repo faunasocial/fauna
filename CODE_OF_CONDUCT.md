@@ -33,9 +33,8 @@ Examples of unacceptable behavior:
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported privately to the project maintainers by contacting an organization owner
-through GitHub (for example, via a private message or by using the repository's
-**Security → Report a vulnerability** channel for confidential contact). All
+reported privately to the project maintainers through the repository's
+**Security → Report a vulnerability** channel, which reaches only them. All
 complaints will be reviewed and investigated promptly and fairly. Maintainers are
 obligated to respect the privacy and security of the reporter.
 

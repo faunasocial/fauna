@@ -26,10 +26,15 @@ const KNOCK_FALLBACK_KEY: &str = "notifications.knock_body";
 /// 8-hex prefix the nest puts in `notifications.row_knock`'s `sender` arg.
 const KNOCK_SENDER_PREFIX: usize = 8;
 
-/// The most characters of the knocker's message a knock toast carries. The nest
-/// already refuses a summary over `MAX_KNOCK_SUMMARY_BYTES`; this cap is the
-/// client's own defense in depth (a non-conforming or hostile peer nest).
-const KNOCK_ARG_MAX_CHARS: usize = 200;
+/// The most characters one arg of a row's sentence carries — a knocker's
+/// message, a bridged author's display name. The nest already refuses a knock
+/// summary over `MAX_KNOCK_SUMMARY_BYTES`; this cap is the client's own defense
+/// in depth (a non-conforming or hostile peer nest, a remote network's profile).
+const ARG_MAX_CHARS: usize = 200;
+
+/// The most characters the nest's English `summary` carries when it is painted
+/// verbatim: the longest catalog sentence plus a capped arg or two.
+const SUMMARY_MAX_CHARS: usize = 1000;
 
 /// What an app renders for one row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,7 +76,7 @@ pub fn knock_push_text(push: &KnockPayload) -> NotificationText {
     if let Some(body) = push.body.as_ref()
         && fauna_i18n::strings::lookup(&body.key).is_some()
     {
-        return sanitized_localized(body);
+        return localized(body);
     }
     let sender: String = push.sender_id.chars().take(KNOCK_SENDER_PREFIX).collect();
     NotificationText::Localized(LocalizedText::key_args(
@@ -87,12 +92,18 @@ pub fn knock_push_text(push: &KnockPayload) -> NotificationText {
 #[cfg(feature = "local-clock")]
 const DEADLINE_ARGS: [&str; 2] = ["execute_after", "lands_at"];
 
+/// Every arg is text someone else may have chosen (a stranger's knock message, a
+/// bridged author's display name), so each is reduced to plain single-line text
+/// and capped (`fauna_core::control_chars::sanitize_plain_line`) before any app
+/// paints it — in a row or an OS toast, which say the same thing.
 fn localized(body: &fauna_protocol::LocalizedText) -> NotificationText {
     NotificationText::Localized(LocalizedText::key_args(
         body.key.clone(),
-        body.args
-            .iter()
-            .map(|(k, v)| (k.clone(), display_arg(k, v))),
+        body.args.iter().map(|(k, v)| {
+            let plain = fauna_core::control_chars::sanitize_plain_line(v, ARG_MAX_CHARS);
+            let shown = display_arg(k, &plain);
+            (k.clone(), shown)
+        }),
     ))
 }
 
@@ -112,22 +123,6 @@ fn display_arg(_name: &str, value: &str) -> String {
     value.to_string()
 }
 
-/// [`localized`] for a body whose args a stranger chose: every arg is reduced to
-/// plain single-line text and capped
-/// (`fauna_core::control_chars::sanitize_plain_line`), so no app's OS toast
-/// paints control, bidi or unbounded text.
-fn sanitized_localized(body: &fauna_protocol::LocalizedText) -> NotificationText {
-    NotificationText::Localized(LocalizedText::key_args(
-        body.key.clone(),
-        body.args.iter().map(|(k, v)| {
-            (
-                k.clone(),
-                fauna_core::control_chars::sanitize_plain_line(v, KNOCK_ARG_MAX_CHARS),
-            )
-        }),
-    ))
-}
-
 fn decide(body: Option<&fauna_protocol::LocalizedText>, summary: &str) -> NotificationText {
     if let Some(body) = body
         && fauna_i18n::strings::lookup(&body.key).is_some()
@@ -137,7 +132,10 @@ fn decide(body: Option<&fauna_protocol::LocalizedText>, summary: &str) -> Notifi
     if summary.is_empty() {
         return NotificationText::Localized(LocalizedText::key(DEFAULT_BODY_KEY));
     }
-    NotificationText::Verbatim(summary.to_string())
+    NotificationText::Verbatim(fauna_core::control_chars::sanitize_plain_line(
+        summary,
+        SUMMARY_MAX_CHARS,
+    ))
 }
 
 #[cfg(test)]
@@ -277,6 +275,53 @@ mod tests {
         }
     }
 
+    /// The witness for a bridged author's display name: a newline, a bidi
+    /// override and 10 KB in the `{sender}` arg reach the row and the toast as
+    /// one plain, capped line — and both still say the same thing.
+    #[test]
+    fn a_remote_sender_arg_is_plain_capped_text_on_row_and_toast() {
+        let hostile = format!(
+            "\u{202E}Alice\n(your contact)\u{2028}{}",
+            "x".repeat(10_240)
+        );
+        let body = WireText::new("notifications.row_like").with_arg("sender", &hostile);
+        let NotificationText::Localized(text) = notification_text(&row("", Some(body.clone())))
+        else {
+            panic!("a catalog key must localize");
+        };
+        let sender = &text.args["sender"];
+        assert!(!sender.chars().any(|c| c.is_control()), "{sender:?}");
+        assert!(!sender.contains(['\u{202E}', '\u{2028}']));
+        assert!(sender.starts_with("Alice (your contact) x"));
+        assert_eq!(sender.chars().count(), ARG_MAX_CHARS);
+        let push = NotificationPayload {
+            notification_id: 1,
+            notif_type: "like".into(),
+            source: "bluesky".into(),
+            sender_id: None,
+            content_id: None,
+            summary: String::new(),
+            body: Some(body),
+            timestamp: 1,
+            extra: Default::default(),
+        };
+        assert_eq!(
+            notification_push_text(&push),
+            NotificationText::Localized(text)
+        );
+    }
+
+    /// The English fallback names the same remote author, so it is one plain
+    /// line too.
+    #[test]
+    fn a_verbatim_summary_is_one_plain_line() {
+        let item = row("\u{202E}Alice\nliked your post", None);
+        assert_eq!(
+            notification_text(&item),
+            NotificationText::Verbatim("Alice liked your post".into())
+        );
+    }
+
     /// An unknown key with an empty summary still must not paint the key.
     #[test]
     fn an_unknown_key_over_an_empty_summary_is_the_default_body() {
@@ -353,7 +398,7 @@ mod tests {
         assert!(!message.chars().any(|c| c.is_control()), "{message:?}");
         assert!(!message.contains(['\u{202E}', '\u{2028}']));
         assert!(message.starts_with("Alice (your contact): <a href=x>go</a> x"));
-        assert_eq!(message.chars().count(), KNOCK_ARG_MAX_CHARS);
+        assert_eq!(message.chars().count(), ARG_MAX_CHARS);
         assert_eq!(text.args["sender"], KNOCKER[..8]);
     }
 

@@ -1,11 +1,11 @@
 <script lang="ts">
-  import { identity } from '$lib/store';
-  import { adminDashboardSnapshot, type AdminStatCard } from '$lib/rpc';
+  import { identity } from '#lib/store';
+  import { adminDashboardSnapshot, type AdminStatCard } from '#lib/rpc';
   import { onMount } from 'svelte';
-  import MessageBanner from '$lib/components/MessageBanner.svelte';
-  import { t } from '$lib/i18n/strings';
-  import { resolveLocalized } from '$lib/i18n/localized';
-  import { IDS } from '$lib/generated/uiIds';
+  import MessageBanner from '#lib/components/MessageBanner.svelte';
+  import { t } from '#lib/i18n/strings';
+  import { resolveLocalized } from '#lib/i18n/localized';
+  import { IDS } from '#lib/generated/uiIds';
 
   // The dashboard is a dumb renderer over the shared snapshot (`admin.md` § 1.
   // Dashboard → *The card set*): the fold, its order and its labels/values live

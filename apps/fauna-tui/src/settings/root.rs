@@ -119,8 +119,10 @@ fn build_section(status: &StatusText) -> Vec<Element> {
 }
 
 /// The Settings root. `region` is the region transparency section
-/// (`crate::region::settings_elements` — device-scoped, so it rides in from the
-/// app rather than from `SettingsState`), painted beside feature limits: the
+/// (`crate::region::settings_elements`) followed by the session nest's rules
+/// surface (`crate::nest_rules::settings_elements`) — both device-scoped, so
+/// they ride in from the app rather than from `SettingsState` — painted beside
+/// feature limits: the
 /// two "what bounds me, and who says so" surfaces sit together. `status` is the
 /// shared Status snapshot's text projection (`super::status_text` — three of
 /// its legs are live app state, so it rides in the same way).

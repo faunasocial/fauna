@@ -3,7 +3,7 @@
 //! (`apps/fauna-web/src/routes/onboarding/+page.svelte`); the wizard branch is
 //! shared Rust (`fauna-onboarding-machine`), this page is the thin GTK glue.
 //!
-//! One selectable `recover-box-item-{n}` row per box the admin custodies
+//! One selectable `recover-box-item` row (one repeated id, by index) per box the admin custodies
 //! (`m.recovery_boxes()`). Two production glue paths push that list in: the
 //! launch entry's fetch (`main.rs::handle_launch_phase`) and, on entering this
 //! page, `mod.rs::fetch_recovery_boxes` — a deployment-seed plane read
@@ -151,17 +151,17 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
             let selected = m.recovery_selected_nest_id();
 
             // Rebuild rows only when the box set changed. On empty this clears
-            // every `recover-box-item-*` widget so is_visible reports false.
+            // every `recover-box-item` widget so is_visible reports false.
             if *last_boxes.borrow() != boxes {
                 while let Some(child) = list.first_child() {
                     list.remove(&child);
                 }
                 rows.borrow_mut().clear();
-                for (i, id) in boxes.iter().enumerate() {
+                for id in boxes.iter() {
                     let row = Button::new();
                     row.add_css_class("card");
                     row.set_hexpand(true);
-                    set_test_id(&row, &format!("recover-box-item-{i}"));
+                    set_test_id(&row, ids::RECOVER_BOX_ITEM);
 
                     let row_content = gtk::Box::new(Orientation::Vertical, 2);
                     row_content.set_halign(gtk::Align::Start);

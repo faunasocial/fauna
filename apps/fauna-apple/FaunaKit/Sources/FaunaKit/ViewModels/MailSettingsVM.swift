@@ -94,7 +94,94 @@ public final class MailSettingsVM: MachineBackedVM {
 
     /// Refresh from the nest (page mount + after the account-plane watcher fires).
     /// Shared plumbing — `MachineBackedVM.hydrateFromMachine()`.
-    public func hydrate() async { await hydrateFromMachine() }
+    public func hydrate() async {
+        await hydrateFromMachine()
+        await loadForwarding()
+    }
+
+    /// The aftermath's settle hook (`FaunaClient.mailSettledGeneration`): re-hydrate
+    /// the mounted machine so a mail burn that finished while the page was open
+    /// shows its rows as revoked. A VM `configure` never ran for has no machine
+    /// and stays untouched — the page's own `.task` hydrates it on first show.
+    func rehydrateOnSettle() async {
+        guard machine != nil else { return }
+        await hydrate()
+    }
+
+    // MARK: - Forwarding (mail-forwarding.md)
+
+    /// The two Forwarding inputs' drafts. Typing writes only the draft; Enter
+    /// commits (`commitForwardAllTo` / `commitForwardPerHour`) and the field then
+    /// repaints from the value the nest kept.
+    public var forwardAllToDraft = ""
+    public var forwardPerHourDraft = ""
+    /// The nest's ceiling for the hourly limit (0 until loaded).
+    public internal(set) var forwardPerHourCeiling: UInt32 = 0
+
+    /// Read both settings into the drafts. Shown only while mail is enabled, so
+    /// nothing is fetched otherwise.
+    private func loadForwarding() async {
+        guard enabled, let api = configuredApi else { return }
+        do {
+            forwardAllToDraft = try await api.forwardAllToGet() ?? ""
+            let hourly = try await api.forwardPerHourGet()
+            forwardPerHourDraft = String(hourly.value)
+            forwardPerHourCeiling = hourly.ceiling
+        } catch {
+            errorMessage = DisplayError.message(error)
+        }
+    }
+
+    /// Enter on the forward-all field: the shared parser decides, a refusal shows
+    /// on the page's `error-message` and sends nothing.
+    public func commitForwardAllTo() async {
+        guard let api = configuredApi else {
+            errorMessage = L.errors.notConnectedToNest
+            return
+        }
+        let address: String?
+        switch forwardAllToDraftOutcome(draft: forwardAllToDraft) {
+        case .clear: address = nil
+        case .set(let a): address = a
+        case .refused(let message):
+            errorMessage = renderLocalizedText(message)
+            return
+        }
+        do {
+            forwardAllToDraft = try await api.forwardAllToSet(address) ?? ""
+            errorMessage = nil
+        } catch {
+            errorMessage = DisplayError.message(error)
+        }
+    }
+
+    /// Enter on the hourly-limit field; same shape as `commitForwardAllTo`.
+    public func commitForwardPerHour() async {
+        guard let api = configuredApi else {
+            errorMessage = L.errors.notConnectedToNest
+            return
+        }
+        let value: UInt32
+        switch forwardPerHourDraftOutcome(draft: forwardPerHourDraft, ceiling: forwardPerHourCeiling) {
+        case .value(let v): value = v
+        case .refused(let message):
+            errorMessage = renderLocalizedText(message)
+            return
+        }
+        do {
+            let kept = try await api.forwardPerHourSet(value)
+            forwardPerHourDraft = String(kept.value)
+            forwardPerHourCeiling = kept.ceiling
+            errorMessage = nil
+        } catch {
+            errorMessage = DisplayError.message(error)
+        }
+    }
+
+    /// The hourly-limit subtitle, from the shared hint (names the ceiling).
+    public var forwardPerHourHintText: String {
+        renderLocalizedText(forwardPerHourHint(ceiling: forwardPerHourCeiling))
+    }
 
     /// Dispatch a user action; the machine runs it to completion (or records an
     /// error on the snapshot), then we re-read.
@@ -133,6 +220,8 @@ public final class MailSettingsVM: MachineBackedVM {
         let snap = machine.snapshot()
         snapshot = snap
         errorMessage = snap.error ?? thrown.map { "\($0)" }
+        // Enabling mail from this page reveals the Forwarding section mid-visit.
+        if enabled && forwardPerHourCeiling == 0 { await loadForwarding() }
     }
 
     // The credentials list's row reads (the secret reveal, the substituted MUA

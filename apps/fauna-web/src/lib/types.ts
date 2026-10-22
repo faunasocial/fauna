@@ -123,4 +123,5 @@ export interface Contact {
   created_at?: number;
   handle?: string;     // peer's public handle (local peer with a handle; absent for federated)
   domain?: string;     // nest's handle domain (absent for federated)
+  home_nest_url?: string; // federated peer's home nest, when the nest knows it (absent otherwise)
 }

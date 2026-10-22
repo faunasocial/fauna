@@ -6,7 +6,7 @@
 // `auth-errors.ts` out of `wasm.ts`.
 //
 // `wasm-launch.ts` re-exports everything here, so call sites keep importing
-// from `$lib/wasm-launch` and nothing outside this file changed.
+// from `#lib/wasm-launch` and nothing outside this file changed.
 
 /** `{phase, token, last_error, superseded_successor, …}` per
  *  `fauna-launch-machine/src/snapshots.rs` — `snapshotJson()` serializes the

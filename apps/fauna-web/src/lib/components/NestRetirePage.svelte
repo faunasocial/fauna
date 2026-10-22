@@ -21,17 +21,17 @@
   // and is dropped on exit (`cancel`). Reference app: tui
   // (`apps/fauna-tui/src/wizard/nest_retire.rs`).
   import { onDestroy, onMount } from 'svelte';
-  import { IDS } from '$lib/generated/uiIds';
-  import { t } from '$lib/i18n/strings';
+  import { IDS } from '#lib/generated/uiIds';
+  import { t } from '#lib/i18n/strings';
   import {
     resolveKey,
     resolveLocalized,
     resolveLocalizedNested,
     type LocalizedText,
-  } from '$lib/i18n/localized';
-  import { PROVIDERS } from '$lib/generated/providers';
-  import { localDomainMachine } from '$lib/rpc';
-  import { ensureWasm, logMessage, retireHeldDns } from '$lib/wasm';
+  } from '#lib/i18n/localized';
+  import { PROVIDERS } from '#lib/generated/providers';
+  import { localDomainMachine } from '#lib/rpc';
+  import { ensureWasm, logMessage, retireHeldDns } from '#lib/wasm';
   import {
     createNestRetireMachine,
     provisioningStatusGlyph,
@@ -40,8 +40,8 @@
     type RetireServerRow,
     type RetireSnapshot,
     type RetireStepState,
-  } from '$lib/wasm-onboarding';
-  import { pendingProviderBaseUrl } from '$lib/onboarding/machine.svelte';
+  } from '#lib/wasm-onboarding';
+  import { pendingProviderBaseUrl } from '#lib/onboarding/machine.svelte';
 
   interface Props {
     /** Which entry opened the page — where Back and Done return to. */
@@ -527,7 +527,7 @@
         {/if}
         {#if snap.force_server_offered}
           <!-- The dangling-record warning, repeated where the choice is made. -->
-          <p class="muted">{t.onboarding.retire.force_server_warning}</p>
+          <p class="muted" data-testid={IDS.RETIRE_FORCE_SERVER_WARNING}>{t.onboarding.retire.force_server_warning}</p>
           <button
             class="btn danger"
             data-testid={IDS.RETIRE_FORCE_SERVER_BUTTON}

@@ -424,25 +424,40 @@ fn contacts_list_handler() -> RpcHandler {
             // claimed domain, not the stale `--handle-domain` seed (which left it
             // `None`). mail-multidomain.md § Multi-domain handles.
             let nest_domain: Option<String> = Some(state.handle_domain());
-            let contacts: Vec<ContactItem> = rows
-                .into_iter()
-                .map(|c| {
-                    let is_local = c.handle.is_some();
-                    // An empty handle on a local user is "no usable handle".
-                    let handle = c.handle.filter(|h| !h.is_empty());
-                    let domain = if is_local { nest_domain.clone() } else { None };
-                    ContactItem {
-                        // hex of the raw peer bytes — the HTTP twin's `peer_id`.
-                        peer_id: hex::encode(&c.peer_id),
-                        status: c.status,
-                        accepted_at: c.accepted_at,
-                        created_at: c.created_at,
-                        handle,
-                        domain,
-                        extra: std::collections::BTreeMap::new(),
-                    }
-                })
-                .collect();
+            let mut contacts: Vec<ContactItem> = Vec::with_capacity(rows.len());
+            for c in rows {
+                let is_local = c.handle.is_some();
+                // An empty handle on a local user is "no usable handle".
+                let handle = c.handle.filter(|h| !h.is_empty());
+                let domain = if is_local { nest_domain.clone() } else { None };
+                // A federated peer's home: the edge's recorded VERIFIED origin
+                // nest, resolved here through the nest-wide `nest_addresses`
+                // directory, proven addresses first — never a per-row URL
+                // (`docs/goal/ui/contacts.md` § State & data shape, the rule
+                // `behavior/federated-follow.md` § Decision 1 states for the
+                // outbox, which reads it the same way).
+                let home_nest_url = match c.peer_nest_id {
+                    Some(nest) => state
+                        .db
+                        .resolve_foreign_nest_urls(&nest, 1)
+                        .await
+                        .map_err(contacts_internal)?
+                        .into_iter()
+                        .next(),
+                    None => None,
+                };
+                contacts.push(ContactItem {
+                    // hex of the raw peer bytes — the HTTP twin's `peer_id`.
+                    peer_id: hex::encode(&c.peer_id),
+                    status: c.status,
+                    accepted_at: c.accepted_at,
+                    created_at: c.created_at,
+                    handle,
+                    domain,
+                    home_nest_url,
+                    extra: std::collections::BTreeMap::new(),
+                });
+            }
 
             encode_reply(
                 &ContactListReply {

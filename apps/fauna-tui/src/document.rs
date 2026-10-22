@@ -477,6 +477,7 @@ mod tests {
                     verification: VerificationStatus::Verified,
                     authoring_origin: AuthoringOriginStatus::Unknown,
                     legal_takedown_ref: None,
+                    admin_block_reason: None,
                     not_found: false,
                 },
                 RenderBlock::LinkPreview {

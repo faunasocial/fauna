@@ -7,7 +7,7 @@
 //! (`fauna_rpc_wasm::connection_reports_json`), where every report is visible:
 //! the SPA's state callback fires on transitions only, which is exactly what
 //! the stickiness proof must see past. Painted errors are fed by the SPA
-//! (`$lib/e2e-painted-errors.ts`), one call per painted frame whose error
+//! (`#lib/e2e-painted-errors.ts`), one call per painted frame whose error
 //! surfaces changed, since only the page knows what it painted.
 //!
 //! `test-helpers` only (convention 15): none of this is in a production bundle.

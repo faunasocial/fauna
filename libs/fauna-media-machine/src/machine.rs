@@ -32,7 +32,7 @@ use crate::snapshots::{
     FileVersionSummary, FollowedScopeOption, MediaFolderOption, MediaItemSummary,
     MediaPageSnapshot, ShareCreateSnapshot, ShareLinkSummary, ShareLinksSnapshot,
 };
-pub use fauna_client_media::member_rows::MlsQuery;
+pub use fauna_client_media::member_rows::{FolderChannelOwners, MlsQuery};
 
 /// i18n key for a cross-set read (`refresh()`) failure ("Failed to load media: {message}").
 const REFRESH_ERROR_KEY: &str = "media.error_refresh";
@@ -537,7 +537,10 @@ impl MediaMachine {
     /// construction and never over UniFFI (a trait object has no FFI ABI).
     /// Until wired, every shared row is dropped (fail-safe): shared sets still
     /// reach the page through their items, as item-only options by name.
+    /// The same query is the member-row declassification anchor, so it is
+    /// handed to the nest seam too ([`MediaNestApi::set_mls_query`]).
     pub fn set_mls_query(&self, mls_query: Arc<dyn MlsQuery>) {
+        self.nest_api.set_mls_query(mls_query.clone());
         *self.mls_query.lock().unwrap() = Some(mls_query);
     }
 
@@ -2704,8 +2707,9 @@ impl MediaMachine {
                 // A `path_seal_required` refusal means the nest's view of the
                 // folder's audience differs from what this upload assumed:
                 // re-read the snapshot so the page no longer shows the stale
-                // verdict. The refresh clears the error, so set it after.
-                if e.detail().contains("path_seal_required") {
+                // verdict. The refresh clears the error, so set it after. Keyed
+                // on the variant: the nest's detail is prose without the code.
+                if matches!(e, MediaApiError::SealRequired { .. }) {
                     self.refresh(Some(backup_key)).await;
                 }
                 self.set_error(UPLOAD_ERROR_KEY, e.detail())

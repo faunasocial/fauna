@@ -57,11 +57,11 @@ Stamped 2026-09-23 at 039e9619ca.
 13. [app] A new throwaway address goes to the top of the list and is copied for you, with a confirmation — `docs/goal/behavior/mail-aliases.md` § Layout
    - `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_generated_disposable_lands_on_top_copied_and_confirmed`
 14. [app] You can see when a throwaway address expires and extend it before it does — `docs/goal/behavior/mail-aliases.md` § Don't do these
-   - (none)
+   - `tests/e2e-unified/tests/test_mail_aliases_expiry.py::test_a_throwaway_address_shows_its_expiry_and_is_extended`
 15. [app] Opening an address's history shows what came in through it: the address that was hit, the sender's domain and when — `docs/goal/behavior/mail-aliases.md` § Per-alias-hit audit list
-   - (none)
+   - `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_an_address_shows_where_its_mail_came_from`
 16. [app] An address's label is shown beside "delivered to" on the messages it received — `docs/goal/behavior/mail-aliases.md` § Label
-   - (none)
+   - `tests/e2e-unified/tests/test_mail_delivered_to_alias.py::test_a_received_message_shows_the_alias_it_arrived_on`
 17. [app] Claiming a reserved name such as postmaster or abuse is refused, and the page says why — `docs/goal/behavior/mail-aliases.md` § Reserved local-parts (uncircumventable)
    - `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_reserved_name_is_refused_on_the_page`
 18. [nest] Mail to your address with anything added after a plus sign reaches you, with nothing to set up — `docs/goal/behavior/mail-aliases.md` § Kind 2 — +suffix sub-addressing (RFC 5233)
@@ -96,13 +96,13 @@ Stamped 2026-09-23 at 039e9619ca.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+0d95e205 standalone |
-| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
+| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
+| linux | ✅ full | 0.1.4-dev+ea391d07 standalone |
 | windows | ⚠ partial | |
 | macos | ⚠ partial | |
 | ios | ⚠ partial | |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.2-dev+7663afa6 standalone |
+| tui | ✅ full | 0.1.2-dev+7663afa6 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -126,15 +126,15 @@ Stamped 2026-09-23 at 039e9619ca.
 | 6 | nest | `tests/e2e-unified/tests/test_mail_spam_threshold_override.py::test_per_account_spam_threshold_override_rides_the_message_to_the_scorer` | nest (linux): passed, nest (windows): passed |
 | 7 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_add_wildcard_prefix_from_the_sheet` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_add_sheet_sets_label_spam_threshold_and_hourly_limit` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_row_shows_hit_count_and_last_hit_after_real_inbound` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_row_shows_hit_count_and_last_hit_after_real_inbound` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 10 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_edit_sheet_changes_label_and_controls_but_never_the_kind` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_add_sheet_sets_label_spam_threshold_and_hourly_limit` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_edit_sheet_changes_label_and_controls_but_never_the_kind` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_a_throwaway_address_lasts_and_takes_what_you_chose` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 13 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_generated_disposable_lands_on_top_copied_and_confirmed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 14 | app | (none) | — |
-| 15 | app | (none) | — |
-| 16 | app | (none) | — |
+| 14 | app | `tests/e2e-unified/tests/test_mail_aliases_expiry.py::test_a_throwaway_address_shows_its_expiry_and_is_extended` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 15 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_an_address_shows_where_its_mail_came_from` | web (linux): failed, linux (linux): passed, tui (linux): passed |
+| 16 | app | `tests/e2e-unified/tests/test_mail_delivered_to_alias.py::test_a_received_message_shows_the_alias_it_arrived_on` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 17 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_reserved_name_is_refused_on_the_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 18 | nest | `tests/e2e-unified/tests/test_mail_bridge_alias_delivery.py::test_plus_suffix_reaches_the_owner_with_nothing_set_up` | nest (linux): passed |
 | 19 | nest | `tests/e2e-unified/tests/test_mail_bridge_alias_delivery.py::test_wildcard_prefix_address_reaches_the_owner` | nest (linux): passed |

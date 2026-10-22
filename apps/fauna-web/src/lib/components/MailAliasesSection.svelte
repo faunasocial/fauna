@@ -12,19 +12,28 @@
   // `error`. Behavior + IDs: docs/goal/behavior/mail-aliases.md § Aliases UX,
   // ui.yaml § mail-aliases / mail-aliases-list.
   //
-  // Two honest gaps surfaced (never faked), mirroring linux: the per-row
+  // One honest gap surfaced (never faked), mirroring linux: the per-row
   // disabled-toggle is one-way (no un-revoke RPC — revoke/update can't clear
-  // `disabled`), and `mail-aliases-list-item-show-audit` is inert (the per-alias
-  // hit list `list_account_alias_hits` is a follow-on slice the machine doesn't
-  // expose yet).
-  import { identity } from '$lib/store';
-  import { mailAliasesMachine } from '$lib/rpc';
-  import { ensureWasm, aliasKindBadge, aliasHitsLabel, parseCount, parseCountI64 } from '$lib/wasm';
-  import { resolveLocalized } from '$lib/i18n/localized';
+  // `disabled`). `mail-aliases-list-item-show-audit` opens the address's
+  // history (`mail-aliases.md` § Per-alias-hit audit list) through the
+  // machine's `ShowAudit` / `HideAudit` — tui's `audit_elements` shape.
+  import { identity } from '#lib/store';
+  import { mailAliasesMachine } from '#lib/rpc';
+  import {
+    ensureWasm,
+    aliasKindBadge,
+    aliasHitsLabel,
+    aliasExpiryLabel,
+    aliasIsExtendable,
+    parseCount,
+    parseCountI64,
+  } from '#lib/wasm';
+  import { resolveLocalized } from '#lib/i18n/localized';
+  import { localTimestamp } from '#lib/value-format';
   import { onMount } from 'svelte';
-  import { t } from '$lib/i18n/strings';
+  import { t } from '#lib/i18n/strings';
   import type { WasmMailAliasesMachine } from '../../../static/fauna_wasm.js';
-  import { IDS } from '$lib/generated/uiIds';
+  import { IDS } from '#lib/generated/uiIds';
 
   // The parent settings page owns the single error surface; alias dispatch errors
   // flow into it (the same surface MailSettingsSection binds to).
@@ -67,6 +76,17 @@
     invalid: number;
     outcomes: ImportAliasOutcomeView[];
   }
+  // One message that arrived on an address, and the one address whose
+  // history is open (`AliasHitView` / `AliasAuditView`).
+  interface AliasHitView {
+    matched_address: string;
+    sender_domain: string;
+    received_at_ms: number;
+  }
+  interface AliasAuditView {
+    alias_id_hex: string;
+    hits: AliasHitView[];
+  }
   interface AliasesSnapshot {
     aliases: AliasView[];
     default_domain: string | null;
@@ -74,6 +94,7 @@
     last_import_result: ImportResultView | null;
     status: string; // "Idle" | "Loading" | "Working"
     error: string | null;
+    audit: AliasAuditView | null;
   }
 
   let machine: WasmMailAliasesMachine | null = null;
@@ -117,6 +138,11 @@
   let armedDelete = $state<string | null>(null);
 
   const hasDomain = $derived(snap?.default_domain != null);
+
+  // The open history when it is row `v`'s own, else null.
+  function auditFor(v: AliasView): AliasAuditView | null {
+    return snap?.audit?.alias_id_hex === v.alias_id_hex ? snap.audit : null;
+  }
 
   function applySnapshot(): void {
     if (!machine) return;
@@ -165,6 +191,27 @@
   function formatHits(v: AliasView): string {
     const d = v.last_hit_at_ms != null ? new Date(v.last_hit_at_ms).toLocaleDateString() : null;
     return resolveLocalized(aliasHitsLabel(v.hit_count, d));
+  }
+
+  // A disposable's expiry and its extend (mail-aliases.md § Don't do these —
+  // never auto-expire without telling the user, who can extend before it
+  // lapses). Both decided by the shared helpers at paint time; the expiry date
+  // is a JS-local format, the `formatHits` split.
+  function formatExpiry(v: AliasView): string | null {
+    const d = v.expires_at_ms != null ? new Date(v.expires_at_ms).toLocaleDateString() : '';
+    const label = aliasExpiryLabel(v.expires_at_ms, Date.now(), d);
+    return label ? resolveLocalized(label) : null;
+  }
+
+  function extendable(v: AliasView): boolean {
+    return aliasIsExtendable(v.kind, v.expires_at_ms, v.uses_remaining, Date.now());
+  }
+
+  // The extend reads the clock the moment it fires; the shared machine refuses
+  // a row that is no longer extendable before any round trip, and fills the
+  // new expiry and the row's other controls itself.
+  function onExtend(v: AliasView): void {
+    void dispatch({ Extend: { alias_id_hex: v.alias_id_hex, now_ms: Date.now() } });
   }
 
   function openAdd(): void {
@@ -472,6 +519,14 @@
         <span class="badge" data-testid={IDS.MAIL_ALIASES_LIST_ITEM_KIND}>{kindBadge(v.kind)}</span>
         <span class="muted small" data-testid={IDS.MAIL_ALIASES_LIST_ITEM_LABEL}>{v.label}</span>
         <span class="muted small" data-testid={IDS.MAIL_ALIASES_LIST_ITEM_HITS}>{formatHits(v)}</span>
+        {#if formatExpiry(v)}
+          <span class="muted small" data-testid={IDS.MAIL_ALIASES_LIST_ITEM_EXPIRES_AT}>{formatExpiry(v)}</span>
+        {/if}
+        {#if extendable(v)}
+          <button class="btn small" data-testid={IDS.MAIL_ALIASES_LIST_ITEM_EXTEND_BUTTON} onclick={() => onExtend(v)}>
+            {t.mail_aliases.extend}
+          </button>
+        {/if}
         {#if v.is_canonical}
           <!-- The canonical <handle>@<domain> primary is read-only: the nest
                rejects disabling / editing / revoking / deleting it
@@ -508,11 +563,29 @@
             onclick={() => onDelete(v)}
           >{armedDelete === v.alias_id_hex ? t.common.confirm_q : t.mail_aliases.delete}</button>
         {/if}
-        <!-- Inert: per-alias hit audit (list_account_alias_hits) is a follow-on
-             slice the shared machine doesn't expose yet (same gap as linux). -->
-        <button class="btn small" data-testid={IDS.MAIL_ALIASES_LIST_ITEM_SHOW_AUDIT} disabled>
-          {t.mail_aliases.show_audit}
+        <!-- The history disclosure: the machine holds the one open address's
+             newest hits; this row paints them when they are its own. -->
+        <button
+          class="btn small"
+          data-testid={IDS.MAIL_ALIASES_LIST_ITEM_SHOW_AUDIT}
+          onclick={() => dispatch(auditFor(v) ? 'HideAudit' : { ShowAudit: { alias_id_hex: v.alias_id_hex } })}
+        >
+          {auditFor(v) ? t.mail_aliases.hide_audit : t.mail_aliases.show_audit}
         </button>
+        {#if auditFor(v)}
+          {@const audit = auditFor(v)!}
+          {#if audit.hits.length === 0}
+            <p class="muted small" data-testid={IDS.MAIL_ALIASES_AUDIT_EMPTY}>{t.mail_aliases.audit_empty}</p>
+          {:else}
+            {#each audit.hits as hit}
+              <div class="small" data-testid={IDS.MAIL_ALIASES_AUDIT_ITEM}>
+                <span data-testid={IDS.MAIL_ALIASES_AUDIT_ITEM_MATCHED_ADDRESS}>{hit.matched_address}</span>
+                <span data-testid={IDS.MAIL_ALIASES_AUDIT_ITEM_SENDER_DOMAIN}>{hit.sender_domain}</span>
+                <span data-testid={IDS.MAIL_ALIASES_AUDIT_ITEM_RECEIVED_AT}>{localTimestamp(hit.received_at_ms)}</span>
+              </div>
+            {/each}
+          {/if}
+        {/if}
       </div>
     {/each}
   </div>

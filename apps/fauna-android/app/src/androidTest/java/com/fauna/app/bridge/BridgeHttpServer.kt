@@ -11,7 +11,11 @@ import java.util.concurrent.ConcurrentLinkedQueue
  *  declared-region override. */
 private val REGION_E2E_ENV_KEYS = listOf("FAUNA_E2E_REGION_REGISTRY", "FAUNA_E2E_REGION_DECLARED")
 
-/** The admin DNS page's e2e seams the launch environment may carry
+/** The Outlook import's mail-import seeds ride this list too
+ *  (`e2e-gated-seeds.md`): the source trust anchor, the preset-host redirect
+ *  and the Microsoft authority, the last two naming reversed loopback ports.
+ *
+ *  The admin DNS page's e2e seams the launch environment may carry
  *  (`conftest.py`'s android block), all read by `fauna-client-dns` via
  *  std::env: the fake-provider decorator gate, the compressed re-check clock,
  *  and the ACME directory seed (e2e-automation-surface-gating.md § The ACME
@@ -23,6 +27,9 @@ private val DNS_E2E_ENV_KEYS = listOf(
     "FAUNA_E2E_ACME_DIRECTORY_URL",
     "FAUNA_E2E_ACME_CA_PEM",
     "FAUNA_E2E_ACME_NAMESERVER",
+    "FAUNA_E2E_IMAP_EXTRA_CA_PEM",
+    "FAUNA_E2E_IMAP_HOST_MAP",
+    "FAUNA_E2E_MICROSOFT_AUTHORITY",
 )
 
 class BridgeHttpServer(
@@ -216,6 +223,8 @@ class BridgeHttpServer(
                         // The admin DNS page's fake provider + re-check clock.
                         DNS_E2E_ENV_KEYS.associateWith { env.optString(it, "") }
                             .filterValues { it.isNotEmpty() },
+                        // The driver's first launch: a new install.
+                        freshInstall = data.optBoolean("fresh_install", false),
                     )
                     json(Response.Status.CREATED, """{"session_id":"1"}""")
                 }
@@ -450,6 +459,7 @@ class AppLauncher(private val instrumentation: android.app.Instrumentation) {
         clockOffsetSecs: String = "",
         regionEnv: Map<String, String> = emptyMap(),
         dnsEnv: Map<String, String> = emptyMap(),
+        freshInstall: Boolean = false,
     ) {
         val pkg = instrumentation.targetContext.packageName
         Runtime.getRuntime().exec(arrayOf("am", "force-stop", pkg)).waitFor()
@@ -469,6 +479,15 @@ class AppLauncher(private val instrumentation: android.app.Instrumentation) {
             // Full overwrite (matches build_registry_seed's producer contract:
             // one complete flat map per seed, not a merge).
             credFile.writeText(seedCredentials.toString())
+        }
+        if (freshInstall) {
+            // A driver's first launch is a new install (the driver's
+            // `fresh_install`): it starts never opted in to push. The
+            // install-scoped intent file (PushHost) would otherwise carry an
+            // earlier test's bit, which the other apps' per-test install dir
+            // clears by construction; a relaunch of the same driver keeps it,
+            // as the same install does.
+            java.io.File(instrumentation.targetContext.filesDir, "push-intent.cbor").delete()
         }
 
         val intent = instrumentation.targetContext.packageManager.getLaunchIntentForPackage(pkg)

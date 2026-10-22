@@ -412,33 +412,21 @@ pub async fn mint_bearer_over_custodied_fleet_handshake(
     device_signing_key: &SigningKey,
     authorization: &fauna_core::encoding::EmbedAsBytes,
 ) -> Result<MintedBearer, AnonClientError> {
-    use fauna_protocol::auth::{CUSTODIED_FLEET_HANDSHAKE_KIND, CustodiedFleetHandshakeRequest};
+    use fauna_protocol::auth::CUSTODIED_FLEET_HANDSHAKE_KIND;
 
     let client = AnonymousNestClient::connect(nest_url).await?;
     let nest_id = crate::read_login_binding(&client).await?;
 
-    let device_key = device_signing_key.verifying_key().to_bytes();
-    let timestamp = fauna_core::data::Timestamp::now_millis();
     let nonce = crate::fresh_nonce();
-    let msg = fauna_protocol::auth::custodied_fleet_handshake_signed_message(
+    // The one request builder every host's mint calls (the browser socket's
+    // too — `fauna_client_core::auth`).
+    let req = fauna_client_core::auth::build_custodied_fleet_handshake(
         &owner_actor_id,
-        &device_key,
-        timestamp,
+        device_signing_key,
+        authorization,
         &nest_id,
         &nonce,
     );
-    let signature = device_signing_key.sign(&msg);
-
-    let req = CustodiedFleetHandshakeRequest {
-        owner_actor_id: fauna_core::hex32::encode(&owner_actor_id),
-        device_key: fauna_core::hex32::encode(&device_key),
-        timestamp,
-        signature: hex::encode(signature.to_bytes()),
-        client_nonce: fauna_protocol::ByteBuf::from(nonce.to_vec()),
-        authorization: authorization.clone(),
-        nest_id: fauna_core::hex32::encode(&nest_id),
-        extra: Default::default(),
-    };
 
     let reply: HandshakeReply = client.request(CUSTODIED_FLEET_HANDSHAKE_KIND, req).await?;
 
@@ -538,11 +526,33 @@ mod tests {
     /// so the e2e offset the wrong-clock witnesses seed reaches every mint —
     /// on a UniFFI app the held bearer's anchor is here, not in the launch
     /// machine, and a case-M witness on an anchor reading the real clock would
-    /// pass without testing anything. The offset is process-global and held
-    /// for one read only (no other test in this crate reads the live clock).
+    /// pass without testing anything. The offset is process-global and every
+    /// mint in this binary reads it, so the body runs in a child process of
+    /// its own (this binary re-run on this one test) where nothing else can
+    /// observe the skew; the private `now_client_secs` is why it cannot move
+    /// to `tests/` instead.
     #[test]
     fn the_anchor_reads_the_shared_client_clock() {
         use fauna_protocol::client_clock;
+        const CHILD: &str = "FAUNA_CLOCK_PIN_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let out = std::process::Command::new(std::env::current_exe().expect("test exe"))
+                .args([
+                    "--exact",
+                    "bearer::tests::the_anchor_reads_the_shared_client_clock",
+                    "--test-threads=1",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .expect("re-run this test binary");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                out.status.success() && stdout.contains("1 passed"),
+                "the child run failed:\n{stdout}\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            return;
+        }
         struct Reset;
         impl Drop for Reset {
             fn drop(&mut self) {

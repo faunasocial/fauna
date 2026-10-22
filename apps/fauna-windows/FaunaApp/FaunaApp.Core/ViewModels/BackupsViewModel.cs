@@ -1029,7 +1029,10 @@ public partial class BackupsViewModel : ViewModelBase
         _agentChannel?.Invoke() is null
             ? Array.Empty<string?>()
             : FaunaFfiMethods.BackupReseedRows(
-                _destinationViews.ToArray(), _deviceId, OrphanedStoreText is not null);
+                _destinationViews.ToArray(), _deviceId, OrphanedStoreText is not null,
+                // The nest-held pull-back is not wired on windows yet: no button on
+                // a nest-kind row until its confirm runs BackupPullBackFromDestination.
+                false);
 
     /// <summary>Does the orphaned-store row carry the restore button?</summary>
     public bool ReseedOnOrphanedStore => ReseedRows.Contains(null);

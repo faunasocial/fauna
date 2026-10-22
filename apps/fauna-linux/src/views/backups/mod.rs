@@ -2,6 +2,7 @@ pub mod destinations;
 pub mod file_list;
 pub mod restore;
 pub mod snapshot_list;
+pub mod snapshot_restore;
 
 use adw::prelude::*;
 use std::rc::Rc;
@@ -83,6 +84,10 @@ pub fn build_backups_view(client: &Rc<FaunaClient>) -> (adw::NavigationSplitView
     let (file_list_widget, snapshot_file_list_box, detail_header) =
         file_list::build_snapshot_file_list(crate::i18n::strings::backups::SNAPSHOT_TITLE);
     content_box.append(&file_list_widget);
+    // The whole-snapshot restore, inside the open snapshot detail beside the
+    // file list (`ui/backups.md` § Whole-snapshot restore).
+    let restore_panel = snapshot_restore::SnapshotRestorePanel::build(client);
+    content_box.append(&restore_panel.widget);
 
     // Restore surfaces + backup-destination management — scrollable together so
     // the history list, restore action card, and destination list all fit.
@@ -123,6 +128,7 @@ pub fn build_backups_view(client: &Rc<FaunaClient>) -> (adw::NavigationSplitView
         let machine = Arc::clone(&machine);
         let client = Rc::clone(client);
         let file_list_box = snapshot_file_list_box.clone();
+        let restore_panel = Rc::clone(&restore_panel);
         let error_label = error_label.clone();
         // `SnapshotPaneHandles` lives in the returned `BackupsHandles`, so the
         // loop keeps its own clone — a refcount bump over the same widgets.
@@ -136,6 +142,7 @@ pub fn build_backups_view(client: &Rc<FaunaClient>) -> (adw::NavigationSplitView
                     page.detail.as_ref(),
                     &client,
                 );
+                restore_panel.update(page.detail.as_ref());
                 // The machine's `error` is the page's ONE `error-message`
                 // (e2e Rule 2). A completed check with errors is NOT one — it
                 // reports through the check-result surface (rule 6).

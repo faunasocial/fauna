@@ -32,7 +32,7 @@ from i18n.strings import S
 # iOS in-process (probe: `mail-add-credential-name-input` count=1 + the whole 6-id
 # form tree). But it EXPOSED the next iOS gap: SUBMITTING the enable-mode form does
 # NOT complete the enable — after clicking `mail-add-credential-submit-button` the
-# probe saw, for 40s straight: no credential row (`mail-settings-credential-item`
+# probe saw, for 40s straight: no credential row (the roster's `connected-apps-item`
 # count=0), no MUA instructions, the status indicator gone (the form never dismissed),
 # and no error. So it is NOT a slow-enable/timeout. macOS runs the IDENTICAL shared
 # submit→EnableMail flow 8/8 green, so the iOS submit either doesn't dispatch EnableMail
@@ -142,7 +142,7 @@ def test_mail_settings_enable_populates_mua_instructions(logged_in_app):
 @pytest.mark.feature("turn-on-mail")
 def test_mail_settings_enable_renders_credential_row(logged_in_app):
     """Slice 3: an enabled actor has its credential(s) rendered as indexed
-    `mail-settings-credential-item-*` rows (mail-settings.md § Credentials list).
+    `connected-apps-item-*` roster rows (mail-settings.md § Credentials list).
 
     Enabling goes Toggle → add-credential form → submit; the committed
     `fauna.state.mail` credentials re-render as rows. `ensure_mail_enabled` is
@@ -170,17 +170,17 @@ def test_mail_settings_enable_renders_credential_row(logged_in_app):
         f"substituted (no template placeholder); got {username!r}"
     )
 
-    # The row's kind badge (mail-settings-credential-item-type) renders the
+    # The row's kind badge (connected-apps-item-type) renders the
     # human auth-kind label from shared-Rust credential_kind_badge (i18n
     # settings.mail.kind_{password,bearer}; mail-settings.md § Credentials list
     # "kind (Password / Bearer token)"). The default MUA credential is
     # password-auth, so the badge must be a non-empty, placeholder-free label.
-    # Closes the mail-settings-credential-item-type coverage gap — no client
+    # Closes the connected-apps-item-type coverage gap — no client
     # asserted this shared-Rust render leg before.
     kind = app.mail_settings.credential_type(0)
     assert kind and "{" not in kind, (
         "the credential row must render its kind badge "
-        "(mail-settings-credential-item-type) with the shared-Rust auth-kind "
+        "(connected-apps-item-type) with the shared-Rust auth-kind "
         f"label; got {kind!r} — error: "
         f"{app.mail_settings.page_error_text(timeout=2.0)!r}"
     )

@@ -20,7 +20,7 @@ resting on the tier_3 test that consumes it:
   sweep lands, and the push-arm attribution becomes a wall-clock race
   (``testing.md`` § conventions, point 14). It reads like a harmless
   simplification, which is why it needs a test and not a comment;
-- ``setConvPollSecs`` keeps exactly one importer, ``$lib/e2e-automation``, so it
+- ``setConvPollSecs`` keeps exactly one importer, ``#lib/e2e-automation``, so it
   is tree-shaken out of production bundles with the rest of the automation
   surface (``testing.md`` § conventions, point 15).
 """
@@ -148,7 +148,7 @@ def test_the_setter_has_exactly_one_importer(setter):
     )
     assert importers == ["apps/fauna-web/src/lib/e2e-automation.ts"], (
         f"{setter} is reachable from production code paths "
-        f"({importers}) — it must be imported only by $lib/e2e-automation, "
+        f"({importers}) — it must be imported only by #lib/e2e-automation, "
         "which a production `vite build` constant-folds away "
         "(testing.md § conventions, point 15)"
     )

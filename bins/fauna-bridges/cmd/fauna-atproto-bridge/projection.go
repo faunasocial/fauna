@@ -35,6 +35,7 @@ import (
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/atprotoid"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/atprotopds"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/atprotorepo"
+	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/logplane"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mailfauna"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/wsrpc"
 	faunaAtproto "github.com/faunasocial/fauna/libs/fauna-mail-go/fauna_bridge_atproto"
@@ -514,6 +515,7 @@ func projectIdentity(ctx context.Context, c wsrpc.Caller, deps *projDeps, id wsr
 				if verr := deps.store.VerifyRepo(ctx, did, pub); verr != nil {
 					logger.Error("atproto self-check FAILED: repo head does not verify under the current signing key",
 						"did", did, "handle", id.Handle, "err", verr)
+					logplane.RepoSelfCheckFailed()
 				}
 			}
 		}

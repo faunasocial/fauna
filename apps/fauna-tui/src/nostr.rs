@@ -1105,10 +1105,12 @@ fn linked_elements(st: &NostrState, out: &mut Vec<Element>) {
     // The localized stored-mode label from the ONE shared map, so every app
     // renders this row identically (`nostr.md:139`). An unknown/absent value
     // renders verbatim, which is the shared map's own documented behavior.
+    // `nostr-signing-mode`, shared on every app since 2026-10-16.
     if let Some(mode) = st.signing_mode() {
-        out.push(Element::chrome(crate::wizard::localized(
-            &nostr_key_source_label(mode),
-        )));
+        out.push(Element::label(
+            ids::NOSTR_SIGNING_MODE,
+            crate::wizard::localized(&nostr_key_source_label(mode)),
+        ));
     }
     out.push(Element::gesture_button(
         ids::NOSTR_UNLINK_BUTTON,
@@ -1533,6 +1535,29 @@ mod tests {
         );
     }
 
+    /// A linked account's signing mode is `nostr-signing-mode`, painted from
+    /// the shared label map — never the raw stored value (`nostr.md`
+    /// § Signing-mode display).
+    #[test]
+    fn a_linked_account_tags_its_signing_mode() {
+        let mut app = nostr_app();
+        app.nostr.registered = true;
+        app.nostr.status = Some(status(true, Some("imported"), vec![]));
+        let label = elements(&app)
+            .into_iter()
+            .find(|e| e.id == ids::NOSTR_SIGNING_MODE)
+            .expect("a linked account shows its signing mode")
+            .text;
+        assert_eq!(
+            label,
+            crate::wizard::localized(&nostr_key_source_label("imported"))
+        );
+        assert_ne!(label, "imported");
+
+        app.nostr.status = Some(status(false, None, vec![]));
+        assert_eq!(count_id(&app, ids::NOSTR_SIGNING_MODE), 0);
+    }
+
     /// An unregistered bridge (a nest built without the `nostr` cargo feature)
     /// is the one case that paints the notice instead of the page.
     #[test]
@@ -1912,6 +1937,7 @@ mod tests {
             "nostr-nsec-input",
             "nostr-link-button",
             "nostr-unlink-button",
+            "nostr-signing-mode",
             "nostr-expose-content",
             "nostr-auto-publish",
             "nostr-publish-replies",

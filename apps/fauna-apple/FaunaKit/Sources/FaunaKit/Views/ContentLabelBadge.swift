@@ -15,11 +15,16 @@ import SwiftUI
 /// (off `MessageSnapshot.labels`), and both feed post-cards (off
 /// `PostSummary.labels`) — each site picks the entry via the shared
 /// `primaryContentLabel(labels:)` free fn, never a client-side reduce.
+///
+/// `facts` are named automation reads beyond the label (`/element/attr`), empty
+/// everywhere but the moderation-queue row (`ModerationQueueVM.badgeFacts`).
 public struct ContentLabelBadge: View {
     private let category: String
+    private let facts: [String: String]
 
-    public init(category: String) {
+    public init(category: String, facts: [String: String] = [:]) {
         self.category = category
+        self.facts = facts
     }
 
     public var body: some View {
@@ -27,7 +32,12 @@ public struct ContentLabelBadge: View {
         HStack(spacing: 3) {
             Text(style.icon)
                 .font(.caption2)
-            automationText(Ids.contentLabelBadge, renderLocalizedText(style.label))
+            Text(renderLocalizedText(style.label))
+                .accessibilityIdentifier(Ids.contentLabelBadge)
+                .automationValue(
+                    Ids.contentLabelBadge,
+                    text: { renderLocalizedText(style.label) },
+                    attributes: facts.isEmpty ? nil : { facts })
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(Color(hex: style.accent))
         }

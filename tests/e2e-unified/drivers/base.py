@@ -976,6 +976,18 @@ class PlatformDriver(ABC):
         """Take a screenshot. Returns path to the saved image."""
         ...
 
+    def capture_window(self, name: str, width_dip: int, height_dip: int) -> dict:
+        """Size the app's own window to ``width_dip`` × ``height_dip``
+        device-independent pixels and capture that window alone (never the
+        screen) to a PNG — the store-listing screenshots' path
+        (``tests/store_listing/``). Returns ``{"path", "width", "height",
+        "scale", "settled"}``: the PNG, its pixel size, the display scale, and
+        whether two consecutive renders agreed before the bridge's deadline.
+
+        A desktop app's capability; an app without it raises, and the listing
+        test declares the absence."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement capture_window")
+
     def navigate_to(self, view: str) -> None:
         """Navigate to a view by name. Default: clicks '{view}-tab'."""
         self.click(f"{view}-tab")

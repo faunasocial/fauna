@@ -217,6 +217,7 @@ public struct AdminDnsView: View {
             if let ld {
                 catchAllPicker(ld)
                 catchAllClearedBySuccessionState(ld)
+                dmarcPolicyPicker(ld)
                 roleAddressPickers(ld)
             }
             certStatusBadge(name)
@@ -417,6 +418,40 @@ public struct AdminDnsView: View {
             return nil
         }
         return vm.actors.first { vm.actorLabel($0.actorId) == text }?.actorId
+    }
+
+    /// Per-domain published DMARC policy (`dmarc-reporting.md` § Multi-domain
+    /// deployments). A RAW-VALUE picker: the option list, the RFC 7489 tag each
+    /// option round-trips and the policy it names all come from the shared
+    /// `dmarcPolicyOptions()`; the localized label only paints. `reject`, the
+    /// default, clears the override. The write sets only `dmarcPolicy`.
+    private func dmarcPolicyPicker(_ d: LocalDomainView) -> some View {
+        let options = dmarcPolicyOptions()
+        return Picker(L.admin.dns.dmarcPolicyLabel, selection: Binding(
+            get: { d.dmarcPolicy },
+            set: { policy in Task { await vm.setDmarcPolicy(domain: d.domain, policy: policy) } }
+        )) {
+            ForEach(options, id: \.value) { option in
+                Text(renderLocalizedText(option.label)).tag(option.policy)
+            }
+        }
+        .pickerStyle(.menu)
+        .disabled(vm.isBusy)
+        .accessibilityIdentifier(Ids.adminDnsDomainDmarcPolicySelect)
+        .automationSelect(
+            Ids.adminDnsDomainDmarcPolicySelect,
+            // The RFC 7489 tag, not the localized label (the action layer's
+            // `dmarc_policy_selected` get_text and `set_dmarc_policy` select).
+            value: {
+                let live = vm.localDomain(d.domain)?.dmarcPolicy ?? d.dmarcPolicy
+                return options.first { $0.policy == live }?.value ?? ""
+            },
+            isEnabled: { !vm.isBusy }
+        ) { tag in
+            guard let policy = options.first(where: { $0.value == tag })?.policy else { return }
+            Task { await vm.setDmarcPolicy(domain: d.domain, policy: policy) }
+        }
+        .faunaGate("fauna.bridges.update_local_domain_config")
     }
 
     private func roleAddressPickers(_ d: LocalDomainView) -> some View {

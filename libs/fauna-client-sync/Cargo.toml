@@ -107,6 +107,10 @@ fauna-credential-store = { path = "../fauna-credential-store" }
 # `SecretStore`, the trait that store's `set` lives on. Already in the desktop
 # graph via fauna-credential-store; named directly so the trait is in scope.
 fauna-client-accounts = { workspace = true }
+# `root::platform_state_base` — the agent's production state base, where the
+# agent's unattended credential file rests; the app resolves the same store
+# over it ([`agent::agent_credential_store`]).
+fauna-account-store = { path = "../fauna-account-store" }
 
 # wasm: forward fauna-protocol's `js` feature (fauna-core's js-sys time
 # backend) so the transitive wasm build resolves. Off on native.

@@ -1,5 +1,7 @@
 package com.fauna.app.ui.screen.settings
 
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -21,10 +23,11 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.fauna.app.R
 import com.fauna.app.ui.util.localized
-import com.fauna.app.ui.viewmodel.FilterPrefill
+import com.fauna.app.ui.viewmodel.FilterForm
 import com.fauna.app.ui.viewmodel.PrivacySettingsVM
 import com.fauna.ffi.FfiEmailFilter
 import com.fauna.ffi.FfiFilterActionInputs
+import com.fauna.ffi.FfiFilterRuleInputs
 import com.fauna.ffi.inboxModeOptions
 import social.fauna.generated.Ids
 
@@ -106,7 +109,7 @@ fun PrivacySettingsContent(
     emailFilterError: String?,
     creatingFilter: Boolean,
     editingFilterId: Long?,
-    editFilterPrefill: FilterPrefill?,
+    editFilterPrefill: FilterForm?,
     isFilterEditable: (FfiEmailFilter) -> Boolean,
     spamThreshold: Float,
     phishingThreshold: Float,
@@ -117,9 +120,9 @@ fun PrivacySettingsContent(
     onBack: () -> Unit,
     onInboxModeChange: (String) -> Unit,
     onDeleteFilter: (Long) -> Unit,
-    onCreateFilter: (name: String, ruleType: String, ruleValue: String, action: FfiFilterActionInputs) -> Unit,
+    onCreateFilter: (FilterForm) -> Unit,
     onEditFilter: (Long) -> Unit,
-    onSaveFilter: (name: String, ruleType: String, ruleValue: String, action: FfiFilterActionInputs) -> Unit,
+    onSaveFilter: (FilterForm) -> Unit,
     onCancelEditFilter: () -> Unit,
     onSpamThresholdChange: (Float) -> Unit,
     onPhishingThresholdChange: (Float) -> Unit,
@@ -430,13 +433,54 @@ fun PrivacySettingsContent(
                     showCreateForm = false
                     onCancelEditFilter()
                 },
-                onCreate = { name, ruleType, ruleValue, action ->
-                    onCreateFilter(name, ruleType, ruleValue, action)
-                },
-                onSave = { name, ruleType, ruleValue, action ->
-                    onSaveFilter(name, ruleType, ruleValue, action)
-                }
+                onCreate = onCreateFilter,
+                onSave = onSaveFilter,
             )
+        }
+    }
+}
+
+/** One labelled text field of the filter form, tagged with its ui.yaml id. */
+@Composable
+private fun FilterField(value: String, onValueChange: (String) -> Unit, label: Int, tag: String) {
+    Spacer(Modifier.height(8.dp))
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        label = { Text(stringResource(label)) },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth().testTag(tag)
+    )
+}
+
+/** One kind dropdown of the filter form (the condition's or the action's). */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun FilterKindDropdown(selected: String, options: List<String>, label: Int, tag: String, onSelect: (String) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { expanded = !expanded },
+        modifier = Modifier.testTag(tag)
+    ) {
+        OutlinedTextField(
+            value = selected,
+            onValueChange = {},
+            readOnly = true,
+            label = { Text(stringResource(label)) },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            modifier = Modifier.menuAnchor().fillMaxWidth()
+        )
+        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            options.forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(option) },
+                    onClick = {
+                        onSelect(option)
+                        expanded = false
+                    }
+                )
+            }
         }
     }
 }
@@ -446,34 +490,37 @@ fun PrivacySettingsContent(
 private fun FilterFormSheet(
     creatingFilter: Boolean,
     editingFilterId: Long?,
-    prefill: FilterPrefill?,
+    prefill: FilterForm?,
     onDismiss: () -> Unit,
-    onCreate: (name: String, ruleType: String, ruleValue: String, action: FfiFilterActionInputs) -> Unit,
-    onSave: (name: String, ruleType: String, ruleValue: String, action: FfiFilterActionInputs) -> Unit,
+    onCreate: (FilterForm) -> Unit,
+    onSave: (FilterForm) -> Unit,
 ) {
-    var name by remember { mutableStateOf(prefill?.name ?: "") }
-    var ruleType by remember { mutableStateOf(prefill?.ruleType ?: "SenderIs") }
-    var ruleValue by remember { mutableStateOf(prefill?.ruleValue ?: "") }
-    // The whole inputs struct is the form state (settings.md § Email filter
-    // create-dialog encoding): the Reject reason rides along on an edit and a
-    // Forward's destination + copy mode sit beside the action tag.
-    var action by remember {
+    // The whole form is one value (settings.md § Email filter create-dialog
+    // encoding): the condition and action inputs the shared encoders read, so
+    // an edit writes back every input it was saved with (the Reject reason
+    // included), plus the rule's order and its `continue` flag.
+    var form by remember {
         mutableStateOf(
-            prefill?.action ?: FfiFilterActionInputs(
-                kind = "Allow", rejectReason = "", forwardAddress = "", keepLocalCopy = true,
+            prefill ?: FilterForm(
+                name = "",
+                rule = FfiFilterRuleInputs(kind = "SenderIs", value = ""),
+                action = FfiFilterActionInputs(
+                    kind = "Allow", rejectReason = "", forwardAddress = "", keepLocalCopy = true,
+                ),
+                priority = "",
+                continueOnMatch = false,
             )
         )
     }
+    val rule = form.rule
+    val action = form.action
 
-    var ruleTypeExpanded by remember { mutableStateOf(false) }
-    var actionExpanded by remember { mutableStateOf(false) }
-
-    // Dropdown tags are the canonical PascalCase variant names — the shared
-    // encoder (encodeEmailFilterRule / encodeEmailFilterActionInputs) consumes them
-    // directly, so every app emits the same wire shape (settings.md § Email
-    // filter create-dialog encoding: the 5 single-string rules + 3 actions).
-    val ruleTypeOptions = listOf("SenderIs", "SenderDomain", "SubjectContains", "BodyContains", "HeaderExists")
-    val actionOptions = listOf("Allow", "Discard", "Reject", "Forward")
+    // Dropdown tags are the canonical PascalCase variant names the shared
+    // encoders consume (`SUPPORTED_RULE_KINDS` / `SUPPORTED_ACTION_KINDS`).
+    val ruleTypeOptions = listOf(
+        "SenderIs", "SenderDomain", "SubjectContains", "BodyContains", "HeaderExists", "HeaderContains", "SpamScoreAtLeast",
+    )
+    val actionOptions = listOf("Allow", "Discard", "Reject", "Forward", "FileInto", "AddLabel", "AutoReply")
 
     // Dismiss sheet when creation completes
     var wasCreating by remember { mutableStateOf(false) }
@@ -489,125 +536,110 @@ private fun FilterFormSheet(
             modifier = Modifier
                 .padding(horizontal = 24.dp, vertical = 16.dp)
                 .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
         ) {
             Text(
                 if (editingFilterId != null) stringResource(R.string.common_edit)
                 else stringResource(R.string.settings_privacy_page_new_filter),
                 style = MaterialTheme.typography.titleMedium
             )
-            Spacer(Modifier.height(16.dp))
-
-            OutlinedTextField(
-                value = name,
-                onValueChange = { name = it },
-                label = { Text(stringResource(R.string.common_name)) },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth().testTag(Ids.FILTER_NAME_INPUT)
-            )
             Spacer(Modifier.height(8.dp))
-
-            ExposedDropdownMenuBox(
-                expanded = ruleTypeExpanded,
-                onExpandedChange = { ruleTypeExpanded = !ruleTypeExpanded },
-                modifier = Modifier.testTag(Ids.FILTER_RULE_TYPE)
-            ) {
-                OutlinedTextField(
-                    value = ruleType,
-                    onValueChange = {},
-                    readOnly = true,
-                    label = { Text(stringResource(R.string.settings_rule_type)) },
-                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = ruleTypeExpanded) },
-                    modifier = Modifier.menuAnchor().fillMaxWidth()
+            FilterField(form.name, { form = form.copy(name = it) }, R.string.common_name, Ids.FILTER_NAME_INPUT)
+            Spacer(Modifier.height(8.dp))
+            FilterKindDropdown(rule.kind, ruleTypeOptions, R.string.settings_rule_type, Ids.FILTER_RULE_TYPE) {
+                form = form.copy(rule = rule.copy(kind = it))
+            }
+            FilterField(rule.value, { form = form.copy(rule = rule.copy(value = it)) }, R.string.settings_rule_value, Ids.FILTER_RULE_VALUE)
+            // The two conditions with a second input (email-filters.md § Email
+            // filter rules): a header's value beside its name, and a spam score.
+            when (rule.kind) {
+                "HeaderContains" -> FilterField(
+                    rule.headerValue, { form = form.copy(rule = rule.copy(headerValue = it)) },
+                    R.string.settings_privacy_page_header_value, Ids.FILTER_RULE_HEADER_VALUE,
                 )
-                ExposedDropdownMenu(
-                    expanded = ruleTypeExpanded,
-                    onDismissRequest = { ruleTypeExpanded = false }
-                ) {
-                    ruleTypeOptions.forEach { option ->
-                        DropdownMenuItem(
-                            text = { Text(option) },
-                            onClick = {
-                                ruleType = option
-                                ruleTypeExpanded = false
-                            }
-                        )
-                    }
-                }
+                "SpamScoreAtLeast" -> FilterField(
+                    rule.spamScore, { form = form.copy(rule = rule.copy(spamScore = it)) },
+                    R.string.settings_privacy_page_spam_score, Ids.FILTER_RULE_SPAM_SCORE,
+                )
             }
             Spacer(Modifier.height(8.dp))
-
-            OutlinedTextField(
-                value = ruleValue,
-                onValueChange = { ruleValue = it },
-                label = { Text(stringResource(R.string.settings_rule_value)) },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth().testTag(Ids.FILTER_RULE_VALUE)
-            )
-            Spacer(Modifier.height(8.dp))
-
-            ExposedDropdownMenuBox(
-                expanded = actionExpanded,
-                onExpandedChange = { actionExpanded = !actionExpanded },
-                modifier = Modifier.testTag(Ids.FILTER_ACTION_SELECT)
-            ) {
-                OutlinedTextField(
-                    value = action.kind,
-                    onValueChange = {},
-                    readOnly = true,
-                    label = { Text(stringResource(R.string.settings_privacy_page_action)) },
-                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = actionExpanded) },
-                    modifier = Modifier.menuAnchor().fillMaxWidth()
-                )
-                ExposedDropdownMenu(
-                    expanded = actionExpanded,
-                    onDismissRequest = { actionExpanded = false }
-                ) {
-                    actionOptions.forEach { option ->
-                        DropdownMenuItem(
-                            text = { Text(option) },
-                            onClick = {
-                                action = action.copy(kind = option)
-                                actionExpanded = false
-                            }
-                        )
-                    }
-                }
+            FilterKindDropdown(action.kind, actionOptions, R.string.settings_privacy_page_action, Ids.FILTER_ACTION_SELECT) {
+                form = form.copy(action = action.copy(kind = it))
             }
-            if (action.kind == "Forward") {
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = action.forwardAddress,
-                    onValueChange = { action = action.copy(forwardAddress = it) },
-                    label = { Text(stringResource(R.string.settings_privacy_page_forward_address)) },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth().testTag(Ids.FILTER_FORWARD_ADDRESS)
-                )
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Checkbox(
-                        checked = action.keepLocalCopy,
-                        onCheckedChange = { action = action.copy(keepLocalCopy = it) },
-                        modifier = Modifier.testTag(Ids.FILTER_KEEP_LOCAL_COPY)
+            // Each action's own inputs, present only while it is selected.
+            when (action.kind) {
+                "Forward" -> {
+                    FilterField(
+                        action.forwardAddress, { form = form.copy(action = action.copy(forwardAddress = it)) },
+                        R.string.settings_privacy_page_forward_address, Ids.FILTER_FORWARD_ADDRESS,
                     )
-                    Text(stringResource(R.string.settings_privacy_page_keep_local_copy))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Checkbox(
+                            checked = action.keepLocalCopy,
+                            onCheckedChange = { form = form.copy(action = action.copy(keepLocalCopy = it)) },
+                            modifier = Modifier.testTag(Ids.FILTER_KEEP_LOCAL_COPY)
+                        )
+                        Text(stringResource(R.string.settings_privacy_page_keep_local_copy))
+                    }
                 }
+                "FileInto" -> FilterField(
+                    action.fileIntoMailbox, { form = form.copy(action = action.copy(fileIntoMailbox = it)) },
+                    R.string.settings_privacy_page_file_into_mailbox, Ids.FILTER_FILE_INTO_MAILBOX,
+                )
+                "AddLabel" -> FilterField(
+                    action.label, { form = form.copy(action = action.copy(label = it)) },
+                    R.string.settings_privacy_page_add_label, Ids.FILTER_ADD_LABEL,
+                )
+                "AutoReply" -> {
+                    FilterField(
+                        action.autoReplySubject, { form = form.copy(action = action.copy(autoReplySubject = it)) },
+                        R.string.settings_privacy_page_auto_reply_subject, Ids.FILTER_AUTO_REPLY_SUBJECT,
+                    )
+                    FilterField(
+                        action.autoReplyBody, { form = form.copy(action = action.copy(autoReplyBody = it)) },
+                        R.string.settings_privacy_page_auto_reply_body, Ids.FILTER_AUTO_REPLY_BODY,
+                    )
+                    FilterField(
+                        action.autoReplyIntervalHours,
+                        { form = form.copy(action = action.copy(autoReplyIntervalHours = it)) },
+                        R.string.settings_privacy_page_auto_reply_interval_hours, Ids.FILTER_AUTO_REPLY_INTERVAL_HOURS,
+                    )
+                }
+            }
+            // The rule's place in the order and its `continue` flag: rules run
+            // in order, the first match wins unless it is marked to keep going.
+            FilterField(
+                form.priority, { form = form.copy(priority = it) },
+                R.string.settings_privacy_page_priority, Ids.FILTER_PRIORITY_INPUT,
+            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Checkbox(
+                    checked = form.continueOnMatch,
+                    onCheckedChange = { form = form.copy(continueOnMatch = it) },
+                    modifier = Modifier.testTag(Ids.FILTER_CONTINUE_TOGGLE)
+                )
+                Text(stringResource(R.string.settings_privacy_page_continue_matching))
             }
             Spacer(Modifier.height(16.dp))
 
             if (editingFilterId == null) {
                 Button(
-                    onClick = { onCreate(name, ruleType, ruleValue, action) },
-                    enabled = !creatingFilter && name.isNotBlank() && ruleValue.isNotBlank(),
+                    onClick = { onCreate(form) },
+                    enabled = !creatingFilter && form.name.isNotBlank(),
                     modifier = Modifier.fillMaxWidth().testTag(Ids.CREATE_FILTER)
                 ) {
                     Text(stringResource(R.string.common_create))
                 }
             } else {
                 Button(
-                    onClick = { onSave(name, ruleType, ruleValue, action) },
-                    enabled = !creatingFilter && name.isNotBlank() && ruleValue.isNotBlank(),
+                    onClick = { onSave(form) },
+                    enabled = !creatingFilter && form.name.isNotBlank(),
                     modifier = Modifier.fillMaxWidth().testTag(Ids.SAVE_FILTER)
                 ) {
                     Text(stringResource(R.string.common_save))

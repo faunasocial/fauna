@@ -12,6 +12,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import com.fauna.app.ui.util.resolveLocalized
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -38,7 +39,9 @@ import social.fauna.generated.FieldType
 import social.fauna.generated.PROVIDERS
 import social.fauna.generated.ProviderMeta
 import uniffi.fauna_client_dns.CertHealthState
+import uniffi.fauna_client_dns.CertIssuanceErrorRow
 import uniffi.fauna_client_dns.CertStatusRow
+import uniffi.fauna_client_dns.certIssuanceErrorLine
 import uniffi.fauna_client_dns.CredentialSummary
 import uniffi.fauna_client_dns.DelegationView
 import uniffi.fauna_client_dns.DnsCredentialField
@@ -53,6 +56,8 @@ import uniffi.fauna_client_mail_settings.PrimaryDomainRenameView
 import uniffi.fauna_client_mail_settings.DomainDmarcPolicy
 import uniffi.fauna_client_mail_settings.RoleAddressKind
 import uniffi.fauna_client_mail_settings.dmarcPolicyOptions
+import uniffi.fauna_client_mail_settings.removeConfirmBody
+import uniffi.fauna_client_mail_settings.removeConfirmTitle
 import uniffi.fauna_client_mail_settings.roleAddressOptions
 import social.fauna.generated.Ids
 
@@ -82,11 +87,13 @@ fun AdminDnsScreen(
     val activeRename by vm.activeRename.collectAsState()
     val renameAvailable by vm.renameAvailable.collectAsState()
     val addingFirstDomain by vm.addingFirstDomain.collectAsState()
+    val removeConfirmDomain by vm.removeConfirmDomain.collectAsState()
     val dnsDomains by vm.dnsDomains.collectAsState()
     val credentials by vm.credentials.collectAsState()
     val actors by vm.actors.collectAsState()
     val manageAll by vm.manageAll.collectAsState()
     val certStatuses by vm.certStatuses.collectAsState()
+    val certIssuanceErrors by vm.certIssuanceErrors.collectAsState()
     val delegations by vm.delegations.collectAsState()
     val pendingCert by vm.pendingCert.collectAsState()
     val working by vm.working.collectAsState()
@@ -110,11 +117,13 @@ fun AdminDnsScreen(
         activeRename = activeRename,
         renameAvailable = renameAvailable,
         addingFirstDomain = addingFirstDomain,
+        removeConfirmDomain = removeConfirmDomain,
         dnsDomains = dnsDomains,
         credentials = credentials,
         actors = actors,
         manageAll = manageAll,
         certStatuses = certStatuses,
+        certIssuanceErrors = certIssuanceErrors,
         delegations = delegations,
         pendingCert = pendingCert,
         working = working,
@@ -122,7 +131,9 @@ fun AdminDnsScreen(
         onBack = { navController.exitAdminToPrimary() },
         onRefresh = vm::refresh,
         onAddDomain = vm::addDomain,
-        onRemoveDomain = vm::removeDomain,
+        onArmRemoveDomain = vm::armRemoveDomain,
+        onConfirmRemoveDomain = vm::confirmRemoveDomain,
+        onCancelRemoveDomain = vm::cancelRemoveDomain,
         onRestoreDomain = vm::restoreDomain,
         onStartRename = vm::startPrimaryRename,
         onCompleteRename = vm::completePrimaryRename,
@@ -153,6 +164,7 @@ fun AdminDnsContent(
     activeRename: PrimaryDomainRenameView?,
     renameAvailable: Boolean,
     addingFirstDomain: Boolean,
+    removeConfirmDomain: String? = null,
     dnsDomains: List<DomainView>,
     credentials: List<CredentialSummary>,
     actors: List<ActorOption>,
@@ -162,10 +174,13 @@ fun AdminDnsContent(
     pendingCert: PendingCertIssue?,
     working: Boolean,
     error: String?,
+    certIssuanceErrors: List<CertIssuanceErrorRow> = emptyList(),
     onBack: () -> Unit,
     onRefresh: () -> Unit,
     onAddDomain: (String) -> Unit,
-    onRemoveDomain: (String) -> Unit,
+    onArmRemoveDomain: (String) -> Unit,
+    onConfirmRemoveDomain: () -> Unit = {},
+    onCancelRemoveDomain: () -> Unit = {},
     onRestoreDomain: (String) -> Unit,
     onStartRename: (ByteArray, Long?) -> Unit,
     onCompleteRename: (ByteArray, Boolean) -> Unit,
@@ -292,6 +307,18 @@ fun AdminDnsContent(
                 )
             }
 
+            // The remove-confirm dialog, painted only while the shared machine holds
+            // a domain armed (`remove_confirm_domain`; mail-multidomain.md §
+            // Removing a local domain). Only its confirm removes.
+            if (removeConfirmDomain != null) {
+                RemoveConfirmDialog(
+                    domain = removeConfirmDomain,
+                    working = working,
+                    onConfirm = onConfirmRemoveDomain,
+                    onCancel = onCancelRemoveDomain,
+                )
+            }
+
             AddDomainForm(
                 working = working,
                 addingFirstDomain = addingFirstDomain,
@@ -305,6 +332,19 @@ fun AdminDnsContent(
             )
 
             HorizontalDivider()
+
+            // Why the nest's own certificate requests are failing: deployment-level,
+            // once, above the domain rows (tls-certificates.md § Keeping the cert
+            // alive). The wording is the shared `certIssuanceErrorLine`; the date is
+            // rendered like the cert badge's expiry; plain `Text`, never markup.
+            certIssuanceErrors.forEach { e ->
+                Text(
+                    certIssuanceErrorLine(e, formatCertExpiry(e.failedAtUnix)),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.tertiary,
+                    modifier = Modifier.testTag(Ids.ADMIN_DNS_CERT_ISSUANCE_ERROR),
+                )
+            }
 
             // ── Active domains: merge ld (name/primary/catch-all) + dns (records/mode) ──
             if (activeDomains.isEmpty()) {
@@ -347,7 +387,7 @@ fun AdminDnsContent(
                             renameTarget = domain.domain
                             renameSheetOpen = true
                         },
-                        onRemove = { onRemoveDomain(domain.domain) },
+                        onRemove = { onArmRemoveDomain(domain.domain) },
                         onSetCatchAll = { onSetCatchAll(domain.domain, it) },
                         onSetRoleAddress = { role, hex -> onSetRoleAddress(domain.domain, role, hex) },
                         onSetDmarcPolicy = { onSetDmarcPolicy(domain.domain, it) },
@@ -409,6 +449,50 @@ fun AdminDnsContent(
     }
 }
 
+// ── Remove-confirm dialog ────────────────────────────────────────────────────
+
+@Composable
+private fun RemoveConfirmDialog(
+    domain: String,
+    working: Boolean,
+    onConfirm: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    val ctx = LocalContext.current
+    // Only the confirm reaches the nest (`fauna.bridges.remove_local_domain`);
+    // the row's press and the cancel are the dialog's buffer and stay live with
+    // no nest.
+    val confirmGate = faunaGate("fauna.bridges.remove_local_domain", enabled = !working)
+    Card(modifier = Modifier.fillMaxWidth().testTag(Ids.ADMIN_DNS_DOMAIN_REMOVE_CONFIRM_MODAL)) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = resolveLocalized(ctx, removeConfirmTitle(domain)) ?: domain,
+                style = MaterialTheme.typography.titleSmall,
+            )
+            Text(
+                text = resolveLocalized(ctx, removeConfirmBody(domain)) ?: domain,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = onConfirm,
+                    enabled = confirmGate.enabled,
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                    modifier = Modifier.testTag(Ids.ADMIN_DNS_DOMAIN_REMOVE_CONFIRM_BUTTON),
+                ) { Text(stringResource(R.string.admin_dns_remove_confirm)) }
+                OutlinedButton(
+                    onClick = onCancel,
+                    modifier = Modifier.testTag(Ids.ADMIN_DNS_DOMAIN_REMOVE_CANCEL_BUTTON),
+                ) { Text(stringResource(R.string.common_cancel)) }
+            }
+            DisabledControlReasonText(confirmGate.reason)
+        }
+    }
+}
+
 // ── Add-domain form ──────────────────────────────────────────────────────────
 
 @Composable
@@ -444,11 +528,12 @@ private fun AddDomainForm(
             )
             // A domainless nest's first add is a one-way door — say so before the
             // submit that makes it irreversible (`deployment-home-with-public-
-            // relay.md` § MUA reach). No testTag: untagged chrome, no ui.yaml id.
+            // relay.md` § MUA reach).
             if (addingFirstDomain) {
                 Text(
                     text = stringResource(R.string.admin_dns_add_domain_primary_warning),
                     color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.testTag(Ids.ADMIN_DNS_ADD_DOMAIN_PRIMARY_WARNING),
                 )
             }
             // Only the submit reaches the nest (`fauna.bridges.add_local_domain`);
@@ -681,15 +766,6 @@ private fun DomainRow(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            // The primary domain cannot be removed (mail-multidomain.md § Additional) —
-            // that page predicate is handed to the gate rather than re-tested beside
-            // it, so a reconnect restores exactly it and never more. Hoisted out of
-            // the header Row so the reason renders beneath the row (§ R11 (account-data-plane.md § The ratified decisions)) instead of
-            // as another horizontal item.
-            val removeGate = faunaGate(
-                "fauna.bridges.remove_local_domain",
-                enabled = !working && !domain.isPrimary,
-            )
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -708,13 +784,14 @@ private fun DomainRow(
                     )
                 }
                 OutlinedButton(
+                    // Only opens the confirm (no nest); the primary cannot be
+                    // removed (mail-multidomain.md § Additional).
                     onClick = onRemove,
-                    enabled = removeGate.enabled,
+                    enabled = !working && !domain.isPrimary,
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
                     modifier = Modifier.testTag(Ids.ADMIN_DNS_DOMAIN_REMOVE_BUTTON),
                 ) { Text(stringResource(R.string.admin_dns_remove)) }
             }
-            DisabledControlReasonText(removeGate.reason)
 
             // Primary-domain rename affordances (mail-primary-domain-rename.md
             // § UX surface). Primary row: "Rename primary" (disabled until a

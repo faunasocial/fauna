@@ -86,8 +86,8 @@ pub fn qualify_reclaim_handle(handle: String, domain: Option<String>, nest_url: 
 }
 
 /// Extract the bare host (no scheme / port / userinfo) from a nest base URL —
-/// e.g. `https://example.com` → `example.com`, `http://localhost:3000` → `localhost`,
-/// bare `example.com` → `example.com`. Returns `None` for an empty/hostless URL.
+/// e.g. `https://example.net` → `example.net`, `http://localhost:3000` → `localhost`,
+/// bare `example.net` → `example.net`. Returns `None` for an empty/hostless URL.
 /// Plain string parsing (the one dependency, `fauna_core::web`, is WASM-safe)
 /// so the crate stays wasm-safe.
 /// `pub(crate)`: also keys the claim-URI first-contact identity hold
@@ -124,8 +124,9 @@ pub(crate) fn nest_host(url: &str) -> Option<String> {
 ///
 /// Returns `None` (— i.e. "no TLD, hide the `.{tld}` message") when the handle
 /// has no `@`, an empty local part or empty domain (`@x` / `x@`), or a domain
-/// with no `.` (still being typed, or a bare hostname). The domain extraction
-/// mirrors `machine::parse_handle_domain`; the TLD is the substring after the
+/// with no `.` (still being typed, or a bare hostname), or a second `@` (no
+/// domain at all). The domain comes from `machine::parse_handle_domain`, the
+/// one canonical handle parser the dialled `nest_url` uses too; the TLD is the substring after the
 /// domain's last `.`. This is the canonical shape: web + iOS already matched it,
 /// and macOS (previously returned the whole domain on a dot-less domain) is now
 /// migrated onto this helper via the UniFFI export below. The web (already
@@ -133,11 +134,7 @@ pub(crate) fn nest_host(url: &str) -> Option<String> {
 /// handle leaks a local-part dot — bug-fix) legs are the cross-area remainder.
 #[cfg_attr(feature = "uniffi", uniffi::export)]
 pub fn handle_tld(handle: String) -> Option<String> {
-    let at = handle.find('@')?;
-    if at == 0 || at == handle.len() - 1 {
-        return None;
-    }
-    let domain = &handle[at + 1..];
+    let domain = crate::machine::parse_handle_domain(&handle)?;
     let dot = domain.rfind('.')?;
     let tld = &domain[dot + 1..];
     if tld.is_empty() {
@@ -242,18 +239,18 @@ mod tests {
         assert_eq!(
             qualify_reclaim_handle(
                 String::new(),
-                Some("example.com".into()),
-                "https://example.com".into()
+                Some("example.net".into()),
+                "https://example.net".into()
             ),
             ""
         );
         assert_eq!(
             qualify_reclaim_handle(
-                "alice@example.com".into(),
+                "alice@example.net".into(),
                 Some("other.example".into()),
                 "https://x".into()
             ),
-            "alice@example.com"
+            "alice@example.net"
         );
     }
 
@@ -264,7 +261,7 @@ mod tests {
             qualify_reclaim_handle(
                 "alice".into(),
                 Some("custom.example".into()),
-                "https://example.com".into()
+                "https://example.net".into()
             ),
             "alice@custom.example"
         );
@@ -273,9 +270,9 @@ mod tests {
             qualify_reclaim_handle(
                 "alice".into(),
                 Some(String::new()),
-                "https://example.com".into()
+                "https://example.net".into()
             ),
-            "alice@example.com"
+            "alice@example.net"
         );
     }
 
@@ -287,16 +284,16 @@ mod tests {
             "bob@localhost"
         );
         assert_eq!(
-            qualify_reclaim_handle("bob".into(), None, "example.com".into()),
-            "bob@example.com"
+            qualify_reclaim_handle("bob".into(), None, "example.net".into()),
+            "bob@example.net"
         );
         assert_eq!(
             qualify_reclaim_handle(
                 "bob".into(),
                 None,
-                "https://user@example.com:8443/path".into()
+                "https://user@example.net:8443/path".into()
             ),
-            "bob@example.com"
+            "bob@example.net"
         );
         // Hostless URL → can't qualify → return the bare localpart (safety net covers it).
         assert_eq!(
@@ -308,17 +305,17 @@ mod tests {
     #[test]
     fn nest_host_variants() {
         assert_eq!(
-            nest_host("https://example.com").as_deref(),
-            Some("example.com")
+            nest_host("https://example.net").as_deref(),
+            Some("example.net")
         );
         assert_eq!(
             nest_host("http://localhost:3000").as_deref(),
             Some("localhost")
         );
-        assert_eq!(nest_host("example.com").as_deref(), Some("example.com"));
+        assert_eq!(nest_host("example.net").as_deref(), Some("example.net"));
         assert_eq!(
-            nest_host("https://user@example.com:8443/x").as_deref(),
-            Some("example.com")
+            nest_host("https://user@example.net:8443/x").as_deref(),
+            Some("example.net")
         );
         assert_eq!(nest_host(""), None);
         assert_eq!(nest_host("https://"), None);
@@ -376,5 +373,13 @@ mod tests {
             Some("com")
         );
         assert_eq!(handle_tld("alice.b@example".into()), None);
+    }
+
+    #[test]
+    fn handle_tld_none_for_second_at() {
+        // A two-`@` handle has no domain (`parse_handle_domain` rejects it, so
+        // the wizard never dials it); the TLD hint must not read one either —
+        // it used to report `test` off the domain after the FIRST `@`.
+        assert_eq!(handle_tld("a@b@nest.test".into()), None);
     }
 }

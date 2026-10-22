@@ -12,7 +12,7 @@ debounced ``fauna.drafts.put``, and the next launch restores it via
 **All seven apps now.** tui is the lead app and landed first
 (``apps/fauna-tui/src/feed/drafts.rs``); linux landed second
 (``apps/fauna-linux/src/feed/drafts.rs``, 2026-08-19); android third
-(``FeedManagerHost.kt`` + ``ApiClient.kt``, 2026-08-20); web fourth (``$lib/feed.ts`` + ``routes/feed/+page.svelte``,
+(``FeedManagerHost.kt`` + ``ApiClient.kt``, 2026-08-20); web fourth (``#lib/feed.ts`` + ``routes/feed/+page.svelte``,
 2026-08-21); macos fifth (shared FaunaKit
 ``FeedVM.configure``, 2026-08-25) — the same
 ``FeedVM`` change covers iOS too, and iOS is e2e-proven from this pass on too

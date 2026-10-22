@@ -25,7 +25,6 @@ pub struct UpdateConfig {
     pub check_interval: Duration,
     pub auto_apply: bool,
     pub install_dir: PathBuf,
-    pub github_token: Option<String>,
 }
 
 /// Result of an update check or apply operation.

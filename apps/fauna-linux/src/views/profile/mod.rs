@@ -3,25 +3,30 @@
 //! top-level `profile-tab`) **or** another actor's (reached by tap-through —
 //! e.g. a contact row), branching on `is_self` (the `target` argument). Both
 //! show an identity header (`user-header`) + a tab strip (`profile-posts-tab`
-//! landmark · `profile-tiers-tab`). The Tiers tab hosts the subscriptions
+//! · `profile-tiers-tab`). The Posts tab lists the viewed actor's posts as the
+//! feed paints them, over an author window of the feed manager (`posts`).
+//! The Tiers tab hosts the subscriptions
 //! Slice-A author management (`tiers`) on the SELF profile, or the Slice-B
 //! subscriber-browse offers section (`offers`) on another's.
 //!
 //! The header renders the actor's **display_name** when they have published a
-//! `Profile` (`fauna.profile.get` → `fauna_client_profile::decode_profile`),
+//! `Profile` (`fauna.profile.get` → `fauna_client_profile::decode_profile_display`),
 //! falling back to the **handle** (account cache, SELF only) then the actor_id.
 //! On another's profile the name goes through the one shared resolver over the
 //! viewer's own nickname for them (`value-formatting.md` § Peer display label):
 //! a nickname heads the page and the public name it replaced stays beneath it
 //! (`profile-public-name`), and the **private section** ([`private`]) edits
 //! that nickname, the notes and the labels.
-//! The avatar is still a placeholder (avatar/banner are deferred). The primary
+//! The stored avatar and banner (`profile-avatar` / `profile-banner`) paint
+//! once fetched from the nest that served the profile ([`HeaderPictures`]);
+//! the generic avatar icon stands in while the profile names none. The primary
 //! relationship action is `profile-edit-button` (own profile → the text-only
 //! edit form `edit`, publishing via `fauna.profile.set`) or
 //! `profile-follow-button` (another's → subscribe to the free "followers" tier).
 
 pub mod edit;
 pub mod offers;
+mod posts;
 pub mod private;
 pub mod tiers;
 
@@ -31,7 +36,7 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 
-use fauna_client_profile::{ProfileClient, decode_profile};
+use fauna_client_profile::{ProfileClient, decode_profile_display};
 use fauna_client_subscriptions::SubscriptionsClient;
 use fauna_conversations::TypedAddress;
 use fauna_core::identity::ActorId;
@@ -45,6 +50,86 @@ use crate::i18n::strings::profile as p;
 use crate::testid::set_test_id;
 use crate::views::contacts::guardian_ask::GuardianAsk;
 
+/// Open a Profile page: `(target, home)` — `target` is `None` for the viewer's
+/// own profile (SELF) or `Some(actor hex)` for another's; `home` is the routing
+/// hint the open carries (where the viewer met the actor — never identity). The
+/// one opener every tap-through and the state-protocol nav patch resolve to.
+pub type OpenProfile = Rc<dyn Fn(Option<String>, Option<String>)>;
+
+thread_local! {
+    /// The live main window's opener, registered by `app.rs` when it builds the
+    /// window ([`register_opener`]). The doors that live deep in other pages —
+    /// the Find User result, a post's author line — reach the Profile page
+    /// through it instead of each threading a callback down their builders.
+    static OPENER: RefCell<Option<OpenProfile>> = const { RefCell::new(None) };
+}
+
+/// Point the doors at the main window's Profile opener (the window rebuilt on
+/// every sign-in registers its own).
+pub fn register_opener(open: OpenProfile) {
+    OPENER.with(|slot| *slot.borrow_mut() = Some(open));
+}
+
+/// Open another actor's Profile with the home the viewer met them on carried
+/// (`profile.md` § Layout & flow → *Reaching another actor's profile with their
+/// home carried*): an id naming the viewer opens SELF through the shared
+/// `fauna_core::format::profile_nav_target`, never their own profile in OTHER
+/// shape. Answers `false` when no main window has registered an opener.
+pub fn open_actor(client: &FaunaClient, actor_id: &str, home: Option<String>) -> bool {
+    let Some(open) = OPENER.with(|slot| slot.borrow().clone()) else {
+        return false;
+    };
+    let me = client.actor_id();
+    open(
+        fauna_core::format::profile_nav_target(actor_id, me.as_deref()),
+        home,
+    );
+    true
+}
+
+/// The page's actor-home slot: the OTHER actor's home nest URL (`None` = this
+/// nest) that the follow, the knock and the remote header read all read
+/// (`profile.md` § Where logic lives → *The actor's home*).
+type HomeSlot = Rc<RefCell<Option<String>>>;
+
+/// What the open page reports as `data.profile` (ui.yaml `profile.is_self`,
+/// `profile.actor_id`, `profile.home_nest_url`).
+struct PageReport {
+    is_self: bool,
+    actor_id: String,
+    actor_home: HomeSlot,
+}
+
+thread_local! {
+    /// The most recently built Profile page — the page is rebuilt per target, so
+    /// the newest build is the one on screen (or about to be).
+    static PAGE_REPORT: RefCell<Option<PageReport>> = const { RefCell::new(None) };
+}
+
+fn report_page(is_self: bool, actor_id: &str, actor_home: &HomeSlot) {
+    PAGE_REPORT.with(|report| {
+        *report.borrow_mut() = Some(PageReport {
+            is_self,
+            actor_id: actor_id.to_string(),
+            actor_home: Rc::clone(actor_home),
+        });
+    });
+}
+
+/// The state-protocol read of the Profile page: `{is_self, actor_id,
+/// home_nest_url}` (`home_nest_url` is the actor-home slot, `null` = this
+/// nest), `null` before any page was built.
+pub fn state_json() -> serde_json::Value {
+    PAGE_REPORT.with(|report| match report.borrow().as_ref() {
+        Some(r) => serde_json::json!({
+            "is_self": r.is_self,
+            "actor_id": r.actor_id,
+            "home_nest_url": r.actor_home.borrow().clone(),
+        }),
+        None => serde_json::Value::Null,
+    })
+}
+
 /// Handles the app retains. The page refreshes itself on each mutation
 /// (observer-free, `feed.md` § Architectural rules); `refresh_tiers` additionally
 /// lets `app.rs` re-read the Tiers-tab sections when the profile page becomes
@@ -52,6 +137,10 @@ use crate::views::contacts::guardian_ask::GuardianAsk;
 /// subscribe request that arrived while the author was elsewhere shows up.
 pub struct ProfileHandles {
     pub refresh_tiers: Rc<dyn Fn()>,
+    /// Open the Posts tab afresh — a new author window and its first page
+    /// (`profile.md` § The Posts tab: every open reads, no client cache).
+    /// `app.rs` runs it when the page becomes visible, beside `refresh_tiers`.
+    pub open_posts: Rc<dyn Fn()>,
 }
 
 /// Build the Profile page. `target` is the viewed actor: `None` = the viewer's
@@ -61,11 +150,17 @@ pub struct ProfileHandles {
 /// `profile-edit-button` (self) or `profile-follow-button` (other), and the
 /// Tiers tab hosts the SELF author-management sections (`tiers`) or the OTHER
 /// subscriber-browse offers section (`offers`). The page is rebuilt per target
-/// by `app.rs`'s `open_profile`.
+/// by `app.rs`'s `open_profile`. `carried_home` is the open target's routing
+/// hint — where the viewer met the actor (`profile.md` § Layout & flow →
+/// *Reaching another actor's profile with their home carried*); it only seeds
+/// the page's actor-home slot ([`HomeSlot`]). `open_post` opens the feed page's
+/// `post_detail` for a post id — the door a Posts-tab card activation uses.
 pub fn build_profile_view(
     client: &Rc<FaunaClient>,
     target: Option<String>,
+    carried_home: Option<String>,
     on_open_conversations: Rc<dyn Fn()>,
+    open_post: Rc<dyn Fn(String)>,
 ) -> (gtk::Box, ProfileHandles) {
     let is_self = target.is_none();
     let actor_id = target.unwrap_or_else(|| client.actor_id().unwrap_or_default());
@@ -76,7 +171,22 @@ pub fn build_profile_view(
         .build();
     set_test_id(&outer, ids::PROFILE_VIEW);
 
-    let (header, header_widgets) = build_header(client, &actor_id, is_self);
+    // OTHER: the one actor-home slot the follow, the knock and the remote
+    // header read all read (`profile.md` § Where logic lives → *The actor's
+    // home*), seeded at once from the carried hint through the shared rule so a
+    // follow pressed before the header read answers already routes. SELF has
+    // no other actor's home, so a hint there is dropped.
+    let carried_home = carried_home.filter(|_| !is_self);
+    let actor_home: HomeSlot = Rc::new(RefCell::new(actor_home_for(
+        carried_home.as_deref(),
+        &actor_id,
+        None,
+        client.node_url(),
+    )));
+    report_page(is_self, &actor_id, &actor_home);
+
+    let (header, header_widgets) = build_header(client, &actor_id, is_self, &actor_home);
+    outer.append(&header_widgets.pictures.banner);
     outer.append(&header);
 
     // Page-level error-message (Rule 2), shared into the Tiers tab so its
@@ -88,13 +198,6 @@ pub fn build_profile_view(
     error_label.set_wrap(true);
     error_label.set_margin_start(12);
     set_test_id(&error_label, ids::ERROR_MESSAGE);
-
-    // OTHER: where `profile-request-contact-button`'s knock goes — the shared
-    // `fauna_client_profile::knock_recipient_nest_url` over the profile this
-    // open's header read already fetched (`profile.md` § Where logic lives →
-    // *Request contact routing*). `None` until that read lands, and whenever
-    // the profile gives no better answer: the knock then goes to this nest.
-    let knock_route: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
     // Secondary relationship actions — OTHER profile only (`profile.md` § Layout
     // & flow: "on another's profile only, secondary relationship actions"):
@@ -195,7 +298,7 @@ pub fn build_profile_view(
             &request_btn,
             &ask,
             &error_label,
-            &knock_route,
+            &actor_home,
         );
         actions.append(&request_btn);
         actions.append(ask.widget());
@@ -258,10 +361,11 @@ pub fn build_profile_view(
     let refresh_header: Rc<dyn Fn()> = {
         let client = Rc::clone(client);
         let names = header_widgets.names.clone();
+        let pictures = header_widgets.pictures.clone();
         let actor_id = actor_id.clone();
-        // SELF has no one to knock, so no route slot to fill.
-        let route_slot = (!is_self).then(|| Rc::clone(&knock_route));
-        Rc::new(move || refresh_header_name(&client, &names, &actor_id, route_slot.clone()))
+        // SELF has no home to resolve, so no slot to fill.
+        let home = (!is_self).then(|| (Rc::clone(&actor_home), carried_home.clone()));
+        Rc::new(move || refresh_header_name(&client, &names, &pictures, &actor_id, home.clone()))
     };
     // The text-only edit form (publish via `fauna.profile.set`) is SELF-only.
     if let Some(edit_btn) = &header_widgets.edit_btn {
@@ -275,19 +379,13 @@ pub fn build_profile_view(
     // the handle/actor_id on not_found).
     refresh_header();
 
-    // Inner stack: posts (landmark, content TBD) / tiers (SELF author-management
-    // sections, or — for another actor — the subscriber-browse offers section).
+    // Inner stack: posts (the viewed actor's posts as the feed paints them —
+    // `posts`) / tiers (SELF author-management sections, or — for another
+    // actor — the subscriber-browse offers section).
     let stack = gtk::Stack::new();
     stack.set_vexpand(true);
 
-    let posts_page = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .build();
-    let posts_placeholder = gtk::Label::new(Some(p::NO_POSTS));
-    posts_placeholder.set_halign(gtk::Align::Start);
-    posts_placeholder.add_css_class("dim-label");
-    posts_placeholder.set_margin_start(12);
-    posts_page.append(&posts_placeholder);
+    let (posts_page, open_posts) = posts::build(client, &actor_id, error_label.clone(), open_post);
     stack.add_named(&posts_page, Some("posts"));
 
     let (tiers_page, refresh_tiers) = if is_self {
@@ -305,9 +403,13 @@ pub fn build_profile_view(
     {
         let stack = stack.clone();
         let heading = heading.clone();
+        // Every activation reads the author's posts afresh (`profile.md` § The
+        // Posts tab → *Order and paging*), as tui's `profile-posts-tab` does.
+        let open = Rc::clone(&open_posts);
         posts_tab.connect_clicked(move |_| {
             stack.set_visible_child_name("posts");
             heading.set_text(p::POSTS);
+            open();
         });
     }
     {
@@ -328,7 +430,13 @@ pub fn build_profile_view(
         });
     }
 
-    (outer, ProfileHandles { refresh_tiers })
+    (
+        outer,
+        ProfileHandles {
+            refresh_tiers,
+            open_posts,
+        },
+    )
 }
 
 /// Header widgets the page wires after construction: the identity `names`
@@ -337,6 +445,7 @@ pub fn build_profile_view(
 /// is built and wired here (no `edit_btn`), so `edit_btn` is `None`.
 struct HeaderWidgets {
     names: HeaderNames,
+    pictures: HeaderPictures,
     edit_btn: Option<gtk::Button>,
 }
 
@@ -419,6 +528,7 @@ fn build_header(
     client: &Rc<FaunaClient>,
     actor_id: &str,
     is_self: bool,
+    actor_home: &HomeSlot,
 ) -> (gtk::Box, HeaderWidgets) {
     let header = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -428,9 +538,9 @@ fn build_header(
         .margin_end(12)
         .build();
 
-    let avatar = gtk::Image::from_icon_name("avatar-default-symbolic");
-    avatar.set_pixel_size(48);
-    header.append(&avatar);
+    let pictures = HeaderPictures::new();
+    header.append(&pictures.avatar_icon);
+    header.append(&pictures.avatar);
 
     let info = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -519,18 +629,114 @@ fn build_header(
         {
             let client = Rc::clone(client);
             let actor_id = actor_id.to_string();
-            follow_btn.connect_clicked(move |btn| follow(&client, &actor_id, btn));
+            let actor_home = Rc::clone(actor_home);
+            follow_btn.connect_clicked(move |btn| {
+                let home = actor_home.borrow().clone();
+                follow(&client, &actor_id, home, btn)
+            });
         }
         header.append(&follow_btn);
         None
     };
 
-    (header, HeaderWidgets { names, edit_btn })
+    (
+        header,
+        HeaderWidgets {
+            names,
+            pictures,
+            edit_btn,
+        },
+    )
+}
+
+/// The header's stored pictures (`profile-avatar`, `profile-banner`;
+/// `profile.md` § Layout & flow, the `user-header` component): each element
+/// renders only while the profile names its picture, and is empty — no
+/// paintable, so `get_attr(<id>, state)` answers `placeholder` — until its
+/// bytes paint, staying so after a failed fetch (never `error-message`). The
+/// generic avatar icon stands in while the profile names no avatar.
+#[derive(Clone)]
+struct HeaderPictures {
+    avatar_icon: gtk::Image,
+    avatar: gtk::Picture,
+    banner: gtk::Picture,
+    /// Bumped by every header read, so a fetch an older read started (a save
+    /// refetches both) never paints over a newer profile's pictures.
+    epoch: Rc<Cell<u64>>,
+}
+
+impl HeaderPictures {
+    fn new() -> Self {
+        let avatar_icon = gtk::Image::from_icon_name("avatar-default-symbolic");
+        avatar_icon.set_pixel_size(48);
+        let avatar = gtk::Picture::new();
+        avatar.set_size_request(48, 48);
+        avatar.set_content_fit(gtk::ContentFit::Cover);
+        avatar.set_valign(gtk::Align::Center);
+        avatar.set_visible(false);
+        set_test_id(&avatar, ids::PROFILE_AVATAR);
+        let banner = gtk::Picture::new();
+        banner.set_size_request(-1, 120);
+        banner.set_content_fit(gtk::ContentFit::Cover);
+        banner.set_visible(false);
+        set_test_id(&banner, ids::PROFILE_BANNER);
+        Self {
+            avatar_icon,
+            avatar,
+            banner,
+            epoch: Rc::new(Cell::new(0)),
+        }
+    }
+
+    /// A header read answered: render exactly the elements the profile names,
+    /// each empty until [`Self::paint`]. Returns the read's epoch.
+    fn name(&self, avatar: bool, banner: bool) -> u64 {
+        let epoch = self.epoch.get() + 1;
+        self.epoch.set(epoch);
+        for (picture, named) in [(&self.avatar, avatar), (&self.banner, banner)] {
+            picture.set_paintable(None::<&gtk::gdk::Paintable>);
+            picture.set_visible(named);
+        }
+        self.avatar_icon.set_visible(!avatar);
+        epoch
+    }
+
+    /// Paint fetched `bytes` into `picture` — unless a newer read has named
+    /// the pictures since, or the bytes will not decode (the element then
+    /// stays empty).
+    fn paint(&self, epoch: u64, picture: &gtk::Picture, bytes: &[u8]) {
+        if epoch != self.epoch.get() {
+            return;
+        }
+        if let Ok(texture) =
+            gtk::gdk::Texture::from_bytes(&gtk::glib::Bytes::from_owned(bytes.to_vec()))
+        {
+            picture.set_paintable(Some(&texture));
+        }
+    }
+}
+
+/// The nest whose blob route serves the header's pictures: this one (`None`)
+/// for a profile it served, the home a relayed profile came from otherwise
+/// (`profile.md` § Where logic lives → *Bytes direct, as for a relayed post*),
+/// pinned to the identity this nest stamped on the relay reply so a home
+/// serving the self-signed floor paints; a reply with no stamp keeps the
+/// WebPKI floor (`transport-trust.md` § The post arm → *A relayed profile's
+/// pictures*).
+fn picture_home(
+    relayed_from: Option<&str>,
+    home_nest_actor_id: Option<&str>,
+) -> Option<fauna_client::ForeignHome> {
+    relayed_from.map(|url| fauna_client::ForeignHome::new(url, home_nest_actor_id))
 }
 
 /// Follow = subscribe to the free "followers" tier (`profile.md` § Where logic
 /// lives → *Follow / unfollow*). On success the button label flips to "Following".
-fn follow(client: &Rc<FaunaClient>, actor_id: &str, btn: &gtk::Button) {
+/// `home` is the page's actor-home slot as it reads at the press: the shared
+/// `SubscriptionsClient::subscribe_across_nests` mints the subscriber's signed
+/// follow intent when another nest is the author's home, and is the plain local
+/// follow for `None` (`federated-follow.md` § Decision 2).
+fn follow(client: &Rc<FaunaClient>, actor_id: &str, home: Option<String>, btn: &gtk::Button) {
     let Ok(author) = ActorId::from_hex(actor_id) else {
         return;
     };
@@ -545,7 +751,7 @@ fn follow(client: &Rc<FaunaClient>, actor_id: &str, btn: &gtk::Button) {
         move || async move {
             let subs = SubscriptionsClient::new(nest);
             let subscriber = fauna_core::identity::ActorKeypair::from_secret(subscriber_secret);
-            subs.subscribe_publishing_ek(author, FOLLOWERS_TIER, &subscriber)
+            subs.subscribe_across_nests(author, FOLLOWERS_TIER, &subscriber, home)
                 .await
                 .is_ok()
         },
@@ -725,58 +931,138 @@ fn toggle_block(
     );
 }
 
-/// Re-render the header identity from the published `Profile`: fetch
-/// `fauna.profile.get(actor_id)`, decode (`fauna_client_profile::decode_profile`),
-/// and re-paint the header's names over the published `display_name`; on
-/// `not_found`/transport error they keep their fallback ([`HeaderNames`]).
-/// Works for any actor — the read is a public-by-actor_id fetch.
+/// Re-render the header identity from the published `Profile`: the shared
+/// `ProfileClient::profile_header_read` (this nest first, and on its
+/// `not_found` the relay to the page's actor-home slot, `profile.md` § Where
+/// logic lives → *The remote read*), decoded
+/// (`fauna_client_profile::decode_profile_display`), re-painting the header's
+/// names over the published `display_name`; on `not_found`/transport error they
+/// keep their fallback ([`HeaderNames`]) and nothing reaches `error-message`.
+/// The name paints first; then the pictures the profile names are fetched
+/// through the session's post-blob host pick from the nest that served it
+/// ([`picture_home`]) and painted ([`HeaderPictures`]) — tui's
+/// `fetch_pictures`. Every call (a save included) refetches both.
 ///
-/// `knock_route` (OTHER only) is filled off the SAME read: the profile the
-/// header renders is the one whose home nest a knock from this page goes to
-/// ([`knock_route_for`]).
+/// `home` (OTHER only) is the page's actor-home slot with the hint the open
+/// carried: the slot as the open seeded it is where the relay goes, and the
+/// SAME read replaces it through the shared rule ([`actor_home_for`]) — the
+/// profile the header renders is the one whose home a follow or knock from this
+/// page goes to.
 fn refresh_header_name(
     client: &Rc<FaunaClient>,
     names: &HeaderNames,
+    pictures: &HeaderPictures,
     actor_id: &str,
-    knock_route: Option<Rc<RefCell<Option<String>>>>,
+    home: Option<(HomeSlot, Option<String>)>,
 ) {
     let nest = client.nest_rpc().clone();
     let actor_id = actor_id.to_string();
     let own_nest_url = client.node_url().to_string();
     let names = names.clone();
+    let pictures = pictures.clone();
+    let blob_client = Rc::clone(client);
     let painted = actor_id.clone();
+    let relay_home = home.as_ref().and_then(|(slot, _)| slot.borrow().clone());
+    let carried = home.as_ref().and_then(|(_, carried)| carried.clone());
+    let is_other = home.is_some();
     spawn_with_snapshot(
         &client.runtime_handle(),
         move || async move {
             let pc = ProfileClient::new(nest);
-            match pc.profile_get(actor_id.clone()).await {
-                Ok(reply) => {
-                    let body: &[u8] = reply.body.as_ref();
-                    let name = decode_profile(body)
-                        .ok()
-                        .and_then(|(prof, _origin)| prof.display_name)
-                        .filter(|s| !s.trim().is_empty());
-                    (name, knock_route_for(&actor_id, body, &own_nest_url))
-                }
+            let (body, home) = match pc
+                .profile_header_read(actor_id.clone(), relay_home.as_deref())
+                .await
+            {
+                Ok(read) => (
+                    Some(read.reply.body.to_vec()),
+                    picture_home(
+                        read.relayed_from.as_deref(),
+                        read.home_nest_actor_id.as_deref(),
+                    ),
+                ),
                 Err(_) => (None, None),
-            }
+            };
+            let display = body
+                .as_deref()
+                .and_then(|body| decode_profile_display(body).ok());
+            let name = display
+                .as_ref()
+                .and_then(|d| d.display_name.clone())
+                .filter(|s| !s.trim().is_empty());
+            let named = HeaderPictureHashes {
+                avatar: display.as_ref().and_then(|d| d.avatar_hash_hex()),
+                banner: display.as_ref().and_then(|d| d.banner_hash_hex()),
+                home,
+            };
+            let resolved = is_other
+                .then(|| {
+                    actor_home_for(
+                        carried.as_deref(),
+                        &actor_id,
+                        body.as_deref(),
+                        &own_nest_url,
+                    )
+                })
+                .flatten();
+            (name, resolved, named)
         },
-        move |(display_name, route)| {
+        move |(display_name, resolved, named)| {
             *names.display_name.borrow_mut() = display_name;
             names.paint(&painted);
-            if let Some(slot) = knock_route {
-                *slot.borrow_mut() = route;
+            if let Some((slot, _)) = home {
+                *slot.borrow_mut() = resolved;
             }
+            fetch_header_pictures(&blob_client, &pictures, named);
         },
     );
 }
 
-/// The knock route for `actor_id_hex` off the profile body the open fetched —
-/// the shared `fauna_client_profile::knock_recipient_nest_url`; a malformed id
+/// The pictures a header read found named: their hex blob hashes, and the
+/// nest whose blob route serves them ([`picture_home`]).
+struct HeaderPictureHashes {
+    avatar: Option<String>,
+    banner: Option<String>,
+    home: Option<fauna_client::ForeignHome>,
+}
+
+/// Render the elements `named` names, then fetch each picture through the
+/// session's post-blob host pick — capped and verified against the hash
+/// ([`fauna_client::PostBlobHosts::get`]) — and paint it. A failed fetch
+/// leaves its element empty, never `error-message`.
+fn fetch_header_pictures(
+    client: &Rc<FaunaClient>,
+    pictures: &HeaderPictures,
+    named: HeaderPictureHashes,
+) {
+    let epoch = pictures.name(named.avatar.is_some(), named.banner.is_some());
+    for (hash, picture) in [
+        (named.avatar, pictures.avatar.clone()),
+        (named.banner, pictures.banner.clone()),
+    ] {
+        let Some(hash) = hash else { continue };
+        let rx = client.fetch_post_blob_bytes(&hash, named.home.clone());
+        let pictures = pictures.clone();
+        gtk::glib::spawn_future_local(async move {
+            if let Ok(Ok(bytes)) = rx.recv().await {
+                pictures.paint(epoch, &picture, &bytes);
+            }
+        });
+    }
+}
+
+/// The OTHER actor's home for `actor_id_hex` through the shared
+/// `fauna_client_profile::actor_home` rule: their own signed profile (the body
+/// the header read fetched, `None` before it answers) beats the hint the open
+/// carried; a hint naming the viewer's own nest is this nest. A malformed id
 /// answers `None` (this nest) like any other unusable input.
-fn knock_route_for(actor_id_hex: &str, profile_body: &[u8], own_nest_url: &str) -> Option<String> {
+fn actor_home_for(
+    carried: Option<&str>,
+    actor_id_hex: &str,
+    profile_body: Option<&[u8]>,
+    own_nest_url: &str,
+) -> Option<String> {
     let actor = ActorId::from_hex(actor_id_hex).ok()?;
-    fauna_client_profile::knock_recipient_nest_url(&actor, profile_body, own_nest_url)
+    fauna_client_profile::actor_home(carried, &actor, profile_body, own_nest_url)
 }
 
 /// The OTHER profile's `profile-request-contact-button` plus its guardian-ask
@@ -799,7 +1085,7 @@ fn wire_request_contact(
     btn: &gtk::Button,
     ask: &Rc<GuardianAsk>,
     error_label: &gtk::Label,
-    knock_route: &Rc<RefCell<Option<String>>>,
+    knock_route: &HomeSlot,
 ) {
     {
         let client = Rc::clone(client);
@@ -1051,6 +1337,121 @@ mod tests {
     /// A malformed actor id routes nowhere foreign — `None` = this nest.
     #[test]
     fn a_malformed_actor_id_knocks_on_this_nest() {
-        assert_eq!(knock_route_for("not-hex", b"", "https://home.test"), None);
+        assert_eq!(
+            actor_home_for(
+                Some("https://met.test"),
+                "not-hex",
+                Some(b"".as_slice()),
+                "https://home.test"
+            ),
+            None
+        );
+    }
+
+    /// The carried hint seeds the slot until the header read answers; a hint
+    /// naming the viewer's own nest is this nest (the shared rule's pins).
+    #[test]
+    fn the_carried_home_seeds_the_actor_home_slot() {
+        let actor = "ab".repeat(32);
+        assert_eq!(
+            actor_home_for(Some("https://met.test"), &actor, None, "https://home.test"),
+            Some("https://met.test".to_string())
+        );
+        assert_eq!(
+            actor_home_for(
+                Some("https://HOME.test/"),
+                &actor,
+                None,
+                "https://home.test"
+            ),
+            None
+        );
+        assert_eq!(
+            actor_home_for(None, &actor, None, "https://home.test"),
+            None
+        );
+    }
+
+    /// A 1×1 PNG, the bytes a fetched picture decodes from.
+    fn png() -> Vec<u8> {
+        let texture = gtk::gdk::MemoryTexture::new(
+            1,
+            1,
+            gtk::gdk::MemoryFormat::R8g8b8a8,
+            &gtk::glib::Bytes::from_static(&[0xff, 0, 0, 0xff]),
+            4,
+        );
+        texture.save_to_png_bytes().to_vec()
+    }
+
+    /// `profile-avatar` / `profile-banner` render only while the profile
+    /// names the picture, empty until its bytes paint (tui's
+    /// `the_header_paints_only_the_pictures_the_profile_names`); the generic
+    /// avatar icon stands in for a profile with no avatar.
+    #[test]
+    fn the_header_paints_only_the_pictures_the_profile_names() {
+        crate::testid::run_on_gtk_thread(|| {
+            let pictures = HeaderPictures::new();
+            assert!(!pictures.avatar.is_visible() && !pictures.banner.is_visible());
+            assert!(pictures.avatar_icon.is_visible());
+
+            let epoch = pictures.name(true, false);
+            assert!(pictures.avatar.is_visible(), "a named avatar renders");
+            assert!(!pictures.banner.is_visible(), "an unnamed banner does not");
+            assert!(!pictures.avatar_icon.is_visible());
+            assert!(pictures.avatar.paintable().is_none(), "empty until painted");
+
+            pictures.paint(epoch, &pictures.avatar, b"not an image");
+            assert!(
+                pictures.avatar.paintable().is_none(),
+                "undecodable bytes stay empty"
+            );
+            pictures.paint(epoch, &pictures.avatar, &png());
+            assert!(pictures.avatar.paintable().is_some());
+
+            pictures.name(false, false);
+            assert!(
+                !pictures.avatar.is_visible(),
+                "a cleared avatar leaves the header"
+            );
+            assert!(pictures.avatar.paintable().is_none());
+            assert!(pictures.avatar_icon.is_visible());
+        });
+    }
+
+    /// A fetch an older header read started never paints over a newer read's
+    /// pictures — a save refetches both, and the first fetch may land last.
+    #[test]
+    fn a_stale_picture_fetch_does_not_paint() {
+        crate::testid::run_on_gtk_thread(|| {
+            let pictures = HeaderPictures::new();
+            let stale = pictures.name(true, true);
+            let fresh = pictures.name(true, true);
+            pictures.paint(stale, &pictures.banner, &png());
+            assert!(pictures.banner.paintable().is_none());
+            pictures.paint(fresh, &pictures.banner, &png());
+            assert!(pictures.banner.paintable().is_some());
+        });
+    }
+
+    /// The pictures come from the nest that served the profile: this one for a
+    /// local read, the relayed-from home otherwise, pinned to the identity the
+    /// relay stamped (tui's `the_pictures_come_from_the_nest_that_served_the_profile`).
+    #[test]
+    fn the_pictures_come_from_the_nest_that_served_the_profile() {
+        assert_eq!(picture_home(None, None), None);
+        let id = "ab".repeat(32);
+        assert_eq!(
+            picture_home(Some("https://home.test"), Some(&id)),
+            Some(fauna_client::ForeignHome::new(
+                "https://home.test",
+                Some(&id)
+            ))
+        );
+        assert_eq!(
+            picture_home(Some("https://home.test"), None),
+            Some(fauna_client::ForeignHome::new("https://home.test", None)),
+            "an unstamped relay keeps the WebPKI floor"
+        );
     }
 }

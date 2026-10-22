@@ -50,6 +50,8 @@
 //! app and that host would be sharing exactly the fields whose *absence* is the
 //! agent's contract, so the two stay separate on purpose.
 
+#[cfg(unix)]
+pub mod conversations_door;
 pub mod deployment_seeds;
 pub mod holder_yield;
 pub mod p2p_participation;
@@ -551,6 +553,19 @@ async fn assemble(
                  the machine's named row is the one enrollment target"
             )
         })?;
+
+    // The data path's own connection is one of this device's live connections
+    // too, so it announces the same device the app session announces
+    // (`common.md` § Registration → *Every connection announces*): one silent
+    // connection would quiet every relay row of the actor — the user's other
+    // devices — for as long as the app runs (§ Dispatch Logic, the
+    // compatibility rider). The machine's own id is the id the app's push row
+    // and presence use. Set before the first connect, which reads the slot.
+    if let Some(device_client) = &device_client {
+        device_client
+            .set_push_presence(params.enrollment_target_device_id.clone())
+            .await;
+    }
 
     let handle = AccountStoreRuntime::start(params).await?;
     // Spawned only now, gated on the runtime's grant-registered signal: a

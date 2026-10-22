@@ -157,6 +157,10 @@ class ConnectedAppsVM @Inject constructor(
 
     fun unblock(clientId: String) = run { it.unblock(clientId) }
 
+    /** The account's external-apps switch (`atproto-external-apps-enable`): the
+     *  machine writes and re-reads, and the toggle paints the re-read. */
+    fun setExternalAppsEnabled(enabled: Boolean) = run { it.setExternalAppsEnabled(enabled) }
+
     fun armRevoke(key: String) {
         revokeArmed.value = key
     }

@@ -34,7 +34,8 @@
 //!    among them); a pair the set lacks is `custody_incomplete`, unless the
 //!    target itself holds that segment byte-identical — the delivery leg skips
 //!    those as an economy, and the target's own copy is then the pair.
-//! 3. Every pair blake3-verified in memory and admitted through
+//! 3. Every pair staged on disk (`super::pair_stage`), blake3-verified off
+//!    its files and admitted through
 //!    `FramedSegment::open`, every record re-hashed against its CID on read
 //!    (the carv2 reader's own check) — before anything is written.
 //! 4. **The recovery set**: every record whose CID the target holds in no
@@ -90,16 +91,20 @@ use fauna_cbor::Cid;
 use fauna_contacts::segments::placement::CardPlacementRecord;
 use fauna_core::crypto::{NestBackupKey, OwnerSealKey};
 use fauna_core::data::ContentHash;
-use fauna_core::file_download::{FileDownloadKeys, download_file_bytes_by_manifest};
+use fauna_core::file_download::{
+    FileDownloadKeys, download_file_bytes_by_manifest, download_file_to_path_by_manifest,
+    fetch_manifest,
+};
 use fauna_mail::segments::MailFloorMetadata;
 use fauna_mail::segments::floor::CONTINUATION_ROLE_PART;
 use fauna_mail::segments::placement::{MailPlacementRecord, RecordPlacement};
 use fauna_protocol::segments::SegmentRef;
 use fauna_sync_engine::segment_backup::{
-    LiveManifestMirror, SegmentFamily, parse_reserved_backup_set_name,
+    LiveManifestMirror, SegmentFamily, parse_landing_set_name,
 };
 
-use super::materialize::{LocalStoreFetcher, MaterializeRefusal, VerifiedPair, verify_pair};
+use super::materialize::{LocalStoreFetcher, MaterializeRefusal};
+use super::pair_stage::{PairStage, VerifiedPair, file_blake3_hex, pair_paths, verify_pair};
 use crate::db::nest_backup_keys::NEST_BACKUP_KEY_LEN;
 use crate::routes::AppState;
 
@@ -130,6 +135,10 @@ pub struct RecoverOutcome {
     /// The counter floor applied: the greatest ledger generation over the
     /// content mirrors read. `None` when the set's mirrors named nothing.
     pub floor: Option<u32>,
+    /// Every candidate landed, so the call reclaimed the landing set
+    /// (`materialize::reclaim_landing_set`). `false` on a torn run, which
+    /// keeps the set as its retry's input.
+    pub landing_reclaimed: bool,
 }
 
 /// The kinds this verb recovers, and what differs between them.
@@ -183,17 +192,50 @@ impl Arm {
     }
 }
 
-/// One record a delivered segment holds, read and CID-verified.
+/// One record a delivered segment holds, CID-verified on a first read.
 struct Candidate {
     cid: Cid,
-    bytes: Vec<u8>,
+    body: Body,
     floor: Vec<u8>,
     bucket: String,
 }
 
+/// Where a candidate's bytes are: in its staged segment, read again — and
+/// re-verified by the carv2 reader — only when the record is landed, so the
+/// recovery set is never in memory at once (`message-segment-store.md`
+/// § Segment size).
+enum Body {
+    Staged(Arc<fauna_segment_store::FramedSegment>),
+    #[cfg(test)]
+    Held(Vec<u8>),
+}
+
+impl Candidate {
+    fn bytes(&self) -> Result<Vec<u8>, MaterializeRefusal> {
+        match &self.body {
+            Body::Staged(seg) => match seg.read_record(&self.cid) {
+                Ok(Some(bytes)) => Ok(bytes),
+                Ok(None) => Err(anyhow::anyhow!(
+                    "the staged segment no longer holds record {}",
+                    self.cid
+                )),
+                Err(e) => Err(anyhow::anyhow!(
+                    "read the recovered record {}: {e}",
+                    self.cid
+                )),
+            }
+            .map_err(MaterializeRefusal::Integrity),
+            #[cfg(test)]
+            Body::Held(bytes) => Ok(bytes.clone()),
+        }
+    }
+}
+
 /// Every generation the set holds at each path — live and retained — and the
-/// means to open them. Opening is memoized by manifest hash: the seal is
-/// convergent, so one hash is one plaintext wherever it appears.
+/// means to open them. A mirror is opened whole, memoized by manifest hash
+/// (the seal is convergent, so one hash is one plaintext wherever it appears);
+/// a segment half is chosen by its manifest's content address and
+/// reassembled into a file, never opened in memory.
 struct Generations<'a> {
     fetcher: &'a LocalStoreFetcher,
     keys: &'a FileDownloadKeys,
@@ -224,19 +266,33 @@ impl Generations<'_> {
         Ok(out)
     }
 
-    /// The generation at `path` whose plaintext hashes to `blake3_hex`, if the
-    /// set holds one.
-    async fn find(
-        &mut self,
+    /// Reassemble into `dest` the generation at `path` whose plaintext hashes
+    /// to `blake3_hex`, a window of chunks at a time; `false` if the set holds
+    /// none. The generation is picked by its manifest's content address — the
+    /// address the download then holds the reassembled file to — so only the
+    /// one that matches is fetched.
+    async fn find_to(
+        &self,
         path: &str,
         blake3_hex: &str,
-    ) -> Result<Option<Vec<u8>>, MaterializeRefusal> {
-        for bytes in self.all_at(path).await? {
-            if hex::encode(blake3::hash(&bytes).as_bytes()) == blake3_hex {
-                return Ok(Some(bytes));
+        dest: &std::path::Path,
+    ) -> Result<bool, MaterializeRefusal> {
+        let integrity = MaterializeRefusal::Integrity;
+        for &hash in self.by_path.get(path).into_iter().flatten() {
+            let manifest = fetch_manifest(self.fetcher, self.keys, &hash, None)
+                .await
+                .with_context(|| format!("open the manifest of custody path `{path}`"))
+                .map_err(integrity)?;
+            if hex::encode(manifest.file_hash.digest()) != blake3_hex {
+                continue;
             }
+            download_file_to_path_by_manifest(self.fetcher, self.keys, hash, None, path, dest)
+                .await
+                .with_context(|| format!("open custody path `{path}`"))
+                .map_err(integrity)?;
+            return Ok(true);
         }
-        Ok(None)
+        Ok(false)
     }
 
     fn holds_any(&self, family: SegmentFamily, scope_hex: &str, kind: &str) -> bool {
@@ -277,20 +333,53 @@ enum LocalFamily<'a> {
 }
 
 impl LocalFamily<'_> {
-    async fn pair(&self, scope: &[u8; 32], id: u32) -> Option<(Vec<u8>, Vec<u8>)> {
+    /// Copy the target's own halves of segment `id` into the staged paths
+    /// given (`None`: a half the set already supplied), a buffer at a time off
+    /// the handles opened under the store's lock — the serve and backup doors'
+    /// own reading. Each copied half is kept only if it hashes to `want`'s
+    /// matching hash; any other is removed, and stays missing.
+    async fn stage_missing(
+        &self,
+        scope: &[u8; 32],
+        id: u32,
+        halves: [(Option<&std::path::Path>, &str); 2],
+    ) {
         let pair = match self {
-            Self::Content(m) => m.read_segment_pair(scope, id).await.ok(),
-            Self::MailJournal(j) => j.read_segment_pair(scope, id).await.ok(),
-            Self::CalJournal(j) => j.read_segment_pair(scope, id).await.ok(),
-            Self::CardJournal(j) => j.read_segment_pair(scope, id).await.ok(),
+            Self::Content(m) => m.open_segment_pair(scope, id).await.ok(),
+            Self::MailJournal(j) => j.open_segment_pair(scope, id).await.ok(),
+            Self::CalJournal(j) => j.open_segment_pair(scope, id).await.ok(),
+            Self::CardJournal(j) => j.open_segment_pair(scope, id).await.ok(),
         };
-        pair.map(|p| (p.dat, p.meta))
+        let Some(pair) = pair else { return };
+        for (mut file, (dest, want)) in [pair.dat, pair.meta].into_iter().zip(halves) {
+            let Some(dest) = dest else { continue };
+            let copied = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(dest)
+                .and_then(|mut to| std::io::copy(&mut file, &mut to).map(|_| ()));
+            let matches = copied.is_ok() && file_blake3_hex(dest).is_ok_and(|got| got == want);
+            if !matches {
+                let _ = std::fs::remove_file(dest);
+            }
+        }
     }
 }
 
+/// Where [`pairs_of`] stages the pairs it finds.
+enum StageAt<'a> {
+    /// Each pair in a fresh directory of its own: content pairs, where two
+    /// generations of one segment id may both be in hand.
+    EachOwn(&'a mut PairStage),
+    /// Every pair in this one directory: one journal mirror generation, which
+    /// its replay folds as a directory.
+    Shared(std::path::PathBuf),
+}
+
 /// Every distinct pair `mirror` names, from the set or — when the set lacks it
-/// and the target holds it byte-identical — from the target. Verified against
-/// the mirror either way; nothing is written.
+/// and the target holds it byte-identical — from the target, staged on disk.
+/// Verified against the mirror either way; nothing is written outside the
+/// stage.
 async fn pairs_of(
     gens: &mut Generations<'_>,
     local: &LocalFamily<'_>,
@@ -298,114 +387,107 @@ async fn pairs_of(
     scope: &[u8; 32],
     scope_hex: &str,
     mirror: &LiveManifestMirror,
+    mut into: StageAt<'_>,
 ) -> Result<Vec<VerifiedPair>, MaterializeRefusal> {
+    let integrity = MaterializeRefusal::Integrity;
     let mut out = Vec::with_capacity(mirror.live.len());
     for seg in &mirror.live {
+        let dir = match &mut into {
+            StageAt::EachOwn(stage) => stage.fresh_dir().map_err(integrity)?,
+            StageAt::Shared(dir) => dir.clone(),
+        };
+        let (dat, meta) = pair_paths(&dir, seg.segment_id);
         let meta_hex = seg.meta_blake3_hex.as_str();
         let dat_path = family.dat_path(scope_hex, seg.segment_id);
         let meta_path = family.meta_path(scope_hex, seg.segment_id);
-        let mut dat = gens.find(&dat_path, &seg.blake3_hex).await?;
-        let mut meta = gens.find(&meta_path, meta_hex).await?;
+        let has_dat = gens.find_to(&dat_path, &seg.blake3_hex, &dat).await?;
+        let has_meta = gens.find_to(&meta_path, meta_hex, &meta).await?;
         // A half the set lacks may be one the leg skipped because the target
         // holds it byte-identical; the target's own copy is then that half,
         // held to the same hash the mirror names.
-        if (dat.is_none() || meta.is_none())
-            && let Some((local_dat, local_meta)) = local.pair(scope, seg.segment_id).await
-        {
-            let hex_of = |b: &[u8]| hex::encode(blake3::hash(b).as_bytes());
-            if dat.is_none() && hex_of(&local_dat) == seg.blake3_hex {
-                dat = Some(local_dat);
-            }
-            if meta.is_none() && hex_of(&local_meta) == meta_hex {
-                meta = Some(local_meta);
-            }
+        if !has_dat || !has_meta {
+            local
+                .stage_missing(
+                    scope,
+                    seg.segment_id,
+                    [
+                        ((!has_dat).then_some(dat.as_path()), seg.blake3_hex.as_str()),
+                        ((!has_meta).then_some(meta.as_path()), meta_hex),
+                    ],
+                )
+                .await;
         }
-        let (dat, meta) = match (dat, meta) {
-            (Some(dat), Some(meta)) => (dat, meta),
-            (dat, _) => {
-                return Err(MaterializeRefusal::IncompleteSegment {
-                    segment_id: seg.segment_id,
-                    missing_path: if dat.is_none() { dat_path } else { meta_path },
-                });
-            }
+        if !dat.exists() || !meta.exists() {
+            return Err(MaterializeRefusal::IncompleteSegment {
+                segment_id: seg.segment_id,
+                missing_path: if dat.exists() { meta_path } else { dat_path },
+            });
+        }
+        let pair = VerifiedPair {
+            id: seg.segment_id,
+            dat,
+            meta,
         };
-        verify_pair(&dat, &meta, seg).map_err(MaterializeRefusal::Integrity)?;
-        out.push((seg.segment_id, dat, meta));
+        verify_pair(&pair, seg).map_err(integrity)?;
+        out.push(pair);
     }
     Ok(out)
 }
 
-/// A scratch directory for opening delivered pairs, removed on drop. Inside the
-/// segment store's own data dir so nothing crosses a filesystem, and named so
-/// no store's replay (which lists `seg-*` files of a scope dir) ever sees it.
-struct Scratch(std::path::PathBuf);
+/// The most record bytes [`read_candidates`] reads into memory at once while
+/// it verifies a delivered segment — a constant, never the segment. A single
+/// record longer than it (bounded by `fauna_carv2::v1::MAX_RECORD_LEN`) is
+/// read alone.
+const VERIFY_BATCH_BYTES: u64 = 4 * 1024 * 1024;
 
-impl Scratch {
-    fn new(under: &std::path::Path) -> anyhow::Result<Self> {
-        let mut token = [0u8; 8];
-        getrandom::fill(&mut token).map_err(|e| anyhow::anyhow!("scratch token: {e}"))?;
-        let dir = under.join(format!(".recover-scratch-{}", hex::encode(token)));
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("create the recover scratch dir {}", dir.display()))?;
-        Ok(Self(dir))
-    }
-
-    /// Write one pair under its own subdirectory (two generations of one
-    /// segment id may both be in hand) and return the `.dat` path.
-    fn put(&self, n: usize, (id, dat, meta): &VerifiedPair) -> anyhow::Result<std::path::PathBuf> {
-        let dir = self.0.join(format!("{n:06}"));
-        std::fs::create_dir_all(&dir)?;
-        let dat_path = dir.join(format!("seg-{id:08}.dat"));
-        std::fs::write(dir.join(format!("seg-{id:08}.meta")), meta)?;
-        std::fs::write(&dat_path, dat)?;
-        Ok(dat_path)
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-/// Admit every pair through `FramedSegment::open` and read every record it
-/// holds, CID-verified, deduplicated by CID across pairs.
-fn read_candidates(
-    scratch: &Scratch,
-    pairs: &[VerifiedPair],
-) -> Result<Vec<Candidate>, MaterializeRefusal> {
+/// Admit every staged pair through `FramedSegment::open` and read every
+/// record it holds, CID-verified — a few at a time, the bodies dropped once
+/// read — deduplicated by CID across pairs. The candidates keep their
+/// segments open for the landing's own read.
+fn read_candidates(pairs: &[VerifiedPair]) -> Result<Vec<Candidate>, MaterializeRefusal> {
     let integrity = MaterializeRefusal::Integrity;
     let mut seen: HashSet<Cid> = HashSet::new();
     let mut out = Vec::new();
-    for (n, pair) in pairs.iter().enumerate() {
-        let path = scratch.put(n, pair).map_err(integrity)?;
-        let seg = fauna_segment_store::FramedSegment::open(&path).map_err(|e| {
-            integrity(anyhow::anyhow!(
-                "the delivered segment {} does not reopen: {e}",
-                pair.0
-            ))
-        })?;
-        let entries: Vec<&fauna_segment_store::RecordEntry> = seg.iter_records().collect();
-        // The carv2 reader re-hashes every block against the CID it is filed
-        // under — the kind-agnostic admission check of § Record identity.
-        let bodies = seg.read_records_bulk(&entries).map_err(|e| {
+    for pair in pairs {
+        let seg = Arc::new(
+            fauna_segment_store::FramedSegment::open(&pair.dat).map_err(|e| {
+                integrity(anyhow::anyhow!(
+                    "the delivered segment {} does not reopen: {e}",
+                    pair.id
+                ))
+            })?,
+        );
+        let read = |e: fauna_segment_store::SegmentStoreError| {
             integrity(anyhow::anyhow!(
                 "read the delivered segment {}: {e}",
-                pair.0
+                pair.id
             ))
-        })?;
-        for (entry, body) in entries.iter().zip(bodies) {
-            let body = body.ok_or_else(|| {
-                integrity(anyhow::anyhow!(
-                    "the delivered segment {} indexes record {} it does not hold",
-                    pair.0,
-                    entry.cid
-                ))
-            })?;
+        };
+        let entries: Vec<&fauna_segment_store::RecordEntry> = seg.iter_records().collect();
+        let cids: Vec<&Cid> = entries.iter().map(|e| &e.cid).collect();
+        let lens = seg.record_block_lens(&cids).map_err(read)?;
+        // The carv2 reader re-hashes every block against the CID it is filed
+        // under — the kind-agnostic admission check of § Record identity.
+        let mut batch: Vec<&fauna_segment_store::RecordEntry> = Vec::new();
+        let mut batch_bytes = 0u64;
+        for (i, entry) in entries.iter().enumerate() {
+            let len = lens[i].unwrap_or(0);
+            if !batch.is_empty() && batch_bytes + len > VERIFY_BATCH_BYTES {
+                verify_records(&seg, &batch, pair.id).map_err(read)??;
+                batch.clear();
+                batch_bytes = 0;
+            }
+            batch.push(entry);
+            batch_bytes += len;
+        }
+        if !batch.is_empty() {
+            verify_records(&seg, &batch, pair.id).map_err(read)??;
+        }
+        for entry in &entries {
             if seen.insert(entry.cid) {
                 out.push(Candidate {
                     cid: entry.cid,
-                    bytes: body,
+                    body: Body::Staged(Arc::clone(&seg)),
                     floor: entry.floor_metadata.clone(),
                     bucket: seg.header.bucket.clone(),
                 });
@@ -415,52 +497,64 @@ fn read_candidates(
     Ok(out)
 }
 
-/// Stage one delivered journal mirror generation's pairs into a scratch dir of
-/// their own, ready for the kind's replay; returns the dir. Nothing is written
-/// to the target's journal area.
+/// Read `batch` off `seg` — the carv2 reader's CID check — and drop the
+/// bodies; the inner error names a record the index lists and the segment
+/// does not hold.
+fn verify_records(
+    seg: &fauna_segment_store::FramedSegment,
+    batch: &[&fauna_segment_store::RecordEntry],
+    id: u32,
+) -> Result<Result<(), MaterializeRefusal>, fauna_segment_store::SegmentStoreError> {
+    let bodies = seg.read_records_bulk(batch)?;
+    for (entry, body) in batch.iter().zip(bodies) {
+        if body.is_none() {
+            return Ok(Err(MaterializeRefusal::Integrity(anyhow::anyhow!(
+                "the delivered segment {id} indexes record {} it does not hold",
+                entry.cid
+            ))));
+        }
+    }
+    Ok(Ok(()))
+}
+
+/// One delivered journal mirror generation, its pairs staged together in
+/// `dir` for the kind's replay.
+struct JournalGeneration {
+    dir: std::path::PathBuf,
+    pairs: Vec<VerifiedPair>,
+}
+
+/// Prove every pair of one staged journal generation reopens, ready for the
+/// kind's replay over its dir. Nothing is written to the target's journal area.
 fn stage_journal_generation(
-    scratch: &Scratch,
-    g: usize,
-    pairs: &[VerifiedPair],
-) -> Result<std::path::PathBuf, MaterializeRefusal> {
-    let integrity = MaterializeRefusal::Integrity;
-    let dir = scratch.0.join(format!("journal-{g:04}"));
-    std::fs::create_dir_all(&dir)
-        .context("create a journal fold dir")
-        .map_err(integrity)?;
-    for (id, dat, meta) in pairs {
-        std::fs::write(dir.join(format!("seg-{id:08}.meta")), meta)
-            .context("stage a journal sidecar")
-            .map_err(integrity)?;
-        let dat_path = dir.join(format!("seg-{id:08}.dat"));
-        std::fs::write(&dat_path, dat)
-            .context("stage a journal segment")
-            .map_err(integrity)?;
+    generation: &JournalGeneration,
+) -> Result<&std::path::Path, MaterializeRefusal> {
+    for pair in &generation.pairs {
         // Every segment the ledger names must open: the replay would skip
         // an unopenable highest one as a crash tail, which is right for a
         // live journal and wrong for a delivered one.
-        fauna_segment_store::FramedSegment::open(&dat_path).map_err(|e| {
-            integrity(anyhow::anyhow!(
-                "the delivered journal segment {id} does not reopen: {e}"
+        fauna_segment_store::FramedSegment::open(&pair.dat).map_err(|e| {
+            MaterializeRefusal::Integrity(anyhow::anyhow!(
+                "the delivered journal segment {} does not reopen: {e}",
+                pair.id
             ))
         })?;
     }
-    Ok(dir)
+    Ok(&generation.dir)
 }
 
 /// Replay each delivered mail journal mirror generation into a scratch fold,
 /// oldest ledger first, and keep for each record the placements the NEWEST
 /// generation naming it gives.
 fn placements_from_folds(
-    scratch: &Scratch,
-    folds: &[Vec<VerifiedPair>],
+    folds: &[JournalGeneration],
 ) -> Result<HashMap<Vec<u8>, Vec<RecordPlacement>>, MaterializeRefusal> {
     let integrity = MaterializeRefusal::Integrity;
     let mut out: HashMap<Vec<u8>, Vec<RecordPlacement>> = HashMap::new();
-    for (g, pairs) in folds.iter().enumerate() {
-        let dir = stage_journal_generation(scratch, g, pairs)?;
+    for generation in folds {
+        let dir = stage_journal_generation(generation)?;
         let fold =
-            crate::segments::mail_placement::rebuild_mail_placement_manifest_from_segments(&dir)
+            crate::segments::mail_placement::rebuild_mail_placement_manifest_from_segments(dir)
                 .context("fold a delivered journal generation")
                 .map_err(integrity)?;
         let mut this_gen: HashMap<Vec<u8>, Vec<RecordPlacement>> = HashMap::new();
@@ -688,23 +782,22 @@ impl DavFold {
 /// Replay every delivered DAV journal generation into a scratch fold and
 /// reduce them all into one [`DavFold`].
 fn dav_fold_from_journals(
-    scratch: &Scratch,
     arm: Arm,
-    folds: &[Vec<VerifiedPair>],
+    folds: &[JournalGeneration],
 ) -> Result<DavFold, MaterializeRefusal> {
     let integrity = MaterializeRefusal::Integrity;
     let mut out = DavFold::default();
-    for (g, pairs) in folds.iter().enumerate() {
-        let dir = stage_journal_generation(scratch, g, pairs)?;
+    for generation in folds {
+        let dir = stage_journal_generation(generation)?;
         match arm {
             Arm::Calendar => out.absorb_cal(
-                &crate::segments::cal_placement::rebuild_cal_placement_manifest_from_segments(&dir)
+                &crate::segments::cal_placement::rebuild_cal_placement_manifest_from_segments(dir)
                     .context("fold a delivered calendar journal generation")
                     .map_err(integrity)?,
             ),
             Arm::Card => out.absorb_card(
                 &crate::segments::card_placement::rebuild_card_placement_manifest_from_segments(
-                    &dir,
+                    dir,
                 )
                 .context("fold a delivered contacts journal generation")
                 .map_err(integrity)?,
@@ -775,11 +868,13 @@ pub(crate) async fn recover_segment_set(
     stop_after: Option<usize>,
 ) -> Result<RecoverOutcome, MaterializeRefusal> {
     let integrity = MaterializeRefusal::Integrity;
-    let (kind, _named_scope) = parse_reserved_backup_set_name(set_name).ok_or_else(|| {
-        MaterializeRefusal::NotASegmentSet {
+    // The landing name, never the rail's (`reserved-folders.md` § __mail Sync →
+    // *The landing set*): a destination's own `__<kind>` copy is never flipped
+    // in place on the nest that holds it, so a `__<kind>` name is refused here.
+    let (kind, _named_scope) =
+        parse_landing_set_name(set_name).ok_or_else(|| MaterializeRefusal::NotASegmentSet {
             set_name: set_name.to_string(),
-        }
-    })?;
+        })?;
     let arm = Arm::of(kind).ok_or(MaterializeRefusal::UnsupportedKind { kind })?;
     let segments = arm.segments(state);
     // The owner is the authenticated connection's actor, never a wire
@@ -854,6 +949,11 @@ pub(crate) async fn recover_segment_set(
             path: SegmentFamily::Content.mirror_path(&scope_hex, kind),
         });
     }
+    // Every pair is staged here, and the stage lives until the last record
+    // has landed: the candidates read their bodies off it.
+    let mut stage = PairStage::new(segments.data_dir())
+        .await
+        .map_err(integrity)?;
     let local_content = LocalFamily::Content(segments);
     let mut content_pairs: Vec<VerifiedPair> = Vec::new();
     let mut seen_pairs: HashSet<(String, String)> = HashSet::new();
@@ -876,13 +976,14 @@ pub(crate) async fn recover_segment_set(
                 &scope,
                 &scope_hex,
                 &only_new,
+                StageAt::EachOwn(&mut stage),
             )
             .await?,
         );
     }
     let floor = content_mirrors.iter().map(|m| m.next_segment_id_seen).max();
 
-    let mut journal_folds: Vec<Vec<VerifiedPair>> = Vec::new();
+    let mut journal_folds: Vec<JournalGeneration> = Vec::new();
     let local_journal = arm.journal(state);
     if let Some(local_journal) = &local_journal
         && gens.holds_any(SegmentFamily::Placement, &scope_hex, kind)
@@ -898,34 +999,34 @@ pub(crate) async fn recover_segment_set(
                 path: SegmentFamily::Placement.mirror_path(&scope_hex, kind),
             });
         }
-        for mirror in &journal_mirrors {
-            journal_folds.push(
-                pairs_of(
-                    &mut gens,
-                    local_journal,
-                    SegmentFamily::Placement,
-                    &scope,
-                    &scope_hex,
-                    mirror,
-                )
-                .await?,
-            );
+        for (g, mirror) in journal_mirrors.iter().enumerate() {
+            let dir = stage
+                .named_dir(&format!("journal-{g:04}"))
+                .map_err(integrity)?;
+            let pairs = pairs_of(
+                &mut gens,
+                local_journal,
+                SegmentFamily::Placement,
+                &scope,
+                &scope_hex,
+                mirror,
+                StageAt::Shared(dir.clone()),
+            )
+            .await?;
+            journal_folds.push(JournalGeneration { dir, pairs });
         }
     }
 
-    let scratch = Scratch::new(segments.data_dir()).map_err(integrity)?;
-    let candidates = read_candidates(&scratch, &content_pairs)?;
+    let candidates = read_candidates(&content_pairs)?;
     let placements = match arm {
         Arm::Post => Placements::None,
-        Arm::Mail => Placements::Mail(placements_from_folds(&scratch, &journal_folds)?),
-        Arm::Calendar | Arm::Card => {
-            Placements::Dav(dav_fold_from_journals(&scratch, arm, &journal_folds)?)
-        }
+        Arm::Mail => Placements::Mail(placements_from_folds(&journal_folds)?),
+        Arm::Calendar | Arm::Card => Placements::Dav(dav_fold_from_journals(arm, &journal_folds)?),
     };
-    drop(scratch);
 
     let Landed { mut outcome, whole } =
         land(state, &scope, arm, candidates, &placements, stop_after).await?;
+    drop(stage);
     outcome.floor = floor;
     if !whole {
         return Ok(outcome);
@@ -947,6 +1048,11 @@ pub(crate) async fn recover_segment_set(
     if arm == Arm::Mail && outcome.recovered > 0 {
         crate::segments::notify_mail_received(&state.ws, &scope);
     }
+    // Every candidate landed: the landing set is scaffolding derived twice
+    // over, reclaimed in this call (`reserved-folders.md` § __mail Sync → *The
+    // landing set* → *Lifecycle*).
+    outcome.landing_reclaimed =
+        super::materialize::reclaim_landing_set(state, actor, set_name).await;
     Ok(outcome)
 }
 
@@ -1132,6 +1238,7 @@ async fn recover_mail(
     outcome: &mut RecoverOutcome,
 ) -> Result<bool, MaterializeRefusal> {
     let integrity = MaterializeRefusal::Integrity;
+    let bytes = c.bytes()?;
     let floor = MailFloorMetadata::decode(&c.floor)
         .map_err(|e| integrity(anyhow::anyhow!("decode a recovered record's floor: {e}")))?;
     let digest: [u8; 32] = c.cid.digest();
@@ -1159,7 +1266,7 @@ async fn recover_mail(
         &state.mail_segments,
         &state.db,
         scope,
-        &c.bytes,
+        &bytes,
         &c.bucket,
         floor,
         |tx| {
@@ -1379,12 +1486,13 @@ async fn recover_dav(
         return Ok(false);
     }
 
+    let bytes = c.bytes()?;
     let now = crate::db::now_epoch_secs();
     let cid = c.cid;
     let bad = |what: &str, e: String| integrity(anyhow::anyhow!("decode a recovered {what}: {e}"));
     let landed = match arm {
         Arm::Calendar => {
-            let env = fauna_calendar::segments::CalRecordEnvelope::decode(&c.bytes)
+            let env = fauna_calendar::segments::CalRecordEnvelope::decode(&bytes)
                 .map_err(|e| bad("envelope", e.to_string()))?;
             let meta = fauna_calendar::segments::CalFloorMetadata::decode(&c.floor)
                 .map_err(|e| bad("floor", e.to_string()))?;
@@ -1392,7 +1500,7 @@ async fn recover_dav(
                 &state.cal_segments,
                 &state.db,
                 scope,
-                &c.bytes,
+                &bytes,
                 &meta,
                 |tx| {
                     use crate::db::bridge_caldav::ReplaceCaldavEventOutcome as O;
@@ -1434,7 +1542,7 @@ async fn recover_dav(
             .await
         }
         _ => {
-            let env = fauna_contacts::segments::CardRecordEnvelope::decode(&c.bytes)
+            let env = fauna_contacts::segments::CardRecordEnvelope::decode(&bytes)
                 .map_err(|e| bad("envelope", e.to_string()))?;
             let meta = fauna_contacts::segments::CardFloorMetadata::decode(&c.floor)
                 .map_err(|e| bad("floor", e.to_string()))?;
@@ -1442,7 +1550,7 @@ async fn recover_dav(
                 &state.card_segments,
                 &state.db,
                 scope,
-                &c.bytes,
+                &bytes,
                 &meta,
                 |tx| {
                     use crate::db::bridge_carddav::ReplaceCarddavCardOutcome as O;
@@ -1535,9 +1643,10 @@ async fn recover_post(
     c: Candidate,
 ) -> Result<bool, MaterializeRefusal> {
     let integrity = MaterializeRefusal::Integrity;
+    let bytes = c.bytes()?;
     let outcome = state
         .post_segments
-        .append_record_with_bucket(scope, c.cid, &c.bytes, &c.floor, &c.bucket)
+        .append_record_with_bucket(scope, c.cid, &bytes, &c.floor, &c.bucket)
         .await
         .map_err(|e| integrity(anyhow::anyhow!("append a recovered post: {e}")))?;
     let conn = state.db.conn().await;
@@ -1548,7 +1657,7 @@ async fn recover_post(
     let n = crate::segments::post::reassert_records(
         &tx,
         scope,
-        &[(outcome.segment_id, c.cid, c.bytes, c.floor)],
+        &[(outcome.segment_id, c.cid, bytes, c.floor)],
     )
     .context("re-assert the recovered post")
     .map_err(integrity)?;
@@ -1618,7 +1727,7 @@ mod tests {
         let (cid, bytes) = fauna_mail::segments::ops::encode_record(&envelope).unwrap();
         Candidate {
             cid,
-            bytes,
+            body: Body::Held(bytes),
             floor: floor(received_at).encode().unwrap(),
             bucket: fauna_segment_store::bucket_for(received_at / 1000),
         }
@@ -1631,7 +1740,7 @@ mod tests {
             &state.mail_segments,
             &state.db,
             &OWNER,
-            &c.bytes,
+            &c.bytes().unwrap(),
             MailFloorMetadata::decode(&c.floor).unwrap(),
         )
         .await
@@ -1642,7 +1751,7 @@ mod tests {
     fn copy(c: &Candidate) -> Candidate {
         Candidate {
             cid: c.cid,
-            bytes: c.bytes.clone(),
+            body: Body::Held(c.bytes().unwrap()),
             floor: c.floor.clone(),
             bucket: c.bucket.clone(),
         }
@@ -1905,7 +2014,7 @@ mod tests {
         };
         let c = Candidate {
             cid,
-            bytes,
+            body: Body::Held(bytes),
             floor: floor.encode().unwrap(),
             bucket: fauna_segment_store::bucket_for(created_at),
         };
@@ -2361,7 +2470,7 @@ mod tests {
         };
         let c = Candidate {
             cid,
-            bytes,
+            body: Body::Held(bytes),
             floor: floor.encode().unwrap(),
             bucket: fauna_segment_store::bucket_for(T0),
         };

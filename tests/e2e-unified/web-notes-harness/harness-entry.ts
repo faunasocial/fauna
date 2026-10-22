@@ -27,8 +27,8 @@ import { EditorState, Compartment } from '@codemirror/state';
 import { Decoration, EditorView, keymap } from '@codemirror/view';
 import { history, defaultKeymap, historyKeymap } from '@codemirror/commands';
 
-import { ensureWasm } from '$lib/wasm';
-import { notesEditorExtensions, composeHideExtension } from '$lib/notes-editor-cm';
+import { ensureWasm } from '#lib/wasm';
+import { notesEditorExtensions, composeHideExtension } from '#lib/notes-editor-cm';
 
 // The spec's exact mixed-block probe corpus: a heading, two nested bullets, a
 // checked + an unchecked todo, and a paragraph with inline **bold** + `code`.

@@ -130,7 +130,7 @@ pub struct RoomMemberRow {
     pub handle: Option<String>,
     /// For a principal homed on **another** nest: the handle its own home
     /// nest announced on the member's relayed drain and this nest verified
-    /// (`federation.md` § Cross-nest shared folders + channel append, the
+    /// (`federation-shared-folders.md` § Cross-nest shared folders + channel append, the
     /// id→handle bullet), `LEFT JOIN`ed from the member's
     /// `channel_foreign_members` binding — a room id *is* its channel id.
     /// `None` until the member's home nest has announced one. Never set for
@@ -762,7 +762,7 @@ impl CacheDb {
         // roster). The second `LEFT JOIN` is the foreign twin: a member homed
         // elsewhere has no `users` row here, but its own home nest may have
         // announced its handle on the member's relayed drain, which this nest
-        // verified and stored on the binding row (`federation.md` § Cross-nest
+        // verified and stored on the binding row (`federation-shared-folders.md` § Cross-nest
         // shared folders + channel append, the id→handle bullet). A room id is
         // its channel id, so the binding is keyed exactly as the roster is.
         let sql = if include_removed {

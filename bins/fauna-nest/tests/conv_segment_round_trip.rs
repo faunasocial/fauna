@@ -116,11 +116,11 @@ async fn channel_send_to_fetch_round_trip() {
         1,
         "exactly one conv mirror row for the channel"
     );
-    let (mirror_seq, mirror_seg_id, mirror_record_id, mirror_legal_ref) = &mirror[0];
+    let (mirror_seq, mirror_seg_id, mirror_record_id, mirror_withhold) = &mirror[0];
     assert_eq!(*mirror_seq, 1, "mirror row carries the assigned seq");
-    assert_eq!(
-        *mirror_legal_ref, None,
-        "a live conv record has no takedown ref"
+    assert!(
+        !mirror_withhold.is_withheld(),
+        "a live conv record has no takedown ref and no admin block"
     );
     assert_ne!(
         mirror_record_id.digest(),

@@ -16,6 +16,11 @@ public class EventsVM {
     public var selectedEvent: EventDetail?
     public var selectedEventAttendees: [Attendee] = []
     public var reminderOffset: String?
+    /// The open refused scheduling changes (`ui/events.md` § Refused scheduling
+    /// changes) — the shared `refused_change_view` rows; empty means the list is
+    /// absent. Re-read on every calendar load and, while the page is open, on the
+    /// store-change notice (`RefusedChangeList`'s `onStoreChange`).
+    public var refusedChanges: [FfiRefusedChange] = []
 
     public var isLoading = false
     public var errorMessage: String?
@@ -212,6 +217,7 @@ public class EventsVM {
         selectedEvent = nil
         selectedEventAttendees = []
         reminderOffset = nil
+        refusedChanges = []
         composePrefillDate = nil
         isLoading = false
         errorMessage = nil
@@ -458,8 +464,32 @@ public class EventsVM {
         }
     }
 
+    /// Re-read the refused-change list. A store that is not up yet reads empty.
+    /// Level, not event: assigns only a list that differs, so a store-change
+    /// notice that moved nothing here repaints nothing.
+    public func loadRefusedChanges() async {
+        guard let api else { return }
+        let rows = await api.refusedChangesOpen()
+        guard self.api === api else { return }
+        if rows != refusedChanges { refusedChanges = rows }
+    }
+
+    /// `refused-change-dismiss` — the row's only control, a local store write
+    /// (no nest needed). There is deliberately no "apply anyway".
+    public func dismissRefusedChange(key: String) async {
+        guard let api else { return }
+        do {
+            try await api.refusedChangeDismiss(key: key)
+        } catch {
+            guard self.api === api else { return }
+            errorMessage = DisplayError.http(error)
+        }
+        await loadRefusedChanges()
+    }
+
     public func loadCalendars() async {
         guard let api else { return }
+        await loadRefusedChanges()
         do {
             let previous = calendars
             let loaded = try await api.listCalendars()

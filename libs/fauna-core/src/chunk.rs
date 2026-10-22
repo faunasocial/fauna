@@ -239,12 +239,18 @@ impl ChunkManifest {
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("sealed manifest without stored_hashes"))?;
         let opened = crate::manifest_crypto::open_manifest_hashes(root_secret, stored, &sealed)?;
+        // The blob authenticated under this root, so the miscount is the
+        // writer's own and recurs on every pull (`file-sync.md` § *A failed
+        // change must not strand the device*, TRANSIENT IS THE DEFAULT).
         if opened.chunk_hashes.len() != stored.len() {
-            anyhow::bail!(
-                "sealed manifest opens to {} chunk hashes for {} store keys",
-                opened.chunk_hashes.len(),
-                stored.len()
-            );
+            return Err(crate::apply_failure::permanent(
+                crate::apply_failure::PermanentApplyFailure::CONTENT_UNADDRESSED,
+                format!(
+                    "sealed manifest opens to {} chunk hashes for {} store keys",
+                    opened.chunk_hashes.len(),
+                    stored.len()
+                ),
+            ));
         }
         self.file_hash = opened.file_hash;
         self.chunk_hashes = opened.chunk_hashes;

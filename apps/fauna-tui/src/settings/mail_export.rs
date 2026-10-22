@@ -1256,7 +1256,13 @@ mod tests {
         state.mail_export.machine = Some(Arc::new(
             crate::mail_glue::build_mail_export_machine_without_key_custody(nest),
         ));
-        assert!(crate::settings::mail_export_resync_op(&state).is_some());
+        assert!(
+            matches!(
+                crate::settings::mail_export_resync_op(&state),
+                Some(crate::settings::Op::ResyncMailExport { .. })
+            ),
+            "a repaint op, not the visit's gesture-folded hydrate"
+        );
         state.sub = SubPage::MailSpam;
         assert!(
             crate::settings::mail_export_resync_op(&state).is_none(),

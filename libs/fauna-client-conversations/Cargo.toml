@@ -39,6 +39,14 @@ hex = { workspace = true }
 # `fauna-mls/native` off-wasm and `fauna-mls/js` on wasm).
 fauna-conversations = { path = "../fauna-conversations", default-features = false }
 async-trait = "0.1"
+# Both targets: the typed `fauna.posts.*` calls. The room search's post read
+# (`fauna.posts.get`, or its `get_remote` relay — `room-search.md` § The
+# surface) runs on both targets; natively it is also the content index's posts
+# reconcile walk (`fauna.posts.list` paging) and query-time resolver
+# (`content-index.md` § Ingest triggers, v1 — the posts ruling). A thin,
+# wasm-clean transport wrapper with no conversations dep, so the edge cannot
+# cycle.
+fauna-client-posts = { path = "../fauna-client-posts" }
 # Both targets: the generic `EmailClient<R>` backs `NestOutboundMailSink<R>` — the
 # shared outbound-mail send sink (native `Arc<NestClient>` + wasm `WsRpcClient`,
 # the send twin of `NestMailInboundSource`) — as well as the native-only
@@ -117,11 +125,6 @@ fauna-client-recovery = { path = "../fauna-client-recovery" }
 # rest of the launcher. Safe direction — carddav has no conversations dep, so the
 # edge cannot cycle (`content-index.md` § Ingest triggers, v1 — the contacts ruling).
 fauna-client-carddav = { path = "../fauna-client-carddav" }
-# The posts reconcile walk (`fauna.posts.list` paging) + the query-time resolver
-# (`fauna.posts.get` per hit). Same safe direction as carddav above — a thin
-# transport wrapper with no conversations dep (`content-index.md` § Ingest
-# triggers, v1 — the posts ruling).
-fauna-client-posts = { path = "../fauna-client-posts" }
 # The File arm's enumeration door + query-time resolver, both a `fauna.media.list`
 # drain (`content-index.md` § Ingest triggers, v1 — the files/media ruling).
 # Same safe direction again: `fauna-client-media` depends on nothing but

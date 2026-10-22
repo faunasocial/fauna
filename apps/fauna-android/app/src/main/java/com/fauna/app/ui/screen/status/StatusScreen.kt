@@ -126,6 +126,10 @@ fun StatusScreen(
             // every sub-paged settings shell (linux's `views/status.rs`, apple's).
             // Always present.
             RegionSettingsSection()
+            // Its twin for the session nest's own rules (`settings-nest-rules-*`,
+            // nest-rules.md § Acceptance at joining, and a change of rules → the
+            // rules surface); absent while the nest has published none.
+            com.fauna.app.ui.screen.settings.NestRulesSettingsSection()
         }
     }
 }

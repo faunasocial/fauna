@@ -277,6 +277,7 @@ fn machine_at_already_on_nest() -> (Arc<OnboardingMachine>, Arc<FakeNestApi>) {
         continue_enabled: true,
         control_checkbox_visible: false,
         control_checkbox_checked: false,
+        ..Default::default()
     });
     (m, fake)
 }
@@ -342,9 +343,12 @@ async fn an_approved_join_request_reaches_the_offer_too() {
     assert!(m.wizard_outcome().is_none());
 }
 
-/// An `AlreadyOnNest` sign-in is NOT a join — the user is already on this box,
-/// and this is just another device or another launch. § 3b-ter's "first login"
-/// has already happened, so the offer must not reappear.
+/// A returning `AlreadyOnNest` sign-in is NOT a join — the user is already on
+/// this box, and this is just another device or another launch. § 3b-ter's
+/// "first login" has already happened, so the offer must not reappear. (The
+/// injected snapshot carries no `first_sign_in`, so it reads as returning; the
+/// admin-admitted user's FIRST sign-in, which is offered, is pinned over the
+/// real probe in `handle_check_local_nest.rs`.)
 ///
 /// Pinned as its own test because the cost of getting it wrong is asymmetric:
 /// re-offering on every sign-in turns a one-time courtesy into a nag that

@@ -1,0 +1,50 @@
+---
+import Base from '../layouts/Base.astro';
+import Meadow from '../components/Meadow.astro';
+import { fill } from '../data/fill.ts';
+// Every word on this page is single-sourced from docs/sites/fauna-social/
+// and imported at build time — the same mechanism the bylaws pages use for
+// docs/governance/. Edit the copy THERE; this file owns structure and
+// styling only. The body IS the page: its `#` heading and the paragraph
+// under it become the hero, the prose follows, and a blockquote is the boxed
+// call-to-action (plain CSS, no parsing).
+import { compiledContent, frontmatter as fm } from '../../../../docs/sites/fauna-social/index.md';
+import { takeOpening } from '../data/copy.ts';
+
+const { heading, lead, rest } = takeOpening(fill(await compiledContent()));
+---
+<Base title={fm.title} description={fm.description}>
+  <section class="hero">
+    <div class="wrap center">
+      <h1 set:html={heading} />
+      <p class="lead hero-lead" set:html={lead} />
+    </div>
+    <Meadow />
+  </section>
+
+  <div class="wrap page">
+    <article class="prose copy">
+      <Fragment set:html={rest} />
+
+      <p class="center next">
+        <a href={fm.next.href} class="btn btn-primary">{fm.next.label}</a>
+      </p>
+    </article>
+  </div>
+</Base>
+
+<style>
+  .hero {
+    background: linear-gradient(to bottom, var(--sky), var(--bg) 85%);
+    padding-top: 4rem;
+  }
+  .hero h1 {
+    font-size: clamp(2.2rem, 6vw, 3.4rem);
+    font-weight: 900;
+  }
+  .hero-lead {
+    max-width: 620px;
+    margin: 1.25rem auto 0;
+  }
+  .next { margin-top: 2rem; }
+</style>

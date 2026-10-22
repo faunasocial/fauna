@@ -807,7 +807,7 @@ pub struct ResolvedBinding {
     pub read_only: bool,
 }
 
-/// Where a cross-nest set's planes go (`federation.md` § Cross-nest shared
+/// Where a cross-nest set's planes go (`federation-shared-folders.md` § Cross-nest shared
 /// folders + channel append): the byte plane dials the **home** nest under a
 /// write-token bearer minted on the own nest; the control plane relays through
 /// the own nest, addressed by the set's channel id.
@@ -1667,9 +1667,211 @@ pub fn build_restore_engine(
     engine
 }
 
+/// Restore every regular file of a **folder** snapshot into `output_dir` — the
+/// ONE whole-snapshot restore entry point every host calls: tui's
+/// `snapshot-restore-button` directly, and `fauna-ffi`'s
+/// `FfiSyncEngineHost::restore_snapshot_to_dir` (macOS `MacRestoreView`) as a
+/// thin adapter (`docs/goal/ui/backups.md` § Where logic lives → *Whole-snapshot
+/// restore*; `docs/goal/behavior/backup-restore.md` § 4).
+///
+/// In order: refuse an `output_dir` that exists and is not a directory (before
+/// any fetch); read the snapshot over the custody-wired
+/// [`fauna_client_snapshots::SnapshotsClient::get_for_restore`] — keyed by the
+/// seat's `folder_keys` resolver **and** the owner root, so a sealed row
+/// renders, and a listing that still renders fewer rows than the snapshot holds
+/// fails loudly instead of restoring an empty directory as a success; refuse a
+/// message-kind snapshot (it restores through
+/// `fauna.filesync.snapshot.restore_message_kind`, not a file walk); create
+/// `output_dir`; then run [`SyncEngine::restore_snapshot_files_to_dir`] over the
+/// one-shot [`build_restore_engine`], with the same resolver as the snapshot
+/// reader's nonce source.
+///
+/// Returns the walk's [`RestoreSummary`] **with** its `unverified` paths: the
+/// walk writes everything recoverable, and how a partial result is said is the
+/// host's — tui paints it in `snapshot-restore-result`, the FFI adapter keeps
+/// its throw-on-partial contract.
+///
+/// The returned future is `!Send` (the engine's `SyncDb` is rusqlite): a host
+/// on a multi-threaded runtime confines it to a current-thread runtime on its
+/// own thread, as both hosts do.
+pub async fn restore_snapshot_into_dir(
+    auth: Arc<AuthClient>,
+    nest_rpc: Arc<NestClient>,
+    device_id: [u8; 32],
+    owner_secret: &[u8; 32],
+    folder_keys: Option<Arc<dyn fauna_core::folder_keys::FolderKeyResolver>>,
+    snapshot_id: i64,
+    output_dir: &std::path::Path,
+) -> Result<crate::engine::RestoreSummary> {
+    if output_dir.exists() && !output_dir.is_dir() {
+        anyhow::bail!(
+            "{} is not a directory — choose a directory to restore into",
+            output_dir.display()
+        );
+    }
+    let snapshot = fauna_client_snapshots::SnapshotsClient::new(Arc::clone(&nest_rpc))
+        .with_label_custody(fauna_core::label_custody::LabelCustody::new(
+            folder_keys.clone(),
+            Some(BackupKey::derive(owner_secret)),
+        ))
+        .get_for_restore(snapshot_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("fetch snapshot {snapshot_id}: {e}"))?;
+    if let Some(kind) = &snapshot.message_kind {
+        anyhow::bail!(
+            "snapshot {snapshot_id} is a '{kind}' message-kind snapshot — restore it via \
+             fauna.filesync.snapshot.restore_message_kind, not the file walk"
+        );
+    }
+    let files = snapshot_files_to_restore(&snapshot.files).map_err(anyhow::Error::msg)?;
+    let set = fauna_client_snapshots::SnapshotSet::of(&snapshot);
+    std::fs::create_dir_all(output_dir)
+        .with_context(|| format!("create {}", output_dir.display()))?;
+
+    let engine = build_restore_engine(
+        auth,
+        nest_rpc,
+        device_id,
+        &fauna_core::hex32::encode(owner_secret),
+        folder_keys.map(fauna_client_sync::SetNonceSource::Resolver),
+    );
+    engine
+        .restore_snapshot_files_to_dir(&set, &files, output_dir)
+        .await
+        .with_context(|| format!("restore snapshot {snapshot_id}"))
+}
+
+/// Map a snapshot's file entries to the restore walk's inputs.
+///
+/// **Only regular files** carry a restorable manifest (the nest records the value
+/// `"regular"`, **not** `"file"` — `bins/fauna-nest/src/db/sync_storage.rs`).
+/// Directories are recreated by the write path and symlinks are not materialized
+/// by this v1 walk, so both are dropped here. A malformed `manifest_hash` (not 32
+/// bytes) is a hard error — a corrupt listing must not silently restore a subset.
+pub fn snapshot_files_to_restore(
+    files: &[fauna_protocol::filesync::SnapshotFileEntry],
+) -> std::result::Result<Vec<crate::engine::SnapshotFileToRestore>, String> {
+    files
+        .iter()
+        .filter(|f| f.file_type == "regular")
+        .map(|f| {
+            let raw: [u8; 32] = f
+                .manifest_hash
+                .as_ref()
+                .try_into()
+                .map_err(|_| format!("{}: manifest hash is not 32 bytes", f.path))?;
+            Ok(crate::engine::SnapshotFileToRestore {
+                relative_path: f.path.clone(),
+                manifest_hash: fauna_core::data::ContentHash::from_digest_raw(raw),
+            })
+        })
+        .collect()
+}
+
+/// Resolve the typed `snapshot-restore-destination-input` into the directory
+/// [`restore_snapshot_into_dir`] writes into: a `~/` prefix (or a bare `~`)
+/// names `home`, and anything else must already be absolute — a relative path
+/// would resolve against wherever the app happened to be started, which the
+/// user cannot see. `None` = not a usable destination. Pure over its inputs so
+/// a test can pin it without the process environment. Shared by every host that
+/// takes a typed destination (tui, linux).
+pub fn resolve_restore_destination(
+    typed: &str,
+    home: Option<std::ffi::OsString>,
+) -> Option<std::path::PathBuf> {
+    let typed = typed.trim();
+    let home = || {
+        home.clone()
+            .filter(|h| !h.is_empty())
+            .map(std::path::PathBuf::from)
+    };
+    if typed == "~" {
+        return home();
+    }
+    if let Some(rest) = typed.strip_prefix("~/") {
+        return Some(home()?.join(rest));
+    }
+    let path = std::path::PathBuf::from(typed);
+    path.is_absolute().then_some(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restore_destinations_resolve_absolute_or_home_relative_only() {
+        let home = || Some(std::ffi::OsString::from("/home/u"));
+        assert_eq!(
+            resolve_restore_destination("/srv/r", home()),
+            Some(std::path::PathBuf::from("/srv/r"))
+        );
+        assert_eq!(
+            resolve_restore_destination("  ~/Restored ", home()),
+            Some(std::path::PathBuf::from("/home/u/Restored"))
+        );
+        assert_eq!(
+            resolve_restore_destination("~", home()),
+            Some(std::path::PathBuf::from("/home/u"))
+        );
+        assert_eq!(resolve_restore_destination("Restored", home()), None);
+        assert_eq!(resolve_restore_destination("~/x", None), None);
+        assert_eq!(
+            resolve_restore_destination("~/x", Some(std::ffi::OsString::new())),
+            None,
+            "an empty home is no home"
+        );
+    }
+
+    fn entry(
+        path: &str,
+        file_type: &str,
+        manifest: Vec<u8>,
+    ) -> fauna_protocol::filesync::SnapshotFileEntry {
+        fauna_protocol::filesync::SnapshotFileEntry {
+            path: path.into(),
+            manifest_hash: serde_bytes::ByteBuf::from(manifest),
+            size_bytes: 0,
+            mtime: 0,
+            mode: 0,
+            file_type: file_type.into(),
+            symlink_target: None,
+            path_hash: None,
+            path_sealed: None,
+            extra: Default::default(),
+        }
+    }
+
+    /// Guards the `file_type == "regular"` predicate. The nest records regular
+    /// files as `"regular"` (NOT `"file"`); a wrong literal here would silently
+    /// map **zero** files and restore an empty folder with no error — the
+    /// silent-feature-death class. Directories + symlinks are correctly dropped.
+    #[test]
+    fn only_regular_files_map_to_restore_inputs() {
+        let files = vec![
+            entry("a.txt", "regular", vec![1u8; 32]),
+            entry("sub", "directory", vec![]),
+            entry("link", "symlink", vec![2u8; 32]),
+            entry("nested/c.bin", "regular", vec![3u8; 32]),
+        ];
+        let out = snapshot_files_to_restore(&files).expect("map");
+        assert_eq!(out.len(), 2, "only the two regular files survive");
+        assert_eq!(out[0].relative_path, "a.txt");
+        assert_eq!(out[1].relative_path, "nested/c.bin");
+        assert_eq!(
+            out[0].manifest_hash,
+            fauna_core::data::ContentHash::from_digest_raw([1u8; 32]),
+            "raw 32-byte manifest_hash resolves to the right ContentHash"
+        );
+    }
+
+    /// A corrupt listing (manifest hash not 32 bytes) is a hard error, never a
+    /// silent partial restore.
+    #[test]
+    fn malformed_manifest_hash_is_a_hard_error() {
+        let files = vec![entry("bad.txt", "regular", vec![1u8; 16])];
+        assert!(snapshot_files_to_restore(&files).is_err());
+    }
 
     /// The sign-out sweep takes the actor's scope, `device.db` included; the
     /// install dir survives it. The next sign-in must come back to the same id.

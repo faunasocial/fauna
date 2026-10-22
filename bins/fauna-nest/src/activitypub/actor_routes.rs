@@ -763,6 +763,7 @@ mod tests {
             load_hint: None,
             inbox_mode: InboxMode::Open,
             recovery_head: None,
+            audience: fauna_core::data::ProfileAudience::ThisNest,
             updated_at: Timestamp(0),
         };
         // Exactly what `fauna.profile.set` stores as the content-row payload.
@@ -1056,6 +1057,7 @@ mod tests {
             load_hint: None,
             inbox_mode: InboxMode::Closed,
             recovery_head: None,
+            audience: fauna_core::data::ProfileAudience::ThisNest,
             updated_at: Timestamp(0),
         };
         let stored = sign_and_pack(&kp, &profile).expect("sign+pack");

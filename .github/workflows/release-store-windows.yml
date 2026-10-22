@@ -43,6 +43,9 @@ env:
   # reads it back out of the package.
   STORE_IDENTITY_NAME: FaunaSocial.FaunaSocial
   STORE_PUBLISHER: "CN=E8868D60-047A-46A3-B608-0D4CA88AB791"
+  # The runner's Python writes stdout in cp1252; the packer and the grade
+  # print non-ASCII, which crashed the pack before it built anything.
+  PYTHONUTF8: "1"
   # Artifact build: per-invocation feature resolution, never workspace-unified
   # (.cargo/config.toml § feature unification) -- the recipe's own setting.
   CARGO_RESOLVER_FEATURE_UNIFICATION: selected
@@ -58,13 +61,16 @@ jobs:
   # (release.yml) keeps the full build. The two
   # deviations are the runner's: cargo is called directly (the recipe's
   # `scripts\cargo-win.cmd` wrapper only locates a dev box's MSVC install,
-  # which the runner image already provides), and the app is published with
-  # `dotnet publish` (release.yml's `build-windows` does the same; the recipe
-  # needs MSBuild only because the dev box is arm64, where the XAML compiler
-  # does not run under `dotnet`). The generated i18n and provider files are
+  # which the runner image already provides), and MSBuild.exe is found with
+  # vswhere rather than the recipe's dev-box path. The app is published with
+  # MSBuild as in the recipe -- under `dotnet publish` the XAML compiler fails
+  # on x64 too (the 0.1.5 dry run). The generated i18n and provider files are
   # tracked, so the recipe's two generator dependencies have nothing to do.
   build-store:
     strategy:
+      # Each architecture reports on its own: a red on one leg says nothing
+      # about the other, and cancelling it hides the evidence.
+      fail-fast: false
       matrix:
         include:
           - arch: x64
@@ -135,13 +141,31 @@ jobs:
       # 3. The app, self-contained Release (the works-out-of-the-box invariant),
       #    with the store-safe define: the csproj drops the payments and
       #    peer-to-peer sharing pages and their glue.
+      #    MSBuild.exe, not `dotnet publish`: only under MSBuild does the XAML
+      #    compiler run in-process; `dotnet publish` shells out to the net472
+      #    XamlCompiler.exe, which exited 1 with no diagnostic on both legs of
+      #    the 0.1.5 dry run. The same command `just windows-store-package` runs.
       - name: Publish the app
-        run: >
-          dotnet publish
-          apps/fauna-windows/FaunaApp/FaunaApp/FaunaApp.csproj
-          -c Release -r ${{ matrix.dotnet_rid }}
-          -p:SelfContained=true -p:WindowsAppSDKSelfContained=true
-          -p:FaunaStoreSafe=true
+        shell: pwsh
+        run: |
+          $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
+          if (-not $msbuild) { throw "no MSBuild.exe on this runner" }
+          & $msbuild apps/fauna-windows/FaunaApp/FaunaApp/FaunaApp.csproj -restore -t:Publish `
+            -p:Configuration=Release -p:RuntimeIdentifier=${{ matrix.dotnet_rid }} `
+            -p:SelfContained=true -p:WindowsAppSDKSelfContained=true `
+            -p:FaunaStoreSafe=true `
+            -bl:publish.binlog
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # The XAML compiler can fail with no message on the console; the binary
+      # log carries its diagnostics. Nothing secret is in scope in this workflow.
+      - name: Keep the publish log
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: publish-binlog-${{ matrix.arch }}
+          path: publish.binlog
+          if-no-files-found: warn
 
       # 4. Stage exactly the payload the manifest references.
       - name: Stage the payload

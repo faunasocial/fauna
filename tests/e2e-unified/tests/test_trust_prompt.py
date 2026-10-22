@@ -388,6 +388,106 @@ def test_the_joiner_can_accept_and_still_reach_the_app(
     )
 
 
+# ── The admin-admitted user: `AlreadyOnNest`, first or returning ───────────
+#
+# § 3b-ter's 2026-10-19 amendment: a user an admin admits directly
+# (`fauna.admin.users.create`, `admin.md` § Section 3 — Admit) never redeems an
+# invite or has a request approved — their first conclusion of the wizard is
+# Continue on `handle_entry`'s `AlreadyOnNest`. The nest states whether that
+# sign-in is the account's first (`login.md` § Direct Auth → the verify reply,
+# `first_sign_in`), and the arm offers iff it is. The REAL handle check runs
+# here — the registered-probe's verify is where the fact is read, so a
+# known-nest shortcut past the probe could not observe it.
+
+
+def _admit(nest) -> tuple[str, str]:
+    """Admit a fresh identity as the nest admin, with no sign-in of its own —
+    any session minted for it here would set the first-session mark the
+    journey is about. Returns ``(secret_hex, localpart)``."""
+    sk = SigningKey.generate()
+    localpart = "admitted" + secrets.token_hex(3)
+    admin = nest["admin"]["signing_key"]
+    with WsRpcAdminClient(
+        nest["url"],
+        actor_id=bytes(admin.verify_key),
+        signing_key=bytes(admin),
+    ) as ws:
+        ws.call(
+            "fauna.admin.users.create",
+            {
+                "actor_id": bytes(sk.verify_key),
+                "tier": "free",
+                "label": localpart,
+                "handle": localpart,
+            },
+        )
+    return bytes(sk).hex(), localpart
+
+
+def _sign_in_through_the_handle_check(app, nest, secret_hex: str, localpart: str) -> None:
+    """Import the identity and drive the real handle check to `AlreadyOnNest`,
+    then press Continue.
+
+    The handle names the nest's own authority, so the resolved `nest_url` is
+    the nest itself; the `nest` override routes the probe — the raw nest on a
+    native app, web's SPA proxy on web (`joiner_nest`'s `dial_url`)."""
+    from urllib.parse import urlparse
+
+    from conftest import _relaunch_trusting_nest
+
+    _relaunch_trusting_nest(app.driver, nest)
+    ob = app.onboarding
+    # Before the identity exists: web's override re-mounts the page.
+    app.driver.set_provider_base_urls({"nest": nest["dial_url"]})
+    ob.navigate_to_status()
+    ob.import_key(secret_hex)
+    app.driver.wait_for("handle-input", timeout=UI_SETTLE_S)
+    handle = f"{localpart}@{urlparse(nest['url']).netloc}"
+    app.driver.clear_and_type("handle-input", handle)
+    app.driver.click("handle-check-button")
+    wait_until(
+        lambda: app.driver.is_enabled("handle-entry-continue-button"),
+        RPC_ROUNDTRIP_S, interval=0.5,
+        diagnose=lambda: (
+            f"the handle check for the admitted {handle!r} never enabled "
+            "Continue (expected AlreadyOnNest). message: "
+            f"{app.driver.get_text('handle-message-area')!r} "
+            f"error={app.error_text()!r}"
+        ),
+    )
+    app.driver.click("handle-entry-continue-button")
+
+
+@pytest.mark.feature("join-a-nest")
+def test_an_admitted_users_first_sign_in_offers_the_trust_and_a_later_one_does_not(
+    app, joiner_nest
+):
+    """The admitted user's first sign-in reaches the offer; the same identity
+    signing in again on a wiped store goes straight to the app.
+
+    The pair red-verifies itself: a build that suppressed every `AlreadyOnNest`
+    (the pre-amendment rule) reds the first half, and one that offered on every
+    `AlreadyOnNest` — the shape § 3b-ter set aside — reds the second."""
+    secret_hex, localpart = _admit(joiner_nest)
+
+    _sign_in_through_the_handle_check(app, joiner_nest, secret_hex, localpart)
+    _require_the_prompt(app, leaving="the admitted user's first handle check")
+    assert app.onboarding.finish_trust_prompt(grant=False)
+    _wait_for_the_app(app)
+    assert not app.has_error(), (
+        f"declining must not surface an error on the app: {app.error_text()!r}"
+    )
+
+    # A new device: the app's stores wiped, the same identity signing in again.
+    app.driver.reset()
+    _sign_in_through_the_handle_check(app, joiner_nest, secret_hex, localpart)
+    _wait_for_the_app(app)
+    assert not app.onboarding.trust_prompt_showing(), (
+        "a returning sign-in must not be offered the box again"
+    )
+    assert not app.has_error(), f"unexpected error on the app: {app.error_text()!r}"
+
+
 # ── The fifth door: the manual-DNS `already_claimed` resume ────────────────
 #
 # § 3b-ter's last route (ratified 2026-09-21): a box provisioned with DNS

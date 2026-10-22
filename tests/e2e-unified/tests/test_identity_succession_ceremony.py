@@ -1446,6 +1446,121 @@ def test_a_lost_reply_you_cannot_check_says_so_and_reopening_signs_you_in(
     )
 
 
+@pytest.mark.web
+@pytest.mark.standalone_only
+@pytest.mark.feature("take-your-account-back")
+def test_the_relaunch_adoption_writes_its_link_only_under_a_sibling_tabs_registry_lock(
+    succeedable_app, nest_instance
+):
+    """the lost-reply relaunch adoption's succession-link write waits for the
+    registry lock a sibling web tab holds, then lands when it lets go.
+
+    web only (the lock is the Web Locks API; every native app takes the kernel
+    file lock inside the shared call). ``long-term-store.md`` § Multi-account
+    evolution → *Cross-process mutation lock*.
+
+    The world is the previous test's, up to the reopen: the submit committed, its
+    reply was dropped and the reconcile's lookup refused, so this browser holds
+    the successor's key but never wrote the link. A sibling tab then takes the
+    lock, and the app reopens. **The write isolated** is the retired row's
+    ``succeeded_by`` in ``fauna/index``: nothing else on a reopen writes it (the
+    ceremony that would have died before it), so it appearing while the sibling
+    holds the lock means the adoption's ``adoptHeldSuccessor`` never asked for
+    the lock. Observed as state, not elapsed time (convention 14).
+    """
+    import time
+
+    from helpers.rpc_hold import (
+        drop_rpc_reply,
+        refuse_rpc,
+        release_rpc_hold,
+        rpc_hold_status,
+        wait_for_dropped_rpc,
+        wait_for_refused_rpc,
+    )
+    from helpers.web_tabs import HOLD_LOCK_JS, RELEASE_LOCK_JS, REGISTRY_LOCK, lock_queue
+
+    app, _user = succeedable_app
+    port = nest_instance["port"]
+    assert app.driver.preserve_state_across_relaunch(), (
+        "web must pin its client-local store across a relaunch, or 'reopen the "
+        "app' opens a fresh install rather than the device holding the successor"
+    )
+    app.settings._navigate_subpage("status")
+    old_actor, held = _kit_in_hand(app)
+
+    def _link(driver):
+        raw = driver.eval_js("localStorage.getItem('fauna/index')")
+        index = json.loads(raw) if raw else {}
+        for entry in index.get("accounts", []):
+            if entry.get("actor_id") == old_actor:
+                return entry.get("succeeded_by")
+        return None
+
+    dropped_before = rpc_hold_status(port, _SUBMIT_KIND)["dropped"]
+    refused_before = rpc_hold_status(port, _LOOKUP_KIND)["refused"]
+    drop_rpc_reply(port, _SUBMIT_KIND)
+    refuse_rpc(port, _LOOKUP_KIND)
+    try:
+        app.settings.succeed_identity_with_held_kit(held)
+        wait_for_dropped_rpc(port, _SUBMIT_KIND, count=dropped_before + 1)
+        wait_for_refused_rpc(port, _LOOKUP_KIND, count=refused_before + 1)
+        wait_until(
+            lambda: _OUTCOME_UNKNOWN_SAVED.fullmatch(app.error_text()) is not None,
+            SUCCESSION_AND_RELAUNCH_S,
+            diagnose=lambda: (
+                "the undecidable arm never painted its saved-successor sentence; "
+                f"error surface: {_redacted(app.error_text())!r}"
+            ),
+        )
+    finally:
+        release_rpc_hold(port, _SUBMIT_KIND)
+        release_rpc_hold(port, _LOOKUP_KIND)
+    assert _link(app.driver) is None, (
+        "precondition: the lost ceremony must not have written the succession link"
+    )
+
+    holder = app.driver.open_lock_holder_tab()
+    try:
+        assert holder.eval_js(HOLD_LOCK_JS) is True
+        queue = lock_queue(holder)
+        assert REGISTRY_LOCK in queue["held"], (
+            f"the sibling tab never got the registry lock; queue reads {queue!r}"
+        )
+        assert app.driver.recover(), "the app did not come back up after a relaunch"
+
+        deadline = time.monotonic() + SUCCESSION_AND_RELAUNCH_S
+        queue = None
+        while time.monotonic() < deadline:
+            link = _link(holder)
+            queue = lock_queue(holder)
+            assert link is None, (
+                "the relaunch adoption wrote the succession link while a sibling tab "
+                f"held the registry lock {REGISTRY_LOCK!r} — adoptHeldSuccessor never "
+                f"asked for it. succeeded_by={link!r} queue={queue!r}"
+            )
+            if REGISTRY_LOCK in queue["pending"]:
+                break
+            time.sleep(0.5)
+        assert queue and REGISTRY_LOCK in queue["pending"], (
+            "the reopened tab never queued a request on the registry lock: "
+            f"queue={queue!r}, error={_redacted(app.error_text())!r}"
+        )
+
+        assert holder.eval_js(RELEASE_LOCK_JS) is True
+        wait_until(
+            lambda: _link(holder) is not None,
+            SUCCESSION_AND_RELAUNCH_S,
+            diagnose=lambda: (
+                "the adoption never recorded the succession link after the sibling "
+                f"released the lock; queue={lock_queue(holder)!r}, "
+                f"error={_redacted(app.error_text())!r}"
+            ),
+        )
+    finally:
+        holder.teardown()
+
+
 @pytest.mark.standalone_only
 @pytest.mark.feature("take-your-account-back")
 def test_a_lost_reply_you_cannot_check_or_store_keeps_the_only_key_on_screen(

@@ -20,7 +20,7 @@ rather than from a fixture's own key material, so a test that did not mint the
 identity can still arrange a second tab.
 
 It writes what the SPA's ``loadIdentity`` reads: the registry's ``fauna/index``
-and the per-actor slots (``$lib/store`` resolves the identity through the
+and the per-actor slots (``#lib/store`` resolves the identity through the
 registry's session material; there is no single-slot mirror any more).
 """
 from __future__ import annotations
@@ -81,7 +81,70 @@ def seed_origin_store_from_session(driver) -> dict:
     return session
 
 
-#: This tab's account pin (`$lib/tabPin`) — `sessionStorage`, per-tab by
+#: The one origin-wide registry mutation lock. The name is the historical one
+#: (`fauna_client_accounts::WEB_MUTATION_LOCK_NAME`), kept so tabs of an older
+#: and a newer build still exclude each other.
+REGISTRY_LOCK = "fauna.accounts.migrate"
+
+#: Take the registry lock in the page it runs in and hold it until
+#: ``RELEASE_LOCK_JS`` — the shape a sibling tab mid-mutation presents.
+HOLD_LOCK_JS = f"""
+(() => {{
+  window.__faunaTestLockRelease = null;
+  const held = new Promise((resolve) => {{ window.__faunaTestLockRelease = resolve; }});
+  window.__faunaTestLockDone = navigator.locks.request(
+    {json.dumps(REGISTRY_LOCK)}, {{ mode: 'exclusive' }},
+    () => {{ window.__faunaTestLockGranted = true; return held; }},
+  );
+  return true;
+}})()
+"""
+
+#: Hand the held lock to a SECOND hold: the new request is queued first, so it
+#: sits behind every request already pending (a reopened tab's launch writes),
+#: then the first hold is released. ``window.__faunaTestLockGranted`` reads
+#: ``true`` once the second hold is granted — i.e. once everything that was
+#: queued before the handoff has run — so a request pending after that point was
+#: made LATER (``GRANTED_LOCK_JS`` reads the flag).
+HANDOFF_LOCK_JS = f"""
+(() => {{
+  const releaseFirst = window.__faunaTestLockRelease;
+  window.__faunaTestLockGranted = false;
+  const held = new Promise((resolve) => {{ window.__faunaTestLockRelease = resolve; }});
+  window.__faunaTestLockDone = navigator.locks.request(
+    {json.dumps(REGISTRY_LOCK)}, {{ mode: 'exclusive' }},
+    () => {{ window.__faunaTestLockGranted = true; return held; }},
+  );
+  releaseFirst();
+  return true;
+}})()
+"""
+
+GRANTED_LOCK_JS = "window.__faunaTestLockGranted === true"
+
+RELEASE_LOCK_JS = """
+(async () => {
+  window.__faunaTestLockRelease();
+  await window.__faunaTestLockDone;
+  return true;
+})()
+"""
+
+QUERY_LOCKS_JS = """
+(async () => {
+  const q = await navigator.locks.query();
+  return { held: q.held.map((l) => l.name), pending: q.pending.map((l) => l.name) };
+})()
+"""
+
+
+def lock_queue(driver) -> dict:
+    """The origin's Web Locks state as ``{"held": [...], "pending": [...]}`` —
+    origin-wide, so any tab reads the same answer."""
+    return driver.eval_js(QUERY_LOCKS_JS) or {"held": [], "pending": []}
+
+
+#: This tab's account pin (`#lib/tabPin`) — `sessionStorage`, per-tab by
 #: construction, and the slot a tab's own boot resolves its identity through.
 PIN_KEY = "fauna_tab_account"
 
@@ -93,7 +156,7 @@ def open_same_account_tab(driver, *, budget_s: float = 60.0):
     Three steps, each load-bearing: seed the origin store
     (:func:`seed_origin_store_from_session`) so the two tabs are one profile —
     one device leaf, one registry — then pin the new tab to the account
-    (`$lib/tabPin`, what a real tab carries once it has chosen one), then sign
+    (`#lib/tabPin`, what a real tab carries once it has chosen one), then sign
     it in with the same session patch `_login_app_as` uses for web.
 
     **Why the patch and not the tab's own boot.** Measured 2026-09-20: a second

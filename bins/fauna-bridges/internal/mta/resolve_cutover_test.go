@@ -158,10 +158,19 @@ func TestForwarderNullSenderDropped(t *testing.T) {
 	}
 }
 
-// errForwardRefused stands in for nest refusing a `redirect` forward it cannot
-// park without evicting the only copy of other accepted mail (mail-forwarding.md
-// § Queue ceiling) — or any failure that leaves the forward un-enqueued.
-var errForwardRefused = errors.New("forward_message: forward queue full")
+// errForwardRefused is nest refusing a `redirect` forward it cannot park without
+// evicting the only copy of other accepted mail (mail-forwarding.md § Queue
+// ceiling), in the shape the transport delivers it: a typed RpcError carrying
+// wsrpc.CodeForwardQueueFull. The pins below therefore see the refusal by name,
+// so a later code-keyed mapping (a permanent 5xx, say) of this one code cannot
+// turn the 451 or the local fallback into a loss without reddening them.
+var errForwardRefused = func() error {
+	payload, err := cbor.Marshal(map[string]any{"code": wsrpc.CodeForwardQueueFull})
+	if err != nil {
+		panic(err)
+	}
+	return &wsrpc.ServerError{Payload: payload}
+}()
 
 // wantTempfail451 asserts err is a 451 SMTPError.
 func wantTempfail451(t *testing.T, err error) {

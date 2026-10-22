@@ -61,8 +61,8 @@ public class MailListsViewModelTests
         var fake = new FakeMailListsMachine
         {
             NextSnapshot = FakeMailListsMachine.Snap(
-                new[] { FakeMailListsMachine.Row("id-1", "Bob's Weekly", "bob-weekly", "example.com") },
-                new[] { "example.com", "other.test" }),
+                new[] { FakeMailListsMachine.Row("id-1", "Bob's Weekly", "bob-weekly", "example.net") },
+                new[] { "example.net", "other.test" }),
         };
         var vm = new MailListsViewModel(fake);
 
@@ -71,7 +71,7 @@ public class MailListsViewModelTests
         Assert.Equal(1, fake.HydrateCalls);
         Assert.Single(vm.Lists);
         Assert.Equal("Bob's Weekly", vm.Lists[0].FriendlyName);
-        Assert.Equal("bob-weekly@example.com", vm.Lists[0].Address);
+        Assert.Equal("bob-weekly@example.net", vm.Lists[0].Address);
         Assert.Equal(2, vm.LocalDomains.Count);
         Assert.True(vm.CanManage);
         Assert.Null(vm.Error);
@@ -97,15 +97,15 @@ public class MailListsViewModelTests
     {
         var fake = new FakeMailListsMachine
         {
-            NextSnapshot = FakeMailListsMachine.Snap(Array.Empty<ListView>(), new[] { "example.com" }),
+            NextSnapshot = FakeMailListsMachine.Snap(Array.Empty<ListView>(), new[] { "example.net" }),
         };
         var vm = new MailListsViewModel(fake);
         await vm.LoadCommand.ExecuteAsync(null);
 
-        await vm.CreateAsync("Bob's Weekly", "bob-weekly", "example.com", "desc", "", "", 500);
+        await vm.CreateAsync("Bob's Weekly", "bob-weekly", "example.net", "desc", "", "", 500);
 
         Assert.Contains(fake.Dispatched, a =>
-            a is MailListsAction.Create { draft.friendlyName: "Bob's Weekly", draft.localPart: "bob-weekly", draft.localDomain: "example.com" });
+            a is MailListsAction.Create { draft.friendlyName: "Bob's Weekly", draft.localPart: "bob-weekly", draft.localDomain: "example.net" });
         Assert.Null(vm.Error);
     }
 
@@ -115,13 +115,13 @@ public class MailListsViewModelTests
         var fake = new FakeMailListsMachine
         {
             NextSnapshot = FakeMailListsMachine.Snap(
-                new[] { FakeMailListsMachine.Row("id-1", "Old", "news", "example.com") },
-                new[] { "example.com" }),
+                new[] { FakeMailListsMachine.Row("id-1", "Old", "news", "example.net") },
+                new[] { "example.net" }),
         };
         var vm = new MailListsViewModel(fake);
         await vm.LoadCommand.ExecuteAsync(null);
 
-        await vm.UpdateAsync("id-1", "New name", "news", "example.com", "now described", "", "", null);
+        await vm.UpdateAsync("id-1", "New name", "news", "example.net", "now described", "", "", null);
         await vm.DeleteAsync("id-1");
 
         Assert.Contains(fake.Dispatched, a => a is MailListsAction.Update { listIdHex: "id-1", draft.friendlyName: "New name" });
@@ -133,13 +133,13 @@ public class MailListsViewModelTests
     {
         var fake = new FakeMailListsMachine
         {
-            NextSnapshot = FakeMailListsMachine.Snap(Array.Empty<ListView>(), new[] { "example.com" }),
+            NextSnapshot = FakeMailListsMachine.Snap(Array.Empty<ListView>(), new[] { "example.net" }),
         };
         var vm = new MailListsViewModel(fake);
         await vm.LoadCommand.ExecuteAsync(null);
 
         fake.NextError = "boom";
-        await vm.CreateAsync("X", "x", "example.com", "", "", "", null);
+        await vm.CreateAsync("X", "x", "example.net", "", "", "", null);
 
         Assert.False(string.IsNullOrEmpty(vm.Error));
     }

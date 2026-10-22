@@ -195,8 +195,8 @@ async fn plain_user_deletion_is_still_accepted_through_both_doors() {
     .expect("an admin may still schedule a plain user's deletion");
 }
 
-/// The gate spans the account's local succession chain (`admin.md` § Admin
-/// continuity and succession). A deletion takes every local predecessor with
+/// The gate spans the account's local succession chain (`admin.md` § Cutting a
+/// user off, the `Admin ⊇ User` paragraph). A deletion takes every local predecessor with
 /// it — their `admin_actor_ids` rows purged, their `users` rows deleted — so a
 /// retired identity's admin row would leave without `admin.remove`'s quorum or
 /// the superadmin floor. Both deletion doors refuse while one is held.

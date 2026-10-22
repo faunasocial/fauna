@@ -40,7 +40,10 @@ class SocialInboxMappingTest {
             createdAt = 1200L,
             handle = null,
             domain = null,
+            homeNestUrl = "https://home.example",
         ).toContactEntity(handle = "alice", domain = "example.com", nodeUrl = "https://example.com")
+        // The row's tap carries the roster's home as the Profile's home.
+        assertEquals("https://home.example", contact.homeNestUrl)
 
         assertEquals("11".repeat(32), contact.peerId)
         assertEquals("accepted", contact.status)
@@ -65,6 +68,7 @@ class SocialInboxMappingTest {
         assertNull(contact.handle)
         assertNull(contact.domain)
         assertNull(contact.nodeUrl)
+        assertNull(contact.homeNestUrl)
         assertNull(contact.acceptedAt)
         assertEquals("blocked", contact.status)
     }

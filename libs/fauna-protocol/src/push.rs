@@ -149,11 +149,95 @@ pub struct PresenceReply {
     pub extra: BTreeMap<String, Value>,
 }
 
+// ── The web-push payload (the plaintext inside RFC 8291 aes128gcm) ───────────
+
+/// The title every `web-push` payload and `ws-device` frame carries — generic
+/// on purpose: a relay must not read the content (`apps/common.md` § Content
+/// Encryption). One owner for the nest that writes it and the app that falls
+/// back to it.
+pub const GENERIC_TITLE: &str = "Fauna";
+/// The body twin of [`GENERIC_TITLE`].
+pub const GENERIC_BODY: &str = "New message";
+
+/// The JSON object a `web-push` delivery encrypts — what the nest writes and
+/// what an app that decrypts its own Web Push messages (android through its
+/// UnifiedPush connector; a browser's service worker) reads back. JSON, not
+/// CBOR: it is the Web Push convention a service worker's `event.data.json()`
+/// reads. `url` is the deep link a tap opens, absent today on `web-push`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebPushPayload {
+    pub title: String,
+    pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// A newer sender's keys, kept rather than dropped (transport.md § Schema
+    /// and forward-compat discipline, rule 4). JSON, like the payload.
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+impl WebPushPayload {
+    /// The generic payload every `web-push` delivery carries.
+    pub fn generic() -> Self {
+        Self {
+            title: GENERIC_TITLE.to_string(),
+            body: GENERIC_BODY.to_string(),
+            url: None,
+            extra: BTreeMap::new(),
+        }
+    }
+
+    /// The JSON bytes the nest encrypts.
+    pub fn to_json(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("a struct of strings always serializes")
+    }
+
+    /// Read a decrypted payload. Anything that is not the object above — a
+    /// sender newer than this reader, a relay's own test message — reads as
+    /// [`Self::generic`]: a notification still shows, and nothing a relay
+    /// wrote is shown as Fauna's words.
+    pub fn parse_or_generic(bytes: &[u8]) -> Self {
+        serde_json::from_slice(bytes).unwrap_or_else(|_| Self::generic())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::codec::test_support::assert_round_trips;
     use crate::codec::{decode_strict as decode, encode_canonical};
+
+    #[test]
+    fn the_generic_web_push_payload_is_the_bytes_the_nest_has_always_sent() {
+        assert_eq!(
+            WebPushPayload::generic().to_json(),
+            br#"{"title":"Fauna","body":"New message"}"#.to_vec()
+        );
+    }
+
+    #[test]
+    fn a_web_push_payload_reads_back_with_its_url() {
+        let sent = WebPushPayload {
+            url: Some("fauna://inbox".into()),
+            ..WebPushPayload::generic()
+        };
+        assert_eq!(WebPushPayload::parse_or_generic(&sent.to_json()), sent);
+        // A newer sender's extra field is kept, not a parse failure.
+        let newer = br#"{"title":"T","body":"B","tag":"x"}"#;
+        let read = WebPushPayload::parse_or_generic(newer);
+        assert_eq!(read.title, "T");
+        assert_eq!(read.extra.get("tag"), Some(&serde_json::json!("x")));
+    }
+
+    #[test]
+    fn an_unreadable_web_push_payload_reads_as_the_generic_one() {
+        for bytes in [&b""[..], b"not json", br#"{"title":1}"#] {
+            assert_eq!(
+                WebPushPayload::parse_or_generic(bytes),
+                WebPushPayload::generic()
+            );
+        }
+    }
 
     #[test]
     fn presence_round_trips() {

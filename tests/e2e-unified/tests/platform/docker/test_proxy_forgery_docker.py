@@ -83,7 +83,7 @@ def forged_nest(docker_image):
                    check=True, capture_output=True, timeout=30)
     try:
         start_container_with_ports(
-            name, {3000: http_port, FORGER_PORT: fwd_port},
+            name, {443: http_port, FORGER_PORT: fwd_port},
             env={"FAUNA_CLAIM_CODE": CLAIM_CODE, "FAUNA_PORT": "3000"},
             data_volume=volume,
         )

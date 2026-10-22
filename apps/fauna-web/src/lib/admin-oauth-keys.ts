@@ -5,11 +5,11 @@
 // (`apps/fauna-tui/src/admin/mod.rs`).
 //
 // This module decides only WHEN a control may act. Every sentence the section
-// shows is a shared `fauna_client_admin` fold reached through `$lib/wasm` (the
+// shows is a shared `fauna_client_admin` fold reached through `#lib/wasm` (the
 // confirm fold is handed in as a parameter rather than imported), and every
 // dispatch stays in the page. That split is what lets the guards making a
 // double press harmless run under plain `deno test`: the imports are relative
-// and type-only for the reason `./custody.ts` records — the `$lib` alias is a
+// and type-only for the reason `./custody.ts` records — the `#lib` alias is a
 // SvelteKit/Vite one `deno test` cannot resolve.
 //
 // Every transition returns a NEW section (or `null` when it refuses, leaving

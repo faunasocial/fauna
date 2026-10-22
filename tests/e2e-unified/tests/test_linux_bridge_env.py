@@ -33,6 +33,7 @@ pytestmark = pytest.mark.tier_1
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from drivers.linux import (
+    XVFB_SERVER_ARGS,
     _headless_render_cmd_env,
     _private_bus_env,
     _secret_service_bus_missing,
@@ -56,7 +57,10 @@ class TestHeadlessWaylandFix:
         cmd, env = _headless_render_cmd_env(list(_APP), dict(_WAYLAND_ENV))
 
         assert cmd[:2] == ["xvfb-run", "-a"]
-        assert cmd[2:] == _APP  # the app command is preserved after the wrapper
+        # A screen taller than the app's default window, or a popover anchored
+        # low in a tall page cannot map (drivers/linux.py::XVFB_SERVER_ARGS).
+        assert cmd[2:4] == ["-s", XVFB_SERVER_ARGS]
+        assert cmd[4:] == _APP  # the app command is preserved after the wrapper
         assert env["GDK_BACKEND"] == "x11"
         assert "WAYLAND_DISPLAY" not in env
         # DISPLAY must be left intact — xvfb-run overrides it to the Xvfb at

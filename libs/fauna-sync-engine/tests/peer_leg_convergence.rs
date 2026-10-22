@@ -3017,6 +3017,156 @@ async fn the_dns_door_refuses_while_no_tip_resolves() {
     );
 }
 
+// ── The mail import's remembered source (`mailbox-migration.md`; `fauna.state.mail-import-source`) ──
+
+/// Remember `next` (or forget, `None`) on `replica` through the production
+/// door (`mail_import_source_rows::write_mail_import_source`), then the
+/// runtime's publish step. Whether the door wrote.
+async fn put_import_source(
+    replica: &Replica,
+    next: Option<&fauna_core::mail_import_source::RememberedImportSource>,
+) -> anyhow::Result<bool> {
+    let requester = NoNest;
+    let sk = signing_key(replica.device);
+    let sched = schedule();
+    let tr = trust();
+    let plane = AccountStatePlane::new_pull_only(
+        &replica.store,
+        &requester,
+        &sched,
+        &sk,
+        &tr,
+        fleet_scope(),
+    )
+    .unwrap();
+    let wrote = fauna_sync_engine::mail_import_source_rows::write_mail_import_source(
+        &replica.store,
+        &plane,
+        writer_id(replica.device).0,
+        next,
+    )
+    .await?;
+    plane.publish_pending().await.expect("publish step");
+    Ok(wrote)
+}
+
+fn import_source(host: &str) -> fauna_core::mail_import_source::RememberedImportSource {
+    fauna_core::mail_import_source::RememberedImportSource {
+        provider: "imap".into(),
+        host: host.into(),
+        port: 143,
+        tls_mode: "starttls".into(),
+        username: "person@old.example".into(),
+    }
+}
+
+/// **The remembered source converges latest-wins, and a forget on one device
+/// stays forgotten on both.** A connects (the door writes), B learns it, B
+/// later connects to another server, then A forgets — the stamped tombstone
+/// wins over B's earlier put on both replicas, in identical bytes.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_remembered_import_source_converges_and_a_forget_holds() {
+    use fauna_protocol::merge_policy::{KIND_MAIL_IMPORT_SOURCE, MAIL_IMPORT_SOURCE_ROW_KEY};
+    use fauna_sync_engine::mail_import_source_rows::read_mail_import_source;
+
+    let TippedPair { a, b, ab, ba, .. } = tipped_pair().await;
+    let fleet = fleet_scope();
+
+    let first = import_source("mail.old.example");
+    assert!(
+        put_import_source(&a, Some(&first))
+            .await
+            .expect("A's door writes")
+    );
+    b.walk_peer_scope(&ba, fleet).await;
+    assert_eq!(
+        read_mail_import_source(&b.store).await.unwrap(),
+        Some(first.clone()),
+        "B opened A's tip-sealed row"
+    );
+    assert!(
+        !put_import_source(&a, Some(&first))
+            .await
+            .expect("an unchanged write"),
+        "remembering the record as it stands writes nothing"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let later = import_source("imap.another.example");
+    assert!(
+        put_import_source(&b, Some(&later))
+            .await
+            .expect("B's door writes")
+    );
+    a.walk_peer_scope(&ab, fleet).await;
+    assert_eq!(
+        read_mail_import_source(&a.store).await.unwrap(),
+        Some(later),
+        "A: the later connection wins"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    assert!(
+        put_import_source(&a, None)
+            .await
+            .expect("A's forget writes")
+    );
+    b.walk_peer_scope(&ba, fleet).await;
+    for (side, store) in [("A", &a.store), ("B", &b.store)] {
+        assert_eq!(
+            read_mail_import_source(store).await.unwrap(),
+            None,
+            "{side}: the forget holds"
+        );
+    }
+    assert_eq!(
+        stored(
+            &a.store,
+            KIND_MAIL_IMPORT_SOURCE,
+            MAIL_IMPORT_SOURCE_ROW_KEY
+        )
+        .await,
+        stored(
+            &b.store,
+            KIND_MAIL_IMPORT_SOURCE,
+            MAIL_IMPORT_SOURCE_ROW_KEY
+        )
+        .await,
+        "both replicas hold identical bytes"
+    );
+    assert!(
+        !put_import_source(&a, None)
+            .await
+            .expect("a forget of nothing"),
+        "forgetting what is already forgotten writes nothing"
+    );
+}
+
+/// **The door refuses while no generation tip resolves, and keeps nothing.**
+#[tokio::test(flavor = "multi_thread")]
+async fn the_remembered_import_source_door_refuses_while_no_tip_resolves() {
+    use fauna_protocol::merge_policy::KIND_MAIL_IMPORT_SOURCE;
+
+    let listeners: Listeners = fauna_transport::testing::listeners();
+    let now = Arc::new(AtomicU64::new(5_000));
+    let a = replica(DEVICE_A, &listeners, &now, None, QuotaConfig::default()).await;
+    let err = put_import_source(&a, Some(&import_source("mail.old.example")))
+        .await
+        .expect_err("no tip resolves, so the door must refuse");
+    assert!(
+        format!("{err:#}").contains("no candidate generation tip resolves"),
+        "expected the no-tip refusal, got: {err:#}"
+    );
+    assert!(
+        a.store
+            .states_of_kind(KIND_MAIL_IMPORT_SOURCE)
+            .await
+            .unwrap()
+            .is_empty(),
+        "nothing durable is left behind"
+    );
+}
+
 // ── The ATProto app credentials (`atproto-pds-full.md`; `fauna.state.atproto`) ──
 
 /// Which app-credential door a test drives.
@@ -4859,6 +5009,7 @@ enum MailWrite<'a> {
     Mark(&'a str, fauna_core::data::MsekFingerprint),
     Revoke(&'a str),
     Generation(&'a fauna_core::data::PriorMsekRetirement),
+    Clear(&'a fauna_core::secret::SecretArray32),
 }
 
 /// Drive one mail door (`mail_rows::{write_mail_state, put_credential,
@@ -4867,8 +5018,8 @@ enum MailWrite<'a> {
 /// door wrote.
 async fn mail_door(replica: &Replica, write: MailWrite<'_>, at: u64) -> anyhow::Result<bool> {
     use fauna_sync_engine::mail_rows::{
-        mark_credential_wrapped, put_credential, put_generation, revoke_credential,
-        write_mail_state,
+        clear_mail_rotation, mark_credential_wrapped, put_credential, put_generation,
+        revoke_credential, write_mail_state,
     };
     let requester = NoNest;
     let sk = signing_key(replica.device);
@@ -4891,6 +5042,7 @@ async fn mail_door(replica: &Replica, write: MailWrite<'_>, at: u64) -> anyhow::
         MailWrite::Mark(id, fp) => mark_credential_wrapped(store, &plane, id, fp, now).await?,
         MailWrite::Revoke(id) => revoke_credential(store, &plane, id, now).await?,
         MailWrite::Generation(g) => put_generation(store, &plane, g).await?,
+        MailWrite::Clear(new_msek) => clear_mail_rotation(store, &plane, new_msek, now).await?,
     };
     plane.publish_pending().await.expect("publish step");
     Ok(wrote)
@@ -4905,6 +5057,7 @@ fn a_mail_credential(id: &str, secret: &str, created_at: u64) -> fauna_core::dat
         created_at,
         updated_at: fauna_core::data::Timestamp::default(),
         wrapped_under: None,
+        token_minted_at: None,
         revoked_at_unix: None,
         burned: None,
     }
@@ -5091,13 +5244,14 @@ async fn a_fresh_device_reads_the_mail_custody_back() {
 /// **The rotation finalize's revert, on the plane rows** (`mail-credentials.md`
 /// § Cross-device finalize race). A swaps its MSEK to MSEK′; B, a sibling that
 /// never saw the swap, finalizes its OWN concurrent rotation to MSEK″ under a
-/// later stamp — the one write that can revert a swap, since every other state
-/// write restates no key material and a restatement of the key a replica
-/// already holds joins to no change (the door writes nothing). The state row's
-/// join is a deliberate-rotation latest-wins on the stamp, so after the walks
-/// both replicas hold MSEK″ — and MSEK′ is in neither `msek` nor a
-/// generation row (a generation row is written only for the key a finalize
-/// retires): the residual the finalize's read back exists to catch. A's
+/// later key stamp — the one write that can revert a swap, since no other
+/// state write advances the key's own stamp (`msek_at`: a write that leaves
+/// the MSEK absent or restates the stored one keeps it). The MSEK
+/// join is a deliberate-rotation latest-wins on that stamp, so after the walks
+/// both replicas hold MSEK″ — and MSEK′ is in neither `msek` nor a generation
+/// row (a generation row is written only for the key a finalize retires),
+/// only in A's sentinel, which B's swap never clears: the residual the
+/// finalize's read back exists to catch. A's
 /// re-drive — the same swap, stamped strictly above what it now reads — lands
 /// MSEK′ on both, the old key a prior generation.
 #[tokio::test(flavor = "multi_thread")]
@@ -5170,8 +5324,13 @@ async fn a_reverted_mail_key_swap_is_caught_on_read_back_and_re_driven() {
     let read_back = read_mail(&a.store).await.unwrap();
     assert_eq!(read_back.msek, Some(other.clone()), "the swap was reverted");
     assert!(
-        !read_back.prior_mseks.contains(&new) && read_back.pending_rotation.is_none(),
-        "MSEK′ survives nowhere on the joined row — what the read back must catch"
+        !read_back.prior_mseks.contains(&new),
+        "MSEK′ is no generation — what the read back must catch"
+    );
+    assert_eq!(
+        read_back.pending_rotation.map(|p| p.new_msek),
+        Some(new.clone()),
+        "MSEK′ stays in custody in A's sentinel: B's swap never clears it"
     );
 
     // The re-drive: the same swap, stamped above what A now reads.
@@ -5194,6 +5353,210 @@ async fn a_reverted_mail_key_swap_is_caught_on_read_back_and_re_driven() {
             Some(1_700_000_400),
             "{side}: two records of one retirement join on the later instant"
         );
+    }
+    assert_mail_rows_identical(&a, &b).await;
+}
+
+/// **A stale flag flip never reverts a committed swap**
+/// (`mail-credentials.md` § Cross-device finalize race). A finalizes a
+/// rotation — the old key's generation row, the swap to MSEK′ under its
+/// sentinel, the sentinel's clear; B, which has not walked any of it, flips
+/// CalDAV on above all three stamps. B's write keeps its stored MSEK at its
+/// stored key stamp, so after the walks both replicas hold MSEK′ with no
+/// sentinel, the old key a generation row, and B's flag.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stale_mail_flag_flip_never_reverts_a_committed_key_swap() {
+    use fauna_core::data::PriorMsekRetirement;
+    use fauna_core::mail_rows::{MailRotationSentinel, MailStateRow};
+    use fauna_core::secret::SecretArray32;
+    use fauna_sync_engine::mail_rows::read_mail;
+
+    let TippedPair { a, b, ab, ba, .. } = tipped_pair().await;
+    let fleet = fleet_scope();
+    let old = SecretArray32::new([0x01; 32]);
+    let new = SecretArray32::new([0x02; 32]);
+    let enabled = MailStateRow {
+        msek: Some(old.clone()),
+        mail_enabled: Some(true),
+        ..MailStateRow::default()
+    };
+    assert!(
+        mail_door(&a, MailWrite::State(&enabled), 100)
+            .await
+            .unwrap()
+    );
+    b.walk_peer_scope(&ba, fleet).await;
+    let b_view = read_mail(&b.store).await.unwrap();
+
+    let retired = PriorMsekRetirement {
+        msek: old.clone(),
+        retired_at_unix: 1_700_000_300,
+    };
+    assert!(
+        mail_door(&a, MailWrite::Generation(&retired), 300)
+            .await
+            .unwrap()
+    );
+    let swap = MailStateRow {
+        msek: Some(new.clone()),
+        pending_rotation: Some(MailRotationSentinel {
+            new_msek: new.clone(),
+        }),
+        ..MailStateRow::recreatable_of(&read_mail(&a.store).await.unwrap())
+    };
+    assert!(mail_door(&a, MailWrite::State(&swap), 300).await.unwrap());
+    assert!(
+        !mail_door(&a, MailWrite::Clear(&old), 310).await.unwrap(),
+        "a clear naming another MSEK′ is no clear"
+    );
+    assert!(mail_door(&a, MailWrite::Clear(&new), 310).await.unwrap());
+    assert_eq!(read_mail(&a.store).await.unwrap().msek, Some(new.clone()));
+
+    // B, stale, flips CalDAV on — stamped above every one of A's writes.
+    let flip = MailStateRow {
+        caldav_enabled: true,
+        ..MailStateRow::recreatable_of(&b_view)
+    };
+    assert!(mail_door(&b, MailWrite::State(&flip), 400).await.unwrap());
+    a.walk_peer_scope(&ab, fleet).await;
+    b.walk_peer_scope(&ba, fleet).await;
+
+    for (side, store) in [("A", &a.store), ("B", &b.store)] {
+        let mail = read_mail(store).await.unwrap();
+        assert_eq!(mail.msek, Some(new.clone()), "{side}: the swap survives");
+        assert!(mail.pending_rotation.is_none(), "{side}: the clear holds");
+        assert!(mail.caldav_enabled, "{side}: B's newer flag wins");
+        assert_eq!(
+            mail.prior_mseks,
+            vec![old.clone()],
+            "{side}: the old key is its generation row"
+        );
+    }
+    assert_mail_rows_identical(&a, &b).await;
+}
+
+/// **A stale flag flip never clears a sentinel its replica never
+/// saw.** A starts a rotation (the sentinel naming MSEK′); B, which has
+/// not walked it, flips CalDAV on above it. After the walks both replicas
+/// still hold the sentinel — the rotation stays resumable.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stale_mail_flag_flip_never_clears_an_unseen_sentinel() {
+    use fauna_core::mail_rows::{MailRotationSentinel, MailStateRow};
+    use fauna_core::secret::SecretArray32;
+    use fauna_sync_engine::mail_rows::read_mail;
+
+    let TippedPair { a, b, ab, ba, .. } = tipped_pair().await;
+    let fleet = fleet_scope();
+    let old = SecretArray32::new([0x01; 32]);
+    let new = SecretArray32::new([0x02; 32]);
+    let enabled = MailStateRow {
+        msek: Some(old.clone()),
+        mail_enabled: Some(true),
+        ..MailStateRow::default()
+    };
+    assert!(
+        mail_door(&a, MailWrite::State(&enabled), 100)
+            .await
+            .unwrap()
+    );
+    b.walk_peer_scope(&ba, fleet).await;
+    let b_view = read_mail(&b.store).await.unwrap();
+
+    let start = MailStateRow {
+        pending_rotation: Some(MailRotationSentinel {
+            new_msek: new.clone(),
+        }),
+        ..MailStateRow::recreatable_of(&read_mail(&a.store).await.unwrap())
+    };
+    assert!(mail_door(&a, MailWrite::State(&start), 300).await.unwrap());
+    let flip = MailStateRow {
+        caldav_enabled: true,
+        ..MailStateRow::recreatable_of(&b_view)
+    };
+    assert!(mail_door(&b, MailWrite::State(&flip), 400).await.unwrap());
+    a.walk_peer_scope(&ab, fleet).await;
+    b.walk_peer_scope(&ba, fleet).await;
+
+    for (side, store) in [("A", &a.store), ("B", &b.store)] {
+        let mail = read_mail(store).await.unwrap();
+        assert_eq!(
+            mail.pending_rotation.map(|p| p.new_msek),
+            Some(new.clone()),
+            "{side}: the sentinel survives"
+        );
+        assert_eq!(mail.msek, Some(old.clone()));
+        assert!(mail.caldav_enabled, "{side}: B's newer flag wins");
+    }
+    assert_mail_rows_identical(&a, &b).await;
+}
+
+/// **A flag write from a load that predates a clear never re-sets the
+/// sentinel.** A starts a rotation; B walks it and loads (its view
+/// holds the sentinel); A clears the sentinel, and B walks that clear BETWEEN
+/// its load and its write; B then turns email off from its pre-clear view,
+/// stamped above the clear. After the walks no replica holds the sentinel —
+/// a cleared rotation stays cleared, and B's flag lands.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_flag_write_from_a_pre_clear_load_never_re_sets_the_sentinel() {
+    use fauna_core::mail_rows::{MailRotationSentinel, MailStateRow};
+    use fauna_core::secret::SecretArray32;
+    use fauna_sync_engine::mail_rows::read_mail;
+
+    let TippedPair { a, b, ab, ba, .. } = tipped_pair().await;
+    let fleet = fleet_scope();
+    let old = SecretArray32::new([0x01; 32]);
+    let new = SecretArray32::new([0x02; 32]);
+    let enabled = MailStateRow {
+        msek: Some(old.clone()),
+        mail_enabled: Some(true),
+        ..MailStateRow::default()
+    };
+    assert!(
+        mail_door(&a, MailWrite::State(&enabled), 100)
+            .await
+            .unwrap()
+    );
+    let start = MailStateRow {
+        pending_rotation: Some(MailRotationSentinel {
+            new_msek: new.clone(),
+        }),
+        ..MailStateRow::recreatable_of(&read_mail(&a.store).await.unwrap())
+    };
+    assert!(mail_door(&a, MailWrite::State(&start), 300).await.unwrap());
+    b.walk_peer_scope(&ba, fleet).await;
+    let b_view = read_mail(&b.store).await.unwrap();
+    assert!(
+        b_view.pending_rotation.is_some(),
+        "B's load saw the sentinel"
+    );
+
+    assert!(mail_door(&a, MailWrite::Clear(&new), 310).await.unwrap());
+    b.walk_peer_scope(&ba, fleet).await;
+    assert!(
+        read_mail(&b.store)
+            .await
+            .unwrap()
+            .pending_rotation
+            .is_none(),
+        "the clear reached B before its write"
+    );
+
+    let off = MailStateRow {
+        mail_enabled: Some(false),
+        ..MailStateRow::recreatable_of(&b_view)
+    };
+    assert!(mail_door(&b, MailWrite::State(&off), 400).await.unwrap());
+    a.walk_peer_scope(&ab, fleet).await;
+    b.walk_peer_scope(&ba, fleet).await;
+
+    for (side, store) in [("A", &a.store), ("B", &b.store)] {
+        let mail = read_mail(store).await.unwrap();
+        assert!(
+            mail.pending_rotation.is_none(),
+            "{side}: the cleared sentinel stays cleared"
+        );
+        assert_eq!(mail.mail_enabled, Some(false), "{side}: B's flag lands");
+        assert_eq!(mail.msek, Some(old.clone()));
     }
     assert_mail_rows_identical(&a, &b).await;
 }

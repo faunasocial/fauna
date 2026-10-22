@@ -138,8 +138,9 @@ fn sha256_file(path: &std::path::Path) -> std::io::Result<String> {
 /// set that makes a degraded box identifiable is one shape, not two hand-kept
 /// copies.
 ///
-/// `update_channel` is the channel id in force, `null` on a pinned box and on
-/// the degraded needs-update boot, which opened no database
+/// `update_channel` is the channel id in force, `null` on a pinned box, on a
+/// nest the image does not run (`update_channel::enactable`) and on the
+/// degraded needs-update boot, which opened no database
 /// (`nest/update-channel.md` § The channel as nest state → *What the nest
 /// reports*): the updater reads it here, without a shell on the box.
 pub fn identity_json(status: &str, update_channel: Option<&str>) -> serde_json::Value {

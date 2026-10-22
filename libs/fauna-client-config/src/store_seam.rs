@@ -17,6 +17,7 @@ use fauna_core::data::{
 };
 use fauna_core::identity::ActorId;
 use fauna_core::mail_rows::{MailRows, MailStateRow};
+use fauna_core::secret::SecretArray32;
 use fauna_core::succession_ledger::SuccessionLedger;
 use fauna_protocol::MaybeSendSync;
 
@@ -723,9 +724,13 @@ pub trait MailStore: MaybeSendSync {
     /// rule ([`MailRows::spent_credential_ids`]) and the derived owed set
     /// ([`MailRows::owed_rewrap`]) read. [`MailRows::config`] is [`Self::load`].
     async fn load_rows(&self) -> Result<MailRows, StoreError>;
-    /// Write the state row: `state`'s content (its `updated_at` ignored)
-    /// joined into what is stored.
+    /// Write the state row: `state` written over what is stored
+    /// ([`MailStateRow::written_over`] — its stamps ignored, an absent MSEK or
+    /// sentinel no change) and joined into it.
     async fn write_state(&self, state: MailStateRow) -> Result<bool, StoreError>;
+    /// Clear the rotation sentinel, only when the stored one names `new_msek`
+    /// ([`MailStateRow::rotation_cleared`]).
+    async fn clear_rotation(&self, new_msek: SecretArray32) -> Result<bool, StoreError>;
     /// Put one credential at its own row, joined into what is stored — a
     /// marker the store holds is never undone.
     async fn put_credential(&self, credential: MailCredential) -> Result<bool, StoreError>;
@@ -735,6 +740,15 @@ pub trait MailStore: MaybeSendSync {
         &self,
         credential_id: String,
         fingerprint: MsekFingerprint,
+    ) -> Result<bool, StoreError>;
+    /// Record that a fresh outbound submission token issued at `minted_at`
+    /// (unix seconds) was provisioned for `credential_id` — the token-mint
+    /// stamp the refresh reads (`mail-credentials.md` rule 10). A no-op on an
+    /// absent or marked row, or one already naming a mint at least as recent.
+    async fn mark_token_minted(
+        &self,
+        credential_id: String,
+        minted_at: u64,
     ) -> Result<bool, StoreError>;
     /// Soft-revoke `credential_id`: the marker, the generation cleared and the
     /// secret emptied together; the id stays spent.
@@ -768,6 +782,33 @@ pub trait MailStore: MaybeSendSync {
     /// § Hard revoke → *Published before the nest moves*, the stale-sibling
     /// rule).
     async fn walk(&self) -> Result<(), StoreError>;
+}
+
+/// The **remembered mail-import source** seam —
+/// `fauna.state.mail-import-source`, one row per account: the old provider's
+/// server, port, connection security and username the import wizard
+/// prefills, until the user forgets them (`mailbox-migration.md`
+/// § Credential handling). Never the password.
+///
+/// Production implements it **directly on the account-store handle**
+/// (`fauna_account_plane`'s `impl MailImportSourceStore for
+/// AccountStoreHandle`) and on the seat-sourced `AccountMailImportSourceStore`;
+/// the write is a whole-record latest-wins put (a tombstone for `None`) whose
+/// refusals surface as [`StoreError::Save`].
+///
+/// Same `Send` split as [`SuccessionLedgerStore`].
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait MailImportSourceStore: MaybeSendSync {
+    /// The remembered source — `None` when nothing is remembered.
+    async fn load(
+        &self,
+    ) -> Result<Option<fauna_core::mail_import_source::RememberedImportSource>, StoreError>;
+    /// Remember `next`, or forget the stored record (`None`).
+    async fn save(
+        &self,
+        next: Option<fauna_core::mail_import_source::RememberedImportSource>,
+    ) -> Result<(), StoreError>;
 }
 
 /// The **kind-manifest** seam — `fauna.state.kind-manifest`, one row per

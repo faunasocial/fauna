@@ -20,7 +20,7 @@ This is a coarse v1 — line-level heuristics. A future revision will use
 a CDDL parser. v1 catches common drift; non-trivial schema changes still
 require human review.
 
-Exit 0 = OK. Exit 1 = blocked drift detected.
+Exit 0 = OK. Exit 1 = blocked drift detected. Exit 2 = `ratified-breaks.txt` malformed.
 """
 
 from __future__ import annotations
@@ -77,7 +77,9 @@ def is_transition(token: str) -> bool:
     )
 
 
-def parse_ratified_breaks(text: str) -> frozenset[tuple[str, str]]:
+def parse_ratified_breaks(
+    text: str, lenient: bool = False
+) -> frozenset[tuple[str, str]]:
     """The `cddl` entries of ratified-breaks.txt as `(key, transition)` pairs.
 
     One entry per line, `<gate> <key> <transition> <ratified-on>
@@ -88,32 +90,52 @@ def parse_ratified_breaks(text: str) -> frozenset[tuple[str, str]]:
     excuse (or silently stop excusing) anything, so an unrecognized gate
     name raises exactly like a short or invalid line does. `key` is `Type`
     or `Type.field`; a bare `Type` is only ever `removed`.
+
+    `lenient` is the merge-base read: the base list feeds only the only-grows
+    check, so a line the grammar rejects is skipped with a warning instead of
+    raising — a malformed base line must never wedge the commit that fixes
+    it. HEAD's list is always read strictly, which is what keeps it
+    well-formed.
     """
     entries = set()
     for n, raw in enumerate(text.splitlines(), 1):
         line = raw.split("#", 1)[0].strip()
         if not line:
             continue
-        parts = line.split()
-        gate = parts[0]
-        if gate == "rust":
+        try:
+            entry = _parse_entry(n, raw, line)
+        except ValueError as e:
+            if not lenient:
+                raise
+            print(f"warn: {RATIFIED_BREAKS_PATH} at merge base: {e} — line skipped", file=sys.stderr)
             continue
-        if gate != "cddl":
-            raise ValueError(f"line {n}: unknown gate {gate!r} — want `cddl` or `rust`: {raw!r}")
-        if len(parts) < 5:
-            raise ValueError(
-                f"line {n}: want `cddl <key> <transition> <ratified-on> <ratification…>`: {raw!r}"
-            )
-        key, transition = parts[1], parts[2]
-        if not is_transition(transition):
-            raise ValueError(
-                f"line {n}: transition {transition!r} is not one of "
-                f"{sorted(TRANSITIONS)} or `{RETYPED_PREFIX}<type>`: {raw!r}"
-            )
-        if "." not in key and transition != REMOVED:
-            raise ValueError(f"line {n}: a bare type entry is only ever `{REMOVED}`: {raw!r}")
-        entries.add((key, transition))
+        if entry is not None:
+            entries.add(entry)
     return frozenset(entries)
+
+
+def _parse_entry(n: int, raw: str, line: str) -> tuple[str, str] | None:
+    """One non-blank, comment-stripped line as a `cddl` `(key, transition)`,
+    None for a `rust` line (the struct gate's), ValueError when malformed."""
+    parts = line.split()
+    gate = parts[0]
+    if gate == "rust":
+        return None
+    if gate != "cddl":
+        raise ValueError(f"line {n}: unknown gate {gate!r} — want `cddl` or `rust`: {raw!r}")
+    if len(parts) < 5:
+        raise ValueError(
+            f"line {n}: want `cddl <key> <transition> <ratified-on> <ratification…>`: {raw!r}"
+        )
+    key, transition = parts[1], parts[2]
+    if not is_transition(transition):
+        raise ValueError(
+            f"line {n}: transition {transition!r} is not one of "
+            f"{sorted(TRANSITIONS)} or `{RETYPED_PREFIX}<type>`: {raw!r}"
+        )
+    if "." not in key and transition != REMOVED:
+        raise ValueError(f"line {n}: a bare type entry is only ever `{REMOVED}`: {raw!r}")
+    return (key, transition)
 
 
 def git_show(ref: str, path: str) -> str | None:
@@ -168,7 +190,39 @@ def find_types(text: str) -> set[str]:
     return set(re.findall(r"^([A-Z][\w_]*)\s*=", text, re.MULTILINE))
 
 
+def check_revivals(
+    path: str, head: str, allow: frozenset[tuple[str, str]]
+) -> list[str]:
+    """Names `head` defines that the list records as `removed`. Since a
+    removed name never comes back, a revival is a violation of the LIST's
+    invariant (the same class as the only-grows check), not a schema break:
+    it is refused whatever the product version, the 0.1.x window included —
+    which is what keeps a `removed` entry from excusing a same-named
+    successor and from wedging the gate at 0.2.0."""
+    errors = []
+    for t in sorted(find_types(head)):
+        if (t, REMOVED) in allow:
+            errors.append(f"{path}: revives type `{t}`, a ratified removal (ratified-breaks.txt)")
+        for f in sorted(parse_fields(head, t)):
+            if (f"{t}.{f}", REMOVED) in allow:
+                errors.append(
+                    f"{path}: type `{t}`: revives field `{f}`, a ratified removal (ratified-breaks.txt)"
+                )
+    return errors
+
+
 def check_schema_pair(
+    path: str,
+    base: str | None,
+    head: str,
+    allow: frozenset[tuple[str, str]] = frozenset(),
+) -> list[str]:
+    """Revivals plus breaks, for callers that want one list (the gate itself
+    keeps them apart: only the breaks are softened inside the window)."""
+    return check_revivals(path, head, allow) + check_breaks(path, base, head, allow)
+
+
+def check_breaks(
     path: str,
     base: str | None,
     head: str,
@@ -181,21 +235,10 @@ def check_schema_pair(
     its own key — `(Type, removed)` the type's removal, `(Type.field,
     removed)` the field's removal, `(Type.field, optional→required)` the
     tightening and never a later removal or retype, `(Type.field,
-    retyped→T)` a retype to `T` and no other. And since a removed name never comes back, a head defining a
-    type or field the list records as `removed` is itself a finding — which
-    is what keeps a `removed` entry from excusing a same-named successor.
+    retyped→T)` a retype to `T` and no other.
     """
     errors = []
     head_types = find_types(head)
-
-    for t in sorted(head_types):
-        if (t, REMOVED) in allow:
-            errors.append(f"{path}: revives type `{t}`, a ratified removal (ratified-breaks.txt)")
-        for f in sorted(parse_fields(head, t)):
-            if (f"{t}.{f}", REMOVED) in allow:
-                errors.append(
-                    f"{path}: type `{t}`: revives field `{f}`, a ratified removal (ratified-breaks.txt)"
-                )
 
     if base is None:
         # New file — only adds; nothing else to check.
@@ -258,15 +301,12 @@ def main() -> int:
     # base carried is refused here, independently of whether the dropped
     # name is also revived — closing the two-step attack (delete the entry,
     # then revive the name in the same change) the revival-only check below
-    # cannot see on its own.
+    # cannot see on its own. The base list is read leniently (malformed lines
+    # skipped): it feeds only this check.
     base_allow = frozenset()
     base_ratified_text = git_show(base, RATIFIED_BREAKS_PATH)
     if base_ratified_text is not None:
-        try:
-            base_allow = parse_ratified_breaks(base_ratified_text)
-        except ValueError as e:
-            print(f"error: {RATIFIED_BREAKS_PATH} at merge base: {e}", file=sys.stderr)
-            return 2
+        base_allow = parse_ratified_breaks(base_ratified_text, lenient=True)
 
     all_errors = []
     for key, transition in sorted(base_allow - allow):
@@ -284,7 +324,8 @@ def main() -> int:
         rel = cddl.as_posix()
         head_text = cddl.read_text()
         base_text = git_show(base, rel)
-        breaks.extend(check_schema_pair(rel, base_text, head_text, allow))
+        all_errors.extend(check_revivals(rel, head_text, allow))
+        breaks.extend(check_breaks(rel, base_text, head_text, allow))
 
     cargo = Path("Cargo.toml")
     version = product_version(cargo.read_text(encoding="utf-8")) if cargo.exists() else None

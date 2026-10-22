@@ -508,7 +508,7 @@ pub fn sweep_ghost_shell_registrations() -> usize {
         }
         match unregister_shell_root(&r) {
             Ok(()) => {
-                tracing::info!(id = %r.id, path = ?r.path, "swept ghost shell sync root");
+                tracing::info!(id = %r.id, path = ?r.path.as_deref().map(fauna_core::log_redact::log_path), "swept ghost shell sync root");
                 removed += 1;
             }
             Err(e) => tracing::warn!(id = %r.id, error = %e, "ghost shell unregister failed"),
@@ -541,7 +541,7 @@ pub fn unregister_all_shell_sync_roots() -> usize {
     for r in roots {
         match unregister_shell_root(&r) {
             Ok(()) => {
-                tracing::info!(id = %r.id, path = ?r.path, "unregistered sync root at uninstall");
+                tracing::info!(id = %r.id, path = ?r.path.as_deref().map(fauna_core::log_redact::log_path), "unregistered sync root at uninstall");
                 removed += 1;
             }
             Err(e) => tracing::warn!(id = %r.id, error = %e, "uninstall shell unregister failed"),
@@ -711,7 +711,7 @@ unsafe extern "system" fn fetch_data_callback(
             });
         }
         None => {
-            tracing::warn!(full, "FETCH_DATA path not under sync root; failing");
+            tracing::warn!(full = %fauna_core::log_redact::log_path(&full), "FETCH_DATA path not under sync root; failing");
             let _ = sink.transfer_failed();
         }
     }
@@ -760,7 +760,7 @@ unsafe extern "system" fn fetch_placeholders_callback(
             });
         }
         None => {
-            tracing::warn!(full, "FETCH_PLACEHOLDERS path not under sync root; empty");
+            tracing::warn!(full = %fauna_core::log_redact::log_path(&full), "FETCH_PLACEHOLDERS path not under sync root; empty");
             // No children to name, so the parent rel is irrelevant here.
             let sink = CfApiPlaceholderSink {
                 conn_key,
@@ -826,7 +826,7 @@ unsafe extern "system" fn dehydrate_completion_callback(
         }
         None => {
             tracing::warn!(
-                full,
+                full = %fauna_core::log_redact::log_path(&full),
                 "NOTIFY_DEHYDRATE_COMPLETION path not under sync root; ignoring"
             );
         }

@@ -56,6 +56,7 @@ class ClearSelectionOnLeaveTest {
                     contentWarning = null,
                 ),
                 legalTakedownRef = null,
+                adminBlockReason = null,
                 planeRef = null,
             ),
         )

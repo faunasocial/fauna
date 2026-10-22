@@ -144,7 +144,7 @@ impl VpsProvider for Linode {
             "label": name,
             "type": server_type,
             "region": location,
-            "image": "linode/ubuntu24.04",
+            "image": "linode/ubuntu26.04",
             "root_pass": root_pass,
             "metadata": {
                 "user_data": user_data_b64,
@@ -193,6 +193,8 @@ impl VpsProvider for Linode {
         &self,
         client: &Client,
         curated_ids: &[&str],
+        // Linode types are account-wide: every region sells them at one price.
+        _location: &str,
     ) -> Result<Vec<ServerTypeInfo>, ProvisionError> {
         // /v4/linode/types is unauthenticated; bearer-auth is harmless.
         let resp = crate::vps::get_bearer(

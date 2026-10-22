@@ -11,7 +11,7 @@
 //! answer every app gives. This file owns the text buffers and nothing else.
 
 use fauna_client_account_runtime::contact_overlays::{StagedSave, save_staged};
-use fauna_core::contact_overlay::OverlayForm;
+use fauna_core::contact_overlay::{OverlayForm, label_suggestions};
 use fauna_i18n::strings::profile as t;
 use fauna_ui_ids as ids;
 
@@ -33,6 +33,24 @@ impl ProfileState {
     /// else the live projection.
     pub(super) fn private_form(&self) -> OverlayForm {
         self.private_edit.form(&self.live_private_form())
+    }
+
+    /// The completion offered under `profile-label-field`: the derived
+    /// vocabulary's labels matching what is typed, minus those already staged
+    /// (`fauna_core::contact_overlay::label_suggestions`). Nothing is offered
+    /// until something is typed.
+    fn label_suggestions(&self) -> Vec<String> {
+        if self.label_input.trim().is_empty() {
+            return Vec::new();
+        }
+        let Some(cache) = self.overlays.as_ref() else {
+            return Vec::new();
+        };
+        label_suggestions(
+            &cache.vocabulary(),
+            &self.label_input,
+            &self.private_form().labels,
+        )
     }
 
     /// The viewer's nickname for the viewed person, when one is set — the
@@ -82,6 +100,24 @@ pub(super) fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 Ok(()) => {
                     st.label_input.clear();
                     app.errors.remove(&Page::Profile);
+                }
+            }
+            None
+        }
+        Action::PickLabelSuggestion(i) => {
+            let st = &mut app.profile;
+            // Staged exactly as if typed and added.
+            if let Some(label) = st.label_suggestions().get(i).cloned() {
+                let live = st.live_private_form();
+                match st.private_edit.add_label(&live, &label) {
+                    Err(refusal) => {
+                        app.errors
+                            .insert(Page::Profile, crate::wizard::localized(&refusal));
+                    }
+                    Ok(()) => {
+                        st.label_input.clear();
+                        app.errors.remove(&Page::Profile);
+                    }
                 }
             }
             None
@@ -202,6 +238,14 @@ pub(super) fn elements(st: &ProfileState, out: &mut Vec<Element>) {
         )
         .labelled(t::PRIVATE_LABEL_ADD),
     );
+    for (i, label) in st.label_suggestions().into_iter().enumerate() {
+        out.push(Element::gesture_button(
+            ids::PROFILE_LABEL_SUGGESTION,
+            label,
+            true,
+            Gesture::Profile(Action::PickLabelSuggestion(i)),
+        ));
+    }
     out.push(Element::gesture_button(
         ids::PROFILE_LABEL_ADD_BUTTON,
         t::PRIVATE_LABEL_ADD,

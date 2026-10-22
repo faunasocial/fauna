@@ -806,6 +806,18 @@ pub struct ResolverInput<'a> {
     /// catch-all, none of which may swallow list mail. The handler looks it up
     /// only when exact and forwarder missed (the three share the exact key).
     pub list_address: bool,
+    /// The actor whose registered handle is `local_part`, when the handler found
+    /// one — the handle match closing the exact-key tier (`mail-aliases.md`
+    /// § Resolution order step 2). A handle is its actor's address on every
+    /// active local domain whether or not its canonical exact row exists, so it
+    /// outranks every pattern step and catch-all. The handler looks it up only
+    /// on an active local domain and only when the stored exact-key rows
+    /// (exact, forwarder, list) all missed.
+    pub handle_owner: Option<[u8; 32]>,
+    /// The actor whose registered handle is the `+suffix`-stripped base, when
+    /// [`Self::subaddress_base`] missed — step 3's retry of the exact-key match,
+    /// the handle match included.
+    pub subaddress_handle_owner: Option<[u8; 32]>,
 }
 
 /// The bare reason text of the `550` an inbound RCPT to a list address gets
@@ -846,9 +858,9 @@ pub enum RecipientResolution {
         stamped_headers: Vec<(String, String)>,
         controls: ResolvedControls,
         /// The stored row this resolve matched (for hit logging + the
-        /// disposable decrement). `None` only for **catch-all** — the
-        /// per-domain designated actor has no `account_aliases` row, so it
-        /// logs no hit. The matcher only signals; the handler does the I/O.
+        /// disposable decrement). `None` only for **catch-all** and the
+        /// **handle match** — neither has an `account_aliases` row, so
+        /// neither logs a hit. The matcher only signals; the handler does the I/O.
         matched: Option<MatchedAlias>,
     },
     /// An admin forwarder matched (§ Resolution order step 2 `:124`): no local
@@ -901,7 +913,7 @@ impl RecipientResolution {
 
 /// The fixed-order RCPT-TO resolver (`mail-aliases.md` § Resolution order
 /// `:119-138`, § Architectural rules `:329`): **exact → forwarder / list →
-/// +suffix → disposable → wildcard → role → catch-all → 550**. The order is a contract, not a
+/// handle → +suffix → disposable → wildcard → role → catch-all → 550**. The order is a contract, not a
 /// knob. Pure over the pre-fetched [`ResolverInput`]. Exact and forwarder share
 /// the exact-key tier and are mutually exclusive on one address, so exact
 /// (step 1) wins whenever both are somehow present.
@@ -933,6 +945,14 @@ pub fn resolve_recipient(input: &ResolverInput<'_>) -> RecipientResolution {
             reason: LIST_SUBMISSIONS_REFUSED.into(),
         };
     }
+    // 2 (cont.). Handle — a registered handle on a key no stored row holds. It
+    // comes after the stored rows, so a pair predating the handle/alias
+    // exclusion keeps delivering to the key's holder (the one `From:` yields
+    // to), and before every pattern step and catch-all, which would otherwise
+    // take mail the handle's owner sends as.
+    if let Some(actor) = input.handle_owner {
+        return resolve_handle(actor, Vec::new());
+    }
     // 3. +suffix sub-addressing — strip on the first '+', re-match the base.
     if input.subaddressing_enabled {
         match split_subaddress(input.local_part) {
@@ -946,6 +966,12 @@ pub fn resolve_recipient(input: &ResolverInput<'_>) -> RecipientResolution {
             SubaddressSplit::Valid { suffix, .. } => {
                 if let Some(m) = &input.subaddress_base {
                     return resolve_exact(m, vec![(HEADER_ADDRESS_SUFFIX.to_string(), suffix)]);
+                }
+                if let Some(actor) = input.subaddress_handle_owner {
+                    return resolve_handle(
+                        actor,
+                        vec![(HEADER_ADDRESS_SUFFIX.to_string(), suffix)],
+                    );
                 }
                 // base miss → fall through to wildcard / catch-all.
             }
@@ -1022,6 +1048,16 @@ pub fn resolve_recipient(input: &ResolverInput<'_>) -> RecipientResolution {
     RecipientResolution::Reject {
         smtp_code: 550,
         reason: "User unknown".into(),
+    }
+}
+
+/// A handle match: no stored row, so no controls to carry and no hit to log.
+fn resolve_handle(actor_id: [u8; 32], headers: Vec<(String, String)>) -> RecipientResolution {
+    RecipientResolution::Resolved {
+        actor_id,
+        stamped_headers: headers,
+        controls: ResolvedControls::default(),
+        matched: None,
     }
 }
 
@@ -1406,7 +1442,75 @@ mod tests {
             wildcards,
             role_address_target: None,
             list_address: false,
+            handle_owner: None,
+            subaddress_handle_owner: None,
         }
+    }
+
+    /// The handle closes the exact-key tier: it outranks a disposable it
+    /// spells, a wildcard and catch-all, stamps nothing and logs no hit — and a
+    /// stored exact row on the key still wins over it.
+    #[test]
+    fn resolve_handle_outranks_patterns_and_yields_to_a_stored_row() {
+        let wild = [WildcardCandidate {
+            alias_id: [3; 16],
+            actor_id: [3; 32],
+            prefix: "bob-".into(),
+            disabled: false,
+            controls: ResolvedControls::default(),
+        }];
+        let mut input = base_input("bob-temp-abcdef", &wild);
+        input.catch_all_actor = Some([9; 32]);
+        input.disposable = Some(DisposableCandidate {
+            alias_id: [4; 16],
+            actor_id: [4; 32],
+            token: "abcdef".into(),
+            disabled: false,
+            alive: true,
+            controls: ResolvedControls::default(),
+        });
+        input.handle_owner = Some([5; 32]);
+        assert_eq!(
+            resolve_recipient(&input),
+            RecipientResolution::Resolved {
+                actor_id: [5; 32],
+                stamped_headers: Vec::new(),
+                controls: ResolvedControls::default(),
+                matched: None,
+            }
+        );
+        input.exact = Some(exact(7, false));
+        assert!(matches!(
+            resolve_recipient(&input),
+            RecipientResolution::Resolved {
+                actor_id: [7, ..],
+                ..
+            }
+        ));
+    }
+
+    /// `bob-x+news` with no stored row on `bob-x`: the handle base wins over a
+    /// wildcard the full local part also matches, stamping the suffix.
+    #[test]
+    fn resolve_subaddress_retries_the_handle() {
+        let wild = [WildcardCandidate {
+            alias_id: [3; 16],
+            actor_id: [3; 32],
+            prefix: "bob-".into(),
+            disabled: false,
+            controls: ResolvedControls::default(),
+        }];
+        let mut input = base_input("bob-x+news", &wild);
+        input.subaddress_handle_owner = Some([5; 32]);
+        assert_eq!(
+            resolve_recipient(&input),
+            RecipientResolution::Resolved {
+                actor_id: [5; 32],
+                stamped_headers: vec![(HEADER_ADDRESS_SUFFIX.to_string(), "news".to_string())],
+                controls: ResolvedControls::default(),
+                matched: None,
+            }
+        );
     }
 
     fn fwd(dest: &str, admin: u8, disabled: bool) -> ForwarderCandidate {

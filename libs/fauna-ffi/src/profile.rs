@@ -78,6 +78,10 @@ pub struct FfiProfileDisplay {
     pub avatar_hash_hex: Option<String>,
     /// Hex blob hash of the stored banner, or `None`.
     pub banner_hash_hex: Option<String>,
+    /// Whether the owner opened the profile to other nests (`audience =
+    /// Everyone`) — `profile-edit-audience-toggle`'s current value. An audience
+    /// this build does not name reads as off.
+    pub audience_everyone: bool,
 }
 
 /// FFI mirror of [`fauna_client_profile::ProfileImageEdit`] — what one save
@@ -118,18 +122,46 @@ impl FfiProfileImageEdit {
 /// read-modify-write.
 #[uniffi::export]
 pub fn decode_profile_display(body: Vec<u8>) -> Result<FfiProfileDisplay, FfiError> {
-    let display = fauna_client_profile::decode_profile_display(&body).map_err(general_err)?;
-    Ok(FfiProfileDisplay {
-        display_name: display.display_name,
-        bio: display.bio,
-        links: display
-            .links
-            .into_iter()
-            .map(FfiProfileLink::from)
-            .collect(),
-        avatar_hash_hex: display.avatar.map(|h| hex::encode(h.digest())),
-        banner_hash_hex: display.banner.map(|h| hex::encode(h.digest())),
-    })
+    fauna_client_profile::decode_profile_display(&body)
+        .map(FfiProfileDisplay::from)
+        .map_err(general_err)
+}
+
+/// The OWN edit form's projection — [`decode_profile_display`] with
+/// `audience_everyone` resolved exactly as the save will sign it, over the
+/// edit base [`crate::profile_client::FfiProfileClient::load_edit_base`] read
+/// (`own_actor_id_hex` the signed-in identity). Thin UniFFI adapter over the
+/// shared [`fauna_client_profile::decode_own_profile_display`] (`profile.md`
+/// § Where logic lives → *Profile publish/edit* → *Edit surface*).
+#[uniffi::export]
+pub fn decode_own_profile_display(
+    own_actor_id_hex: String,
+    body: Vec<u8>,
+    last_direct_body: Option<Vec<u8>>,
+) -> Result<FfiProfileDisplay, FfiError> {
+    let own = fauna_core::identity::ActorId::from_hex(&own_actor_id_hex).map_err(general_err)?;
+    fauna_client_profile::decode_own_profile_display(&own, &body, last_direct_body.as_deref())
+        .map(FfiProfileDisplay::from)
+        .map_err(general_err)
+}
+
+impl From<fauna_client_profile::ProfileDisplay> for FfiProfileDisplay {
+    fn from(display: fauna_client_profile::ProfileDisplay) -> Self {
+        let (avatar_hash_hex, banner_hash_hex) =
+            (display.avatar_hash_hex(), display.banner_hash_hex());
+        Self {
+            display_name: display.display_name,
+            bio: display.bio,
+            links: display
+                .links
+                .into_iter()
+                .map(FfiProfileLink::from)
+                .collect(),
+            avatar_hash_hex,
+            banner_hash_hex,
+            audience_everyone: display.audience.is_everyone(),
+        }
+    }
 }
 
 /// Where a knock sent from `actor_id`'s profile page must go — the value for
@@ -150,6 +182,29 @@ pub fn knock_recipient_nest_url(
     fauna_client_profile::knock_recipient_nest_url(&actor, &profile_body, &own_nest_url)
 }
 
+/// The other actor's home nest — the profile page's one `actor_home` slot, read
+/// by the follow and the knock alike (`profile.md` § Where logic lives → *The
+/// actor's home*). Thin UniFFI adapter over the shared
+/// [`fauna_client_profile::actor_home`]: `carried` is the home the page's open
+/// target carried, `profile_body` the header read's profile (`None` before it
+/// answers). A wrong-length `actor_id` yields `None`, the same lenience as
+/// [`knock_recipient_nest_url`].
+#[uniffi::export]
+pub fn actor_home(
+    carried: Option<String>,
+    actor_id: Vec<u8>,
+    profile_body: Option<Vec<u8>>,
+    own_nest_url: String,
+) -> Option<String> {
+    let actor = crate::bytes_to_actor_id(&actor_id).ok()?;
+    fauna_client_profile::actor_home(
+        carried.as_deref(),
+        &actor,
+        profile_body.as_deref(),
+        &own_nest_url,
+    )
+}
+
 /// The read-modify-write sign step for the profile edit form. Thin UniFFI
 /// adapter over the shared [`fauna_client_profile::build_edited_profile`] — the
 /// read-modify-write (overwrite only `display_name` / `bio` / `links`, preserve
@@ -160,7 +215,11 @@ pub fn knock_recipient_nest_url(
 ///
 /// `secret` is the 32-byte ed25519 actor secret. `base_body` is the current
 /// stored profile bytes (from `FfiProfileClient::profile_get`) when
-/// re-editing, or `None` for a first publish. `predecessors` is
+/// re-editing, or `None` for a first publish; `last_direct_body` the owner's
+/// last identity-signed row served beside it (`FfiProfileEditBase`), which the
+/// save takes `audience` and the harvest anchors from over an external app's
+/// edit — `None` degrades them (`profile.md` § After an identity succession →
+/// base-admission rule 3). `predecessors` is
 /// `FfiAccountRegistry::predecessors_of(<this actor>)` — the hex ids this
 /// device records the identity succeeding from, empty for one that never
 /// succeeded. A stored base that is unsigned, or signed for anyone else, is
@@ -171,6 +230,7 @@ pub fn knock_recipient_nest_url(
 pub fn build_edited_profile(
     secret: Vec<u8>,
     base_body: Option<Vec<u8>>,
+    last_direct_body: Option<Vec<u8>>,
     predecessors: Vec<String>,
     display_name: Option<String>,
     bio: Option<String>,
@@ -181,6 +241,7 @@ pub fn build_edited_profile(
     fauna_client_profile::build_edited_profile(
         &kp,
         base_body.as_deref(),
+        last_direct_body.as_deref(),
         &fauna_client_profile::predecessors_from_hex(&predecessors),
         display_name,
         bio,
@@ -197,31 +258,39 @@ pub fn build_edited_profile(
 /// The picture bytes are uploaded separately, through the ordinary public-post
 /// blob path (`media.md` § Encryption at rest — avatar / banner blobs are
 /// signed plaintext, the same shape as public-post attachments); this records
-/// the resulting hash on the signed profile. `predecessors` follows
-/// [`build_edited_profile`]'s rule.
+/// the resulting hash on the signed profile. `last_direct_body` and
+/// `predecessors` follow [`build_edited_profile`]'s rule.
+///
+/// `audience_everyone` is `profile-edit-audience-toggle`: `Some(true)` opens
+/// the profile to other nests, `Some(false)` closes it, `None` (the toggle
+/// untouched) keeps what the base holds.
 #[uniffi::export]
 #[allow(clippy::too_many_arguments)]
 pub fn build_edited_profile_with_images(
     secret: Vec<u8>,
     base_body: Option<Vec<u8>>,
+    last_direct_body: Option<Vec<u8>>,
     predecessors: Vec<String>,
     display_name: Option<String>,
     bio: Option<String>,
     links: Vec<FfiProfileLink>,
     avatar: FfiProfileImageEdit,
     banner: FfiProfileImageEdit,
+    audience_everyone: Option<bool>,
 ) -> Result<Vec<u8>, FfiError> {
     let kp = keypair_from_bytes(&secret)?;
     let links: Vec<ProfileLink> = links.into_iter().map(ProfileLink::from).collect();
     fauna_client_profile::build_edited_profile_with_images(
         &kp,
         base_body.as_deref(),
+        last_direct_body.as_deref(),
         &fauna_client_profile::predecessors_from_hex(&predecessors),
         display_name,
         bio,
         links,
         avatar.into_shared()?,
         banner.into_shared()?,
+        audience_everyone.map(fauna_client_profile::audience_from_toggle),
     )
     .map_err(general_err)
 }
@@ -256,6 +325,7 @@ mod tests {
             // Non-`None` for the same reason: an edit of the display fields
             // must never drop the cached RecoveryKey binding.
             recovery_head: Some(ChainHead::new([0xA7; 32], 3)),
+            audience: fauna_core::data::ProfileAudience::ThisNest,
             updated_at: Timestamp(0),
         }
     }
@@ -302,6 +372,34 @@ mod tests {
         );
     }
 
+    /// The `actor_home` face: the signed profile beats the carried hint, the
+    /// hint stands before the header read, and a wrong-length id is `None`.
+    #[test]
+    fn the_actor_home_face_answers_with_the_shared_rule() {
+        let kp = ActorKeypair::generate();
+        let mut profile = base_profile(&kp);
+        profile.nests = vec![fauna_core::data::NestEntry {
+            nest_id: vec![7u8; 32],
+            url: "https://peer.example:9000/".into(),
+            roles: vec![fauna_core::data::NestRole::Social],
+        }];
+        let body = build_profile(&kp, &profile).expect("build");
+        let actor = kp.actor_id().0.to_vec();
+        let hint = Some("https://met.example".to_string());
+        let me = "https://home.example".to_string();
+
+        assert_eq!(
+            actor_home(hint.clone(), actor.clone(), Some(body), me.clone()).as_deref(),
+            Some("https://peer.example:9000/"),
+        );
+        assert_eq!(
+            actor_home(hint.clone(), actor.clone(), None, me.clone()).as_deref(),
+            Some("https://met.example"),
+        );
+        assert_eq!(actor_home(Some(me.clone()), actor, None, me.clone()), None);
+        assert_eq!(actor_home(hint, vec![1, 2, 3], None, me), None);
+    }
+
     #[test]
     fn build_edited_profile_overwrites_display_preserves_rest() {
         let kp = ActorKeypair::generate();
@@ -311,6 +409,7 @@ mod tests {
         let edited = build_edited_profile(
             kp.secret_bytes().to_vec(),
             Some(base_bytes),
+            None,
             vec![],
             Some("new".into()),
             Some("newbio".into()),
@@ -341,6 +440,7 @@ mod tests {
         let fresh = build_edited_profile(
             kp.secret_bytes().to_vec(),
             None,
+            None,
             vec![],
             Some("fresh".into()),
             None,
@@ -353,6 +453,51 @@ mod tests {
         assert_eq!(decoded.bio, None);
         assert!(decoded.admin_nests.is_empty());
         assert_eq!(decoded.inbox_mode, InboxMode::Open);
+    }
+
+    #[test]
+    fn the_audience_toggle_round_trips_through_the_ffi_faces() {
+        let kp = ActorKeypair::generate();
+        let save = |base: Option<Vec<u8>>, toggle: Option<bool>| {
+            build_edited_profile_with_images(
+                kp.secret_bytes().to_vec(),
+                base,
+                None,
+                vec![],
+                Some("name".into()),
+                None,
+                vec![],
+                FfiProfileImageEdit::Keep,
+                FfiProfileImageEdit::Keep,
+                toggle,
+            )
+            .expect("build")
+        };
+        let fresh = save(None, None);
+        assert!(
+            !decode_profile_display(fresh)
+                .expect("decode")
+                .audience_everyone
+        );
+        let opened = save(None, Some(true));
+        assert!(
+            decode_profile_display(opened.clone())
+                .expect("decode")
+                .audience_everyone
+        );
+        // The toggle untouched keeps the owner's own `Everyone`; off closes it.
+        let kept = save(Some(opened.clone()), None);
+        assert!(
+            decode_profile_display(kept)
+                .expect("decode")
+                .audience_everyone
+        );
+        let closed = save(Some(opened), Some(false));
+        assert!(
+            !decode_profile_display(closed)
+                .expect("decode")
+                .audience_everyone
+        );
     }
 
     #[test]
@@ -391,6 +536,7 @@ mod tests {
             build_edited_profile(
                 successor.secret_bytes().to_vec(),
                 Some(inherited.clone()),
+                None,
                 predecessors,
                 Some("new".into()),
                 None,

@@ -501,7 +501,7 @@ def test_strict_exits_zero_on_a_clean_tree(tmp_path):
     assert done.returncode == 0, done.stdout.decode() + done.stderr.decode()
 
 
-def test_json_output_carries_all_three_reports(tmp_path):
+def test_json_output_carries_all_four_reports(tmp_path):
     _write_ui(tmp_path, "pages: {}\nelements: {}\n")
     done = subprocess.run(
         [sys.executable, _SCRIPT, "--root", str(tmp_path), "--json"],
@@ -510,7 +510,12 @@ def test_json_output_carries_all_three_reports(tmp_path):
     )
     payload = json.loads(done.stdout.decode())
     assert set(payload) == set(
-        ("referenced-not-registered", "registered-not-referenced", "rendered-not-declared")
+        (
+            "referenced-not-registered",
+            "registered-not-referenced",
+            "rendered-not-declared",
+            "indexed-id-suffixed",
+        )
     )
 
 
@@ -612,6 +617,8 @@ def test_real_ui_yaml_backlog_is_bounded(mod):
     assert len(found["registered-not-referenced"]) <= 0
     rendered = sum(len(v) for v in found["rendered-not-declared"].values())
     assert rendered <= 0
+    suffixed = sum(len(v) for v in found["indexed-id-suffixed"].values())
+    assert suffixed <= 0, found["indexed-id-suffixed"]
 
 
 def test_row_23_declared_ids_no_longer_flagged(mod):
@@ -650,3 +657,116 @@ def test_row_23_declared_ids_no_longer_flagged(mod):
         flagged = found["rendered-not-declared"][app]
         for element_id in ids:
             assert element_id not in flagged, f"{element_id} regressed back to undeclared on {app}"
+
+
+# ── indexed-id-suffixed: convention 1's one id per indexed item ──────────────
+#
+# The owner's 2026-10-16 ruling moved three `-{n}` families to one repeated id read
+# by index; this report keeps the shape from coming back. Each test pins one leg.
+
+_INDEXED_UI = """
+    pages:
+      p:
+        elements:
+          - box-row
+          - day-cell
+    elements:
+      box-row:
+        type: button
+        description: "One box row (indexed: one repeated id, row n addressed by index)."
+        indexed: true
+      day-cell:
+        type: view
+        description: "A day cell, indexed by ISO date (day-cell-{YYYY-MM-DD})."
+        indexed: true
+    """
+
+
+def _app_file(root, rel: str, body: str):
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(textwrap.dedent(body), encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "app, rel, body",
+    [
+        ("tui", "apps/fauna-tui/src/a.rs", 'let x = format!("box-row-{i}");\n'),
+        ("tui", "apps/fauna-tui/src/a.rs", 'let x = format!("{}-{i}", ids::BOX_ROW);\n'),
+        ("linux", "apps/fauna-linux/src/a.rs", 'set(&w, &format!("{}-{}", fauna_ui_ids::BOX_ROW, i));\n'),
+        ("web", "apps/fauna-web/src/a.svelte", '<p data-testid={`${IDS.BOX_ROW}-${i}`}></p>\n'),
+        ("web", "apps/fauna-web/src/a.svelte", '<p data-testid="box-row-{i}"></p>\n'),
+        ("android", "apps/fauna-android/a.kt", 'Modifier.testTag("${Ids.BOX_ROW}-$i")\n'),
+        ("android", "apps/fauna-android/a.kt", 'Modifier.testTag("box-row-$idx")\n'),
+        ("apple", "apps/fauna-apple/a.swift", 'automationText("\\(Ids.boxRow)-\\(index)", label)\n'),
+        ("windows", "apps/fauna-windows/a.cs", 'SetAutomationId(row, $"box-row-{i}");\n'),
+        ("windows", "apps/fauna-windows/a.cs", 'SetAutomationId(row, $"{Ids.BoxRow}-{i}");\n'),
+    ],
+)
+def test_indexed_id_suffixed_flags_every_apps_suffix_idiom(mod, tmp_path, monkeypatch, app, rel, body):
+    monkeypatch.setattr(mod, "INDEXED_SUFFIX_PENDING", {})
+    _write_ui(tmp_path, _INDEXED_UI)
+    _app_file(tmp_path, rel, body)
+    found = mod.build_findings(("indexed-id-suffixed",), tmp_path)["indexed-id-suffixed"]
+    assert list(found[app]) == ["box-row"], found
+
+
+def test_indexed_id_suffixed_passes_the_bare_id_comments_and_html_label_ids(mod, tmp_path, monkeypatch):
+    monkeypatch.setattr(mod, "INDEXED_SUFFIX_PENDING", {})
+    _write_ui(tmp_path, _INDEXED_UI)
+    _app_file(tmp_path, "apps/fauna-tui/src/a.rs", '''
+        // the old `box-row-{n}` shape is gone
+        /// `box-row-{i}` in a doc comment
+        let x = Element::label(ids::BOX_ROW, "t");
+        ''')
+    _app_file(tmp_path, "apps/fauna-web/src/a.svelte", '''
+        <!-- box-row-{i} -->
+        <label for="box-row-{i}" data-testid={IDS.BOX_ROW}></label>
+        <input id="box-row-{i}" />
+        ''')
+    found = mod.build_findings(("indexed-id-suffixed",), tmp_path)["indexed-id-suffixed"]
+    assert not any(found.values()), found
+
+
+def test_indexed_id_suffixed_exempts_a_value_keyed_id_the_spec_declares(mod, tmp_path, monkeypatch):
+    """`events-day-cell-{YYYY-MM-DD}` is a ratified id shape, not a row index —
+    exempt because its own description declares the template."""
+    monkeypatch.setattr(mod, "INDEXED_SUFFIX_PENDING", {})
+    _write_ui(tmp_path, _INDEXED_UI)
+    _app_file(tmp_path, "apps/fauna-tui/src/a.rs", 'let x = format!("day-cell-{y:04}-{m:02}");\n')
+    found = mod.build_findings(("indexed-id-suffixed",), tmp_path)["indexed-id-suffixed"]
+    assert not any(found.values()), found
+
+
+def test_indexed_id_suffixed_flags_a_positional_template_in_the_spec(mod, tmp_path, monkeypatch):
+    monkeypatch.setattr(mod, "INDEXED_SUFFIX_PENDING", {})
+    _write_ui(tmp_path, _INDEXED_UI.replace(
+        "(indexed: one repeated id, row n addressed by index)", "(indexed, id box-row-{n})"))
+    found = mod.build_findings(("indexed-id-suffixed",), tmp_path)["indexed-id-suffixed"]
+    assert list(found["ui.yaml"]) == ["box-row"]
+
+
+def test_indexed_id_suffixed_pending_pair_passes_until_fixed_then_reads_stale(mod, tmp_path, monkeypatch):
+    """The allow-list is a ratchet: a pending pair is silent while still suffixed,
+    and the moment the app moves the entry itself is the finding."""
+    monkeypatch.setattr(mod, "INDEXED_SUFFIX_PENDING", {"windows": frozenset({"box-row"})})
+    _write_ui(tmp_path, _INDEXED_UI)
+    _app_file(tmp_path, "apps/fauna-windows/a.cs", 'SetAutomationId(row, $"box-row-{i}");\n')
+    found = mod.build_findings(("indexed-id-suffixed",), tmp_path)["indexed-id-suffixed"]
+    assert not any(found.values()), found
+    _app_file(tmp_path, "apps/fauna-windows/a.cs", "SetAutomationId(row, Ids.BoxRow);\n")
+    found = mod.build_findings(("indexed-id-suffixed",), tmp_path)["indexed-id-suffixed"]
+    assert list(found["windows"]) == ["box-row"]
+    assert "stale" in found["windows"]["box-row"]
+
+
+def test_indexed_id_suffixed_the_real_pending_list_is_exactly_what_the_apps_paint(mod, monkeypatch):
+    """Against the real tree with the allow-list emptied, the detector finds every
+    pending pair and nothing else — so the list is neither vacuous nor hiding a
+    pair the detector cannot see."""
+    pending = mod.INDEXED_SUFFIX_PENDING
+    monkeypatch.setattr(mod, "INDEXED_SUFFIX_PENDING", {})
+    found = mod.build_findings(("indexed-id-suffixed",))["indexed-id-suffixed"]
+    assert {app: set(items) for app, items in found.items() if items} == {
+        app: set(ids) for app, ids in pending.items()
+    }

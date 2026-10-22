@@ -84,6 +84,10 @@ mod tests {
         let redacted = log_folder_name("My Photos 2026");
         assert!(!redacted.contains("Photos"));
         assert!(redacted.starts_with("name~"));
+        // The e2e twin (`tests/e2e-unified/helpers/folder_content.py`
+        // `log_folder_name`) pins this same vector: an agent-log barrier that
+        // matches a set by name reads it redacted, never in plaintext.
+        assert_eq!(redacted, "name~b8b858714318");
     }
 
     #[test]

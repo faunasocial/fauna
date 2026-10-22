@@ -9,15 +9,28 @@ use rusqlite::OptionalExtension;
 use uuid::Uuid;
 
 /// Who may appeal an enforcement record — [`CacheDb::appeal_subject`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppealSubject {
-    /// A post-side record whose author this nest knows: only they appeal it
+    /// A record whose author this nest knows — a post's, or a conversation
+    /// record's attested author named by its queue row: only they appeal it
     /// (`moderation.md` § Wire — "the **author's** appeal").
     Author([u8; 32]),
-    /// A record with no attributable author — a conversation takedown (sealed
-    /// records persist no sender) or a post-side attribution gap. Any
-    /// authenticated caller who holds the record's id appeals it.
+    /// A record with no attributable author — a conversation record no
+    /// attestation names, or a post-side attribution gap. Any authenticated
+    /// caller who holds the record's id appeals it.
     Unattributed,
+    /// Every record here is a row another nest decided and delivered to its
+    /// author's home: only the author appeals it, and the appeal is relayed to
+    /// the issuer, which decides and keeps it (`moderation.md` § Legal
+    /// takedown → *The author homed on another nest*). The newest such row
+    /// names the issuer.
+    Delivered {
+        author: [u8; 32],
+        /// The verified issuer nest.
+        issuer_nest_id: [u8; 32],
+        /// The issuer's own row id.
+        issuer_ref: String,
+    },
 }
 
 /// The outcome of [`CacheDb::record_appeal`].
@@ -32,10 +45,13 @@ pub enum AppealRecord {
 
 /// The audit actions that record a **decision** on appealed content — each
 /// one closes every appeal pending against its target
-/// ([`CacheDb::record_appeal`]).
-pub const APPEAL_DECISION_ACTIONS: [&str; 2] = [
+/// ([`CacheDb::record_appeal`]): the legal takedown's two and the admin
+/// block's two (`moderation.md` § Admin block of a reported item).
+pub const APPEAL_DECISION_ACTIONS: [&str; 4] = [
     "moderation:legal-takedown",
     "moderation:legal-takedown-restore",
+    "moderation:admin-block",
+    "moderation:admin-block-restore",
 ];
 
 /// The training-history mutation a client-path `put_spam_model` write applies
@@ -414,7 +430,7 @@ impl CacheDb {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
             "SELECT id, content_type, content_id, obligation_id, rule_index,
-                    category, confidence, action_taken, timestamp
+                    category, confidence, action_taken, timestamp, issuer_nest_id
              FROM obligation_action_records
              WHERE content_type = ?1 AND content_id = ?2
              ORDER BY action_taken ASC",
@@ -431,6 +447,7 @@ impl CacheDb {
                     confidence: row.get(6)?,
                     action_taken: row.get(7)?,
                     timestamp: row.get(8)?,
+                    issuer_nest_id: row.get(9)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -448,7 +465,7 @@ impl CacheDb {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
             "SELECT id, content_type, content_id, obligation_id,
-                    rule_index, category, confidence, action_taken, timestamp
+                    rule_index, category, confidence, action_taken, timestamp, issuer_nest_id
              FROM obligation_action_records
              WHERE author_hex = ?1
              ORDER BY timestamp DESC
@@ -466,6 +483,7 @@ impl CacheDb {
                     confidence: row.get(6)?,
                     action_taken: row.get(7)?,
                     timestamp: row.get(8)?,
+                    issuer_nest_id: row.get(9)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -492,8 +510,9 @@ impl CacheDb {
     ///    so a second kind of actioned row can use it). Author: the row's own
     ///    `author_hex`. This arm is what makes the handle outlive a restore: the
     ///    flag clears, the row stays as additive history (§ Persistence).
-    /// 2. **`content_meta.legal_takedown_ref`** — the live post's serve-withhold
-    ///    flag. Redundant with (1) on every production path today, and kept
+    /// 2. **`content_meta.legal_takedown_ref`** (or `.admin_block_report_id`,
+    ///    the admin block's flag — `moderation.md` § Admin block of a reported
+    ///    item) — the live post's serve-withhold flag. Redundant with (1) on every production path today, and kept
     ///    deliberately: the flag *is* the takedown's primary state, so a path
     ///    that ever sets it without queueing a row still owes its author a
     ///    handle. Author: `content.author`, the takedown handler's own lookup.
@@ -501,17 +520,25 @@ impl CacheDb {
     ///    post taken down and then deleted, in either ordering. The compelled
     ///    fact outlives the content it was compelled against. Author: the floor
     ///    row's `author_id`.
-    /// 4. **`segment_records.legal_takedown_ref`** — the conversation arm, and
-    ///    the one a gate reading obligation rows alone would get *wrong*: conv
-    ///    records persist no sender, so a conv takedown writes no obligation row
-    ///    at all, and the appeal is precisely how its triple holds (§ Legal
+    /// 4. **`segment_records.legal_takedown_ref`** (or `.admin_block_report_id`)
+    ///    — the conversation arm, and the one a gate reading obligation rows
+    ///    alone would get *wrong*: a conv takedown or block of a record no
+    ///    attestation names (`conv_record_authors`) writes no obligation row at
+    ///    all, and this arm is precisely how its triple holds (§ Legal
     ///    takedown → *Conversations*). [`AppealSubject::Unattributed`]: there is
-    ///    no author to check against.
+    ///    no author to check against. An attested record's takedown or block
+    ///    writes the author's row, so arm 1 scopes its appeal first.
     ///
     /// A post-side record whose author no arm can name (an obligation row with
     /// an empty or undecodable `author_hex` and no other source) is `Unattributed` too —
     /// the safe failure direction of an attribution gap is to admit, since a
     /// false refusal denies the author the handle the triple guarantees.
+    ///
+    /// An arm-1 row another nest delivered is not one of the four: when no arm
+    /// matches a decision of this nest's own, the newest delivered row answers
+    /// [`AppealSubject::Delivered`] — the author's appeal of another nest's
+    /// decision, which this nest relays (§ Legal takedown → *The author homed
+    /// on another nest*).
     ///
     /// `content_id` is matched as given; the handler canonicalizes a 32-byte hex
     /// id to lowercase first (arms 2–4 decode it and are case-blind; arm 1
@@ -522,30 +549,67 @@ impl CacheDb {
         // Arm 1. Any row makes the content appealable; a row naming an author
         // scopes it. A takedown writes `hex::encode(author)`, so a decodable
         // value is the author and anything else is an attribution gap.
+        //
+        // A row another nest delivered (`issuer_nest_id` set) is not this
+        // nest's decision: it is answered only when no local arm matches, so a
+        // decision of this nest's own is always appealed here.
         let mut stmt = conn
             .prepare_cached(
-                "SELECT author_hex FROM obligation_action_records WHERE content_id = ?1",
+                "SELECT author_hex, issuer_nest_id, issuer_ref FROM obligation_action_records
+                  WHERE content_id = ?1 ORDER BY id DESC",
             )
             .context("appeal_subject: prepare obligation_action_records")?;
-        let authors = stmt
-            .query_map(rusqlite::params![content_id], |row| row.get::<_, String>(0))
+        let rows = stmt
+            .query_map(rusqlite::params![content_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
             .context("appeal_subject: obligation_action_records")?
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("appeal_subject: read obligation_action_records")?;
         drop(stmt);
-        let obligation_actioned = !authors.is_empty();
-        if let Some(author) = authors
-            .iter()
-            .find_map(|a| fauna_core::hex32::decode(a).ok())
-        {
-            return Ok(Some(AppealSubject::Author(author)));
+        let mut obligation_actioned = false;
+        let mut delivered = None;
+        for (author_hex, issuer, issuer_ref) in &rows {
+            let author = fauna_core::hex32::decode(author_hex).ok();
+            match (issuer, issuer_ref) {
+                (None, _) => {
+                    obligation_actioned = true;
+                    if let Some(author) = author {
+                        return Ok(Some(AppealSubject::Author(author)));
+                    }
+                }
+                (Some(issuer), Some(issuer_ref)) => {
+                    if delivered.is_none()
+                        && let (Some(author), Ok(issuer_nest_id)) =
+                            (author, fauna_core::hex32::decode(issuer))
+                    {
+                        delivered = Some(AppealSubject::Delivered {
+                            author,
+                            issuer_nest_id,
+                            issuer_ref: issuer_ref.clone(),
+                        });
+                    }
+                }
+                (Some(_), None) => {}
+            }
         }
+        let local_or_delivered = |actioned: bool| {
+            if actioned {
+                Some(AppealSubject::Unattributed)
+            } else {
+                delivered.clone()
+            }
+        };
 
         // The remaining three arms are keyed by the 32-byte id. A `content_id`
         // that is not one simply matches none of them — never an error, and
         // never a scan.
         let Ok(id) = fauna_core::hex32::decode(content_id) else {
-            return Ok(obligation_actioned.then_some(AppealSubject::Unattributed));
+            return Ok(local_or_delivered(obligation_actioned));
         };
 
         // Arm 2: the flag, attributed through the content row.
@@ -553,7 +617,8 @@ impl CacheDb {
             .query_row(
                 "SELECT c.author FROM content_meta m
                    LEFT JOIN content c ON c.id = m.content_id
-                  WHERE m.content_id = ?1 AND m.legal_takedown_ref IS NOT NULL
+                  WHERE m.content_id = ?1
+                    AND (m.legal_takedown_ref IS NOT NULL OR m.admin_block_report_id IS NOT NULL)
                   LIMIT 1",
                 rusqlite::params![id.as_slice()],
                 |row| row.get(0),
@@ -586,7 +651,7 @@ impl CacheDb {
             .query_row(
                 "SELECT 1 FROM segment_records
                   WHERE kind = 'conv' AND record_cid = ?1
-                    AND legal_takedown_ref IS NOT NULL
+                    AND (legal_takedown_ref IS NOT NULL OR admin_block_report_id IS NOT NULL)
                   LIMIT 1",
                 rusqlite::params![&record_cid.as_bytes()[..]],
                 |row| row.get(0),
@@ -594,15 +659,15 @@ impl CacheDb {
             .optional()
             .context("appeal_subject: segment_records")?;
         let actioned = obligation_actioned || flag_actioned || floor.is_some() || conv.is_some();
-        Ok(actioned.then_some(AppealSubject::Unattributed))
+        Ok(local_or_delivered(actioned))
     }
 
     /// Record `appellant`'s appeal against `content_id` on the permanent audit
     /// chain — **at most one pending appeal per (appellant, content_id)**.
     ///
     /// An appeal is *pending* until a decision on the content is recorded after
-    /// it: a `moderation:legal-takedown` or `moderation:legal-takedown-restore`
-    /// audit row targeting the same id ([`APPEAL_DECISION_ACTIONS`]). A repeat
+    /// it: a takedown, admin-block or overturn audit row targeting the same id
+    /// ([`APPEAL_DECISION_ACTIONS`]). A repeat
     /// while one is pending collapses — [`AppealRecord::AlreadyPending`], no row
     /// written — so the chain grows by one bounded row per appellant per
     /// decision, never per call (`moderation.md` § Errors & edge cases). The
@@ -623,11 +688,13 @@ impl CacheDb {
         let last_decision: i64 = conn
             .query_row(
                 "SELECT COALESCE(MAX(id), 0) FROM audit_log
-                  WHERE target = ?1 AND action IN (?2, ?3)",
+                  WHERE target = ?1 AND action IN (?2, ?3, ?4, ?5)",
                 rusqlite::params![
                     content_id,
                     APPEAL_DECISION_ACTIONS[0],
-                    APPEAL_DECISION_ACTIONS[1]
+                    APPEAL_DECISION_ACTIONS[1],
+                    APPEAL_DECISION_ACTIONS[2],
+                    APPEAL_DECISION_ACTIONS[3]
                 ],
                 |row| row.get(0),
             )
@@ -713,13 +780,13 @@ impl CacheDb {
         admin_actor: &[u8],
         audit_detail: &str,
         timestamp_us: i64,
-    ) -> Result<()> {
+    ) -> Result<Option<i64>> {
         use anyhow::Context;
-        let author_hex = hex::encode(author);
         let conn = self.conn.lock().await;
         let tx = conn
             .unchecked_transaction()
             .context("begin legal-takedown tx")?;
+        let mut queued = None;
         let n = tx.execute(
             "UPDATE content_meta SET legal_takedown_ref = ?1 WHERE content_id = ?2",
             rusqlite::params![reference, post_id.as_slice()],
@@ -743,24 +810,17 @@ impl CacheDb {
             super::web::mark_web_render_owed_for_post(&tx, post_id)?;
 
             // The author-queue row (`fauna.moderation.actions`) — takedown
-            // only. `category="illegal"` is the enforcement descriptor (not a
-            // classifier emission); `obligation_id` records the issuing admin;
-            // confidence 1.0 = a definitive legal action.
-            tx.execute(
-                "INSERT INTO obligation_action_records
-                    (content_type, content_id, author_hex, obligation_id, rule_index,
-                     category, confidence, action_taken, label_id, timestamp, signature)
-                 VALUES ('post', ?1, ?2, ?3, 0, 'illegal', 1.0, ?4, NULL, ?5, ?6)",
-                rusqlite::params![
-                    content_id_hex,
-                    author_hex,
-                    admin_actor,
-                    fauna_core::obligation::ObligationAction::TakenDown as u8,
-                    timestamp_us,
-                    &[][..],
-                ],
-            )
-            .context("insert takedown obligation row")?;
+            // only.
+            queued = Some(insert_enforcement_row(
+                &tx,
+                "post",
+                content_id_hex,
+                author,
+                admin_actor,
+                "illegal",
+                fauna_core::obligation::ObligationAction::TakenDown,
+                timestamp_us,
+            )?);
 
             // The ATProto retraction witness — the same `tombstone/post`
             // journal row `delete_post_core` writes, in the SAME transaction
@@ -828,7 +888,8 @@ impl CacheDb {
             Some(content_id_hex),
             Some(audit_detail),
         )?;
-        tx.commit().context("commit legal-takedown tx")
+        tx.commit().context("commit legal-takedown tx")?;
+        Ok(queued)
     }
 
     /// Atomically apply a legal takedown against a post whose CONTENT ROW is
@@ -870,9 +931,8 @@ impl CacheDb {
         blob_digests: &[[u8; 32]],
         audit_detail: &str,
         timestamp_us: i64,
-    ) -> Result<()> {
+    ) -> Result<i64> {
         use anyhow::Context;
-        let author_hex = hex::encode(author);
         let flat_digests: Vec<u8> = blob_digests
             .iter()
             .flat_map(|d| d.iter().copied())
@@ -882,21 +942,16 @@ impl CacheDb {
             .unchecked_transaction()
             .context("begin legal-takedown-of-deleted-post tx")?;
 
-        tx.execute(
-            "INSERT INTO obligation_action_records
-                (content_type, content_id, author_hex, obligation_id, rule_index,
-                 category, confidence, action_taken, label_id, timestamp, signature)
-             VALUES ('post', ?1, ?2, ?3, 0, 'illegal', 1.0, ?4, NULL, ?5, ?6)",
-            rusqlite::params![
-                content_id_hex,
-                author_hex,
-                admin_actor,
-                fauna_core::obligation::ObligationAction::TakenDown as u8,
-                timestamp_us,
-                &[][..],
-            ],
-        )
-        .context("insert takedown obligation row (already-deleted post)")?;
+        let queued = insert_enforcement_row(
+            &tx,
+            "post",
+            content_id_hex,
+            author,
+            admin_actor,
+            "illegal",
+            fauna_core::obligation::ObligationAction::TakenDown,
+            timestamp_us,
+        )?;
 
         // The permanent compelled-fact record — the same table + shape
         // `record_taken_down_post_deleted` writes for the opposite
@@ -923,7 +978,8 @@ impl CacheDb {
             Some(audit_detail),
         )?;
         tx.commit()
-            .context("commit legal-takedown-of-deleted-post tx")
+            .context("commit legal-takedown-of-deleted-post tx")?;
+        Ok(queued)
     }
 
     /// Set (or clear) the legal-obligation takedown flag on a post
@@ -1596,12 +1652,12 @@ pub enum AbuseReportResolve {
     NotFound,
 }
 
-const ABUSE_REPORT_COLUMNS: &str = "id, created_at, reporter_actor, origin_nest_id, \
+pub(super) const ABUSE_REPORT_COLUMNS: &str = "id, created_at, reporter_actor, origin_nest_id, \
      origin_report_ref, subject_kind, subject_id, subject_channel, subject_actor, reason, \
      note, excerpt, block_author, forwarded_to, status, outcome, resolved_at, resolved_by, \
      forwarded_nest_id";
 
-fn abuse_report_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AbuseReportRow> {
+pub(super) fn abuse_report_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AbuseReportRow> {
     Ok(AbuseReportRow {
         id: row.get(0)?,
         created_at: row.get(1)?,
@@ -1625,7 +1681,7 @@ fn abuse_report_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AbuseRepor
     })
 }
 
-fn abuse_report_by_id(
+pub(super) fn abuse_report_by_id(
     conn: &rusqlite::Connection,
     id: &str,
 ) -> rusqlite::Result<Option<AbuseReportRow>> {
@@ -1964,6 +2020,23 @@ impl CacheDb {
         abuse_report_by_id(&conn, &id).context("insert_forwarded_abuse_report: read back")
     }
 
+    /// Whether a forwarded copy keyed `(origin, ref)` is already stored — a
+    /// re-delivery, which the deliver leg answers without spending its budgets.
+    pub async fn forwarded_abuse_report_exists(
+        &self,
+        origin_nest_id: &str,
+        origin_report_ref: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM abuse_reports
+                            WHERE origin_nest_id = ?1 AND origin_report_ref = ?2)",
+            rusqlite::params![origin_nest_id, origin_report_ref],
+            |row| row.get::<_, i64>(0).map(|v| v != 0),
+        )
+        .context("forwarded_abuse_report_exists")
+    }
+
     /// A peer withdrew a report it forwarded: the reporter's note and excerpt
     /// are deleted whatever the copy's state (their data), and an open copy
     /// leaves the queue. A resolved copy keeps its status — the audit record
@@ -2181,6 +2254,214 @@ fn enqueue_abuse_report_call_in(
     )
     .context("enqueue_abuse_report_call")?;
     Ok(conn.last_insert_rowid())
+}
+
+/// The author-queue row (`fauna.moderation.actions`) an admin's enforcement
+/// act writes — the appeal handle of the transparency triple, the same shape
+/// for a post and a conversation record, a takedown and a block. `category` is
+/// the enforcement descriptor (`"illegal"`, or the block's report reason — not
+/// a classifier emission); `obligation_id` records the issuing admin;
+/// confidence 1.0 = a definitive human act. Callers run it inside the act's
+/// own transaction, so the row lands with the flag or not at all. Returns the
+/// row's id — the `ref` its delivery to a foreign author's home carries
+/// (`crate::moderation_federation::deliver_obligation`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn insert_enforcement_row(
+    conn: &rusqlite::Connection,
+    content_type: &str,
+    content_id_hex: &str,
+    author: &[u8; 32],
+    admin: &[u8],
+    category: &str,
+    action: fauna_core::obligation::ObligationAction,
+    timestamp_us: i64,
+) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO obligation_action_records
+            (content_type, content_id, author_hex, obligation_id, rule_index,
+             category, confidence, action_taken, label_id, timestamp, signature)
+         VALUES (?1, ?2, ?3, ?4, 0, ?5, 1.0, ?6, NULL, ?7, ?8)",
+        rusqlite::params![
+            content_type,
+            content_id_hex,
+            hex::encode(author),
+            admin,
+            category,
+            action as u8,
+            timestamp_us,
+            &[][..],
+        ],
+    )
+    .with_context(|| format!("insert {content_type} enforcement obligation row"))?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// `abuse_report_outbox.kind` for `fauna.federation.moderation.obligation.deliver`
+/// — the moderation plane's one durable queue carries the author's queue row to
+/// a foreign author's home too (`moderation.md` § Legal takedown → *The author
+/// homed on another nest*). The entry's `report_id` is the row's id.
+pub const OBLIGATION_CALL_DELIVER: &str = "obligation_deliver";
+
+/// One of this nest's own obligation rows, as its delivery reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObligationDeliveryRow {
+    pub id: i64,
+    pub content_type: String,
+    pub content_id: String,
+    pub author_hex: String,
+    pub category: String,
+    pub action_taken: u8,
+    pub timestamp: i64,
+}
+
+/// A row another nest delivered, as the author's home stores it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveredObligation {
+    /// The verified origin nest (hex).
+    pub issuer_nest_id: String,
+    pub issuer_ref: String,
+    pub content_type: String,
+    pub content_id: String,
+    pub author: [u8; 32],
+    pub category: String,
+    pub action_taken: u8,
+    pub timestamp: i64,
+}
+
+impl CacheDb {
+    /// This nest's own obligation row `id` — `None` for an unknown id or a row
+    /// another nest delivered (a delivered row is never passed on).
+    pub async fn obligation_row_for_delivery(
+        &self,
+        id: i64,
+    ) -> Result<Option<ObligationDeliveryRow>> {
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            "SELECT id, content_type, content_id, author_hex, category, action_taken, timestamp
+               FROM obligation_action_records
+              WHERE id = ?1 AND issuer_nest_id IS NULL",
+            rusqlite::params![id],
+            |row| {
+                Ok(ObligationDeliveryRow {
+                    id: row.get(0)?,
+                    content_type: row.get(1)?,
+                    content_id: row.get(2)?,
+                    author_hex: row.get(3)?,
+                    category: row.get(4)?,
+                    action_taken: row.get(5)?,
+                    timestamp: row.get(6)?,
+                })
+            },
+        )
+        .optional()
+        .context("obligation_row_for_delivery")
+    }
+
+    /// This nest's own obligation rows written at or after `since_us` (epoch
+    /// microseconds) that no home has acknowledged and whose delivery is not
+    /// queued — the boot reconcile's candidates. A hosted author's row is one
+    /// too; the delivery itself passes over it.
+    pub async fn undelivered_obligation_row_ids(&self, since_us: i64) -> Result<Vec<i64>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT r.id FROM obligation_action_records r
+                  WHERE r.issuer_nest_id IS NULL AND r.delivered_to_nest_id IS NULL
+                    AND r.timestamp >= ?1
+                    AND NOT EXISTS (SELECT 1 FROM abuse_report_outbox o
+                                     WHERE o.kind = ?2 AND o.report_id = CAST(r.id AS TEXT))
+                  ORDER BY r.id",
+            )
+            .context("undelivered_obligation_row_ids: prepare")?;
+        let ids = stmt
+            .query_map(
+                rusqlite::params![since_us, OBLIGATION_CALL_DELIVER],
+                |row| row.get(0),
+            )
+            .context("undelivered_obligation_row_ids: query")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("undelivered_obligation_row_ids: read")?;
+        Ok(ids)
+    }
+
+    /// The author's home acknowledged row `id`'s delivery: bind the row to that
+    /// nest's verified id, the one nest whose relayed appeal it accepts.
+    pub async fn mark_obligation_delivered(&self, id: i64, nest_id_hex: &str) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "UPDATE obligation_action_records SET delivered_to_nest_id = ?2
+              WHERE id = ?1 AND issuer_nest_id IS NULL",
+            rusqlite::params![id, nest_id_hex],
+        )
+        .context("mark_obligation_delivered")?;
+        Ok(())
+    }
+
+    /// Row `id` and the content and author it names, when it was delivered to
+    /// `nest_id_hex` — the issuer's gate for a relayed appeal.
+    pub async fn obligation_row_delivered_to(
+        &self,
+        id: i64,
+        nest_id_hex: &str,
+    ) -> Result<Option<(String, String)>> {
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            "SELECT content_id, author_hex FROM obligation_action_records
+              WHERE id = ?1 AND issuer_nest_id IS NULL AND delivered_to_nest_id = ?2",
+            rusqlite::params![id, nest_id_hex],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .context("obligation_row_delivered_to")
+    }
+
+    /// Has `(issuer_nest_id, issuer_ref)` already been stored here? A
+    /// re-delivery spends no budget.
+    pub async fn delivered_obligation_exists(
+        &self,
+        issuer_nest_id: &str,
+        issuer_ref: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            "SELECT 1 FROM obligation_action_records
+              WHERE issuer_nest_id = ?1 AND issuer_ref = ?2",
+            rusqlite::params![issuer_nest_id, issuer_ref],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|found| found.is_some())
+        .context("delivered_obligation_exists")
+    }
+
+    /// Store a delivered row on the author's queue. Idempotent on
+    /// `(issuer_nest_id, issuer_ref)`; returns whether a row landed. The
+    /// issuing admin is not named here (`obligation_id` is empty): the issuer
+    /// is the nest, and the row names it.
+    pub async fn insert_delivered_obligation(&self, row: &DeliveredObligation) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        let n = conn
+            .execute(
+                "INSERT OR IGNORE INTO obligation_action_records
+                    (content_type, content_id, author_hex, obligation_id, rule_index,
+                     category, confidence, action_taken, label_id, timestamp, signature,
+                     issuer_nest_id, issuer_ref)
+                 VALUES (?1, ?2, ?3, ?4, 0, ?5, 1.0, ?6, NULL, ?7, ?4, ?8, ?9)",
+                rusqlite::params![
+                    row.content_type,
+                    row.content_id,
+                    hex::encode(row.author),
+                    &[][..],
+                    row.category,
+                    row.action_taken,
+                    row.timestamp,
+                    row.issuer_nest_id,
+                    row.issuer_ref,
+                ],
+            )
+            .context("insert_delivered_obligation")?;
+        Ok(n == 1)
+    }
 }
 
 #[cfg(test)]
@@ -3145,8 +3426,8 @@ mod quarantine_access_tests {
     }
 
     /// The arm that would break if the gate read `obligation_action_records`
-    /// alone: a **conversation** takedown writes NO obligation row — conv
-    /// records persist no sender, so there is no author queue to key one to
+    /// alone: a takedown of a **conversation** record no attestation names
+    /// writes NO obligation row — there is no author queue to key one to
     /// (`moderation.md` § Legal takedown → *Conversations*) — and its appeal
     /// handle is `segment_records.legal_takedown_ref`, which a member reaches
     /// by the record's own 32-byte hex id.

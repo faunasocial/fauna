@@ -350,9 +350,12 @@ pub(super) fn account_elements(
         ));
     }
     // ── Delete account (type-to-confirm gate, mirroring web/windows) ──
-    // The confirmation's own text (settings.md item 14): chrome only until the
-    // shared element ID for it is approved (rule A) — no id, so e2e can't read it yet.
-    els.push(Element::chrome(t::account_page::DELETE_CONFIRM_TEXT));
+    // The confirmation's own text (settings.md item 14), incl. the export-first
+    // reminder — `settings-delete-confirm-text`, so e2e reads what the person reads.
+    els.push(Element::label(
+        ids::SETTINGS_DELETE_CONFIRM_TEXT,
+        t::account_page::DELETE_CONFIRM_TEXT,
+    ));
     els.push(
         Element::input(
             ids::SETTINGS_DELETE_CONFIRM_FIELD,
@@ -452,7 +455,7 @@ pub(super) fn pending_description(row: &super::PendingActionRow) -> String {
 /// mechanics `architecture/apps/tui.md` § Credential storage): status line,
 /// the change-passphrase trigger, and — while armed — the re-key modal. The
 /// caller gates on the sealed arm being active. The three inputs carry the
-/// tui-unlock masking contract: the registered text is a same-length bullet
+/// unlock masking contract: the registered text is a same-length bullet
 /// mask ([`crate::unlock::mask`]), so the raw values never enter the
 /// automation registry or `/app/state`.
 fn credential_store_elements(state: &SettingsState) -> Vec<Element> {
@@ -742,7 +745,7 @@ mod tests {
 
     /// The armed modal paints the ui.yaml family in order, and every input's
     /// registered text is a same-length bullet mask — the raw values must
-    /// never reach the registry (the tui-unlock contract).
+    /// never reach the registry (the unlock contract).
     #[test]
     fn the_armed_modal_paints_the_ui_yaml_family_and_masks_every_buffer() {
         let mut state = SettingsState::default();

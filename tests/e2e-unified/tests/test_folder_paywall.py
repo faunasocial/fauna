@@ -42,7 +42,10 @@ import uuid
 import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
+from helpers.app_surface import app_name, skip_unbuilt
 from helpers.set_names import find_set
+from helpers.waiting import wait_until
+from i18n.strings import S
 
 pytestmark = [
     pytest.mark.tier2,
@@ -74,6 +77,11 @@ pytestmark = [
     # apart from the parked knock button). Re-added here.
     pytest.mark.tui,
 ]
+
+# The apps that paint `folder-paywall-hint` by id (user-approved 2026-10-16; tui
+# led 2026-10-18). Every other marked app still proves the disabled half, then
+# declares the hint as unbuilt parity debt — this set is the hint's parity ledger.
+_PAYWALL_HINT_BUILT = {"tui", "web", "linux", "android"}
 
 
 @pytest.fixture
@@ -241,13 +249,12 @@ def test_folder_paywall_select_is_unavailable_without_a_tier(app, paywall_nest):
     `ui/folders.md` § Element IDs → *Web paywall*: "disabled, with a 'create a
     tier first' hint, for a creator holding no tiers (nothing to paywall to)".
 
-    The disabled state is read through the uniform `/element/enabled` contract
-    (`paywall_select_enabled`). The hint itself carries no ui.yaml id — tui
-    paints it as the select's prompt label, which the automation surface
-    deliberately does not register (an element's registry text is its VALUE) —
-    so this witness pins the control's unavailability, and the hint's
-    observability is captured as its own row rather than scraped off the
-    screen here.
+    Both halves are read: the disabled state through the uniform
+    `/element/enabled` contract (`paywall_select_enabled`), and the hint through
+    its own line, `folder-paywall-hint` (user-approved 2026-10-16) — a select's
+    label is not what the automation surface reads, so the hint is the
+    `folder-website-hint` shape. An app that has not painted the id yet still
+    proves the disabled half, then declares the hint as unbuilt parity debt.
 
     Ordering is a causal barrier, not a wait: the select is asserted RENDERED
     on the website-enabled row before its enabled state is read, and the row's
@@ -299,3 +306,23 @@ def test_folder_paywall_select_is_unavailable_without_a_tier(app, paywall_nest):
             f"is nothing to paywall to; error={app.error_text()!r}"
         )
         assert _paywalled_tier(gt, name) is None, "nothing may have been paywalled"
+
+        if app_name(app.driver) not in _PAYWALL_HINT_BUILT:
+            skip_unbuilt(
+                app.driver,
+                surface="folder-paywall-hint",
+                detail="the create-a-tier-first line beside the disabled paywall "
+                "select is painted by id on tui first (ui/folders.md § Element IDs "
+                "→ Web paywall)",
+                tracked="",
+            )
+        want = S.devices.paywall_tier_needs_tier
+        wait_until(
+            lambda: b.paywall_hint_text() == want,
+            15.0,
+            diagnose=lambda: (
+                f"the disabled paywall select must carry folder-paywall-hint "
+                f"reading {want!r}, reads {b.paywall_hint_text()!r}; "
+                f"error={app.error_text()!r}"
+            ),
+        )

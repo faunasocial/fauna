@@ -183,7 +183,35 @@ pub struct ReqwestNestContentApi<B: BearerSource> {
     /// Base URL of the nest, e.g. `https://nest.example` (no trailing slash).
     /// Paths passed to the trait methods are appended verbatim.
     base_url: String,
-    bearer: B,
+    /// `None` only for [`Self::anonymous`]: no `Authorization` header, ever.
+    bearer: Option<B>,
+}
+
+/// The `B` of an anonymous [`ReqwestNestContentApi`] — a bearer source that
+/// cannot exist, so the type itself says no bearer is ever attached.
+pub enum NoBearer {}
+
+#[async_trait]
+impl BearerSource for NoBearer {
+    async fn bearer(&self) -> Result<String, ApiError> {
+        match *self {}
+    }
+}
+
+impl ReqwestNestContentApi<NoBearer> {
+    /// A content API that never sends a bearer — for a nest's **public**
+    /// routes on a nest this session holds no account on (another nest's
+    /// `GET /api/v1/blob/{hash}`, `feed.md` § The read model → *A post homed on
+    /// another nest*). Handing that nest this session's bearer would give a
+    /// credential for one nest to another; a route that needs one answers
+    /// `401`, surfaced as-is (there is no source to refresh).
+    pub fn anonymous(base_url: impl Into<String>, http: reqwest::Client) -> Self {
+        Self {
+            http,
+            base_url: base_url.into().trim_end_matches('/').to_string(),
+            bearer: None,
+        }
+    }
 }
 
 impl<B: BearerSource> ReqwestNestContentApi<B> {
@@ -191,7 +219,7 @@ impl<B: BearerSource> ReqwestNestContentApi<B> {
         Self {
             http,
             base_url: base_url.into().trim_end_matches('/').to_string(),
-            bearer,
+            bearer: Some(bearer),
         }
     }
 
@@ -200,7 +228,8 @@ impl<B: BearerSource> ReqwestNestContentApi<B> {
     }
 
     /// Attach the bearer, send, and — on `401` — fire the source's
-    /// `notify_401()` and retry once with the fresh bearer.
+    /// `notify_401()` and retry once with the fresh bearer. An
+    /// [anonymous](ReqwestNestContentApi::anonymous) API sends as-is.
     ///
     /// A second `401`, a `notify_401` that doesn't recover (source can't
     /// produce a new bearer), or a non-cloneable streaming body all surface
@@ -208,7 +237,13 @@ impl<B: BearerSource> ReqwestNestContentApi<B> {
     /// 401 — the TTL loop / cache keeps the bearer fresh) pays only one
     /// `try_clone`, cheap for the buffered bodies the content API uses.
     async fn send(&self, req: reqwest::RequestBuilder) -> Result<reqwest::Response, ApiError> {
-        let token = self.bearer.bearer().await?;
+        let Some(bearer) = &self.bearer else {
+            return req
+                .send()
+                .await
+                .map_err(|e| ApiError::Transport(e.to_string()));
+        };
+        let token = bearer.bearer().await?;
         let retry = req.try_clone();
         let resp = req
             .bearer_auth(&token)
@@ -219,8 +254,8 @@ impl<B: BearerSource> ReqwestNestContentApi<B> {
             return Ok(resp);
         }
         // Stale / server-revoked bearer. React, then one retry with a fresh one.
-        self.bearer.notify_401().await;
-        let (Some(retry), Ok(token)) = (retry, self.bearer.bearer().await) else {
+        bearer.notify_401().await;
+        let (Some(retry), Ok(token)) = (retry, bearer.bearer().await) else {
             return Ok(resp);
         };
         retry

@@ -998,7 +998,7 @@ mod tests {
     fn shed_key_of_matches_check_conns_own_discriminant() {
         let state = crate::ws::WsState::new();
 
-        let (anon_conn, _rx) = state.subscribe_anonymous(v4(203, 0, 113, 7, 5000));
+        let (anon_conn, _rx) = state.subscribe_anonymous(v4(203, 0, 113, 7, 5000), None);
         assert!(
             matches!(ShedKey::of(&anon_conn), ShedKey::Peer(p) if p == v4(203, 0, 113, 7, 5000)),
             "an anonymous connection must key its shed sample on the peer \

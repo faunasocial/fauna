@@ -4,6 +4,7 @@ pub mod admin_calendar;
 pub mod admin_contacts;
 pub mod admin_files;
 pub mod admin_mail;
+pub mod admin_mail_reports;
 pub mod admin_web;
 pub mod atproto;
 pub mod connected_apps;
@@ -264,9 +265,23 @@ pub(super) fn commit_bridge_settings(
     let bridges = fauna_client_bridges::BridgesClient::new(client.nest_rpc().clone());
     let handle = client.runtime_handle();
     let bridge_id = bridge_id.to_string();
+    let tx = client.tx();
     handle.spawn(async move {
-        if let Err(e) = bridges.set_settings(bridge_id, settings).await {
-            tracing::error!("[settings] bridge set_settings error: {e}");
+        match bridges.set_settings(bridge_id, settings).await {
+            // A saved setting re-reads the bridges snapshot (no toast — the
+            // change already shows on the control), so a card opened later,
+            // after leaving the page and coming back, paints what the nest
+            // holds rather than the value the snapshot was first read with.
+            Ok(_) => {
+                if let Ok(reply) = bridges.list().await {
+                    tx.send(crate::app::UiMessage::Data(
+                        crate::app::DataMessage::BridgesLoaded {
+                            bridges: reply.bridges,
+                        },
+                    ));
+                }
+            }
+            Err(e) => tracing::error!("[settings] bridge set_settings error: {e}"),
         }
     });
 }
@@ -443,6 +458,9 @@ thread_local! {
     /// The Export wizard's re-read, fired off `StaleSurfaces::mail_export`.
     static MAIL_EXPORT_REHYDRATE_HANDLER: RefCell<Option<AtprotoRehydrateHandler>> =
         const { RefCell::new(None) };
+    /// The Import wizard's re-read, fired off `StaleSurfaces::mail_import`.
+    static MAIL_IMPORT_REHYDRATE_HANDLER: RefCell<Option<AtprotoRehydrateHandler>> =
+        const { RefCell::new(None) };
     /// The session's mail-settings machine, published by the Mail & Calendar
     /// page when it builds it. Its app passwords are rows of the Connected apps
     /// roster, which reads them through this same machine.
@@ -610,6 +628,25 @@ pub fn set_mail_export_rehydrate_handler(handler: AtprotoRehydrateHandler) {
 /// user moves on). The handler itself gates on the page being shown.
 pub fn notify_mail_export_rehydrate() {
     let handler = MAIL_EXPORT_REHYDRATE_HANDLER.with(|cell| cell.borrow().clone());
+    if let Some(handler) = handler {
+        handler();
+    }
+}
+
+/// Register the Import wizard's push re-read (`StaleSurfaces::mail_import`) —
+/// the [`set_mail_export_rehydrate_handler`] twin.
+pub fn set_mail_import_rehydrate_handler(handler: AtprotoRehydrateHandler) {
+    MAIL_IMPORT_REHYDRATE_HANDLER.with(|cell| {
+        *cell.borrow_mut() = Some(handler);
+    });
+}
+
+/// Fire the Import wizard's re-read, if registered — `StaleSurfaces::mail_import`,
+/// an import another device started, paused, failed or dismissed
+/// (`mailbox-migration.md` § A failed import is a record the wizard shows until
+/// the user moves on). The handler itself gates on the page being shown.
+pub fn notify_mail_import_rehydrate() {
+    let handler = MAIL_IMPORT_REHYDRATE_HANDLER.with(|cell| cell.borrow().clone());
     if let Some(handler) = handler {
         handler();
     }

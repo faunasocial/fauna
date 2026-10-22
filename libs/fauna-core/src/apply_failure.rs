@@ -148,9 +148,66 @@ impl PermanentApplyFailure {
         reason: "file kept out by the per-operation transfer cap",
     };
 
+    /// A row no key this reader holds opens, held past [`KEY_PENDING_HOLD`]
+    /// — the KEY-PENDING class (`file-sync.md` § *A failed change must not
+    /// strand the device*, TRANSIENT IS THE DEFAULT). The one marker no open
+    /// site raises: the failure is transient ([`KeyPendingOpen`]) until the
+    /// applier's bound runs out, and then the APPLIER marks it. Passing it
+    /// drops nothing, because a content-key gain re-owes the passed-heads
+    /// re-judge, which opens and folds it then
+    /// (`writer-signed-change-records.md` ruling (8)(f)).
+    pub const KEY_PENDING: Self = Self {
+        reason: "no key this reader holds opens it yet",
+    };
+
     pub const fn new(reason: &'static str) -> Self {
         Self { reason }
     }
+}
+
+/// How long a KEY-PENDING row may hold the catch-up anchor, in wall time from
+/// the first such failure of the same lowest held seq, before the applier
+/// passes it as [`PermanentApplyFailure::KEY_PENDING`]. A constant, never a
+/// setting: passing loses nothing (the re-judge re-folds the row on a key
+/// gain), so the bound only trades a short wait for an honest key that is
+/// still syncing against how long a hostile row can stall a device.
+pub const KEY_PENDING_HOLD: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// A **transient** crypto-open failure of the KEY-PENDING class: the row's
+/// bytes were all fetched, and no root this reader holds opens them — a sealed
+/// manifest that opens under no candidate root, a stamped generation this
+/// reader lacks, or a chunk whose tag fails under every candidate root. It
+/// says nothing about the writer (a same-version key can still arrive by a
+/// custody merge), so it holds the anchor like any transient failure, for at
+/// most [`KEY_PENDING_HOLD`]. A fetch or transport failure is never this.
+///
+/// Unlike [`PermanentApplyFailure`], [`permanent_reason`] never reports it;
+/// [`is_key_pending`] does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyPendingOpen;
+
+impl fmt::Display for KeyPendingOpen {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("no key this reader holds opens it (key pending)")
+    }
+}
+
+impl std::error::Error for KeyPendingOpen {}
+
+/// Raise `message` as a KEY-PENDING open failure — the marker underneath, the
+/// message on top, as [`permanent`] does.
+pub fn key_pending(message: impl fmt::Display + Send + Sync + 'static) -> anyhow::Error {
+    anyhow::Error::new(KeyPendingOpen).context(message)
+}
+
+/// Whether `err` was raised as a KEY-PENDING open failure, either attachment
+/// style (see [`permanent_reason`]). A permanent marker on the same chain
+/// wins at the applier, which asks [`permanent_reason`] first.
+pub fn is_key_pending(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<KeyPendingOpen>().is_some()
+        || err
+            .chain()
+            .any(|e| e.downcast_ref::<KeyPendingOpen>().is_some())
 }
 
 impl fmt::Display for PermanentApplyFailure {
@@ -282,6 +339,19 @@ mod tests {
         );
     }
 
+    /// A KEY-PENDING open is transient to every classifier that asks only for
+    /// a permanent reason, and found through the context layers stacked on it.
+    #[test]
+    fn a_key_pending_open_is_transient_and_found_under_context() {
+        let err = key_pending("chunk 0 failed under every candidate root")
+            .context("downloading photos/a.jpg")
+            .context("catch-up pass");
+        assert_eq!(permanent_reason(&err), None);
+        assert!(is_key_pending(&err));
+        assert!(format!("{err:#}").contains("every candidate root"));
+        assert!(!is_key_pending(&anyhow::anyhow!("connection reset")));
+    }
+
     /// The reason is a fixed class name, never row content — it lands in a
     /// conflict row and a log line.
     #[test]
@@ -291,6 +361,7 @@ mod tests {
             PermanentApplyFailure::CONTENT_UNADDRESSED,
             PermanentApplyFailure::PATH_REFUSED,
             PermanentApplyFailure::NO_KEY_MATERIAL,
+            PermanentApplyFailure::KEY_PENDING,
         ] {
             assert!(!marker.reason.is_empty());
             assert!(

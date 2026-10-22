@@ -12,6 +12,11 @@ import FaunaKit
 /// its nav-bar title.
 struct ConversationDetailView: View {
     @Environment(ConversationsVM.self) private var vm
+    #if !FAUNA_KIDS
+    // The feed is excised from the kids build, which has no page for a room-search post hit to open.
+    @Environment(FeedVM.self) private var feedVM
+    @Environment(AppState.self) private var appState
+    #endif
     let threadId: ThreadId
 
     var body: some View {
@@ -20,7 +25,18 @@ struct ConversationDetailView: View {
                 // The list's page-error banner sits under this push, so the
                 // pushed screen carries it (a refused add is stamped while the
                 // thread is open).
+                #if FAUNA_KIDS
                 ThreadDetailView(detail: detail, showsPageError: true)
+                #else
+                ThreadDetailView(detail: detail, showsPageError: true, onOpenRoomPost: { postId, home in
+                    // A room-search post hit opens on the feed tab through the same
+                    // pending-open door a Search hit uses, carrying the room's home
+                    // so a foreign-homed post resolves through `resolve_post_from`.
+                    appState.selectedTab = "feed"
+                    feedVM.pendingPostOpenHome = home
+                    feedVM.pendingPostOpen = postId
+                })
+                #endif
             } else {
                 // Thread vanished out from under us (e.g. reset) — rare.
                 ContentUnavailableView(

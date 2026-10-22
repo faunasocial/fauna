@@ -80,7 +80,7 @@ fun FeedPostVideo(document: RenderDocument, postId: String, vm: FeedVM) {
                 media = null
                 phase = machine.phase
                 scope.launch {
-                    val resolved = vm.resolvePlayback(block, cacheDir)
+                    val resolved = vm.resolvePlayback(postId, block, cacheDir)
                     if (machine.resolved(gen, resolved)) {
                         media = resolved
                     } else {

@@ -72,7 +72,7 @@ Stamped 2026-10-13 at ab51f8d2bd.
 24. [app] After you choose to delete the server despite a failed DNS step, the records that were not removed join the by-hand list, each with the value that identifies it — `docs/goal/behavior/nest-retirement.md` § DNS cleanup — scope and order
     - `tests/e2e-unified/tests/test_nest_retire.py::test_retire_failed_dns_stops_before_the_server_and_force_deletes_only_it`
 25. [app] Choosing to delete the server anyway repeats the warning that records left behind point at an address someone else may be given — `docs/goal/behavior/nest-retirement.md` § DNS cleanup — scope and order
-    - (none)
+    - `tests/e2e-unified/tests/test_nest_retire.py::test_retire_failed_dns_stops_before_the_server_and_force_deletes_only_it`
 26. [app] When a server served several domains, the records pointing at it are removed from every one of them, not only the main one — `docs/goal/behavior/nest-retirement.md` § DNS cleanup — scope and order
     - `tests/e2e-unified/tests/test_nest_retire.py::test_retire_walk_lists_confirms_and_cleans_dns_before_the_server`
 27. [app] Records for another domain whose DNS the app cannot reach are listed for you to remove by hand — `docs/goal/behavior/nest-retirement.md` § DNS cleanup — scope and order
@@ -107,7 +107,7 @@ Stamped 2026-10-13 at ab51f8d2bd.
 | macos |  no run recorded | |
 | ios |  no run recorded | |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.4-dev+e0aed9d5.dirty standalone |
+| tui | ✅ full | 0.1.5-dev+cab1c46a.dirty standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -116,36 +116,36 @@ Stamped 2026-10-13 at ab51f8d2bd.
 | 3 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_failed_dns_stops_before_the_server_and_force_deletes_only_it` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_leaving_a_failed_run_disarms_it_for_every_other_row` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_transfer_code_leg` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_from_admin_marks_warns_and_retires_the_box_the_session_is_signed_into` | tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_from_admin_marks_warns_and_retires_the_box_the_session_is_signed_into` | web (linux): failed, tui (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_from_admin_cleans_dns_through_the_held_credential` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_walk_lists_confirms_and_cleans_dns_before_the_server` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_forgets_the_token_on_leaving_and_asks_again` | tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_from_admin_marks_warns_and_retires_the_box_the_session_is_signed_into` | tui (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_lists_unmarked_servers_with_a_note_behind_the_same_typed_confirm` | tui (linux): passed |
+| 8 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_forgets_the_token_on_leaving_and_asks_again` | web (linux): passed, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_from_admin_marks_warns_and_retires_the_box_the_session_is_signed_into` | web (linux): failed, tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_lists_unmarked_servers_with_a_note_behind_the_same_typed_confirm` | web (linux): failed, tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_empty_account_says_so_and_names_the_pre_marker_case` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_walk_lists_confirms_and_cleans_dns_before_the_server` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_confirm_warns_and_states_the_dns_plan_and_an_unattributed_box_touches_no_dns` | tui (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_confirm_warns_and_states_the_dns_plan_and_an_unattributed_box_touches_no_dns` | web (linux): passed, tui (linux): passed |
 | 14 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_walk_lists_confirms_and_cleans_dns_before_the_server` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 15 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_walk_lists_confirms_and_cleans_dns_before_the_server` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 16 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_confirm_warns_and_states_the_dns_plan_and_an_unattributed_box_touches_no_dns` | tui (linux): passed |
-| 17 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_confirm_warns_and_states_the_dns_plan_and_an_unattributed_box_touches_no_dns` | tui (linux): passed |
-| 18 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_from_admin_marks_warns_and_retires_the_box_the_session_is_signed_into` | tui (linux): passed |
-| 19 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_from_admin_marks_warns_and_retires_the_box_the_session_is_signed_into` | tui (linux): passed |
-| 20 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_a_run_that_stopped_leaves_the_server_listed_and_retiring_again_finishes` | tui (linux): passed |
-| 21 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_a_server_already_gone_counts_as_deleted` | tui (linux): passed |
-| 22 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_a_run_that_stopped_leaves_the_server_listed_and_retiring_again_finishes` | tui (linux): passed |
+| 16 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_confirm_warns_and_states_the_dns_plan_and_an_unattributed_box_touches_no_dns` | web (linux): passed, tui (linux): passed |
+| 17 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_confirm_warns_and_states_the_dns_plan_and_an_unattributed_box_touches_no_dns` | web (linux): passed, tui (linux): passed |
+| 18 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_from_admin_marks_warns_and_retires_the_box_the_session_is_signed_into` | web (linux): failed, tui (linux): passed |
+| 19 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_from_admin_marks_warns_and_retires_the_box_the_session_is_signed_into` | web (linux): failed, tui (linux): passed |
+| 20 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_a_run_that_stopped_leaves_the_server_listed_and_retiring_again_finishes` | web (linux): passed, tui (linux): passed |
+| 21 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_a_server_already_gone_counts_as_deleted` | web (linux): passed, tui (linux): passed |
+| 22 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_a_run_that_stopped_leaves_the_server_listed_and_retiring_again_finishes` | web (linux): passed, tui (linux): passed |
 | 23 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_without_dns_access_removes_nothing_and_lists_what_still_points_at_the_server` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 24 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_failed_dns_stops_before_the_server_and_force_deletes_only_it` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 25 | app | (none) | — |
+| 25 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_failed_dns_stops_before_the_server_and_force_deletes_only_it` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 26 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_walk_lists_confirms_and_cleans_dns_before_the_server` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 27 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_lists_another_domains_records_by_hand_when_its_dns_is_out_of_reach` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 28 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_removes_the_records_the_app_itself_published` | tui (linux): passed |
+| 28 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_removes_the_records_the_app_itself_published` | web (linux): passed, tui (linux): passed |
 | 29 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_walk_lists_confirms_and_cleans_dns_before_the_server` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 30 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_walk_lists_confirms_and_cleans_dns_before_the_server` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 31 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_transfer_code_is_forgotten_on_leaving_and_offered_only_for_a_confirmed_domain` | tui (linux): passed |
+| 31 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_transfer_code_is_forgotten_on_leaving_and_offered_only_for_a_confirmed_domain` | web (linux): passed, tui (linux): passed |
 | 32 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_transfer_code_leg` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 33 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_transfer_code_is_forgotten_on_leaving_and_offered_only_for_a_confirmed_domain` | tui (linux): passed |
+| 33 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_transfer_code_is_forgotten_on_leaving_and_offered_only_for_a_confirmed_domain` | web (linux): passed, tui (linux): passed |
 | 34 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_keeps_the_nests_recovery_key` | tui (linux): passed |
-| 35 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_list_holds_every_server_however_many` | tui (linux): passed |
+| 35 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_list_holds_every_server_however_many` | web (linux): passed, tui (linux): passed |
 | 36 | app | `tests/e2e-unified/tests/test_nest_retire.py::test_retire_transfer_code_leg` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 <!-- features-render:end -->

@@ -17,17 +17,17 @@
   // subscription registers the re-score obligation, but the MDA drain has
   // nothing to unseal until a matching capability is minted to the user's own
   // MDA holder.
-  import { identity } from '$lib/store';
-  import { sharedRpcPort } from '$lib/rpc';
-  import { ensureWasm, textModelNeedsNewerApp } from '$lib/wasm';
-  import LabelerInspectPanel from '$lib/components/LabelerInspectPanel.svelte';
-  import { createLabelerCatalogMachine } from '$lib/wasm-labeler-catalog';
-  import { resolveLocalized } from '$lib/i18n/localized';
+  import { identity } from '#lib/store';
+  import { sharedRpcPort } from '#lib/rpc';
+  import { ensureWasm, textModelNeedsNewerApp } from '#lib/wasm';
+  import LabelerInspectPanel from '#lib/components/LabelerInspectPanel.svelte';
+  import { createLabelerCatalogMachine } from '#lib/wasm-labeler-catalog';
+  import { resolveLocalized } from '#lib/i18n/localized';
   import { onMount, onDestroy } from 'svelte';
-  import { t } from '$lib/i18n/strings';
-  import type { LabelerCatalogSnapshot } from '$lib/labeler-catalog-machine';
+  import { t } from '#lib/i18n/strings';
+  import type { LabelerCatalogSnapshot } from '#lib/labeler-catalog-machine';
   import type { LabelerCatalogMachine } from '../../../static/fauna_wasm_labeler_catalog.js';
-  import { IDS } from '$lib/generated/uiIds';
+  import { IDS } from '#lib/generated/uiIds';
 
   let { error = $bindable('') } = $props();
 

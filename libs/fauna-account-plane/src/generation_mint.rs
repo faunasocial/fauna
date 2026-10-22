@@ -277,8 +277,10 @@ pub async fn mint_generation<B: StoreBackend, R: RpcRequester>(
     //     be filtered out: the mint is refused instead. The deposit it leaves
     //     is the orphaned holder-side wrap this function's contract already
     //     calls harmless, and the next origination re-mints over the fresh
-    //     view. The caller's writes follow with no await between (store
-    //     calls are synchronous underneath), so the answer holds for them.
+    //     view. The caller's writes follow with no await between on
+    //     native (store calls are synchronous there), so the answer holds
+    //     for them; on web their IndexedDB reads leave the bounded window
+    //     `no_longer_wrap_targets` documents.
     let removed = crate::generation_topup::no_longer_wrap_targets(
         store,
         ctx.root,

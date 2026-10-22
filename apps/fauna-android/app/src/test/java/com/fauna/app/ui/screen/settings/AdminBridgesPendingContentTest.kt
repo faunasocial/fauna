@@ -4,21 +4,27 @@ import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import com.fauna.app.testing.FaunaRobolectricTestRunner
 import org.robolectric.annotation.Config
 import uniffi.fauna_client_mail_settings.ApprovedBridgeView
+import uniffi.fauna_client_mail_settings.BridgeConfirm
 import uniffi.fauna_client_mail_settings.PendingBridgeView
 
 /**
  * Compose-level coverage for the stateless [AdminBridgesPendingContent] (the admin
  * `admin-bridges-pending` page, mail-bridge-lifecycle.md § Pending approval): the
- * indexed approval cards, the source-IP dash placeholder, approve, the
- * two-click-confirm reject, and (admin.md § Approved-bridges roster) the approved
- * roster + rotate-service-user-key inline confirm. Renders with seeded state — no
- * Hilt, no VM, no FFI.
+ * indexed approval cards, the source-IP dash placeholder, approve, the inline
+ * reject confirm, and (admin.md § Approved-bridges roster) the approved roster +
+ * rotate-service-user-key inline confirm. Both confirms are the shared machine's
+ * `arm` / `disarm` / `Confirm`: the harness holds `armed` the way the VM mirrors the
+ * machine's snapshot. Renders with seeded state — no Hilt, no VM, no FFI.
  */
 @RunWith(FaunaRobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -66,11 +72,11 @@ class AdminBridgesPendingContentTest {
         working: Boolean = false,
         displayName: (String) -> String = displayNameStub,
         onApprove: (String, String) -> Unit = { _, _ -> },
-        onReject: (String) -> Unit = {},
-        onRotate: (String) -> Unit = {},
+        onConfirm: (BridgeConfirm?) -> Unit = {},
         formatTimestamp: (Long) -> String = { ms -> "ts:$ms" },
     ) {
         composeTestRule.setContent {
+            var armed by remember { mutableStateOf<BridgeConfirm?>(null) }
             AdminBridgesPendingContent(
                 pending = pending,
                 approved = approved,
@@ -78,8 +84,13 @@ class AdminBridgesPendingContentTest {
                 displayName = displayName,
                 onBack = {},
                 onApprove = onApprove,
-                onReject = onReject,
-                onRotate = onRotate,
+                armed = armed,
+                onArm = { armed = it },
+                onDisarm = { armed = null },
+                onConfirm = {
+                    onConfirm(armed)
+                    armed = null
+                },
                 formatTimestamp = formatTimestamp,
             )
         }
@@ -151,14 +162,33 @@ class AdminBridgesPendingContentTest {
     }
 
     @Test
-    fun rejectRequiresTwoClicks() {
-        var rejected: String? = null
-        render(pending = listOf(bridge(pubkey = "f00d")), onReject = { rejected = it })
-        val rejectBtn = composeTestRule.onNodeWithTag("admin-bridges-pending-reject-button")
-        rejectBtn.performScrollTo().performClick() // arm
-        assertNull(rejected)
-        rejectBtn.performClick() // confirm
-        assertEquals("f00d", rejected)
+    fun rejectAsksFirstAndOnlyTheConfirmRejects() {
+        // mail-bridge-lifecycle.md § Pending approval: Reject opens a confirm that says
+        // the bridge cannot connect again until an admin re-approves a fresh keypair;
+        // cancel closes it, only the confirm runs the armed act.
+        var confirmed: BridgeConfirm? = null
+        render(pending = listOf(bridge(pubkey = "f00d")), onConfirm = { confirmed = it })
+        composeTestRule.onAllNodesWithTag("admin-bridges-reject-warning-text").assertCountEquals(0)
+        composeTestRule.onNodeWithTag("admin-bridges-pending-reject-button").performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("admin-bridges-reject-confirm").assertExists()
+        composeTestRule.onNodeWithTag("admin-bridges-reject-warning-text").assertTextContains(
+            "It will not be able to connect again until an admin re-approves a fresh keypair.",
+        )
+        assertNull(confirmed)
+        composeTestRule.onNodeWithTag("admin-bridges-reject-cancel-button").performScrollTo().performClick()
+        assertNull(confirmed)
+        composeTestRule.onAllNodesWithTag("admin-bridges-reject-warning-text").assertCountEquals(0)
+
+        composeTestRule.onNodeWithTag("admin-bridges-pending-reject-button").performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("admin-bridges-reject-confirm-button").performScrollTo().performClick()
+        assertEquals(BridgeConfirm.Reject(pubkeyHex = "f00d"), confirmed)
+    }
+
+    @Test
+    fun rejectConfirmOpensOnlyUnderTheCardItNames() {
+        render(pending = listOf(bridge(pubkey = "aa"), bridge(pubkey = "bb")))
+        composeTestRule.onAllNodesWithTag("admin-bridges-pending-reject-button")[1].performScrollTo().performClick()
+        composeTestRule.onAllNodesWithTag("admin-bridges-reject-confirm").assertCountEquals(1)
     }
 
     @Test
@@ -187,8 +217,8 @@ class AdminBridgesPendingContentTest {
 
     @Test
     fun rotateConfirmDispatchesOnConfirmAndClosesOnCancel() {
-        var rotated: String? = null
-        render(approved = listOf(approvedBridge(pubkey = "cafe")), onRotate = { rotated = it })
+        var rotated: BridgeConfirm? = null
+        render(approved = listOf(approvedBridge(pubkey = "cafe")), onConfirm = { rotated = it })
         composeTestRule.onNodeWithTag("admin-bridges-approved-rotate-button").performScrollTo().performClick()
         composeTestRule.onNodeWithTag("admin-bridges-rotate-cancel-button").performScrollTo().performClick()
         assertNull(rotated)
@@ -196,6 +226,6 @@ class AdminBridgesPendingContentTest {
 
         composeTestRule.onNodeWithTag("admin-bridges-approved-rotate-button").performScrollTo().performClick()
         composeTestRule.onNodeWithTag("admin-bridges-rotate-confirm-button").performScrollTo().performClick()
-        assertEquals("cafe", rotated)
+        assertEquals(BridgeConfirm.Rotate(pubkeyHex = "cafe"), rotated)
     }
 }

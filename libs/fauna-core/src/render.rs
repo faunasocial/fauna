@@ -255,6 +255,19 @@ pub enum RenderBlock {
         /// order.
         #[serde(default)]
         not_found: bool,
+        /// `Some(reason_token)` when this nest's admin **blocked** the quoted
+        /// post after a report (`moderation.md` § Admin block of a reported
+        /// item): the client paints the shared notice
+        /// ([`crate::obligation::admin_block_notice`]) in place of the quoted
+        /// content when `body` is empty (any viewer but the author), and beside
+        /// it when the author's own read kept the body. Additive (`None` for
+        /// every quote not blocked, and for a block serialized before the
+        /// field), carried from
+        /// [`QuotedPostView::admin_block_reason`](fauna_feed::QuotedPostView).
+        /// Last in the variant, for the reason `not_found` is.
+        #[serde(default)]
+        #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+        admin_block_reason: Option<String>,
     },
     /// A first-class in-bubble reply-quote node — the conversations analogue of
     /// [`QuotedPost`](Self::QuotedPost) (render-model.md § D2: a reply-quote is a
@@ -614,10 +627,17 @@ impl RenderDocument {
     /// (render-model.md § D6c) — the slot takes a blob image first, so this is `None`
     /// whenever [`Self::first_image_hash`] is `Some`.
     pub fn proxied_post_image(&self) -> Option<&str> {
+        self.proxied_post_image_ref().map(|img| img.path)
+    }
+
+    /// [`Self::proxied_post_image`] with the block's `alt` — the whole ref the slot paints
+    /// (the placeholder's text is the path, the painted image's accessibility text the alt).
+    /// The single home of the slot precedence; the UniFFI / wasm faces return this.
+    pub fn proxied_post_image_ref(&self) -> Option<ProxiedImageRef<'_>> {
         if self.first_image_hash().is_some() {
             return None;
         }
-        self.proxied_images().into_iter().next().map(|img| img.path)
+        self.proxied_images().into_iter().next()
     }
 
     /// The nest-relative path a post's `video-thumbnail` slot paints when it is a bridged
@@ -625,13 +645,16 @@ impl RenderDocument {
     /// (render-model.md § D6c → *Proxied video*) — [`Self::proxied_post_image`]'s
     /// precedence, applied to the video slot.
     pub fn proxied_post_video(&self) -> Option<&str> {
+        self.proxied_post_video_ref().map(|video| video.path)
+    }
+
+    /// [`Self::proxied_post_video`] with the block's `alt`; the single home of the video
+    /// slot precedence, and what the UniFFI / wasm faces return.
+    pub fn proxied_post_video_ref(&self) -> Option<ProxiedVideoRef<'_>> {
         if self.first_video_hash().is_some() {
             return None;
         }
-        self.proxied_videos()
-            .into_iter()
-            .next()
-            .map(|video| video.path)
+        self.proxied_videos().into_iter().next()
     }
 
     /// The folded feed quote-post embed ([`RenderBlock::QuotedPost`]), if the manager
@@ -716,6 +739,9 @@ pub struct QuotedPostEmbed<'a> {
     pub authoring_origin: AuthoringOriginStatus,
     pub legal_takedown_ref: Option<&'a str>,
     pub not_found: bool,
+    /// The admin block's reason token — see [`RenderBlock::QuotedPost`]'s
+    /// `admin_block_reason`.
+    pub admin_block_reason: Option<&'a str>,
 }
 
 /// A [`PreviewState::Resolved`] link preview, borrowed from a [`RenderBlock::LinkPreview`] —
@@ -749,6 +775,11 @@ pub struct QuotedPostEmbedOwned {
     #[serde(default)]
     #[cfg_attr(feature = "uniffi", uniffi(default = false))]
     pub not_found: bool,
+    /// See [`RenderBlock::QuotedPost`]'s `admin_block_reason`. Defaulted on
+    /// every face, as `not_found` is.
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub admin_block_reason: Option<String>,
 }
 
 impl From<QuotedPostEmbed<'_>> for QuotedPostEmbedOwned {
@@ -761,6 +792,7 @@ impl From<QuotedPostEmbed<'_>> for QuotedPostEmbedOwned {
             authoring_origin: e.authoring_origin,
             legal_takedown_ref: e.legal_takedown_ref.map(str::to_string),
             not_found: e.not_found,
+            admin_block_reason: e.admin_block_reason.map(str::to_string),
         }
     }
 }
@@ -973,6 +1005,7 @@ fn quoted_post(blocks: &[RenderBlock]) -> Option<QuotedPostEmbed<'_>> {
             authoring_origin,
             legal_takedown_ref,
             not_found,
+            admin_block_reason,
         } => Some(QuotedPostEmbed {
             post_id,
             author,
@@ -981,6 +1014,7 @@ fn quoted_post(blocks: &[RenderBlock]) -> Option<QuotedPostEmbed<'_>> {
             authoring_origin: *authoring_origin,
             legal_takedown_ref: legal_takedown_ref.as_deref(),
             not_found: *not_found,
+            admin_block_reason: admin_block_reason.as_deref(),
         }),
         RenderBlock::ListBlock { items, .. } => {
             items.iter().find_map(|item| quoted_post(&item.blocks))
@@ -2244,6 +2278,7 @@ mod tests {
                     authoring_origin: AuthoringOriginStatus::Unknown,
                     legal_takedown_ref: None,
                     not_found: false,
+                    admin_block_reason: None,
                 },
             ],
         };
@@ -2670,6 +2705,7 @@ mod tests {
             authoring_origin: AuthoringOriginStatus::Unknown,
             legal_takedown_ref: None,
             not_found: false,
+            admin_block_reason: None,
         }
     }
 
@@ -3318,6 +3354,7 @@ mod tests {
                 authoring_origin: AuthoringOriginStatus::Unknown,
                 legal_takedown_ref: Some("DMCA-1".into()),
                 not_found: false,
+                admin_block_reason: None,
             }],
         };
         let embed = doc
@@ -3342,6 +3379,7 @@ mod tests {
                 authoring_origin: AuthoringOriginStatus::Unknown,
                 legal_takedown_ref: None,
                 not_found: true,
+                admin_block_reason: None,
             }],
         };
         let embed = doc.quoted_post().expect("a gone quote is still an embed");
@@ -3361,6 +3399,7 @@ mod tests {
             authoring_origin: AuthoringOriginStatus::Unknown,
             legal_takedown_ref: None,
             not_found: true,
+            admin_block_reason: None,
         })
         .unwrap();
         let fields = value
@@ -3374,6 +3413,53 @@ mod tests {
             block,
             RenderBlock::QuotedPost {
                 not_found: false,
+                ..
+            }
+        ));
+    }
+
+    /// An admin-blocked quote is still an embed carrying its reason — through
+    /// the owned mirror every FFI/wasm face hands to an app — and a block
+    /// serialized before the field reads as not blocked.
+    #[test]
+    fn an_admin_blocked_quote_projects_its_reason() {
+        let block = RenderBlock::QuotedPost {
+            post_id: "p".into(),
+            author: String::new(),
+            body: String::new(),
+            verification: VerificationStatus::Unchecked,
+            authoring_origin: AuthoringOriginStatus::Unknown,
+            legal_takedown_ref: None,
+            not_found: false,
+            admin_block_reason: Some("harassment".into()),
+        };
+        let doc = RenderDocument {
+            blocks: vec![block.clone()],
+        };
+        let embed = doc
+            .quoted_post()
+            .expect("a blocked quote is still an embed");
+        assert_eq!(embed.admin_block_reason, Some("harassment"));
+        assert!(!embed.not_found, "blocked is not gone");
+        assert_eq!(
+            QuotedPostEmbedOwned::from(embed)
+                .admin_block_reason
+                .as_deref(),
+            Some("harassment")
+        );
+
+        let mut value = serde_json::to_value(block).unwrap();
+        value
+            .as_object_mut()
+            .and_then(|o| o.values_mut().next())
+            .and_then(|v| v.as_object_mut())
+            .expect("an externally tagged struct variant")
+            .remove("admin_block_reason");
+        let old: RenderBlock = serde_json::from_value(value).unwrap();
+        assert!(matches!(
+            old,
+            RenderBlock::QuotedPost {
+                admin_block_reason: None,
                 ..
             }
         ));

@@ -68,9 +68,9 @@ class SettingsActions:
     # everywhere, and `navigate_to_about()` lands where they render.
 
     def navigate_to_about(self) -> None:
-        """Land where the About block renders: the Settings root on tui, the
-        General sub-page on the desktop sidebar shells."""
-        if self.driver.is_tui():
+        """Land where the About block renders: the Settings root on tui, android
+        and ios, the General sub-page on the sidebar shells."""
+        if self.driver.is_tui() or self.driver.is_android() or self.driver.is_ios():
             self.navigate()
         else:
             self._navigate_subpage("general")
@@ -146,6 +146,13 @@ class SettingsActions:
         (``settings-delete-confirm-field``, Account sub-page)."""
         self._navigate_subpage("account")
         self.driver.clear_and_type("settings-delete-confirm-field", text)
+
+    def delete_confirm_text(self) -> str:
+        """The delete confirmation's own text (``settings-delete-confirm-text``,
+        Account sub-page) — what the person reads before typing DELETE, incl. the
+        reminder to take the account data export and the mail export first."""
+        self._navigate_subpage("account")
+        return self.driver.get_text("settings-delete-confirm-text")
 
     def is_delete_account_enabled(self) -> bool:
         """Whether ``settings-delete-account-button`` is currently clickable —
@@ -398,7 +405,9 @@ class SettingsActions:
     def create_email_filter(self, name: str, rule_type: str, rule_value: str,
                             action: str, timeout: float = 15, *,
                             forward_address: str | None = None,
-                            keep_local_copy: bool = True) -> None:
+                            keep_local_copy: bool = True,
+                            inputs: dict[str, str] | None = None,
+                            continue_matching: bool | None = None) -> None:
         """Create an email filter, returning once the row is actually there.
 
         Polls for the new row rather than sleeping a fixed second (convention
@@ -417,7 +426,10 @@ class SettingsActions:
         A `Forward` action takes `forward_address` (typed into
         `filter-forward-address`) and `keep_local_copy` (the
         `filter-keep-local-copy` checkbox, checked by default; `False` is the
-        redirect copy mode).
+        redirect copy mode). `inputs` types any other form field by its ui.yaml
+        id once the rule type and action are chosen (`filter-rule-header-value`,
+        `filter-file-into-mailbox`, `filter-priority-input`, …), and
+        `continue_matching` sets `filter-continue-toggle`.
         """
         self._navigate_subpage("privacy")
         before = self.driver.count("filter-item")
@@ -433,6 +445,11 @@ class SettingsActions:
             self.driver.wait_for("filter-forward-address")
             self.driver.clear_and_type("filter-forward-address", forward_address)
             self.set_filter_keep_local_copy(keep_local_copy)
+        for element_id, value in (inputs or {}).items():
+            self.driver.wait_for(element_id)
+            self.driver.clear_and_type(element_id, value)
+        if continue_matching is not None:
+            self.set_filter_continue(continue_matching)
         self.driver.click("create-filter")
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -524,6 +541,28 @@ class SettingsActions:
     def filter_forward_address(self) -> str:
         """The open filter form's `filter-forward-address` buffer."""
         return self.driver.get_text("filter-forward-address")
+
+    def filter_input(self, element_id: str) -> str:
+        """The open filter form's text field `element_id`."""
+        return self.driver.get_text(element_id)
+
+    def filter_continue(self) -> bool:
+        """The open filter form's `filter-continue-toggle` state (keep checking
+        later rules after this one matches)."""
+        return self.driver.get_attr("filter-continue-toggle", "checked") == "true"
+
+    def set_filter_continue(self, on: bool) -> None:
+        """Set the open filter form's `filter-continue-toggle`, clicking only
+        when it differs, then confirm the flip landed."""
+        from helpers.waiting import wait_until
+
+        if self.filter_continue() != on:
+            self.driver.click("filter-continue-toggle")
+        wait_until(
+            lambda: self.filter_continue() == on,
+            5,
+            diagnose=lambda: f"filter-continue-toggle never read {on}",
+        )
 
     def open_filter_edit(self, index: int) -> None:
         """Open the nth filter's edit form (pre-populated via filters_get),

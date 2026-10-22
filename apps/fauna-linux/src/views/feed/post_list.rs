@@ -270,15 +270,16 @@ fn composed_verdict(post: &PostSummary) -> fauna_core::obligation::ComposedVerdi
     )
 }
 
-/// The region placeholder a post paints in place of its body, when a region
-/// policy withholds it — an unrevealed `collapse`, or a `block` (which has no
-/// reveal). The ONE check both the list card and the post detail make
-/// (`region-blocking.md` § Where it composes: no render surface reaches the
-/// composed call for one source while bypassing it for another).
-fn region_withheld(post: &PostSummary) -> Option<fauna_client_region::RegionPlaceholder> {
-    let withheld = crate::region::region_verdict(&composed_verdict(post))?;
+/// The placeholder a post paints in place of its body, when a region's or the
+/// nest's published rule withholds it — an unrevealed `collapse`, or a
+/// `block` (which has no reveal). The ONE check both the list card and the
+/// post detail make (`region-blocking.md` § Where it composes, `nest-rules.md`
+/// § The nest source in the engine: no render surface reaches the composed
+/// call for one source while bypassing it for another).
+fn rule_withheld(post: &PostSummary) -> Option<crate::nest_rules::Withheld> {
+    let withheld = crate::nest_rules::Withheld::from_verdict(&composed_verdict(post))?;
     let revealed = REVEALED_CONTENT_POSTS.with(|s| s.borrow().contains(&post.post_id));
-    (withheld.verb == fauna_client_region::RegionVerb::Block || !revealed).then_some(withheld)
+    (withheld.is_block() || !revealed).then_some(withheld)
 }
 
 /// Persistent widget handles for the post-list pane — the bits `refresh`
@@ -573,7 +574,7 @@ pub fn build_post_list_wired(
                 // window still opens with real content instead of degrading
                 // to a no-op the way a raw `.posts.iter().find()` scan would.
                 let target_id = post.reposted_post_id.clone().unwrap_or(post.post_id);
-                open_post_detail_by_id(&stack, &open_id, &open_sig, &m, &c, &rt, target_id);
+                open_post_detail_by_id(&stack, &open_id, &open_sig, &m, &c, &rt, target_id, None);
             }
         });
     }
@@ -584,12 +585,12 @@ pub fn build_post_list_wired(
         let stack = content_stack.downgrade();
         let m = Arc::clone(manager);
         let open_id = Rc::clone(&open_detail_id);
-        crate::region::register_block_counter(&content_stack, move || {
+        crate::region::register_block_counter(&content_stack, move |is_blocked| {
             let Some(stack) = stack.upgrade() else {
                 return 0;
             };
             let snapshot = m.snapshot();
-            let blocked = |p: &PostSummary| crate::region::is_region_blocked(&composed_verdict(p));
+            let blocked = |p: &PostSummary| is_blocked(&composed_verdict(p));
             match stack.visible_child_name().as_deref() {
                 Some("list") => snapshot.posts.iter().filter(|p| blocked(p)).count(),
                 Some("detail") => open_id
@@ -753,7 +754,80 @@ pub fn render_posts(
 
     // Rebuild rows from the snapshot's ordered, deduplicated list.
     // Rows only: the placeholder holding the empty states must survive.
-    let list = &handles.post_list_box;
+    paint_post_cards(
+        &handles.post_list_box,
+        snap,
+        manager,
+        client,
+        rt,
+        &handles.error_message_label,
+    );
+
+    // Detail pane. An open detail belongs to the selection it was opened under:
+    // picking another feed (or Trending) drops it and shows the list, while a
+    // re-query of the SAME selection — this page's own map refresh, a reconnect
+    // re-hydrate, a compose re-fetch — keeps it. Dropping on every fresh page
+    // wiped a search deep link whenever its resolve landed before the map
+    // refresh that navigating here had started (`ui/feed.md`'s `post_detail`,
+    // which a `search-result-item` activation opens). A kept detail repaints
+    // when its embeds resolved (so a late-folded `QuotedPost` / `Image`
+    // appears) — only on an actual embed-signature change, to avoid a
+    // gratuitous rebuild + scroll reset.
+    let selection = feed_selection(snap);
+    let keep_detail =
+        detail_outlives_render(handles.settled_selection.borrow().as_ref(), &selection);
+    if fresh_page {
+        *handles.settled_selection.borrow_mut() = Some(selection);
+    }
+    if !keep_detail {
+        *handles.open_detail_id.borrow_mut() = None;
+        if let Some(d) = handles.content_stack.child_by_name("detail") {
+            handles.content_stack.remove(&d);
+        }
+        handles.content_stack.set_visible_child_name("list");
+    } else {
+        let open = handles.open_detail_id.borrow().clone();
+        if let Some(pid) = open {
+            // `find_post` (not a raw `.posts.iter().find()` scan of only the
+            // loaded list) so a deep-linked post parked in
+            // `FeedSnapshot::deep_linked_post` reactively repaints here too —
+            // the same union `show_post_detail`'s caller reads.
+            if let Some(post) = snap.find_post(&pid) {
+                let sig = detail_embed_sig(post);
+                if handles.open_detail_sig.get() != sig {
+                    show_post_detail(
+                        &handles.content_stack,
+                        &handles.open_detail_id,
+                        &handles.open_detail_sig,
+                        post,
+                        manager,
+                        client,
+                        rt,
+                    );
+                }
+            }
+        }
+    }
+
+    render_thread(handles, snap, manager, keep_detail);
+}
+
+/// Rebuild `list`'s rows from `snap.posts` — one [`build_post_card`] per post,
+/// in order — and fire each card's lazy resolves (media, the quoted/reposted
+/// post, link previews, the unlock price, the tips) on `manager`. Shared by the
+/// feed page's [`render_posts`] and the profile's Posts tab
+/// (`views::profile::posts`), which hands in its author window: the cards, their
+/// ⋯ menu, reply dialog and tip list then act on the manager their rows came
+/// from (`profile.md` § The Posts tab → *What a row is*). Rows only: a list
+/// placeholder survives.
+pub(crate) fn paint_post_cards(
+    list: &gtk::ListBox,
+    snap: &FeedSnapshot,
+    manager: &Arc<LinuxFeedManager>,
+    client: &Rc<FaunaClient>,
+    rt: &Handle,
+    error_label: &gtk::Label,
+) {
     crate::views::layout::clear_list_box_rows(list);
     for post in &snap.posts {
         list.append(&build_post_card(
@@ -762,7 +836,7 @@ pub fn render_posts(
             manager,
             client,
             rt,
-            &handles.error_message_label,
+            error_label,
         ));
         // Lazily resolve the media blob hash (a no-op once resolved / for a post
         // with no media); the manager folds an `Image` block into the document +
@@ -817,6 +891,18 @@ pub fn render_posts(
             let id = post.post_id.clone();
             rt.spawn(async move { m.resolve_post_unlock_offer(id).await });
         }
+        // The remote author's byline (`feed.md` § The read model → *The remote
+        // author's byline*): a post homed on another nest names its author from
+        // their own signed profile. Fire-once for the same reason as the tips
+        // below — every outcome writes a face, an empty one when the author
+        // shows none — and the manager's memo folds an author's N cards into
+        // one relay. The card's label changes nowhere: `author_label_with`
+        // already reads `author_display`.
+        if post.home_nest_url.is_some() && post.author_display.is_none() {
+            let m = Arc::clone(manager);
+            let id = post.post_id.clone();
+            rt.spawn(async move { m.resolve_author_face(id).await });
+        }
         // The tip surface (`monetization.md` § Tips). No data trigger exists —
         // nothing in the feed projection says whether a post has tips — so the
         // guard is the resolved field alone, and the resolve is fire-once
@@ -836,54 +922,6 @@ pub fn render_posts(
             rt.spawn(async move { m.resolve_post_tips(id).await });
         }
     }
-
-    // Detail pane. An open detail belongs to the selection it was opened under:
-    // picking another feed (or Trending) drops it and shows the list, while a
-    // re-query of the SAME selection — this page's own map refresh, a reconnect
-    // re-hydrate, a compose re-fetch — keeps it. Dropping on every fresh page
-    // wiped a search deep link whenever its resolve landed before the map
-    // refresh that navigating here had started (`ui/feed.md`'s `post_detail`,
-    // which a `search-result-item` activation opens). A kept detail repaints
-    // when its embeds resolved (so a late-folded `QuotedPost` / `Image`
-    // appears) — only on an actual embed-signature change, to avoid a
-    // gratuitous rebuild + scroll reset.
-    let selection = feed_selection(snap);
-    let keep_detail =
-        detail_outlives_render(handles.settled_selection.borrow().as_ref(), &selection);
-    if fresh_page {
-        *handles.settled_selection.borrow_mut() = Some(selection);
-    }
-    if !keep_detail {
-        *handles.open_detail_id.borrow_mut() = None;
-        if let Some(d) = handles.content_stack.child_by_name("detail") {
-            handles.content_stack.remove(&d);
-        }
-        handles.content_stack.set_visible_child_name("list");
-    } else {
-        let open = handles.open_detail_id.borrow().clone();
-        if let Some(pid) = open {
-            // `find_post` (not a raw `.posts.iter().find()` scan of only the
-            // loaded list) so a deep-linked post parked in
-            // `FeedSnapshot::deep_linked_post` reactively repaints here too —
-            // the same union `show_post_detail`'s caller reads.
-            if let Some(post) = snap.find_post(&pid) {
-                let sig = detail_embed_sig(post);
-                if handles.open_detail_sig.get() != sig {
-                    show_post_detail(
-                        &handles.content_stack,
-                        &handles.open_detail_id,
-                        &handles.open_detail_sig,
-                        post,
-                        manager,
-                        client,
-                        rt,
-                    );
-                }
-            }
-        }
-    }
-
-    render_thread(handles, snap, manager, keep_detail);
 }
 
 /// Paint the thread page (`feed-thread-page`) from the shared
@@ -966,6 +1004,7 @@ fn open_post_detail_by_id(
     client: &Rc<FaunaClient>,
     rt: &Handle,
     post_id: String,
+    home: Option<String>,
 ) {
     // Fast path: already loaded (the ordinary card-click case) — show now,
     // no round trip, matching every pre-existing detail open.
@@ -1003,7 +1042,15 @@ fn open_post_detail_by_id(
     let pid = post_id.clone();
     crate::async_helper::spawn_with_snapshot(
         rt,
-        move || async move { manager_bg.resolve_post(pid).await },
+        move || async move {
+            // A post the room's home holds, not this nest: the relay door, so
+            // its sealed words still unseal from the home (`feed.md` § The read
+            // model → *A post homed on another nest*).
+            match home {
+                Some(home) => manager_bg.resolve_post_from(pid, home).await,
+                None => manager_bg.resolve_post(pid).await,
+            }
+        },
         move |_resolution: fauna_feed::PostResolution| {
             if let Some(post) = manager_render.snapshot().find_post(&post_id).cloned() {
                 show_post_detail(
@@ -1100,7 +1147,33 @@ pub fn open_post_detail_fn(
     let client = Rc::clone(client);
     let rt = rt.clone();
     Rc::new(move |post_id: String| {
-        open_post_detail_by_id(&stack, &open_id, &open_sig, &manager, &client, &rt, post_id);
+        open_post_detail_by_id(
+            &stack, &open_id, &open_sig, &manager, &client, &rt, post_id, None,
+        );
+    })
+}
+
+/// [`open_post_detail_fn`] for a post named with the nest that holds it — the
+/// room search's post hit in a room homed on another nest
+/// (`room-search.md` § The surface → *Opening a hit*): the resolve is
+/// `FeedManager::resolve_post_from`, and every byte leg of the opened post
+/// reads through the shared post-blob plane with the post's own `blob_home`.
+pub fn open_post_detail_from_fn(
+    handles: &PostListHandles,
+    manager: &Arc<LinuxFeedManager>,
+    client: &Rc<FaunaClient>,
+    rt: &Handle,
+) -> Rc<dyn Fn(String, Option<String>)> {
+    let stack = handles.content_stack.clone();
+    let open_id = Rc::clone(&handles.open_detail_id);
+    let open_sig = Rc::clone(&handles.open_detail_sig);
+    let manager = Arc::clone(manager);
+    let client = Rc::clone(client);
+    let rt = rt.clone();
+    Rc::new(move |post_id: String, home: Option<String>| {
+        open_post_detail_by_id(
+            &stack, &open_id, &open_sig, &manager, &client, &rt, post_id, home,
+        );
     })
 }
 
@@ -1127,7 +1200,11 @@ fn show_post_detail(
     // flips the embed signature, and `render_posts` repaints this detail with
     // the full body — until then the detail shows the plaintext teaser.
     if post.gated_tier.is_some() && !post.gated_unlocked {
-        client.unlock_gated_post(Arc::clone(manager), post.post_id.clone());
+        client.unlock_gated_post(
+            Arc::clone(manager),
+            post.post_id.clone(),
+            crate::feed::post_media::post_home(post),
+        );
     }
 
     if let Some(old) = stack.child_by_name("detail") {
@@ -1148,15 +1225,33 @@ fn show_post_detail(
     // (`region-blocking.md` § Where it composes) — a region-withheld post
     // opened from anywhere shows the placeholder, never the body the card
     // withheld. The reveal of a `collapse` re-opens the detail in full.
-    let detail = if let Some(withheld) = region_withheld(post) {
+    // The family arm composes here too (`family-safety.md` § Content policy):
+    // a guardian-blocked post opened from its placeholder card shows the same
+    // placeholder — the frame and the guardian's reason — never its body.
+    let composed = composed_verdict(post);
+    let withheld = rule_withheld(post);
+    let family_withheld = withheld.is_none()
+        && match composed.verdict {
+            RenderVerdict::Block => true,
+            RenderVerdict::Collapse => {
+                !REVEALED_CONTENT_POSTS.with(|s| s.borrow().contains(&post.post_id))
+            }
+            _ => false,
+        };
+    let detail = if withheld.is_some() || family_withheld {
         let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
         crate::testid::set_test_id(&outer, ids::FEED_POST_DETAIL_DIALOG);
         let header = adw::HeaderBar::new();
         header.set_title_widget(Some(&gtk::Label::new(Some(common::FEED))));
+        let on_back: Rc<dyn Fn()> = Rc::new(on_back);
         let back_btn = gtk::Button::from_icon_name("go-previous-symbolic");
         back_btn.set_tooltip_text(Some(crate::i18n::strings::common::BACK));
-        back_btn.connect_clicked(move |_| on_back());
+        {
+            let on_back = Rc::clone(&on_back);
+            back_btn.connect_clicked(move |_| on_back());
+        }
         header.pack_start(&back_btn);
+        super::post_detail::bind_escape_back(&outer, on_back);
         outer.append(&header);
         let (s, open, sig, p, m, c, r) = (
             stack.clone(),
@@ -1167,10 +1262,14 @@ fn show_post_detail(
             Rc::clone(client),
             rt.clone(),
         );
-        outer.append(&crate::region::placeholder_box(&withheld, move || {
+        let on_reveal = move || {
             REVEALED_CONTENT_POSTS.with(|set| set.borrow_mut().insert(p.post_id.clone()));
             show_post_detail(&s, &open, &sig, &p, &m, &c, &r);
-        }));
+        };
+        match withheld {
+            Some(withheld) => outer.append(&withheld.placeholder_box(on_reveal)),
+            None => outer.append(&content_placeholder_box(&composed, on_reveal)),
+        }
         outer.upcast::<gtk::Widget>()
     } else {
         build_post_detail(post, manager, client, rt, on_back).upcast::<gtk::Widget>()
@@ -1639,23 +1738,35 @@ fn build_compose_post_wired(
 /// share one cache.
 pub(crate) fn build_post_image(
     hash: &str,
+    home: Option<fauna_client::ForeignHome>,
     manager: &Arc<LinuxFeedManager>,
     client: &Rc<FaunaClient>,
 ) -> gtk::Box {
-    build_post_image_from(hash, manager, client.as_ref())
+    build_post_image_from(hash, home, manager, client.as_ref())
 }
 
 /// Where a `post-image` card's two nest reads come from — `FaunaClient` in the
-/// app, a counting fake in the tests that pin how many a repaint issues. The
-/// blob GET is the document walk's own seam ([`document::BlobSource`], which
-/// the og:image reads through too); this adds the C2PA check.
+/// app, a counting fake in the tests that pin how many a repaint issues. Both
+/// reads are the post's own bytes, so both take the post's
+/// [`blob_home`](fauna_feed::PostSummary::blob_home) (`home`, `None` for this
+/// nest) and hand it to the shared plane unchanged. The og:image's blob GET is
+/// the document walk's own seam ([`document::BlobSource`]) and stays this
+/// nest's.
 pub(crate) trait PostMediaSource: document::BlobSource {
+    /// The post image's blob GET, from the nest the post rests on.
+    fn fetch_post_blob_bytes(
+        &self,
+        hash: &str,
+        home: Option<fauna_client::ForeignHome>,
+    ) -> async_channel::Receiver<Result<Vec<u8>, ApiError>>;
+
     /// The `c2pa-badge` verdict's two nest reads: the blob's `x-c2pa` hint as
     /// a pre-filter (`None` when it says no), else the blob's bytes as
     /// fetched, for the caller to correct the hint against.
     fn fetch_c2pa_candidate_bytes(
         &self,
         hash: &str,
+        home: Option<fauna_client::ForeignHome>,
     ) -> async_channel::Receiver<Result<Option<Vec<u8>>, ApiError>>;
 
     /// `GET <path>` on the reader's own nest — a bridged post's
@@ -1665,11 +1776,20 @@ pub(crate) trait PostMediaSource: document::BlobSource {
 }
 
 impl PostMediaSource for FaunaClient {
+    fn fetch_post_blob_bytes(
+        &self,
+        hash: &str,
+        home: Option<fauna_client::ForeignHome>,
+    ) -> async_channel::Receiver<Result<Vec<u8>, ApiError>> {
+        FaunaClient::fetch_post_blob_bytes(self, hash, home)
+    }
+
     fn fetch_c2pa_candidate_bytes(
         &self,
         hash: &str,
+        home: Option<fauna_client::ForeignHome>,
     ) -> async_channel::Receiver<Result<Option<Vec<u8>>, ApiError>> {
-        FaunaClient::fetch_c2pa_candidate_bytes(self, hash)
+        FaunaClient::fetch_c2pa_candidate_bytes(self, hash, home)
     }
 
     fn fetch_proxied_bytes(
@@ -1682,6 +1802,7 @@ impl PostMediaSource for FaunaClient {
 
 fn build_post_image_from(
     hash: &str,
+    home: Option<fauna_client::ForeignHome>,
     manager: &Arc<LinuxFeedManager>,
     client: &dyn PostMediaSource,
 ) -> gtk::Box {
@@ -1694,7 +1815,7 @@ fn build_post_image_from(
     match media_loads::ask_image(manager, hash, &picture) {
         Ask::Ready(texture) => picture.set_paintable(Some(&texture)),
         Ask::Start => {
-            let rx = client.fetch_blob_bytes(hash);
+            let rx = client.fetch_post_blob_bytes(hash, home.clone());
             let manager = Arc::clone(manager);
             let item_hash = hash.to_string();
             glib::spawn_future_local(async move {
@@ -1752,7 +1873,7 @@ fn build_post_image_from(
     match media_loads::ask_c2pa(manager, hash, &badge) {
         Ask::Ready(verdict) => badge.set_visible(verdict),
         Ask::Start => {
-            let rx = client.fetch_c2pa_candidate_bytes(hash);
+            let rx = client.fetch_c2pa_candidate_bytes(hash, home);
             let manager = Arc::clone(manager);
             let item_hash = hash.to_string();
             glib::spawn_future_local(async move {
@@ -2241,10 +2362,10 @@ fn build_post_card(
     // — rather than the family notice; checked first because it is the same
     // verb, only better attributed. A revealed region `collapse` falls through
     // to the ordinary arms (tui's `feed/mod.rs` orders the arms the same way).
-    if let Some(withheld) = region_withheld(post) {
+    if let Some(withheld) = rule_withheld(post) {
         row.update_property(&[
             gtk::accessible::Property::Description("post-card"),
-            gtk::accessible::Property::Label(&crate::region::notice_text(&withheld)),
+            gtk::accessible::Property::Label(&withheld.notice_text()),
         ]);
         let post_c = post.clone();
         let m = Arc::clone(manager);
@@ -2253,26 +2374,23 @@ fn build_post_card(
         let error_label_c = error_label.clone();
         // Weak: the row owns this closure through its child.
         let row_weak = glib::object::ObjectExt::downgrade(&row);
-        row.set_child(Some(&crate::region::placeholder_box(
-            &withheld,
-            move || {
-                REVEALED_CONTENT_POSTS.with(|s| s.borrow_mut().insert(post_c.post_id.clone()));
-                if let Some(row) = row_weak.upgrade() {
-                    row.update_property(&[
-                        gtk::accessible::Property::Description("post-card"),
-                        gtk::accessible::Property::Label(&post_c.body),
-                    ]);
-                    row.set_child(Some(&build_post_card_body(
-                        &post_c,
-                        &m.snapshot().bridge_roster,
-                        &m,
-                        &c,
-                        &rt_c,
-                        &error_label_c,
-                    )));
-                }
-            },
-        )));
+        row.set_child(Some(&withheld.placeholder_box(move || {
+            REVEALED_CONTENT_POSTS.with(|s| s.borrow_mut().insert(post_c.post_id.clone()));
+            if let Some(row) = row_weak.upgrade() {
+                row.update_property(&[
+                    gtk::accessible::Property::Description("post-card"),
+                    gtk::accessible::Property::Label(&post_c.body),
+                ]);
+                row.set_child(Some(&build_post_card_body(
+                    &post_c,
+                    &m.snapshot().bridge_roster,
+                    &m,
+                    &c,
+                    &rt_c,
+                    &error_label_c,
+                )));
+            }
+        })));
         return row;
     }
     if content_verdict == RenderVerdict::Block {
@@ -2281,7 +2399,7 @@ fn build_post_card(
             gtk::accessible::Property::Description("post-card"),
             gtk::accessible::Property::Label(notice),
         ]);
-        row.set_child(Some(&build_content_block(composed.reported())));
+        row.set_child(Some(&build_content_block(&composed)));
         return row;
     }
 
@@ -2295,7 +2413,7 @@ fn build_post_card(
         // must not leak the text it hides into the accessibility tree.
         row.update_property(&[
             gtk::accessible::Property::Description("post-card"),
-            gtk::accessible::Property::Label(feed::POST_MUTED_PLACEHOLDER),
+            gtk::accessible::Property::Label(crate::i18n::strings::muted_words::COLLAPSED),
         ]);
         row.set_child(Some(&build_muted_collapse(
             post,
@@ -2318,6 +2436,7 @@ fn build_post_card(
             gtk::accessible::Property::Label(family::CONTENT_COLLAPSED_NOTICE),
         ]);
         row.set_child(Some(&build_content_collapse(
+            &composed,
             post,
             manager,
             client,
@@ -2354,7 +2473,8 @@ use crate::content_policy::block_notice;
 /// `reported` is the viewer's own report (`moderation.md` § Corollary): the same
 /// element reads "You reported this" and carries `source="reported"` — a
 /// personal filter, not a policy, so it names the viewer's own act.
-fn build_content_block(reported: bool) -> gtk::Box {
+fn build_content_block(composed: &fauna_core::obligation::ComposedVerdict) -> gtk::Box {
+    let reported = composed.reported();
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 4);
     vbox.set_margin_top(12);
     vbox.set_margin_bottom(12);
@@ -2367,26 +2487,32 @@ fn build_content_block(reported: bool) -> gtk::Box {
     placeholder.set_wrap(true);
     placeholder.set_xalign(0.0);
     crate::testid::set_test_id(&placeholder, ids::CONTENT_POLICY_BLOCKED_NOTICE);
+    // `state` tells the block arm from the collapse arm's same notice.
+    crate::testid::set_test_attr(&placeholder, "state", "blocked");
     if reported {
         crate::testid::set_test_attr(&placeholder, "source", "reported");
     }
     vbox.append(&placeholder);
+    // The guardian rule's reason, verbatim beside the frame (`nest-rules.md`
+    // § The shared rule editor → *The reason is the member's to read*).
+    if let Some(reason) = crate::content_policy::reason_label(composed) {
+        vbox.append(&reason);
+    }
     vbox
 }
 
-/// The content-policy **collapse** placeholder + one-tap reveal (family-safety.md
-/// § Content policy). Revealing rebuilds the full card body in place, session-local
-/// (`REVEALED_CONTENT_POSTS`) — the floor itself persists; the guardian relaxing it
-/// is what stops future collapse. The placeholder is presentation-only (no test id):
-/// v1 e2e drives only the `block` case (the collapse reveal is a user affordance).
-fn build_content_collapse(
-    post: &PostSummary,
-    manager: &Arc<LinuxFeedManager>,
-    client: &Rc<FaunaClient>,
-    rt: &Handle,
-    error_label: &gtk::Label,
-    row: &gtk::ListBoxRow,
+/// The family-policy placeholder for `composed`, a `Block` or `Collapse`
+/// verdict: [`build_content_block`], or — for a collapse — the notice in
+/// `state="collapsed"`, the guardian's reason beside it and the reveal button,
+/// whose click runs `on_reveal`. The one painter the list card and the post
+/// detail both build through.
+fn content_placeholder_box(
+    composed: &fauna_core::obligation::ComposedVerdict,
+    on_reveal: impl Fn() + 'static,
 ) -> gtk::Box {
+    if composed.verdict == RenderVerdict::Block {
+        return build_content_block(composed);
+    }
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 4);
     vbox.set_margin_top(12);
     vbox.set_margin_bottom(12);
@@ -2398,39 +2524,62 @@ fn build_content_collapse(
     placeholder.set_halign(gtk::Align::Start);
     placeholder.set_wrap(true);
     placeholder.set_xalign(0.0);
+    crate::testid::set_test_id(&placeholder, ids::CONTENT_POLICY_BLOCKED_NOTICE);
+    crate::testid::set_test_attr(&placeholder, "state", "collapsed");
     vbox.append(&placeholder);
+    if let Some(reason) = crate::content_policy::reason_label(composed) {
+        vbox.append(&reason);
+    }
 
     let reveal = gtk::Button::with_label(family::CONTENT_REVEAL_BUTTON);
     reveal.add_css_class("flat");
     reveal.set_halign(gtk::Align::Start);
-    {
-        let post = post.clone();
-        let m = Arc::clone(manager);
-        let c = Rc::clone(client);
-        let rt = rt.clone();
-        let error_label = error_label.clone();
-        // Weak: the row owns this button through its child (see build_muted_collapse).
-        let row = glib::object::ObjectExt::downgrade(row);
-        reveal.connect_clicked(move |_| {
-            REVEALED_CONTENT_POSTS.with(|s| s.borrow_mut().insert(post.post_id.clone()));
-            if let Some(row) = row.upgrade() {
-                row.update_property(&[
-                    gtk::accessible::Property::Description("post-card"),
-                    gtk::accessible::Property::Label(&post.body),
-                ]);
-                row.set_child(Some(&build_post_card_body(
-                    &post,
-                    &m.snapshot().bridge_roster,
-                    &m,
-                    &c,
-                    &rt,
-                    &error_label,
-                )));
-            }
-        });
-    }
+    crate::testid::set_test_id(&reveal, ids::CONTENT_POLICY_COLLAPSED_REVEAL_BUTTON);
+    reveal.connect_clicked(move |_| on_reveal());
     vbox.append(&reveal);
     vbox
+}
+
+/// The content-policy **collapse** placeholder + one-tap reveal (family-safety.md
+/// § Content policy). Revealing rebuilds the full card body in place, session-local
+/// (`REVEALED_CONTENT_POSTS`) — the floor itself persists; the guardian relaxing it
+/// is what stops future collapse. The placeholder is the block arm's
+/// `content-policy-blocked-notice` in `state="collapsed"`, beside
+/// `content-policy-collapsed-reveal-button` (ids user-approved 2026-10-16), both
+/// inside the `post-card` row.
+fn build_content_collapse(
+    composed: &fauna_core::obligation::ComposedVerdict,
+    post: &PostSummary,
+    manager: &Arc<LinuxFeedManager>,
+    client: &Rc<FaunaClient>,
+    rt: &Handle,
+    error_label: &gtk::Label,
+    row: &gtk::ListBoxRow,
+) -> gtk::Box {
+    let post = post.clone();
+    let m = Arc::clone(manager);
+    let c = Rc::clone(client);
+    let rt = rt.clone();
+    let error_label = error_label.clone();
+    // Weak: the row owns this button through its child (see build_muted_collapse).
+    let row = glib::object::ObjectExt::downgrade(row);
+    content_placeholder_box(composed, move || {
+        REVEALED_CONTENT_POSTS.with(|s| s.borrow_mut().insert(post.post_id.clone()));
+        if let Some(row) = row.upgrade() {
+            row.update_property(&[
+                gtk::accessible::Property::Description("post-card"),
+                gtk::accessible::Property::Label(&post.body),
+            ]);
+            row.set_child(Some(&build_post_card_body(
+                &post,
+                &m.snapshot().bridge_roster,
+                &m,
+                &c,
+                &rt,
+                &error_label,
+            )));
+        }
+    })
 }
 
 /// The muted-post placeholder + one-tap reveal. Revealing rebuilds the full
@@ -2450,13 +2599,13 @@ fn build_muted_collapse(
     vbox.set_margin_start(12);
     vbox.set_margin_end(12);
 
-    let placeholder = gtk::Label::new(Some(feed::POST_MUTED_PLACEHOLDER));
+    let placeholder = gtk::Label::new(Some(crate::i18n::strings::muted_words::COLLAPSED));
     placeholder.add_css_class("dim-label");
     placeholder.set_halign(gtk::Align::Start);
     crate::testid::set_test_id(&placeholder, ids::FEED_POST_MUTED);
     vbox.append(&placeholder);
 
-    let reveal = gtk::Button::with_label(feed::POST_MUTED_REVEAL);
+    let reveal = gtk::Button::with_label(crate::i18n::strings::muted_words::REVEAL);
     reveal.add_css_class("flat");
     reveal.set_halign(gtk::Align::Start);
     crate::testid::set_test_id(&reveal, ids::FEED_POST_MUTED_REVEAL_BUTTON);
@@ -2518,6 +2667,27 @@ fn author_label_with(
         .primary
 }
 
+/// Make a post's author line a door into the author's Profile (`feed.md` §
+/// User actions; ui.yaml `click post-author → profile` and `click
+/// feed-post-detail-author → profile`): activating it opens the profile with
+/// the post's `home_nest_url` carried as the open target's home, so a relayed
+/// or delivered post's author is one tap away. An author line naming the viewer
+/// opens SELF (the shared `profile_nav_target` inside
+/// [`crate::views::profile::open_actor`]). The id stays `type: text` — the
+/// press rides a gesture on the label, not a button.
+pub(crate) fn wire_author_door(label: &gtk::Label, client: &Rc<FaunaClient>, post: &PostSummary) {
+    let click = gtk::GestureClick::new();
+    let client = Rc::clone(client);
+    let author = post.author.clone();
+    let home = post.home_nest_url.clone();
+    click.connect_released(move |gesture, _, _, _| {
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        crate::views::profile::open_actor(&client, &author, home.clone());
+    });
+    label.add_controller(click);
+    label.set_cursor_from_name(Some("pointer"));
+}
+
 /// Build the full post-card body: author + badges + metadata + body (markdown
 /// blockquotes) + tag chips + the embedded quoted-post + media image + link
 /// preview, the ⋯ overflow (training verbs), and Reply / Repost / Quote / Like
@@ -2549,6 +2719,7 @@ fn build_post_card_body(
     author_label.set_hexpand(true);
     author_label.add_css_class("heading");
     crate::testid::set_test_id(&author_label, ids::POST_AUTHOR);
+    wire_author_door(&author_label, client, post);
     top_line.append(&author_label);
 
     // The attribution marker beside the author (id user-approved 2026-08-11):
@@ -2682,6 +2853,21 @@ fn build_post_card_body(
         top_line.append(&buy);
     }
 
+    // Bought, the author's grant still on its way (`monetization.md` § Per-post
+    // pay-to-unlock → *a completed buy must not be re-offered*): the shared
+    // marker the buy sets and every later declined resolve re-sets. Never set
+    // while the offer is (the buy clears it in the same write); the
+    // `gated_unlocked` check keeps it off an opened post. Same payments gate as
+    // the buy button it replaces.
+    #[cfg(feature = "payments")]
+    if post.unlock_offer.is_none() && post.unlock_purchase_pending && !post.gated_unlocked {
+        let pending = gtk::Label::new(Some(feed::post::PURCHASE_PENDING));
+        pending.add_css_class("caption");
+        pending.add_css_class("dim-label");
+        crate::testid::set_test_id(&pending, ids::GATED_POST_PURCHASE_PENDING);
+        top_line.append(&pending);
+    }
+
     // `content-label-badge` — the highest-confidence classifier verdict, if
     // any, presented entirely through the shared `content_label_style` map
     // (icon + accent colour + i18n label) — same idiom as the moderation
@@ -2764,7 +2950,12 @@ fn build_post_card_body(
     // A bridged post's own picture / video (`ProxiedImage` / `ProxiedVideo`,
     // render-model.md § D6c) takes the same slot when there is no blob one.
     if let Some(hash) = post.document.first_image_hash() {
-        vbox.append(&build_post_image(hash, manager, client));
+        vbox.append(&build_post_image(
+            hash,
+            crate::feed::post_media::post_home(post),
+            manager,
+            client,
+        ));
     } else if let Some(path) = post.document.proxied_post_image() {
         vbox.append(&build_post_proxied_image(path, manager, client));
     }
@@ -2772,7 +2963,13 @@ fn build_post_card_body(
     // § D6b); mutually exclusive with the image branch above, same fold.
     // A tap plays it in place (§ D6c → *Inline playback*).
     if let Some(block) = post_video_block(&post.document) {
-        vbox.append(&build_post_video(&post.post_id, block, manager, client));
+        vbox.append(&build_post_video(
+            &post.post_id,
+            block,
+            crate::feed::post_media::post_home(post),
+            manager,
+            client,
+        ));
     }
 
     // Link-preview cards (render-model.md § D4): one per Resolved `LinkPreview` block in
@@ -2869,9 +3066,10 @@ fn build_post_card_body(
         // Reply → compose dialog.
         {
             let c = Rc::clone(client);
+            let m = Arc::clone(manager);
             let pid = post.post_id.clone();
             reply_btn.connect_clicked(move |btn| {
-                let dialog = build_reply_dialog(&c, &pid);
+                let dialog = build_reply_dialog(&c, &m, &pid);
                 if let Some(root) = btn.root()
                     && let Some(win) = root.downcast_ref::<gtk::Window>()
                 {
@@ -2888,9 +3086,10 @@ fn build_post_card_body(
         // nothing on a native post.
         {
             let c = Rc::clone(client);
+            let m = Arc::clone(manager);
             let pid = post.post_id.clone();
             repost_btn.connect_clicked(move |_| {
-                c.interact_with_post(&pid, "repost", None);
+                c.interact_with_post(&m, &pid, "repost", None);
             });
         }
 
@@ -2907,9 +3106,10 @@ fn build_post_card_body(
         // `ui/feed.md` § Implementation status today. Don't reintroduce it.
         {
             let c = Rc::clone(client);
+            let m = Arc::clone(manager);
             let pid = post.post_id.clone();
             quote_btn.connect_clicked(move |_| {
-                c.interact_with_post(&pid, "quote", None);
+                c.interact_with_post(&m, &pid, "quote", None);
             });
         }
 
@@ -2920,9 +3120,10 @@ fn build_post_card_body(
         // (actor, post), so a second tap moved nothing on any app.
         {
             let c = Rc::clone(client);
+            let m = Arc::clone(manager);
             let pid = post.post_id.clone();
             like_btn.connect_clicked(move |_| {
-                c.interact_with_post(&pid, "like", None);
+                c.interact_with_post(&m, &pid, "like", None);
             });
         }
     }
@@ -2983,7 +3184,7 @@ fn build_post_actions_button(
         // Declared here, not only on the immediate-dispatch branch below: with
         // no in-context target this button opens `open_train_target_sheet`
         // instead (linux always builds both halves, unlike tui's early
-        // return), but that sheet's own "Save" ends at the same
+        // return), but that sheet's row tap ends at the same
         // `dispatch_train` → `train_post`/`untrain_post` put. Same wire kind
         // either way, so one declaration on the button that starts the
         // ceremony covers it.
@@ -3427,11 +3628,15 @@ fn dispatch_train(
 }
 
 /// The factor-target sheet (`feed-post-train-target-sheet`): shown when the
-/// current feed's composition does not single out one trained topic. Lists the
-/// user's trained factors from the sealed registry — model strings are the
-/// stable `topic:<hex>` keys, the expression renders the user's chosen name
-/// (the feed-factor-select pattern) — and trains the picked one, or links out
-/// to the Personalization home to create a new one.
+/// current feed's composition does not single out one trained topic. A sheet
+/// of tappable rows (`topic-factors.md` § Authoring surface & picker, ratified
+/// 2026-10-16): one `feed-post-train-target-item` button per trained topic in
+/// registry order — text the user's name for it, `factor` attr the stable
+/// `topic:<hex>` key's hex alone — whose one tap trains the post with the verb
+/// that opened the sheet (the marked verb again un-trains, as train-in-context
+/// does), and `feed-post-train-target-new-button` last, which leaves for the
+/// Personalization home's Trained-topics facet. The sheet is presented once the
+/// sealed-registry read resolves, so it never paints half-filled.
 fn open_train_target_sheet(
     anchor: &impl IsA<gtk::Widget>,
     manager: &Arc<LinuxFeedManager>,
@@ -3449,95 +3654,86 @@ fn open_train_target_sheet(
     // seam since this isn't a destructive confirm.
     #[allow(deprecated)]
     let dialog = adw::MessageDialog::new(toplevel.as_ref(), Some(feed::TRAIN_TARGET_TITLE), None);
-
-    let factor_keys: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
-    let factor_names: Rc<RefCell<std::collections::HashMap<String, String>>> =
-        Rc::new(RefCell::new(std::collections::HashMap::new()));
-    let model = gtk::StringList::new(&[]);
-    let dropdown = gtk::DropDown::new(Some(model.clone()), gtk::Expression::NONE);
-    {
-        let factor_names = Rc::clone(&factor_names);
-        let label_expr = gtk::ClosureExpression::new::<String>(
-            &[] as &[gtk::Expression],
-            glib::closure_local!(move |item: gtk::StringObject| {
-                let key = item.string().to_string();
-                factor_names.borrow().get(&key).cloned().unwrap_or(key)
-            }),
-        );
-        dropdown.set_expression(Some(&label_expr));
-    }
+    dialog.add_response("cancel", common::CANCEL);
+    dialog.set_close_response("cancel");
 
     let sheet = gtk::Box::new(gtk::Orientation::Vertical, 8);
     crate::testid::set_test_id(&sheet, ids::FEED_POST_TRAIN_TARGET_SHEET);
-    sheet.append(&dropdown);
     dialog.set_extra_child(Some(&sheet));
 
     // Populate from the sealed registry — async on the tokio runtime, results
     // applied on the GTK thread (spawn_with_snapshot; a glib-context await of
-    // a NestClient call panics — its reply timeout is a tokio timer). The
-    // sheet opens immediately and the options land when the read resolves.
-    {
-        let factor_keys = Rc::clone(&factor_keys);
-        let factor_names = Rc::clone(&factor_names);
-        let model = model.clone();
-        crate::async_helper::spawn_with_snapshot(
-            rt,
-            move || async move {
-                match fauna_sync_engine::preference_surfaces::load_personalization(
-                    &crate::account_runtime::handle_source(),
-                )
-                .await
-                {
-                    Ok(registry) => registry
-                        .trained_factors
-                        .iter()
-                        .filter_map(|m| m.factor_key().map(|k| (k, m.name.clone())))
-                        .collect(),
-                    Err(_) => Vec::new(),
-                }
-            },
-            move |topics: Vec<(String, String)>| {
-                for (key, name) in topics {
-                    factor_names.borrow_mut().insert(key.clone(), name);
-                    model.append(&key);
-                    factor_keys.borrow_mut().push(key);
-                }
-            },
-        );
-    }
-
-    dialog.add_response("cancel", common::CANCEL);
-    // "New trained topic" links out to the Personalization home rather than
-    // duplicating the create form here — the existing-factors + "New trained
-    // topic…" sheet `topic-factors.md` § Authoring surface & picker ratifies,
-    // in the shape windows, android and web already give it.
-    dialog.add_response(
-        "new",
-        crate::i18n::strings::personalization::TRAINED_FACTOR_CREATE,
-    );
-    dialog.add_response("train", common::SAVE);
-    dialog.set_response_appearance("train", adw::ResponseAppearance::Suggested);
-    dialog.set_default_response(Some("train"));
-    dialog.set_close_response("cancel");
-
-    {
-        let m = Arc::clone(manager);
-        let rt = rt.clone();
-        let error_label = error_label.clone();
-        let anchor: gtk::Widget = anchor.as_ref().clone();
-        dialog.connect_response(None, move |dlg, response| {
-            if response == "train" {
-                let idx = dropdown.selected() as usize;
-                if let Some(factor) = factor_keys.borrow().get(idx).cloned() {
-                    dispatch_train(&m, &rt, post_id.clone(), factor, verb, false, &error_label);
-                }
-            } else if response == "new" {
-                crate::app::navigate_to_settings_subpage(&anchor, "personalization");
+    // a NestClient call panics — its reply timeout is a tokio timer).
+    let m = Arc::clone(manager);
+    let rt_for_rows = rt.clone();
+    let anchor: gtk::Widget = anchor.as_ref().clone();
+    let error_label = error_label.clone();
+    crate::async_helper::spawn_with_snapshot(
+        rt,
+        move || async move {
+            match fauna_sync_engine::preference_surfaces::load_personalization(
+                &crate::account_runtime::handle_source(),
+            )
+            .await
+            {
+                // A topic whose key is unknown/corrupt (`factor_key()` None)
+                // gets no row.
+                Ok(registry) => registry
+                    .trained_factors
+                    .iter()
+                    .filter_map(|m| m.factor_key().map(|k| (k, m.name.clone())))
+                    .collect(),
+                Err(_) => Vec::new(),
             }
-            dlg.close();
-        });
-    }
-    dialog.present();
+        },
+        move |topics: Vec<(String, String)>| {
+            for (key, name) in topics {
+                let item = gtk::Button::with_label(&name);
+                item.add_css_class("flat");
+                let hex = key.strip_prefix("topic:").unwrap_or(&key);
+                crate::testid::set_test_attr(&item, "factor", hex);
+                crate::testid::set_test_id(&item, ids::FEED_POST_TRAIN_TARGET_ITEM);
+                crate::offline_gate::declare_wire_kind(&item, "fauna.personalization.model.put");
+                let marked = m.example_label_for(&post_id, &key) == Some(verb);
+                let m = Arc::clone(&m);
+                let rt = rt_for_rows.clone();
+                let post_id = post_id.clone();
+                let error_label = error_label.clone();
+                let dialog = dialog.clone();
+                item.connect_clicked(move |_| {
+                    dispatch_train(
+                        &m,
+                        &rt,
+                        post_id.clone(),
+                        key.clone(),
+                        verb,
+                        marked,
+                        &error_label,
+                    );
+                    dialog.close();
+                });
+                sheet.append(&item);
+            }
+
+            // Always the last entry; with zero topics it is the only one.
+            // "New trained topic…" links out to the Personalization home
+            // rather than duplicating the create form here.
+            let new_btn = gtk::Button::with_label(
+                crate::i18n::strings::personalization::TRAINED_FACTOR_CREATE,
+            );
+            new_btn.add_css_class("flat");
+            crate::testid::set_test_id(&new_btn, ids::FEED_POST_TRAIN_TARGET_NEW_BUTTON);
+            {
+                let dialog = dialog.clone();
+                new_btn.connect_clicked(move |_| {
+                    crate::app::navigate_to_settings_subpage(&anchor, "personalization");
+                    dialog.close();
+                });
+            }
+            sheet.append(&new_btn);
+            dialog.present();
+        },
+    );
 }
 
 /// Render the epoch-millis `timestamp` as a relative-time string via the shared
@@ -3551,7 +3747,11 @@ pub(crate) fn format_timestamp(millis: i64) -> String {
 
 /// Build a reply compose dialog (the send goes through `interact_with_post`
 /// → the shared `FeedManager::interact`).
-pub fn build_reply_dialog(client: &Rc<FaunaClient>, post_id: &str) -> adw::Window {
+pub fn build_reply_dialog(
+    client: &Rc<FaunaClient>,
+    manager: &Arc<LinuxFeedManager>,
+    post_id: &str,
+) -> adw::Window {
     let dialog = adw::Window::builder()
         .title(common::REPLY)
         .modal(true)
@@ -3603,9 +3803,10 @@ pub fn build_reply_dialog(client: &Rc<FaunaClient>, post_id: &str) -> adw::Windo
     // only where this reader cannot write for the audience
     // (`goal/behavior/restricted-posts.md` § Encryption at rest → *Ruling 5's
     // build — the shape*, (d) + (e)). A public target paints neither. The
-    // checkbox is born unchecked at every open and never remembered.
-    let target =
-        crate::feed::host::manager().and_then(|m| m.snapshot().find_post(post_id).cloned());
+    // checkbox is born unchecked at every open and never remembered. The
+    // target is resolved against the manager its row came from — the
+    // timeline's, or a profile's author window (`profile.md` § The Posts tab).
+    let target = manager.snapshot().find_post(post_id).cloned();
     let audience = target.as_ref().and_then(|p| p.reply_audience);
     if let (Some(target), Some(audience)) = (target.as_ref(), audience) {
         let text = match audience {
@@ -3635,6 +3836,7 @@ pub fn build_reply_dialog(client: &Rc<FaunaClient>, post_id: &str) -> adw::Windo
 
     {
         let c = Rc::clone(client);
+        let m = Arc::clone(manager);
         let pid = post_id.to_string();
         let d = dialog.clone();
         let tv = text_view.clone();
@@ -3647,7 +3849,7 @@ pub fn build_reply_dialog(client: &Rc<FaunaClient>, post_id: &str) -> adw::Windo
             if !text.trim().is_empty() {
                 // `confirm` is only ever visible (hence only ever checkable)
                 // under *public by confirmation*.
-                c.reply_to_post(&pid, &text, confirm.is_active());
+                c.reply_to_post(&m, &pid, &text, confirm.is_active());
                 d.close();
             }
         });
@@ -4033,6 +4235,8 @@ mod tests {
         checks: RefCell<Vec<CheckReply>>,
         /// Every proxied-path GET, with the path it asked for.
         proxied: RefCell<Vec<(String, BlobReply)>>,
+        /// The home each post-blob GET and C2PA check was handed, in order.
+        homes: RefCell<Vec<Option<fauna_client::ForeignHome>>>,
     }
 
     impl document::BlobSource for CountingMedia {
@@ -4047,12 +4251,25 @@ mod tests {
     }
 
     impl PostMediaSource for CountingMedia {
+        fn fetch_post_blob_bytes(
+            &self,
+            _hash: &str,
+            home: Option<fauna_client::ForeignHome>,
+        ) -> async_channel::Receiver<Result<Vec<u8>, ApiError>> {
+            let (tx, rx) = async_channel::bounded(1);
+            self.gets.borrow_mut().push(tx);
+            self.homes.borrow_mut().push(home);
+            rx
+        }
+
         fn fetch_c2pa_candidate_bytes(
             &self,
             _hash: &str,
+            home: Option<fauna_client::ForeignHome>,
         ) -> async_channel::Receiver<Result<Option<Vec<u8>>, ApiError>> {
             let (tx, rx) = async_channel::bounded(1);
             self.checks.borrow_mut().push(tx);
+            self.homes.borrow_mut().push(home);
             rx
         }
 
@@ -4224,6 +4441,46 @@ mod tests {
         });
     }
 
+    /// The byte rule on the image legs (`feed.md` § The read model → *A post
+    /// homed on another nest*): a post homed elsewhere hands its
+    /// [`blob_home`](fauna_feed::PostSummary::blob_home) — URL and identity —
+    /// to the image GET and to the C2PA check unchanged; a post this nest holds
+    /// hands `None` to both. The card re-derives nothing.
+    #[test]
+    fn a_post_images_reads_take_the_posts_blob_home_unchanged() {
+        on_private_context(|_ctx| {
+            let manager = offline_manager();
+            let nest = CountingMedia::default();
+            let post = fauna_feed::PostSummary {
+                home_nest_url: Some(" https://home.example ".to_string()),
+                home_nest_actor_id: Some("ab".repeat(32)),
+                ..Default::default()
+            };
+            let home = crate::feed::post_media::post_home(&post);
+            assert_eq!(
+                home,
+                Some(fauna_client::ForeignHome::new(
+                    "https://home.example",
+                    Some(&"ab".repeat(32))
+                )),
+            );
+
+            let hash = hex::encode([0xacu8; 32]);
+            let _card = build_post_image_from(&hash, home.clone(), &manager, &nest);
+            assert_eq!(nest.counts(), (1, 1));
+            assert_eq!(*nest.homes.borrow(), vec![home.clone(), home]);
+
+            let own = hex::encode([0xadu8; 32]);
+            let _own = build_post_image_from(
+                &own,
+                crate::feed::post_media::post_home(&fauna_feed::PostSummary::default()),
+                &manager,
+                &nest,
+            );
+            assert_eq!(nest.homes.borrow()[2..], [None, None]);
+        });
+    }
+
     /// The repaint pin: a feed card rebuilt from the same snapshot — while its
     /// image is still loading, and again after it painted — issues no second
     /// blob GET and no second C2PA check, and the card rebuilt after the paint
@@ -4237,8 +4494,8 @@ mod tests {
             let nest = CountingMedia::default();
             let hash = hex::encode([0xabu8; 32]);
 
-            let _first = build_post_image_from(&hash, &manager, &nest);
-            let rebuilt_while_loading = build_post_image_from(&hash, &manager, &nest);
+            let _first = build_post_image_from(&hash, None, &manager, &nest);
+            let rebuilt_while_loading = build_post_image_from(&hash, None, &manager, &nest);
             assert_eq!(
                 nest.counts(),
                 (1, 1),
@@ -4253,7 +4510,7 @@ mod tests {
                 "the card rebuilt while loading must be painted when the one load lands"
             );
 
-            let repainted = build_post_image_from(&hash, &manager, &nest);
+            let repainted = build_post_image_from(&hash, None, &manager, &nest);
             assert_eq!(
                 nest.counts(),
                 (1, 1),
@@ -4286,9 +4543,9 @@ mod tests {
             let forged_hash = hex::encode([0x02u8; 32]);
             let unasserted_hash = hex::encode([0x03u8; 32]);
 
-            let signed_card = build_post_image_from(&signed_hash, &manager, &nest);
-            let forged_card = build_post_image_from(&forged_hash, &manager, &nest);
-            let unasserted_card = build_post_image_from(&unasserted_hash, &manager, &nest);
+            let signed_card = build_post_image_from(&signed_hash, None, &manager, &nest);
+            let forged_card = build_post_image_from(&forged_hash, None, &manager, &nest);
+            let unasserted_card = build_post_image_from(&unasserted_hash, None, &manager, &nest);
 
             let signed = signed_png();
             let plain = png();
@@ -4383,12 +4640,12 @@ mod tests {
             let nest = CountingMedia::default();
             let hash = hex::encode([0x21u8; 32]);
 
-            let _ = build_post_image_from(&hash, &manager, &nest);
+            let _ = build_post_image_from(&hash, None, &manager, &nest);
             let _ = nest.gets.borrow()[0].try_send(Err(ApiError::Transport("timed out".into())));
             let _ = nest.checks.borrow()[0].try_send(Ok(None));
             while ctx.iteration(false) {}
 
-            let retried = build_post_image_from(&hash, &manager, &nest);
+            let retried = build_post_image_from(&hash, None, &manager, &nest);
             assert_eq!(
                 nest.counts(),
                 (2, 1),
@@ -4407,7 +4664,7 @@ mod tests {
             let nest = CountingMedia::default();
             let hash = hex::encode([0x22u8; 32]);
 
-            let _ = build_post_image_from(&hash, &manager, &nest);
+            let _ = build_post_image_from(&hash, None, &manager, &nest);
             let _ = nest.gets.borrow()[0].try_send(Err(ApiError::Status {
                 code: 404,
                 message: "no such blob".into(),
@@ -4415,7 +4672,7 @@ mod tests {
             let _ = nest.checks.borrow()[0].try_send(Ok(None));
             while ctx.iteration(false) {}
 
-            let _ = build_post_image_from(&hash, &manager, &nest);
+            let _ = build_post_image_from(&hash, None, &manager, &nest);
             assert_eq!(nest.counts(), (1, 1));
         });
     }
@@ -4431,13 +4688,13 @@ mod tests {
             let hash = hex::encode([0xcdu8; 32]);
 
             let first_reader = offline_manager();
-            let card = build_post_image_from(&hash, &first_reader, &nest);
+            let card = build_post_image_from(&hash, None, &first_reader, &nest);
             nest.answer(0, &png(), Some(&png()));
             let (picture, _) = image_parts(&card);
             assert!(pump_until(ctx, || picture.paintable().is_some()));
 
             let next_reader = offline_manager();
-            let card = build_post_image_from(&hash, &next_reader, &nest);
+            let card = build_post_image_from(&hash, None, &next_reader, &nest);
             assert_eq!(nest.counts(), (2, 2), "a new reader loads for itself");
             let (picture, badge) = image_parts(&card);
             assert!(picture.paintable().is_none());
@@ -4455,14 +4712,14 @@ mod tests {
             let hash = hex::encode([0xefu8; 32]);
 
             let first_reader = offline_manager();
-            let _ = build_post_image_from(&hash, &first_reader, &nest);
+            let _ = build_post_image_from(&hash, None, &first_reader, &nest);
             let next_reader = offline_manager();
-            let _ = build_post_image_from(&hash, &next_reader, &nest);
+            let _ = build_post_image_from(&hash, None, &next_reader, &nest);
 
             nest.answer(0, &png(), Some(&png()));
             while ctx.iteration(false) {}
 
-            let card = build_post_image_from(&hash, &next_reader, &nest);
+            let card = build_post_image_from(&hash, None, &next_reader, &nest);
             assert_eq!(
                 nest.counts(),
                 (2, 2),
@@ -4486,13 +4743,13 @@ mod tests {
             let nest = CountingMedia::default();
             let hash = hex::encode([0x12u8; 32]);
 
-            let card = build_post_image_from(&hash, &manager, &nest);
+            let card = build_post_image_from(&hash, None, &manager, &nest);
             nest.answer(0, &png(), None);
             let (picture, _) = image_parts(&card);
             assert!(pump_until(ctx, || picture.paintable().is_some()));
 
             crate::media_loads::clear_for_identity_change();
-            let _ = build_post_image_from(&hash, &manager, &nest);
+            let _ = build_post_image_from(&hash, None, &manager, &nest);
             assert_eq!(nest.counts(), (2, 2));
         });
     }

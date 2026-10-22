@@ -52,6 +52,57 @@ use fauna_core::room_post::{RoomPostSeal, room_post_of};
 
 use crate::routes::AppState;
 
+/// The bound on a sealed room-post body fetched from a delivered post's home:
+/// the view indexes typed text only, never an attachment, so a body past this
+/// is no post body and gets no view.
+const DELIVERED_BODY_CAP: usize = 1024 * 1024;
+
+/// The sealed body of a post a federated follow delivered here, fetched once
+/// by content address from the public blob route of the home it was delivered
+/// from (`content.origin_nest_url` — an address this nest resolved for a
+/// verified peer, never user input). `None` for a post this nest holds as its
+/// own, and for every failure: the view is silent, as for a body that has not
+/// arrived.
+async fn fetch_delivered_body(
+    state: &Arc<AppState>,
+    post_id: &[u8; 32],
+    digest: &[u8; 32],
+) -> Option<Vec<u8>> {
+    let home = state.db.delivered_post_home(post_id).await.ok().flatten()?;
+    fetch_body_from_home(&home, digest, state.peer_fetch_loopback.as_ref()).await
+}
+
+/// `GET <home>/api/v1/blob/<digest>`, the bytes only when they are the body
+/// the post names. The home URL is the delivering peer's, so the dial goes
+/// through the SSRF guard (`crate::ssrf::peer_fetch_get`,
+/// `deployment-threat-model.md` § Concern 2, item 3).
+async fn fetch_body_from_home(
+    home: &str,
+    digest: &[u8; 32],
+    loopback: Option<&reqwest::Client>,
+) -> Option<Vec<u8>> {
+    let url = format!(
+        "{}/api/v1/blob/{}",
+        home.trim_end_matches('/'),
+        hex::encode(digest)
+    );
+    let resp = crate::ssrf::peer_fetch_get(&url, std::time::Duration::from_secs(30), loopback)
+        .await
+        .ok()?
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body = crate::ssrf::read_capped(resp, DELIVERED_BODY_CAP)
+        .await
+        .ok()?;
+    // Content-addressed: bytes that are not the body the post names are
+    // nobody's body.
+    (*blake3::hash(&body).as_bytes() == *digest).then_some(body)
+}
+
 /// Build the home nest's derived view of one stored room-restricted post.
 ///
 /// `body` is the post's `EmbedAsBytes` wire exactly as stored — the caller has
@@ -105,9 +156,17 @@ pub(crate) async fn index_room_post(state: &Arc<AppState>, post_id: &[u8; 32], b
         return;
     };
     // The sealed body rides beside the post (a client uploads it first); a
-    // relayed post whose blob has not arrived yet simply gets no view.
-    let Ok(Some(sealed)) = store.get(&gated.encrypted_ref).await else {
-        return;
+    // relayed post whose blob has not arrived yet simply gets no view. A post
+    // a federated follow delivered has its body at its home, never here, and
+    // is fetched from there once (`federated-follow.md` § Decision 4, the
+    // room arm) — only now, past every check above, so a post naming no room
+    // this nest homes never dials.
+    let sealed = match store.get(&gated.encrypted_ref).await {
+        Ok(Some(sealed)) => sealed,
+        _ => match fetch_delivered_body(state, post_id, &gated.encrypted_ref.digest()).await {
+            Some(sealed) => sealed,
+            None => return,
+        },
     };
     let base = zeroize::Zeroizing::new(fauna_core::group_content::room_post_base_key(&key));
     let per_post = zeroize::Zeroizing::new(fauna_core::subscription::crypto::derive_post_key(
@@ -236,4 +295,33 @@ fn decode_stored_post(body: &[u8]) -> Option<Post> {
         fauna_core::encoding::canonical_decode(body).ok()?;
     let (post_bytes, _) = wire.into_signed().ok()?;
     fauna_core::encoding::decode_signed_bytes(&post_bytes).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ssrf::test_server::{head_with_length, serve_once};
+
+    /// The delivering home is a peer's claim: a shipped nest refuses a
+    /// loopback or metadata-service home before any dial, and the test state's
+    /// loopback exemption is what lets two in-process nests fetch at all.
+    #[tokio::test]
+    async fn delivered_body_fetch_is_guarded() {
+        let test_client = reqwest::Client::new();
+        let lo = Some(&test_client);
+        let body = b"sealed room post".to_vec();
+        let digest = *blake3::hash(&body).as_bytes();
+        let home = serve_once(head_with_length("200 OK", body.len()), body.clone(), false).await;
+        assert_eq!(fetch_body_from_home(&home, &digest, None).await, None);
+        assert_eq!(
+            fetch_body_from_home("https://169.254.169.254", &digest, None).await,
+            None
+        );
+        assert_eq!(
+            fetch_body_from_home("http://169.254.169.254", &digest, lo).await,
+            None
+        );
+        let home = serve_once(head_with_length("200 OK", body.len()), body.clone(), false).await;
+        assert_eq!(fetch_body_from_home(&home, &digest, lo).await, Some(body));
+    }
 }

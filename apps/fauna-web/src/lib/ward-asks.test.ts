@@ -13,6 +13,7 @@ import {
   foldKnockReply,
   keepOnEmptyReread,
   KNOCK_SENT,
+  knocksAwaitGuardian,
   knockStateFor,
   sourceAskRows,
   wardAsksFromStatus,
@@ -28,7 +29,7 @@ function anAsk(byte: number): ContactAsk {
 }
 
 // The shared rules are Rust-tested (`fauna_client_family::ward_asks`) and
-// reach the app through `$lib/wasm`'s `wardAskRules`; this stub is only what
+// reach the app through `#lib/wasm`'s `wardAskRules`; this stub is only what
 // these render tests need from them — an exact peer / triple match.
 const RULES: AskRules = {
   contactAskPending: (asks, peerHex) =>
@@ -37,6 +38,7 @@ const RULES: AskRules = {
     const a = asks.find((x) => x.bridge_id === bridgeId && x.operation === operation && x.target === target);
     return a ? (a.approved_at != null ? 'approved' : 'pending') : null;
   },
+  knocksAwaitGuardian: (policy) => policy?.contact_approval === true,
 };
 
 function aFeedAsk(bridge: string, op: string, target: string, approved: boolean): FeedAsk {
@@ -51,7 +53,7 @@ Deno.test('a status reply without supervised_by yields no asks, however many row
     contact_requests: [anAsk(0xcd)],
     feed_requests: [aFeedAsk('activitypub', 'follow', 'x', true)],
   });
-  assertEquals(asks, { contact: [], feed: [] }, 'a graduated account has no guardian to be waiting on');
+  assertEquals(asks, { contact: [], feed: [], policy: null }, 'a graduated account has no guardian to be waiting on');
 });
 
 Deno.test('a supervised reply carries its own asks', () => {
@@ -61,6 +63,16 @@ Deno.test('a supervised reply carries its own asks', () => {
   });
   assertEquals(asks.contact.length, 1);
   assertEquals(asks.feed, [], 'an absent feed_requests reads as none');
+});
+
+Deno.test('contact approval on the ward\'s own policy marks the knocks; graduation clears it', () => {
+  const approvalOn = { contact_approval: true };
+  const supervised = wardAsksFromStatus({ supervised_by: { handle: 'mum' }, policy: approvalOn });
+  assertEquals(knocksAwaitGuardian(RULES, supervised), true);
+  const off = wardAsksFromStatus({ supervised_by: { handle: 'mum' }, policy: { contact_approval: false } });
+  assertEquals(knocksAwaitGuardian(RULES, off), false, 'approval off: the ward decides its own knocks');
+  const graduated = wardAsksFromStatus({ supervised_by: null, policy: approvalOn });
+  assertEquals(knocksAwaitGuardian(RULES, graduated), false, 'no guardian, no wait');
 });
 
 Deno.test('an empty re-read after an ask keeps what the client already holds', () => {

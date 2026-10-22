@@ -116,12 +116,11 @@ use fauna_core::data::ContentHash;
 use fauna_core::file_download::FileDownloadKeys;
 use fauna_protocol::RpcRequester;
 use fauna_protocol::sync::{SyncChangeRecordReply, SyncChangeRecordRequest};
-use fauna_protocol::sync_writer_sig::SignedChange;
 
 use crate::custodian_store::{CustodianStore, held_path, path_in_set};
 use crate::seal::{SealedBlob, seal_blob};
 use crate::segment_backup::{
-    BACKED_UP_KINDS, SegmentFamily, SegmentHalf, reserved_backup_set_name,
+    BACKED_UP_KINDS, SegmentFamily, SegmentHalf, landing_set_name, reserved_backup_set_name,
 };
 use fauna_core::data::parse_folder_backup_set_name;
 
@@ -153,67 +152,15 @@ impl BlobPushSink for SyncClientSink<'_> {
     }
 }
 
-/// Is `leaf` the hex spelling of a 32-byte `path_hash` — the one shape a
-/// covered-folder mirror's local leaf can have?
-///
-/// The pull writes `hex::encode(&entry.path_hash)` and nothing else
-/// (`crate::custodian_pull::CustodianPull::run_folder_once`), and the source
-/// nest's own folder pass records exactly the same spelling, so this is the
-/// delivery door's admission rule rather than a defensive guess: lowercase, so
-/// two spellings of one hash can never fork the target's path keying.
-pub(crate) fn is_path_hash_hex(leaf: &str) -> bool {
-    fauna_core::hex32::is_lowercase_hex64(leaf)
-}
-
-/// What one delivery pass moved.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ReseedReport {
-    /// Custody paths recorded on the target this pass, in push order.
-    pub delivered_paths: Vec<String>,
-    /// Every custody set this pass delivered at least one path into, in
-    /// delivery order — what the ceremony driver materializes
-    /// (`fauna_client_backup::reseed::run_reseed`). A set the store holds
-    /// nothing for is absent, so phase 3 never names a set phase 2 left empty.
-    pub delivered_sets: Vec<DeliveredSet>,
-    /// Segments delivered **without** a sidecar because this store holds
-    /// none for them — a store that never completed a pull pass after the
-    /// 2026-08-29 widening. Their `.dat` landed (it is real custody, and a
-    /// later pull + re-delivery converges), but materialization cannot reopen
-    /// them until the sidecar arrives; a ceremony driver must show this
-    /// rather than report the corpus whole.
-    pub sidecarless_segments: Vec<u32>,
-    /// Covered-folder paths delivered **without** a sealed name because this
-    /// store holds none for them (a source that served no seal —
-    /// [`crate::custodian_store::HeldRow::path_sealed`]). Their bytes and
-    /// custody landed, but the folder materialize arm re-homes from
-    /// `(path_hash, path_sealed, manifest_hash)` and cannot re-home a row with
-    /// no name. A ceremony driver must show this rather than report the folder
-    /// whole.
-    pub folder_paths_without_seal: Vec<String>,
-    /// Chunk bodies actually uploaded (post-dedup).
-    pub chunks_uploaded: usize,
-    /// Chunk bodies the target already held.
-    pub chunks_deduped: usize,
-    /// Manifests uploaded — one per delivered path.
-    pub manifests_uploaded: usize,
-    /// Sum of the delivered paths' **plaintext** sizes: what the custody rows
-    /// declare, matching the nest coordinator's own `size_bytes`.
-    pub plaintext_bytes: u64,
-}
-
-impl ReseedReport {
-    pub(crate) fn absorb(&mut self, other: ReseedReport) {
-        self.delivered_paths.extend(other.delivered_paths);
-        self.delivered_sets.extend(other.delivered_sets);
-        self.sidecarless_segments.extend(other.sidecarless_segments);
-        self.folder_paths_without_seal
-            .extend(other.folder_paths_without_seal);
-        self.chunks_uploaded += other.chunks_uploaded;
-        self.chunks_deduped += other.chunks_deduped;
-        self.manifests_uploaded += other.manifests_uploaded;
-        self.plaintext_bytes = self.plaintext_bytes.saturating_add(other.plaintext_bytes);
-    }
-}
+/// The pieces both delivery legs share — the report a pass counts in, the
+/// bytes-then-custody landing, the folder re-home's signature — live in
+/// [`fauna_client_sync::reseed_leg`] since 2026-10-18, beside the nest-held
+/// pull-back that went wasm-clean; re-exported so this leg keeps its import
+/// paths.
+pub use fauna_client_sync::reseed_leg::{
+    RehomeRow, ReseedReport, is_path_hash_hex, push_sealed, record_custody, rehome_nonce,
+    sign_rehome_rows,
+};
 
 /// One re-seed delivery pass over a custodian store.
 ///
@@ -338,6 +285,13 @@ impl<'a, P: BlobPushSink, R: RpcRequester> ReseedDelivery<'a, P, R> {
     pub async fn run_kind(&self, kind: &str) -> Result<ReseedReport> {
         let set = reserved_backup_set_name(kind, &self.scope_id)
             .ok_or_else(|| anyhow::anyhow!("kind has no backup surface: {kind}"))?;
+        // Two names, derived and trusted neither: the store holds the copy
+        // under its own set's name, and the target is recorded — and the verb
+        // named — under the landing name, never the rail's, which the target
+        // mints as soon as it holds mail (`reserved-folders.md` § __mail Sync →
+        // *The landing set*).
+        let landing = landing_set_name(kind, &self.scope_id)
+            .ok_or_else(|| anyhow::anyhow!("kind has no landing set: {kind}"))?;
         let scope_hex = hex::encode(self.scope_id);
         let rows = self.store.held().await?;
 
@@ -367,12 +321,12 @@ impl<'a, P: BlobPushSink, R: RpcRequester> ReseedDelivery<'a, P, R> {
 
             for id in segments {
                 report.absorb(
-                    self.deliver_path(&set, kind, &family.dat_path(&scope_hex, id))
+                    self.deliver_path(&set, &landing, kind, &family.dat_path(&scope_hex, id))
                         .await?,
                 );
                 let meta = family.meta_path(&scope_hex, id);
                 if CustodianStore::live_at(&rows, &held_path(&set, &meta)).is_some() {
-                    report.absorb(self.deliver_path(&set, kind, &meta).await?);
+                    report.absorb(self.deliver_path(&set, &landing, kind, &meta).await?);
                 } else {
                     tracing::warn!(
                         kind,
@@ -387,12 +341,12 @@ impl<'a, P: BlobPushSink, R: RpcRequester> ReseedDelivery<'a, P, R> {
             }
             let mirror = family.mirror_path(&scope_hex, kind);
             if CustodianStore::live_at(&rows, &held_path(&set, &mirror)).is_some() {
-                report.absorb(self.deliver_path(&set, kind, &mirror).await?);
+                report.absorb(self.deliver_path(&set, &landing, kind, &mirror).await?);
             }
         }
         if !report.delivered_paths.is_empty() {
             report.delivered_sets.push(DeliveredSet {
-                set_name: set.clone(),
+                set_name: landing,
                 axis: SetAxis::Segment,
                 folder_display_name: None,
                 folder_label: None,
@@ -624,8 +578,15 @@ impl<'a, P: BlobPushSink, R: RpcRequester> ReseedDelivery<'a, P, R> {
     ///
     /// `path` is the path **within** `set` — what the custody record carries,
     /// byte-identical to a nest destination's; the store row it is read from is
-    /// that path qualified by the set ([`held_path`]).
-    async fn deliver_path(&self, set: &str, kind: &str, path: &str) -> Result<ReseedReport> {
+    /// that path qualified by the set ([`held_path`]), and the record lands in
+    /// `landing`, the kind's landing set on the target.
+    async fn deliver_path(
+        &self,
+        set: &str,
+        landing: &str,
+        kind: &str,
+        path: &str,
+    ) -> Result<ReseedReport> {
         let held = held_path(set, path);
         let plain = self
             .store
@@ -641,7 +602,7 @@ impl<'a, P: BlobPushSink, R: RpcRequester> ReseedDelivery<'a, P, R> {
             .with_context(|| format!("re-seed: sealing {path} under the nest backup root"))?;
 
         let mut report = self.push(&sealed).await?;
-        self.record(set, kind, path, &sealed, plaintext_bytes)
+        self.record(landing, kind, path, &sealed, plaintext_bytes)
             .await?;
 
         report.delivered_paths.push(path.to_string());
@@ -684,61 +645,6 @@ impl<'a, P: BlobPushSink, R: RpcRequester> ReseedDelivery<'a, P, R> {
         .await
         .with_context(|| format!("re-seed: recording custody for {kind} path {path}"))
     }
-}
-
-/// Bytes first, then the manifest — the shared
-/// [`fauna_client_backup::recover_leg::push_sealed`], read back as a
-/// [`ReseedReport`] for the two legs here that count in those terms
-/// ([`ReseedDelivery`] and the nest-held pull-back).
-pub(crate) async fn push_sealed<P: BlobPushSink>(
-    sink: &P,
-    sealed: &SealedBlob,
-) -> Result<ReseedReport> {
-    let pushed = fauna_client_backup::recover_leg::push_sealed(sink, sealed).await?;
-    Ok(ReseedReport {
-        chunks_uploaded: pushed.chunks_uploaded,
-        chunks_deduped: pushed.chunks_deduped,
-        manifests_uploaded: 1,
-        ..ReseedReport::default()
-    })
-}
-
-/// Custody second — the client-authed reserved-set arm, shared by both legs.
-///
-/// `path_sealed` is `None`, and must be: a reserved backup destination's
-/// custody paths are machine-authored routing keys, which is exactly the class
-/// `record_change_core` exempts from the S9 seal requirement. Sending a seal
-/// here would not be safer — it would be a different path key than the one
-/// every other arm of the stack derives.
-pub(crate) async fn record_custody<R: RpcRequester>(
-    nest: &R,
-    set: &str,
-    device_id: &str,
-    path: &str,
-    sealed: &SealedBlob,
-    plaintext_bytes: u64,
-) -> Result<()> {
-    let req = SyncChangeRecordRequest {
-        folder: set.to_string(),
-        device_id: device_id.to_string(),
-        path: path.to_string(),
-        manifest_hash: Some(hex::encode(sealed.manifest_hash.digest())),
-        // The nest DERIVES the custody charge from the bytes it actually holds
-        // and never meters this figure; it is declared as the source's
-        // plaintext size so a delivered row reads identically to one the source
-        // nest's own coordinator wrote.
-        size_bytes: plaintext_bytes as i64,
-        change_type: "create".to_string(),
-        ..Default::default()
-    };
-    let _: SyncChangeRecordReply = nest
-        .request(
-            "fauna.sync.changes.record",
-            fauna_protocol::folders::addressed(req),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-    Ok(())
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -953,7 +859,7 @@ impl<P: BlobPushSink, R: RpcRequester> ReseedDelivery<'_, P, R> {
 
     /// The owner's signature over every row the folder materialize arm will
     /// re-home from `set` (`writer-signed-change-records.md` ruling
-    /// (7)(a)(ii)): one [`SignedChange::for_rehome`] per live mirror row this
+    /// (7)(a)(ii)): one [`fauna_protocol::sync_writer_sig::SignedChange::for_rehome`] per live mirror row this
     /// store holds with a sealed name — the source `path_hash` (the row's
     /// leaf), the mirrored manifest, the source's declared size and sealed name
     /// verbatim, exactly what [`Self::record_folder`] delivered and the arm
@@ -1025,84 +931,6 @@ impl<P: BlobPushSink, R: RpcRequester> ReseedDelivery<'_, P, R> {
     }
 }
 
-/// One custody row a folder materialize re-homes, as the owner's re-home
-/// statement names it (`writer-signed-change-records.md` ruling (7)(a)(ii)):
-/// the source `path_hash` (the row's leaf), the mirrored manifest, the
-/// manifest's own `total_size` and the source's sealed name, verbatim.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RehomeRow {
-    pub(crate) path_hash: [u8; 32],
-    pub(crate) manifest_hash: [u8; 32],
-    /// The manifest's `total_size` — never a custody row's declared or derived
-    /// size: both halves read the one figure both hold (ruling (7)(a)(ii),
-    /// *Where the statement reads its size*).
-    pub(crate) total_size: u64,
-    pub(crate) path_sealed: Vec<u8>,
-}
-
-/// The host's signer and the nonce of the live set `set` re-homes into — the
-/// set named by its display name, resolved through the host's
-/// [`fauna_client_sync::SetNonceSource`] as every other record's is. No
-/// signer, no display name, or no nonce → the [`FolderRehome::Unsigned`] the
-/// driver holds the set with.
-pub(crate) async fn rehome_nonce<'s>(
-    signing: Option<&'s fauna_client_sync::RecordSigning>,
-    set: &DeliveredSet,
-) -> std::result::Result<(&'s fauna_client_sync::RecordSigning, [u8; 32]), FolderRehome> {
-    let unsigned = |reason: String| FolderRehome::Unsigned { reason };
-    let Some(signing) = signing else {
-        return Err(unsigned(
-            "this device holds no change signer for the restored folder".into(),
-        ));
-    };
-    let Some(display_name) = set.folder_display_name.as_deref() else {
-        return Err(unsigned(format!("no display name for {}", set.set_name)));
-    };
-    match signing.set_nonce.lookup(display_name).await {
-        Ok(Some(nonce)) => Ok((signing, nonce)),
-        Ok(None) => Err(unsigned(format!(
-            "this device holds no set nonce for the folder {display_name}"
-        ))),
-        Err(e) => Err(unsigned(format!(
-            "reading the set nonce for the folder {display_name}: {e:#}"
-        ))),
-    }
-}
-
-/// The owner's signature over each row, one [`SignedChange::for_rehome`] per
-/// row under `nonce` — what both delivery legs hand the driver.
-pub(crate) fn sign_rehome_rows(
-    signing: &fauna_client_sync::RecordSigning,
-    nonce: [u8; 32],
-    rows: &[RehomeRow],
-) -> FolderRehome {
-    let owner = signing.signer.actor_id();
-    let signatures = rows
-        .iter()
-        .map(|row| {
-            let statement = SignedChange::for_rehome(
-                nonce,
-                owner,
-                row.path_hash,
-                row.manifest_hash,
-                row.total_size as i64,
-                &row.path_sealed,
-            );
-            fauna_protocol::backup::RehomeSignature {
-                path_hash: fauna_protocol::ByteBuf::from(row.path_hash.to_vec()),
-                signature: fauna_protocol::ByteBuf::from(
-                    signing.signer.sign_statement(&statement).to_vec(),
-                ),
-                ..Default::default()
-            }
-        })
-        .collect();
-    FolderRehome::Signed {
-        signer_key: signing.signer.signer_key().to_vec(),
-        signatures,
-    }
-}
-
 /// The production seam: the owner's own authed WS-RPC connection to the
 /// target, whose request future is `Send` (`fauna_client::NestClient`'s
 /// `RpcRequester` impl says so), so the ceremony can run on a spawned task.
@@ -1122,6 +950,7 @@ mod tests {
     use super::*;
     use crate::custodian_store::SourceFacts;
     use fauna_core::crypto::BackupKey;
+    use fauna_protocol::sync_writer_sig::SignedChange;
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex};
 
@@ -1428,15 +1257,15 @@ mod tests {
                 .iter()
                 .map(|s| s.set_name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["__mail", "__post", "__calendar"],
+            vec!["__landing/mail", "__landing/post", "__landing/calendar"],
             "one set per held kind, in the sweep's order, and none for a kind held nowhere"
         );
         assert_eq!(report.delivered_paths, vec![seg(1), seg(1), seg(1)]);
         let records = rig.nest.records();
         for (set, plain) in [
-            ("__mail", &mail),
-            ("__post", &post),
-            ("__calendar", &calendar),
+            ("__landing/mail", &mail),
+            ("__landing/post", &post),
+            ("__landing/calendar", &calendar),
         ] {
             let rec = records
                 .iter()
@@ -1485,12 +1314,12 @@ mod tests {
                 .iter()
                 .map(|s| s.set_name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["__mail"],
+            vec!["__landing/mail"],
             "one set, named once"
         );
         for record in rig.nest.records() {
             assert_eq!(
-                record.folder, "__mail",
+                record.folder, "__landing/mail",
                 "{} was recorded into another set",
                 record.path
             );
@@ -1564,7 +1393,7 @@ mod tests {
         assert!(report.sidecarless_segments.is_empty());
         let records = rig.nest.records();
         let meta_rec = records.iter().find(|r| r.path == meta(1)).unwrap();
-        assert_eq!(meta_rec.folder, "__mail");
+        assert_eq!(meta_rec.folder, "__landing/mail");
         assert_eq!(meta_rec.size_bytes, 300);
         assert!(
             meta_rec.path_sealed.is_none(),
@@ -1748,11 +1577,12 @@ mod tests {
     }
 
     /// The custody row's shape — the half a materialize verb will read back.
-    /// Reserved-set name from the one shared derivation, no `path_sealed` (the
+    /// The landing name from the one shared derivation — never the rail's,
+    /// which the target mints as soon as it holds mail — no `path_sealed` (the
     /// exempt machine-authored-path class), plaintext `size_bytes`, and no key
     /// material anywhere on the wire.
     #[tokio::test]
-    async fn the_custody_row_names_the_shared_reserved_set_and_carries_no_seal() {
+    async fn the_custody_row_names_the_shared_landing_set_and_carries_no_seal() {
         let rig = Rig::new();
         let plain = body(0x77, 12_345);
         rig.hold(&seg(7), &plain, 100).await;
@@ -1760,11 +1590,8 @@ mod tests {
         rig.delivery().run_kind("mail").await.unwrap();
 
         let rec = &rig.nest.records()[0];
-        assert_eq!(
-            rec.folder,
-            reserved_backup_set_name("mail", &SCOPE).unwrap()
-        );
-        assert_eq!(rec.folder, "__mail");
+        assert_eq!(rec.folder, landing_set_name("mail", &SCOPE).unwrap());
+        assert_eq!(rec.folder, "__landing/mail");
         assert_eq!(rec.path, seg(7));
         assert_eq!(rec.change_type, "create");
         assert_eq!(rec.device_id, DEVICE);
@@ -2378,7 +2205,7 @@ mod tests {
             report.delivered_sets,
             vec![
                 DeliveredSet {
-                    set_name: reserved_backup_set_name("mail", &SCOPE).unwrap(),
+                    set_name: landing_set_name("mail", &SCOPE).unwrap(),
                     axis: SetAxis::Segment,
                     folder_display_name: None,
                     folder_label: None,
@@ -2450,7 +2277,7 @@ mod tests {
         assert_eq!(
             corpus.sets,
             vec![DeliveredSet {
-                set_name: reserved_backup_set_name("mail", &SCOPE).unwrap(),
+                set_name: landing_set_name("mail", &SCOPE).unwrap(),
                 axis: SetAxis::Segment,
                 folder_display_name: None,
                 folder_label: None,

@@ -20,9 +20,21 @@ use fauna_protocol::notifications::{
 pub use fauna_protocol::notifications;
 
 mod destination;
+mod muted;
 mod text;
 pub use destination::{NotificationDestination, notification_destination};
+pub use muted::{knock_push_muted, notification_muted, notification_push_muted};
 pub use text::{NotificationText, knock_push_text, notification_push_text, notification_text};
+
+/// Whether this row's dismiss is greyed at `now_micros` — a `security.notice`
+/// inside its retention window (`behavior/notifications.md` § Retention rule
+/// 2). The row-shaped twin of
+/// [`notifications::is_security_notice_retained`] for the apps that cross a
+/// wasm / UniFFI boundary with a whole row; the nest's refusal stays the
+/// authority.
+pub fn notification_retained(item: &notifications::NotifItem, now_micros: i64) -> bool {
+    notifications::is_security_notice_retained(&item.notif_type, item.created_at, now_micros)
+}
 
 /// Typed `fauna.notifications.*` call surface, generic over the WS-RPC
 /// transport (`R: RpcRequester`): native call sites pass `Arc<NestClient>`, the
@@ -242,6 +254,19 @@ mod tests {
         assert_eq!(kind, "fauna.notifications.dismiss");
         let req: NotifDismissRequest = fauna_protocol::decode_strict(&payload).expect("decodes");
         assert_eq!(req.id, 42);
+    }
+
+    #[test]
+    fn retained_greys_only_a_young_security_notice() {
+        let now = 100 * 86_400 * 1_000_000_i64;
+        let row = |t: &str, age_days: i64| notifications::NotifItem {
+            notif_type: t.into(),
+            created_at: now - age_days * 86_400 * 1_000_000,
+            ..Default::default()
+        };
+        assert!(notification_retained(&row("security.notice", 1), now));
+        assert!(!notification_retained(&row("security.notice", 15), now));
+        assert!(!notification_retained(&row("like", 1), now));
     }
 
     #[test]

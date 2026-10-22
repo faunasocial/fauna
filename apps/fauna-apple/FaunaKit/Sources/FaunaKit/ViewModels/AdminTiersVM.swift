@@ -8,7 +8,7 @@ import SwiftUI
 /// editor, never a third tier list). Admission (assigning a tier to a user)
 /// lives on the `admin-users` hub (§ 2), not here.
 ///
-/// Drives the shared `fauna.admin.tiers.{list,update}` +
+/// Drives the shared `fauna.admin.tiers.{list,create,update}` +
 /// `fauna.admin.membership_tiers.{list,set,clear}` kinds via the UniFFI
 /// `FfiAdminClient` (`FfiNestClient.admin()`), plus `fauna.subscriptions.tiers.list`
 /// via `APIClient.listSubscriptionTiers()` for the membership row set — no
@@ -90,6 +90,50 @@ public final class AdminTiersVM: BusyAdminCommandVM {
                 maxFeeds: tier.maxFeeds
             )
         }
+    }
+
+    /// Define a new tier via `fauna.admin.tiers.create` (admin.md § 3 → *Defining a
+    /// new tier*), then refetch so it appears as an ordinary row. The name is
+    /// trimmed here and each cap goes through the shared `parseCap` (UniFFI face
+    /// of `fauna_core::format::parse_cap`, the row editor's validator); an empty
+    /// name or an unparseable cap is refused locally on `error-message` with its
+    /// own sentence, and a nest refusal (a taken name is `fauna.admin.conflict`)
+    /// is worded through `addTierError`. Returns `true` only when the nest
+    /// accepted the create — the form clears on that alone, so a refused name
+    /// keeps what was typed.
+    public func addTier(name: String, inbox: String, storage: String, devices: String,
+                        blobSize: String, feeds: String) async -> Bool {
+        guard let admin else { return false }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            errorMessage = L.admin.settingsPage.addTierErrorEmptyName
+            return false
+        }
+        guard let maxInboxBytes = parseCap(input: inbox),
+              let maxStorageBytes = parseCap(input: storage),
+              let maxDevices = parseCap(input: devices),
+              let maxBlobSize = parseCap(input: blobSize),
+              let maxFeeds = parseCap(input: feeds) else {
+            errorMessage = L.admin.settingsPage.addTierErrorInvalidCap
+            return false
+        }
+        isBusy = true
+        var created = false
+        do {
+            try await admin.tiersCreate(
+                name: trimmed, maxInboxBytes: maxInboxBytes, maxStorageBytes: maxStorageBytes,
+                maxDevices: maxDevices, maxBlobSize: maxBlobSize, maxFeeds: maxFeeds)
+            errorMessage = nil
+            created = true
+        } catch {
+            errorMessage = L.admin.settingsPage.addTierError(message: DisplayError.message(error) ?? "")
+        }
+        isBusy = false
+        let failure = errorMessage
+        await hydrate()
+        // `hydrate` clears a stale error on success; a refused create keeps its own.
+        if !created { errorMessage = failure }
+        return created
     }
 
     /// Designate/re-point a membership tier via `fauna.admin.membership_tiers.set`

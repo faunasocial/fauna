@@ -261,6 +261,8 @@ public struct AccountSettingsView: View {
                         Text(L.settings.accountPage.deleteConfirmText)
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                            .accessibilityIdentifier(Ids.settingsDeleteConfirmText)
+                            .automationValue(Ids.settingsDeleteConfirmText, text: { L.settings.accountPage.deleteConfirmText })
                         TextField(L.settings.deleteConfirmPlaceholder, text: $deleteConfirmText)
                             .textFieldStyle(.roundedBorder)
                             #if os(iOS)

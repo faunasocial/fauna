@@ -52,6 +52,7 @@ pytestmark = pytest.mark.tier_1
 
 _REPO = Path(__file__).resolve().parents[3]
 _JUSTFILE = _REPO / "justfile"
+_ANDROID_STORE_SAFE_SCAN = _REPO / "scripts/android-store-safe-scan.sh"
 
 #: The justfile with `\`-continuations joined, so a `for pat in …` list that wraps
 #: reads as one line. Two of the store-safe recipes wrap today; a scanner that
@@ -2057,7 +2058,7 @@ _ANDROID_ABSENT_FFI_TYPES = [
 # Excised free functions, matched only where they are QUALIFIED by the generated
 # package (which is how shared code would have to reach them — the app-side
 # extensions of the same name live in `com.fauna.app.payments`).
-_ANDROID_ABSENT_FFI_FUNCTIONS = ["paymentsKnownKinds", "paymentsWebhookUrl"]
+_ANDROID_ABSENT_FFI_FUNCTIONS = ["paymentsKnownKinds", "paymentsWebhookUrl", "paymentsReturnUrl"]
 _ANDROID_ELEMENT_ID_PREFIXES = (
     "subscription-provider-",
     "subscription-claim-",
@@ -2363,7 +2364,18 @@ def test_the_android_app_shell_has_its_own_two_column_artifact_witness():
     constants are deflate-compressed inside it, so `strings -a app.apk` reports
     zero matches for everything and reads exactly like a perfect excision.
     """
-    body = _recipe_body("android-store-safe-check")
+    recipe = _recipe_body("android-store-safe-check")
+    assert "scripts/android-store-safe-scan.sh absent" in recipe, (
+        "android-store-safe-check's first column no longer runs the shared excision "
+        "scan in its `absent` mode"
+    )
+    assert "scripts/android-store-safe-scan.sh present" in recipe, (
+        "android-store-safe-check's second column no longer runs the shared excision "
+        "scan in its `present` mode"
+    )
+    # The unpack and the pattern list live in the shared scan the Play bundle
+    # also runs — one list for both artifacts — so the pins read both texts.
+    body = recipe + _ANDROID_STORE_SAFE_SCAN.read_text(encoding="utf-8")
     assert "_android-ffi-flavor storeSafe store-safe" in body, (
         "android-store-safe-check's first column no longer stages the store-safe FFI — "
         "the kind-string assertion would then be about R8's dead-stripping luck rather "
@@ -2397,6 +2409,51 @@ def test_the_android_app_shell_has_its_own_two_column_artifact_witness():
     )
     assert "vacuous" in body, (
         "android-store-safe-check lost the comment explaining why the second column exists"
+    )
+
+
+def test_the_play_store_safe_bundle_runs_the_excision_scan_on_itself():
+    """The `0.1.4` Play upload is the `storeSafe` AAB (installers/android.md
+    § Goal, user-ruled 2026-10-14). The witness APK proves the build
+    TYPE excises; only a scan of the uploaded bundle proves the artifact Play
+    serves does. The bundle keeps its members under `base/`, so the shared scan
+    must read that layout, and its positive controls are what stand in for a
+    default-flavor column the upload build does not build.
+    """
+    header = _recipe_header("android-bundle-store-safe")
+    assert "android-ffi-store-safe" in header, (
+        "android-bundle-store-safe no longer takes the store-safe FFI, so the Play "
+        "bundle would package a payments-carrying libfauna_ffi.so"
+    )
+    assert '"dist"' in header, (
+        "android-bundle-store-safe no longer builds the FFI on the size-optimised "
+        "`dist` profile android-bundle ships with"
+    )
+    assert "_android-bundle storeSafe" in _recipe_body("android-bundle-store-safe")
+    shared = _recipe_body("_android-bundle")
+    assert 'TASK="bundle${VARIANT^}"' in shared, "the shared body no longer bundles its variant"
+    assert "scripts/android-store-safe-scan.sh absent" in shared, (
+        "the storeSafe Play bundle no longer scans itself for the excised planes"
+    )
+    assert "TestAgentEntryPoint" in shared, (
+        "the shared bundle body lost the automation-surface strip check (convention 15)"
+    )
+    scan = _ANDROID_STORE_SAFE_SCAN.read_text(encoding="utf-8")
+    assert "base/dex/classes*.dex" in scan and "base/lib/*/*.so" in scan, (
+        "the shared scan no longer reads an AAB's base-module layout, so a bundle "
+        "scan would unpack nothing"
+    )
+    for ctl in ("'page-heading'", "'error-message'", "fauna\\.feed\\."):
+        assert ctl in scan, f"the shared scan lost its positive control {ctl}"
+    gradle = (_REPO / "apps/fauna-android/app/build.gradle.kts").read_text(encoding="utf-8")
+    store_safe = gradle.split('create("storeSafe")', 1)[1].split('create("foss")', 1)[0]
+    assert "versionNameSuffix =" not in store_safe, (
+        "storeSafe carries a version-name suffix again, so the Play listing would read "
+        "`0.1.4-<suffix>` instead of the fleet version"
+    )
+    assert "applicationIdSuffix" not in store_safe, (
+        "storeSafe carries an application-id suffix, so its bundle is no longer the "
+        "main Play package"
     )
 
 
@@ -2568,9 +2625,28 @@ def test_the_android_witness_watches_the_p2p_share_member():
     with the `uniffi.*` binding packages unkept, R8 folded the ceremony
     section's gates to false and the default dex kept only
     `offline-share-own-code` (measured 2026-09-30, fixed 2026-10-08)."""
-    body = _recipe_body("android-store-safe-check")
-    ss_col, sep, default_col = body.partition("column 2")
-    assert sep, "android-store-safe-check lost its `column 2` marker, so the columns cannot be told apart"
+    # Every column's patterns live in the shared scan, split by member: the
+    # default (`present`) column scans PAY_PATS + P2P_PATS, the store-safe
+    # (`absent`) one those plus both ABSENT_ONLY arrays; `no-payments` takes the
+    # P2P half present (pinned by the store-no-payments section below).
+    scan = _ANDROID_STORE_SAFE_SCAN.read_text(encoding="utf-8")
+    names = ("PAY_PATS", "PAY_ABSENT_ONLY_PATS", "P2P_PATS", "P2P_ABSENT_ONLY_PATS")
+    arrays = dict(re.findall(rf"^({'|'.join(names)})=\((.*)\)$", scan, re.M))
+    assert set(arrays) == set(names), (
+        "scripts/android-store-safe-scan.sh lost one of its four pattern arrays, so the "
+        "columns cannot be told apart"
+    )
+    default_col = arrays["PAY_PATS"] + arrays["P2P_PATS"]
+    ss_col = default_col + arrays["PAY_ABSENT_ONLY_PATS"] + arrays["P2P_ABSENT_ONLY_PATS"]
+    assert re.search(
+        r'^\s*absent\)\s+ABSENT=\("\$\{PAY_PATS\[@\]\}" "\$\{PAY_ABSENT_ONLY_PATS\[@\]\}" '
+        r'"\$\{P2P_PATS\[@\]\}" "\$\{P2P_ABSENT_ONLY_PATS\[@\]\}"\); PRESENT=\(\)',
+        scan, re.M,
+    ), "the scan's `absent` mode no longer takes all four arrays absent"
+    assert re.search(
+        r'^\s*present\)\s+ABSENT=\(\); PRESENT=\("\$\{PAY_PATS\[@\]\}" "\$\{P2P_PATS\[@\]\}"\)',
+        scan, re.M,
+    ), "the scan's `present` mode no longer requires both members' painted patterns"
     for pat in _gated_catalog()["p2p-share"]["id_prefixes"]:
         assert f"'{pat}'" in ss_col, f"android-store-safe-check's store-safe column lost its '{pat}' pattern"
     for pat in ("offline-share-", "offline-receive-"):
@@ -2615,8 +2691,8 @@ def test_android_minified_builds_keep_every_jna_binding_package():
 #     written;
 #   • and the removal is done by the **isolated-module pattern**, not by a
 #     compiler. Folding a branch to `false` does not by itself unlink a module,
-#     so the glue lives in exactly one place — `$lib/payments` — and the renders
-#     in `$lib/components/payments/`. Both are imported ONLY from behind the
+#     so the glue lives in exactly one place — `#lib/payments` — and the renders
+#     in `#lib/components/payments/`. Both are imported ONLY from behind the
 #     condition, and the three source pins below are what keep it that way.
 #
 # ⚠ web's criterion-2 axis is FACE NAMES, not kind strings. The SPA never spells
@@ -2651,6 +2727,7 @@ _WEB_PAYMENTS_FACES = (
     "paymentsClaimsRedeem",
     "paymentsKnownKinds",
     "paymentsWebhookUrl",
+    "paymentsReturnUrl",
     "tipAmount",
     "tipCount",
     "tipMore",
@@ -2709,7 +2786,7 @@ def _web_payments_imports(text: str) -> list[str]:
     Matched as import STATEMENTS on the raw text rather than as substrings: the
     surface is discussed in prose all over these files, and a relative
     specifier (`./payments/TipSurface.svelte`, which is how a sibling component
-    imports it) shares no prefix with the `$lib/` form a substring scan would
+    imports it) shares no prefix with the `#lib/` form a substring scan would
     look for. Any specifier containing `payments` is this surface — the SPA has
     no other module by that name.
     """
@@ -2757,10 +2834,10 @@ def test_no_shared_web_source_names_a_payments_face():
     detach a module: the branch disappears, the *import* beside it does not
     necessarily, and even when it does, a function defined in an
     unconditionally-bundled module keeps its name in the artifact. So every
-    payments face must live in `$lib/payments`, whose only importers are the
+    payments face must live in `#lib/payments`, whose only importers are the
     render components — themselves imported only from behind the condition.
 
-    `$lib/rpc`, `$lib/wasm` and `$lib/value-format` are where these functions
+    `#lib/rpc`, `#lib/wasm` and `#lib/value-format` are where these functions
     naturally belong and where they used to live; all three are in every bundle.
     That is precisely why they had to move.
     """
@@ -2777,8 +2854,8 @@ def test_no_shared_web_source_names_a_payments_face():
         "these SHARED web sources name a payments face, so the store-safe bundle carries "
         'its name even with every caller folded away (dynamic-features.md § What '
         '"completely compiled away" means, criterion 2 — web\'s axis is face names, since '
-        "the SPA never spells a kind string). Move the function into `$lib/payments` and "
-        f"let a `$lib/components/payments/` component call it: {offenders!r}"
+        "the SPA never spells a kind string). Move the function into `#lib/payments` and "
+        f"let a `#lib/components/payments/` component call it: {offenders!r}"
     )
 
 
@@ -2789,7 +2866,7 @@ def test_no_shared_web_source_paints_a_payments_element_id():
     files and gate them in place. web cannot: a Svelte component's template is a
     module-level construct, so an id inside a folded `{#if}` may still be emitted
     with the module. The web answer is to move the render OUT — into
-    `$lib/components/payments/` — which makes the invariant checkable as an
+    `#lib/components/payments/` — which makes the invariant checkable as an
     absence rather than as the presence of a condition.
 
     `PostSummary.tips` is why this cannot be skipped: it is a deliberately
@@ -2859,21 +2936,21 @@ def test_every_payments_import_sits_behind_the_web_compile_condition():
 
 
 def test_only_the_payments_components_import_the_payments_glue():
-    """`$lib/payments` has exactly one class of importer.
+    """`#lib/payments` has exactly one class of importer.
 
     The glue module is what carries every face name, so the moment a shared
     module imports it directly the isolation is gone — the chunk joins the
     always-bundled graph and no `{#if}` anywhere can take it back out. Keeping
-    the importer set to `$lib/components/payments/` is what makes the pin above
+    the importer set to `#lib/components/payments/` is what makes the pin above
     sufficient: gate the components, and the glue travels with them.
     """
     offenders = {}
     for path in _web_shared_sources():
-        glue = [s for s in _web_payments_imports(path.read_text(encoding="utf-8")) if "$lib/payments" in s]
+        glue = [s for s in _web_payments_imports(path.read_text(encoding="utf-8")) if "#lib/payments" in s]
         if glue:
             offenders[path.relative_to(_REPO).as_posix()] = glue
     assert not offenders, (
-        "these shared web sources import `$lib/payments` directly. Only components under "
+        "these shared web sources import `#lib/payments` directly. Only components under "
         f"{_WEB_COMPONENT_DIR.name}/ may — everything else must go through one of them, or "
         f"the glue chunk is pulled into every bundle: {offenders!r}"
     )
@@ -3106,7 +3183,9 @@ def test_a_shell_store_safe_ffi_flavor_carries_only_its_declared_interim_extras(
     """
     body = _recipe_body(recipe)
     carried: set[str] = set()
-    for m in re.finditer(r"ffi-flavor\b[^\n]*?\bstore-safe((?:,[a-z0-9-]+)*)", body):
+    # A `storeNoPayments` line is the second store flavor, whose kept member is
+    # its definition rather than a carry (pinned in the store-no-payments section).
+    for m in re.finditer(r"ffi-flavor\b(?! storeNoPayments)[^\n]*?\bstore-safe((?:,[a-z0-9-]+)*)", body):
         carried |= {f for f in m.group(1).split(",") if f}
     assert carried == _STORE_SAFE_INTERIM_CARRY[recipe], (
         f"{recipe}'s store-safe FFI flavor carries {sorted(carried)!r} beyond the "
@@ -3565,3 +3644,122 @@ def test_the_windows_witness_scan_actually_sees_a_utf16_element_id():
         "assertion in windows-store-safe-check would read as a clean excision and every "
         "presence assertion as a renamed id — the witness would be measuring nothing"
     )
+
+
+# ── the `store-no-payments` flavor (2026-10-17) ──────────────────────────────
+#
+# The second store flavor (`dynamic-features.md` § The App-Store escape hatch →
+# *The store flavors*): `payments` (and `zaps`, its subset member) excised,
+# `p2p-share` KEPT. Spelled at every flavor root as the complement plus the
+# kept member — `--no-default-features --features store-safe,p2p-share` — so it
+# needs no new cargo feature anywhere, and every column that witnesses it
+# asserts BOTH directions: the money plane absent, the sharing plane present.
+# A column asserting only the absence would pass on a build that had silently
+# fallen back to `store-safe`, which is exactly the flavor this one exists to
+# differ from.
+
+_NO_PAYMENTS_FEATURES = "--no-default-features --features store-safe,p2p-share"
+
+
+def test_the_ffi_witness_has_a_store_no_payments_column():
+    body = _recipe_body("ffi-store-safe-check")
+    build = f"cargo build --locked -p fauna-ffi {_NO_PAYMENTS_FEATURES}"
+    assert build in body, (
+        "ffi-store-safe-check no longer builds the store-no-payments flavor of fauna-ffi"
+    )
+    column = body.split(build, 1)[1].split("cargo build", 1)[0]
+    absent = re.search(r'^\s*absent "store-no-payments"([^\n]*)$', column, re.MULTILINE)
+    present = re.search(r'^\s*present "store-no-payments"([^\n]*)$', column, re.MULTILINE)
+    assert absent and present, (
+        "the store-no-payments column must assert both directions — the money plane "
+        "absent AND the sharing plane present, or it cannot tell this flavor from store-safe"
+    )
+    for token in ("fauna\\.payments\\.", "FfiPaymentsClient", "ZAP_PATS[@]", "PAY_ID_PATS[@]"):
+        assert token in absent.group(1), f"the store-no-payments column no longer asserts {token} absent"
+    for token in ("P2P_ID_PATS[@]", "P2P_FACE_PATS[@]"):
+        assert token in present.group(1), f"the store-no-payments column no longer asserts {token} present"
+
+
+@pytest.mark.parametrize("app, binary", [("tui", "fauna-tui"), ("linux", "fauna-desktop")])
+def test_every_app_shell_witness_has_a_store_no_payments_column(app, binary):
+    body = _recipe_body(f"{app}-store-safe-check")
+    build = f"cargo build --locked -p fauna-{app} --bin {binary} {_NO_PAYMENTS_FEATURES}"
+    assert build in body, f"{app}-store-safe-check no longer builds the store-no-payments flavor"
+    column = body.split(build, 1)[1].split("cargo build", 1)[0]
+    assert "NO_PAYMENTS_ABSENT[@]" in column and "NO_PAYMENTS_PRESENT[@]" in column, (
+        f"{app}-store-safe-check's store-no-payments column must assert both lists: the "
+        "money plane absent and the sharing plane present"
+    )
+    absent = re.search(r"^\s*NO_PAYMENTS_ABSENT=\(([^)]*)\)", body, re.MULTILINE)
+    present = re.search(r"^\s*NO_PAYMENTS_PRESENT=\(([^)]*)\)", body, re.MULTILINE)
+    assert absent and present, f"{app}-store-safe-check lost its store-no-payments lists"
+    absent_pats = set(re.findall(r"'([^']+)'", absent.group(1)))
+    present_pats = set(re.findall(r"'([^']+)'", present.group(1)))
+    assert {"subscription-provider-", "post-tip-", "fauna\\.payments\\."} <= absent_pats
+    assert set(_gated_catalog()["p2p-share"]["id_prefixes"]) <= present_pats, (
+        f"{app}-store-safe-check's store-no-payments column must require every p2p-share "
+        f"catalog prefix present: watched={sorted(present_pats)!r}"
+    )
+    assert not absent_pats & present_pats
+
+
+def test_the_android_store_no_payments_build_type():
+    """`release` minus `payments`: `initWith(release)`, PAYMENTS false, P2P_SHARE
+    true, no suffix — the same no-drift argument `storeSafe` makes."""
+    text = _ANDROID_GRADLE.read_text(encoding="utf-8")
+    assert 'create("storeNoPayments")' in text, "android lost its storeNoPayments build type"
+    block = _kotlin_code_only(text.split('create("storeNoPayments")', 1)[1].split("create(", 1)[0])
+    assert 'initWith(getByName("release"))' in block
+    assert 'buildConfigField("boolean", "PAYMENTS", "false")' in block
+    assert 'buildConfigField("boolean", "P2P_SHARE", "true")' in block
+    assert 'buildConfigField("boolean", "KIDS", "false")' in block
+    assert "versionNameSuffix" not in block and "applicationIdSuffix" not in block, (
+        "storeNoPayments must carry the main Play identity and the fleet version, as storeSafe does"
+    )
+
+    m = re.search(r'getByName\("storeNoPayments"\)\s*\{([^}]*)\}', text)
+    assert m, "no sourceSets entry for the storeNoPayments build type"
+    dirs = set(re.findall(r'java\.srcDir\("([^"]+)"\)', m.group(1)))
+    assert dirs == {
+        "src/noKids/java", "src/noPayments/java", "src/noKidsNoPayments/java",
+        "src/p2pShare/java", "src/noAgent/java", "src/storeAge/java",
+    }, f"storeNoPayments takes the wrong source dirs: {sorted(dirs)!r}"
+
+    # The Play libraries reach it by inheriting `storeSafe`'s configuration, so
+    # no dependency line (and no version) is spelled a second time.
+    assert re.search(
+        r'named\("storeNoPaymentsImplementation"\)\s*\{\s*extendsFrom\(\s*configurations\.getByName\(\s*"storeSafeImplementation"\s*\)',
+        text,
+    ), "storeNoPaymentsImplementation no longer extends storeSafeImplementation"
+
+
+def test_the_android_store_no_payments_recipes():
+    assert "_android-ffi-flavor storeNoPayments store-safe,p2p-share" in _recipe_body(
+        "android-ffi-store-no-payments"
+    )
+    assert "android-ffi-store-no-payments" in _recipe_header("android-store-no-payments")
+    assert "assembleStoreNoPayments" in _recipe_body("android-store-no-payments")
+    assert "android-ffi-store-no-payments" in _recipe_header("android-bundle-store-no-payments")
+    assert "_android-bundle storeNoPayments" in _recipe_body("android-bundle-store-no-payments")
+    assert "android-store-safe-scan.sh no-payments" in _recipe_body("_android-bundle"), (
+        "the storeNoPayments Play bundle no longer scans itself"
+    )
+    check = _recipe_body("android-store-safe-check")
+    assert "_android-ffi-flavor storeNoPayments store-safe,p2p-share arm64" in check
+    assert "assembleStoreNoPayments" in check
+    assert "android-store-safe-scan.sh no-payments" in check
+    # Its staged bindings are a shipping (production) tree, like storeSafe's: no
+    # e2e seam, and no debug sibling (it differs from debug by the payments plane).
+    assert _recipe_body("_android-ffi-bindgen").count("*/src/storeNoPayments/*") >= 2
+
+
+def test_the_android_scan_has_a_no_payments_mode():
+    """`no-payments` = the money plane absent and the sharing plane present, in one
+    scan, so the Play bundle can prove both on itself."""
+    text = _ANDROID_STORE_SAFE_SCAN.read_text(encoding="utf-8")
+    assert re.search(r'case "\$MODE" in absent\|present\|no-payments\)', text)
+    assert re.search(
+        r'^\s*no-payments\)\s+ABSENT=\("\$\{PAY_PATS\[@\]\}" "\$\{PAY_ABSENT_ONLY_PATS\[@\]\}"\); '
+        r'PRESENT=\("\$\{P2P_PATS\[@\]\}"\)',
+        text, re.M,
+    ), "the scan's `no-payments` mode must take the money half absent and the sharing half present"

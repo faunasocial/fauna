@@ -151,7 +151,7 @@ public struct PostCardBody: View {
             postCardId(ContentPolicyBlockedNotice(reported: decision.reported).padding(.vertical, verticalPadding))
         } else if contentVerdict == "collapse" && !contentRevealed {
             postCardId(ContentPolicyCollapsedPlaceholder { contentRevealed = true }.padding(.vertical, verticalPadding))
-        } else if (vm.manager?.isMuted(postId: post.postId) ?? false) && !mutedRevealed {
+        } else if vm.isMuted(postId: post.postId) && !mutedRevealed {
             postCardId(FeedPostMutedPlaceholder(onReveal: {
                 mutedRevealed = true
                 FeedVM.revealedMutedPostIds.insert(post.postId)
@@ -258,7 +258,10 @@ public struct PostCardBody: View {
                 // takes the blob image first — asking the shared manager, which holds the keys,
                 // whether it is sealed (`ui/media.md` § Encryption at rest) — else a bridged
                 // post's `ProxiedImage` (render-model.md § D6c), never an absolute URL.
-                if let source = vm.documentPostImage(post.document), !source.isUnavailable {
+                // The post's `postBlobHome` is handed to every byte leg unchanged — a post homed on
+                // another nest is read from there through the shared plane, never from this nest.
+                let blobHome = postBlobHome(post: post)
+                if let source = vm.documentPostImage(post.document, home: blobHome), !source.isUnavailable {
                     let openLightbox = { lightboxItem = LightboxItem(source: source) }
                     PostImage(source: source, activate: openLightbox)
                         .frame(maxHeight: 200)
@@ -268,14 +271,14 @@ public struct PostCardBody: View {
                     // Provenance is a blob's (`ui/media.md` § C2PA provenance); a proxied
                     // picture carries no badge, as on tui.
                     if let hash = documentMediaImageHash(post.document) {
-                        PostImageC2paBadge(hash: hash, check: { await vm.hasC2pa($0) })
+                        PostImageC2paBadge(hash: hash, check: { await vm.hasC2pa($0, home: blobHome) })
                     }
                 }
                 // `video-thumbnail` — the D6b `Video` sibling of `Image` (render-model.md § D6b);
                 // mutually exclusive with the image branch above, same fold. A tap plays it in
                 // place off the shared `playback_source` (§ D6c → Inline playback).
                 if let hash = documentMediaVideoHash(post.document) {
-                    VideoThumbnailView(hash: hash, resolve: { await vm.videoPlaybackURL(hash) })
+                    VideoThumbnailView(hash: hash, resolve: { await vm.videoPlaybackURL(hash, home: postBlobHome(post: post)) })
                 } else if let path = documentMediaProxiedVideoPath(post.document) {
                     // A bridged post's `ProxiedVideo` (§ D6c → Proxied video): glyph + path, inert.
                     VideoThumbnailView(proxiedPath: path)

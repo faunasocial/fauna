@@ -133,8 +133,15 @@ fn arm() -> Arm {
 
 /// The pure selection: a desktop session wins, otherwise the terminal escape in
 /// the terminal's own dialect.
+///
+/// **macOS never takes the desktop arm** — a compile-time platform fact, not a
+/// probe: the OS refuses the crate's legacy-client post while `show()` reports
+/// `Ok`, so the escape fallback would never fire and no banner would reach the
+/// user (`tui.md` § System integration → *Notifications*, the 2026-10-08
+/// ruling). Windows is the mirror: its constant-`true` probe always selects
+/// the desktop arm.
 fn select_arm(desktop_session: bool, term: &str) -> Arm {
-    if desktop_session {
+    if desktop_session && !cfg!(target_os = "macos") {
         Arm::Desktop
     } else {
         Arm::TerminalEscape(detect_dialect(term))
@@ -159,6 +166,7 @@ fn term() -> String {
 
 /// The desktop arm: the summary/body shape linux's `notify_message` uses,
 /// restricted to the builder calls every `notify-rust` platform arm offers.
+#[cfg(not(target_os = "macos"))]
 fn show_desktop(label: &str, snippet: &str) -> Result<(), ()> {
     notify_rust::Notification::new()
         .summary(&fauna_i18n::strings::notifications::message_from(label))
@@ -167,6 +175,14 @@ fn show_desktop(label: &str, snippet: &str) -> Result<(), ()> {
         .show()
         .map(|_| ())
         .map_err(|_| ())
+}
+
+/// macOS has no desktop arm ([`select_arm`] never picks it), so `notify-rust`
+/// is unused there; this keeps [`dispatch`]'s call site platform-uniform and,
+/// were it ever reached, degrades to the escape like any failed desktop post.
+#[cfg(target_os = "macos")]
+fn show_desktop(_label: &str, _snippet: &str) -> Result<(), ()> {
+    Err(())
 }
 
 /// Pick the dialect from the terminal's `TERM` self-identification.
@@ -278,6 +294,24 @@ mod tests {
         assert_eq!(detect_dialect("rio"), Dialect::Osc777);
     }
 
+    /// macOS refuses the desktop post while `show()` reports success (`tui.md`
+    /// § System integration → *Notifications*, the 2026-10-08 ruling), so the
+    /// escape is selected even with a desktop session present. Asks
+    /// `select_arm(true, …)` directly: the public `keyring_probe` answers
+    /// `false` in every test build, so a test through it could never go red.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_always_selects_the_escape_arm() {
+        for term in ["", "xterm-256color", "foot"] {
+            assert_eq!(
+                select_arm(true, term),
+                Arm::TerminalEscape(detect_dialect(term)),
+                "{term:?}"
+            );
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_desktop_session_selects_the_desktop_arm_whatever_the_terminal() {
         for term in ["", "xterm-256color", "foot"] {

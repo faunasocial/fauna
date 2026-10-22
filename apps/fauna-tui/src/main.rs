@@ -40,6 +40,7 @@ mod media;
 mod media_handoff;
 mod mls_query;
 mod moderation;
+mod nest_rules;
 mod nostr;
 mod notifications;
 /// The T1 body-rendered browse trigger's app half: which records this frame
@@ -60,6 +61,7 @@ mod region;
 mod remote_image;
 mod report;
 mod routes;
+mod rule_editor;
 mod screen_lock;
 mod search;
 mod session;

@@ -10,9 +10,9 @@
   // of the three ids. The rank knob defaults CHECKED — an existing paying
   // subscriber isn't charged twice for a post their subscription would cover;
   // pay-per-view is the deliberate opt-in.
-  import AskingPriceInput from '$lib/components/payments/AskingPriceInput.svelte';
-  import { t } from '$lib/i18n/strings';
-  import { PAYMENTS_IDS } from '$lib/components/payments/generatedIds';
+  import AskingPriceInput from '#lib/components/payments/AskingPriceInput.svelte';
+  import { t } from '#lib/i18n/strings';
+  import { PAYMENTS_IDS } from '#lib/components/payments/generatedIds';
 
   interface Props {
     sellPrice: string;

@@ -8,9 +8,9 @@
   // imported only from behind `__FAUNA_PAYMENTS__`. An excised editor sends
   // neither field, and `tiers.update` reads a missing one as keep
   // (monetization.md § The asking price), so a priced tier survives an edit.
-  import AskingPriceInput from '$lib/components/payments/AskingPriceInput.svelte';
-  import { t } from '$lib/i18n/strings';
-  import { PAYMENTS_IDS } from '$lib/components/payments/generatedIds';
+  import AskingPriceInput from '#lib/components/payments/AskingPriceInput.svelte';
+  import { t } from '#lib/i18n/strings';
+  import { PAYMENTS_IDS } from '#lib/components/payments/generatedIds';
 
   interface Props {
     priceHint: string;

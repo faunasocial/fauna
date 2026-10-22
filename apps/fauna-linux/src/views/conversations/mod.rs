@@ -21,6 +21,7 @@ pub mod message_bubble;
 pub mod recipient_picker;
 mod rename_overlay;
 mod room_labelers;
+mod room_search;
 mod room_settings_overlay;
 mod subject_divider;
 mod thread_header;
@@ -43,18 +44,28 @@ use crate::conversations::observer;
 ///
 /// `member_reviews` is the window's post-succession review roster, shared with
 /// the contacts badge — the one piece of this page's state it does not own.
+///
+/// `open_room_post` is the feed page's deep-link door for a room-search post hit:
+/// the post's id and the room's home when another nest holds it.
 pub fn build_conversations_view(
     manager: Arc<ConversationsManager>,
     client: std::rc::Rc<crate::client::FaunaClient>,
     rt: tokio::runtime::Handle,
     member_reviews: std::rc::Rc<crate::settings::member_review::Roster>,
+    open_room_post: std::rc::Rc<dyn Fn(String, Option<String>)>,
 ) -> adw::NavigationSplitView {
     // The session's own actor — never `active_actor_id_hex()`, which can name
     // a different account than the one this process serves on a bound
     // (secondary) launch (`account-scoping.md:818-837`).
     let actor_id_hex = client.actor_id().unwrap_or_default();
     let list_pane = list::ConversationList::new(manager.clone(), actor_id_hex, rt.clone());
-    let detail_pane = detail::ConversationDetail::new(manager.clone(), client, rt, member_reviews);
+    let detail_pane = detail::ConversationDetail::new(
+        manager.clone(),
+        client,
+        rt.clone(),
+        member_reviews,
+        open_room_post,
+    );
 
     // Wrap in NavigationSplitView (mirrors the previous layout shape).
     let list_page = adw::NavigationPage::builder()
@@ -69,6 +80,21 @@ pub fn build_conversations_view(
     let split = adw::NavigationSplitView::new();
     split.set_sidebar(Some(&list_page));
     split.set_content(Some(&detail_page));
+
+    // Re-entering the page re-reads the open thread's withheld badges
+    // (`dm-message-withheld-badge`): a decision made while the author was elsewhere
+    // lands on a thread that stays selected, so the thread-open read alone
+    // (`detail.rs`) would never see it. The snapshot notify repaints.
+    {
+        let manager = manager.clone();
+        let rt = rt.clone();
+        split.connect_map(move |_| {
+            if let Some(thread_id) = manager.selected_thread_id() {
+                let manager = manager.clone();
+                rt.spawn(async move { manager.refresh_withheld_messages(thread_id).await });
+            }
+        });
+    }
 
     // Subscribe to snapshot changes. The receiver runs on the GTK main
     // loop via `spawn_wake_loop`; on every coalesced wake re-render both panes.

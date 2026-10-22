@@ -1,7 +1,13 @@
-//! Which blobs a legal takedown withholds from the blob-serve door.
+//! Which blobs a legal takedown — or the admin's block of a reported item —
+//! withholds from the blob-serve door.
 //!
 //! Owner: `docs/goal/behavior/moderation.md` § Legal takedown → *The
-//! blob-serve door*.
+//! blob-serve door*; the second ground is § Admin block of a reported item,
+//! which feeds blocked records in as a second input to the same derived set and
+//! records the ground per blob so the door answers 403 for a block and 451 for
+//! a takedown. The anonymous doors cannot tell an author apart, so a blocked
+//! record's attachments are withheld from every requester (decision 4's stated
+//! limit).
 //!
 //! A takedown withholds a record's **body** at the read primitive every
 //! per-record serve path flows through (`segments::conv::read_after_seq` for
@@ -60,8 +66,43 @@
 //! that already walks.
 
 use crate::db::CacheDb;
+pub use crate::db::blob_withhold::WithholdGround;
 use anyhow::{Context, Result};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+
+/// Each post's withhold ground, read once per walk — the post half of the
+/// predicate's flag input (the conversation half reads its own in SQL).
+#[derive(Default, Debug)]
+pub struct PostWithholds {
+    taken_down: HashSet<[u8; 32]>,
+    blocked: HashSet<[u8; 32]>,
+}
+
+impl PostWithholds {
+    pub async fn load(db: &CacheDb) -> Result<Self> {
+        Ok(Self {
+            taken_down: db
+                .taken_down_post_ids()
+                .await
+                .context("listing taken-down post ids for the withhold walk")?,
+            blocked: db
+                .admin_blocked_post_ids()
+                .await
+                .context("listing admin-blocked post ids for the withhold walk")?,
+        })
+    }
+
+    /// The ground withholding `post_id`, the stronger one when both apply.
+    pub fn ground(&self, post_id: &[u8; 32]) -> Option<WithholdGround> {
+        if self.taken_down.contains(post_id) {
+            Some(WithholdGround::Legal)
+        } else if self.blocked.contains(post_id) {
+            Some(WithholdGround::AdminBlock)
+        } else {
+            None
+        }
+    }
+}
 
 /// The two sides of the withhold predicate, accumulated over a walk of every
 /// live record on the box.
@@ -71,35 +112,44 @@ use std::collections::HashSet;
 /// handler feeds it from a walk of its own — one predicate, two callers.
 #[derive(Default, Debug)]
 pub struct WithholdSets {
-    /// Blobs named by a live record that IS under a legal takedown.
-    flagged: HashSet<[u8; 32]>,
-    /// Blobs named by a live record that is NOT under a legal takedown.
+    /// Blobs named by a live record that IS withheld, on the strongest ground
+    /// any such record carries.
+    flagged: HashMap<[u8; 32], WithholdGround>,
+    /// Blobs named by a live record that is NOT withheld.
     unflagged: HashSet<[u8; 32]>,
 }
 
 impl WithholdSets {
     /// Fold in one live record's blob references.
     ///
-    /// `taken_down` is the naming record's own flag — `content_meta`'s for a
-    /// post, `segment_records`' for a conversation record.
-    pub fn add_record(&mut self, taken_down: bool, refs: impl IntoIterator<Item = [u8; 32]>) {
-        let side = if taken_down {
-            &mut self.flagged
-        } else {
-            &mut self.unflagged
-        };
-        side.extend(refs);
+    /// `ground` is the naming record's own withhold — `content_meta`'s flags
+    /// for a post, `segment_records`' for a conversation record — or `None`
+    /// for a record served as normal.
+    pub fn add_record(
+        &mut self,
+        ground: Option<WithholdGround>,
+        refs: impl IntoIterator<Item = [u8; 32]>,
+    ) {
+        match ground {
+            Some(ground) => {
+                for r in refs {
+                    let slot = self.flagged.entry(r).or_insert(ground);
+                    *slot = (*slot).max(ground);
+                }
+            }
+            None => self.unflagged.extend(refs),
+        }
     }
 
     /// Fold in the conversation half — every attachment hash a live conv
-    /// record names, split on that record's own takedown flag.
+    /// record names, split on that record's own withhold.
     pub async fn add_conversations(&mut self, db: &CacheDb) -> Result<()> {
-        for (hash, taken_down) in db
-            .conv_attachment_refs_by_takedown()
+        for (hash, ground) in db
+            .conv_attachment_refs_by_withhold()
             .await
-            .context("reading live conversation attachment refs by takedown")?
+            .context("reading live conversation attachment refs by withhold")?
         {
-            self.add_record(taken_down, [hash]);
+            self.add_record(ground, [hash]);
         }
         Ok(())
     }
@@ -125,7 +175,7 @@ impl WithholdSets {
             .await
             .context("reading blob digests of posts deleted while taken down")?
         {
-            self.add_record(true, [digest]);
+            self.add_record(Some(WithholdGround::Legal), [digest]);
         }
         Ok(())
     }
@@ -133,8 +183,13 @@ impl WithholdSets {
     /// The withheld set: named by a taken-down record, named by nothing live
     /// that is not taken down. Sorted, so a rebuild is byte-stable and two
     /// runs over one store are trivially comparable in a test.
-    pub fn resolve(&self) -> Vec<[u8; 32]> {
-        let mut out: Vec<[u8; 32]> = self.flagged.difference(&self.unflagged).copied().collect();
+    pub fn resolve(&self) -> Vec<([u8; 32], WithholdGround)> {
+        let mut out: Vec<([u8; 32], WithholdGround)> = self
+            .flagged
+            .iter()
+            .filter(|(h, _)| !self.unflagged.contains(*h))
+            .map(|(h, g)| (*h, *g))
+            .collect();
         out.sort_unstable();
         out
     }
@@ -153,13 +208,13 @@ impl WithholdSets {
     pub async fn store(&self, db: &CacheDb, complete: bool) -> Result<usize> {
         let withheld = self.resolve();
         if complete {
-            db.replace_blob_legal_withhold(&withheld)
+            db.replace_blob_withhold(&withheld)
                 .await
-                .context("replacing the legal-takedown blob withhold set")
+                .context("replacing the blob withhold set")
         } else {
-            db.add_blob_legal_withhold(&withheld)
+            db.add_blob_withhold(&withheld)
                 .await
-                .context("extending the legal-takedown blob withhold set")
+                .context("extending the blob withhold set")
         }
     }
 }
@@ -187,10 +242,7 @@ pub async fn recompute(
 ) -> Result<usize> {
     let mut sets = WithholdSets::default();
     let mut complete = true;
-    let taken_down = db
-        .taken_down_post_ids()
-        .await
-        .context("listing taken-down post ids for the withhold rebuild")?;
+    let withholds = PostWithholds::load(db).await?;
     let post_ids = db
         .list_all_post_ids()
         .await
@@ -214,8 +266,10 @@ pub async fn recompute(
             }
         };
         if let Some(post) = crate::db::posts::decode_stored_post(&body) {
-            let flagged = taken_down.contains(post_id);
-            sets.add_record(flagged, post.blob_refs().into_iter().map(|h| h.digest()));
+            sets.add_record(
+                withholds.ground(post_id),
+                post.blob_refs().into_iter().map(|h| h.digest()),
+            );
         }
     }
     sets.add_conversations(db).await?;
@@ -225,7 +279,38 @@ pub async fn recompute(
 
 #[cfg(test)]
 mod tests {
-    use super::WithholdSets;
+    use super::{WithholdGround, WithholdSets};
+
+    const LEGAL: Option<WithholdGround> = Some(WithholdGround::Legal);
+    const BLOCK: Option<WithholdGround> = Some(WithholdGround::AdminBlock);
+
+    /// The second ground (`moderation.md` § Admin block of a reported item):
+    /// a blocked record's blob is withheld as a block, the per-record exemption
+    /// binds it exactly as a takedown's, and a blob both grounds reach is
+    /// withheld on the stronger — the door answers 451, never 403, for bytes a
+    /// takedown compelled off the box.
+    #[test]
+    fn a_block_withholds_on_its_own_ground_and_a_takedown_dominates() {
+        let blocked_only = h(11);
+        let both = h(12);
+        let shared_with_live = h(13);
+        let mut sets = WithholdSets::default();
+        sets.add_record(BLOCK, [blocked_only, both, shared_with_live]);
+        sets.add_record(LEGAL, [both]);
+        sets.add_record(None, [shared_with_live]);
+        assert_eq!(
+            sets.resolve(),
+            vec![
+                (blocked_only, WithholdGround::AdminBlock),
+                (both, WithholdGround::Legal),
+            ]
+        );
+        // Fold order does not matter: the legal ground wins either way.
+        let mut rev = WithholdSets::default();
+        rev.add_record(LEGAL, [both]);
+        rev.add_record(BLOCK, [both]);
+        assert_eq!(rev.resolve(), vec![(both, WithholdGround::Legal)]);
+    }
 
     fn h(b: u8) -> [u8; 32] {
         [b; 32]
@@ -243,15 +328,15 @@ mod tests {
         let only_live = h(3);
 
         let mut a = WithholdSets::default();
-        a.add_record(true, [only_flagged, shared]);
-        a.add_record(false, [shared, only_live]);
-        assert_eq!(a.resolve(), vec![only_flagged]);
+        a.add_record(LEGAL, [only_flagged, shared]);
+        a.add_record(None, [shared, only_live]);
+        assert_eq!(a.resolve(), vec![(only_flagged, WithholdGround::Legal)]);
 
         // Same facts, opposite fold order.
         let mut b = WithholdSets::default();
-        b.add_record(false, [shared, only_live]);
-        b.add_record(true, [only_flagged, shared]);
-        assert_eq!(b.resolve(), vec![only_flagged]);
+        b.add_record(None, [shared, only_live]);
+        b.add_record(LEGAL, [only_flagged, shared]);
+        assert_eq!(b.resolve(), vec![(only_flagged, WithholdGround::Legal)]);
     }
 
     /// Two flagged records naming one blob withhold it once, and a blob no
@@ -260,14 +345,14 @@ mod tests {
     #[test]
     fn nothing_is_withheld_without_a_flagged_namer() {
         let mut sets = WithholdSets::default();
-        sets.add_record(false, [h(4), h(5)]);
+        sets.add_record(None, [h(4), h(5)]);
         assert!(sets.resolve().is_empty());
 
         let dup = h(6);
         let mut sets = WithholdSets::default();
-        sets.add_record(true, [dup]);
-        sets.add_record(true, [dup]);
-        assert_eq!(sets.resolve(), vec![dup]);
+        sets.add_record(LEGAL, [dup]);
+        sets.add_record(LEGAL, [dup]);
+        assert_eq!(sets.resolve(), vec![(dup, WithholdGround::Legal)]);
     }
 
     /// An INCOMPLETE walk may add but must never release. The failure this
@@ -283,7 +368,7 @@ mod tests {
         db.replace_blob_legal_withhold(&[already]).await.unwrap();
 
         let mut partial = WithholdSets::default();
-        partial.add_record(true, [newly]);
+        partial.add_record(LEGAL, [newly]);
         partial.store(&db, false).await.unwrap();
         assert!(
             db.blob_is_legally_withheld(&already).await.unwrap(),

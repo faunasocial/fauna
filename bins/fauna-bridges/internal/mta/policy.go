@@ -97,6 +97,13 @@ type rateBucket struct {
 	count    uint32
 }
 
+// limiterSweepThreshold is the entry count past which RateLimiter and
+// SenderDomainChecker drop their expired entries before adding a new one — the
+// sweep-under-lock pattern of internal/authlock's Lockout (sweepExpiredLocked),
+// at its threshold. Both maps are keyed on what a stranger chooses (a source
+// IP, a MAIL FROM domain), so without it they grow for the process's life.
+const limiterSweepThreshold = 4096
+
 // NewRateLimiter constructs a rate limiter with the given limit
 // (allowed calls per window), window duration, and Clock.
 //
@@ -139,6 +146,9 @@ func (rl *RateLimiter) Allow(ip string) bool {
 	now := rl.clock.Now()
 	b, ok := rl.buckets[ip]
 	if !ok {
+		if len(rl.buckets) >= limiterSweepThreshold {
+			rl.sweepExpiredLocked(now)
+		}
 		b = &rateBucket{windowAt: now}
 		rl.buckets[ip] = b
 	}
@@ -151,6 +161,17 @@ func (rl *RateLimiter) Allow(ip string) bool {
 	}
 	b.count++
 	return true
+}
+
+// sweepExpiredLocked drops every bucket whose window has elapsed — a bucket
+// Allow would reset on its next call anyway, so nothing a live window counts is
+// lost. Caller holds rl.mu.
+func (rl *RateLimiter) sweepExpiredLocked(now time.Time) {
+	for k, b := range rl.buckets {
+		if now.Sub(b.windowAt) >= rl.window {
+			delete(rl.buckets, k)
+		}
+	}
 }
 
 // ── DNSBL ──────────────────────────────────────────────────────────
@@ -649,10 +670,29 @@ func (c *SenderDomainChecker) CheckSenderDomain(domain string) (ok bool, reason 
 	// domain for the next CacheTTL.
 	if !hadError {
 		c.mu.Lock()
-		c.cache[domain] = senderDomainEntry{ok: ok, expires: time.Now().Add(c.CacheTTL)}
+		now := time.Now()
+		if len(c.cache) >= limiterSweepThreshold {
+			c.sweepExpiredLocked(now)
+		}
+		// Still full of live entries: skip caching this answer rather than
+		// grow — the cache only saves a lookup, so leaving one out costs a
+		// repeat query, never a wrong verdict.
+		if len(c.cache) < limiterSweepThreshold {
+			c.cache[domain] = senderDomainEntry{ok: ok, expires: now.Add(c.CacheTTL)}
+		}
 		c.mu.Unlock()
 	}
 	return ok, reason
+}
+
+// sweepExpiredLocked drops every cached answer past its expiry. Caller holds
+// c.mu for writing.
+func (c *SenderDomainChecker) sweepExpiredLocked(now time.Time) {
+	for k, e := range c.cache {
+		if !now.Before(e.expires) {
+			delete(c.cache, k)
+		}
+	}
 }
 
 func (c *SenderDomainChecker) lookup(domain string) (ok bool, reason string, hadError bool) {

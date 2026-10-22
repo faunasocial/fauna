@@ -1675,7 +1675,7 @@ pub async fn learn_succession_link(
                 nest,
                 identity,
                 &predecessors,
-                base.as_deref(),
+                base.as_ref().map(|b| b.body.as_slice()),
                 Some(home),
             )
             .await
@@ -1707,7 +1707,11 @@ pub async fn learn_succession_link(
 /// needs, so a writer handed that list admits it.
 ///
 /// `Ok(None)` is a never-published profile, which is a first publish. An `Err`
-/// is the read failing; recording the link is best-effort, as in the hop.
+/// is the read failing; recording the link is best-effort, as in the hop. The
+/// base carries the owner's last identity-signed row the nest served beside a
+/// delegated body, which the form's projection
+/// (`fauna_client_profile::decode_own_profile_display`) and its save both read
+/// (`profile.md` § Where logic lives → *Profile publish/edit* → *Edit surface*).
 ///
 /// Wasm-clean and generic over the transport, unlike its neighbours: all 7
 /// apps' edit forms load their base here — tui and linux directly, the FFI apps
@@ -1717,7 +1721,10 @@ pub async fn load_profile_edit_base<R>(
     nest: R,
     accounts: &fauna_client_accounts::AccountRegistry,
     identity: &fauna_core::identity::ActorKeypair,
-) -> Result<Option<Vec<u8>>, fauna_client_profile::LearnPredecessorsError<R::Error>>
+) -> Result<
+    Option<fauna_client_profile::EditBase>,
+    fauna_client_profile::LearnPredecessorsError<R::Error>,
+>
 where
     R: fauna_protocol::RpcRequester,
     R::Error: fauna_protocol::RpcErrorClass,
@@ -1730,13 +1737,17 @@ where
 /// Read, prove, persist — the one body behind [`learn_succession_link`],
 /// [`load_profile_edit_base`] and web's sign-in hop (`fauna-wasm`'s
 /// `run_aftermath_web`, which cannot reach the native
-/// [`learn_succession_link`]). Returns the stored bytes and whether a link was
+/// [`learn_succession_link`]). Returns the edit base (the stored bytes and the
+/// owner's last identity-signed row served beside them) and whether a link was
 /// newly recorded.
 pub async fn read_own_profile_learning_link<R>(
     nest: R,
     accounts: &fauna_client_accounts::AccountRegistry,
     identity: &fauna_core::identity::ActorKeypair,
-) -> Result<(Option<Vec<u8>>, bool), fauna_client_profile::LearnPredecessorsError<R::Error>>
+) -> Result<
+    (Option<fauna_client_profile::EditBase>, bool),
+    fauna_client_profile::LearnPredecessorsError<R::Error>,
+>
 where
     R: fauna_protocol::RpcRequester,
     R::Error: fauna_protocol::RpcErrorClass,
@@ -1745,11 +1756,15 @@ where
     let recorded =
         fauna_client_profile::predecessors_from_hex(&accounts.predecessors_of(&actor_hex));
     let base = fauna_client_profile::fetch_own_profile_base(nest, identity, &recorded).await?;
+    let edit_base = base.edit_base();
     if base.proven.is_empty() {
-        return Ok((base.body, false));
+        return Ok((edit_base, false));
     }
     let hexes: Vec<String> = base.proven.iter().map(|id| id.to_hex()).collect();
-    let learned = match accounts.record_predecessors(&actor_hex, &hexes) {
+    let learned = match accounts
+        .record_predecessors_serialized(&actor_hex, &hexes)
+        .await
+    {
         Ok(()) => {
             tracing::info!(
                 predecessors = hexes.len(),
@@ -1762,7 +1777,7 @@ where
             false
         }
     };
-    Ok((base.body, learned))
+    Ok((edit_base, learned))
 }
 
 /// [`sweep_after_succession`]'s body, over the two things it actually needs from
@@ -2434,6 +2449,7 @@ mod tests {
                 load_hint: None,
                 inbox_mode: InboxMode::ContactsOnly,
                 recovery_head: None,
+                audience: fauna_core::data::ProfileAudience::ThisNest,
                 updated_at: Timestamp(0),
             },
         )
@@ -2443,6 +2459,7 @@ mod tests {
             fauna_client_profile::build_edited_profile(
                 &successor,
                 Some(&inherited),
+                None,
                 &[],
                 Some("Ada".into()),
                 None,
@@ -2468,7 +2485,7 @@ mod tests {
                     "fauna.profile.get",
                     &fauna_protocol::profile::ProfileGetReply {
                         body: ByteBuf::from(inherited.clone()),
-                        extra: Default::default(),
+                        ..Default::default()
                     },
                 )
                 .reply(
@@ -2489,7 +2506,9 @@ mod tests {
             &successor,
         ))
         .expect("the base reads");
-        assert_eq!(base.as_deref(), Some(inherited.as_slice()));
+        let base = base.expect("a published base");
+        assert_eq!(base.body, inherited);
+        assert_eq!(base.last_direct_body, None, "a direct base carries no row");
         assert_eq!(
             registry.predecessors_of(&successor_hex),
             vec![predecessor.actor_id_hex()],
@@ -2502,7 +2521,8 @@ mod tests {
             fauna_client_profile::predecessors_from_hex(&registry.predecessors_of(&successor_hex));
         fauna_client_profile::build_edited_profile(
             &successor,
-            base.as_deref(),
+            Some(&base.body),
+            base.last_direct_body.as_deref(),
             &recorded,
             Some("Ada".into()),
             Some("still counts things".into()),

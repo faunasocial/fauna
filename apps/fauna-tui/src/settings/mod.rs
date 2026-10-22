@@ -92,9 +92,10 @@ use fauna_client_account::AccountClient;
 use fauna_client_contacts::ContactsClient;
 use fauna_client_email::EmailClient;
 use fauna_client_email::email::{
-    EmailFilter, EmailFilterAction, EmailFilterRule, FilterActionInputs,
+    EmailFilter, EmailFilterAction, EmailFilterRule, FilterActionInputs, FilterRuleInputs,
     SUPPORTED_ACTION_KINDS as FILTER_ACTION_TYPES, SUPPORTED_RULE_KINDS as FILTER_RULE_TYPES,
-    describe_filter_action, describe_filter_rule, encode_filter_action, encode_filter_rule,
+    describe_filter_action, describe_filter_rule_inputs, encode_filter_action,
+    encode_filter_rule_inputs, parse_filter_priority,
 };
 use fauna_client_mail_settings::{
     CredentialKind, ExportFormat, ExportSessionState, ExportStep, ImportSessionState,
@@ -103,7 +104,7 @@ use fauna_client_mail_settings::{
     MailImportMachine, MailImportSnapshot, MailListMembersAction, MailListMembersMachine,
     MailListMembersSnapshot, MailListsAction, MailListsMachine, MailListsSnapshot,
     MailSettingsAction, MailSettingsMachine, MailSettingsSnapshot, MailSpamAction, MailSpamMachine,
-    SecretBytes,
+    MicrosoftSignInState, SecretBytes,
 };
 use fauna_client_pair::{LinkedNestsAction, LinkedNestsMachine, LinkedNestsSnapshot, TrustLens};
 use fauna_client_recovery::linked_fanout::native::NativeLinkedNestDial;
@@ -567,7 +568,7 @@ pub struct QuotaView {
 /// `credential-store-rekey-modal` paints iff so, the media confirm-modal
 /// idiom. [`SecretString`]s so disarming (cancel, success, the Account nav
 /// edge) zeroizes the passphrases rather than merely dropping them; the
-/// painted/registered text is a same-length bullet mask (the tui-unlock
+/// painted/registered text is a same-length bullet mask (the unlock
 /// contract), so the raw values never enter the automation registry or
 /// `/app/state`.
 #[derive(Default)]
@@ -1039,6 +1040,19 @@ impl SettingsState {
             self.account_runtime_source(),
         ))
     }
+
+    /// The mail import's remembered source (`fauna.state.mail-import-source`)
+    /// over this session's runtime slot, waiting for the runtime when it is
+    /// not up yet.
+    pub(crate) fn mail_import_source_store(
+        &self,
+    ) -> Arc<dyn fauna_client_config::MailImportSourceStore> {
+        Arc::new(
+            fauna_sync_engine::account_runtime::AccountMailImportSourceStore::new(
+                self.account_runtime_source(),
+            ),
+        )
+    }
 }
 
 impl Default for SettingsState {
@@ -1234,10 +1248,20 @@ struct PrivacyState {
     /// toggles it) — mirrors linux's `form_box.set_visible`.
     show_add_form: bool,
     filter_name_input: String,
-    /// The create-dialog rule-type tag — one of [`FILTER_RULE_TYPES`], the
-    /// PascalCase set `encode_filter_rule` accepts.
-    filter_rule_type: String,
-    filter_rule_value: String,
+    /// The form's condition inputs — the `filter-rule-type` tag (one of
+    /// [`FILTER_RULE_TYPES`]) and the `filter-rule-value` buffer, plus
+    /// `filter-rule-header-value` for a header-contains condition and
+    /// `filter-rule-spam-score` for a spam-score one — held as the shared
+    /// `FilterRuleInputs` the encoder reads and `describe_filter_rule_inputs`
+    /// fills on edit.
+    filter_rule: FilterRuleInputs,
+    /// The `filter-priority-input` buffer — the rule's order, parsed by the
+    /// shared `parse_filter_priority` (blank is 0).
+    filter_priority_input: String,
+    /// The `filter-continue-toggle` checkbox — the rule's `continue` flag
+    /// (`email-filters.md` § Email filter rules), off by default
+    /// (first-match-wins).
+    filter_continue: bool,
     /// The form's action inputs — the `filter-action-select` tag (one of
     /// [`FILTER_ACTION_TYPES`]) plus, for a Forward, the
     /// `filter-forward-address` buffer and the `filter-keep-local-copy`
@@ -1262,9 +1286,10 @@ impl Default for PrivacyState {
             filters: Vec::new(),
             show_add_form: false,
             filter_name_input: String::new(),
-            filter_rule_type: FILTER_RULE_TYPES[0].to_string(),
+            filter_rule: FilterRuleInputs::default(),
+            filter_priority_input: String::new(),
+            filter_continue: false,
             filter_action: FilterActionInputs::default(),
-            filter_rule_value: String::new(),
             editing_filter_id: None,
         }
     }
@@ -1281,8 +1306,9 @@ impl PrivacyState {
         self.show_add_form = false;
         self.editing_filter_id = None;
         self.filter_name_input.clear();
-        self.filter_rule_value.clear();
-        self.filter_rule_type = FILTER_RULE_TYPES[0].to_string();
+        self.filter_rule = FilterRuleInputs::default();
+        self.filter_priority_input.clear();
+        self.filter_continue = false;
         self.filter_action = FilterActionInputs::default();
     }
 
@@ -1750,8 +1776,10 @@ impl SettingsState {
             &handle,
         );
         // The Import sub-page's shared machine — the Export reasoning exactly:
-        // user-tier and infallible, so no secret is decoded here.
-        self.mail_import = mail_import::MailImportState::build(Arc::clone(&nest));
+        // user-tier and infallible, so no secret is decoded here. The account
+        // remembers the source it last connected to.
+        self.mail_import =
+            mail_import::MailImportState::build(Arc::clone(&nest), self.mail_import_source_store());
         // The archive-import wizard's shared machine. Unlike every machine
         // above, construction can FAIL — it needs the actor's identity key
         // (the archive folder rests owner-sealed) and this device's sync id —
@@ -2330,14 +2358,34 @@ pub fn mail_spam_resync_op(state: &SettingsState) -> Option<Op> {
 ///
 /// The visit's hydrate op minus the visit's `reset_form`, the
 /// [`mail_spam_resync_op`] shape: a push never clears the date drafts the user
-/// is typing. `None` unless the Export sub-page is the one shown (the flag is
+/// is typing. Folded as a repaint ([`Op::ResyncMailExport`]): one progress push
+/// lands per page, and a push between Cancel's two presses must not disarm it.
+/// `None` unless the Export sub-page is the one shown (the flag is
 /// page-gated; a visit re-reads anyway) or before login (no machine).
 pub fn mail_export_resync_op(state: &SettingsState) -> Option<Op> {
     if state.sub != SubPage::MailExport {
         return None;
     }
     let machine = state.mail_export.machine.clone()?;
-    Some(Op::HydrateMailExport { machine })
+    Some(Op::ResyncMailExport { machine })
+}
+
+/// Re-read the Import wizard off a *push* (or a reconnect) rather than a visit
+/// — `fauna_protocol::StaleSurfaces::mail_import`: an import another device
+/// started, paused, failed or dismissed (`mailbox-migration.md` § A failed
+/// import is a record the wizard shows until the user moves on). The
+/// machine's own `Refresh` decides what to adopt, and ignores the nudge while
+/// it holds a run — the [`mail_export_resync_op`] shape, folded as a repaint
+/// ([`Op::ResyncMailImport`]): one progress push lands per batch, and a push
+/// between Cancel's two presses must not disarm it. `None` unless the Import
+/// sub-page is the one shown (the flag is page-gated; a visit re-reads anyway)
+/// or before login (no machine).
+pub fn mail_import_resync_op(state: &SettingsState) -> Option<Op> {
+    if state.sub != SubPage::MailImport {
+        return None;
+    }
+    let machine = state.mail_import.machine.clone()?;
+    Some(Op::ResyncMailImport { machine })
 }
 
 /// Re-read the Connected apps page off the same push — the consent card moved
@@ -2489,13 +2537,18 @@ pub fn spawn_mail_export_progress_refresh(
 /// `Running`. Gating on both, not just the sub-page, means the tick goes
 /// quiet the moment the run is paused/done/cancelled/errored — there is
 /// nothing left for `run_import`'s background task to mutate.
+///
+/// The same tick carries the Outlook source's Microsoft sign-in while it is in
+/// flight (`mail_import::microsoft_sign_in_in_flight`): `run_microsoft_sign_in`
+/// polls in a background task, and its grant connects and moves the step on
+/// with nobody pressing anything. The gate reads the RENDERED snapshot, so
+/// the tick that paints the sign-in's end is the one that turns it off.
 pub fn mail_import_progress_active(state: &SettingsState) -> bool {
     state.sub == SubPage::MailImport
-        && state
-            .mail_import
-            .snapshot
-            .as_ref()
-            .is_some_and(|s| s.session_state == Some(ImportSessionState::Running))
+        && state.mail_import.snapshot.as_ref().is_some_and(|s| {
+            s.session_state == Some(ImportSessionState::Running)
+                || (s.error.is_none() && mail_import::microsoft_sign_in_in_flight(s))
+        })
 }
 
 /// The Import wizard's machine handle, for `main.rs`'s periodic tick — the
@@ -2892,6 +2945,9 @@ pub enum Action {
     /// version is out (`settings/about.rs`; `installers/README.md` § Knowing a
     /// newer version is out). Returns [`Op::CheckForUpdates`].
     CheckForUpdates,
+    /// `settings-terms-link` — a terminal cannot open a browser, so the link
+    /// shows `fauna_core::TERMS_URL` and copies it (OSC 52). Local.
+    CopyTermsUrl,
     /// A rail row → enter the `tui-settings` sub-page.
     OpenTuiSettings,
     /// A rail row → enter the Logs sub-page.
@@ -2979,6 +3035,15 @@ pub enum Action {
     /// `mail-aliases-list-item-overflow-menu` — the overflow Delete
     /// (destructive, irreversible). Same two-click arming as revoke.
     MailAliasesDelete(String),
+    /// `mail-aliases-list-item-extend-button` — push a live disposable's expiry
+    /// out (`MailAliasesAction::Extend`; `mail-aliases.md` § Don't do these).
+    /// Single click, no arming: an extend only lengthens a life.
+    MailAliasesExtend(String),
+    /// `mail-aliases-list-item-show-audit` — open this address's history
+    /// (`MailAliasesAction::ShowAudit`), or close it when it is the one open
+    /// (`HideAudit`). `opening` is read off the snapshot at paint time, the
+    /// `MailAliasesToggleActive` shape, so the declared kind is exact.
+    MailAliasesToggleAudit { alias_id_hex: String, opening: bool },
 
     // ── Mail → Lists (`mail-mass-mailing.md` § `mail-lists` page UX). Every
     // row-scoped variant carries the row's `list_id_hex`, never its index — the
@@ -3078,6 +3143,28 @@ pub enum Action {
     /// Checked first by the shared `parse_forward_per_hour_draft` against the
     /// ceiling the last read returned; inert until that first read.
     MailCommitForwardPerHour,
+    /// `mail-settings-receive-toggle` — flip the receive switch over
+    /// `fauna.bridges.set_mail_switches`, then re-read both
+    /// (`mail-policy-config.md` § Tier 3). Non-optimistic, the
+    /// `MailToggleServeHere` shape; inert until the first read.
+    MailToggleReceive,
+    /// `mail-settings-send-toggle` — the send switch, same shape.
+    MailToggleSend,
+    /// `mail-settings-scan-result-visible-toggle` — the scan-result switch
+    /// (`mail-content-scanning.md` § Per-account opt-out for visible scan
+    /// details), same shape, written through the facade's
+    /// `set_scan_result_visible_and_reload`; the shared conversations
+    /// projection honours it when a thread next opens.
+    MailToggleScanResultVisible,
+    /// `mail-settings-autorespond-toggle` — off deletes the auto-respond rule;
+    /// on sends the message draft, checked first by the shared
+    /// `parse_autorespond_message_draft` (`email-filters.md` § The auto-respond
+    /// setting). Inert until the first read.
+    MailToggleAutorespond,
+    /// `mail-settings-autorespond-message-input` — commit (Enter/click) the
+    /// draft through the facade's `autorespond_set`, which also turns the reply
+    /// on; same draft check.
+    MailCommitAutorespondMessage,
 
     // ── Mail → Export mailbox (`mail-export.md` § UX shape → § Wizard steps).
     // Steps 1–3 are client-side (the machine never touches the seam for them);
@@ -3151,22 +3238,38 @@ pub enum Action {
     /// (step 1). Same label round-trip shape as
     /// [`Self::MailImportSelectSourceKind`], via `mail_import::tls_mode_for_label`.
     MailImportSetTlsMode(ImportTlsMode),
-    /// `mail-import-source-oauth-button` — the Outlook OAuth start. Disabled:
-    /// no app wires the Microsoft Graph dance yet
-    /// (`mailbox-migration.md` § Implementation status today's "Not in scope"
-    /// list) — painted so ui.yaml's element exists, never actuable.
+    /// `mail-import-source-oauth-button` — **Sign in with Microsoft** for the
+    /// Outlook source (`mailbox-migration.md` § Microsoft sign-in — the
+    /// device-code grant): on the Source step commit the address draft and ask
+    /// for a code (the shared `microsoft_sign_in_actions`); on an adopted
+    /// session's Progress step a bare `BeginMicrosoftSignIn`. The executor
+    /// spawns the polling half (`Op::MailImportDispatch`).
     MailImportOAuthStart,
+    /// The id-less **Open in browser** beside `mail-import-source-oauth-code`:
+    /// hands Microsoft's sign-in address to `os_open`. Purely local — no
+    /// machine action, the `MailImportToggleSkipped` shape.
+    MailImportOpenMicrosoftSignIn,
     /// `mail-import-connect-button` — commit whichever Source-step fields the
     /// current provider kind shows (host/port/username/password, per
     /// `MailImportState::connect_actions`), then `LOGIN` + `LIST` against the
     /// source (step 1→2). One awaited op, the `MailExportNext` date-buffer
     /// shape: a dispatch per keystroke would be one op per character.
     MailImportConnect,
+    /// `mail-import-source-forget-button` — dispatch `ForgetSource`: the
+    /// account forgets the remembered server, port, connection security and
+    /// username, and the Source step's drafts are cleared
+    /// (`mailbox-migration.md` § Credential handling).
+    MailImportForgetSource,
     /// One per-mailbox checkbox on the scope step (step 3). Carries the
     /// mailbox **name**, never an index — the `MailExportToggleMailbox` shape
     /// exactly (the indexed `mail-import-scope-mailbox-item` id, user-approved
     /// 2026-08-28).
     MailImportToggleMailbox(String),
+    /// `mail-import-scope-import-duplicates-toggle` — flip the advanced
+    /// "Import duplicates anyway" choice (`SetImportDuplicates` with the
+    /// negated snapshot value, the `MailExportToggleStripHeaders` shape), so
+    /// the painted `state` attr reads back from the machine, never a click echo.
+    MailImportToggleImportDuplicates,
     /// The shared `wizard-next-button` — advance Scope → Confirm. First commits
     /// both the date-from and max-size drafts (`MailImportState::scope_next_actions`)
     /// — the `MailExportNext` shape.
@@ -3185,11 +3288,26 @@ pub enum Action {
     /// `apply_local` spawns `run_import` again, the `MailImportStart` shape —
     /// the fetch-drive loop stops on Pause and needs a fresh spawn to resume.
     MailImportResume,
+    /// `mail-import-restart-button` — restart every source mailbox the old
+    /// provider rebuilt (`mailbox-migration.md` § Resume protocol step 4):
+    /// dispatch `RestartRebuiltMailboxes`, which resumes the paused session
+    /// with those mailboxes' cursors dropped; `apply_local` spawns
+    /// `run_import` again, the `MailImportResume` shape.
+    MailImportRestart,
     /// `mail-import-cancel-button` — arm the two-click inline confirm, or, if
     /// already armed, dispatch `Cancel`. Already-imported messages are kept
     /// (`mailbox-migration.md` § Wizard steps step 5) — the `MailExportCancel`
     /// gate shape, without the blob-unlink side effect (import has no blob).
     MailImportCancel,
+    /// `mail-import-quota-skip-rest-button` — on the full-mailbox notice,
+    /// record what is left as skipped and finish (`mailbox-migration.md`
+    /// § Failure handling → *Nest-side errors*). `apply_local` spawns
+    /// `run_import`, the `MailImportResume` shape.
+    MailImportSkipRest,
+    /// `mail-import-dismiss-button` — a FAILED import's one control: delete
+    /// the record and return to Source (`mailbox-migration.md` § A failed
+    /// import is a record the wizard shows until the user moves on).
+    MailImportDismiss,
     /// `mail-import-review-skipped-button` — show/hide the skip log on the
     /// Done screen (`mailbox-migration.md` § Wizard steps step 6). Purely
     /// local: the log is already on the snapshot, so this is a view toggle,
@@ -3206,6 +3324,11 @@ pub enum Action {
     /// The picker round-trips the crate's canonical platform label, resolved
     /// back to its variant by `archive_import::source_kind_for_label`.
     ArchiveImportSelectSource(ArchiveSourceKind),
+    /// `archive-import-source-export-link` — hand the chosen platform's export
+    /// page (the snapshot's `source_export_url`, a shared constant) to
+    /// `os_open` (step 1). Purely local — no machine action, the
+    /// `MailImportOpenMicrosoftSignIn` shape.
+    ArchiveImportOpenExportPage,
     /// `archive-import-archive-open-button` — commit the path buffer
     /// (`ArchiveImportState::open_actions`), then open + index the zip
     /// (step 2). One awaited op, the `MailImportConnect` shape: tui has no
@@ -3529,6 +3652,14 @@ pub enum Action {
     /// `connected-apps-blocked-item-unblock` — lift one per-client block, by
     /// the blocked client's id.
     ConnectedAppsUnblock(String),
+    /// `atproto-external-apps-enable` — flip the account's external-apps
+    /// switch from the Connected apps page (re-homed there from the AT
+    /// Protocol page, owner-ruled 2026-10-16). No carried value (matching
+    /// [`Action::MailToggleServeHere`]): the current value is read from the
+    /// snapshot, and the `state` attr only flips once the nest confirms the
+    /// write, never a local optimistic guess (needs the machine →
+    /// [`apply_local`]).
+    ConnectedAppsToggleExternalApps,
     /// A rail row → enter the Mail → Aliases sub-page (self-hydrates the shared
     /// machine). The human affordance for a page that, until this landed, could
     /// only be reached from the e2e nav patch.
@@ -3673,6 +3804,10 @@ pub enum Action {
     /// index (a list re-ordered by a concurrent normalize would otherwise
     /// un-mute the wrong word — the `ConnectedAppsRevealSecret` reasoning).
     RemoveMutedWord(String),
+    /// `muted-word-level-select[row]` — set that row's level (`value` is the
+    /// picker's option value, `MutedKeywordLevel::value`). The row resolves
+    /// to its term at dispatch, so the save, like the remove, targets the term.
+    SetMutedWordLevel { row: usize, value: String },
     /// One of the four `inbox-mode-*` buttons — sets the mode optimistically
     /// (instant local feedback, matching linux) and issues
     /// `fauna.inbox.mode.set` (needs the nest → [`apply_local`]).
@@ -3689,6 +3824,9 @@ pub enum Action {
     /// `filter-keep-local-copy` — flip the Forward action's copy mode
     /// (checked = `copy`, unchecked = `redirect`); local buffer only.
     ToggleFilterKeepLocalCopy,
+    /// `filter-continue-toggle` — flip the rule's `continue` flag (keep
+    /// evaluating later rules after this one matches); local buffer only.
+    ToggleFilterContinue,
     /// `create-filter` — encode the form (shared `encode_filter_rule`/
     /// `encode_filter_action`) and issue `fauna.email.filters.create`, then
     /// refresh the list (needs the nest → [`apply_local`]).
@@ -4009,6 +4147,13 @@ pub enum Action {
     /// two folders bound to one set flip apart. Touches `app.sync_agent` →
     /// [`apply_local`]; no `Op`.
     SetLocationMode { path: String, mode: String },
+    /// `folder-location-free-space-button` — *Free up space* on the bound
+    /// on-demand location at `path` (`on-demand-files.md` § The free-up-space
+    /// gesture where the OS offers none): the agent's `FreeLocationSpace`
+    /// sweep. Keyed by path like [`Action::SetLocationMode`]; the row's two
+    /// lines repaint from the agent's reading, never from the press. Touches
+    /// `app.sync_agent` → [`apply_local`]; no `Op`.
+    FreeLocationSpace { path: String },
     /// `folder-location-apply-deletes-button` — the user confirmed the
     /// **mass-delete floor**'s hold on the carried **set name**: propagate the
     /// held deletions to the nest (`delete-propagation.md` § A wholesale-vanished
@@ -4031,9 +4176,9 @@ pub enum Action {
     /// A rail row → enter the Settings → AT Protocol sub-page (self-hydrates the
     /// F1 login-plane panel; needs the machine → [`apply_local`]).
     OpenAtproto,
-    /// `atproto-app-credential-mint` — mint a new app credential (auto-labeled,
-    /// `dm_allowed: false` — F1 collects no label/dm_allowed input, see the
-    /// module doc) through the shared machine, then re-snapshot (needs the
+    /// `atproto-app-credential-mint` — mint a new app credential (auto-labeled;
+    /// `dm_allowed` is the staged `atproto-app-credential-dm-access` value, off
+    /// by default — see the module doc) through the shared machine, then re-snapshot (needs the
     /// machine → [`apply_local`]).
     AtprotoMint,
     /// `atproto-app-credential-reveal` — reveal (or re-reveal) this
@@ -4047,13 +4192,6 @@ pub enum Action {
     /// reasoning as [`Self::AtprotoReveal`] (needs the machine →
     /// [`apply_local`]).
     AtprotoRevoke(String),
-    /// `atproto-external-apps-enable` — flip the per-account external-apps
-    /// kill-switch. No carried value (matching [`Action::MailToggleServeHere`]):
-    /// the current value is read from the snapshot and flipped in
-    /// [`apply_local`], so the `state` attr only flips once the nest confirms
-    /// the write, never a local optimistic guess (needs the machine →
-    /// [`apply_local`]).
-    AtprotoToggleExternalApps,
     /// `atproto-delegation-authorize` — the D10 authoring delegation's mint
     /// ceremony (`AtprotoSettingsMachine::authorize_external_apps`, a
     /// three-call nest round-trip composed inside the machine). Doubles as the
@@ -4085,6 +4223,11 @@ pub enum Action {
     /// set_history_backfill`, the same synchronous-local shape as
     /// [`Self::AtprotoCancelTransition`].
     AtprotoSetHistoryBackfill(bool),
+    /// `atproto-app-credential-dm-access` — stage whether the NEXT minted app
+    /// credential carries direct-message access (`atproto-pds-full.md` D3).
+    /// Local page state read when the mint button is pressed
+    /// ([`Self::AtprotoMint`]); no nest call.
+    AtprotoSetMintDmAccess(bool),
     /// `atproto-delete-tombstone` — `AtprotoSettingsMachine::
     /// set_delete_retire_identity`: tick the delete card's terminal opt-in.
     /// A card mutation only, same synchronous-local shape as
@@ -4125,6 +4268,18 @@ pub enum Action {
     NestsShowAddForm,
     /// `nests-add-cancel-button` — close the add form and drop what was typed.
     NestsCancelAdd,
+    /// `nests-custody-restore-button` — reveal the restore-from-a-custodian
+    /// form (`nests.md` § Trust facet — restore from a custodian nest). Pure
+    /// local.
+    NestsShowRestoreForm,
+    /// `nests-custody-restore-cancel-button` — close the restore form and drop
+    /// the address.
+    NestsCancelRestore,
+    /// `nests-custody-restore-submit-button` (the typed address) and
+    /// `nest-trust-custody-restore-button[i]` (the row's own address) — the
+    /// shared runtime command `RestoreFromCustodian { url }`. Store + network
+    /// → [`apply_local`].
+    NestsRestoreFromCustodian(String),
     /// `nests-add-submit-button` — link the entered nest. The shared
     /// `classify_link_input` decides whether that value is a 64-hex **identity**
     /// (single-end `Link`) or an **address** (both-ends `LinkBoth`), so this
@@ -4295,6 +4450,9 @@ impl Action {
             Action::ConnectedAppsBlockRequest(_) | Action::ConnectedAppsUnblock(_) => {
                 Some("fauna.oauth.consent.block_client")
             }
+            Action::ConnectedAppsToggleExternalApps => {
+                Some("fauna.bridges.atproto.set_external_apps_enabled")
+            }
             // The verb is the machine's, per row class — every class's revoke
             // needs the nest (a mail app password's ends two on-nest blobs
             // before it marks the custody row), so the principal delete stands
@@ -4356,6 +4514,12 @@ impl Action {
                 Some("fauna.bridges.revoke_account_alias")
             }
             Action::MailAliasesRevoke(_) => Some("fauna.bridges.revoke_account_alias"),
+            Action::MailAliasesExtend(_) => Some("fauna.bridges.update_account_alias"),
+            // Closing the history is local: the machine drops what it holds.
+            Action::MailAliasesToggleAudit { opening: true, .. } => {
+                Some("fauna.bridges.list_account_alias_hits")
+            }
+            Action::MailAliasesToggleAudit { opening: false, .. } => None,
             Action::MailAliasesDelete(_) => Some("fauna.bridges.delete_account_alias"),
 
             // ── Mail → Lists / list members (`mail-mass-mailing.md`) ────────
@@ -4382,6 +4546,16 @@ impl Action {
             // `MailAccountClient`, like the threshold above.
             Action::MailCommitForwardAllTo => Some("fauna.bridges.set_forward_all_to"),
             Action::MailCommitForwardPerHour => Some("fauna.bridges.set_forward_per_hour"),
+            Action::MailToggleReceive
+            | Action::MailToggleSend
+            | Action::MailToggleScanResultVisible => Some("fauna.bridges.set_mail_switches"),
+            // The facade's binding leg: turning the reply on (or changing its
+            // words) always writes a filter rule — a create on first use, an
+            // update after — and the create is the one that decides whether the
+            // gesture can complete.
+            Action::MailToggleAutorespond | Action::MailCommitAutorespondMessage => {
+                Some("fauna.email.filters.create")
+            }
 
             // ── Mail → Export mailbox (`mail-export.md`) ────────────────────
             // The wizard's steps 1–3 are client-side state moves inside the
@@ -4414,14 +4588,21 @@ impl Action {
             | Action::MailImportSetTlsMode(_)
             | Action::MailImportOAuthStart
             | Action::MailImportConnect
+            | Action::MailImportForgetSource
             | Action::MailImportToggleMailbox(_)
+            | Action::MailImportToggleImportDuplicates
             | Action::MailImportNext
             | Action::MailImportBack
-            | Action::MailImportToggleSkipped => None,
+            | Action::MailImportToggleSkipped
+            | Action::MailImportOpenMicrosoftSignIn => None,
             Action::MailImportStart => Some("fauna.bridges.start_import_session"),
             Action::MailImportPause => Some("fauna.bridges.pause_import_session"),
-            Action::MailImportResume => Some("fauna.bridges.resume_import_session"),
+            Action::MailImportResume | Action::MailImportRestart => {
+                Some("fauna.bridges.resume_import_session")
+            }
             Action::MailImportCancel => Some("fauna.bridges.cancel_import_session"),
+            Action::MailImportSkipRest => Some("fauna.bridges.resume_import_session"),
+            Action::MailImportDismiss => Some("fauna.bridges.discard_import_session"),
 
             // ── Import from other services (`archive-import.md`) ────────────
             // Only ONE gesture here reaches the nest. Steps 1–3 are client-side
@@ -4439,6 +4620,7 @@ impl Action {
             // all. `RpcArchiveNest::create_folder` sends it through
             // `FoldersClient::create` (`rpc_glue.rs`).
             Action::ArchiveImportSelectSource(_)
+            | Action::ArchiveImportOpenExportPage
             | Action::ArchiveImportOpenArchive
             | Action::ArchiveImportToggleCategory(_)
             | Action::ArchiveImportSetAudienceMode(_)
@@ -4526,6 +4708,7 @@ impl Action {
             // ── Muted words + task delegation: both are account-plane writes ──
             Action::AddMutedWord
             | Action::RemoveMutedWord(_)
+            | Action::SetMutedWordLevel { .. }
             | Action::SetTaskAssignment { .. } => Some("fauna.account.state.put"),
 
             // ── Personalization (`topic-factors.md`, `engagement-cues.md`) ──
@@ -4684,9 +4867,6 @@ impl Action {
             Action::AtprotoMint => Some("fauna.bridges.atproto.provision_app_credential"),
             Action::AtprotoReveal(_) => None,
             Action::AtprotoRevoke(_) => Some("fauna.bridges.atproto.revoke_app_credential"),
-            Action::AtprotoToggleExternalApps => {
-                Some("fauna.bridges.atproto.set_external_apps_enabled")
-            }
             Action::AtprotoAuthorizeDelegation => {
                 Some("fauna.bridges.atproto.provision_authoring_delegation")
             }
@@ -4710,6 +4890,8 @@ impl Action {
             // The newer-version check reads the RELEASE feed (GitHub), never a
             // nest: no wire kind, nothing for the offline gate to classify.
             Action::CheckForUpdates => None,
+            // Copies a constant to the local clipboard: no wire kind.
+            Action::CopyTermsUrl => None,
 
             // ── Nests (`ui/nests.md`) ───────────────────────────────────────
             // Link and LinkBoth write the same reciprocal `pair.add` rows, so
@@ -4730,6 +4912,10 @@ impl Action {
             Action::NestsRevokeBackupSeal => Some("fauna.backup.nest_key.revoke"),
             Action::NestsRevokeBackupWriter(_) => Some("fauna.backup.writer_grant.revoke"),
             Action::NestsRestoreGeneration { .. } => Some("fauna.backup.generation.restore"),
+            // The restore dials the CUSTODIAN's nest, never this session's
+            // own — its whole case is the own nest gone — so no own-nest kind
+            // gates it (the contest ceremony's precedent).
+            Action::NestsRestoreFromCustodian(_) => None,
 
             // ── Encryption (`settings.md`) ───────────────────────────────────
             Action::RefreshKeyPackages => Some("fauna.conversations.keypackage.upload"),
@@ -4804,6 +4990,7 @@ impl Action {
             | Action::SetFilterRuleType(_)
             | Action::SetFilterActionSelect(_)
             | Action::ToggleFilterKeepLocalCopy
+            | Action::ToggleFilterContinue
             | Action::OpenFolderWizard
             | Action::ToggleWizardDeviceMember(_)
             | Action::ToggleWizardDeviceFlag { .. }
@@ -4822,11 +5009,13 @@ impl Action {
             | Action::AddLocation
             | Action::RemoveLocation(_)
             | Action::SetLocationMode { .. }
+            | Action::FreeLocationSpace { .. }
             | Action::ApplyHeldDeletes(_)
             | Action::ToggleSyncAgentLinger
             | Action::AtprotoCancelTransition
             | Action::AtprotoSetDidMethod(_)
             | Action::AtprotoSetHistoryBackfill(_)
+            | Action::AtprotoSetMintDmAccess(_)
             | Action::AtprotoSetDeleteRetireIdentity(_)
             | Action::AtprotoDeletePresence
             | Action::AtprotoCancelDelete
@@ -4834,6 +5023,8 @@ impl Action {
             | Action::AtprotoCancelContest
             | Action::NestsShowAddForm
             | Action::NestsCancelAdd
+            | Action::NestsShowRestoreForm
+            | Action::NestsCancelRestore
             | Action::NestsSetLens { .. }
             | Action::NestsOpenMint(_)
             | Action::NestsSetMintScope(_)
@@ -4997,11 +5188,14 @@ pub fn apply(state: &mut SettingsState, action: Action) {
                 state.privacy.show_add_form = true;
             }
         }
-        Action::SetFilterRuleType(value) => state.privacy.filter_rule_type = value,
+        Action::SetFilterRuleType(value) => state.privacy.filter_rule.kind = value,
         Action::SetFilterActionSelect(value) => state.privacy.filter_action.kind = value,
         Action::ToggleFilterKeepLocalCopy => {
             let inputs = &mut state.privacy.filter_action;
             inputs.keep_local_copy = !inputs.keep_local_copy;
+        }
+        Action::ToggleFilterContinue => {
+            state.privacy.filter_continue = !state.privacy.filter_continue;
         }
         // The mail toggle is the one entry point for both directions, and both
         // halves are purely local — no `Op` until the user commits. Enabling is
@@ -5283,6 +5477,7 @@ pub fn apply(state: &mut SettingsState, action: Action) {
         | Action::RecoveryStolen
         | Action::RecoveryVeto
         | Action::RecoveryCopySecret
+        | Action::CopyTermsUrl
         | Action::MemberReviewKeep { .. }
         | Action::MemberReviewRemove { .. }
         | Action::MemberReviewDefer
@@ -5330,6 +5525,7 @@ pub fn apply(state: &mut SettingsState, action: Action) {
         | Action::ConnectedAppsCopySecret(_)
         | Action::ConnectedAppsCopyUsername(_)
         | Action::ConnectedAppsUnblock(_)
+        | Action::ConnectedAppsToggleExternalApps
         | Action::OpenWeb
         | Action::ToggleWebSubdomain
         | Action::CopyWebLink(_)
@@ -5346,6 +5542,7 @@ pub fn apply(state: &mut SettingsState, action: Action) {
         | Action::SetTaskAssignment { .. }
         | Action::AddMutedWord
         | Action::RemoveMutedWord(_)
+        | Action::SetMutedWordLevel { .. }
         | Action::CommitTrainedFactorName
         | Action::StartTrainedFactorRename(_)
         | Action::DeleteTrainedFactor(_)
@@ -5383,13 +5580,13 @@ pub fn apply(state: &mut SettingsState, action: Action) {
         | Action::AddLocation
         | Action::RemoveLocation(_)
         | Action::SetLocationMode { .. }
+        | Action::FreeLocationSpace { .. }
         | Action::ApplyHeldDeletes(_)
         | Action::ToggleSyncAgentLinger
         | Action::OpenAtproto
         | Action::AtprotoMint
         | Action::AtprotoReveal(_)
         | Action::AtprotoRevoke(_)
-        | Action::AtprotoToggleExternalApps
         | Action::AtprotoAuthorizeDelegation
         | Action::AtprotoRevokeDelegation
         | Action::AtprotoSelectLevel(_)
@@ -5397,6 +5594,7 @@ pub fn apply(state: &mut SettingsState, action: Action) {
         | Action::AtprotoCancelTransition
         | Action::AtprotoSetDidMethod(_)
         | Action::AtprotoSetHistoryBackfill(_)
+        | Action::AtprotoSetMintDmAccess(_)
         | Action::AtprotoSetDeleteRetireIdentity(_)
         | Action::AtprotoDeletePresence
         | Action::AtprotoConfirmDelete
@@ -5408,6 +5606,9 @@ pub fn apply(state: &mut SettingsState, action: Action) {
         | Action::NestsShowAddForm
         | Action::NestsCancelAdd
         | Action::NestsSubmitAdd
+        | Action::NestsShowRestoreForm
+        | Action::NestsCancelRestore
+        | Action::NestsRestoreFromCustodian(_)
         | Action::NestsUnlink(_)
         | Action::NestsRetryForwards
         | Action::NestsDiscardForwards
@@ -5438,6 +5639,8 @@ pub fn apply(state: &mut SettingsState, action: Action) {
         | Action::MailAliasesToggleActive { .. }
         | Action::MailAliasesRevoke(_)
         | Action::MailAliasesDelete(_)
+        | Action::MailAliasesExtend(_)
+        | Action::MailAliasesToggleAudit { .. }
         // Same for the Spam page: every gesture reads the machine Arc or the
         // nest handle off `App`, and both rail rows route through
         // `route_subpage`, so none reaches this state-only path either.
@@ -5452,6 +5655,11 @@ pub fn apply(state: &mut SettingsState, action: Action) {
         // handle off `App`.
         | Action::MailCommitForwardAllTo
         | Action::MailCommitForwardPerHour
+        | Action::MailToggleReceive
+        | Action::MailToggleSend
+        | Action::MailToggleScanResultVisible
+        | Action::MailToggleAutorespond
+        | Action::MailCommitAutorespondMessage
         // Same for the two Lists pages: every gesture reads the machine Arc
         // (or, for the members page, the nest handle it rebuilds from) off
         // `App`, and both rail rows route through `route_subpage`.
@@ -5496,14 +5704,20 @@ pub fn apply(state: &mut SettingsState, action: Action) {
         | Action::MailImportSetTlsMode(_)
         | Action::MailImportOAuthStart
         | Action::MailImportConnect
+        | Action::MailImportForgetSource
         | Action::MailImportToggleMailbox(_)
+        | Action::MailImportToggleImportDuplicates
         | Action::MailImportNext
         | Action::MailImportBack
         | Action::MailImportStart
         | Action::MailImportPause
         | Action::MailImportResume
+        | Action::MailImportRestart
         | Action::MailImportCancel
+        | Action::MailImportSkipRest
+        | Action::MailImportDismiss
         | Action::MailImportToggleSkipped
+        | Action::MailImportOpenMicrosoftSignIn
         // Same for the archive-import wizard: every gesture, nest call or not,
         // goes through the shared machine's `dispatch`, so each needs the
         // machine Arc off `App` in `apply_local`; the rail row routes through
@@ -5512,6 +5726,7 @@ pub fn apply(state: &mut SettingsState, action: Action) {
         // sit in the same `archive_import` match block as their siblings.
         | Action::OpenArchiveImport
         | Action::ArchiveImportSelectSource(_)
+        | Action::ArchiveImportOpenExportPage
         | Action::ArchiveImportOpenArchive
         | Action::ArchiveImportToggleCategory(_)
         | Action::ArchiveImportSetAudienceMode(_)
@@ -5722,28 +5937,44 @@ fn member_access_at(state: &SettingsState, index: usize) -> Option<String> {
 /// which `Op` the caller wraps the result in. Surfaces an unknown-kind error on
 /// `error-message` instead of a silent coercion, matching linux's `read_form`.
 /// `None` (with the error already inserted) on either field failing to encode;
-/// clears any prior page error only once both succeed.
-fn encode_filter_form(app: &mut App) -> Option<(String, EmailFilterRule, EmailFilterAction)> {
-    let name = app.settings.privacy.filter_name_input.trim().to_string();
-    let rule = match encode_filter_rule(
-        &app.settings.privacy.filter_rule_type,
-        &app.settings.privacy.filter_rule_value,
-    ) {
-        Ok(rule) => rule,
-        Err(e) => {
-            app.errors.insert(Page::Settings, e.to_string());
-            return None;
+/// clears any prior page error only once every field succeeds.
+fn encode_filter_form(app: &mut App) -> Option<FilterForm> {
+    let p = &app.settings.privacy;
+    let encoded = encode_filter_rule_inputs(&p.filter_rule)
+        .map_err(|e| e.to_string())
+        .and_then(|rule| {
+            let action = encode_filter_action(&p.filter_action).map_err(|e| e.to_string())?;
+            let priority =
+                parse_filter_priority(&p.filter_priority_input).map_err(|e| e.to_string())?;
+            Ok(FilterForm {
+                name: p.filter_name_input.trim().to_string(),
+                rule,
+                action,
+                priority,
+                continue_on_match: p.filter_continue,
+            })
+        });
+    match encoded {
+        Ok(form) => {
+            app.errors.remove(&Page::Settings);
+            Some(form)
         }
-    };
-    let action = match encode_filter_action(&app.settings.privacy.filter_action) {
-        Ok(action) => action,
-        Err(e) => {
-            app.errors.insert(Page::Settings, e.to_string());
-            return None;
+        Err(message) => {
+            app.errors.insert(Page::Settings, message);
+            None
         }
-    };
-    app.errors.remove(&Page::Settings);
-    Some((name, rule, action))
+    }
+}
+
+/// The shared filter form, encoded — what `create-filter` and `save-filter`
+/// send.
+#[derive(Debug)]
+pub(crate) struct FilterForm {
+    name: String,
+    rule: EmailFilterRule,
+    action: EmailFilterAction,
+    priority: i32,
+    continue_on_match: bool,
 }
 
 /// [`Action::SignOutConfirm`] with its refusal passed in, so a test can reach
@@ -5888,6 +6119,10 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // difference. `parse_kit` still accepts the bare hex a user writes down
         // from the display. Same unification as the onboarding kit screen
         // (`wizard::recovery_kit::kit_uri`).
+        Action::CopyTermsUrl => {
+            crate::wizard::copy_to_clipboard(fauna_core::TERMS_URL);
+            None
+        }
         Action::RecoveryCopySecret => {
             if let Some(minted) = &app.settings.recovery.minted {
                 crate::wizard::copy_to_clipboard(minted.copy_payload());
@@ -7130,6 +7365,14 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             app.sync_agent.set_location_mode(path, mode, app.tx.clone());
             None
         }
+        // `folder-location-free-space-button` — NOT optimistic either: the
+        // agent answers once the sweep is accepted, and both lines beside the
+        // button are its `ListLocations` reading (the reconcile after the press,
+        // then the status-tick watch as the sweep moves them).
+        Action::FreeLocationSpace { path } => {
+            app.sync_agent.free_location_space(path, app.tx.clone());
+            None
+        }
         // `folder-location-apply-deletes-button` — the user confirmed the
         // mass-delete floor's hold. Deliberately NOT optimistic (unlike add and
         // remove above): the agent re-derives the missing set at click time, so
@@ -7289,6 +7532,35 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 },
             })
         }
+        // The extend reads the clock here, the one moment the gesture fires; the
+        // shared machine refuses a row that is no longer extendable before any
+        // round trip.
+        Action::MailAliasesExtend(alias_id_hex) => {
+            let machine = app.settings.mail_aliases.machine.clone()?;
+            Some(Op::MailAliasesDispatch {
+                machine,
+                action: MailAliasesAction::Extend {
+                    alias_id_hex,
+                    now_ms: fauna_core::data::Timestamp::now_millis() as i64,
+                },
+            })
+        }
+        // The history disclosure: the machine fetches on open and drops what it
+        // holds on close, so both directions go through it.
+        Action::MailAliasesToggleAudit {
+            alias_id_hex,
+            opening,
+        } => {
+            let machine = app.settings.mail_aliases.machine.clone()?;
+            Some(Op::MailAliasesDispatch {
+                machine,
+                action: if opening {
+                    MailAliasesAction::ShowAudit { alias_id_hex }
+                } else {
+                    MailAliasesAction::HideAudit
+                },
+            })
+        }
         // The two-click inline confirms, on the button itself:
         // arming is local and only the confirm reaches the machine. Arming one
         // row disarms every other, so only one destructive action is ever primed.
@@ -7423,6 +7695,54 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 }
             }
         }
+        // ── Mail → the receive / send switches. The flipped value comes from
+        // the last confirmed read; no read yet = inert, never a guessed write.
+        Action::MailToggleReceive => {
+            let receive = !app.settings.mail.switches.as_ref()?.receive_enabled;
+            Some(Op::MailSetSwitches {
+                nest: app.settings.nest.clone()?,
+                receive_enabled: Some(receive),
+                send_enabled: None,
+            })
+        }
+        Action::MailToggleSend => {
+            let send = !app.settings.mail.switches.as_ref()?.send_enabled;
+            Some(Op::MailSetSwitches {
+                nest: app.settings.nest.clone()?,
+                receive_enabled: None,
+                send_enabled: Some(send),
+            })
+        }
+        Action::MailToggleScanResultVisible => {
+            let visible = !app.settings.mail.switches.as_ref()?.scan_result_visible;
+            Some(Op::MailSetScanResultVisible {
+                nest: app.settings.nest.clone()?,
+                visible,
+            })
+        }
+        // ── Mail → the automatic reply. Off needs no draft; on (the toggle or
+        // the message's Enter) is the shared draft check first.
+        Action::MailToggleAutorespond if app.settings.mail.autorespond.as_ref()?.enabled => {
+            Some(Op::MailSetAutorespond {
+                nest: app.settings.nest.clone()?,
+                message: None,
+            })
+        }
+        Action::MailToggleAutorespond | Action::MailCommitAutorespondMessage => {
+            match fauna_client_mail_settings::parse_autorespond_message_draft(
+                &app.settings.mail.autorespond_message_input,
+            ) {
+                Ok(message) => Some(Op::MailSetAutorespond {
+                    nest: app.settings.nest.clone()?,
+                    message: Some(message),
+                }),
+                Err(reason) => {
+                    app.errors
+                        .insert(Page::Settings, crate::wizard::localized(&reason));
+                    None
+                }
+            }
+        }
 
         // ── Mail → Export mailbox. Every gesture funnels through the one
         // `MailExportDispatch` op, the `MailListsDispatch` reasoning: exactly one
@@ -7528,11 +7848,40 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             machine: app.settings.mail_import.machine.clone()?,
             actions: vec![MailImportAction::SetTlsMode { mode }],
         }),
-        // Disabled — see the variant's doc comment. Never actuated by the UI
-        // (`enabled: false`); this arm exists only so the match stays
-        // exhaustive, and it is a deliberate no-op rather than a panic if it
-        // ever were.
-        Action::MailImportOAuthStart => None,
+        // Sign in with Microsoft (the variant's doc comment). The executor
+        // spawns `run_microsoft_sign_in` once Microsoft has answered with a code.
+        Action::MailImportOAuthStart => {
+            let e = &app.settings.mail_import;
+            let adopted = e
+                .snapshot
+                .as_ref()
+                .is_some_and(|s| s.resume_needs_credentials);
+            let actions = if adopted {
+                vec![MailImportAction::BeginMicrosoftSignIn]
+            } else {
+                fauna_client_mail_settings::microsoft_sign_in_actions(&e.username_input)
+            };
+            Some(Op::MailImportDispatch {
+                machine: e.machine.clone()?,
+                actions,
+            })
+        }
+        // Purely local: the address the snapshot carries goes to the OS
+        // handler (`os_open` — silent on a headless box, where the code and
+        // address stay painted for the person to type on another device).
+        Action::MailImportOpenMicrosoftSignIn => {
+            if let Some(view) = app
+                .settings
+                .mail_import
+                .snapshot
+                .as_ref()
+                .and_then(|s| s.microsoft_signin.as_ref())
+                .filter(|v| !v.verification_uri.is_empty())
+            {
+                crate::os_open::open(&view.verification_uri);
+            }
+            None
+        }
         // Commit whichever Source-step fields the current kind shows, then
         // Connect — one awaited op (`MailImportState::connect_actions`).
         Action::MailImportConnect => {
@@ -7549,10 +7898,28 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 actions,
             })
         }
+        Action::MailImportForgetSource => Some(Op::MailImportDispatch {
+            machine: app.settings.mail_import.machine.clone()?,
+            actions: vec![MailImportAction::ForgetSource],
+        }),
         Action::MailImportToggleMailbox(mailbox) => Some(Op::MailImportDispatch {
             machine: app.settings.mail_import.machine.clone()?,
             actions: vec![MailImportAction::ToggleMailbox { mailbox }],
         }),
+        Action::MailImportToggleImportDuplicates => {
+            // Non-optimistic, the `MailExportToggleStripHeaders` shape: the new
+            // value is derived from the last snapshot and the dispatch awaited.
+            let value = !app
+                .settings
+                .mail_import
+                .snapshot
+                .as_ref()
+                .is_some_and(|s| s.import_duplicates);
+            Some(Op::MailImportDispatch {
+                machine: app.settings.mail_import.machine.clone()?,
+                actions: vec![MailImportAction::SetImportDuplicates { value }],
+            })
+        }
         Action::MailImportNext => {
             let e = &app.settings.mail_import;
             let machine = e.machine.clone()?;
@@ -7592,6 +7959,10 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             machine: app.settings.mail_import.machine.clone()?,
             actions: app.settings.mail_import.resume_actions(),
         }),
+        Action::MailImportRestart => Some(Op::MailImportDispatch {
+            machine: app.settings.mail_import.machine.clone()?,
+            actions: vec![MailImportAction::RestartRebuiltMailboxes],
+        }),
         // The two-click inline confirm, the `MailExportCancel` shape: arming is
         // local and only the confirm reaches the machine. Already-imported
         // messages are kept (`mailbox-migration.md` § Wizard steps step 5).
@@ -7607,6 +7978,16 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 actions: vec![MailImportAction::Cancel],
             })
         }
+        // A run-starting action like Resume (`import_action_starts_run`),
+        // so the same executor spawns the walk.
+        Action::MailImportSkipRest => Some(Op::MailImportDispatch {
+            machine: app.settings.mail_import.machine.clone()?,
+            actions: vec![MailImportAction::SkipRest],
+        }),
+        Action::MailImportDismiss => Some(Op::MailImportDispatch {
+            machine: app.settings.mail_import.machine.clone()?,
+            actions: vec![MailImportAction::Dismiss],
+        }),
         // Purely local — the skip log is already on the snapshot, so showing it
         // is a view toggle with no machine action behind it (the
         // `ArchiveImportToggleSkipped` shape).
@@ -7623,6 +8004,14 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             machine: app.settings.archive_import.machine.clone()?,
             actions: vec![ArchiveImportAction::SelectSource { kind }],
         }),
+        // Purely local — the address is the shared constant the step paints,
+        // never anything typed (the `MailImportOpenMicrosoftSignIn` shape).
+        Action::ArchiveImportOpenExportPage => {
+            crate::os_open::open(&archive_import::source_export_url(
+                app.settings.archive_import.snapshot.as_ref(),
+            ));
+            None
+        }
         // Commit the path draft, then open — one awaited op
         // (`ArchiveImportState::open_actions`), the `MailImportConnect` shape.
         Action::ArchiveImportOpenArchive => {
@@ -8018,6 +8407,24 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             machine: app.settings.connected_apps.machine.clone()?,
             gesture: ConnectedAppsGesture::Unblock(client_id),
         }),
+        // The switch → `set_external_apps_enabled` with the flipped value.
+        // Non-optimistic, the `MailToggleServeHere` shape: the current value is
+        // read from the snapshot (an unread snapshot counts as ON, the flag's
+        // default) and the dispatch is awaited, so the `state` attr flips only
+        // once the nest confirms the write.
+        Action::ConnectedAppsToggleExternalApps => {
+            let enabled = app
+                .settings
+                .connected_apps
+                .snapshot
+                .as_ref()
+                .map(|s| s.external_apps_off)
+                .unwrap_or(false);
+            Some(Op::ConnectedApps {
+                machine: app.settings.connected_apps.machine.clone()?,
+                gesture: ConnectedAppsGesture::SetExternalApps(enabled),
+            })
+        }
         // Both rail rows route through `route_subpage`, the one place a settings
         // sub-page's nav-edge load is decided — so a rail click and the e2e's
         // nav patch reach the page by exactly the same path.
@@ -8138,7 +8545,10 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // (`monetization.md` § Flows → Unsubscribe).
         Action::UnsubscribeMine(index) => Some(Op::SubscriptionsConsumer {
             nest: app.settings.nest.clone()?,
-            action: ConsumerOp::Unsubscribe(app.settings.subscriptions.author_at(index)?),
+            action: ConsumerOp::Unsubscribe {
+                leave: app.settings.subscriptions.leave_at(index)?,
+                secret_hex: app.settings.secret_hex.clone(),
+            },
         }),
         #[cfg(feature = "payments")]
         Action::RedeemClaim => Some(Op::SubscriptionsConsumer {
@@ -8222,6 +8632,22 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             &mut app.settings,
             muted_words::MutedWordsMutation::Remove(term),
         ),
+        Action::SetMutedWordLevel { row, value } => {
+            // A value the picker never offered, or a row that is gone, is a
+            // no-op — the picker paints only the two levels, disabled in flight.
+            let level = fauna_core::scoring::MutedKeywordLevel::from_value(&value)?;
+            let term = app
+                .settings
+                .muted_words
+                .keywords()
+                .get(row)?
+                .keyword
+                .clone();
+            muted_words_mutate_op(
+                &mut app.settings,
+                muted_words::MutedWordsMutation::SetLevel(term, level),
+            )
+        }
         // ── Trained topics facet (topic-factors.md § Authoring surface) ──
         // Every arm delegates to `trained_topics`, which owns the local
         // bookkeeping (the retarget, the busy arming) and returns the op; the
@@ -8309,14 +8735,9 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             Some(Op::SaveSpamPrefs { nest, req })
         }
         Action::CreateFilter => {
-            let (name, rule, action) = encode_filter_form(app)?;
+            let form = encode_filter_form(app)?;
             let nest = app.settings.nest.clone()?;
-            Some(Op::CreateFilter {
-                nest,
-                name,
-                rules: vec![rule],
-                action,
-            })
+            Some(Op::CreateFilter { nest, form })
         }
         Action::DeleteFilter(id) => {
             let nest = app.settings.nest.clone()?;
@@ -8360,15 +8781,9 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         }
         Action::SaveFilter => {
             let id = app.settings.privacy.editing_filter_id?;
-            let (name, rule, action) = encode_filter_form(app)?;
+            let form = encode_filter_form(app)?;
             let nest = app.settings.nest.clone()?;
-            Some(Op::UpdateFilter {
-                nest,
-                id,
-                name,
-                rules: vec![rule],
-                action,
-            })
+            Some(Op::UpdateFilter { nest, id, form })
         }
         // A rail-row click into Account — refresh the switcher snapshot from the
         // registry as we enter, the same edge the two-element nav patch refreshes
@@ -8474,14 +8889,27 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 .clone()
                 .map(|machine| Op::HydrateAtproto { machine, nest })
         }
-        // Mint a new app credential — auto-labeled, `dm_allowed: false` (F1
-        // collects no label/dm_allowed input, see the module doc).
-        Action::AtprotoMint => app
-            .settings
-            .atproto
-            .machine
-            .clone()
-            .map(|machine| Op::MintAtproto { machine }),
+        // Mint a new app credential — auto-labeled; `dm_allowed` is the toggle's
+        // staged value at the moment of the press (off by default).
+        Action::AtprotoMint => {
+            let dm_allowed = app.settings.atproto.mint_dm_access;
+            app.settings
+                .atproto
+                .machine
+                .clone()
+                .map(|machine| Op::MintAtproto {
+                    machine,
+                    dm_allowed,
+                })
+        }
+        // Staging only: the choice is read by the next mint, nothing reaches
+        // the nest here. Re-fold the snapshot so the page repaints.
+        Action::AtprotoSetMintDmAccess(enabled) => {
+            let machine = app.settings.atproto.machine.clone()?;
+            app.settings.atproto.mint_dm_access = enabled;
+            apply_atproto_snapshot(app, machine.snapshot());
+            None
+        }
         Action::AtprotoReveal(credential_id) => {
             let machine = app.settings.atproto.machine.clone()?;
             Some(Op::RevealAtproto {
@@ -8495,21 +8923,6 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 machine,
                 credential_id,
             })
-        }
-        // The kill-switch → `set_external_apps_enabled` with the flipped value.
-        // Non-optimistic, the `MailToggleServeHere` shape: the current value is
-        // read from the snapshot and the dispatch is awaited, so the `state`
-        // attr flips only once the nest confirms the write.
-        Action::AtprotoToggleExternalApps => {
-            let enabled = !app
-                .settings
-                .atproto
-                .snapshot
-                .as_ref()
-                .map(|s| s.external_apps_enabled)
-                .unwrap_or(true);
-            let machine = app.settings.atproto.machine.clone()?;
-            Some(Op::SetAtprotoExternalApps { machine, enabled })
         }
         // The D10 delegation gestures. Both are plain machine calls with no
         // carried value — the ceremony (and the renewal semantics) live in the
@@ -8630,6 +9043,33 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             app.settings.nests.add_form_open = false;
             app.settings.nests.add_input.clear();
             None
+        }
+        Action::NestsShowRestoreForm => {
+            app.settings.nests.restore_form_open = true;
+            None
+        }
+        Action::NestsCancelRestore => {
+            app.settings.nests.restore_form_open = false;
+            app.settings.nests.restore_input.clear();
+            None
+        }
+        // The restore gesture (`nests.md` § Trust facet — restore from a
+        // custodian nest): the shared runtime command, then the Nests
+        // re-hydrate, so a restored custody row paints as soon as it lands.
+        // The shell holds no dial, handshake or walk logic.
+        Action::NestsRestoreFromCustodian(url) => {
+            let url = url.trim().to_string();
+            if url.is_empty() {
+                return None;
+            }
+            let store = app.settings.account_store.clone()?;
+            app.settings.nests.restore_notice = Some(nests::RestoreNotice::Running);
+            Some(Op::RestoreFromCustodian {
+                store,
+                url,
+                machine: app.settings.nests.machine.clone(),
+                custody: custody_ctx_of(&app.settings),
+            })
         }
         // The shared classifier decides identity-vs-address, so the two link
         // shapes differ only in which action it hands back (priority #2 — one
@@ -8781,6 +9221,42 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
 /// because the fold is identical for all of them: the machine owns the
 /// sequencing, including *which nest* a backup revoke is spoken to, so this
 /// layer only names the action. `None` pre-login (no machine yet).
+/// [`Op::HydrateNests`]'s body — the visit's hydrate, and the re-read after a
+/// restore from a custodian nest ([`Op::RestoreFromCustodian`]).
+async fn hydrate_nests(
+    machine: Arc<LinkedNestsMachine>,
+    store: Option<fauna_sync_engine::account_runtime::AccountStoreHandle>,
+    custody: Option<devices::CustodyCtx>,
+    reread: bool,
+) -> Outcome {
+    // A hydrate failure is not dropped: the machine stamps it on
+    // `snapshot.error`, which the single fold bridges onto `error-message` (a
+    // denied holder discovery degrades to an empty facet rather than a failed
+    // hydrate — `nests.md` § Implementation status).
+    let _ = machine.hydrate().await;
+    // The escrow-holder read (T16 badge): who has stamped an escrow receipt
+    // for this account's generation keys — the shared
+    // `AccountStoreHandle::escrow_holders` derivation every account-runtime
+    // app reads. A local store read; unreadable → None keeps the previous set.
+    let escrow_holders = match store {
+        Some(store) => store.escrow_holders().await.ok(),
+        None => None,
+    };
+    // The custody facet: the custodian-NEST rows (the nest-custodian identity
+    // fact) render from the same fold the Devices page paints — loaded here so
+    // a Nests visit never paints a stale or absent family.
+    let custody = match custody {
+        Some(ctx) => devices::load_custody_facet(ctx.nest, ctx.store).await,
+        None => None,
+    };
+    Outcome::NestsPage {
+        snapshot: Box::new(machine.snapshot()),
+        escrow_holders,
+        custody,
+        reread,
+    }
+}
+
 fn nests_op(app: &App, action: LinkedNestsAction) -> Option<Op> {
     app.settings
         .nests
@@ -9299,9 +9775,7 @@ pub enum Op {
     /// after every mutation instead of racing a background one sidesteps it).
     CreateFilter {
         nest: Arc<NestClient>,
-        name: String,
-        rules: Vec<EmailFilterRule>,
-        action: EmailFilterAction,
+        form: FilterForm,
     },
     /// `fauna.email.filters.delete`, then `fauna.email.filters.list` — same
     /// refresh-not-race shape as [`Self::CreateFilter`].
@@ -9321,19 +9795,17 @@ pub enum Op {
         store: Arc<dyn fauna_client_config::SuccessionLedgerStore>,
         id: i64,
     },
-    /// `fauna.email.filters.get`, decoded via the shared `describe_filter_rule`/
-    /// `describe_filter_action` (the reverse of the create-side encoders) into
-    /// the `(rule_kind, value, action_kind)` triple the shared form
-    /// pre-populates from — [`Action::OpenEditFilterForm`]'s network half.
+    /// `fauna.email.filters.get`, decoded via the shared
+    /// `describe_filter_rule_inputs`/`describe_filter_action` (the reverse of
+    /// the create-side encoders) into the inputs the shared form pre-populates
+    /// from — [`Action::OpenEditFilterForm`]'s network half.
     FetchFilterForEdit { nest: Arc<NestClient>, id: i64 },
     /// `fauna.email.filters.update`, then `fauna.email.filters.list` — same
     /// refresh-not-race shape as [`Self::CreateFilter`].
     UpdateFilter {
         nest: Arc<NestClient>,
         id: i64,
-        name: String,
-        rules: Vec<EmailFilterRule>,
-        action: EmailFilterAction,
+        form: FilterForm,
     },
     /// The Mail sub-page's self-hydrate, awaited on the nav edge
     /// (`route_subpage` / `Action::OpenMail`) — `MailSettingsMachine::hydrate`
@@ -9354,6 +9826,25 @@ pub enum Op {
     },
     /// `fauna.bridges.set_forward_per_hour` then a re-read of value + ceiling.
     MailSetForwardPerHour { nest: Arc<NestClient>, value: u32 },
+    /// `fauna.bridges.set_mail_switches` (a `None` switch keeps its value) then
+    /// a re-read of both.
+    MailSetSwitches {
+        nest: Arc<NestClient>,
+        receive_enabled: Option<bool>,
+        send_enabled: Option<bool>,
+    },
+    /// The scan-result switch over `fauna.bridges.set_mail_switches` (the
+    /// other switches keep their values) then a re-read of all of them.
+    MailSetScanResultVisible {
+        nest: Arc<NestClient>,
+        visible: bool,
+    },
+    /// The auto-respond facade: `Some` sets the reply (turning it on), `None`
+    /// clears it; then a re-read of the setting.
+    MailSetAutorespond {
+        nest: Arc<NestClient>,
+        message: Option<String>,
+    },
     /// The Aliases sub-page's self-hydrate, awaited on the nav edge
     /// (`route_subpage`) — `MailAliasesMachine::hydrate` then `snapshot`.
     HydrateMailAliases { machine: Arc<MailAliasesMachine> },
@@ -9501,11 +9992,19 @@ pub enum Op {
     /// `MailExportMachine::snapshot()` to make the redraw at the top of the
     /// select loop paint fresh counts.
     RefreshMailExportProgress { machine: Arc<MailExportMachine> },
+    /// The Export wizard's push re-read ([`mail_export_resync_op`]) — the
+    /// visit's hydrate, folded as a repaint (`Outcome::MailExportProgress`)
+    /// rather than a gesture, so it never disarms an armed Cancel.
+    ResyncMailExport { machine: Arc<MailExportMachine> },
     /// The Import sub-page's self-hydrate, awaited on the nav edge
     /// (`route_subpage`) — `MailImportMachine::hydrate` then `snapshot`. Unlike
     /// Export this also picks up an already-running session started on another
     /// device (`mailbox-migration.md` § Wizard steps step 5).
     HydrateMailImport { machine: Arc<MailImportMachine> },
+    /// The Import wizard's push re-read ([`mail_import_resync_op`]) — the
+    /// visit's hydrate, folded as a repaint (`Outcome::MailImportProgress`)
+    /// rather than a gesture, so it never disarms an armed Cancel.
+    ResyncMailImport { machine: Arc<MailImportMachine> },
     /// Every Import wizard gesture — the `MailExportDispatch` shape exactly,
     /// including the same multi-action carry for the Scope step's commit-then-
     /// advance. The one difference: when the dispatched actions include `Start`
@@ -10101,13 +10600,14 @@ pub enum Op {
         nest: Option<Arc<NestClient>>,
     },
     /// `AtprotoSettingsMachine::mint` — auto-labeled ("App credential N"),
-    /// `dm_allowed: false`. The newly-minted credential's secret is captured
+    /// `dm_allowed` the staged mint-time toggle. The newly-minted credential's secret is captured
     /// via a before/after diff of the credential-id set (`mint` doesn't return
     /// which row it created, only the secret) and shown inline once the fold
     /// repaints the new row — mirrors linux's `settings/atproto.rs` mint
     /// handler exactly.
     MintAtproto {
         machine: Arc<AtprotoSettingsMachine>,
+        dm_allowed: bool,
     },
     /// `AtprotoSettingsMachine::reveal_secret` — the on-demand read of one
     /// credential's secret from the client's **own** `fauna.state.atproto` store. Not a
@@ -10122,12 +10622,6 @@ pub enum Op {
     RevokeAtproto {
         machine: Arc<AtprotoSettingsMachine>,
         credential_id: String,
-    },
-    /// `AtprotoSettingsMachine::set_external_apps_enabled`, then re-snapshot —
-    /// the `atproto-external-apps-enable` kill-switch.
-    SetAtprotoExternalApps {
-        machine: Arc<AtprotoSettingsMachine>,
-        enabled: bool,
     },
     /// `AtprotoSettingsMachine::authorize_external_apps`, then re-snapshot —
     /// `atproto-delegation-authorize`. The machine composes the whole D10
@@ -10188,6 +10682,16 @@ pub enum Op {
     DispatchNests {
         machine: Arc<LinkedNestsMachine>,
         action: LinkedNestsAction,
+    },
+    /// The restore from a custodian nest (`nests.md` § Trust facet — restore
+    /// from a custodian nest): `AccountStoreHandle::restore_from_custodian`,
+    /// then the Nests re-hydrate ([`Op::HydrateNests`]'s body) so a restored
+    /// custody row paints with the notice.
+    RestoreFromCustodian {
+        store: fauna_sync_engine::account_runtime::AccountStoreHandle,
+        url: String,
+        machine: Option<Arc<LinkedNestsMachine>>,
+        custody: Option<devices::CustodyCtx>,
     },
     /// The Sessions page — the nav-edge hydrate (no act) or one act, then the
     /// re-read and the shared fold (`sessions::run`).
@@ -10423,10 +10927,11 @@ pub enum Outcome {
     /// error and a forwarding error both reach `error-message`.
     MailHydrated {
         snapshot: Box<MailSettingsSnapshot>,
-        forwarding: Box<mail::MailForwardingRead>,
+        account: Box<mail::MailAccountRead>,
     },
-    /// A Forwarding commit resolved (set, then re-read).
-    MailForwardingRead(Box<mail::MailForwardingRead>),
+    /// A per-account commit resolved (set, then re-read) — Forwarding, the
+    /// receive / send switches, or the automatic reply.
+    MailAccountRead(Box<mail::MailAccountRead>),
     /// An enable/add-credential submit resolved. Carries the same snapshot the
     /// [`Self::MailSnapshot`] fold applies (via `apply_mail_snapshot`, so the
     /// error still bridges in exactly one place) **plus** the OAUTHBEARER one-time
@@ -10781,15 +11286,16 @@ pub enum Outcome {
     },
     /// A fresh read of the open inherited-rule marks, after a *Keep*.
     FilterMarks(Option<Vec<i64>>),
-    /// The filter-edit fetch resolved and decoded — the shared rule
-    /// `(kind, value)` pair and action inputs the create/edit form
+    /// The filter-edit fetch resolved and decoded — the shared rule and action
+    /// inputs, the order and the `continue` flag the create/edit form
     /// pre-populates from, entering edit mode (`editing_filter_id = Some(id)`).
     FilterForEditLoaded {
         id: i64,
         name: String,
-        rule_kind: String,
-        value: String,
+        rule: FilterRuleInputs,
         action: FilterActionInputs,
+        priority: i32,
+        continue_on_match: bool,
     },
     /// A filter update succeeded — the refreshed list, plus the form collapses
     /// and resets (leaving edit mode), mirroring [`Self::FilterCreated`].
@@ -10892,6 +11398,13 @@ pub enum Outcome {
     /// machine's error bridges onto `error-message`. Boxed like the other
     /// machine snapshots: it carries every row's whole trust facet.
     NestsSnapshot(Box<LinkedNestsSnapshot>),
+    /// [`Op::RestoreFromCustodian`]'s answer: the runtime's outcome (`Err` =
+    /// the gesture could not run), then the Nests re-read when a machine was
+    /// there to hydrate.
+    NestsCustodyRestored {
+        result: Result<fauna_sync_engine::custodian_nest_restore::CustodianRestoreOutcome, String>,
+        page: Option<Box<Outcome>>,
+    },
     /// The MLS key-package count resolved — `Ok` the available count (the
     /// page's low-key warning re-derives from it, never carried separately),
     /// `Err` the message `error-message` shows. Folded by both
@@ -11758,14 +12271,19 @@ impl Op {
                     Err(e) => Outcome::SpamPrefsFailed(format!("{e}")),
                 }
             }
-            Op::CreateFilter {
-                nest,
-                name,
-                rules,
-                action,
-            } => {
+            Op::CreateFilter { nest, form } => {
                 let email = EmailClient::new(nest);
-                match email.filters_create(name, rules, "all", action, 0).await {
+                match email
+                    .filters_create(
+                        form.name,
+                        vec![form.rule],
+                        "all",
+                        form.action,
+                        form.priority,
+                        form.continue_on_match,
+                    )
+                    .await
+                {
                     Ok(_id) => match email.filters_list().await {
                         Ok(filters) => Outcome::FilterCreated(filters),
                         Err(e) => Outcome::FilterMutationFailed(format!(
@@ -11826,15 +12344,16 @@ impl Op {
                         let described = filter
                             .rules
                             .first()
-                            .and_then(describe_filter_rule)
+                            .and_then(describe_filter_rule_inputs)
                             .zip(describe_filter_action(&filter.action));
                         match described {
-                            Some(((rule_kind, value), action)) => Outcome::FilterForEditLoaded {
+                            Some((rule, action)) => Outcome::FilterForEditLoaded {
                                 id: filter.id,
                                 name: filter.name,
-                                rule_kind: rule_kind.to_string(),
-                                value,
+                                rule,
                                 action,
+                                priority: filter.priority,
+                                continue_on_match: filter.continue_on_match,
                             },
                             // The row's own `filter_is_editable` gate should have
                             // prevented this click — only reachable if the filter
@@ -11847,16 +12366,18 @@ impl Op {
                     Err(e) => Outcome::FilterMutationFailed(format!("{e}")),
                 }
             }
-            Op::UpdateFilter {
-                nest,
-                id,
-                name,
-                rules,
-                action,
-            } => {
+            Op::UpdateFilter { nest, id, form } => {
                 let email = EmailClient::new(nest);
                 match email
-                    .filters_update(id, name, rules, "all", action, 0)
+                    .filters_update(
+                        id,
+                        form.name,
+                        vec![form.rule],
+                        "all",
+                        form.action,
+                        form.priority,
+                        form.continue_on_match,
+                    )
                     .await
                 {
                     Ok(()) => match email.filters_list().await {
@@ -11881,16 +12402,29 @@ impl Op {
                 match nest {
                     Some(nest) => Outcome::MailHydrated {
                         snapshot,
-                        forwarding: Box::new(mail::read_forwarding(nest).await),
+                        account: Box::new(mail::read_account(nest).await),
                     },
                     None => Outcome::MailSnapshot(snapshot),
                 }
             }
             Op::MailSetForwardAllTo { nest, value } => {
-                Outcome::MailForwardingRead(Box::new(mail::set_forward_all_to(nest, value).await))
+                Outcome::MailAccountRead(Box::new(mail::set_forward_all_to(nest, value).await))
             }
             Op::MailSetForwardPerHour { nest, value } => {
-                Outcome::MailForwardingRead(Box::new(mail::set_forward_per_hour(nest, value).await))
+                Outcome::MailAccountRead(Box::new(mail::set_forward_per_hour(nest, value).await))
+            }
+            Op::MailSetSwitches {
+                nest,
+                receive_enabled,
+                send_enabled,
+            } => Outcome::MailAccountRead(Box::new(
+                mail::set_mail_switches(nest, receive_enabled, send_enabled).await,
+            )),
+            Op::MailSetScanResultVisible { nest, visible } => Outcome::MailAccountRead(Box::new(
+                mail::set_scan_result_visible(nest, visible).await,
+            )),
+            Op::MailSetAutorespond { nest, message } => {
+                Outcome::MailAccountRead(Box::new(mail::set_autorespond(nest, message).await))
             }
             Op::HydrateMailAliases { machine } => {
                 // A hydrate failure is not fatal: the machine keeps its
@@ -12055,6 +12589,14 @@ impl Op {
                 // not disarm an armed Cancel.
                 Outcome::MailExportProgress(Box::new(machine.snapshot()))
             }
+            Op::ResyncMailExport { machine } => {
+                // Not fatal, the `HydrateMailExport` reasoning; the machine's
+                // own `Refresh` decides what (if anything) changes.
+                if let Err(e) = machine.hydrate().await {
+                    tracing::warn!("[settings/mail_export] resync: {e:?}");
+                }
+                Outcome::MailExportProgress(Box::new(machine.snapshot()))
+            }
             Op::HydrateMailImport { machine } => {
                 // A hydrate failure is not fatal, the `HydrateMailExport`
                 // reasoning: `hydrate()` calls `refresh()` directly rather than
@@ -12076,7 +12618,10 @@ impl Op {
                 // never observe a half-committed scope.
                 let should_run = actions
                     .iter()
-                    .any(|a| matches!(a, MailImportAction::Start | MailImportAction::Resume));
+                    .any(|a| fauna_client_mail_settings::import_action_starts_run(a.clone()));
+                let began_sign_in = actions
+                    .iter()
+                    .any(|a| matches!(a, MailImportAction::BeginMicrosoftSignIn));
                 // The `should_run` shape: introspect the dispatched actions
                 // rather than threading a separate flag through the op, so a
                 // kind-change dispatch's post-dispatch snapshot gets routed to
@@ -12102,11 +12647,38 @@ impl Op {
                         }
                     });
                 }
+                // The Microsoft sign-in's polling half, once Microsoft answered
+                // with a code — never on a refused `BeginMicrosoftSignIn`
+                // (unavailable, no address). Fire-and-forget like `run_import`:
+                // the page's tick re-reads the snapshot while the sign-in is in
+                // flight (`mail_import_progress_active`), and a grant connects
+                // by itself.
+                if began_sign_in
+                    && snapshot
+                        .microsoft_signin
+                        .as_ref()
+                        .is_some_and(|v| v.state == MicrosoftSignInState::Waiting)
+                {
+                    let m = Arc::clone(&machine);
+                    tokio::spawn(async move {
+                        if let Err(e) = m.run_microsoft_sign_in().await {
+                            tracing::warn!("[settings/mail_import] run_microsoft_sign_in: {e:?}");
+                        }
+                    });
+                }
                 if kind_changed {
                     Outcome::MailImportSnapshotKindChanged(Box::new(snapshot))
                 } else {
                     Outcome::MailImportSnapshot(Box::new(snapshot))
                 }
+            }
+            Op::ResyncMailImport { machine } => {
+                // Not fatal, the `HydrateMailImport` reasoning; the machine's
+                // own `Refresh` decides what (if anything) changes.
+                if let Err(e) = machine.hydrate().await {
+                    tracing::warn!("[settings/mail_import] resync: {e:?}");
+                }
+                Outcome::MailImportProgress(Box::new(machine.snapshot()))
             }
             Op::RefreshMailImportProgress { machine } => {
                 // Pure, cheap, synchronous re-read — no RPC, no dispatch.
@@ -13182,11 +13754,17 @@ impl Op {
                     None => crate::bridges::Outcome::Loaded {
                         bridges: Vec::new(),
                         follows: Default::default(),
+                        follow_requests: Default::default(),
+                        plugins: None,
+                        plugin_cards: None,
                     },
                 };
                 Outcome::AtprotoHydrated { snapshot, bridges }
             }
-            Op::MintAtproto { machine } => {
+            Op::MintAtproto {
+                machine,
+                dm_allowed,
+            } => {
                 let before: HashSet<String> = machine
                     .snapshot()
                     .credentials
@@ -13196,7 +13774,7 @@ impl Op {
                 let label = fauna_i18n::strings::atproto_settings::default_credential_label(
                     &(before.len() + 1).to_string(),
                 );
-                match machine.mint(label, false).await {
+                match machine.mint(label, dm_allowed).await {
                     Ok(secret) => {
                         let new_id = machine
                             .snapshot()
@@ -13235,10 +13813,6 @@ impl Op {
                 machine.revoke(credential_id).await;
                 Outcome::AtprotoSnapshot(Box::new(machine.snapshot()))
             }
-            Op::SetAtprotoExternalApps { machine, enabled } => {
-                machine.set_external_apps_enabled(enabled).await;
-                Outcome::AtprotoSnapshot(Box::new(machine.snapshot()))
-            }
             Op::AuthorizeAtprotoDelegation { machine } => {
                 machine.authorize_external_apps().await;
                 Outcome::AtprotoSnapshot(Box::new(machine.snapshot()))
@@ -13268,36 +13842,27 @@ impl Op {
                 store,
                 custody,
                 reread,
+            } => hydrate_nests(machine, store, custody, reread).await,
+            Op::RestoreFromCustodian {
+                store,
+                url,
+                machine,
+                custody,
             } => {
-                // A hydrate failure is not dropped: the machine stamps it on
-                // `snapshot.error`, which the single fold below bridges onto
-                // `error-message` (a denied holder discovery degrades to an
-                // empty facet rather than a failed hydrate — `nests.md`
-                // § Implementation status).
-                let _ = machine.hydrate().await;
-                // The escrow-holder read (T16 badge): who has stamped an
-                // escrow receipt for this account's generation keys — the
-                // shared `AccountStoreHandle::escrow_holders` derivation every
-                // account-runtime app reads. A local store read; unreadable →
-                // None keeps the previous set.
-                let escrow_holders = match store {
-                    Some(store) => store.escrow_holders().await.ok(),
+                // An `Err` is a gesture that could not run at all (no
+                // enrollment witness yet, a store failure) — `error-message`;
+                // every answer the user is told is an `Ok` outcome.
+                let result = store
+                    .restore_from_custodian(url)
+                    .await
+                    .map_err(|e| format!("{e:#}"));
+                let page = match machine {
+                    Some(machine) => Some(Box::new(
+                        hydrate_nests(machine, Some(store), custody, false).await,
+                    )),
                     None => None,
                 };
-                // The custody facet: the custodian-NEST rows (the
-                // nest-custodian identity fact) render from the same fold
-                // the Devices page paints — loaded here so a Nests visit
-                // never paints a stale or absent family.
-                let custody = match custody {
-                    Some(ctx) => devices::load_custody_facet(ctx.nest, ctx.store).await,
-                    None => None,
-                };
-                Outcome::NestsPage {
-                    snapshot: Box::new(machine.snapshot()),
-                    escrow_holders,
-                    custody,
-                    reread,
-                }
+                Outcome::NestsCustodyRestored { result, page }
             }
             Op::Sessions(op) => Outcome::Sessions(sessions::run(op).await),
             Op::DispatchNests { machine, action } => {
@@ -13573,6 +14138,24 @@ fn apply_mail_import_snapshot(app: &mut App, snapshot: MailImportSnapshot, disar
     }
     if asked_before && !snapshot.resume_needs_credentials {
         e.password_input.clear();
+    }
+    // The source the account remembers (`mailbox-migration.md` § Credential
+    // handling): the machine prefilled the Source step, so fill this visit's
+    // drafts from it once — never over what the user has typed — and empty
+    // them when the user's Forget lands.
+    if snapshot.step == ImportStep::Source {
+        let remembered_before = e.snapshot.as_ref().is_some_and(|s| s.source_remembered);
+        if snapshot.source_remembered && !e.drafts_seeded && e.username_input.is_empty() {
+            e.host_input = snapshot.host.clone();
+            e.port_input = snapshot.port.to_string();
+            e.username_input = snapshot.username.clone();
+            e.drafts_seeded = true;
+        } else if remembered_before && !snapshot.source_remembered {
+            e.host_input.clear();
+            e.port_input.clear();
+            e.username_input.clear();
+            e.password_input.clear();
+        }
     }
     e.snapshot = Some(snapshot);
 }
@@ -14205,21 +14788,18 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         Outcome::MailSpamRead(read) => {
             apply_mail_spam_read(app, *read);
         }
-        Outcome::MailHydrated {
-            snapshot,
-            forwarding,
-        } => {
+        Outcome::MailHydrated { snapshot, account } => {
             apply_mail_snapshot(app, *snapshot);
-            // The snapshot's own error wins the one slot; a forwarding failure
-            // shows only when the snapshot had none.
-            if let Some(err) = forwarding.error()
+            // The snapshot's own error wins the one slot; a per-account read
+            // failure shows only when the snapshot had none.
+            if let Some(err) = account.error()
                 && app.errors.get(&Page::Settings).is_none()
             {
                 app.errors.insert(Page::Settings, err);
             }
-            app.settings.mail.apply_forwarding(*forwarding);
+            app.settings.mail.apply_account_read(*account);
         }
-        Outcome::MailForwardingRead(read) => {
+        Outcome::MailAccountRead(read) => {
             match read.error() {
                 Some(err) => {
                     app.errors.insert(Page::Settings, err);
@@ -14228,7 +14808,7 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
                     app.errors.remove(&Page::Settings);
                 }
             }
-            app.settings.mail.apply_forwarding(*read);
+            app.settings.mail.apply_account_read(*read);
         }
         // The enable/add submit resolved. Apply the snapshot (the SAME single
         // error-bridge site as `MailSnapshot`, via `apply_mail_snapshot`), then
@@ -14836,17 +15416,20 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         Outcome::FilterForEditLoaded {
             id,
             name,
-            rule_kind,
-            value,
+            rule,
             action,
+            priority,
+            continue_on_match,
         } => {
             app.errors.remove(&Page::Settings);
-            app.settings.privacy.editing_filter_id = Some(id);
-            app.settings.privacy.filter_name_input = name;
-            app.settings.privacy.filter_rule_type = rule_kind;
-            app.settings.privacy.filter_rule_value = value;
-            app.settings.privacy.filter_action = action;
-            app.settings.privacy.show_add_form = true;
+            let p = &mut app.settings.privacy;
+            p.editing_filter_id = Some(id);
+            p.filter_name_input = name;
+            p.filter_rule = rule;
+            p.filter_action = action;
+            p.filter_priority_input = priority.to_string();
+            p.filter_continue = continue_on_match;
+            p.show_add_form = true;
         }
         Outcome::FilterUpdated(filters) => {
             app.settings.privacy.filters = filters;
@@ -14985,6 +15568,29 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
                 app.settings.nests.snapshot = Some(*snapshot);
             } else {
                 apply_outcome(app, Outcome::NestsSnapshot(snapshot));
+            }
+        }
+        Outcome::NestsCustodyRestored { result, page } => {
+            // The re-read first: its fold settles `error-message` for the
+            // page, and a gesture that could not run then states why on it.
+            if let Some(page) = page {
+                apply_outcome(app, *page);
+            }
+            let form = &mut app.settings.nests;
+            match result {
+                Ok(outcome) => {
+                    // The form stays open on every failure, the address kept;
+                    // the outcome decides (`CustodianRestoreOutcome::closes_form`).
+                    if outcome.closes_form() {
+                        form.restore_form_open = false;
+                        form.restore_input.clear();
+                    }
+                    form.restore_notice = Some(nests::RestoreNotice::Done(outcome));
+                }
+                Err(reason) => {
+                    form.restore_notice = None;
+                    app.errors.insert(Page::Settings, reason);
+                }
             }
         }
         Outcome::NestsSnapshot(snapshot) => {
@@ -15566,7 +16172,14 @@ pub fn elements(app: &App) -> Vec<Element> {
     match state.sub {
         SubPage::Root => root_page(
             state,
-            crate::region::settings_elements(app),
+            // The two rules surfaces the app reads off device-scoped planes:
+            // the region's, then the session nest's (`nest-rules.md`
+            // § Acceptance at joining, and a change of rules → the rules
+            // surface).
+            crate::region::settings_elements(app)
+                .into_iter()
+                .chain(crate::nest_rules::settings_elements(app))
+                .collect(),
             &status_text(app),
         ),
         SubPage::Account => account_elements(
@@ -15830,21 +16443,43 @@ pub enum SettingsField {
     /// `nests-add-submit-button`, which hands it to the shared
     /// `classify_link_input` — this layer never parses it.
     NestsAddInput,
+    /// `nests-custody-restore-input` — the custodian nest's address, as typed.
+    /// Committed only on `nests-custody-restore-submit-button`; the runtime
+    /// command applies the URL policy, never this layer.
+    NestsRestoreInput,
     /// `custody-held-budget-input[i]` — the T16 per-held-custody budget
     /// draft (the payload is the held-row index, so each row edits its own
     /// buffer). Committed on the input's own Enter
     /// (`Action::CustodySetBudget`), parsed by `parse_byte_size` — the
     /// backups-page typed-byte-size idiom.
     CustodyBudget(u32),
-    /// `filter-rule-value` — the add-filter-form's rule match-value buffer, fed
-    /// to `fauna_protocol::email::encode_filter_rule` on `create-filter`
+    /// `filter-rule-value` — the add-filter-form's rule match-value buffer (a
+    /// header condition's header name), fed to
+    /// `fauna_protocol::email::encode_filter_rule_inputs` on `create-filter`
     /// alongside [`crate::element::SelectTarget::EmailFilterRuleType`]'s current
     /// selection.
     FilterRuleValue,
+    /// `filter-rule-header-value` — a header-contains condition's value.
+    FilterRuleHeaderValue,
+    /// `filter-rule-spam-score` — a spam-score condition's score in points.
+    FilterRuleSpamScore,
+    /// `filter-priority-input` — the rule's order.
+    FilterPriority,
     /// `filter-forward-address` — a Forward action's destination buffer, fed to
     /// `fauna_protocol::email::encode_filter_action` (which validates it) on
     /// `create-filter`/`save-filter`.
     FilterForwardAddress,
+    /// `filter-file-into-mailbox` — a move-to-folder action's mailbox.
+    FilterFileIntoMailbox,
+    /// `filter-add-label` — an add-label action's label.
+    FilterAddLabel,
+    /// `filter-auto-reply-subject` — an automatic reply's subject.
+    FilterAutoReplySubject,
+    /// `filter-auto-reply-body` — an automatic reply's message.
+    FilterAutoReplyBody,
+    /// `filter-auto-reply-interval-hours` — an automatic reply's
+    /// once-per-sender interval.
+    FilterAutoReplyIntervalHours,
     /// `mail-add-credential-name-input` — the Mail sub-page's add-credential
     /// form name buffer, committed only on `mail-add-credential-submit-button`.
     MailCredentialName,
@@ -15880,6 +16515,10 @@ pub enum SettingsField {
     /// rate-limit), committed on its own Enter/click
     /// (`Action::MailCommitForwardPerHour`).
     MailForwardPerHour,
+    /// `mail-settings-autorespond-message-input` — the automatic reply's
+    /// message, committed on its own Enter/click
+    /// (`Action::MailCommitAutorespondMessage`).
+    MailAutorespondMessage,
     /// `mail-aliases-add-sheet-rate-per-hour-input` — the optional per-alias
     /// hourly rate cap, parsed at submit (unparseable = unset).
     MailAliasRatePerHour,
@@ -15997,7 +16636,7 @@ pub enum SettingsField {
     /// `credential-store-rekey-current-input` — the change-passphrase modal's
     /// current-passphrase buffer (`settings.md` § Credential store). Held in a
     /// [`SecretString`] on the state side ([`RekeyModalState`]); the element's
-    /// registered text is a same-length bullet mask (the tui-unlock masking
+    /// registered text is a same-length bullet mask (the unlock masking
     /// contract), so only `App::field`'s type path sees the value. Reads empty
     /// while the modal is unarmed, and writes are dropped then — the inputs
     /// only exist armed.
@@ -16092,9 +16731,26 @@ pub fn field(state: &SettingsState, field: &SettingsField) -> String {
         SettingsField::OfflineSharePeerCodeInput => state.offline_share.peer_code_input.clone(),
         SettingsField::TrainedFactorNameInput => state.trained_topics.input.clone(),
         SettingsField::TrainedFactorPublishNameInput => state.trained_topics.publish.name.clone(),
-        SettingsField::FilterRuleValue => state.privacy.filter_rule_value.clone(),
+        SettingsField::FilterRuleValue => state.privacy.filter_rule.value.clone(),
+        SettingsField::FilterRuleHeaderValue => state.privacy.filter_rule.header_value.clone(),
+        SettingsField::FilterRuleSpamScore => state.privacy.filter_rule.spam_score.clone(),
+        SettingsField::FilterPriority => state.privacy.filter_priority_input.clone(),
+        SettingsField::FilterFileIntoMailbox => {
+            state.privacy.filter_action.file_into_mailbox.clone()
+        }
+        SettingsField::FilterAddLabel => state.privacy.filter_action.label.clone(),
+        SettingsField::FilterAutoReplySubject => {
+            state.privacy.filter_action.auto_reply_subject.clone()
+        }
+        SettingsField::FilterAutoReplyBody => state.privacy.filter_action.auto_reply_body.clone(),
+        SettingsField::FilterAutoReplyIntervalHours => state
+            .privacy
+            .filter_action
+            .auto_reply_interval_hours
+            .clone(),
         SettingsField::FilterForwardAddress => state.privacy.filter_action.forward_address.clone(),
         SettingsField::NestsAddInput => state.nests.add_input.clone(),
+        SettingsField::NestsRestoreInput => state.nests.restore_input.clone(),
         SettingsField::MailCredentialName => state.mail.name_input.clone(),
         SettingsField::MailPassword => state.mail.password_input.clone(),
         SettingsField::ConnectedAppsCode => state.connected_apps.code_input.clone(),
@@ -16104,6 +16760,7 @@ pub fn field(state: &SettingsState, field: &SettingsField) -> String {
         SettingsField::MailSpamThresholdOverride => state.mail_spam.spam_threshold_input.clone(),
         SettingsField::MailForwardAllTo => state.mail.forward_all_to_input.clone(),
         SettingsField::MailForwardPerHour => state.mail.forward_per_hour_input.clone(),
+        SettingsField::MailAutorespondMessage => state.mail.autorespond_message_input.clone(),
         SettingsField::MailAliasRatePerHour => state.mail_aliases.rate_per_hour_input.clone(),
         SettingsField::MailAliasTtl => state.mail_aliases.ttl_input.clone(),
         SettingsField::MailAliasUses => state.mail_aliases.uses_input.clone(),
@@ -16348,9 +17005,24 @@ pub fn set_field(state: &mut SettingsState, field: SettingsField, value: String)
         SettingsField::OfflineSharePeerCodeInput => state.offline_share.peer_code_input = value,
         SettingsField::TrainedFactorNameInput => state.trained_topics.input = value,
         SettingsField::TrainedFactorPublishNameInput => state.trained_topics.publish.name = value,
-        SettingsField::FilterRuleValue => state.privacy.filter_rule_value = value,
+        SettingsField::FilterRuleValue => state.privacy.filter_rule.value = value,
+        SettingsField::FilterRuleHeaderValue => state.privacy.filter_rule.header_value = value,
+        SettingsField::FilterRuleSpamScore => state.privacy.filter_rule.spam_score = value,
+        SettingsField::FilterPriority => state.privacy.filter_priority_input = value,
+        SettingsField::FilterFileIntoMailbox => {
+            state.privacy.filter_action.file_into_mailbox = value
+        }
+        SettingsField::FilterAddLabel => state.privacy.filter_action.label = value,
+        SettingsField::FilterAutoReplySubject => {
+            state.privacy.filter_action.auto_reply_subject = value
+        }
+        SettingsField::FilterAutoReplyBody => state.privacy.filter_action.auto_reply_body = value,
+        SettingsField::FilterAutoReplyIntervalHours => {
+            state.privacy.filter_action.auto_reply_interval_hours = value
+        }
         SettingsField::FilterForwardAddress => state.privacy.filter_action.forward_address = value,
         SettingsField::NestsAddInput => state.nests.add_input = value,
+        SettingsField::NestsRestoreInput => state.nests.restore_input = value,
         SettingsField::MailCredentialName => state.mail.name_input = value,
         SettingsField::MailPassword => state.mail.password_input = value,
         SettingsField::ConnectedAppsCode => state.connected_apps.code_input = value,
@@ -16360,6 +17032,7 @@ pub fn set_field(state: &mut SettingsState, field: SettingsField, value: String)
         SettingsField::MailSpamThresholdOverride => state.mail_spam.spam_threshold_input = value,
         SettingsField::MailForwardAllTo => state.mail.forward_all_to_input = value,
         SettingsField::MailForwardPerHour => state.mail.forward_per_hour_input = value,
+        SettingsField::MailAutorespondMessage => state.mail.autorespond_message_input = value,
         SettingsField::MailAliasRatePerHour => state.mail_aliases.rate_per_hour_input = value,
         SettingsField::MailAliasTtl => state.mail_aliases.ttl_input = value,
         SettingsField::MailAliasUses => state.mail_aliases.uses_input = value,
@@ -17381,6 +18054,99 @@ mod tests {
         assert!(
             partial.to_lowercase().contains("could not"),
             "the partly-owed line must say what is still missing, got {partial:?}"
+        );
+    }
+
+    /// Leg 8 — the subscriber-tier period-key rotation. The shared projection
+    /// decides, the render obeys; the arm that matters is `NestCannotRotate`,
+    /// which is not a failure but leaves the predecessor-era key live, so it
+    /// must render the exposure line, while the ordinary quiet outcomes stay
+    /// silent.
+    #[test]
+    fn the_period_rotation_line_renders_when_the_projection_says_to_and_flags_the_open_exposure() {
+        use fauna_client_subscriptions::orchestration::{
+            PeriodRotationOutcome, PeriodRotationProgress,
+        };
+        let mut app = crate::app::tests::authed_app();
+        app.settings.sub = SubPage::Account;
+        let id = "recovery-kit-period-rotation-status";
+
+        assert!(app.aftermath.period_rotation.is_none());
+        assert!(el(&elements(&app), id).is_none());
+
+        for quiet in [
+            PeriodRotationProgress::Settled(PeriodRotationOutcome::NothingHeld),
+            PeriodRotationProgress::Settled(PeriodRotationOutcome::Swept {
+                rotated: 0,
+                already_current: 2,
+                failed: 0,
+            }),
+        ] {
+            app.aftermath.period_rotation = Some(quiet.clone());
+            assert!(
+                el(&elements(&app), id).is_none(),
+                "{quiet:?} owes the user no word"
+            );
+        }
+
+        for loud in [
+            PeriodRotationProgress::Running,
+            PeriodRotationProgress::Settled(PeriodRotationOutcome::Swept {
+                rotated: 2,
+                already_current: 0,
+                failed: 0,
+            }),
+            PeriodRotationProgress::Settled(PeriodRotationOutcome::Swept {
+                rotated: 1,
+                already_current: 0,
+                failed: 1,
+            }),
+            PeriodRotationProgress::Failed("nest unreachable".into()),
+        ] {
+            app.aftermath.period_rotation = Some(loud.clone());
+            assert!(
+                el(&elements(&app), id).is_some(),
+                "{loud:?} must render a progress line"
+            );
+        }
+
+        app.aftermath.period_rotation = Some(PeriodRotationProgress::Settled(
+            PeriodRotationOutcome::NestCannotRotate,
+        ));
+        let els = elements(&app);
+        let text = el(&els, id)
+            .expect("a nest too old to rotate must not read as a clean aftermath")
+            .text
+            .to_lowercase();
+        assert!(
+            text.contains("too old") && text.contains("anyone who had your previous identity"),
+            "the line must name the open exposure and its cause, got {text:?}"
+        );
+    }
+
+    /// The line sits right after the capability-grant line and above the
+    /// corpus, drafts and mail lines — the order the legs run in.
+    #[test]
+    fn the_period_rotation_line_renders_right_after_the_grant_remint_line() {
+        use fauna_client_capabilities::{GrantRemintOutcome, GrantRemintProgress};
+        use fauna_client_subscriptions::orchestration::{
+            PeriodRotationOutcome, PeriodRotationProgress,
+        };
+        let mut app = crate::app::tests::authed_app();
+        app.settings.sub = SubPage::Account;
+        app.aftermath.grant_remint =
+            Some(GrantRemintProgress::Settled(GrantRemintOutcome::Reminted {
+                reminted: 1,
+                owed: 0,
+            }));
+        app.aftermath.period_rotation = Some(PeriodRotationProgress::Settled(
+            PeriodRotationOutcome::NestCannotRotate,
+        ));
+        let ids: Vec<String> = elements(&app).iter().map(|e| e.id.clone()).collect();
+        let at = |id: &str| ids.iter().position(|i| i == id).unwrap();
+        assert_eq!(
+            at("recovery-kit-period-rotation-status"),
+            at("recovery-kit-grant-remint-status") + 1
         );
     }
 
@@ -19835,6 +20601,18 @@ mod tests {
     }
 
     #[test]
+    fn delete_confirmation_text_is_an_element_naming_both_exports() {
+        let mut app = crate::app::tests::authed_app();
+        app.settings.sub = SubPage::Account;
+        let els = elements(&app);
+        let text = el(&els, "settings-delete-confirm-text").unwrap();
+        assert_eq!(
+            text.text,
+            fauna_i18n::strings::settings::account_page::DELETE_CONFIRM_TEXT
+        );
+    }
+
+    #[test]
     fn delete_account_button_is_disabled_until_delete_is_typed() {
         let mut app = crate::app::tests::authed_app();
         app.settings.sub = SubPage::Account;
@@ -20361,7 +21139,7 @@ mod tests {
         // proves the whole door, not just `apply` in isolation.
         let mut app = crate::app::tests::authed_app();
         assert!(apply_local(&mut app, Action::SetFilterRuleType("HeaderExists".into())).is_none());
-        assert_eq!(app.settings.privacy.filter_rule_type, "HeaderExists");
+        assert_eq!(app.settings.privacy.filter_rule.kind, "HeaderExists");
         assert!(apply_local(&mut app, Action::SetFilterActionSelect("Reject".into())).is_none());
         assert_eq!(app.settings.privacy.filter_action.kind, "Reject");
         assert!(apply_local(&mut app, Action::ToggleFilterKeepLocalCopy).is_none());
@@ -20390,12 +21168,12 @@ mod tests {
         assert!(has(&app, fauna_ui_ids::FILTER_FORWARD_ADDRESS));
         assert!(has(&app, fauna_ui_ids::FILTER_KEEP_LOCAL_COPY));
 
-        app.settings.privacy.filter_rule_value = "boss@example.com".into();
+        app.settings.privacy.filter_rule.value = "boss@example.com".into();
         app.settings.privacy.filter_action.forward_address = "dest@example.net".into();
         apply(&mut app.settings, Action::ToggleFilterKeepLocalCopy);
-        let (_, _, action) = encode_filter_form(&mut app).expect("the form encodes");
+        let form = encode_filter_form(&mut app).expect("the form encodes");
         assert_eq!(
-            action,
+            form.action,
             EmailFilterAction::Forward {
                 address: "dest@example.net".into(),
                 redirect: true,
@@ -21181,11 +21959,57 @@ mod tests {
         assert!(app.errors.contains_key(&Page::Settings));
     }
 
+    /// Each richer action and condition shows only its own inputs, and the
+    /// whole form — order and `continue` included — encodes through the shared
+    /// encoders (`email-filters.md` § Email filter rules).
+    #[test]
+    fn richer_inputs_render_for_their_kind_and_the_form_encodes_order_and_continue() {
+        let mut app = crate::app::tests::authed_app();
+        app.settings.sub = SubPage::Privacy;
+        app.settings.privacy.show_add_form = true;
+        let has = |app: &App, id: &str| elements(app).iter().any(|e| e.id == id);
+        assert!(has(&app, fauna_ui_ids::FILTER_PRIORITY_INPUT));
+        assert!(has(&app, fauna_ui_ids::FILTER_CONTINUE_TOGGLE));
+        assert!(!has(&app, fauna_ui_ids::FILTER_RULE_SPAM_SCORE));
+        assert!(!has(&app, fauna_ui_ids::FILTER_AUTO_REPLY_BODY));
+
+        apply(
+            &mut app.settings,
+            Action::SetFilterRuleType("SpamScoreAtLeast".into()),
+        );
+        apply(
+            &mut app.settings,
+            Action::SetFilterActionSelect("AutoReply".into()),
+        );
+        assert!(has(&app, fauna_ui_ids::FILTER_RULE_SPAM_SCORE));
+        assert!(!has(&app, fauna_ui_ids::FILTER_RULE_HEADER_VALUE));
+        assert!(has(&app, fauna_ui_ids::FILTER_AUTO_REPLY_SUBJECT));
+        assert!(has(&app, fauna_ui_ids::FILTER_AUTO_REPLY_BODY));
+        assert!(has(&app, fauna_ui_ids::FILTER_AUTO_REPLY_INTERVAL_HOURS));
+        assert!(!has(&app, fauna_ui_ids::FILTER_FILE_INTO_MAILBOX));
+
+        let p = &mut app.settings.privacy;
+        p.filter_rule.spam_score = "7.5".into();
+        p.filter_action.auto_reply_subject = "Away".into();
+        p.filter_action.auto_reply_body = "Back on Monday".into();
+        p.filter_priority_input = "3".into();
+        apply(&mut app.settings, Action::ToggleFilterContinue);
+        let form = encode_filter_form(&mut app).expect("the form encodes");
+        assert_eq!(form.rule, EmailFilterRule::SpamScoreAtLeast { milli: 7500 });
+        assert!(matches!(form.action, EmailFilterAction::AutoReply { .. }));
+        assert_eq!((form.priority, form.continue_on_match), (3, true));
+
+        // A refused input names itself on error-message and sends nothing.
+        app.settings.privacy.filter_priority_input = "first".into();
+        assert!(encode_filter_form(&mut app).is_none());
+        assert!(app.errors.contains_key(&Page::Settings));
+    }
+
     #[test]
     fn create_filter_surfaces_an_encode_error_and_makes_no_call() {
         let mut app = crate::app::tests::authed_app();
         app.settings.nest = Some(nest_for_test());
-        app.settings.privacy.filter_rule_type = "NotARealTag".to_string();
+        app.settings.privacy.filter_rule.kind = "NotARealTag".to_string();
         let op = apply_local(&mut app, Action::CreateFilter);
         assert!(op.is_none(), "an unknown rule tag makes no network call");
         assert!(app.errors.contains_key(&Page::Settings));
@@ -21458,7 +22282,7 @@ mod tests {
         let mut app = crate::app::tests::authed_app();
         app.settings.nest = Some(nest_for_test());
         app.settings.privacy.editing_filter_id = Some(11);
-        app.settings.privacy.filter_rule_type = "NotARealTag".to_string();
+        app.settings.privacy.filter_rule.kind = "NotARealTag".to_string();
         let op = apply_local(&mut app, Action::SaveFilter);
         assert!(op.is_none(), "an unknown rule tag makes no network call");
         assert!(app.errors.contains_key(&Page::Settings));
@@ -21471,11 +22295,11 @@ mod tests {
         app.settings.privacy.editing_filter_id = Some(42);
         app.settings.privacy.filter_name_input = "Renamed".to_string();
         let op = apply_local(&mut app, Action::SaveFilter);
-        let Some(Op::UpdateFilter { id, name, .. }) = op else {
+        let Some(Op::UpdateFilter { id, form, .. }) = op else {
             panic!("expected an UpdateFilter op");
         };
         assert_eq!(id, 42);
-        assert_eq!(name, "Renamed");
+        assert_eq!(form.name, "Renamed");
     }
 
     #[test]
@@ -21756,6 +22580,55 @@ mod tests {
         );
     }
 
+    /// A box that cannot enable mail (`ui/mail-settings.md` § Layout & flow):
+    /// the shared snapshot field disables the toggle, its `state` reads
+    /// `unavailable`, and the notice replaces the enable explanation. A mailbox
+    /// already on keeps a live toggle (the way off stays open).
+    #[test]
+    fn an_unavailable_box_disables_the_toggle_under_the_notice() {
+        let mut state = SettingsState::default();
+        mail_state(
+            &mut state,
+            MailSettingsSnapshot {
+                mail_unavailable_here: true,
+                ..Default::default()
+            },
+        );
+        let els = mail_elements(&state);
+        let toggle = el(&els, "mail-settings-enabled-toggle").unwrap();
+        assert_eq!(
+            toggle.attrs,
+            vec![("state".to_string(), "unavailable".to_string())]
+        );
+        assert!(!toggle.enabled, "no gesture can turn mail on");
+        assert_eq!(
+            el(&els, "mail-settings-unavailable-notice").unwrap().text,
+            fauna_i18n::strings::mail_settings::UNAVAILABLE_NOTICE
+        );
+        assert!(
+            !els.iter()
+                .any(|e| e.text == fauna_i18n::strings::settings::mail::ENABLE_SUBTITLE),
+            "the notice stands in for the enable explanation"
+        );
+
+        mail_state(&mut state, MailSettingsSnapshot::default());
+        let els = mail_elements(&state);
+        assert!(el(&els, "mail-settings-unavailable-notice").is_none());
+        assert!(el(&els, "mail-settings-enabled-toggle").unwrap().enabled);
+
+        mail_state(
+            &mut state,
+            MailSettingsSnapshot {
+                mail_unavailable_here: true,
+                ..enabled_snapshot()
+            },
+        );
+        let els = mail_elements(&state);
+        let toggle = el(&els, "mail-settings-enabled-toggle").unwrap();
+        assert!(toggle.enabled, "an enabled mailbox can still be turned off");
+        assert_eq!(toggle.attrs, vec![("state".to_string(), "on".to_string())]);
+    }
+
     /// The status indicator resolves the SHARED label, so the exact cross-app
     /// wording the e2e reads cannot drift. An un-hydrated page reads "disabled",
     /// never "All up to date" (the shared fn gates `Idle` on `enabled`).
@@ -21950,13 +22823,14 @@ mod tests {
         let hint = fauna_i18n::strings::mail_settings::forward_per_hour_subtitle("500");
         assert!(!els.iter().any(|e| e.text == hint));
 
-        state.mail.apply_forwarding(mail::MailForwardingRead {
+        state.mail.apply_account_read(mail::MailAccountRead {
             forward_all_to: Some(Ok(Some("me@elsewhere.example".into()))),
             forward_per_hour: Some(Ok(fauna_protocol::bridge_routing::GetForwardPerHourReply {
                 forward_per_hour: 100,
                 forward_per_hour_ceiling: 500,
                 ..Default::default()
             })),
+            ..mail::MailAccountRead::none()
         });
         let els = mail_elements(&state);
         assert_eq!(
@@ -21984,16 +22858,16 @@ mod tests {
             forward_per_hour_input: "7".into(),
             ..Default::default()
         };
-        m.apply_forwarding(mail::MailForwardingRead {
-            forward_all_to: None,
+        m.apply_account_read(mail::MailAccountRead {
             forward_per_hour: Some(Err("offline".into())),
+            ..mail::MailAccountRead::none()
         });
         assert_eq!(m.forward_all_to_input, "half-typed@");
         assert_eq!(m.forward_per_hour_input, "7");
         // A confirmed clear empties the field.
-        m.apply_forwarding(mail::MailForwardingRead {
+        m.apply_account_read(mail::MailAccountRead {
             forward_all_to: Some(Ok(None)),
-            forward_per_hour: None,
+            ..mail::MailAccountRead::none()
         });
         assert_eq!(m.forward_all_to_input, "");
     }
@@ -22025,6 +22899,171 @@ mod tests {
         assert!(matches!(
             op,
             Some(Op::MailSetForwardAllTo { value: Some(ref v), .. }) if v == "me@elsewhere.example"
+        ));
+    }
+
+    /// The switches, the automatic reply and the quota readout paint only once
+    /// their read has landed, carry the confirmed on/off in `state`, and the
+    /// over-quota notice appears only when a limit has run out.
+    #[test]
+    fn the_account_section_paints_from_the_confirmed_read() {
+        use fauna_protocol::bridge_routing::{GetMailQuotasReply, GetMailSwitchesReply};
+        let mut state = SettingsState::default();
+        mail_state(&mut state, enabled_snapshot());
+        let els = mail_elements(&state);
+        for id in [
+            "mail-settings-receive-toggle",
+            "mail-settings-send-toggle",
+            "mail-settings-scan-result-visible-toggle",
+            "mail-settings-autorespond-toggle",
+            "mail-settings-mailbox-quota",
+            "mail-settings-submission-quota",
+            "mail-settings-over-quota-notice",
+        ] {
+            assert!(el(&els, id).is_none(), "{id} before its read");
+        }
+        assert!(el(&els, "mail-settings-autorespond-message-input").is_some());
+
+        state.mail.apply_account_read(mail::MailAccountRead {
+            switches: Some(Ok(GetMailSwitchesReply {
+                receive_enabled: true,
+                send_enabled: false,
+                scan_result_visible: false,
+                ..Default::default()
+            })),
+            autorespond: Some(Ok(fauna_client_email::AutoRespond {
+                enabled: true,
+                message: "Away".into(),
+            })),
+            quotas: Some(Ok(GetMailQuotasReply {
+                storage_bytes_used: 10,
+                storage_bytes_limit: 100,
+                message_count_used: 1,
+                message_count_limit: 10,
+                submission_used_today: 0,
+                submission_max_per_day: 1000,
+                ..Default::default()
+            })),
+            ..mail::MailAccountRead::none()
+        });
+        let els = mail_elements(&state);
+        let state_of = |id| {
+            el(&els, id)
+                .unwrap()
+                .attrs
+                .iter()
+                .find(|(k, _)| k == "state")
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(
+            state_of("mail-settings-receive-toggle").as_deref(),
+            Some("on")
+        );
+        assert_eq!(
+            state_of("mail-settings-send-toggle").as_deref(),
+            Some("off")
+        );
+        assert_eq!(
+            state_of("mail-settings-scan-result-visible-toggle").as_deref(),
+            Some("off")
+        );
+        assert_eq!(
+            state_of("mail-settings-autorespond-toggle").as_deref(),
+            Some("on")
+        );
+        assert_eq!(
+            el(&els, "mail-settings-autorespond-message-input")
+                .unwrap()
+                .text,
+            "Away"
+        );
+        assert!(
+            el(&els, "mail-settings-mailbox-quota")
+                .unwrap()
+                .text
+                .contains("1 of 10")
+        );
+        assert_eq!(
+            el(&els, "mail-settings-submission-quota").unwrap().text,
+            "0 of 1000 recipients today"
+        );
+        assert!(el(&els, "mail-settings-over-quota-notice").is_none());
+
+        state.mail.apply_account_read(mail::MailAccountRead {
+            quotas: Some(Ok(GetMailQuotasReply {
+                storage_bytes_used: 100,
+                storage_bytes_limit: 100,
+                ..Default::default()
+            })),
+            ..mail::MailAccountRead::none()
+        });
+        let els = mail_elements(&state);
+        assert_eq!(
+            el(&els, "mail-settings-over-quota-notice").unwrap().text,
+            fauna_i18n::strings::mail_settings::OVER_QUOTA_MAILBOX
+        );
+    }
+
+    /// A switch flips the confirmed value and touches only its own half; with no
+    /// read yet the click is inert.
+    #[test]
+    fn toggling_a_switch_flips_the_confirmed_value() {
+        let mut app = crate::app::tests::authed_app();
+        app.settings.sub = SubPage::Mail;
+        app.settings.nest = Some(nest_for_test());
+        assert!(apply_local(&mut app, Action::MailToggleReceive).is_none());
+
+        app.settings.mail.switches = Some(Default::default());
+        assert!(matches!(
+            apply_local(&mut app, Action::MailToggleReceive),
+            Some(Op::MailSetSwitches {
+                receive_enabled: Some(false),
+                send_enabled: None,
+                ..
+            })
+        ));
+        assert!(matches!(
+            apply_local(&mut app, Action::MailToggleSend),
+            Some(Op::MailSetSwitches {
+                receive_enabled: None,
+                send_enabled: Some(false),
+                ..
+            })
+        ));
+        assert!(matches!(
+            apply_local(&mut app, Action::MailToggleScanResultVisible),
+            Some(Op::MailSetScanResultVisible { visible: false, .. })
+        ));
+    }
+
+    /// Turning the reply on checks the draft first; turning it off needs none.
+    #[test]
+    fn the_automatic_reply_checks_its_draft_before_turning_on() {
+        let mut app = crate::app::tests::authed_app();
+        app.settings.sub = SubPage::Mail;
+        app.settings.nest = Some(nest_for_test());
+        app.settings.mail.autorespond = Some(Default::default());
+
+        app.settings.mail.autorespond_message_input = "  ".into();
+        assert!(apply_local(&mut app, Action::MailToggleAutorespond).is_none());
+        assert_eq!(
+            app.errors.get(&Page::Settings).map(String::as_str),
+            Some(fauna_i18n::strings::mail_settings::AUTORESPOND_MESSAGE_EMPTY)
+        );
+
+        app.settings.mail.autorespond_message_input = " Away ".into();
+        assert!(matches!(
+            apply_local(&mut app, Action::MailCommitAutorespondMessage),
+            Some(Op::MailSetAutorespond { message: Some(ref m), .. }) if m == "Away"
+        ));
+
+        app.settings.mail.autorespond = Some(fauna_client_email::AutoRespond {
+            enabled: true,
+            message: "Away".into(),
+        });
+        assert!(matches!(
+            apply_local(&mut app, Action::MailToggleAutorespond),
+            Some(Op::MailSetAutorespond { message: None, .. })
         ));
     }
 
@@ -22762,7 +23801,7 @@ mod tests {
     }
 
     /// The app-password rows moved to Connected apps: this page paints none of
-    /// the `mail-settings-credential-item-*` family, and says where they went.
+    /// the retired `mail-settings-credential-item-*` family, and says where they went.
     #[test]
     fn the_credential_rows_are_not_painted_here() {
         let mut state = SettingsState::default();
@@ -22900,7 +23939,7 @@ mod tests {
 
     /// One flat-indexed `mail-rotate-keys-exclude-item` per credential, checked
     /// state reflecting `MailState::rotate_excluded` — the same registration-order
-    /// convention as `mail-settings-credential-item`.
+    /// convention as `connected-apps-item`.
     #[test]
     fn rotate_form_paints_one_exclude_item_per_credential() {
         let mut state = SettingsState::default();
@@ -23242,6 +24281,11 @@ mod tests {
             },
             Action::MailAliasesRevoke(s()),
             Action::MailAliasesDelete(s()),
+            Action::MailAliasesExtend(s()),
+            Action::MailAliasesToggleAudit {
+                alias_id_hex: s(),
+                opening: true,
+            },
             Action::MailListsOpenAdd,
             Action::MailListsOpenEdit(s()),
             Action::MailListsSetDomain(s()),
@@ -23276,15 +24320,22 @@ mod tests {
             Action::MailImportSetTlsMode(ImportTlsMode::Implicit),
             Action::MailImportOAuthStart,
             Action::MailImportConnect,
+            Action::MailImportForgetSource,
             Action::MailImportToggleMailbox(s()),
+            Action::MailImportToggleImportDuplicates,
             Action::MailImportNext,
             Action::MailImportBack,
             Action::MailImportStart,
             Action::MailImportPause,
             Action::MailImportResume,
+            Action::MailImportRestart,
             Action::MailImportCancel,
+            Action::MailImportSkipRest,
+            Action::MailImportDismiss,
             Action::MailImportToggleSkipped,
+            Action::MailImportOpenMicrosoftSignIn,
             Action::ArchiveImportSelectSource(ArchiveSourceKind::Facebook),
+            Action::ArchiveImportOpenExportPage,
             Action::ArchiveImportOpenArchive,
             Action::ArchiveImportToggleCategory(s()),
             Action::ArchiveImportSetAudienceMode(AudienceMode::Original),
@@ -23297,6 +24348,11 @@ mod tests {
             Action::ArchiveImportToggleSkipped,
             Action::ArchiveImportProfilePrefill,
             Action::MailToggleServeHere,
+            Action::MailToggleReceive,
+            Action::MailToggleSend,
+            Action::MailToggleScanResultVisible,
+            Action::MailToggleAutorespond,
+            Action::MailCommitAutorespondMessage,
             Action::MailOpenRotateForm,
             Action::MailToggleRotateExclude(s()),
             Action::MailRotateConfirm,
@@ -23392,12 +24448,14 @@ mod tests {
             Action::ToggleShareSignals,
             Action::CancelTrainedFactorPublish,
             Action::RemoveMutedWord(s()),
+            Action::SetMutedWordLevel { row: 0, value: s() },
             Action::SetInboxMode(s()),
             Action::SaveSpamPrefs,
             Action::ToggleAddFilterForm,
             Action::SetFilterRuleType(s()),
             Action::SetFilterActionSelect(s()),
             Action::ToggleFilterKeepLocalCopy,
+            Action::ToggleFilterContinue,
             Action::CreateFilter,
             Action::DeleteFilter(1),
             Action::KeepFilter(1),
@@ -23461,12 +24519,13 @@ mod tests {
                 path: s(),
                 mode: s(),
             },
+            Action::FreeLocationSpace { path: s() },
             Action::ToggleSyncAgentLinger,
             Action::OpenAtproto,
             Action::AtprotoMint,
             Action::AtprotoReveal(s()),
             Action::AtprotoRevoke(s()),
-            Action::AtprotoToggleExternalApps,
+            Action::ConnectedAppsToggleExternalApps,
             Action::AtprotoAuthorizeDelegation,
             Action::AtprotoRevokeDelegation,
             Action::AtprotoSelectLevel(s()),
@@ -23474,6 +24533,7 @@ mod tests {
             Action::AtprotoCancelTransition,
             Action::AtprotoSetDidMethod(s()),
             Action::AtprotoSetHistoryBackfill(true),
+            Action::AtprotoSetMintDmAccess(true),
             Action::AtprotoSetDeleteRetireIdentity(true),
             Action::AtprotoDeletePresence,
             Action::AtprotoConfirmDelete,
@@ -23899,7 +24959,32 @@ mod tests {
     // 258 → 259 on 2026-10-12: `MailImportToggleSkipped`
     // (`mail-import-review-skipped-button` reveals the skip log on Done),
     // added to every_action() in the same commit.
-    const ACTION_COUNT: usize = 259;
+    // 259 → 260 on 2026-10-16: `MailImportOpenMicrosoftSignIn` (the id-less
+    // Open in browser beside `mail-import-source-oauth-code`), added to
+    // every_action() in the same commit.
+    // 260 → 261 on 2026-10-17: `FreeLocationSpace`
+    // (`folder-location-free-space-button`), added to every_action() in the
+    // same commit.
+    // 261 → 262 on 2026-10-17: `SetMutedWordLevel`
+    // (`muted-word-level-select`), added to every_action() in the same commit.
+    // 268 → 269 on 2026-10-17: `ArchiveImportOpenExportPage`
+    // (`archive-import-source-export-link`), added to every_action() in the
+    // same commit.
+    // 269 → 270 on 2026-10-17: `MailImportRestart`
+    // (`mail-import-restart-button`), added to every_action() in the same
+    // commit.
+    // 270 → 271 on 2026-10-17: `MailImportForgetSource`
+    // (`mail-import-source-forget-button`), added to every_action() in the
+    // same commit.
+    // 271 → 273 on 2026-10-18: `MailAliasesToggleAudit`
+    // (`mail-aliases-list-item-show-audit`) and `ToggleFilterContinue`
+    // (`filter-continue-toggle`), added to every_action() in the same commit —
+    // plus three variants that had already reached every_action() without this
+    // count moving.
+    // 276 → 277 on 2026-10-19: `MailToggleScanResultVisible`
+    // (`mail-settings-scan-result-visible-toggle`), added to every_action() in
+    // the same commit.
+    const ACTION_COUNT: usize = 277;
 
     #[test]
     fn every_settings_action_is_in_the_corpus() {
@@ -24114,13 +25199,17 @@ mod tests {
             "MailImportSetTlsMode",
             "MailImportOAuthStart",
             "MailImportConnect",
+            "MailImportForgetSource",
             "MailImportToggleMailbox",
+            "MailImportToggleImportDuplicates",
             "MailImportNext",
             "MailImportBack",
             "MailImportToggleSkipped",
+            "MailImportOpenMicrosoftSignIn",
         ];
         // Archive import: `OpenArchive` reads a LOCAL file, and steps 1–3 are
         // client-only FSM moves inside the machine's own `dispatch`.
+        // `OpenExportPage` hands a URL to the OS opener.
         // Pause/Resume/Cancel flip machine-local run flags — every nest call of
         // the run belongs to `run_import`'s background loop, not to the click.
         // `ToggleSkipped` is a view toggle and `ProfilePrefill` is the disabled
@@ -24128,6 +25217,7 @@ mod tests {
         // (`fauna.folders.create`) and is deliberately absent from this list.
         let archive_import = [
             "ArchiveImportSelectSource",
+            "ArchiveImportOpenExportPage",
             "ArchiveImportOpenArchive",
             "ArchiveImportToggleCategory",
             "ArchiveImportSetAudienceMode",
@@ -24201,6 +25291,7 @@ mod tests {
             "ToggleAddFilterForm",
             "SetFilterRuleType",
             "SetFilterActionSelect",
+            "ToggleFilterContinue",
             "ToggleFilterKeepLocalCopy",
             "OpenFolderWizard",
             "ToggleWizardDeviceMember",
@@ -24217,10 +25308,12 @@ mod tests {
             "AddLocation",
             "RemoveLocation",
             "SetLocationMode",
+            "FreeLocationSpace",
             "ToggleSyncAgentLinger",
             "AtprotoCancelTransition",
             "AtprotoSetDidMethod",
             "AtprotoSetHistoryBackfill",
+            "AtprotoSetMintDmAccess",
             "AtprotoSetDeleteRetireIdentity",
             "AtprotoDeletePresence",
             "AtprotoCancelDelete",

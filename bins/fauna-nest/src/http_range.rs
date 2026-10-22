@@ -7,7 +7,8 @@
 //! refuses to play from a server that answers no byte-range request — and the
 //! segment download (`segments::segment_route::get_segment`), where a resumed
 //! fetch asks for the tail it lacks (`render-model.md` § D6c → *Inline
-//! playback*, answer 2: one parser, both routes).
+//! playback*, answer 2: one parser, both routes). The segment download serves a
+//! file through [`serve_file`], which streams it rather than reading it whole.
 //!
 //! **Three outcomes, not two.** A header the nest cannot or will not honour as
 //! one range — malformed, a unit other than `bytes`, `end < start`, or a
@@ -117,6 +118,71 @@ pub fn not_satisfiable(total: u64) -> Response {
         [(header::CONTENT_RANGE, format!("bytes */{total}"))],
     )
         .into_response()
+}
+
+/// The most a [`serve_file`] body reads off disk at once — what one request
+/// holds in memory, however large the file.
+pub const FILE_SERVE_PIECE: usize = 64 * 1024;
+
+/// Serve an open file **by streaming it**, honouring `Range`: 206 for a
+/// satisfiable range (seeked to its start), 416 past the end, else the whole
+/// file with 200. Every success carries `content_type`, `Accept-Ranges` and a
+/// truthful `Content-Length`.
+///
+/// The body is read off `file` [`FILE_SERVE_PIECE`] bytes at a time as the
+/// client drains it, so a request holds one piece, never the file — the shape
+/// a route serving stored bytes with no size ceiling owes its process, since a
+/// whole-file read is an allocation of whatever size the store holds, once per
+/// request (`message-segment-store.md` § Segment size).
+pub async fn serve_file(
+    headers: &HeaderMap,
+    mut file: tokio::fs::File,
+    content_type: &'static str,
+) -> std::io::Result<Response> {
+    use tokio::io::AsyncSeekExt;
+
+    let total = file.metadata().await?.len();
+    let (builder, start, len) = match requested(headers, total) {
+        ByteRange::Satisfiable { start, end } => (
+            partial_content(Response::builder(), start, end, total),
+            start,
+            end - start + 1,
+        ),
+        ByteRange::Unsatisfiable => return Ok(not_satisfiable(total)),
+        ByteRange::Ignore => (
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::ACCEPT_RANGES, "bytes"),
+            0,
+            total,
+        ),
+    };
+    if start > 0 {
+        file.seek(std::io::SeekFrom::Start(start)).await?;
+    }
+    Ok(builder
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_LENGTH, len)
+        .body(file_body(file, len))
+        .expect("static headers")
+        .into_response())
+}
+
+/// `len` bytes of `file` from its current position, as a body read
+/// [`FILE_SERVE_PIECE`] at a time.
+fn file_body(file: tokio::fs::File, len: u64) -> axum::body::Body {
+    use tokio::io::AsyncReadExt;
+
+    let stream = futures_util::stream::unfold(Some(file.take(len)), |reader| async move {
+        let mut reader = reader?;
+        let mut piece = bytes::BytesMut::with_capacity(FILE_SERVE_PIECE);
+        match reader.read_buf(&mut piece).await {
+            Ok(0) => None,
+            Ok(_) => Some((Ok(piece.freeze()), Some(reader))),
+            Err(e) => Some((Err::<bytes::Bytes, _>(e), None)),
+        }
+    });
+    axum::body::Body::from_stream(stream)
 }
 
 #[cfg(test)]

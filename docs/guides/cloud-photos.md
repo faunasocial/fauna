@@ -2,20 +2,18 @@
 
 > **Status — this guide describes Fauna as it is taking shape.** Most of it is
 > built and tested; the [table at the end](#where-this-stands-today) says
-> exactly what is available now, what is landing, and what is planned.
+exactly what is available now and what is not.
 >
 > Part of the [Your own cloud](your-own-cloud.md) series.
 
 ---
 
-For most households, photos are *the* reason the cloud bill exists: the camera
-roll outgrew the free tier years ago, and the subscription has been auto-
-renewing ever since. This guide covers what Fauna does about it.
+Photos are most households' largest collection; this guide covers how Fauna keeps them.
 
 ## Automatic photo backup from your phone
 
 Install the Fauna app, enable photo backup, and the camera roll flows to your
-nest — encrypted on the phone before upload, deduplicated so re-runs and
+nest — encrypted on the phone before upload (unless you make the folder public — see [the privacy difference](#the-privacy-difference-concretely)), deduplicated so re-runs and
 duplicates cost nothing.
 
 Every phone and Mac **strips location and device metadata before upload**, for
@@ -34,10 +32,7 @@ camera took and not a lower-quality re-encoding of it.
   many — and a **Back up now** button is there when you don't want to wait for
   the next scheduled pass.
 - **Android**: turn on photo backup and the camera roll backs up on its own in
-  the background — no need to open the app. Passes run only on Wi-Fi, never on
-  cellular data, and they run every 15 minutes — Android's floor for a
-  repeating background job, and the same cadence on every device; there is no
-  per-folder frequency to set. **Back up now** is still there when you don't
+  the background — no need to open the app. Passes run only on an unmetered connection such as Wi-Fi, never on mobile data, and they run every 15 minutes — Android's floor for a repeating background job, and the same cadence on every device; there is no per-folder frequency to set. **Back up now** is still there when you don't
   want to wait.
 - **Mac**: the desktop app watches the Photos library itself (it's an
   always-running app, so no scheduler gymnastics) — useful when the Mac, not a
@@ -52,21 +47,15 @@ get the good stuff uniformly: the same snapshots, the same retention rules, the
 same off-site [backup destinations and friend-hosted copies](cloud-backup.md),
 and the same browsing, all applying to your photos with no photo-special cases.
 
-Turning photo backup on creates that set for you — there's no wizard to fill in.
-If you were already backing up photos before this shape existed, your existing
-photo set is kept and used as-is: nothing is re-created under a new name, and
-nothing you already uploaded is left behind.
+Turning photo backup on creates that folder for you — there's no wizard to fill in.
 
-On Windows and Linux, the same shape covers any folder of images you add to
-Fauna.
+On Windows and Linux, any folder of images can be kept the same way: switch **Applies deletions** off for it and set how many snapshots and how many days to keep under **What your nest keeps** — see [Backup](cloud-backup.md).
 
 ## Browsing your media anywhere
 
-Every Fauna app — all seven platforms, web included — has a **Media** page:
-your files across all your sets in one place, with a list/thumbnail-grid
-toggle, sorting by name/size/date, and a per-set filter. Thumbnails are
-generated on your devices and stored encrypted like everything else, so
-browsing is fast *and* the nest still can't see your pictures.
+Every Fauna app — all seven platforms, web included — has a **Media** page: your files across all your folders in one place, with a list/thumbnail-grid toggle, sorting by name/size/date, and a per-folder filter. Thumbnails are
+generated on your devices and stored encrypted like the pictures themselves, so
+browsing is fast *and* the nest still can't see your pictures — unless you choose otherwise, as [below](#the-privacy-difference-concretely).
 
 A folder someone has shared with you shows up in that filter too, with its
 owner's name beside it — so a shared "Photos" and your own "Photos" are two
@@ -78,21 +67,18 @@ Honest scoping, because photo apps are a high bar: this is a fast, private
 **file-first browser** — think "your library, everywhere" — not a
 Google-Photos-style product with face recognition, semantic search, memories,
 or editing. A timeline/gallery view may come; treat everything beyond
-browse/view/download as not promised. Original files are stored exactly as
-captured (no recompression, no format conversion) — whatever you put in is
-byte-for-byte what you get back.
+browse/view/download as not promised. Pictures are never recompressed or converted. Photo backup and an upload from the Media page lift out the metadata described below and change nothing else; a file that reaches a folder through a synced location on your computer is kept byte for byte.
 
 ## The privacy difference, concretely
 
 Commercial photo clouds scan your library — for features, for advertising
 signals, and for whatever their next policy update says. On Fauna:
 
-- photos are **encrypted before upload**; the nest stores ciphertext;
+- photos are **encrypted before upload** (except in a folder you make public), and your nest stores them encrypted and can't read them, unless you choose otherwise: a folder you make public, serve over WebDAV or put behind a paywall is readable by the box that serves it;
 - **thumbnails too**;
-- location data is **removed before the photo leaves the device** — for the
-  formats covered below;
+- location data is **removed before the photo leaves the device** when it comes in through photo backup or an upload from the **Media** page — for the formats covered below;
 - and the pictures sit on hardware you chose, under a retention policy you
-  set, next to [backups](cloud-backup.md) that only you can read.
+set, next to [backups](cloud-backup.md) that are encrypted too.
 
 ### What the metadata strip covers
 
@@ -109,9 +95,7 @@ It also includes the **Motion Photos** many Android phones take by default —
 those are a photo with a short video tucked inside the same file, and the video
 half carries its own location. Both halves are cleaned.
 
-Some files still keep their metadata: **PDFs**, **WebM** videos, and **RAW
-photos** (Apple ProRAW, Android RAW, and other DNG/TIFF files). If your camera
-app is set to save RAW, those shots keep their location.
+Some files still keep their metadata: **PDFs**, **WebM** videos, and **RAW photos** (Apple ProRAW, Android RAW, and other DNG/TIFF files). If your camera app is set to save RAW, those shots keep their location. So does any picture that reaches a folder through a synced location on your computer: syncing keeps a file byte for byte, and for a folder the strip runs only on photo backup and an upload from the **Media** page.
 
 One more case, rare but worth stating plainly: if a photo or video is built in a
 way we cannot read confidently — a damaged file, or one written oddly by some
@@ -120,8 +104,8 @@ place.** We would rather hand you back the original file untouched than risk
 damaging the only copy you have; a backup that quietly corrupts a photo is worse
 than one that keeps a location field.
 
-Those are still encrypted before they leave your device, so it is not
-something an outsider or your nest's host can read — it matters when you later
+Unless the folder is public, those are still stored encrypted, so it is not
+something an outsider can read, nor your nest's host — unless you serve the folder over WebDAV or put it behind a paywall, which lets the box that serves it read it. It matters when you make the folder public, or later
 **share or export** one of those files, because the location travels with it.
 
 ## Where this stands today
@@ -130,12 +114,12 @@ something an outsider or your nest's host can read — it matters when you later
 |---|---|
 | iPhone background photo backup (auto + on-demand, progress; network required, not plugged-in-gated) | **Available** |
 | macOS Photos-library backup | **Available** |
-| Photos-library-as-Backup-set (snapshots/retention/off-site applying to photos) | **Available** on iPhone, Mac, and Android |
+| Photo Library folder (snapshots, retention, off-site copies) | **Available** on iPhone, Mac, and Android |
 | Android photo backup (on-demand "back up now") | **Available** |
 | Location/metadata strip for JPEG, PNG, WebP, GIF, HEIC/HEIF, video (MP4/MOV), and Motion Photos | **Available** |
 | Location/metadata strip for PDFs, WebM video, and RAW photos (ProRAW/DNG) | **Not yet** — those files keep their metadata; see above |
-| Android automatic background photo backup (no need to open the app) | **Available** — Wi-Fi only, every 15 minutes |
-| Encrypted, deduplicated upload + encrypted thumbnails | **Available** |
-| Media browser (all sets, list/grid, sort, filter) on all 7 apps | **Available** |
+| Android automatic background photo backup (no need to open the app) | **Available** — unmetered connections such as Wi-Fi only, every 15 minutes |
+| Encrypted, deduplicated upload + encrypted thumbnails | **Available** — except in a folder you make public |
+| Media browser (all folders, list/grid, sort, filter) on all 7 apps | **Available** |
 | Gallery/timeline view, albums, search-by-content, editing | **Not promised** — file-first browsing is the committed scope today |
 | Video streaming beyond basic playback; transcoding | **Not promised** |

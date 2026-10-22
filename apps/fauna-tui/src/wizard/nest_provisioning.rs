@@ -164,6 +164,32 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
         ));
     }
 
+    // A door run that succeeded shows how to reach the box: `ssh <domain>`, the
+    // one address the door admits (the claim reply's echo) and the key this
+    // device wrote to `~/.ssh` (`onboarding-provisioning.md` § 5). Only here,
+    // on the device that ran the wizard — the key is its alone.
+    if overall == progress::OverallStatus::Succeeded
+        && let Some(door) = m.ssh_door_readout()
+    {
+        let address = door
+            .admitted_from
+            .as_deref()
+            .unwrap_or(t::SSH_DOOR_ADDRESS_UNKNOWN);
+        let text = match &door.key_path {
+            Some(path) => {
+                t::ssh_door_command_template(&door.command, address, path, &door.fingerprint)
+            }
+            None => t::ssh_door_command_no_path_template(&door.command, address, &door.fingerprint),
+        };
+        out.push(Element::label(ids::PROVISIONING_SSH_DOOR_COMMAND, text));
+    }
+
+    // The terms notice: below the price recap and the progress, above the
+    // bottom row — this page's Start builds and claims the nest, the gesture
+    // that makes the account (`terms-and-content-guidelines.md` § The
+    // decisions, item 3).
+    out.extend(super::terms_notice());
+
     // Affordances are the typed predicates', not ours — `can_retry()` is the one
     // carrying the Failed-**or-Cancelled** rule (a soft-cancel must leave retry
     // reachable, else the user is stranded with only Back).

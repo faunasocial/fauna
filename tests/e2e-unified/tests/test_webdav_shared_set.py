@@ -126,6 +126,7 @@ from helpers.folder_content import (
     atomic_write,
     await_agent_upload,
     bind_location_under_set,
+    engine_restart_count,
 )
 from helpers.set_names import find_set
 from helpers.waiting import wait_until
@@ -160,21 +161,6 @@ def _read_or_none(path: Path) -> bytes | None:
         return path.read_bytes()
     except (FileNotFoundError, OSError):
         return None
-
-
-def _restart_count(app, set_name: str) -> int:
-    """How many times this seat's agent has restarted ``set_name``'s engine —
-    counted, never merely matched: binding already produces one (the counting
-    lesson `test_folder_member_media_decrypt._engine_restart_count` records)."""
-    try:
-        text = app.driver.app_stderr_text()
-    except Exception:
-        return 0
-    return sum(
-        1
-        for line in text.splitlines()
-        if "restarting engine" in line and set_name in line
-    )
 
 
 def _served(nest, name: str) -> bool:
@@ -528,7 +514,7 @@ def test_a_shared_and_served_folder_shows_owner_mount_and_member_the_same_files(
     )
     # The member's engine is running at its keyed, unserved stamp now (it just
     # hydrated a file), so any restart from here on postdates the baseline.
-    member_restarts = _restart_count(member_app, set_name)
+    member_restarts = engine_restart_count(member_app, set_name)
 
     # ── 3. MUTATION (UI): the owner serves the shared set ────────────────
     _serve_shared_set(owner_app, nest, set_name)
@@ -569,7 +555,7 @@ def test_a_shared_and_served_folder_shows_owner_mount_and_member_the_same_files(
 
     # ── barrier: the member's engine took the served stamp ───────────────
     wait_until(
-        lambda: _restart_count(member_app, set_name) > member_restarts,
+        lambda: engine_restart_count(member_app, set_name) > member_restarts,
         _SERVED_INGEST_S,
         interval=2.0,
         diagnose=lambda: (

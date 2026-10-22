@@ -46,7 +46,7 @@ use std::time::Duration;
 use fauna_account_store::indexeddb::IndexedDbBackend;
 use fauna_account_store::root::StoreRoot;
 use fauna_client_accounts::{
-    AccountRegistry, EraseResidueView, LocalStorageSecretStore, SignOutRecord,
+    AccountRegistry, EraseResidueView, SignOutRecord, WebIdentityStore,
     sign_out_residue_retry_blocked_copy, with_web_mutation_lock,
 };
 use fauna_core::localized::LocalizedText;
@@ -111,7 +111,7 @@ pub(crate) async fn erase_actor_scope_under(
 
 /// The accounts the registry names right now.
 fn registry_accounts() -> Vec<String> {
-    AccountRegistry::new(Arc::new(LocalStorageSecretStore))
+    AccountRegistry::new(Arc::new(WebIdentityStore))
         .list()
         .into_iter()
         .map(|a| a.actor_id)
@@ -125,13 +125,13 @@ fn registry_accounts() -> Vec<String> {
 async fn erase_and_settle(actor: &str) -> bool {
     if StoreRoot::platform().is_ok_and(|root| root.store_name(actor).is_err()) {
         tracing::warn!("[account-scope] sign-out record names {actor:?}, no actor id — dropped");
-        SignOutRecord::settle(&LocalStorageSecretStore, actor);
+        SignOutRecord::settle(&WebIdentityStore, actor);
         return true;
     }
     match erase_actor_scope(actor).await {
         Ok(()) => {
             tracing::info!("[account-scope] erase: removed account scope {actor}");
-            SignOutRecord::settle(&LocalStorageSecretStore, actor);
+            SignOutRecord::settle(&WebIdentityStore, actor);
             true
         }
         Err(e) => {
@@ -180,7 +180,7 @@ fn refused_line(planned: usize) -> Option<LocalizedText> {
 /// the caller puts to the other-tab probe before a load's sweep. Empty with no
 /// record.
 fn planned_erase() -> Vec<String> {
-    SignOutRecord::load(&LocalStorageSecretStore)
+    SignOutRecord::load(&WebIdentityStore)
         .map(|record| record.plan(&registry_accounts()).erase)
         .unwrap_or_default()
 }
@@ -201,7 +201,7 @@ fn planned_erase() -> Vec<String> {
 /// store. A refused sweep keeps every planned account and answers the
 /// refusal's line.
 pub(crate) async fn finish_recorded(erase_refused: bool) -> SignOutFinish {
-    let store = LocalStorageSecretStore;
+    let store = WebIdentityStore;
     let Some(record) = SignOutRecord::load(&store) else {
         return SignOutFinish::default();
     };
@@ -209,7 +209,7 @@ pub(crate) async fn finish_recorded(erase_refused: bool) -> SignOutFinish {
     if plan.wipe {
         SignOutRecord::before_wipe(&store, plan.erase.iter().cloned());
         with_web_mutation_lock(|| {
-            let _ = AccountRegistry::new(Arc::new(LocalStorageSecretStore)).clear_all();
+            let _ = AccountRegistry::new(Arc::new(WebIdentityStore)).clear_all();
         })
         .await;
         SignOutRecord::wipe_done(&store);
@@ -251,7 +251,7 @@ pub(crate) async fn finish_removed_account(actor: &str) {
         .iter()
         .any(|a| a.eq_ignore_ascii_case(actor));
     if named {
-        SignOutRecord::settle(&LocalStorageSecretStore, actor);
+        SignOutRecord::settle(&WebIdentityStore, actor);
     } else {
         // A store that would not go stays recorded; the next load's sweep
         // takes it, and tells the user if it lands on onboarding.
@@ -266,7 +266,7 @@ pub(crate) async fn finish_removed_account(actor: &str) {
 #[wasm_bindgen(js_name = signOutRecordBegin)]
 pub fn sign_out_record_begin(signed_in_actor: Option<String>) {
     let reach = registry_accounts().into_iter().chain(signed_in_actor);
-    let record = SignOutRecord::record_sign_out(&LocalStorageSecretStore, reach);
+    let record = SignOutRecord::record_sign_out(&WebIdentityStore, reach);
     tracing::info!(
         "[account-scope] sign-out recorded for {} account(s)",
         record.accounts.len()
@@ -278,7 +278,7 @@ pub fn sign_out_record_begin(signed_in_actor: Option<String>) {
 /// account as signed in while it finishes the sign-out.
 #[wasm_bindgen(js_name = signOutWipeOwed)]
 pub fn sign_out_wipe_owed() -> bool {
-    SignOutRecord::wipe_owed_in(&LocalStorageSecretStore)
+    SignOutRecord::wipe_owed_in(&WebIdentityStore)
 }
 
 /// The accounts whose store [`sign_out_finish`] would erase right now — what a

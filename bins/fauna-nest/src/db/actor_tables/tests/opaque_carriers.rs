@@ -127,7 +127,9 @@ const ACTOR_BEARING_OPAQUE_COLUMNS: &[(&str, &str, &str)] = &[
          names the reported subject and its author (`subject_actor`, a third party) and carries \
          the reporter's note and excerpt but NEVER the reporter's id -- that never crosses a \
          nest boundary; a `withdraw` or an `outcome` carries only a report ref and an outcome \
-         word. The queue has no actor column: an entry follows the report its `report_id` \
+         word; an `obligation_deliver` (`fauna.federation.moderation.obligation.deliver`) names \
+         a foreign content author and the content an admin acted on, keyed by the obligation \
+         row's id. The queue has no actor column: an entry follows the report its `report_id` \
          names (`abuse_reports`, reporter `Retain`), and leaves when sent, refused, or at the \
          seven-day retry ceiling. The author's id STAYS as written on succession, exactly as \
          `abuse_reports.subject_actor` does -- the report is about the identity that was \
@@ -720,6 +722,12 @@ const ACTOR_BEARING_OPAQUE_COLUMNS: &[(&str, &str, &str)] = &[
 /// a fixed-width digest, key, nonce or signature says so in a phrase; a
 /// structured value says what was read to establish it.
 const NON_ACTOR_OPAQUE_COLUMNS: &[(&str, &str, &str)] = &[
+    (
+        "device_oracle_ops",
+        "op_id",
+        "16 random bytes a device custodian mints per operation so a resubmission keeps \
+         one row (`fauna.principals.ops.record`); names no actor",
+    ),
     (
         "dmarc_outbound_aggregate_reports",
         "payload_xml_gz",
@@ -1320,6 +1328,32 @@ const NON_ACTOR_OPAQUE_COLUMNS: &[(&str, &str, &str)] = &[
          not the member's data). Structurally an actor id, and on a one-person \
          self-hosted nest a 1:1 correlate of that person's server: declared, not \
          ruled, since no succession or deletion is the nest's to have",
+    ),
+    (
+        "remote_follows",
+        "home_nest_id",
+        "the followed author's home DEPLOYMENT's identity key (`federated-follow.md` \
+         § Decision 2) — a box, never an account, the `channel_foreign_members.home_nest_id` \
+         shape",
+    ),
+    (
+        "subscribe_requests",
+        "home_nest_id",
+        "a remote subscriber's home DEPLOYMENT's identity key, the channel-verified origin \
+         that carried the follow intent — a box, never an account",
+    ),
+    (
+        "subscribers",
+        "home_nest_id",
+        "a remote subscriber's home DEPLOYMENT's identity key, copied from the request row \
+         at approval — a box, never an account",
+    ),
+    (
+        "content",
+        "origin_nest_id",
+        "a delivered post's home DEPLOYMENT's identity key, the follow delivery's \
+         channel-verified origin (`transport-trust.md` § The post arm) — a box, never an \
+         account, the `channel_foreign_members.home_nest_id` shape",
     ),
     ("conv_attachment_refs", "channel_id", "a CHANNEL ID"),
     ("conv_record_authors", "channel_id", "a CHANNEL ID"),
@@ -2058,6 +2092,14 @@ const NON_ACTOR_OPAQUE_COLUMNS: &[(&str, &str, &str)] = &[
          plain columns",
     ),
     (
+        "guardian_policies",
+        "content_document",
+        "the canonical DAG-CBOR `ContentPolicyDocument` for publisher `guardian`, written by the \
+         shared rule editor through `fauna.family.policy.update` -- the `nest_content_policy.document` \
+         shape: verdict rules and bundled scorers, no field carrying an actor id; ward and \
+         guardian are plain columns",
+    ),
+    (
         "export_sessions",
         "scope_descriptor",
         "client-authored `ExportScope { mailboxes, date_from, date_to, strip_headers }`, stored \
@@ -2088,6 +2130,21 @@ const NON_ACTOR_OPAQUE_COLUMNS: &[(&str, &str, &str)] = &[
         "`InclusionEvidence`: commit ids, raw git commit and tree objects, a checkpoint, and \
          cosignatures by enrolled LOG WITNESSES -- infrastructure operators, not accounts. The git \
          object bytes are the log's own and are only ever re-hashed",
+    ),
+    (
+        "nest_content_policy",
+        "document",
+        "the canonical DAG-CBOR `ContentPolicyDocument` the admin published, written only by \
+         `put_nest_content_policy` (`fauna.admin.content_policy.set`): a version, verdict rules \
+         (factor, threshold, verdict, reason code and text) and bundled scorers (names, kinds, \
+         keyword terms) -- read in `fauna_core::content_policy`; no field carries an actor id. \
+         The admin who wrote it is named only in the audit row beside it",
+    ),
+    (
+        "nest_content_policy",
+        "signature",
+        "a 64-byte Ed25519 signature by the NEST's identity key over the document, sequence \
+         and issued_at -- the nest's, never an account's",
     ),
     //
     // DARK columns -- no production writer. Each says what was searched for; a producer added

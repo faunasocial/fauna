@@ -108,6 +108,8 @@ async fn min_replies_filter_for_authors() {
             &[author.to_vec()],
             None,
             10,
+            fauna_nest::db::feeds::FeedAudience::OnBox,
+            fauna_nest::db::feeds::FeedLocality::NestWide,
         )
         .await
         .unwrap();
@@ -144,6 +146,8 @@ async fn min_reposts_filter_for_authors() {
             &[author.to_vec()],
             None,
             10,
+            fauna_nest::db::feeds::FeedAudience::OnBox,
+            fauna_nest::db::feeds::FeedLocality::NestWide,
         )
         .await
         .unwrap();

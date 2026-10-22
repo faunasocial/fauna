@@ -9,7 +9,7 @@
 // surfacing; `tests/e2e-unified/tests/test_nest_identity_pin_post_auth.py`).
 //
 // This module exists ONLY in builds made for testing (convention 15): its sole
-// importer is `$lib/e2e-automation`, itself reached only through
+// importer is `#lib/e2e-automation`, itself reached only through
 // `+layout.svelte`'s `if (__FAUNA_E2E_AUTOMATION__)` branch, which a production
 // `vite build` constant-folds away.
 //
@@ -21,7 +21,7 @@
 // escalates. `bearer_force_refresh` runs the production re-mint —
 // `getAuthToken(secret, undefined, true)` → wasm `challengeVerify`'s
 // possession-verify against the TOFU pin → the catch that escalates
-// (`$lib/api.ts`). Either way what the test observes is the real pipeline
+// (`#lib/api.ts`). Either way what the test observes is the real pipeline
 // reacting to a real verdict; a command that painted the identity-changed
 // surface directly (or called `escalateNestIdentityChanged` itself) would
 // assert nothing about whether web can actually *detect* a mid-session
@@ -39,7 +39,7 @@
 // production re-mint as `bearer_force_refresh`, but AWAITED, so the ack lands
 // after the outcome and a refused re-mint fails the command loudly
 // (convention 11) instead of being swallowed. Its observable is the
-// `launch_token` state key (`__fauna_launchToken`, `$lib/api`'s
+// `launch_token` state key (`__fauna_launchToken`, `#lib/api`'s
 // `homeBearerScheduleForTest`).
 
 import { get } from 'svelte/store';
@@ -88,7 +88,7 @@ const handler: E2eCommandHandler = async (action) => {
   }
   // `bearer_force_refresh`: same fire-and-forget shape and the same reason —
   // `getAuthToken`'s own catch is what calls `escalateIfNestIdentityChanged`
-  // (only for the home nest; `$lib/api.ts`), so the rejection this throws is
+  // (only for the home nest; `#lib/api.ts`), so the rejection this throws is
   // already handled before it reaches here. Swallow it rather than let it
   // become an unhandled promise rejection; a *valid* refresh never rejects at
   // all, so there is nothing else this call site needs to observe.
@@ -96,7 +96,7 @@ const handler: E2eCommandHandler = async (action) => {
   return null;
 };
 
-/** Claim the identity domain's command names. Called from `$lib/e2e-automation`
+/** Claim the identity domain's command names. Called from `#lib/e2e-automation`
  *  before `installCommandHook()`. */
 export function registerIdentityCommands(): void {
   registerE2eCommands(ACTIONS, handler);

@@ -47,3 +47,5 @@ test-helpers = []
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
+# Test-only: property tests over the Nostr wire parsers (`tests/proptest_messages.rs`).
+proptest = { workspace = true }

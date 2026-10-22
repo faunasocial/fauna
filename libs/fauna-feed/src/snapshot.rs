@@ -148,11 +148,14 @@ pub struct PostSummary {
     pub post_id: String,
     /// Hex `[u8; 32]` author.
     pub author: String,
-    /// A **bridged** author's face — the handle, display name and (proxied)
-    /// avatar the origin bridge served, carried 1:1 from
-    /// `FeedPostItem.author_display` (`docs/goal/behavior/bridges.md`
-    /// § Unified feed ingestion → *Bridged authors*). `None` for a native
-    /// author. Apps hand `display_name` and `handle` to
+    /// The author's face, carried 1:1 from `FeedPostItem.author_display`
+    /// (`docs/goal/behavior/bridges.md` § Unified feed ingestion → *Bridged
+    /// authors*): a bridged author's handle, display name and (proxied)
+    /// avatar, or a local native author's handle and signed display name as
+    /// their nest projected them (*The local native author*); a remote native
+    /// author's is filled from their own signed profile (`docs/goal/ui/feed.md`
+    /// § The read model → *The remote author's byline*). `None` for an author
+    /// with neither a handle nor a profile. Apps hand `display_name` and `handle` to
     /// `fauna_core::format::peer_display_label` in the self-published-name
     /// slot, so the viewer's own nickname still wins and the chain otherwise
     /// reads display name → handle → short id for every author alike.
@@ -396,6 +399,23 @@ pub struct PostSummary {
     /// (`query_feed`'s feed-index projection) never carries one, because the
     /// nest omits a taken-down post from feed queries outright.
     pub legal_takedown_ref: Option<String>,
+    /// `Some(reason_token)` when this nest's admin **blocked** the post after a
+    /// report (`moderation.md` § Admin block of a reported item) — the report
+    /// reason's wire token (`AbuseReportReason::token`), from which each app
+    /// paints the shared notice
+    /// ([`fauna_core::obligation::admin_block_notice`] — "Blocked by this
+    /// nest's admin after a report: {reason}"). For every viewer but the author
+    /// the nest withholds the body, so [`body`](Self::body) /
+    /// [`author`](Self::author) / [`document`](Self::document) are empty and
+    /// the notice stands **in the body area, in place of the post**; the
+    /// author's own read keeps the body and the notice paints **beside** it
+    /// (decision 4). The [`legal_takedown_ref`](Self::legal_takedown_ref)
+    /// twin, set by the same door ([`crate::FeedManager::resolve_post`]) for
+    /// the same reason: the feed query excludes a blocked post outright.
+    /// Additive `Option`, `None` for every post not blocked.
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub admin_block_reason: Option<String>,
     /// The post's tip surface (`monetization.md` § Tips) — total, count, and a
     /// bounded newest-first attribution window. Resolved lazily by
     /// [`crate::FeedManager::resolve_post_tips`], the `resolve_media` pattern.
@@ -450,9 +470,65 @@ pub struct PostSummary {
     #[serde(default)]
     #[cfg_attr(feature = "uniffi", uniffi(default = false))]
     pub unlock_purchase_pending: bool,
+    /// The post's **home nest** when this nest does not hold it as its own — set
+    /// by [`crate::FeedManager::resolve_post_from`]'s relay arm, the deep-link
+    /// door for a post homed elsewhere (`feed.md` § The read model → *Opening
+    /// a post the timeline never loaded* → *A post homed on another nest*), and
+    /// by the feed read for a post a federated follow delivered here
+    /// (`FeedPostItem::home_nest_url`, `federated-follow.md` § Decision 3).
+    /// The apps' byte legs (media, attachments) read the blob host from it.
+    /// `None` for every post this nest serves itself. Additive.
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub home_nest_url: Option<String>,
+    /// The home nest's identity (hex 32-byte `nest_actor_id`) beside
+    /// [`home_nest_url`](Self::home_nest_url) — stamped by the reader's own
+    /// nest on the relay reply (`PostGetReply::home_nest_actor_id`, the
+    /// `peer_nest_id` it dialed the home as). The foreign byte plane graduates
+    /// its pin against it before the first byte (`transport-trust.md` §
+    /// Mechanism for the federation-granted row → *The post arm*); `None`
+    /// keeps the WebPKI floor. Read through [`blob_home`](Self::blob_home).
+    /// Additive.
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub home_nest_actor_id: Option<String>,
+}
+
+/// The nest a post's own bytes rest on when it is not this one — its URL and
+/// the identity the reader's own nest stamped for it, named together by
+/// [`PostSummary::blob_home`] so no app re-derives either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlobHome<'a> {
+    /// The home's base URL (trimmed, never blank).
+    pub url: &'a str,
+    /// The home's hex `nest_actor_id` (trimmed, never blank) — `None` when no
+    /// path delivered one, which keeps the byte plane's WebPKI floor.
+    pub nest_actor_id: Option<&'a str>,
 }
 
 impl PostSummary {
+    /// The nest this post's own bytes rest on — the sealed body behind
+    /// `gated_blob_hash`, its image, video and thumbnails: its
+    /// [`home_nest_url`](Self::home_nest_url) when another nest is its home,
+    /// `None` for this nest (`feed.md` § The read model → *A post homed on
+    /// another nest*). The one host pick every app's byte legs read, so none of
+    /// them re-decides what a blank home means. Never the link-preview og:image
+    /// or a bridged post's proxied path: those are blobs this nest fetched and
+    /// serves itself. The home's identity rides along
+    /// ([`BlobHome::nest_actor_id`]) for the plane's pin graduation.
+    pub fn blob_home(&self) -> Option<BlobHome<'_>> {
+        fn non_blank(field: &Option<String>) -> Option<&str> {
+            field
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        }
+        non_blank(&self.home_nest_url).map(|url| BlobHome {
+            url,
+            nest_actor_id: non_blank(&self.home_nest_actor_id),
+        })
+    }
+
     /// Whether this post is playable media for engagement-cue derivation —
     /// what [`plays_media`](Self::plays_media) carries. A video
     /// ([`RenderBlock::Video`](fauna_core::render::RenderBlock::Video) /
@@ -506,6 +582,18 @@ impl PostSummary {
         PostSummary {
             post_id: post_id.into(),
             legal_takedown_ref: Some(reference.into()),
+            ..Self::default()
+        }
+    }
+
+    /// The projection of a post this nest's admin **blocked**, as every viewer
+    /// but its author reads it (`moderation.md` § Admin block of a reported
+    /// item): the id and the report's reason token, and nothing else — the
+    /// body is withheld, exactly as for [`taken_down`](Self::taken_down).
+    pub fn blocked(post_id: impl Into<String>, reason_token: impl Into<String>) -> Self {
+        PostSummary {
+            post_id: post_id.into(),
+            admin_block_reason: Some(reason_token.into()),
             ..Self::default()
         }
     }
@@ -681,9 +769,13 @@ pub struct AvailableBridge {
 /// `fauna.posts.get` fallback for a quote outside the loaded page) — the single
 /// The snapshot projection of the wire `fauna_protocol::feed::AuthorDisplay`
 /// (drops the wire `extra` map — UniFFI records can't carry serde-`flatten`),
-/// the bridged author's face [`PostSummary::author_display`] carries.
-/// Bridge-asserted, nest-relayed: the trust class of the post's `source`
-/// badge, never a signed `Profile`.
+/// the author face [`PostSummary::author_display`] carries. Two fillers share
+/// it (`bridges.md` § Unified feed ingestion → *Bridged authors*, ruling 3): a
+/// bridged author's face — bridge-asserted, nest-relayed, the trust class of
+/// the post's `source` badge — and a remote native author's own signed
+/// `Profile`, verified by this client
+/// ([`FeedManager::resolve_author_face`](crate::FeedManager::resolve_author_face),
+/// `display_name` alone). Display, never identity: that is `author`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct AuthorDisplayView {
@@ -758,6 +850,19 @@ pub struct QuotedPostView {
     #[serde(default)]
     #[cfg_attr(feature = "uniffi", uniffi(default = false))]
     pub not_found: bool,
+    /// `Some(reason_token)` when this nest's admin **blocked** the quoted post
+    /// after a report (`moderation.md` § Admin block of a reported item) — the
+    /// [`PostSummary::admin_block_reason`] twin, on the
+    /// [`crate::FeedManager::resolve_quoted_post`] fetch fallback (a blocked
+    /// post is feed-excluded). For a viewer who is not its author `body` /
+    /// `author` are empty and the client paints the shared notice
+    /// (`fauna_core::obligation::admin_block_notice(reason)`) in place of the
+    /// quoted content; for its author the quote keeps its body and the notice
+    /// paints beside it. Folded into
+    /// [`RenderBlock::QuotedPost::admin_block_reason`](fauna_core::render::RenderBlock).
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub admin_block_reason: Option<String>,
 }
 
 /// The Feed page's entire observable state. A cheap clone of the manager's
@@ -803,6 +908,15 @@ pub struct FeedSnapshot {
     /// `selected_feed` drives a custom feed's.
     #[serde(default)]
     pub trending_selected: bool,
+    /// The author an [`author_window`](crate::FeedManager::author_window)
+    /// lists (hex actor id) — the selection `fauna.feed.author.posts` serves
+    /// (`feed.md` § State & data shape → *The author window*). `None` on every
+    /// timeline manager; set once, at the window's construction, and cleared by
+    /// `select_feed` / `select_trending_feed` so no two selection fields ever
+    /// both point somewhere. Additive.
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub author_selected: Option<String>,
     /// The visible, ordered, deduplicated post list — never re-sorted by the
     /// client (`feed.md` § Anti-patterns; the nest supplies the order).
     pub posts: Vec<PostSummary>,
@@ -940,6 +1054,52 @@ pub fn feed_empty_state(snapshot: FeedSnapshot) -> Option<FeedEmptyState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A post's bytes rest on its named home, and on this nest when it names
+    /// none — a blank or whitespace home included, which names no host.
+    #[test]
+    fn blob_home_is_the_named_home_or_this_nest() {
+        let homed = |home: Option<&str>| PostSummary {
+            home_nest_url: home.map(str::to_owned),
+            ..Default::default()
+        };
+        assert_eq!(homed(None).blob_home(), None);
+        assert_eq!(homed(Some("")).blob_home(), None);
+        assert_eq!(homed(Some("  ")).blob_home(), None);
+        assert_eq!(
+            homed(Some(" https://home.example ")).blob_home(),
+            Some(BlobHome {
+                url: "https://home.example",
+                nest_actor_id: None
+            })
+        );
+    }
+
+    /// The home's identity is named with its URL — and only with it: an
+    /// identity without a home names no host, a blank one names no identity.
+    #[test]
+    fn blob_home_names_the_homes_identity_with_its_url() {
+        let homed = |home: Option<&str>, id: Option<&str>| PostSummary {
+            home_nest_url: home.map(str::to_owned),
+            home_nest_actor_id: id.map(str::to_owned),
+            ..Default::default()
+        };
+        let id = "ab".repeat(32);
+        assert_eq!(
+            homed(Some("https://home.example"), Some(&format!(" {id} "))).blob_home(),
+            Some(BlobHome {
+                url: "https://home.example",
+                nest_actor_id: Some(&id)
+            })
+        );
+        assert_eq!(homed(None, Some(&id)).blob_home(), None);
+        assert_eq!(
+            homed(Some("https://home.example"), Some("  "))
+                .blob_home()
+                .and_then(|home| home.nest_actor_id),
+            None
+        );
+    }
 
     fn snapshot(status: FeedStatus, posts: usize, search: Option<&str>) -> FeedSnapshot {
         FeedSnapshot {

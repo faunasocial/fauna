@@ -1,9 +1,9 @@
 """tier_4 (live-remote, OPT-IN): three-client CalDAV calendar round-trip against
-a LIVE nest (e.g. example.com), the calendar sibling of
+a LIVE nest (e.g. example.net), the calendar sibling of
 `test_mail_enable_live_nest.py`.
 
 Goal (the user's target): multiple calendar clients sync one calendar through
-example.com under the handle `test@example.com` — an appointment created, edited, or
+example.net under the handle `test@example.net` — an appointment created, edited, or
 deleted from ANY client becomes visible on the others quickly. We model three
 clients:
 
@@ -15,7 +15,7 @@ clients:
 All three share the actor's single "Personal" calendar.
 
 CONSTRAINT (user, 2026-06-01): the test makes **no nest admin/config API calls**
-to example.com. Every change to the box goes through the linux app UI (onboard,
+to the box. Every change to the box goes through the linux app UI (onboard,
 claim, enable mail, approve bridge, create/edit/delete events) OR through the
 CalDAV protocol itself (which is the real product surface, not a back channel).
 The only out-of-band touch is read-only SSH diagnostics (e.g. reading a fresh
@@ -44,12 +44,12 @@ claim code from `docker logs`), which never mutates the box.
                             Basic auth, shared with IMAP).
 Optional:
   FAUNA_LIVE_CALDAV_URL     CalDAV root base URL if it differs from the nest URL
-                            (e.g. https://mail.example.com:8443). Defaults to the
+                            (e.g. https://mail.example.net:8443). Defaults to the
                             nest URL — see § Known gap below.
   FAUNA_CONV_POLL_SECS=5 (export) so the linux app polls quickly.
 
 KNOWN GAPS this test pins (RED until closed — tracked internally):
-  1. **CalDAV is not exposed externally on example.com.** docker-compose.yml
+  1. **CalDAV is not exposed externally on the live nest.** docker-compose.yml
      publishes 80/443/25/465/587/993 but NOT the MDA's CalDAV port — host 443
      maps to nest (8443), and the MDA's CalDAV listener (container :443) is
      unpublished. The CalDAV clients can't connect until exposure is decided +
@@ -136,7 +136,7 @@ PROP_TIMEOUT = float(os.environ.get("FAUNA_CALDAV_PROP_TIMEOUT", "60"))
 
 @pytest.mark.feature("calendar-in-standard-apps")
 def test_three_client_caldav_roundtrip(app):
-    """One Personal calendar at test@example.com, three clients (2 CalDAV MUAs +
+    """One Personal calendar at test@example.net, three clients (2 CalDAV MUAs +
     the linux Events page). Create/edit/delete from each → visible on the others.
     """
     from helpers.caldav_client import CalDAVClient, build_vevent
@@ -152,7 +152,7 @@ def test_three_client_caldav_roundtrip(app):
 
     nonce = f"cal{int(time.time())}"
 
-    # 1) Get the linux app logged in as test@example.com with mail enabled +
+    # 1) Get the linux app logged in as test@example.net with mail enabled +
     #    bridge serving — ALL through the UI, NO nest API calls (the no-API
     #    constraint). This mirrors test_mail_zero_cheat_live's setup exactly:
     #    reach the admin shell (sign in or claim) → factory-reset via the

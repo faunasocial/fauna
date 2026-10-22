@@ -1,0 +1,25 @@
+---
+import Base from '../layouts/Base.astro';
+import Hedgehog from '../components/critters/Hedgehog.astro';
+---
+{/* public-text: site-chrome */}
+<Base
+  title="Page not found — Fauna Social"
+  description="This burrow is empty."
+  noindex
+>
+  <div class="wrap center lost">
+    <Hedgehog size={140} />
+    <h1>This burrow is empty</h1>
+    <p class="lead">
+      Whatever lived at this address has moved on. Try the
+      <a href="/">meadow</a> instead.
+    </p>
+  </div>
+</Base>
+{/* public-text-end: site-chrome */}
+
+<style>
+  .lost { padding-top: 4rem; }
+  .lost :global(.critter) { margin: 0 auto; }
+</style>

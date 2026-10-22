@@ -94,6 +94,10 @@ struct Widgets {
     #[cfg(feature = "payments")]
     provider_form_webhook_url: gtk::Entry,
     #[cfg(feature = "payments")]
+    provider_form_return_url: gtk::Entry,
+    #[cfg(feature = "payments")]
+    provider_form_return_url_copy: gtk::Button,
+    #[cfg(feature = "payments")]
     provider_form_save: gtk::Button,
     #[cfg(feature = "payments")]
     provider_form_cancel: gtk::Button,
@@ -136,6 +140,14 @@ struct Ctx {
     /// select's dropdown model (refreshed with the same `tiers_list` read).
     #[cfg(feature = "payments")]
     claim_tier_names: RefCell<Vec<String>>,
+    /// The §5 claim CODE whose Void is armed (first press), if any. Keyed by
+    /// code, not row index; every landed re-read clears it.
+    #[cfg(feature = "payments")]
+    claim_void_armed: RefCell<Option<String>>,
+    /// The last §5 claim list read, so arming/cancelling repaints the rows
+    /// without a nest round-trip.
+    #[cfg(feature = "payments")]
+    claims_read: RefCell<Vec<ClaimItem>>,
     w: Widgets,
 }
 
@@ -233,6 +245,8 @@ pub fn build_tiers_tab(
         provider_form_secret,
         provider_form_tier,
         provider_form_webhook_url,
+        provider_form_return_url,
+        provider_form_return_url_copy,
         provider_form_save,
         provider_form_cancel,
         provider_list,
@@ -256,6 +270,8 @@ pub fn build_tiers_tab(
             provider_form_secret,
             provider_form_tier,
             provider_form_webhook_url,
+            provider_form_return_url,
+            provider_form_return_url_copy,
             provider_form_save,
             provider_form_cancel,
         ) = build_provider_form();
@@ -298,6 +314,8 @@ pub fn build_tiers_tab(
             provider_form_secret,
             provider_form_tier,
             provider_form_webhook_url,
+            provider_form_return_url,
+            provider_form_return_url_copy,
             provider_form_save,
             provider_form_cancel,
             provider_list,
@@ -342,6 +360,10 @@ pub fn build_tiers_tab(
         provider_form_tier,
         #[cfg(feature = "payments")]
         provider_form_webhook_url,
+        #[cfg(feature = "payments")]
+        provider_form_return_url,
+        #[cfg(feature = "payments")]
+        provider_form_return_url_copy,
         #[cfg(feature = "payments")]
         provider_form_save,
         #[cfg(feature = "payments")]
@@ -604,6 +626,8 @@ fn build_provider_form() -> (
     gtk::Entry,
     gtk::DropDown,
     gtk::Entry,
+    gtk::Entry,
+    gtk::Button,
     gtk::Button,
     gtk::Button,
 ) {
@@ -660,6 +684,28 @@ fn build_provider_form() -> (
     webhook_row.append(&webhook_copy);
     form.append(&webhook_row);
 
+    // The sibling display for the paywall return door — the post-checkout
+    // redirect to set at the provider, built on the creator's web-site origin
+    // (filled by `update_return_url_preview`).
+    let return_row = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .build();
+    return_row.append(&gtk::Label::new(Some(s::RETURN_URL_LABEL)));
+    let return_url = gtk::Entry::builder().editable(false).hexpand(true).build();
+    set_test_id(&return_url, ids::SUBSCRIPTION_PROVIDER_FORM_RETURN_URL);
+    return_row.append(&return_url);
+    let return_copy = clipboard::copy_button_dynamic({
+        let return_url = return_url.clone();
+        move || return_url.text().to_string()
+    });
+    set_test_id(
+        &return_copy,
+        ids::SUBSCRIPTION_PROVIDER_FORM_RETURN_URL_COPY_BUTTON,
+    );
+    return_row.append(&return_copy);
+    form.append(&return_row);
+
     let buttons = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(8)
@@ -675,7 +721,17 @@ fn build_provider_form() -> (
     buttons.append(&save);
     form.append(&buttons);
 
-    (form, kind, secret, tier, webhook_url, save, cancel)
+    (
+        form,
+        kind,
+        secret,
+        tier,
+        webhook_url,
+        return_url,
+        return_copy,
+        save,
+        cancel,
+    )
 }
 
 /// Wire the three sections to the shared calls, load + render on mount, and
@@ -691,6 +747,10 @@ fn wire(client: &Rc<FaunaClient>, widgets: Widgets) -> Rc<Ctx> {
         provider_tier_names: RefCell::new(Vec::new()),
         #[cfg(feature = "payments")]
         claim_tier_names: RefCell::new(Vec::new()),
+        #[cfg(feature = "payments")]
+        claim_void_armed: RefCell::new(None),
+        #[cfg(feature = "payments")]
+        claims_read: RefCell::new(Vec::new()),
         w: widgets,
     });
 
@@ -757,6 +817,13 @@ fn wire(client: &Rc<FaunaClient>, widgets: Widgets) -> Rc<Ctx> {
             ctx.w.provider_add_button.clone().connect_clicked(move |_| {
                 ctx.w.provider_form_secret.set_text("");
                 update_webhook_url_preview(&ctx);
+                update_return_url_preview(&ctx);
+                // Hydrate the web origin once on open (a no-op once cached);
+                // the display repaints when the read lands.
+                let again = Rc::clone(&ctx);
+                crate::settings::web::ensure_hydrated(&ctx.client, move || {
+                    update_return_url_preview(&again)
+                });
                 clear_error(&ctx.w);
                 ctx.w.provider_form.set_visible(true);
             });
@@ -770,6 +837,7 @@ fn wire(client: &Rc<FaunaClient>, widgets: Widgets) -> Rc<Ctx> {
                 .clone()
                 .connect_selected_notify(move |_| {
                     update_webhook_url_preview(&ctx);
+                    update_return_url_preview(&ctx);
                 });
         }
         // §4: Cancel → hide the form.
@@ -824,6 +892,38 @@ fn update_webhook_url_preview(ctx: &Rc<Ctx>) {
         kind,
     );
     ctx.w.provider_form_webhook_url.set_text(&url);
+}
+
+/// Recompute + set the §4 form's return-URL display from the current kind
+/// selection — the post-checkout redirect the creator sets at their provider so
+/// the buyer lands on the nest's paywall return door. The shape is owned by
+/// `fauna_payments::return_url`; the base is the creator's **web-site** origin
+/// (the shared `site_link_view` the web-settings page shows), never the nest
+/// URL the webhook display uses — the door resolves the site owner from the
+/// request `Host`. With no public web address the field says so and the copy
+/// button is inert.
+#[cfg(feature = "payments")]
+fn update_return_url_preview(ctx: &Rc<Ctx>) {
+    let kinds = fauna_client_payments::known_kinds();
+    let kind = kinds
+        .get(ctx.w.provider_form_kind.selected() as usize)
+        .copied()
+        .unwrap_or("");
+    let origin = crate::settings::web::cached_site_link().and_then(|l| l.origin);
+    match origin {
+        Some(origin) => {
+            ctx.w
+                .provider_form_return_url
+                .set_text(&fauna_client_payments::return_url(&origin, kind));
+            ctx.w.provider_form_return_url_copy.set_sensitive(true);
+        }
+        None => {
+            ctx.w
+                .provider_form_return_url
+                .set_text(s::RETURN_URL_UNAVAILABLE);
+            ctx.w.provider_form_return_url_copy.set_sensitive(false);
+        }
+    }
 }
 
 /// Read the §4 provider form and dispatch the upsert. No client-side
@@ -944,6 +1044,10 @@ enum Action {
     #[cfg(feature = "payments")]
     MintClaim {
         tier: String,
+    },
+    #[cfg(feature = "payments")]
+    VoidClaim {
+        code: String,
     },
 }
 
@@ -1084,6 +1188,21 @@ fn dispatch(ctx: &Rc<Ctx>, action: Action) {
                     .await
                     .map(|_| ())
                     .map_err(|e| e.to_string()),
+                #[cfg(feature = "payments")]
+                Action::VoidClaim { code } => {
+                    match PaymentsClient::new(nest.clone()).claims_void(code).await {
+                        Ok(_) => Ok(()),
+                        // The row the author pressed is no longer theirs to void:
+                        // the list is what is stale, so the re-read that follows
+                        // every success repaints it rather than erroring.
+                        Err(fauna_client::NestClientError::Rpc(ref e))
+                            if e.code == "fauna.payments.claim_not_found" =>
+                        {
+                            Ok(())
+                        }
+                        Err(e) => Err(e.to_string()),
+                    }
+                }
             }
         },
         move |res| {
@@ -1226,7 +1345,12 @@ fn apply_snapshot(ctx: &Rc<Ctx>, snap: Snapshot) {
             Err(msg) => show_error(&ctx.w, &msg),
         }
         match snap.claims {
-            Ok(claims) => render_claim_rows(ctx, &claims),
+            Ok(claims) => {
+                // A landed re-read disarms any pending Void confirm.
+                *ctx.claim_void_armed.borrow_mut() = None;
+                *ctx.claims_read.borrow_mut() = claims.clone();
+                render_claim_rows(ctx, &claims);
+            }
             Err(msg) => show_error(&ctx.w, &msg),
         }
     }
@@ -1536,7 +1660,7 @@ fn render_claim_rows(ctx: &Rc<Ctx>, claims: &[ClaimItem]) {
         ctx.w.claim_list.remove(&row);
     }
     for claim in claims {
-        let row = build_claim_row(claim);
+        let row = build_claim_row(ctx, claim);
         ctx.w.claim_list.append(&row);
         rows.push(row);
     }
@@ -1548,7 +1672,7 @@ fn render_claim_rows(ctx: &Rc<Ctx>, claims: &[ClaimItem]) {
 /// (unlike §4's `provider-status`, this has no unresolved verified-signal
 /// caveat — redeemed/voided are hard nest-side facts).
 #[cfg(feature = "payments")]
-fn build_claim_row(claim: &ClaimItem) -> gtk::Box {
+fn build_claim_row(ctx: &Rc<Ctx>, claim: &ClaimItem) -> gtk::Box {
     let row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(8)
@@ -1577,7 +1701,60 @@ fn build_claim_row(claim: &ClaimItem) -> gtk::Box {
     set_test_id(&status, ids::SUBSCRIPTION_CLAIM_STATUS);
     row.append(&status);
 
+    // A voided code has nothing left to void. The first press arms the row in
+    // place (the same button then names the consequence, a Keep button
+    // appears); the second press on the same button sends the void.
+    if claim.voided_at.is_none() {
+        let armed = ctx.claim_void_armed.borrow().as_deref() == Some(claim.code.as_str());
+        let label = if !armed {
+            s::VOID_CLAIM.to_string()
+        } else if let Some(redeemer) = &claim.redeemed_by {
+            s::void_claim_confirm_redeemed(&redeemer.to_hex(), &claim.tier)
+        } else {
+            s::VOID_CLAIM_CONFIRM_UNREDEEMED.to_string()
+        };
+        let void = gtk::Button::with_label(&label);
+        void.add_css_class("destructive-action");
+        set_test_id(&void, ids::SUBSCRIPTION_CLAIM_VOID_BUTTON);
+        crate::offline_gate::declare_wire_kind(&void, "fauna.payments.claims.void");
+        {
+            let ctx = Rc::clone(ctx);
+            let code = claim.code.clone();
+            void.connect_clicked(move |_| {
+                if ctx.claim_void_armed.borrow().as_deref() == Some(code.as_str()) {
+                    *ctx.claim_void_armed.borrow_mut() = None;
+                    repaint_claims(&ctx);
+                    dispatch(&ctx, Action::VoidClaim { code: code.clone() });
+                } else {
+                    *ctx.claim_void_armed.borrow_mut() = Some(code.clone());
+                    repaint_claims(&ctx);
+                }
+            });
+        }
+        row.append(&void);
+        if armed {
+            let keep = gtk::Button::with_label(s::VOID_CLAIM_CANCEL);
+            let ctx = Rc::clone(ctx);
+            keep.connect_clicked(move |_| {
+                *ctx.claim_void_armed.borrow_mut() = None;
+                repaint_claims(&ctx);
+            });
+            row.append(&keep);
+        }
+    }
+
     row
+}
+
+/// Repaint the §5 rows from the last read (arm / cancel — no nest round-trip).
+/// Deferred to idle: the clicked button is one of the widgets being replaced.
+#[cfg(feature = "payments")]
+fn repaint_claims(ctx: &Rc<Ctx>) {
+    let ctx = Rc::clone(ctx);
+    gtk::glib::idle_add_local_once(move || {
+        let claims = ctx.claims_read.borrow().clone();
+        render_claim_rows(&ctx, &claims);
+    });
 }
 
 fn show_error(w: &Widgets, msg: &str) {

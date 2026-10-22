@@ -18,6 +18,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
 import com.fauna.app.core.AppState
 import com.fauna.app.ui.navigation.FaunaNavHost
+import com.fauna.app.ui.navigation.StoreConsentLockHost
 import dagger.hilt.android.AndroidEntryPoint
 
 @AndroidEntryPoint
@@ -108,6 +109,9 @@ class MainActivity : FragmentActivity() {
         // (region-blocking.md § Fail posture) — idempotent, the leaf reads one
         // OS setting per launch.
         com.fauna.app.core.RegionLeaf.openPlane(this)
+        // The member's nest-rules book, its stored records restored ahead of the
+        // first read too (nest-rules.md § The nest content policy → Carriage).
+        com.fauna.app.core.NestRulesHost.open(this)
         val appState = AppState()
         this.appState = appState
 
@@ -124,10 +128,15 @@ class MainActivity : FragmentActivity() {
                         .fillMaxSize()
                         .semantics { testTagsAsResourceId = true },
                 ) {
-                    FaunaNavHost(
-                        widthSizeClass = windowSizeClass.widthSizeClass,
-                        appState = appState,
-                    )
+                    // The store-consent lock wraps the WHOLE app — before any
+                    // page, onboarding included (account-age-band.md, the
+                    // store-law developer duties bullet, item (3)).
+                    StoreConsentLockHost {
+                        FaunaNavHost(
+                            widthSizeClass = windowSizeClass.widthSizeClass,
+                            appState = appState,
+                        )
+                    }
                 }
             }
         }
@@ -184,13 +193,20 @@ class MainActivity : FragmentActivity() {
         /** `fauna_client_dns`'s fake-provider gate, DNS-page clock override and
          *  ACME directory seed (`e2e_acme_seam`, read when an order starts) —
          *  the keys conftest's android block sets for the admin DNS journeys;
-         *  the whole seed, its name server a reversed loopback port. */
+         *  the whole seed, its name server a reversed loopback port — and the
+         *  Outlook import's three mail-import seeds (`fauna-mail`'s source trust
+         *  anchor, preset-host redirect and Microsoft authority, read via
+         *  std::env when the wizard connects or signs in; the last two name
+         *  reversed loopback ports). */
         val DNS_E2E_ENV_KEYS = listOf(
             "FAUNA_DNS_PROVIDER_FAKE",
             "FAUNA_DNS_RECHECK_SECS",
             "FAUNA_E2E_ACME_DIRECTORY_URL",
             "FAUNA_E2E_ACME_CA_PEM",
             "FAUNA_E2E_ACME_NAMESERVER",
+            "FAUNA_E2E_IMAP_EXTRA_CA_PEM",
+            "FAUNA_E2E_IMAP_HOST_MAP",
+            "FAUNA_E2E_MICROSOFT_AUTHORITY",
         )
     }
 }

@@ -19,9 +19,10 @@ use crate::snapshots::{
     InviteRequestSnapshot, NatModeSnapshot, NatModeState,
 };
 use crate::state::{
-    AgeClaimPlain, AgeNoncePlain, BoxRecoveryEntry, CapturedDnsCredential, CredentialForm,
-    DnsConfigState, DnsRecordPlain, FieldMetaPlain, HostedAuthPrompt, HostedAuthState,
-    IdentityOrigin, LocalizedText, NodeMode, OnboardingStep, State, VpsConfigState,
+    AgeClaimPlain, AgeNoncePlain, BoxRecoveryEntry, CapturedDnsCredential, ContentScanners,
+    CredentialForm, DnsConfigState, DnsRecordPlain, FieldMetaPlain, HostedAuthPrompt,
+    HostedAuthState, IdentityOrigin, LocalizedText, NodeMode, OnboardingStep, SshDoorReadout,
+    State, VpsConfigState,
 };
 
 /// HTTP client for the handle-check **nest-health probe**, for *every* target —
@@ -263,6 +264,102 @@ struct AgeNonceMint {
     attestation_platforms: Vec<String>,
 }
 
+/// The SSH door key a run minted (`installers/vps.md` § The SSH door → *The
+/// key*). `private_key` is `Some` only where it waits for its one hand-over —
+/// on a desktop app it went to `~/.ssh` at mint and the machine kept nothing.
+struct MintedSshDoor {
+    authorized_key: String,
+    readout: SshDoorReadout,
+    private_key: Option<fauna_core::secret::SecretString>,
+}
+
+impl OnboardingMachine {
+    /// The door for a run on `domain`: `None` with the toggle off; else the key
+    /// this wizard already minted for `domain` (a retried run must render the
+    /// key the box may already carry), or a fresh one — written to the
+    /// desktop app's `~/.ssh` at once, so a crash after the box exists cannot
+    /// strand its only key in memory.
+    fn ssh_door_for_run(
+        &self,
+        enabled: bool,
+        domain: &str,
+    ) -> Result<Option<fauna_provisioning::cloud_init::SshDoor>, OnboardingError> {
+        use fauna_provisioning::ssh_door;
+        let mut slot = self.ssh_door.lock().unwrap_or_else(|e| e.into_inner());
+        if !enabled {
+            // A door-less run shows no door, whatever an earlier run minted.
+            *slot = None;
+            return Ok(None);
+        }
+        if let Some(d) = slot.as_ref().filter(|d| d.readout.domain == domain) {
+            return Ok(Some(fauna_provisioning::cloud_init::SshDoor {
+                authorized_key: d.authorized_key.clone(),
+            }));
+        }
+        let fail = |detail: String| OnboardingError::ProvisioningFailed {
+            step: "ssh_door".into(),
+            detail,
+        };
+        let file = ssh_door::key_file_name(domain)
+            .ok_or_else(|| fail(format!("not a plain domain name: {domain}")))?;
+        let key = ssh_door::mint(domain);
+        let key_dir = self
+            .ssh_door_key_dir
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let (command, key_path, private_key) = match key_dir {
+            #[cfg(not(target_arch = "wasm32"))]
+            Some(dir) => {
+                let installed = ssh_door::install_key(std::path::Path::new(&dir), domain, &key)
+                    .map_err(|e| fail(format!("writing the door key under {dir}: {e}")))?;
+                (
+                    installed.command,
+                    Some(installed.key_path.display().to_string()),
+                    None,
+                )
+            }
+            _ => (
+                ssh_door::command_with_identity(&file, domain),
+                None,
+                Some(key.private_openssh),
+            ),
+        };
+        *slot = Some(MintedSshDoor {
+            authorized_key: key.public_line.clone(),
+            readout: SshDoorReadout {
+                domain: domain.to_string(),
+                command,
+                key_path,
+                fingerprint: key.fingerprint,
+                admitted_from: None,
+            },
+            private_key,
+        });
+        Ok(Some(fauna_provisioning::cloud_init::SshDoor {
+            authorized_key: key.public_line,
+        }))
+    }
+
+    /// Put the address the nest echoed in the claim reply on this run's door
+    /// readout (`onboarding-provisioning.md` § 5: the command is shown "with
+    /// the one admitted address"). A door-less run has no readout and keeps
+    /// none; a reply with no address leaves the readout as it was.
+    fn note_ssh_door_source(&self, source: Option<String>) {
+        let Some(address) = source else {
+            return;
+        };
+        if let Some(door) = self
+            .ssh_door
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            door.readout.admitted_from = Some(address);
+        }
+    }
+}
+
 /// The single shared onboarding wizard state machine. Each app holds
 /// `Arc<OnboardingMachine>`, observes via the registered `OnboardingObserver`,
 /// and mutates via the methods exposed below.
@@ -296,6 +393,13 @@ pub struct OnboardingMachine {
     /// `with_nest_api(observer, Arc<FakeNestApi>)`.
     pub(crate) nest_api: Arc<dyn crate::nest_api::NestApi>,
     handle_check: Mutex<HandleCheckSnapshot>,
+    /// The registered-probe's `VerifyReply::first_sign_in`, beside
+    /// `handle_check` rather than on `HandleCheckOutcome::AlreadyOnNest` — the
+    /// snapshot's outcome is matched exhaustively by the app shells. Written
+    /// with every completion (`complete_with_first_sign_in`), so it is `true`
+    /// only while the outcome is the `AlreadyOnNest` a first sign-in concluded;
+    /// read only by that outcome's Continue arm (`onboarding.md` § 3b-ter).
+    handle_check_first_sign_in: std::sync::atomic::AtomicBool,
     invite_request: Mutex<InviteRequestSnapshot>,
     /// The age band the verified OOB code carries (`InviteCodeVerification::
     /// age_band`), held beside `invite_request` rather than on
@@ -413,6 +517,13 @@ pub struct OnboardingMachine {
     /// `label_selector` instead of a name-prefix + age heuristic. NOT a human
     /// config surface — bucket-1 IPC (same bucket as `local_nest_port`).
     provision_labels: RwLock<Vec<(String, String)>>,
+    /// The desktop app's `~/.ssh` ([`Self::set_ssh_door_key_dir`]); `None` on
+    /// an app without one.
+    ssh_door_key_dir: RwLock<Option<String>>,
+    /// The door key this wizard minted, once a door run has started — kept so
+    /// a retried run renders the same public key the box may already carry.
+    /// Never in the snapshot.
+    ssh_door: Mutex<Option<MintedSshDoor>>,
     /// `hosted-auth` sign-ins in flight between [`Self::hosted_auth_begin`]
     /// and [`Self::hosted_auth_wait`], keyed by (form, field id). The RFC 8628
     /// `device_code` is a bearer-like secret the app never needs, so it lives
@@ -523,6 +634,16 @@ pub struct OnboardingMachine {
     /// must outlive the wizard's own state. The held root is per-run; this is
     /// per-box.
     claimed_box_identity: RwLock<Option<(String, [u8; 32])>>,
+    /// This machine, for the probe a `&self` transition into `vps_config`
+    /// starts ([`Self::spawn_channel_probe`]).
+    self_ref: std::sync::Weak<Self>,
+    /// True while the update-channel availability probe is in flight, so
+    /// Back/Continue does not start a second one.
+    channel_probe_in_flight: std::sync::atomic::AtomicBool,
+    /// The location `vps.server_types` was last listed for (`verify_vps` or
+    /// [`Self::refresh_vps_offers`]), so a re-select of the same location —
+    /// a picker restoring its selection on re-render — lists nothing again.
+    vps_offers_listed_for: std::sync::Mutex<Option<String>>,
 }
 
 /// Rust-only injection of the loopback nest port — deliberately NOT a UniFFI
@@ -531,6 +652,179 @@ pub struct OnboardingMachine {
 /// e2e onboarding test sets it to a random free port; the C# desktop app's Option-A
 /// wiring will add the UniFFI setter when it lands.
 impl OnboardingMachine {
+    /// The registry the wizard asks which update channels have a build — the
+    /// probe on entering `vps_config` and the Server step's pre-flight. The
+    /// nest image's own registry (through the CORS forwarder on WASM), or —
+    /// once a test harness has installed a provider-base-URL map — its `ghcr`
+    /// entry, and none when the map has no such entry, so a harness never
+    /// reaches the public registry by accident.
+    pub(crate) fn wizard_registry(
+        &self,
+    ) -> Option<fauna_provisioning::update_channel::registry::Registry> {
+        use fauna_provisioning::update_channel::{NEST_IMAGE_REPOSITORY, registry::Registry};
+        match self
+            .provider_base_urls
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            Some(map) => map
+                .get("ghcr")
+                .map(|origin| Registry::new(self.http.clone(), origin, NEST_IMAGE_REPOSITORY)),
+            None => Some(Registry::nest_for_wizard(self.http.clone())),
+        }
+    }
+
+    /// Start [`Self::probe_channel_availability`] in the background on entering
+    /// `vps_config`: `tokio::spawn` when a runtime is current, `spawn_local` on
+    /// web. A native caller with no runtime on its thread starts nothing — the
+    /// page keeps the Stable default, as before the probe existed — and can
+    /// await the probe on a runtime of its own.
+    pub(crate) fn spawn_channel_probe(&self) {
+        let Some(me) = self.self_ref.upgrade() else {
+            return;
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(me.probe_channel_availability());
+        }
+        #[cfg(target_arch = "wasm32")]
+        wasm_bindgen_futures::spawn_local(me.probe_channel_availability());
+    }
+
+    /// Read every update channel's head from the registry and rest the result
+    /// on `VpsConfigState::channel_availability`, notifying the observer — the
+    /// input of the default channel and of each row's description
+    /// (`onboarding-provisioning.md` § 5 → *What exists decides the default*).
+    /// Runs once per wizard: a probe in flight or a result already present is
+    /// not re-run, and a result that lands after one is already present (a
+    /// test's seed) is dropped.
+    pub async fn probe_channel_availability(self: Arc<Self>) {
+        use fauna_provisioning::update_channel::availability::{WIZARD_PLAN_ARCH, resolve_all};
+        use std::sync::atomic::Ordering;
+        if !self.with_state(|s| s.vps.channel_availability.is_empty()) {
+            return;
+        }
+        let Some(registry) = self.wizard_registry() else {
+            return;
+        };
+        if self.channel_probe_in_flight.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        // Cleared however the probe ends — including a runtime dropped under it.
+        struct InFlight<'a>(&'a std::sync::atomic::AtomicBool);
+        impl Drop for InFlight<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+        let _in_flight = InFlight(&self.channel_probe_in_flight);
+        let found = resolve_all(&registry, WIZARD_PLAN_ARCH).await;
+        self.store_channel_availability(found);
+    }
+
+    /// Rest `found` on the state unless a result is already there.
+    fn store_channel_availability(
+        &self,
+        found: Vec<fauna_provisioning::update_channel::availability::ChannelAvailability>,
+    ) {
+        let stored = {
+            let mut s = self.state.lock().unwrap();
+            if s.vps.channel_availability.is_empty() {
+                s.vps.channel_availability = found;
+                true
+            } else {
+                false
+            }
+        };
+        if stored {
+            self.observer.on_changed();
+        }
+    }
+
+    /// Start [`Self::refresh_vps_offers`] in the background on a location
+    /// change, exactly as [`Self::spawn_channel_probe`] starts its probe: a
+    /// native caller with no runtime on its thread starts nothing and awaits
+    /// the refresh on a runtime of its own.
+    fn spawn_vps_offers_refresh(&self) {
+        let Some(me) = self.self_ref.upgrade() else {
+            return;
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(me.refresh_vps_offers());
+        }
+        #[cfg(target_arch = "wasm32")]
+        wasm_bindgen_futures::spawn_local(me.refresh_vps_offers());
+    }
+
+    /// Re-list the curated offers for `vps.selected_location_id` and rest them
+    /// on `vps.server_types`, dropping a selected offer the new list lacks
+    /// (`registry.md` § Server offers follow the location). Nothing to do
+    /// before verify, or when the offers are already this location's; a
+    /// listing a later location change has superseded is dropped.
+    pub async fn refresh_vps_offers(self: Arc<Self>) {
+        use fauna_provisioning::vps::VpsProvider;
+        let (pid, creds, location) = match self.with_state(|s| {
+            (
+                s.vps.verified,
+                s.vps.selected_provider_id.clone(),
+                s.vps.creds.clone(),
+                s.vps.selected_location_id.clone(),
+            )
+        }) {
+            (true, Some(pid), creds, Some(location)) => (pid, creds, location),
+            _ => return,
+        };
+        if self.vps_offers_listed_for.lock().unwrap().as_deref() == Some(location.as_str()) {
+            return;
+        }
+        let Some(vps_dispatch) = self.vps_dispatch_for(&pid, creds) else {
+            return;
+        };
+        let listed = vps_dispatch
+            .list_server_types(&self.http, &curated_offers_for(&pid), &location)
+            .await;
+        self.mutate(|s| {
+            let current = s.vps.selected_provider_id.as_deref() == Some(pid.as_str())
+                && s.vps.selected_location_id.as_deref() == Some(location.as_str());
+            if !current {
+                return;
+            }
+            match listed {
+                Ok(types) => {
+                    s.vps.server_types = types.into_iter().take(5).collect();
+                    let kept = s
+                        .vps
+                        .selected_server_type_id
+                        .as_ref()
+                        .is_none_or(|sel| s.vps.server_types.iter().any(|t| &t.id == sel));
+                    if !kept {
+                        s.vps.selected_server_type_id = None;
+                    }
+                    *self.vps_offers_listed_for.lock().unwrap() = Some(location.clone());
+                }
+                Err(e) => s.set_error(format!("Server type list failed: {e}")),
+            }
+        });
+    }
+
+    /// The selected provider's VPS adapter over `creds`, honoring the
+    /// `provider_base_urls["vps"]` E2E override so verify and the offer
+    /// listing hit the fake instead of the live cloud API (mirrors
+    /// `run_provisioning_inner`; `None` in production).
+    fn vps_dispatch_for(
+        &self,
+        pid: &str,
+        creds: HashMap<String, SecretString>,
+    ) -> Option<fauna_provisioning::dispatch::VpsDispatch> {
+        fauna_provisioning::dispatch::vps_provider(
+            dispatch_provider_id(pid)?,
+            fauna_provisioning::dispatch::Credentials::from_map(creds),
+            self.provider_base_url("vps".into()),
+        )
+    }
+
     /// Point a bare (no-port) loopback handle (`test@localhost`) at a local nest on
     /// `port` instead of the default 443. The e2e onboarding test boots a nest on a
     /// random free port and calls this so the full flow runs in the harness without
@@ -672,7 +966,7 @@ impl OnboardingMachine {
         nest_expected_identity: crate::nest_api::ExpectedNestIdentity,
         inherits_dial_override: bool,
     ) -> Arc<Self> {
-        Arc::new(Self {
+        Arc::new_cyclic(|self_ref| Self {
             state: Mutex::new(State::new()),
             observer,
             http: reqwest::Client::new(),
@@ -680,6 +974,7 @@ impl OnboardingMachine {
             nest_api,
             nest_resolve_override,
             handle_check: Mutex::new(HandleCheckSnapshot::idle()),
+            handle_check_first_sign_in: std::sync::atomic::AtomicBool::new(false),
             invite_request: Mutex::new(InviteRequestSnapshot::idle()),
             oob_age_band: Mutex::new(None),
             claim_code: Mutex::new(ClaimCodeSnapshot::idle()),
@@ -694,6 +989,8 @@ impl OnboardingMachine {
             provision_image_tag: RwLock::new(None),
             provision_claim_code: RwLock::new(None),
             provision_labels: RwLock::new(Vec::new()),
+            ssh_door_key_dir: RwLock::new(None),
+            ssh_door: Mutex::new(None),
             hosted_auth_pending: Mutex::new(HashMap::new()),
             age_claim: RwLock::new(None),
             age_nonce_mint: RwLock::new(None),
@@ -707,6 +1004,9 @@ impl OnboardingMachine {
             provision_reach_ipv4: RwLock::new(None),
             pending_provision_row: RwLock::new(None),
             claimed_box_identity: RwLock::new(None),
+            self_ref: self_ref.clone(),
+            channel_probe_in_flight: std::sync::atomic::AtomicBool::new(false),
+            vps_offers_listed_for: std::sync::Mutex::new(None),
         })
     }
 
@@ -1155,6 +1455,33 @@ impl OnboardingMachine {
         self.mutate(|s| s.set_error(message));
     }
 
+    /// The app's moment-1 write of the identity just confirmed failed
+    /// (`onboarding.md` § Long-term store contract; `apps/common.md`
+    /// § Credential storage: a keyring failure "is a loud error, not a silent
+    /// fallback"). Puts the wizard back on the screen the person confirmed on
+    /// — `identity_created`, `identity_import` or `recovery_entry` — and paints
+    /// `message` on the shared `error-message` channel, so nobody reaches
+    /// handle entry holding a key that is stored nowhere. Confirming again is
+    /// the retry; the created screen re-shows the same key (it mints once per
+    /// run).
+    ///
+    /// The confirm transitions advance before the app writes because this
+    /// machine holds no store, and some apps' writes are asynchronous; undoing
+    /// the advance here, rather than having each app guess the step it came
+    /// from, keeps the UI and the wizard in step on all of them. A report with
+    /// no confirm behind it, or arriving after the wizard has moved past the
+    /// confirm's landing, paints the message and moves nothing.
+    pub fn identity_commit_failed(&self, message: String) {
+        self.mutate(|s| {
+            if let Some((screen, landing)) = s.identity_commit.take()
+                && s.step == landing
+            {
+                s.step = screen;
+            }
+            s.set_error(message);
+        });
+    }
+
     pub fn is_loading(&self) -> bool {
         self.with_state(|s| s.is_loading)
     }
@@ -1256,6 +1583,9 @@ impl OnboardingMachine {
             // [`Self::begin_create_identity`] for why the door is the wrong
             // place to write it.
             s.identity_origin = Some(IdentityOrigin::Created);
+            // A retry after a failed write (`identity_commit_failed`) must not
+            // carry that failure's message onto the next screen.
+            s.error_message = None;
             if s.renders_recovery_kit {
                 // The kit offer comes right after the identity secret
                 // (onboarding.md § 1 Identity). Mint only if no pending root
@@ -1270,6 +1600,7 @@ impl OnboardingMachine {
             } else {
                 s.step = OnboardingStep::HandleEntry;
             }
+            s.identity_commit = Some((OnboardingStep::IdentityCreated, s.step));
             Ok(secret.into())
         })
     }
@@ -1448,6 +1779,7 @@ impl OnboardingMachine {
                     s.identity_origin = Some(IdentityOrigin::Imported);
                     s.step = OnboardingStep::HandleEntry;
                     s.error_message = None;
+                    s.identity_commit = Some((OnboardingStep::RecoveryEntry, s.step));
                 });
                 // The account IS back — this is never a refusal. But a broken
                 // predecessor section means a corpus still sealed under a
@@ -1658,6 +1990,7 @@ impl OnboardingMachine {
             // on `NestRecovery` once that nest resolves as `AlreadyOnNest`.
             s.step = OnboardingStep::HandleEntry;
             s.error_message = None;
+            s.identity_commit = Some((OnboardingStep::IdentityImport, s.step));
         });
         Ok(secret)
     }
@@ -1805,6 +2138,7 @@ impl OnboardingMachine {
             s.dns.set_up_later = true;
             s.step = OnboardingStep::VpsConfig;
         });
+        self.spawn_channel_probe();
     }
 
     /// Records the user's explicit acceptance of the displayed registration
@@ -2088,7 +2422,7 @@ impl OnboardingMachine {
     /// `start_provisioning()` so the user can still back out before
     /// committing money.
     pub fn continue_from_dns(&self) -> Result<(), OnboardingError> {
-        self.mutate(|s| {
+        let entered = self.mutate(|s| {
             // Mirror creds to VPS when same_provider_for_vps and the
             // provider supports VPS.
             if s.dns.same_provider_for_vps
@@ -2105,7 +2439,9 @@ impl OnboardingMachine {
             }
             s.step = OnboardingStep::VpsConfig;
             Ok(())
-        })
+        });
+        self.spawn_channel_probe();
+        entered
     }
 
     // ── VPS config stage ────────────────────────────────────────────────
@@ -2127,8 +2463,18 @@ impl OnboardingMachine {
         });
     }
 
+    /// Choose the box's location. A change re-lists the offers for it in the
+    /// background ([`Self::refresh_vps_offers`]); the same location again is a
+    /// no-op beyond the notify.
     pub fn select_vps_location(&self, id: String) {
-        self.mutate(|s| s.vps.selected_location_id = Some(id));
+        let changed = self.mutate(|s| {
+            let changed = s.vps.selected_location_id.as_deref() != Some(id.as_str());
+            s.vps.selected_location_id = Some(id);
+            changed
+        });
+        if changed {
+            self.spawn_vps_offers_refresh();
+        }
     }
 
     pub fn set_vps_cred(&self, field_id: String, value: String) {
@@ -2191,6 +2537,59 @@ impl OnboardingMachine {
             .unwrap_or_else(|| self.handle_targets_real_domain())
     }
 
+    /// Set the `vps-config-ssh-door-toggle` (default off): whether the box is
+    /// provisioned with a key-only sshd that admits the admin's own address.
+    /// Decided here for the mail mode's reason — it is written into the box's
+    /// cloud-init. On, the run mints a key for this box alone
+    /// (`installers/vps.md` § The SSH door). Per
+    /// `docs/goal/behavior/onboarding-provisioning.md` § 5.
+    pub fn set_provision_ssh_door(&self, enabled: bool) {
+        self.mutate(|s| s.vps.ssh_door = enabled);
+    }
+
+    /// Whether the `vps-config-ssh-door-toggle` is on; while it is, the page
+    /// shows `vps-config-ssh-door-warning`.
+    pub fn provision_ssh_door_enabled(&self) -> bool {
+        self.with_state(|s| s.vps.ssh_door)
+    }
+
+    /// Where a desktop app keeps SSH keys — the app passes its `~/.ssh` at
+    /// start, and a door run writes its private key there with a `Host` entry
+    /// (`installers/vps.md` § The SSH door → *The key*). Unset — a phone, web
+    /// — the key is held in memory for the one hand-over
+    /// ([`Self::take_ssh_door_private_key`]). Bucket-1 IPC: the app's own
+    /// platform path, never a human choice.
+    pub fn set_ssh_door_key_dir(&self, dir: Option<String>) {
+        *self
+            .ssh_door_key_dir
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = dir;
+    }
+
+    /// What the provisioning page shows for a door box once its key exists:
+    /// the command, the key's path where this device wrote one, and the key's
+    /// fingerprint. `None` for a door-less run. Carries no secret.
+    pub fn ssh_door_readout(&self) -> Option<SshDoorReadout> {
+        self.ssh_door
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|d| d.readout.clone())
+    }
+
+    /// The door's private key, handed over **once** on an app with no
+    /// `~/.ssh` (the `provisioning-ssh-door-save-key-button`: a share sheet, a
+    /// download). The machine drops its copy as it returns it; a desktop app
+    /// never gets one here — its key is already in `~/.ssh`.
+    pub fn take_ssh_door_private_key(&self) -> Option<String> {
+        self.ssh_door
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+            .and_then(|d| d.private_key.take())
+            .map(String::from)
+    }
+
     /// Select a `vps-config-update-channel-row`: which builds the box's
     /// automatic updater follows. Decided at `vps_config`, like the mail mode,
     /// because the channel's image tag is written into the box's cloud-init.
@@ -2204,11 +2603,40 @@ impl OnboardingMachine {
     }
 
     /// The selected update channel — the user's explicit choice if set, else
-    /// the default (`stable`). Clients read this to mark the selected
-    /// `vps-config-update-channel-row`.
+    /// the default: the first channel that has a build this app can use, or
+    /// Stable while the registry has not been read
+    /// (`UpdateChannel::default_for`; `onboarding-provisioning.md` § 5 →
+    /// *What exists decides the default*). Clients read this to mark the
+    /// selected `vps-config-update-channel-row`.
     pub fn provision_update_channel(&self) -> fauna_provisioning::cloud_init::UpdateChannel {
-        self.with_state(|s| s.vps.update_channel)
-            .unwrap_or_default()
+        self.with_state(|s| {
+            s.vps.update_channel.unwrap_or_else(|| {
+                fauna_provisioning::cloud_init::UpdateChannel::default_for(
+                    &s.vps.channel_availability,
+                    &fauna_provisioning::update_channel::availability::product_version(),
+                )
+            })
+        })
+    }
+
+    /// The i18n key of `channel`'s row description: the no-build wording when
+    /// the registry has no build on it, else the compat line's wording at the
+    /// running product major (`UpdateChannel::description_key_for`). Apps look
+    /// the string up by this key rather than choosing per row themselves.
+    pub fn update_channel_description_key_for_row(
+        &self,
+        channel: fauna_provisioning::cloud_init::UpdateChannel,
+    ) -> String {
+        let major = fauna_provisioning::update_channel::availability::product_version().major;
+        self.with_state(|s| {
+            let build = s
+                .vps
+                .channel_availability
+                .iter()
+                .find(|a| a.channel == channel)
+                .map(|a| &a.build);
+            channel.description_key_for(major, build).to_string()
+        })
     }
 
     /// Fields visible on the vps_config form. Filters the selected VPS
@@ -2319,7 +2747,6 @@ impl OnboardingMachine {
     }
 
     pub async fn verify_vps(&self) -> Result<(), OnboardingError> {
-        use fauna_provisioning::dispatch;
         use fauna_provisioning::vps::VpsProvider;
 
         // See `verify_dns` for the cross-app rationale: gating
@@ -2341,25 +2768,14 @@ impl OnboardingMachine {
         };
         let creds = snap.vps.creds.clone();
 
-        let provider_id = match dispatch_provider_id(&pid) {
-            Some(p) => p,
-            None => {
-                clear_verifying(self);
-                return Err(OnboardingError::Other {
-                    detail: format!("unknown provider id: {pid}"),
-                });
-            }
-        };
+        if dispatch_provider_id(&pid).is_none() {
+            clear_verifying(self);
+            return Err(OnboardingError::Other {
+                detail: format!("unknown provider id: {pid}"),
+            });
+        }
 
-        let vps_dispatch = match dispatch::vps_provider(
-            provider_id,
-            dispatch::Credentials::from_map(creds.clone()),
-            // Honor the `provider_base_urls["vps"]` E2E override so the
-            // verify + server-type-list probes hit the fake instead of
-            // the live cloud API (mirrors `run_provisioning_inner`).
-            // `None` in production.
-            self.provider_base_url("vps".into()),
-        ) {
+        let vps_dispatch = match self.vps_dispatch_for(&pid, creds) {
             Some(d) => d,
             None => {
                 clear_verifying(self);
@@ -2382,15 +2798,20 @@ impl OnboardingMachine {
             }
         };
 
-        // Pull curated server types from the provider registry.
-        let curated: Vec<&str> = PROVIDERS
-            .iter()
-            .find(|p| p.id.as_str() == pid)
-            .map(|p| p.curated_offers)
-            .unwrap_or(&[])
-            .to_vec();
+        // Default location is the first one returned. Clients can override
+        // via `select_vps_location()`, which re-lists the offers for it.
+        let default_location = locations.first().map(|l| l.id.clone());
+        let list_location = snap
+            .vps
+            .selected_location_id
+            .clone()
+            .or_else(|| default_location.clone())
+            .unwrap_or_default();
 
-        let types = match vps_dispatch.list_server_types(&self.http, &curated).await {
+        let types = match vps_dispatch
+            .list_server_types(&self.http, &curated_offers_for(&pid), &list_location)
+            .await
+        {
             Ok(types) => types,
             Err(e) => {
                 let msg = e.to_string();
@@ -2405,10 +2826,7 @@ impl OnboardingMachine {
             }
         };
 
-        // Default location is the first one returned. Clients can override
-        // via `select_vps_location()` to surface a real picker.
-        let default_location = locations.first().map(|l| l.id.clone());
-
+        *self.vps_offers_listed_for.lock().unwrap() = Some(list_location);
         self.mutate(|s| {
             s.vps.verified = true;
             s.vps.server_types = types.into_iter().take(5).collect();
@@ -2922,6 +3340,7 @@ impl OnboardingMachine {
             s.step = OnboardingStep::VpsConfig;
             s.error_message = None;
         });
+        self.spawn_channel_probe();
         Ok(())
     }
 
@@ -2980,7 +3399,12 @@ impl OnboardingMachine {
 #[cfg_attr(feature = "uniffi", uniffi::export)]
 impl OnboardingMachine {
     pub fn handle_check_snapshot(&self) -> HandleCheckSnapshot {
-        self.handle_check.lock().unwrap().clone()
+        let mut snap = self.handle_check.lock().unwrap().clone();
+        // Derived on every read, like `invite_request_snapshot`'s labels: no
+        // transition has to remember to set it.
+        snap.terms_notice_visible =
+            crate::snapshots::handle_check::terms_notice_visible_for(&snap.outcome);
+        snap
     }
 
     pub fn invite_request_snapshot(&self) -> InviteRequestSnapshot {
@@ -3619,6 +4043,25 @@ enum VpsShortfall {
 }
 
 impl OnboardingMachine {
+    /// Put the invite page back on `PendingReview` in place of the `Rechecking`
+    /// spinner, so it renders as pending and the poll continues. Only a state
+    /// still `Rechecking` is replaced. Kept out of the UniFFI-exported blocks.
+    fn restore_pending_review(&self, pending_request_id: &str) -> OnboardingStep {
+        use crate::snapshots::InviteRequestState;
+        {
+            let mut snap = self.invite_request.lock().unwrap();
+            if let InviteRequestState::Rechecking = snap.state {
+                snap.state = InviteRequestState::PendingReview {
+                    request_id: pending_request_id.to_string(),
+                    last_checked_ms: Timestamp::now_millis(),
+                };
+                snap.recheck_visible = true;
+            }
+        }
+        self.observer.on_changed();
+        self.state.lock().unwrap().step
+    }
+
     /// The first thing standing between the current VPS choices and Continue,
     /// or `None` when nothing does. Sole source for both
     /// [`Self::can_continue_vps`] and [`Self::vps_continue_blocked_reason`],
@@ -3977,13 +4420,14 @@ impl OnboardingMachine {
                         ]),
                     )
                 };
-                self.complete(
+                self.complete_with_first_sign_in(
                     HandleCheckOutcome::AlreadyOnNest {
                         handle_matches: matches,
                         current_handle: cur,
                     },
                     key,
                     args,
+                    verify.first_sign_in,
                 );
             }
             SilentChallengeOutcome::NotRegistered => {
@@ -4008,20 +4452,24 @@ impl OnboardingMachine {
                 // reuse the resolved `probe_base` (honors scheme/port for
                 // local targets and the E2E "nest" override) rather than
                 // re-deriving `https://{domain}`.
-                let (claimed, node_mode) = match self.nest_api.probe_setup_status(&probe_base).await
-                {
-                    Ok(status) => (status.claimed, status.node_mode),
-                    // Treat "no answer" as "assume claimed" — the
-                    // invite_request branch is graceful for users who
-                    // arrive at a nest they don't have admin for, while
-                    // the claim_code branch only works when there's a
-                    // live claim-code file.
-                    Err(_) => (true, None),
-                };
+                let (claimed, node_mode, content_scanners) =
+                    match self.nest_api.probe_setup_status(&probe_base).await {
+                        Ok(status) => (status.claimed, status.node_mode, status.content_scanners),
+                        // Treat "no answer" as "assume claimed" — the
+                        // invite_request branch is graceful for users who
+                        // arrive at a nest they don't have admin for, while
+                        // the claim_code branch only works when there's a
+                        // live claim-code file.
+                        Err(_) => (true, None, ContentScanners::Unknown),
+                    };
                 // Capture the resolved NAT-mode seed so `reset_nat_mode_snapshot`
                 // can pre-select the `nat_mode_choice` page (onboarding.md
-                // § 3b-bis).
-                self.mutate(|s| s.node_mode_seed = node_mode);
+                // § 3b-bis), and the box's scanner declaration for the mail
+                // intent's third axis (§ 3b).
+                self.mutate(|s| {
+                    s.node_mode_seed = node_mode;
+                    s.content_scanners_seed = content_scanners;
+                });
                 if claimed {
                     self.complete(
                         HandleCheckOutcome::NestRunningUserUnregistered,
@@ -4042,11 +4490,16 @@ impl OnboardingMachine {
             // classification is unreliable, and a false-terminal is worse than
             // offering retry (onboarding.md lines 248–252). Subsumes the old
             // probe's `ServerError { transient: false }` cases.
-            SilentChallengeOutcome::Transient { error: _ } => self.complete_probe_error(
-                HandleCheckPhase::ChallengeResponse,
-                true,
-                "challenge error".into(),
-            ),
+            SilentChallengeOutcome::Transient { error } => {
+                // The page shows the retryable bucket only; the cause goes to
+                // the log, or a failing check can never say why.
+                tracing::warn!(target: "fauna_onboarding", "handle check: silent challenge failed transiently: {error}");
+                self.complete_probe_error(
+                    HandleCheckPhase::ChallengeResponse,
+                    true,
+                    "challenge error".into(),
+                )
+            }
             // The secret isn't a valid 32-byte Ed25519 key — terminal, not
             // retryable (the old probe's `SignatureMismatch`).
             SilentChallengeOutcome::SecretInvalid { error: _ } => self.complete_probe_error(
@@ -4128,6 +4581,19 @@ impl OnboardingMachine {
         msg_key: &str,
         args: HashMap<String, String>,
     ) {
+        self.complete_with_first_sign_in(outcome, msg_key, args, false);
+    }
+
+    /// [`Self::complete`], carrying the registered-probe's `first_sign_in` —
+    /// written under the snapshot's lock, so the outcome and the fact are never
+    /// observed apart.
+    fn complete_with_first_sign_in(
+        &self,
+        outcome: crate::snapshots::HandleCheckOutcome,
+        msg_key: &str,
+        args: HashMap<String, String>,
+        first_sign_in: bool,
+    ) {
         use crate::snapshots::{HandleCheckOutcome, HandleCheckPhase};
         let continue_enabled = matches!(
             outcome,
@@ -4137,6 +4603,8 @@ impl OnboardingMachine {
                 | HandleCheckOutcome::UnregisteredUnclaimedNest
         );
         let mut snap = self.handle_check.lock().unwrap();
+        self.handle_check_first_sign_in
+            .store(first_sign_in, std::sync::atomic::Ordering::SeqCst);
         snap.phase = HandleCheckPhase::Complete;
         snap.outcome = outcome;
         snap.message = LocalizedText {
@@ -4270,11 +4738,23 @@ impl OnboardingMachine {
                     })
                     .unwrap_or_default();
                 let handle = current_handle.unwrap_or(typed_handle);
-                // `Suppress`: this user is ALREADY on this box, so § 3b-ter's
-                // "joining user's first login" is behind them — this is a
-                // second device or a later launch, and the same trust is
+                // `onboarding.md` § 3b-ter, the `AlreadyOnNest` ruling: an
+                // `AlreadyOnNest` conclusion is not by itself a returning
+                // sign-in — a user an admin admitted directly signs in here for
+                // the first time and is owed the offer. The nest tells the two
+                // apart (`VerifyReply::first_sign_in`, read off the
+                // registered-probe); this arm derives nothing. Not first → a
+                // second device or a later launch: suppressed, the same trust
                 // grantable any time from the Nests page.
-                self.leave_for_logged_in(nest_url, handle, TrustOffer::Suppress)
+                let offer = if self
+                    .handle_check_first_sign_in
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    TrustOffer::Offer
+                } else {
+                    TrustOffer::Suppress
+                };
+                self.leave_for_logged_in(nest_url, handle, offer)
             }
             // Invite redemption proceeds with **no consent branch** — the
             // plaintext-mode consent page is retired without replacement
@@ -4522,6 +5002,10 @@ impl OnboardingMachine {
                 "invalid identity secret".into(),
             );
         }
+        // Same discipline as the handle-check: a stale raise from an earlier
+        // operation must not abort this one; only a cancel raised after this
+        // point (`cancel_invite_op`) does.
+        self.cancel.reset();
         self.invite_request.lock().unwrap().state = InviteRequestState::Rechecking;
         self.observer.on_changed();
 
@@ -4529,6 +5013,9 @@ impl OnboardingMachine {
             .nest_api
             .recheck_invite_request(&nest_url, &actor_id_hex)
             .await;
+        if self.cancel.is_raised() {
+            return self.restore_pending_review(&pending_request_id);
+        }
 
         // `NotFound` is the APPROVAL signal, not an error: the admin approve
         // creates the account and deletes the request row (`admin.md` § Section
@@ -4635,9 +5122,17 @@ impl OnboardingMachine {
         pending_request_id: &str,
     ) -> OnboardingStep {
         use crate::nest_api::SilentChallengeOutcome;
-        use crate::snapshots::{ErrorContext, InviteRequestState};
+        use crate::snapshots::ErrorContext;
 
-        match self.nest_api.silent_challenge(nest_url, secret).await {
+        let probe = self.nest_api.silent_challenge(nest_url, secret).await;
+        // A cancel raised while the probe was in flight wins over every verdict,
+        // `Success` included: the contract is that the snapshot stays at its
+        // last-known state, and `Rechecking` is a transient spinner — so that
+        // is the pending state. The next poll tick re-derives admission.
+        if self.cancel.is_raised() {
+            return self.restore_pending_review(pending_request_id);
+        }
+        match probe {
             SilentChallengeOutcome::Success(_) => {
                 // `state.nest_url`, NOT `effective_nest_url()`: this URL is
                 // persisted into the WizardOutcome and surfaced to per-app glue
@@ -4695,18 +5190,7 @@ impl OnboardingMachine {
             // restore the pending state the recheck's `Rechecking` spinner
             // replaced, so the page renders as pending and the poll continues.
             SilentChallengeOutcome::Transient { error: _ } => {
-                {
-                    let mut snap = self.invite_request.lock().unwrap();
-                    if let InviteRequestState::Rechecking = snap.state {
-                        snap.state = InviteRequestState::PendingReview {
-                            request_id: pending_request_id.to_string(),
-                            last_checked_ms: Timestamp::now_millis(),
-                        };
-                        snap.recheck_visible = true;
-                    }
-                }
-                self.observer.on_changed();
-                self.state.lock().unwrap().step
+                self.restore_pending_review(pending_request_id)
             }
         }
     }
@@ -5175,7 +5659,8 @@ impl OnboardingMachine {
             .claim_admin(&nest_url, &code, &secret, &handle, mail_domain_opt)
             .await
         {
-            Ok(_resp) => {
+            Ok(resp) => {
+                self.note_ssh_door_source(resp.ssh_door_source);
                 // `resp.deployment_seed` is deliberately not consumed: the
                 // launched client's custody leg fetches the seed from the box
                 // itself (box-recovery.md § The plane-era recovery floor, (c)).
@@ -5821,8 +6306,12 @@ impl OnboardingMachine {
         };
 
         // Capture the resolved NAT-mode seed so the downstream `nat_mode_choice`
-        // entry pre-selects it — the same capture the handle-check probe does.
-        self.mutate(|s| s.node_mode_seed = status.node_mode);
+        // entry pre-selects it, and the box's scanner declaration for the mail
+        // intent's third axis — the same capture the handle-check probe does.
+        self.mutate(|s| {
+            s.node_mode_seed = status.node_mode;
+            s.content_scanners_seed = status.content_scanners;
+        });
 
         let Some(secret) = self.effective_secret() else {
             return ClaimOutcome::Failed {
@@ -5923,7 +6412,8 @@ impl OnboardingMachine {
             )
             .await
         {
-            Ok(_resp) => {
+            Ok(resp) => {
+                self.note_ssh_door_source(resp.ssh_door_source);
                 // `resp.deployment_seed` is not consumed — the custody leg
                 // fetches it (box-recovery.md § The plane-era recovery floor, (c)).
                 // The claim rode a connection graduated against the held
@@ -6049,35 +6539,41 @@ impl OnboardingMachine {
     /// § 3b-bis, which stays confirm-only by design). The admin's change surface
     /// after onboarding is the admin-mail page.
     ///
-    /// The value is the conjunction of two axes (ratified 2026-07-13): the
+    /// Having claimed, the value is the conjunction of three axes: the
     /// handle-locality predicate ([`Self::handle_targets_real_domain`] — OFF
-    /// for `user@localhost` / `user@IP`, which cannot hold MX/DKIM/TLS) AND
-    /// the NAT axis ([`Self::effective_node_mode`]` != Private`). The NAT
-    /// conjunct is how the two-box home-relay deployment
-    /// (`deployment-home-with-public-relay.md`) says "this box runs no mail"
-    /// with no checkbox: both boxes share one real-domain handle, but the home
-    /// box is the one on the private axis — a claim-time enable there would
-    /// mint a fresh MSEK, diverging from the fleet MSEK `LinkBoth` re-seals
-    /// onto it. Still the onboarding→launch **hand-off channel**: the
-    /// per-app launch glue reads this once `wizard_outcome() == LoggedIn` and,
-    /// with its now-authenticated Admin client, calls
+    /// for `user@localhost` / `user@IP`, which cannot hold MX/DKIM/TLS); the
+    /// NAT axis ([`Self::effective_node_mode`]` != Private` — a box claimed
+    /// with a real-domain handle but on the private axis would mint a fresh
+    /// MSEK diverging from the fleet MSEK `LinkBoth` re-seals onto it); and the
+    /// box's own build — the box's `content_scanners` report from
+    /// `fauna.setup.status` (`absent` on a social-only box, which has no mail
+    /// ports and no clamd/rspamd; `unknown` passes). The last two are read
+    /// together through the shared `fauna_core::mail_availability::mta_can_run`
+    /// predicate, never re-derived here. Only this intent carries the third
+    /// axis: the DAV siblings ride the HTTPS surface every box has.
+    ///
+    /// Still the onboarding→launch **hand-off channel**: the per-app launch
+    /// glue reads this once `wizard_outcome() == LoggedIn` and, with its
+    /// now-authenticated Admin client, calls
     /// `MailAdminClient::set_mail_enabled(true)` — keeping the Admin-class gate
     /// intact rather than opening a pre-identity admin surface. Idempotent with
     /// the mail-settings enable path; only meaningful on the admin-claim path.
-    /// Per `docs/goal/behavior/mail-bridge-lifecycle.md` § Default-off on first
-    /// claim.
+    /// Per `docs/goal/behavior/onboarding.md` § 3b (the gating rule, the
+    /// default rule and *Third axis — the box's own build*).
     pub fn email_enable_requested(&self) -> bool {
+        let scanners = self.with_state(|s| s.content_scanners_seed);
         self.claim_completed()
             && self.handle_targets_real_domain()
-            && self.effective_node_mode() != NodeMode::Private
+            && fauna_core::mail_availability::mta_can_run(self.effective_node_mode(), scanners)
     }
 
     /// Whether the deployment's **calendar (CalDAV)** subsystem should be
     /// enabled at claim. Machine-derived sibling of
-    /// [`Self::email_enable_requested`] — same two-axis derivation
+    /// [`Self::email_enable_requested`] — its first two axes only
     /// (handle locality AND NAT axis), no checkbox (`onboarding.md` § 3b; the
-    /// DAV enables also mint the shared MSEK when first, so the home-relay
-    /// divergence argument covers them too).
+    /// DAV enables also mint the shared MSEK when first, so the NAT-axis
+    /// divergence argument covers them too; the box's content-scanner report is
+    /// mail's alone — CalDAV rides the HTTPS surface every box has).
     ///
     /// The per-app launch glue calls `MailAdminClient::set_caldav_enabled(true)`
     /// on it at `LoggedIn`. The subsystems stay **separately gated** (CalDAV needs
@@ -6196,20 +6692,25 @@ impl OnboardingMachine {
 /// **and** at a joining user's first login", and `docs/features/join-a-nest.md`
 /// outcome 8 sharpens the second half to "your first sign-in to a nest you
 /// **joined**". So the axis is not "did the wizard end in a session" but "did
-/// *this run* put the user on this nest": a claim and both join routes did, a
-/// returning sign-in did not. It is an explicit argument rather than something
-/// derived here because the derivation has burned this machine before —
+/// *this run* put the user on this nest": a claim and both join routes did, and
+/// so does an admin-admitted user's first sign-in; a returning sign-in did not
+/// (the `AlreadyOnNest` arm passes the nest's own `first_sign_in` through). It is
+/// an explicit argument rather than something derived here because the
+/// derivation has burned this machine before —
 /// `OnboardingMachine::claim_completed` exists precisely because an `AlreadyOnNest`
 /// sign-in inferring claim-time state fired four deployment writes against a
 /// box the admin had already configured.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum TrustOffer {
     /// This run established the user on the nest: an admin claim, an invite
-    /// redemption, or an approved join request. Offer the grant.
+    /// redemption, an approved join request, or an admin-admitted user's
+    /// first sign-in (an `AlreadyOnNest` conclusion whose verify said
+    /// `first_sign_in`). Offer the grant.
     Offer,
-    /// No offer: the user was already on this box — a returning
-    /// `AlreadyOnNest` sign-in, where § 3b-ter's "first login" is long past
-    /// and re-asking every launch would train the user to dismiss a
+    /// No offer: the user was already on this box — an `AlreadyOnNest`
+    /// sign-in the nest reports as not their first (`VerifyReply::
+    /// first_sign_in` false or absent), where § 3b-ter's "first login" is long
+    /// past and re-asking every new device would train the user to dismiss a
     /// capability-grant prompt. The one suppressed route. (The manual-DNS
     /// `already_claimed` resume is NOT one: it skips the wizard's setup tail,
     /// but it is this admin's own claim concluding for the first time —
@@ -6539,7 +7040,7 @@ impl OnboardingMachine {
     /// (`self.handle_check`) and the `State` fields a completed probe writes
     /// (`State::clear_handle_check`). Called from the identity-confirm
     /// transitions (`confirm_generated_identity` / `confirm_imported_identity`):
-    /// without it, a prior probe's outcome (e.g. "unregistered at example.com")
+    /// without it, a prior probe's outcome (e.g. "unregistered at example.net")
     /// survives an identity re-import/re-create and the page shows a stale
     /// conclusion until the user clicks Check again. The handle text itself is
     /// preserved — only the probe result is reset. Fires one observer tick (via
@@ -6857,6 +7358,18 @@ impl OnboardingMachine {
     pub fn node_mode_seed_for_test(&self) -> Option<NodeMode> {
         self.with_state(|s| s.node_mode_seed)
     }
+
+    /// Test-only: inject the box's content-scanner declaration (as a
+    /// setup-status probe would report it). Mirrors
+    /// `set_node_mode_seed_for_test`. Per `onboarding.md` § 3b → *Third axis*.
+    pub fn set_content_scanners_seed_for_test(&self, scanners: ContentScanners) {
+        self.mutate(|s| s.content_scanners_seed = scanners);
+    }
+
+    /// Test-only readback for the captured content-scanner declaration.
+    pub fn content_scanners_seed_for_test(&self) -> ContentScanners {
+        self.with_state(|s| s.content_scanners_seed)
+    }
 }
 
 /// Parse one E2E bridge method's JSON payload, `tracing::warn!`ing with the
@@ -7022,7 +7535,10 @@ impl OnboardingMachine {
     /// `set_domain_status_for_test` now that `domain_status` is a derived
     /// view, not stored state — leaves the rest of the snapshot untouched.
     pub fn set_handle_check_outcome_for_test(&self, outcome: crate::snapshots::HandleCheckOutcome) {
-        self.handle_check.lock().unwrap().outcome = outcome;
+        let mut snap = self.handle_check.lock().unwrap();
+        self.handle_check_first_sign_in
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        snap.outcome = outcome;
     }
 
     /// Test-only: bulk-set the DNS creds map. Accepts plain `String` values
@@ -7040,7 +7556,11 @@ impl OnboardingMachine {
     /// exercise `submit_handle_check_continue` without running the full
     /// network probe sequence.
     pub fn set_handle_check_snapshot_for_test(&self, snap: HandleCheckSnapshot) {
-        *self.handle_check.lock().unwrap() = snap;
+        let mut held = self.handle_check.lock().unwrap();
+        self.handle_check_first_sign_in
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        *held = snap;
+        drop(held);
         self.observer.on_changed();
     }
 
@@ -7456,6 +7976,24 @@ impl OnboardingMachine {
                 let tag = serde_json::from_str::<String>(&json_arg).unwrap_or(json_arg);
                 self.set_provision_image_tag(tag);
             }
+            // Seed what the registry says of each update channel, so a test
+            // reads a fixed registry rather than the live one. Replaces any
+            // probed result; a probe still in flight cannot overwrite it.
+            "set_channel_availability_for_test" => {
+                if let Some(found) = parse_bridge_arg::<
+                    Vec<fauna_provisioning::update_channel::availability::ChannelAvailability>,
+                >(name.as_str(), &json_arg)
+                {
+                    self.mutate(|s| s.vps.channel_availability = found);
+                }
+            }
+            // Point a door run's key at a scratch `~/.ssh`: a desktop app under
+            // test shares the developer's real HOME (linux keeps it), and a
+            // door journey must never write the developer's own `~/.ssh`.
+            "set_ssh_door_key_dir" => {
+                let dir = serde_json::from_str::<String>(&json_arg).unwrap_or(json_arg);
+                self.set_ssh_door_key_dir(Some(dir));
+            }
             "set_provision_labels" => {
                 if let Some(labels) =
                     parse_bridge_arg::<Vec<(String, String)>>(name.as_str(), &json_arg)
@@ -7528,6 +8066,7 @@ impl OnboardingMachine {
             // Reader: the live provisioning snapshot, so the test can poll the
             // orchestrator's progress (e.g. "Online step is Running").
             "provisioning_snapshot" => serde_json::to_string(&self.provisioning_snapshot()).ok(),
+            "ssh_door_readout" => serde_json::to_string(&self.ssh_door_readout()).ok(),
             // Reader: confirm a `set_provider_base_urls` override actually
             // applied (the test asserts this before driving a real run, so the
             // orchestrator can't escape to the live internet). `json_arg` is the
@@ -8236,6 +8775,11 @@ async fn run_provisioning_inner(
             from: "vps_config".into(),
             reason: "no server type selected".into(),
         })?;
+    // The `vps-config-ssh-door-toggle` (default off; `installers/vps.md` § The
+    // SSH door): the door key is minted — and on a desktop app written to
+    // `~/.ssh` — before the claim-code slot and the box exist, so a refusal
+    // here spends nothing and leaves nothing behind.
+    let ssh_door = machine.ssh_door_for_run(snapshot.vps.ssh_door, &domain)?;
     // **Custody precedes dispatch** (`docs/goal/behavior/onboarding.md` § 6 *The
     // pending-provision slot*). The claim code exists only in this client until
     // the box is claimed, so minting it and *then* dying — anywhere between here
@@ -8423,6 +8967,9 @@ async fn run_provisioning_inner(
     // to `[("fauna-e2e","1")]` by the live-provision e2e for a `label_selector`
     // sweep. Threaded through the orchestrator to `create_server`; the
     // orchestrator unions in the constant `managed-by=fauna` marker itself.
+    // The registry the Server step asks, before `create_server`, whether the
+    // box's image tag has a build at all (`orchestrator::run_server_step`).
+    let registry = machine.wizard_registry();
     let provision_labels = machine
         .provision_labels
         .read()
@@ -8434,6 +8981,7 @@ async fn run_provisioning_inner(
         claim_code: claim_code.clone(),
         enable_mail,
         deployment_seed: Some(deployment_seed),
+        ssh_door,
     };
 
     // Reset the provisioning snapshot for this new run.
@@ -8507,6 +9055,7 @@ async fn run_provisioning_inner(
         // Path 1: provision_nest_no_dns (deferred-DNS — steps 1, 3, 4 Skipped).
         match fauna_provisioning::orchestrator::provision_nest_no_dns(
             &http,
+            registry.as_ref(),
             &vps,
             &domain,
             &server_name,
@@ -8597,6 +9146,7 @@ async fn run_provisioning_inner(
         match fauna_provisioning::orchestrator::provision_with_registration_snapshot(
             &http,
             probe_for_ip,
+            registry.as_ref(),
             &vps,
             &dns,
             &registrar,
@@ -8656,6 +9206,7 @@ async fn run_provisioning_inner(
         match fauna_provisioning::orchestrator::provision_with_snapshot(
             &http,
             probe_for_ip,
+            registry.as_ref(),
             &vps,
             &dns,
             &domain,
@@ -8722,6 +9273,16 @@ async fn sleep_ms(ms: u64) {
 
 // `fauna_provisioning::generate_claim_code` — pulled via use site —
 // uses a CSPRNG instead of subsec_nanos.
+
+/// The provider's curated offer ids, from the provider registry.
+fn curated_offers_for(pid: &str) -> Vec<&'static str> {
+    PROVIDERS
+        .iter()
+        .find(|p| p.id.as_str() == pid)
+        .map(|p| p.curated_offers)
+        .unwrap_or(&[])
+        .to_vec()
+}
 
 fn dispatch_provider_id(s: &str) -> Option<fauna_provisioning::ProviderId> {
     fauna_provisioning::ProviderId::from_str(s)
@@ -10966,7 +11527,7 @@ mod tests {
         };
 
         // Real registerable domain → all four ON.
-        set_handle("https://example.com", "test@example.com");
+        set_handle("https://example.net", "test@example.net");
         assert!(m.email_enable_requested(), "real domain → email ON");
         assert!(m.caldav_enable_requested(), "real domain → caldav ON");
         assert!(m.carddav_enable_requested(), "real domain → carddav ON");
@@ -10997,7 +11558,7 @@ mod tests {
         let m: Arc<OnboardingMachine> = OnboardingMachine::new(CountingObserver::new());
 
         // Real domain → default ON (mail box).
-        m.set_current_handle("test@example.com".into());
+        m.set_current_handle("test@example.net".into());
         assert!(
             m.provision_mail_mode_enabled(),
             "real domain defaults mail-mode ON"
@@ -11017,7 +11578,7 @@ mod tests {
             "Some(true) overrides the localhost default"
         );
         m.set_provision_mail_mode(false);
-        m.set_current_handle("test@example.com".into());
+        m.set_current_handle("test@example.net".into());
         assert!(
             !m.provision_mail_mode_enabled(),
             "Some(false) overrides the real-domain default"
@@ -11051,6 +11612,120 @@ mod tests {
 
         m.set_provision_update_channel(UpdateChannel::Stable);
         assert_eq!(m.provision_update_channel(), UpdateChannel::Stable);
+
+        // What exists decides the default (`onboarding-provisioning.md` § 5):
+        // with no Stable build, an unchosen page lands on the channel whose
+        // head this app's version can use, and Stable's row says it has none.
+        use fauna_provisioning::update_channel::availability::{
+            ChannelAvailability, ChannelBuild, product_version,
+        };
+        let fresh: Arc<OnboardingMachine> = OnboardingMachine::new(CountingObserver::new());
+        let app = product_version().to_string();
+        fresh.mutate(|s| {
+            s.vps.channel_availability = vec![
+                ChannelAvailability {
+                    channel: UpdateChannel::Stable,
+                    build: ChannelBuild::NoBuild,
+                },
+                ChannelAvailability {
+                    channel: UpdateChannel::Test,
+                    build: ChannelBuild::Available {
+                        version: Some("0.0.1".into()),
+                    },
+                },
+                ChannelAvailability {
+                    channel: UpdateChannel::Dev,
+                    build: ChannelBuild::Available {
+                        version: Some(app.clone()),
+                    },
+                },
+            ]
+        });
+        let want = if product_version().major >= 1 {
+            UpdateChannel::Test
+        } else {
+            UpdateChannel::Dev
+        };
+        assert_eq!(fresh.provision_update_channel(), want);
+        assert_eq!(
+            fresh.update_channel_description_key_for_row(UpdateChannel::Stable),
+            "onboarding.vps_config.update_channel_stable_desc_no_build"
+        );
+        assert_eq!(
+            fresh.update_channel_description_key_for_row(UpdateChannel::Dev),
+            UpdateChannel::Dev.description_key()
+        );
+        // An explicit choice is kept whatever the registry says.
+        fresh.set_provision_update_channel(UpdateChannel::Stable);
+        assert_eq!(fresh.provision_update_channel(), UpdateChannel::Stable);
+        // The reading is not part of a resumed wizard's state.
+        let json = serde_json::to_string(&fresh.vps_config()).unwrap();
+        let back: VpsConfigState = serde_json::from_str(&json).unwrap();
+        assert!(back.channel_availability.is_empty());
+    }
+
+    /// Entering `vps_config` reads the registry once, in the background: the
+    /// harness's `ghcr` override is what it reads (a harness map without one
+    /// reads nothing), the result notifies, a second entry does not read
+    /// again, and a test's seed is never overwritten by a late probe.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn entering_vps_config_probes_the_registry_once() {
+        use fauna_provisioning::cloud_init::UpdateChannel;
+        use fauna_provisioning::update_channel::availability::ChannelBuild;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let reg = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v2/"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&reg)
+            .await;
+        // Nothing is published on any tag: every HEAD answers 404.
+        Mock::given(method("HEAD"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(3)
+            .mount(&reg)
+            .await;
+        let urls = HashMap::from([("ghcr".to_string(), reg.uri())]);
+        let m = OnboardingMachine::new_with_provider_base_urls(CountingObserver::new(), Some(urls));
+        m.dns_set_up_later();
+        let landed = || !m.vps_config().channel_availability.is_empty();
+        for _ in 0..200 {
+            if landed() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let found = m.vps_config().channel_availability;
+        assert_eq!(found.len(), 3, "{found:?}");
+        assert!(found.iter().all(|a| a.build == ChannelBuild::NoBuild));
+        // No channel has a build: nothing qualifies, Stable stays.
+        assert_eq!(m.provision_update_channel(), UpdateChannel::Stable);
+        // Back and Continue again: no second read (the mock expects 3 HEADs).
+        m.clone().probe_channel_availability().await;
+        reg.verify().await;
+
+        // A harness map without a `ghcr` entry reads nothing at all.
+        let none = OnboardingMachine::new_with_provider_base_urls(
+            CountingObserver::new(),
+            Some(HashMap::new()),
+        );
+        assert!(none.wizard_registry().is_none());
+        none.clone().probe_channel_availability().await;
+        assert!(none.vps_config().channel_availability.is_empty());
+
+        // A seed already present is kept.
+        let seeded = OnboardingMachine::new_with_provider_base_urls(
+            CountingObserver::new(),
+            Some(HashMap::from([("ghcr".to_string(), reg.uri())])),
+        );
+        seeded.call_machine_method(
+            "set_channel_availability_for_test".into(),
+            r#"[{"channel":"stable","build":{"build":"unknown"}}]"#.into(),
+        );
+        seeded.store_channel_availability(Vec::new());
+        assert_eq!(seeded.vps_config().channel_availability.len(), 1);
     }
 
     #[test]

@@ -4,6 +4,9 @@ mod post_list;
 mod video_thumbnail;
 
 pub use post_list::PostListHandles;
+// The profile's Posts tab paints its author window through the feed's own cards
+// (`profile.md` § The Posts tab → *What a row is*).
+pub(crate) use post_list::paint_post_cards;
 // The cue probe (`feed::viewport`) reads the inline player's progress.
 pub(crate) use video_thumbnail::{played_position_us, take_played_pm};
 // Shared by the document walker's quoted-post embed (`views::document`) as well
@@ -32,6 +35,11 @@ pub struct FeedViewHandles {
     /// first, so a post the timeline never loaded still renders real content
     /// instead of a blank dialog.
     pub open_post_detail: Rc<dyn Fn(String)>,
+    /// [`Self::open_post_detail`] for a post named with the nest that holds it
+    /// (`Some(home_nest_url)`) — the room search's post hit in a room homed on
+    /// another nest; it resolves through `FeedManager::resolve_post_from`
+    /// (`room-search.md` § The surface → *Opening a hit*).
+    pub open_post_detail_from: Rc<dyn Fn(String, Option<String>)>,
 }
 
 /// Build the full feed view: a navigation split with the feed selector on the
@@ -70,6 +78,8 @@ pub fn build_feed_view(client: &Rc<FaunaClient>) -> (adw::NavigationSplitView, F
     // `search-result-item` activation.
     let open_post_detail =
         post_list::open_post_detail_fn(&post_list_handles, &manager, client, &rt);
+    let open_post_detail_from =
+        post_list::open_post_detail_from_fn(&post_list_handles, &manager, client, &rt);
 
     // The two selector lists (Trending + the user's own feeds) share one logical
     // selection: picking one clears the other's highlight. `unselect_all()`
@@ -246,6 +256,7 @@ pub fn build_feed_view(client: &Rc<FaunaClient>) -> (adw::NavigationSplitView, F
     let handles = FeedViewHandles {
         split: split.clone(),
         open_post_detail,
+        open_post_detail_from,
     };
     (split, handles)
 }

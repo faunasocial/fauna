@@ -38,7 +38,7 @@ Stamped 2026-09-19 at 3ac2cf0c74.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.2-dev+72d6a508 standalone |
+| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
 | linux | ⚠ partial | |
 | windows | ✅ full | 0.1.3-dev+a6f1524b standalone |
 | macos | ⚠ partial | |
@@ -54,7 +54,7 @@ Stamped 2026-09-19 at 3ac2cf0c74.
 | 2 | app | `tests/e2e-unified/tests/test_feed.py::test_post_with_tags` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_feed_compose_dialog.py::test_compose_dialog_button_opens_feed_compose_dialog` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_feed.py::test_compose_attach_affordance_offered` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_feed_compose_in_flight.py::test_text_typed_while_a_post_sends_survives_the_submit` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_feed_compose_in_flight.py::test_the_audience_picked_for_a_post_stays_picked_while_you_keep_typing` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_feed_compose_in_flight.py::test_a_post_that_fails_to_send_says_so_and_keeps_what_you_wrote` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_feed_compose_in_flight.py::test_text_typed_while_a_post_sends_survives_the_submit` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_feed_compose_in_flight.py::test_the_audience_picked_for_a_post_stays_picked_while_you_keep_typing` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 7 | app | `tests/e2e-unified/tests/test_feed_compose_in_flight.py::test_a_post_that_fails_to_send_says_so_and_keeps_what_you_wrote` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

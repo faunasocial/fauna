@@ -103,6 +103,33 @@ pub struct RenderedLocationBinding {
     /// user's*); `None` — macOS, where on-demand is not the agent's — renders
     /// none, never an inert one.
     pub mode: Option<RenderedModeToggle>,
+    /// How this row's *Free up space* verb renders, or `None` where it is
+    /// absent — the shared rule's answer
+    /// ([`fauna_client_sync::agent::LocationBindingsModel::free_space_verb`]:
+    /// present exactly while the switch above is rendered and on and the
+    /// row's placeholder surface stands), projected flat with its lines
+    /// resolved (`on-demand-files.md` § The free-up-space gesture where the OS
+    /// offers none).
+    pub free_space: Option<RenderedFreeSpace>,
+}
+
+/// The flat, cfg-free projection of
+/// [`fauna_client_sync::agent::FreeSpaceVerb`] — one bound row's
+/// `folder-location-free-space-button` and its two lines as the Folders page
+/// paints them. Every string is resolved here, through the shared string
+/// table, so the paint stays dumb; every number behind them is the agent's
+/// reading — the verb is never optimistic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedFreeSpace {
+    /// A sweep is walking the location now — the button's `running` state.
+    pub running: bool,
+    /// The button's label (*Free up space*, or its running form).
+    pub button: String,
+    /// `folder-location-on-device` — how much of the location is on this device.
+    pub on_device: String,
+    /// `folder-location-free-space-result` — the latest sweep's outcome,
+    /// `None` until one has run.
+    pub result: Option<String>,
 }
 
 /// The flat, cfg-free projection of
@@ -618,6 +645,26 @@ impl SyncAgentState {
         }
     }
 
+    /// *Free up space* on the bound on-demand location at `path` — the
+    /// `folder-location-free-space-button` gesture. Fire-and-forget on the
+    /// agent seam; the row's two lines repaint from the agent's reading (the
+    /// reconcile after the press, then the status-tick watch), never from the
+    /// press. A no-op before install / where tui drives no agent.
+    pub fn free_location_space(
+        &self,
+        path: String,
+        tx: tokio::sync::mpsc::UnboundedSender<crate::app::UiMessage>,
+    ) {
+        #[cfg(any(unix, windows))]
+        if let Some(surface) = self.inner.as_ref() {
+            surface.free_location_space(path, tx);
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (path, tx);
+        }
+    }
+
     /// The share pump's two agent seams (`p2p.md` § Cross-user shared-set
     /// transfer, the out-of-process refinement): where each bound folder's
     /// state DB and tree live (`GetShareServeInfo`), and the engine's
@@ -895,6 +942,15 @@ mod native {
                 .rendered()
                 .into_iter()
                 .map(|row| super::RenderedLocationBinding {
+                    free_space: model.free_space_verb(&row).map(|verb| {
+                        let lookup = fauna_i18n::strings::lookup;
+                        super::RenderedFreeSpace {
+                            running: verb.running,
+                            button: verb.button_label(lookup),
+                            on_device: verb.on_device_line(lookup),
+                            result: verb.result_line(lookup),
+                        }
+                    }),
                     mode: model
                         .mode_toggle(&row)
                         .map(|toggle| super::RenderedModeToggle {
@@ -935,6 +991,24 @@ mod native {
                 reconcile_once(Arc::clone(&provisioner), Arc::clone(&model), tx.clone()).await;
                 if let Err(e) = provisioner.set_location_sync_mode(path, mode).await {
                     tracing::warn!("set_location_sync_mode failed (the mode stands): {e}");
+                }
+                reconcile_once(provisioner, model, tx).await;
+            });
+        }
+
+        /// `folder-location-free-space-button` — *Free up space* on the bound
+        /// on-demand location at `path` over the agent's `FreeLocationSpace`,
+        /// which answers once the sweep is accepted; the root's own loop does
+        /// the work. Not optimistic: the reconcile that follows re-reads
+        /// `ListLocations`, and the status-tick watch (`fold_parks`) carries the
+        /// readings as the sweep moves them — so a refusal leaves the row
+        /// showing what the agent holds.
+        pub(super) fn free_location_space(&self, path: String, tx: UnboundedSender<UiMessage>) {
+            let provisioner = Arc::clone(&self.provisioner);
+            let model = Arc::clone(&self.model);
+            tokio::spawn(async move {
+                if let Err(e) = provisioner.free_location_space(path).await {
+                    tracing::warn!("free_location_space failed (nothing was freed): {e}");
                 }
                 reconcile_once(provisioner, model, tx).await;
             });

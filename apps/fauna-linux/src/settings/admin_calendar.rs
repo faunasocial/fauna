@@ -56,14 +56,9 @@ struct CaldavCtx {
     w: CaldavWidgets,
 }
 
-/// Add a `gtk::Entry` row (title + subtitle) to `group`, ID on the entry
+/// Add a titled `gtk::Entry` row to `group`, ID on the entry
 /// (mirrors `admin_mail.rs::entry_row` — the `admin-mail-*-input` idiom).
-fn entry_row(
-    group: &adw::PreferencesGroup,
-    title: &str,
-    subtitle: &str,
-    test_id: &str,
-) -> gtk::Entry {
+fn entry_row(group: &adw::PreferencesGroup, title: &str, test_id: &str) -> gtk::Entry {
     let entry = gtk::Entry::builder()
         .valign(gtk::Align::Center)
         .width_chars(12)
@@ -71,7 +66,6 @@ fn entry_row(
     set_test_id(&entry, test_id);
     let row = adw::ActionRow::builder()
         .title(title)
-        .subtitle(subtitle)
         .activatable(false)
         .build();
     row.add_suffix(&entry);
@@ -122,9 +116,21 @@ pub fn build_admin_calendar_page() -> adw::PreferencesPage {
     let port_entry = entry_row(
         &top_group,
         S::CALDAV_PORT_LABEL,
-        S::CALDAV_PORT_DESC,
         "admin-calendar-caldav-port-input",
     );
+    // admin-calendar-caldav-port-help-text — the help line under the field (an
+    // ActionRow subtitle carries no id of its own, so it is a tagged label row).
+    let port_help = gtk::Label::builder()
+        .label(S::CALDAV_PORT_DESC)
+        .halign(gtk::Align::Start)
+        .xalign(0.0)
+        .wrap(true)
+        .css_classes(["dim-label", "caption"])
+        .build();
+    set_test_id(&port_help, ids::ADMIN_CALENDAR_CALDAV_PORT_HELP_TEXT);
+    let port_help_row = adw::ActionRow::builder().activatable(false).build();
+    port_help_row.set_child(Some(&port_help));
+    top_group.add(&port_help_row);
     let port_save = gtk::Button::builder()
         .label(S::CALDAV_PORT_SAVE)
         .valign(gtk::Align::Center)

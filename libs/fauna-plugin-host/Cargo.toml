@@ -11,6 +11,14 @@ license.workspace = true
 # and no third-party plugin code exists anywhere in the tree.
 test-helpers = ["dep:wat", "dep:wit-component", "dep:wit-parser"]
 
+# E2e test helper: write the hello plugin's component to a path, for a tier_3
+# app journey that serves it as a plugin module (test_plugin_install.py).
+# Path-declared (not src/bin/, which the repo .gitignores for dotnet's bin/).
+[[bin]]
+name = "plugin-fixture-gen"
+path = "src/fixture_gen_main.rs"
+required-features = ["test-helpers"]
+
 [dependencies]
 wasmtime.workspace = true
 anyhow.workspace = true

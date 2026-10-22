@@ -28,6 +28,9 @@ half of revocation, which only the pump's refusal mark makes reachable.
 import os
 import secrets
 import sqlite3
+import ssl
+import urllib.error
+import urllib.request
 
 import pytest
 
@@ -35,6 +38,7 @@ import fauna_ffi
 from clients._ws_rpc_core import RpcCallError
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from common.auth import create_actor_and_register
+from helpers.budgets import RPC_ROUNDTRIP_S
 from helpers.custody_hosting import FleetDevice, Host, custody_hosting_hook, pump
 
 pytestmark = pytest.mark.tier_3
@@ -49,6 +53,9 @@ NOT_REGISTERED = "fauna.auth.not_registered"
 #: What a live session's next request answers once its device stops being one
 #: the door serves: the class re-derives to none on that dispatch.
 SESSION_REFUSED = "fauna.bridges.permission_denied"
+#: An origin this nest has never heard of — the owner's web app restoring from
+#: it runs on its own nest's origin, or the central one.
+FOREIGN_ORIGIN = "https://owners-app.example"
 
 
 @pytest.fixture(scope="module")
@@ -199,6 +206,40 @@ def test_when_the_owner_takes_the_permission_back_the_nest_stops_serving(serve_n
         assert _refused(lambda: FleetDevice(
             serve_nest["url"], owner, device_secret).connect()) == NOT_REGISTERED, (
             "and a new handshake is refused")
+
+
+# A mechanism pin (the route's cross-origin posture), not a catalog outcome.
+@pytest.mark.parametrize("half", ["", "/meta"], ids=["dat", "meta"])
+def test_an_owners_web_app_on_another_origin_may_fetch_held_segments_but_only_with_a_bearer(
+        serve_nest, half):
+    """The owner's web app restoring from this nest runs on an origin this
+    nest has never heard of (its own nest's ``/app``, or the central origin):
+    the segment byte route answers that origin's preflight with the open,
+    credential-less CORS the content-addressed byte routes answer, the bearer
+    header admitted — and still refuses a request that carries no bearer
+    (``message-segment-store.md`` § Implementation status today, the
+    HTTP-residue bullet; ``account-replica-posture.md`` § *Corollary — the
+    cold device*, the web clause's bulk half)."""
+    path = f"{serve_nest['url']}/api/v1/segments/post/{'ab' * 32}/0{half}"
+    context = (ssl._create_unverified_context()
+               if serve_nest["url"].startswith("https://") else None)
+    preflight = urllib.request.Request(path, method="OPTIONS", headers={
+        "Origin": FOREIGN_ORIGIN,
+        "Access-Control-Request-Method": "GET",
+        "Access-Control-Request-Headers": "authorization",
+    })
+    with urllib.request.urlopen(preflight, timeout=RPC_ROUNDTRIP_S, context=context) as resp:
+        assert resp.headers.get_all("Access-Control-Allow-Origin") == ["*"], dict(resp.headers)
+        assert "authorization" in resp.headers.get("Access-Control-Allow-Headers", "").lower()
+        assert resp.headers.get("Access-Control-Allow-Credentials") is None, (
+            "a script-held bearer, never a credentialed request")
+
+    bare = urllib.request.Request(path, headers={"Origin": FOREIGN_ORIGIN})
+    with pytest.raises(urllib.error.HTTPError) as refused:
+        urllib.request.urlopen(bare, timeout=RPC_ROUNDTRIP_S, context=context)
+    assert refused.value.code == 401, refused.value.code
+    assert refused.value.headers.get("Access-Control-Allow-Origin") == "*", (
+        "the refusal is readable cross-origin too, so the app can tell it from a network fault")
 
 
 def _refusal_mark(nest, host: Host, g: bytes) -> int:

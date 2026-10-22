@@ -47,6 +47,9 @@ pub mod attested_predecessors;
 pub mod backup_rows;
 pub mod bind_leg;
 pub mod blessed_nest_rows;
+/// The production segment bootstrap source — the listing and the in-transit
+/// check over the host's byte plane ([`bootstrap_source::SegmentBytes`]).
+pub mod bootstrap_source;
 /// The throwaway fleet-scope replica a process that hosts no account store
 /// reads fleet-only kinds through (`on-demand-files-shared-sets.md` § Shared sets on a
 /// capability host, decision 1′).
@@ -55,6 +58,13 @@ pub mod contact_overlay_rows;
 /// The class-1 leg of a content scope: the feed walk that follows the bulk
 /// bootstrap half (`account-data-plane.md` § the bootstrap contract).
 pub mod content_scope_plane;
+/// The owner-fleet side's NEST-form custodians — the custodian restore
+/// walk's dial targets.
+pub mod custodian_nest_targets;
+/// The owner-fleet restore walk from a custodian NEST — one walk, every host,
+/// behind the host's dial seam ([`custodian_restore::CustodianDial`]).
+#[cfg(feature = "account-driver")]
+pub mod custodian_restore;
 pub mod custody_ceremony_rows;
 pub mod custody_rows;
 /// The delegable scope's retire behind the succession carry: a pass step that
@@ -140,6 +150,7 @@ pub mod kind_manifest_rows;
 /// owner-authenticated connection (`account-sync-plane.md` § The bind leg,
 /// ruling 4).
 pub mod linked_leg;
+pub mod mail_import_source_rows;
 pub mod mail_rows;
 pub mod nostr_confirmation_rows;
 /// The T1 body-rendered browse trigger: the shared intake that turns an app's

@@ -13,7 +13,23 @@
 //!                       //   { kind, actor_id, segment_id, bucket, created_at_secs,
 //!                       //     record_order: [cid, ...],
 //!                       //     floor_metadata: [bytes, ...] }  // parallel to record_order
+//!
+//! seg-NNNNNNNN.tail     // OPEN segments only — the append journal:
+//!                       //   varint(len) || dag-cbor `TailHeader`
+//!                       //   (varint(len) || dag-cbor `TailEntry { cid, floor }`)*
+//!                       // removed once finalize() has made the `.meta` durable.
 //! ```
+//!
+//! ## Crash recovery — the append journal
+//!
+//! The `.meta` is written only at `finalize()`, so a crash with a segment open
+//! would leave a `.dat` nothing can open. Each append therefore makes its block
+//! durable in the `.dat` FIRST, then journals `(cid, floor_metadata)` to the
+//! `.tail` and makes that durable, and only then returns: a journal entry
+//! implies its block is on disk, and an append that returned `Ok` has both.
+//! [`FramedSegment::recover_unfinalized`] rebuilds the finalized pair from the
+//! two files — the `.dat`'s data section in write order, paired with the
+//! journal's entries — dropping only blocks whose append never returned.
 //!
 //! The `.dat` file is **byte-identical to what `go-car` / `iroh-car` /
 //! `kubo dag import` would produce** for the same records — Layer 3's Track C
@@ -55,6 +71,8 @@ use crate::SegmentStoreError;
 use fauna_cbor::Cid;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
+use std::io::Write as _;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 /// Per-record entry surfaced by `FramedSegment::iter_records`. The CID
@@ -116,6 +134,56 @@ struct SegmentSidecar {
 
 const SIDECAR_SCHEMA_VERSION: u16 = 1;
 
+/// First frame of an open segment's `.tail` append journal: the header fields
+/// the `.meta` would carry, so a rebuilt sidecar is the one `finalize()` would
+/// have written. A journal outlives its binary only across a crash into the
+/// next one, but it carries a version for the same additive-evolution reason
+/// the sidecar does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TailHeader {
+    format_version: u16,
+    kind: String,
+    #[serde(with = "serde_bytes")]
+    actor_id: [u8; 32],
+    segment_id: u32,
+    bucket: String,
+    created_at_secs: u64,
+}
+
+/// One appended record's journal frame — what the sidecar keeps per record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TailEntry {
+    cid: Cid,
+    floor: serde_bytes::ByteBuf,
+}
+
+const TAIL_SCHEMA_VERSION: u16 = 1;
+
+/// What [`FramedSegment::recover_unfinalized`] found and did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TailRecovery {
+    /// The `.meta` exists: the segment was finalized and nothing was rebuilt
+    /// (a journal left by a crash just after finalize is removed).
+    AlreadyFinalized,
+    /// The pair was rebuilt from the `.dat` and its journal and is now a
+    /// finalized segment.
+    Rebuilt {
+        /// Records the rebuilt segment holds — every append that returned.
+        records: u32,
+        /// Blocks in the `.dat` with no journal entry: appends that failed or
+        /// crashed before returning, so no caller ever acknowledged them.
+        unjournaled_blocks_dropped: u32,
+        /// Journal entries with no block in the `.dat`. The append protocol
+        /// makes a block durable before its entry, so this is `0` unless the
+        /// disk lost acknowledged writes — a LOSS, not a dropped retry.
+        journaled_blocks_missing: u32,
+    },
+    /// No journal beside the `.dat`, so the per-record floor metadata is gone
+    /// and the pair cannot be rebuilt; nothing was touched. `blocks` is how
+    /// many complete blocks the `.dat` holds.
+    NoJournal { blocks: u32 },
+}
+
 /// The `min_reader_format_version` this binary stamps into new sidecars: the
 /// oldest binary `format_version` that can still read what we write today.
 /// Bumped **only** on a breaking, non-additive sidecar change (deferred to a
@@ -175,6 +243,10 @@ enum SegmentState {
         /// quota/SEARCH sizing never has to finalize the open segment
         /// just to read the CARv2 index.
         record_lens: std::collections::HashMap<Cid, u64>,
+        /// The `.tail` append journal (§ Crash recovery). `None` only for the
+        /// private rebuild [`FramedSegment::recover_unfinalized`] writes,
+        /// whose durability is finalize's alone.
+        journal: Option<File>,
     },
     Finalized {
         /// Records in append order — preserves the at-rest sequencing
@@ -189,9 +261,18 @@ enum SegmentState {
 }
 
 impl FramedSegment {
-    /// Create a new segment file (`.dat`) and seed in-memory state for the
-    /// companion sidecar; the `.meta` file is only written at `finalize()`.
+    /// Create a new segment file (`.dat`) and its `.tail` append journal, and
+    /// seed in-memory state for the companion sidecar; the `.meta` file is
+    /// only written at `finalize()`.
     pub fn create(path: &Path, header: SegmentHeader) -> Result<Self, SegmentStoreError> {
+        Self::create_inner(path, header, true)
+    }
+
+    fn create_inner(
+        path: &Path,
+        header: SegmentHeader,
+        journaled: bool,
+    ) -> Result<Self, SegmentStoreError> {
         let file = OpenOptions::new()
             .create_new(true)
             .read(true)
@@ -199,6 +280,29 @@ impl FramedSegment {
             .open(path)?;
         let writer = fauna_carv2::Writer::new(file, &[])
             .map_err(|e| SegmentStoreError::Encoding(format!("carv2 writer: {e}")))?;
+        let journal = if journaled {
+            writer.get_ref().sync_data()?;
+            let mut journal = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(tail_path_for(path))?;
+            write_frame(
+                &mut journal,
+                &TailHeader {
+                    format_version: TAIL_SCHEMA_VERSION,
+                    kind: header.kind.clone(),
+                    actor_id: header.actor_id,
+                    segment_id: header.segment_id,
+                    bucket: header.bucket.clone(),
+                    created_at_secs: header.created_at_secs,
+                },
+            )?;
+            journal.sync_data()?;
+            Some(journal)
+        } else {
+            None
+        };
         Ok(Self {
             path: path.to_path_buf(),
             header,
@@ -207,6 +311,7 @@ impl FramedSegment {
                 floor_metadata: Vec::new(),
                 record_order: Vec::new(),
                 record_lens: std::collections::HashMap::new(),
+                journal,
             },
         })
     }
@@ -215,6 +320,12 @@ impl FramedSegment {
     /// of `record_bytes`; the carv2 writer streams `(cid, bytes)` to the
     /// data section. Duplicate CIDs error (CARv2 indexes by digest, so a
     /// duplicate would silently overwrite the earlier block).
+    ///
+    /// Returns only once the record is durable: the block is synced to the
+    /// `.dat`, then its journal entry to the `.tail` (§ Crash recovery). An
+    /// I/O failure on either poisons the segment — the writer's index and the
+    /// in-memory record order would otherwise drift apart — and the next
+    /// process's recovery drops the half-written record.
     pub fn append_record(
         &mut self,
         cid: Cid,
@@ -226,22 +337,42 @@ impl FramedSegment {
             floor_metadata: floor_list,
             record_order,
             record_lens,
-            ..
+            journal,
         } = &mut self.state
         else {
-            return Err(SegmentStoreError::InvalidSegment(
-                "append on finalized segment".into(),
-            ));
+            let msg = match self.state {
+                SegmentState::Poisoned => "append on poisoned segment",
+                _ => "append on finalized segment",
+            };
+            return Err(SegmentStoreError::InvalidSegment(msg.into()));
         };
         if record_lens.contains_key(&cid) {
             return Err(SegmentStoreError::InvalidSegment(format!(
                 "duplicate record cid within segment: {cid}"
             )));
         }
+        let durable = (|| -> Result<(), SegmentStoreError> {
+            writer
+                .write_block(&cid, record_bytes)
+                .map_err(|e| SegmentStoreError::Encoding(format!("carv2 write_block: {e}")))?;
+            if let Some(journal) = journal {
+                writer.get_ref().sync_data()?;
+                write_frame(
+                    journal,
+                    &TailEntry {
+                        cid,
+                        floor: serde_bytes::ByteBuf::from(floor_metadata.to_vec()),
+                    },
+                )?;
+                journal.sync_data()?;
+            }
+            Ok(())
+        })();
+        if let Err(e) = durable {
+            self.state = SegmentState::Poisoned;
+            return Err(e);
+        }
         record_lens.insert(cid, record_bytes.len() as u64);
-        writer
-            .write_block(&cid, record_bytes)
-            .map_err(|e| SegmentStoreError::Encoding(format!("carv2 write_block: {e}")))?;
         record_order.push(cid);
         floor_list.push(floor_metadata.to_vec());
         Ok(())
@@ -262,6 +393,7 @@ impl FramedSegment {
             writer,
             floor_metadata,
             record_order,
+            journal,
             ..
         } = current
         else {
@@ -273,7 +405,9 @@ impl FramedSegment {
             };
             return Err(SegmentStoreError::InvalidSegment(msg.into()));
         };
-        // From here forward any error leaves self.state = Poisoned.
+        // From here forward any error leaves self.state = Poisoned. The journal
+        // handle closes first: Windows refuses to unlink an open file.
+        drop(journal);
         let file = writer
             .finalize()
             .map_err(|e| SegmentStoreError::Encoding(format!("carv2 finalize: {e}")))?;
@@ -312,7 +446,6 @@ impl FramedSegment {
         // posts segment cutover — there the fix was `#[cfg(unix)]`; here the
         // sidecar fsync is load-bearing on every platform, so we keep it and
         // route it through a writable handle instead.
-        use std::io::Write as _;
         let meta_path = meta_path_for(&self.path);
         let mut meta_file = OpenOptions::new()
             .create(true)
@@ -321,6 +454,8 @@ impl FramedSegment {
             .open(&meta_path)?;
         meta_file.write_all(&sidecar_bytes)?;
         meta_file.sync_all()?;
+        // The pair is durable; the journal has nothing left to recover.
+        remove_if_exists(&tail_path_for(&self.path))?;
 
         self.header.record_count = record_order.len() as u32;
         let records: Vec<RecordEntry> = record_order
@@ -413,6 +548,90 @@ impl FramedSegment {
             path: path.to_path_buf(),
             header,
             state: SegmentState::Finalized { records },
+        })
+    }
+
+    /// Rebuild a segment a crash left open — a `.dat` with no `.meta` — into a
+    /// finalized pair, from the `.dat`'s data section and the `.tail` append
+    /// journal (§ Crash recovery). The caller guarantees no writer holds the
+    /// segment open (the scope's first touch in a process).
+    ///
+    /// The `.dat`'s blocks are paired with the journal's entries in order;
+    /// the first block without its entry ends the pairing, and it and every
+    /// block after it are appends that never returned. The rebuild is written
+    /// beside the segment and renamed over it, `.dat` first, so a crash at any
+    /// point leaves either the old open shape or a finalized `.dat` the journal
+    /// still describes — a re-run rebuilds from either.
+    pub fn recover_unfinalized(path: &Path) -> Result<TailRecovery, SegmentStoreError> {
+        let meta_path = meta_path_for(path);
+        let tail_path = tail_path_for(path);
+        if meta_path.exists() {
+            remove_if_exists(&tail_path)?;
+            return Ok(TailRecovery::AlreadyFinalized);
+        }
+        let journal = match std::fs::read(&tail_path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let scan = fauna_carv2::scan_data_section(File::open(path)?, |_, _| {
+                    Ok(ControlFlow::Continue(()))
+                })
+                .map_err(|e| SegmentStoreError::Encoding(format!("scan carv2: {e}")))?;
+                return Ok(TailRecovery::NoJournal {
+                    blocks: scan.blocks as u32,
+                });
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let (tail_header, entries) = parse_journal(&journal, &tail_path)?;
+
+        let rebuild_path = path.with_extension("dat.rebuild");
+        let rebuild_meta = meta_path_for(&rebuild_path);
+        remove_if_exists(&rebuild_path)?;
+        remove_if_exists(&rebuild_meta)?;
+        let header = SegmentHeader {
+            kind: tail_header.kind,
+            actor_id: tail_header.actor_id,
+            segment_id: tail_header.segment_id,
+            bucket: tail_header.bucket,
+            created_at_secs: tail_header.created_at_secs,
+            record_count: 0,
+        };
+        let mut rebuilt = Self::create_inner(&rebuild_path, header, false)?;
+        let mut kept = 0usize;
+        let mut unjournaled = 0usize;
+        let mut append_err = None;
+        let scanned = fauna_carv2::scan_data_section(File::open(path)?, |cid, block| {
+            match entries.get(kept) {
+                Some(entry) if unjournaled == 0 && entry.cid == cid => {
+                    if let Err(e) = rebuilt.append_record(cid, &block, &entry.floor) {
+                        append_err = Some(e);
+                        return Ok(ControlFlow::Break(()));
+                    }
+                    kept += 1;
+                }
+                _ => unjournaled += 1,
+            }
+            Ok(ControlFlow::Continue(()))
+        });
+        if let Some(e) = append_err {
+            return Err(e);
+        }
+        match scanned {
+            Ok(_) => {}
+            // A `.dat` whose very prefix never reached the disk holds nothing;
+            // with no journaled entry, nothing was acknowledged either.
+            Err(_) if entries.is_empty() => {}
+            Err(e) => return Err(SegmentStoreError::Encoding(format!("scan carv2: {e}"))),
+        }
+        rebuilt.finalize()?;
+        drop(rebuilt);
+        std::fs::rename(&rebuild_path, path)?;
+        std::fs::rename(&rebuild_meta, &meta_path)?;
+        remove_if_exists(&tail_path)?;
+        Ok(TailRecovery::Rebuilt {
+            records: kept as u32,
+            unjournaled_blocks_dropped: unjournaled as u32,
+            journaled_blocks_missing: (entries.len() - kept) as u32,
         })
     }
 
@@ -607,6 +826,72 @@ pub(crate) fn meta_path_for(dat_path: &Path) -> PathBuf {
     dat_path.with_extension("meta")
 }
 
+/// Derive the `.tail` append-journal path from a segment `.dat` path — the
+/// third sibling, present only while the segment is open (§ Crash recovery).
+pub(crate) fn tail_path_for(dat_path: &Path) -> PathBuf {
+    dat_path.with_extension("tail")
+}
+
+/// `remove_file`, with an already-absent file counted as removed.
+pub(crate) fn remove_if_exists(path: &Path) -> Result<(), SegmentStoreError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Append one journal frame: `varint(len) || canonical dag-cbor`, in one write.
+fn write_frame<T: Serialize>(w: &mut File, value: &T) -> Result<(), SegmentStoreError> {
+    let bytes = fauna_cbor::encode_canonical(value)
+        .map_err(|e| SegmentStoreError::Encoding(format!("encode journal frame: {e}")))?;
+    let mut frame = Vec::with_capacity(bytes.len() + 10);
+    fauna_carv2::v1::write_varint_usize(&mut frame, bytes.len())
+        .map_err(|e| SegmentStoreError::Encoding(format!("journal frame length: {e}")))?;
+    frame.extend_from_slice(&bytes);
+    w.write_all(&frame)?;
+    Ok(())
+}
+
+/// Parse a `.tail` journal: its header, then every entry up to the first frame
+/// that does not decode in full — a torn final frame is an append that never
+/// returned. An unreadable HEADER is an error: `create` makes it durable
+/// before the segment can take an append.
+fn parse_journal(
+    bytes: &[u8],
+    tail_path: &Path,
+) -> Result<(TailHeader, Vec<TailEntry>), SegmentStoreError> {
+    let mut cursor = std::io::Cursor::new(bytes);
+    let header: TailHeader = read_frame(&mut cursor).ok_or_else(|| {
+        SegmentStoreError::InvalidSegment(format!(
+            "append journal at {} has no readable header",
+            tail_path.display()
+        ))
+    })?;
+    if header.format_version > TAIL_SCHEMA_VERSION {
+        return Err(SegmentStoreError::SchemaMismatch(format!(
+            "append journal format_version {} is newer than this binary's {TAIL_SCHEMA_VERSION} \
+             — this nest binary must be updated",
+            header.format_version
+        )));
+    }
+    let mut entries = Vec::new();
+    while let Some(entry) = read_frame::<TailEntry>(&mut cursor) {
+        entries.push(entry);
+    }
+    Ok((header, entries))
+}
+
+/// The next whole frame, or `None` at the end or at a torn/undecodable frame.
+fn read_frame<T: serde::de::DeserializeOwned>(cursor: &mut std::io::Cursor<&[u8]>) -> Option<T> {
+    let len = fauna_carv2::v1::read_varint_usize(cursor).ok()?;
+    let start = cursor.position() as usize;
+    let body = cursor.get_ref().get(start..start.checked_add(len)?)?;
+    let value = fauna_cbor::decode_strict(body).ok()?;
+    cursor.set_position((start + len) as u64);
+    Some(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -754,6 +1039,186 @@ mod tests {
             crate::SegmentStoreError::InvalidSegment(_) => {}
             other => panic!("expected InvalidSegment, got {other:?}"),
         }
+    }
+
+    /// Append `n` records (floor `floor-i`) and drop the segment without
+    /// finalizing — what a crash leaves. Returns the bodies appended.
+    fn crash_with_open_segment(path: &Path, n: u8) -> Vec<Vec<u8>> {
+        let mut seg = FramedSegment::create(path, header(3)).expect("create");
+        let bodies: Vec<Vec<u8>> = (0..n).map(|i| vec![i; 8 + i as usize]).collect();
+        for (i, body) in bodies.iter().enumerate() {
+            seg.append_record(
+                Cid::of_dag_cbor(body),
+                body,
+                format!("floor-{i}").as_bytes(),
+            )
+            .expect("append");
+        }
+        drop(seg);
+        assert!(!meta_path_for(path).exists(), "a crash leaves no sidecar");
+        assert!(
+            tail_path_for(path).exists(),
+            "an open segment keeps its journal"
+        );
+        bodies
+    }
+
+    /// The rebuilt pair is the one `finalize()` would have written: the same
+    /// header, every record in append order with its floor metadata.
+    fn assert_rebuilt(path: &Path, bodies: &[Vec<u8>]) {
+        let seg = FramedSegment::open(path).expect("open the rebuilt pair");
+        assert_eq!(
+            seg.header,
+            SegmentHeader {
+                record_count: bodies.len() as u32,
+                ..header(3)
+            }
+        );
+        let records: Vec<RecordEntry> = seg.iter_records().cloned().collect();
+        let want: Vec<RecordEntry> = bodies
+            .iter()
+            .enumerate()
+            .map(|(i, body)| RecordEntry {
+                cid: Cid::of_dag_cbor(body),
+                floor_metadata: format!("floor-{i}").into_bytes(),
+            })
+            .collect();
+        assert_eq!(records, want);
+        for body in bodies {
+            assert_eq!(
+                seg.read_record(&Cid::of_dag_cbor(body)).expect("read"),
+                Some(body.clone())
+            );
+        }
+        assert!(
+            !tail_path_for(path).exists(),
+            "the journal goes with the rebuild"
+        );
+    }
+
+    #[test]
+    fn finalize_removes_the_append_journal() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let path = tmp.path().join("seg-1.dat");
+        let mut seg = FramedSegment::create(&path, header(1)).expect("create");
+        assert!(tail_path_for(&path).exists());
+        seg.append_record(Cid::of_dag_cbor(b"x"), b"x", b"")
+            .expect("append");
+        seg.finalize().expect("finalize");
+        assert!(!tail_path_for(&path).exists());
+    }
+
+    #[test]
+    fn recover_unfinalized_rebuilds_the_pair_from_the_append_journal() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let path = tmp.path().join("seg-3.dat");
+        let bodies = crash_with_open_segment(&path, 3);
+        assert_eq!(
+            FramedSegment::recover_unfinalized(&path).expect("recover"),
+            TailRecovery::Rebuilt {
+                records: 3,
+                unjournaled_blocks_dropped: 0,
+                journaled_blocks_missing: 0,
+            }
+        );
+        assert_rebuilt(&path, &bodies);
+        assert_eq!(
+            FramedSegment::recover_unfinalized(&path).expect("re-run"),
+            TailRecovery::AlreadyFinalized
+        );
+    }
+
+    #[test]
+    fn recover_unfinalized_ignores_a_torn_trailing_block() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let path = tmp.path().join("seg-3.dat");
+        let bodies = crash_with_open_segment(&path, 2);
+        let mut dat = OpenOptions::new().append(true).open(&path).expect("open");
+        dat.write_all(&[0x40, 0x01, 0x71, 0x1e])
+            .expect("torn record");
+        drop(dat);
+        assert_eq!(
+            FramedSegment::recover_unfinalized(&path).expect("recover"),
+            TailRecovery::Rebuilt {
+                records: 2,
+                unjournaled_blocks_dropped: 0,
+                journaled_blocks_missing: 0,
+            }
+        );
+        assert_rebuilt(&path, &bodies);
+    }
+
+    /// A block whose journal entry never landed is an append that never
+    /// returned — no caller acknowledged it, so the rebuild drops it.
+    #[test]
+    fn recover_unfinalized_drops_a_block_whose_append_never_returned() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let path = tmp.path().join("seg-3.dat");
+        let journal_after_one = {
+            let mut seg = FramedSegment::create(&path, header(3)).expect("create");
+            let body = vec![0u8; 8];
+            seg.append_record(Cid::of_dag_cbor(&body), &body, b"floor-0")
+                .expect("append");
+            let len = std::fs::metadata(tail_path_for(&path)).expect("stat").len();
+            let body = vec![1u8; 9];
+            seg.append_record(Cid::of_dag_cbor(&body), &body, b"floor-1")
+                .expect("append");
+            len
+        };
+        OpenOptions::new()
+            .write(true)
+            .open(tail_path_for(&path))
+            .expect("open journal")
+            .set_len(journal_after_one)
+            .expect("cut the second entry");
+        assert_eq!(
+            FramedSegment::recover_unfinalized(&path).expect("recover"),
+            TailRecovery::Rebuilt {
+                records: 1,
+                unjournaled_blocks_dropped: 1,
+                journaled_blocks_missing: 0,
+            }
+        );
+        assert_rebuilt(&path, &[vec![0u8; 8]]);
+    }
+
+    /// A crash between the rebuild's two renames leaves a FINALIZED `.dat`
+    /// with no `.meta` and the journal still beside it; a re-run rebuilds
+    /// from that shape too (the scan stops at the data section's end, never
+    /// reading the index as a record).
+    #[test]
+    fn recover_unfinalized_reruns_over_a_rebuild_cut_between_its_renames() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let path = tmp.path().join("seg-3.dat");
+        let bodies = crash_with_open_segment(&path, 2);
+        let journal = std::fs::read(tail_path_for(&path)).expect("read journal");
+        FramedSegment::recover_unfinalized(&path).expect("recover");
+        std::fs::remove_file(meta_path_for(&path)).expect("cut before the .meta rename");
+        std::fs::write(tail_path_for(&path), journal).expect("journal still there");
+        assert_eq!(
+            FramedSegment::recover_unfinalized(&path).expect("re-run"),
+            TailRecovery::Rebuilt {
+                records: 2,
+                unjournaled_blocks_dropped: 0,
+                journaled_blocks_missing: 0,
+            }
+        );
+        assert_rebuilt(&path, &bodies);
+    }
+
+    #[test]
+    fn recover_unfinalized_without_a_journal_touches_nothing() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let path = tmp.path().join("seg-3.dat");
+        crash_with_open_segment(&path, 2);
+        std::fs::remove_file(tail_path_for(&path)).expect("drop the journal");
+        let before = std::fs::read(&path).expect("read");
+        assert_eq!(
+            FramedSegment::recover_unfinalized(&path).expect("recover"),
+            TailRecovery::NoJournal { blocks: 2 }
+        );
+        assert_eq!(std::fs::read(&path).expect("read"), before);
+        assert!(!meta_path_for(&path).exists());
     }
 
     /// **`is_unfinalized_crash_tail` is a real discriminator, not a constant

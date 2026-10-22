@@ -175,6 +175,27 @@ pub fn render_document_proxied_videos(document: RenderDocument) -> Vec<ProxiedVi
         .collect()
 }
 
+/// UniFFI face of [`fauna_core::render::RenderDocument::proxied_post_image_ref`] — the ref
+/// (`path` + `alt`) a post's `post-image` slot paints when it is a bridged picture: the first
+/// `ProxiedImage` of a post with no blob image, else `None` (render-model.md § D6c). The slot
+/// precedence lives here in shared Rust, so an app composes nothing from
+/// [`render_document_first_image_hash`] + [`render_document_proxied_images`] itself.
+#[uniffi::export]
+pub fn render_document_proxied_post_image(
+    document: RenderDocument,
+) -> Option<ProxiedImageRefOwned> {
+    document.proxied_post_image_ref().map(Into::into)
+}
+
+/// UniFFI face of [`fauna_core::render::RenderDocument::proxied_post_video_ref`] — the video
+/// twin of [`render_document_proxied_post_image`], for the `video-thumbnail` slot.
+#[uniffi::export]
+pub fn render_document_proxied_post_video(
+    document: RenderDocument,
+) -> Option<ProxiedVideoRefOwned> {
+    document.proxied_post_video_ref().map(Into::into)
+}
+
 /// UniFFI face of [`fauna_core::render::inline_line_runs`] — a paragraph's inline run
 /// split at its hard line breaks into runs of at most
 /// [`fauna_core::render::MAX_LINES_PER_TEXT_RUN`] lines, so a native shell hands no
@@ -286,6 +307,40 @@ mod tests {
     }
 
     #[test]
+    fn proxied_post_slot_faces_yield_the_ref_unless_a_blob_wins() {
+        let proxied = |blocks| RenderDocument { blocks };
+        let pi = || RenderBlock::ProxiedImage {
+            path: "/media/a.png".into(),
+            alt: "A".into(),
+        };
+        let pv = || RenderBlock::ProxiedVideo {
+            path: "/media/a.mp4".into(),
+            alt: "V".into(),
+        };
+        let doc = proxied(vec![pi(), pv()]);
+        let img = render_document_proxied_post_image(doc.clone()).unwrap();
+        assert_eq!((img.path.as_str(), img.alt.as_str()), ("/media/a.png", "A"));
+        let vid = render_document_proxied_post_video(doc).unwrap();
+        assert_eq!((vid.path.as_str(), vid.alt.as_str()), ("/media/a.mp4", "V"));
+
+        // A blob image / video takes its slot first.
+        let blob = proxied(vec![
+            RenderBlock::Image {
+                hash: "abcd".into(),
+                alt: String::new(),
+            },
+            RenderBlock::Video {
+                hash: "feed".into(),
+                alt: String::new(),
+            },
+            pi(),
+            pv(),
+        ]);
+        assert!(render_document_proxied_post_image(blob.clone()).is_none());
+        assert!(render_document_proxied_post_video(blob).is_none());
+    }
+
+    #[test]
     fn first_video_hash_finds_a_nested_video() {
         // The exact twin of first_image_hash_finds_a_nested_image above.
         let doc = RenderDocument {
@@ -321,6 +376,7 @@ mod tests {
                 verification: VerificationStatus::Verified,
                 authoring_origin: AuthoringOriginStatus::Delegated,
                 legal_takedown_ref: None,
+                admin_block_reason: None,
                 not_found: false,
             }],
         };

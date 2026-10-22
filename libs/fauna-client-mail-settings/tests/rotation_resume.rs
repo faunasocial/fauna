@@ -5,10 +5,12 @@
 //! finalize's verify-and-re-drive, § Cross-device finalize race).
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use fauna_client_mail_settings::testing::FakeMailStore;
-use fauna_client_mail_settings::{CredentialKind, MailSettingsAction, SecretBytes};
+use fauna_client_mail_settings::{
+    CredentialKind, MailSettingsAction, RetirementClock, SecretBytes,
+};
 use fauna_core::data::{MailCredential, MailCredentialKind, MsekFingerprint, Timestamp};
 use fauna_core::mail_rows::{MailRotationSentinel, MailRows, MailStateRow};
 use fauna_core::secret::SecretArray32;
@@ -49,6 +51,38 @@ fn stage_sentinel(mail: &FakeMailStore, new_msek: [u8; 32]) {
     });
 }
 
+/// The retirement instant a pinned clock reads (unix seconds, 2027-01-15).
+const PINNED_AT: u64 = 1_800_000_000;
+
+/// A retirement clock that reads `at` every time: step (d) and finalize stamp
+/// the same instant, so a rotation writes its snapshot exactly once.
+fn pinned(at: u64) -> RetirementClock {
+    Arc::new(move || at)
+}
+
+/// A retirement clock one second later on every read: the re-wrap loop
+/// crossing a clock-second boundary between step (d) and finalize.
+fn stepping(from: u64) -> RetirementClock {
+    let next = Arc::new(AtomicU64::new(from));
+    Arc::new(move || next.fetch_add(1, Ordering::SeqCst))
+}
+
+/// The retirement instants the snapshot provisioned `back` writes before the
+/// last carries (`0` = the last), opened under `msek`.
+fn snapshot_retired_at(
+    nest: &fauna_client_mail_settings::testing::FakeNestClient,
+    back: usize,
+    msek: &SecretArray32,
+) -> Vec<u64> {
+    let s = nest.state();
+    let blob = &s.provision_mls_snapshot[s.provision_mls_snapshot.len() - 1 - back];
+    let plain = fauna_mls::wrapped_blob::unseal_mls_snapshot(blob, &msek.to_array())
+        .expect("the snapshot opens under the current MSEK");
+    fauna_mls::wrapped_blob::MlsSnapshotPlaintext::from_canonical_bytes(&plain)
+        .expect("snapshot decodes")
+        .generation_retired_at_unix
+}
+
 /// A stale sibling's state row: the pre-rotation `msek`, no sentinel, stamped
 /// later than anything this device wrote — the row a device that never saw
 /// the rotation writes (a flag flip) and the walk merges in.
@@ -66,6 +100,10 @@ fn stale_peer_row(rows: &MailRows, old: &SecretArray32) -> MailStateRow {
 #[tokio::test]
 async fn rotation_rewraps_all_credentials_and_updates_msek() {
     let (machine, nest, mail) = build();
+    // Step (d) and finalize read one instant — the count below is the
+    // mechanism's, not the box clock's (the boundary case is
+    // `a_rotation_across_a_clock_second_writes_the_snapshot_twice`).
+    let machine = machine.with_retirement_clock(pinned(PINNED_AT));
     // Enable + add two more credentials so the rotation has 3
     // survivors to re-wrap.
     enable(&machine).await;
@@ -113,7 +151,10 @@ async fn rotation_rewraps_all_credentials_and_updates_msek() {
     let retired_at = stored
         .prior_msek_retired_at(&pre_msek)
         .expect("rotation records the retirement instant for the retired MSEK");
-    assert!(retired_at > 0, "instant is a real unix-seconds timestamp");
+    assert_eq!(
+        retired_at, PINNED_AT,
+        "the instant the rotation's clock read"
+    );
 }
 
 /// **Four rotations keep every generation** (`owner-key-material.md`
@@ -203,6 +244,7 @@ async fn the_snapshot_carries_the_instant_finalize_recorded() {
             },
         );
     });
+    let baseline_snapshot = nest.state().provision_mls_snapshot.len();
     machine
         .dispatch(MailSettingsAction::StartRotation {
             excluded_credentials: Vec::new(),
@@ -214,6 +256,11 @@ async fn the_snapshot_carries_the_instant_finalize_recorded() {
         stored.prior_msek_retired_at(&old),
         Some(7),
         "finalize kept the recorded instant"
+    );
+    assert_eq!(
+        nest.state().provision_mls_snapshot.len(),
+        baseline_snapshot + 2,
+        "step (d)'s write, then the re-provision carrying the recorded instant"
     );
     let current = stored.msek.clone().unwrap();
     let blob = nest
@@ -229,6 +276,51 @@ async fn the_snapshot_carries_the_instant_finalize_recorded() {
     assert_eq!(
         snap.generation_retired_at_unix,
         stored.prior_retired_at_unix()
+    );
+}
+
+/// **A rotation whose re-wrap loop crosses a clock-second writes the snapshot
+/// twice, the last carrying the instant finalize recorded.** Step (d) stamps
+/// the outgoing generation at `T`; finalize, reading the clock a second later,
+/// records `T + 1`; so the post-finalize re-provision runs. The clock steps by
+/// hand, so this holds on every run — the shape public CI hit by chance
+/// (2026-10-17, 3 snapshot writes where a same-second run makes 2).
+#[tokio::test]
+async fn a_rotation_across_a_clock_second_writes_the_snapshot_twice() {
+    let (machine, nest, mail) = build();
+    let machine = machine.with_retirement_clock(stepping(PINNED_AT));
+    enable(&machine).await;
+    let old = mail.current().msek.unwrap();
+    let baseline_snapshot = nest.state().provision_mls_snapshot.len();
+
+    machine
+        .dispatch(MailSettingsAction::StartRotation {
+            excluded_credentials: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        nest.state().provision_mls_snapshot.len(),
+        baseline_snapshot + 2,
+        "step (d)'s write, then the re-provision carrying the recorded instant"
+    );
+    let stored = mail.current();
+    assert_eq!(
+        stored.prior_msek_retired_at(&old),
+        Some(PINNED_AT + 1),
+        "finalize recorded its own, later read"
+    );
+    let current = stored.msek.clone().unwrap();
+    assert_eq!(
+        snapshot_retired_at(&nest, 1, &current),
+        vec![PINNED_AT],
+        "step (d)'s snapshot carried step (d)'s read"
+    );
+    assert_eq!(
+        snapshot_retired_at(&nest, 0, &current),
+        vec![PINNED_AT + 1],
+        "the last snapshot carries the instant finalize recorded"
     );
 }
 
@@ -332,9 +424,12 @@ async fn finalize_re_drives_when_a_peer_reverts_the_msek_swap() {
 
 /// The swap is already durable (msek == new,
 /// sentinel still set); finalize's remaining job is the sentinel clear. The
-/// clear restates no key material, so it cannot revert the swap itself — but a
-/// stale sibling's row landing right after it still can, and would drop MSEK′
-/// from every field. Finalize must see that on its read back and re-drive.
+/// clear names MSEK′ and touches nothing else, so it cannot revert the swap
+/// itself, and a stale sibling's flag write cannot either (its absent MSEK is
+/// no change at the door) — but the fake's raw peer join below stands in for
+/// what still can, another device's own swap landing right after the clear,
+/// which would drop MSEK′ from every field. Finalize must see that on its read
+/// back and re-drive.
 #[tokio::test]
 async fn finalize_re_drives_when_a_peer_reverts_the_sentinel_clear() {
     let (machine, _nest, mail) = build();
@@ -498,6 +593,8 @@ async fn resume_completes_from_persisted_sentinel() {
     // credential re-wraps. ResumeRotation must drive the loop to completion
     // over the owed set the markers derive.
     let (machine, nest, mail) = build();
+    // One instant for step (d) and finalize: exactly one snapshot write.
+    let machine = machine.with_retirement_clock(pinned(PINNED_AT));
     enable(&machine).await;
     add(&machine, "iPhone", 0xBB).await;
     let new_msek = [0xEE; 32];
@@ -679,6 +776,7 @@ async fn a_credential_added_mid_rotation_is_rewrapped_and_a_revoked_one_skipped(
             created_at: 5,
             updated_at: Timestamp(5),
             wrapped_under: None,
+            token_minted_at: None,
             revoked_at_unix: None,
             burned: None,
         };
@@ -732,6 +830,7 @@ async fn rotation_uses_per_credential_kind_for_kdf() {
             created_at: 0,
             updated_at: Default::default(),
             wrapped_under: None,
+            token_minted_at: None,
             revoked_at_unix: None,
             burned: None,
         };
@@ -1241,4 +1340,109 @@ async fn enabling_email_while_a_rotation_is_pending_is_refused() {
     );
     assert!(!stored.is_mail_enabled(), "email stays off");
     assert!(nest.state().provision_submission_token.is_empty());
+}
+
+/// An email-only teardown abandons a standing rotation: it clears the
+/// sentinel by name, and its own `mail_enabled` write — a recreatable-half
+/// intent built from the load that still SAW the sentinel — must never set it
+/// again above that clear (`mail-credentials.md` § Cross-device finalize race).
+#[tokio::test]
+async fn an_email_only_teardown_leaves_no_sentinel_behind() {
+    use fauna_client_config::MailStore as _;
+
+    let (machine, _nest, mail) = build();
+    enable(&machine).await;
+    // A rotation under way, its sentinel landed through the store's door.
+    mail.write_state(MailStateRow {
+        pending_rotation: Some(MailRotationSentinel {
+            new_msek: [0x5A; 32].into(),
+        }),
+        ..MailStateRow::recreatable_of(&mail.current())
+    })
+    .await
+    .unwrap();
+    assert!(mail.current().pending_rotation.is_some(), "staged");
+
+    machine
+        .dispatch(MailSettingsAction::DisableMail)
+        .await
+        .expect("teardown");
+
+    let stored = mail.current();
+    assert_eq!(stored.mail_enabled, Some(false), "email is off");
+    assert!(
+        stored.pending_rotation.is_none(),
+        "the abandoned rotation's sentinel stays cleared"
+    );
+}
+
+/// Resume over an email-only teardown's leftover sentinel — a mailbox
+/// whose every credential is revoked — is made unreachable rather than
+/// handled: after the teardown nothing is pending, `ResumeRotation` moves
+/// nothing on the nest, and turning email back on is not refused with the
+/// resume hint.
+#[tokio::test]
+async fn after_an_email_only_teardown_nothing_is_left_to_resume() {
+    let (machine, nest, mail) = build();
+    enable(&machine).await;
+    stage_sentinel(&mail, [0x5A; 32]);
+
+    machine
+        .dispatch(MailSettingsAction::DisableMail)
+        .await
+        .expect("teardown");
+    assert!(
+        mail.current().pending_rotation.is_none(),
+        "nothing is left to resume"
+    );
+    let baseline_wrapped = nest.state().provision_wrapped_mls.len();
+    machine
+        .dispatch(MailSettingsAction::ResumeRotation)
+        .await
+        .expect("nothing pending is a no-op");
+    assert_eq!(
+        nest.state().provision_wrapped_mls.len(),
+        baseline_wrapped,
+        "resume re-wraps nothing over a torn-down mailbox"
+    );
+
+    enable(&machine).await;
+    let stored = mail.current();
+    assert!(stored.is_mail_enabled(), "email is back on");
+    assert!(stored.pending_rotation.is_none());
+}
+
+/// The teardown clears only the sentinel its own load saw, so a
+/// rotation another device starts after that load stands over the revoked
+/// mailbox (staged here after the teardown — the same end state). Resume
+/// completes it: nothing is owed a re-wrap, finalize swaps and clears, and
+/// turning email back on is not refused (`nest/common.md` § Client-state
+/// recoverability).
+#[tokio::test]
+async fn a_rotation_left_standing_over_a_torn_down_mailbox_resumes_to_completion() {
+    let (machine, nest, mail) = build();
+    enable(&machine).await;
+    machine
+        .dispatch(MailSettingsAction::DisableMail)
+        .await
+        .expect("teardown");
+    let new_msek = [0x6B; 32];
+    stage_sentinel(&mail, new_msek);
+    let baseline_wrapped = nest.state().provision_wrapped_mls.len();
+
+    machine
+        .dispatch(MailSettingsAction::ResumeRotation)
+        .await
+        .expect("resume completes over an empty owed set");
+    assert_eq!(
+        nest.state().provision_wrapped_mls.len(),
+        baseline_wrapped,
+        "no revoked credential is re-wrapped"
+    );
+    let stored = mail.current();
+    assert!(stored.pending_rotation.is_none(), "the rotation finished");
+    assert_eq!(stored.msek, Some(new_msek.into()));
+
+    enable(&machine).await;
+    assert!(mail.current().is_mail_enabled(), "email is back on");
 }

@@ -71,8 +71,8 @@ class CalDAVError(RuntimeError):
 class CalDAVClient:
     """A single CalDAV session (one user, one credential).
 
-    base_url is the CalDAV root, e.g. https://example.com (the client appends
-    /caldav/{user}/). username is the full handle (test@example.com); password is
+    base_url is the CalDAV root, e.g. https://example.net (the client appends
+    /caldav/{user}/). username is the full handle (test@example.net); password is
     the mail credential password (AEAD-unwrap-as-auth, shared with IMAP).
     """
 
@@ -620,7 +620,7 @@ def build_invite_vevent(
 def insecure_ssl_context() -> ssl.SSLContext:
     """A no-verify TLS context for pointing at a self-signed dev endpoint.
 
-    The live example.com deployment serves a real ACME cert, so prefer verify=True.
+    The live nest serves a real ACME cert, so prefer verify=True.
     This exists only for local self-signed bring-up during iteration.
     """
     ctx = ssl.create_default_context()

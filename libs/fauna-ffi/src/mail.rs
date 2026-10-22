@@ -3341,6 +3341,31 @@ pub fn forward_self_already_forwarded(
     )
 }
 
+/// True when the MX door must not forward this message: its `From:` names a
+/// served domain (or one beneath or above it), or lies under the primary mail
+/// domain's last two labels, and its inbound DMARC verdict was not `pass` — the
+/// spoof floor (`mail-forwarding.md` § Spoof floor — a local `From:` must have
+/// authenticated). `primary_domain` is the domain the forward's SRS envelope is
+/// on (empty: none configured). The `From:` mailboxes are read from `raw` with
+/// the reader the submission door and the signer use. The forward is
+/// suppressed; local delivery still completes.
+#[uniffi::export]
+pub fn forward_unauthenticated_local_from(
+    raw: Vec<u8>,
+    local_domains: Vec<String>,
+    primary_domain: String,
+    dmarc: DmarcVerdict,
+) -> bool {
+    let hosts = fauna_mail::envelope::from_mailboxes(&raw);
+    let local: Vec<&str> = local_domains.iter().map(String::as_str).collect();
+    fauna_mail::unauthenticated_local_from(
+        hosts.iter().map(|a| a.host.as_str()),
+        &local,
+        &primary_domain,
+        matches!(dmarc, DmarcVerdict::Pass),
+    )
+}
+
 /// FFI error-type adapter over the shared
 /// [`fauna_mls::wrapped_blob::credential_input`]; the credential-kind string
 /// contract (`"plain"` / `"oauthbearer"`) lives there (priority #2).

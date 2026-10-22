@@ -336,7 +336,7 @@ def test_a_live_handle_registers_its_host_so_port_keyed_dials_reach_the_box():
     real HOST, and a helper keyed by port alone used to build
     `https://127.0.0.1:443` for it.
 
-    Measured 2026-10-04 against `dev.example.com`:
+    Measured 2026-10-04 against the dev nest:
     all 19 tests of `test_account_instance_lock_tui.py` and
     `test_account_switcher_tui.py` died at account seeding with
     `ConnectionRefusedError`, because `create_actor_and_register(port, …)` with
@@ -788,6 +788,11 @@ _COMPOSED_AUTHORITY_IS_NOT_A_NEST = {
         "`venue.caldav_port`, the MDA's self-signed HTTPS endpoint a stock "
         "contacts app dials) — a bridge authority, never the nest's API "
         "listener, which the module reaches only as `nest['url']`",
+    "tests/test_cli_mcp.py":
+        "the loopback `Origin` header sent to `fauna-cli mcp --listen`'s own "
+        "HTTP listener (`session.http_port`) — the cli's MCP authority, never "
+        "the nest's API listener, which the module reaches only as a nest "
+        "handle's url",
     "tests/test_mail_abuse_refused.py":
         "the mail bridge's `clamd_addr` / `rspamd_url` scanner addresses on "
         "free loopback ports nothing listens on — the deployment shape of a "
@@ -2022,10 +2027,12 @@ def test_the_global_admin_fixtures_live_only_exclusion_is_accounted_for():
         "caldav_cross_nest_peer",
         "cross_nest_foreign",
         "cross_nest_foreign_ephemeral",
+        "dav_toggle_venue",
         "dedicated_caldav_mailbox_less_nest",
         "dedicated_caldav_only_nest",
         "dedicated_mail_nest",
         "dedicated_mail_nest_handle_domain",
+        "planted_bridges",
         "registration_posture_nest",
         "report_origin_nest",
         "two_nest_custody_rig",
@@ -2557,7 +2564,7 @@ def test_the_reap_follows_a_noted_handle_to_the_successor_that_holds_it():
     """A succession ceremony the APP runs (no harness dial sees it) moves the
     account — and its handle — to a fresh actor id; the retired id keeps a
     handle-less row the nest happily suspends. Measured 2026-10-04 on
-    `dev.example.com`: a reap that suspended only
+    the dev nest: a reap that suspended only
     the noted ids reported success and left both successors of
     `test_account_instance_lock_tui.py` ACTIVE. Handles are unique per box and
     this run minted the noted one, so whoever holds it now is this run's."""
@@ -2672,7 +2679,7 @@ def _wire_call(kind, payload, *, ok=True, reply=None):
 def test_every_account_the_harness_creates_on_live_is_noted_at_the_wire(kind, payload):
     """Account-scoped isolation only holds if the reap knows every account the
     run made, and a per-call-site `live_accounts.note` did not: measured
-    2026-10-04, one interrupted `dev.example.com`
+    2026-10-04, one interrupted dev-nest
     sweep leaked 53 accounts (`crowd*`, `collide*`, `admitted-*`, …) that test
     bodies and fixtures created outside `conftest._make_user`. So the note is
     taken where every harness dial passes — the WS-RPC core — on the successful
@@ -2749,7 +2756,7 @@ def test_only_the_last_handle_on_the_live_box_reaps_the_run(monkeypatch):
     is run-wide — so the reap belongs to the last handle that closes, never to
     a dedicated nest's module teardown.
 
-    Measured 2026-10-05 on `dev.example.com`: `test_archive_import`'s
+    Measured 2026-10-05 on the dev nest: `test_archive_import`'s
     module-scoped `_start_dedicated_nest` resolved to the live box, and its
     cleanup reaped the whole ledger — the session `test_user` included. The
     shared account came back `user is suspended` and every later
@@ -4070,7 +4077,7 @@ def test_the_own_image_reason_names_the_tag_it_actually_boots():
 
     item = _FakeItem(fixturenames=["docker_image"])
     reason = ns.classify(item, nm.parse_nest_mode("docker")).reason
-    assert "fauna-nest-test:local" in reason
+    assert "fauna-nest-test:src-<source key>" in reason
 
 
 def _package_own_image_fixtures():
@@ -4124,7 +4131,10 @@ def _package_own_image_fixtures():
             | {n.attr for n in ast.walk(node) if isinstance(n, ast.Attribute)}
         )
 
-    reaches = {n for n, f in funcs.items() if "IMAGE_TAG" in names_in(f)}
+    # `image_tag()` is the same tag by its function: the helpers that boot the
+    # image name it that way since the tag is keyed on the tree (`helpers/
+    # nest_test_image.py`), the test modules by the `IMAGE_TAG` attribute.
+    reaches = {n for n, f in funcs.items() if {"IMAGE_TAG", "image_tag"} & names_in(f)}
     grew = True
     while grew:
         grew = False
@@ -4299,7 +4309,7 @@ def test_the_own_image_fixture_list_matches_the_platform_docker_package():
         "nest_surface.OWN_IMAGE_FIXTURES have diverged.\n"
         f"  only in the package: {sorted(expected - set(ns.OWN_IMAGE_FIXTURES))}\n"
         f"  only in the list: {sorted(set(ns.OWN_IMAGE_FIXTURES) - expected)}\n"
-        "A fixture that boots fauna-nest-test:local is not a witness of the "
+        "A fixture that boots the keyed test image is not a witness of the "
         "run's nest in any mode — the record would name a commit, a digest and "
         "a mode the test never touched (feature-catalog.md § The ledger). Add "
         "it to OWN_IMAGE_FIXTURES."
@@ -5143,10 +5153,10 @@ def test_an_explicit_peer_url_is_not_overwritten():
     handle = conftest._as_nest_handle({
         "url": "https://127.0.0.1:41234",
         "port": 41234,
-        "peer_url": "https://172.18.0.3:3000",
+        "peer_url": "https://172.18.0.3:443",
         "serve_tls": True,
     })
-    assert handle["peer_url"] == "https://172.18.0.3:3000"
+    assert handle["peer_url"] == "https://172.18.0.3:443"
 
 
 def test_the_run_labels_name_the_harness_and_this_run():
@@ -5543,10 +5553,29 @@ def test_a_docker_peer_url_is_the_container_ip_not_the_published_port(monkeypatc
     handle, _cleanup = conftest._DockerProvider().start(None, tmp_path_factory, "nest")
 
     assert handle["url"] == "https://127.0.0.1:41020"
-    assert handle["peer_url"] == "https://172.30.0.9:3000", (
+    assert handle["peer_url"] == "https://172.30.0.9:443", (
         "a peer dials the container's own address on the run network, at the "
-        "IN-CONTAINER port (3000), not the host's published one"
+        "port the SNI router answers on inside the container (443), not the host's published one"
     )
+
+
+def test_a_docker_nest_is_published_through_the_sni_router(monkeypatch, tmp_path_factory):
+    """The image binds the nest's internal :3000 on container loopback, which no
+    publish reaches; the harness dials the production path, the router's :443
+    (`deployment-threat-model.md` § Concern 1a, the container-hardening paragraph)."""
+    import conftest
+
+    seen = {}
+
+    def _fake_start(name, port_map, **kwargs):
+        seen.update(port_map)
+        return "cid"
+
+    _install_fake_docker(monkeypatch, iter((41030,)), _fake_start)
+    conftest._DockerProvider().start(None, tmp_path_factory, "nest")
+
+    assert seen.get(443) == 41030
+    assert 3000 not in seen
 
 
 def test_the_run_network_is_created_once_per_session_not_once_per_nest(monkeypatch, tmp_path_factory):
@@ -6991,6 +7020,9 @@ def _venue_fixtures(source: str) -> dict[str, frozenset]:
     always in the fixture body, never behind an impl helper — so there is no
     cross-file closure to chase. If that ever stops being true this pin goes red
     (the fixture disappears from the derivation), which is the correct failure.
+    A FACTORY fixture's call sits in the nested function it yields
+    (`dav_toggle_venue`'s `make`), which is still the fixture's body: only
+    module-level functions are keys, so the call is credited to the fixture.
 
     Same falsy rule as its twin: `registration_open=False` is asking for the
     default, not requesting an option.
@@ -6999,7 +7031,7 @@ def _venue_fixtures(source: str) -> dict[str, frozenset]:
 
     out = {}
     tree = _ast.parse(source)
-    for node in _ast.walk(tree):
+    for node in tree.body:
         if not isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
             continue
         asked = set()
@@ -7097,6 +7129,7 @@ _VENUE_FIXTURE_NAMES = (
     "dedicated_mail_nest_handle_domain",
     "dedicated_caldav_mailbox_less_nest",
     "dedicated_caldav_only_nest",
+    "dav_toggle_venue",
 )
 
 
@@ -7246,6 +7279,51 @@ def test_every_provider_declares_its_venue_options_and_answers_the_seam():
     assert "caldav_admin_port" not in docker.supported_venue_options
     assert "caldav_only" in docker.supported_venue_options
     assert "registration_open" in docker.supported_venue_options
+    # The `dav_toggles` venue (`dav_toggle_venue`) — the toggles before the
+    # MDA boots, and the domainless home-nest shape — is honoured by both
+    # modes that start a nest, which is what routed it.
+    for option in ("dav_toggles", "domainless"):
+        assert option in docker.supported_venue_options
+        assert option in _conftest._StandaloneProvider.supported_venue_options
+
+
+def test_kind_reach_stops_at_the_mail_venue_seam():
+    """A test that CALLS a venue factory by name inherits nothing through the
+    provider's `start_mail_venue` — and only through it.
+
+    `dav_toggle_venue`'s tests call the fixture, so the name-keyed graph walked
+    from each into `_start_mail_venue`, on to every provider's
+    `start_mail_venue` (merged by bare name), and into the standalone body's
+    host-bridge spawn — grading every consumer `loopback_kind` in docker for an
+    enrollment docker never makes, so routing the fixture would have freed no
+    cell. `kind_reach._REACH_BARRIERS` cuts the edges into the two
+    standalone-only venue bodies. Three directions are pinned: the consumers
+    reach no loopback-gated kind; the bodies themselves still do (the cut is
+    the seam's, not a blind spot); and the docker method's admin kinds still
+    reach the consumers, which is what keeps them off the shared live box.
+    """
+    from helpers import kind_reach
+    from helpers import nest_surface as ns
+
+    reach = kind_reach.build_reach(ns.LOOPBACK_GATED_KINDS)
+    assert kind_reach._REACH_BARRIERS == frozenset(
+        {"_dedicated_mail_nest_impl", "_dav_toggle_venue_impl"})
+    for body in sorted(kind_reach._REACH_BARRIERS):
+        assert reach.get(body), (
+            f"{body} spawns host bridges, so it must still reach the "
+            "loopback-gated enrollment kind itself")
+    consumers = (
+        "test_contacts_keep_working_with_mail_turned_off",
+        "test_switching_calendar_off_shuts_calendar_apps_out_and_on_lets_them_back",
+    )
+    for test in consumers:
+        assert not reach.get(test), (
+            f"{test} calls `dav_toggle_venue` and reaches "
+            f"{sorted(reach.get(test, ()))} through the venue seam")
+        assert kind_reach.kinds_reached_by(test, ns.KIND_VOCABULARY) & {
+            "fauna.bridges.add_local_domain"}, (
+            f"{test} no longer reaches the docker venue's toggle kinds — the "
+            "cut has widened past the standalone-only bodies")
 
 
 def test_the_caldav_only_docker_venue_publishes_no_mail_port():
@@ -7566,13 +7644,6 @@ _NEST_BINARY_DISPOSITIONS = {
         "compiles no `test-hooks`, so the routed form would accept the app and "
         "assert nothing.",
     "tests/test_version_mismatch_launch.py::"
-    "test_an_app_too_old_for_its_nest_says_to_update_and_offers_no_retry_web":
-        "PREMISE: the web arm of the same witness — it rides the same "
-        "`too_new_nest` fixture, so the nest must be a `test-hooks` build with "
-        "`FAUNA_TEST_REQUIRED_SUBPROTOCOL` set (`routes.rs::"
-        "required_client_subprotocol`); the image compiles no `test-hooks`, so "
-        "the routed form would accept the browser and assert nothing.",
-    "tests/test_version_mismatch_launch.py::"
     "test_a_signed_in_app_whose_nest_is_upgraded_past_it_shows_the_update_surface":
         "PREMISE: the mid-session half of the same witness — the signed-in "
         "app's nest is re-spawned in place with "
@@ -7600,20 +7671,24 @@ _NEST_BINARY_DISPOSITIONS = {
         "it would trade a MIXED exclusion for a FACT one rather than for a "
         "container.",
 
-    # ---- tests/platform/bridge/ and tests/platform/linux/ — 2026-09-02 ---
-    # Four tests, one shape each, and both shapes are the verdict's own
-    # examples of a FACT: poking the nest's db file, and installing its binary.
-    "tests/platform/bridge/test_smtp_sort.py::test_smtp_two_emails_sort":
-        "PREMISE: `set_inbox_open` opens the nest's `nest.db` with `sqlite3` "
-        "and UPDATEs a row mid-test, which is the verdict's own 'reading its "
-        "db_path' half and then some — a container's db is inside the "
-        "container, and a routed form would need a product surface for what "
-        "this test does with SQL.",
-    "tests/platform/bridge/test_smtp_crossnest_sort.py::test_crossnest_sort":
-        "PREMISE: the same `sqlite3` UPDATE against `nest.db`, twice over — it "
-        "runs two nests and pokes both dbs. Its cross-origin subject would also "
-        "put it in `private_peer` territory if routed, so the db access is the "
-        "first of two reasons rather than the only one.",
+    # ---- tests/test_plugin_install.py — triaged 2026-10-17 ---------------
+    "tests/test_plugin_install.py::"
+    "test_an_admin_installs_a_plugin_from_its_card_and_uninstalls_it":
+        "PREMISE: the `plugin_nest` fixture starts a nest whose guarded fetcher "
+        "is allowed to reach the publisher's server on the HOST's loopback "
+        "(`_make_nest` with the loopback-fetch override). A container cannot "
+        "dial the host's `127.0.0.1`, and the routed form's publisher on the "
+        "container network is refused as non-global, so routing it would assert "
+        "nothing the binary form does not.",
+    "tests/test_plugin_install.py::"
+    "test_a_user_connects_a_plugin_from_its_settings_card_and_disconnects_it":
+        "PREMISE: same `plugin_nest` and the same host-loopback publisher as "
+        "its file-mate above.",
+
+    # ---- tests/platform/linux/ — 2026-09-02 ------------------------------
+    # Two tests, one shape: installing the nest's binary, the verdict's own
+    # example of a FACT. (The bridge sort pair that poked the db file is held
+    # out of docker by a ratified FACT now and carries no entry.)
     "tests/platform/linux/test_installer.py::TestNestInstaller::"
     "test_install_and_uninstall":
         "PREMISE: the test hands the nest INSTALLER a `--local-binary` and "
@@ -7710,6 +7785,20 @@ _NEST_BINARY_DISPOSITIONS = {
         "A's PORT and address after A stops — and no provider start option "
         "takes a port. Routable once one does (docker would publish the same "
         "host port for the second container).",
+
+    # The picker half of the Bluesky DM leg's journeys. Its sibling in the same
+    # file is MOOT (it pokes the worker through a test-hooks route); this one
+    # reaches no `/api/v1/test/` route, so nothing derives it — but its nest
+    # still depends on `test-hooks` being compiled in.
+    "tests/test_bridged_dm_legs.py::"
+    "test_a_bluesky_room_started_from_the_picker_by_handle_reaches_the_resolved_peer_alone":
+        "PREMISE: the handle resolves through `getProfile` against the in-test "
+        "`FakeAtprotoFarEnd`, which the nest dials only because "
+        "`FAUNA_TEST_ATPROTO_FAR_END` redirects its Bluesky OAuth client — a "
+        "seam compiled under `test-hooks` alone "
+        "(`bins/fauna-nest/src/state.rs::build_bluesky_oauth_client`). A "
+        "release image would resolve `@peer` against the real network, so a "
+        "routed form could not witness the resolve-to-DID this test is about.",
 
     # PREMISE, and ratified in the file's own docstring rather than inferred.
     "tests/test_version_skew_real_binary.py::"
@@ -9036,6 +9125,48 @@ def test_the_served_cert_fingerprint_has_exactly_one_home():
     )
 
 
+def test_the_no_redirect_opener_has_exactly_one_home():
+    """Priority #4: a redirect-surfacing opener is built in one place,
+    `common.auth.no_redirect_opener`, which keeps the floor-cert handler.
+
+    `urllib.request.build_opener` composes from urllib's defaults and never from
+    the installed opener, so each module that hand-rolled
+    `build_opener(NoRedirect)` silently dropped `_FloorCertHTTPSHandler` and met
+    a TLS-serving nest's self-signed floor cert bare. Six had, and every apex
+    well-known probe among them failed `CERTIFICATE_VERIFY_FAILED` the first
+    time one ran against a `--nest docker` nest (2026-10-14) — a failure that
+    reads as a product red and is a harness one.
+    """
+    import ast as _ast
+    from pathlib import Path
+
+    trees = (Path(__file__).resolve().parents[1],
+             Path(__file__).resolve().parents[2] / "common")
+    home = Path(__file__).resolve().parents[2] / "common" / "auth.py"
+    found = set()
+    for tree in trees:
+        for path in sorted(tree.rglob("*.py")):
+            if ".venv" in path.parts:
+                continue
+            try:
+                module = _ast.parse(path.read_text())
+            except (OSError, SyntaxError):
+                continue
+            for node in _ast.walk(module):
+                if isinstance(node, _ast.ClassDef) and any(
+                        _ast.unparse(base).endswith("HTTPRedirectHandler")
+                        for base in node.bases):
+                    found.add(path)
+    assert home in found, (
+        "common/auth.py no longer defines the no-redirect handler — this pin "
+        "has lost its anchor; re-point it at wherever the one home moved")
+    extra = sorted(str(p) for p in found - {home})
+    assert not extra, (
+        f"these hand-roll a redirect handler instead of calling "
+        f"`common.auth.no_redirect_opener()`: {extra} — an opener built beside "
+        "it drops the floor-cert handler a TLS-serving nest needs")
+
+
 def test_the_federation_client_observes_its_channel_binding_never_assumes_it():
     """The hello's `spki_sha256` comes off the socket, in both places it rides.
 
@@ -9287,7 +9418,7 @@ def test_a_module_constant_a_function_names_is_part_of_its_reach(tmp_path):
     an element-ID name — is reached as surely as one written in its body.
 
     Red-verified 2026-10-05 against the tree itself: the tui live sweep's
-    collection against dev.example.com still selected
+    collection against the dev nest still selected
     `test_mail_admin_policy::test_admin_puts_policy_substruct_over_wire`, whose
     kinds (`fauna.bridges.put_*_policy`) live in the module's `_PUT_CASES` table
     and reach the test only through `@pytest.mark.parametrize(..., _PUT_CASES)`;
@@ -9348,7 +9479,7 @@ def test_a_module_constant_a_function_names_is_part_of_its_reach(tmp_path):
 # switches off class (3) and nothing else.
 
 
-def _live(url="https://dev.example.com"):
+def _live(url="https://dev.fauna.build"):
     return nm.parse_nest_mode(f"live:{url}")
 
 
@@ -9362,11 +9493,11 @@ def test_a_run_declares_a_shared_box_unless_it_says_otherwise():
 
 
 @pytest.mark.parametrize("url", [
-    "https://dev.example.com",
-    "https://dev.example.com/",
+    "https://dev.fauna.build",
+    "https://dev.fauna.build/",
     "https://test.fauna.build",
     "https://test.fauna.build:8443",
-    "  https://dev.example.com  ",
+    "  https://dev.fauna.build  ",
 ])
 def test_the_declaration_is_accepted_for_a_named_staging_box(url):
     mode = nm.declare_box(_live(url), nm.BOX_DISPOSABLE)
@@ -9375,16 +9506,81 @@ def test_the_declaration_is_accepted_for_a_named_staging_box(url):
     assert mode.argument == url.strip()
 
 
-def test_the_declaration_is_refused_for_the_production_box():
+def test_the_declaration_is_refused_for_a_box_humans_use():
     """The whole reason the declaration is gated on a list: a `cd_suite` run
-    pointed at the acceptance nest, where humans are signed in, must still
-    deselect its factory-resetting residents."""
+    pointed at a box where humans are signed in must still deselect its
+    factory-resetting residents."""
     with pytest.raises(nm.NestModeError) as info:
-        nm.declare_box(_live("https://fauna.build"), nm.BOX_DISPOSABLE)
+        nm.declare_box(_live("https://nest.example.org"), nm.BOX_DISPOSABLE)
     message = str(info.value)
-    assert "declare https://fauna.build disposable" in message
+    assert "declare https://nest.example.org disposable" in message
     assert "dev.fauna.build" in message and "test.fauna.build" in message
     assert "shared-box rule" in message
+
+
+# ── The acceptance nest is refused outright (2026-10-17) ─────────────────────
+#
+# `org-nests.md` § The three nests: fauna.build is humans only, no automated
+# tests. A shared-box run is non-destructive, but it still signs in — a complex
+# connection from a dev machine to a box a stranger may hold (`org-nests.md`
+# § fauna.build) — so the RUN is refused, not just
+# its destructive residents.
+
+
+@pytest.mark.parametrize("url", [
+    "https://fauna.build",
+    "https://fauna.build/",
+    "https://FAUNA.build:443",
+    "  https://fauna.build.  ",
+])
+def test_a_live_run_against_the_acceptance_nest_is_refused(url):
+    mode = _live(url)
+    with pytest.raises(nm.NestModeError) as info:
+        nm.refuse_acceptance_nest(mode, environ={})
+    message = str(info.value)
+    assert "acceptance nest" in message and "humans only" in message
+    assert "dev.fauna.build" in message and "test.fauna.build" in message
+    with pytest.raises(nm.NestModeError, match="acceptance nest"):
+        nm.live_url(mode)
+    # Declaring it disposable is refused for the same reason, before the list.
+    with pytest.raises(nm.NestModeError, match="acceptance nest"):
+        nm.declare_box(mode, nm.BOX_DISPOSABLE)
+
+
+@pytest.mark.parametrize("raw", ["standalone", "docker", "live", "live:https://dev.fauna.build"])
+def test_an_exported_acceptance_url_is_refused_on_every_mode(raw):
+    """`live_box` modules read `FAUNA_LIVE_NEST_URL` directly on a standalone
+    `FAUNA_E2E_LIVE=1` run, so the export is a door of its own, whatever the
+    mode — and on a live run with its own `:URL` it is still refused rather
+    than left lying in the environment for a module that reads it raw."""
+    with pytest.raises(nm.NestModeError, match="acceptance nest"):
+        nm.refuse_acceptance_nest(
+            nm.parse_nest_mode(raw), environ={"FAUNA_LIVE_NEST_URL": "https://fauna.build"}
+        )
+
+
+@pytest.mark.parametrize("url", [
+    "https://dev.fauna.build", "https://test.fauna.build", "https://e2e-1a2b.fauna.build",
+])
+def test_the_acceptance_refusal_names_the_apex_only(url):
+    """The zone's other names are the staging boxes and the throwaway
+    provisioning boxes — every one a legitimate target."""
+    nm.refuse_acceptance_nest(_live(url), environ={"FAUNA_LIVE_NEST_URL": url})
+    assert nm.live_url(_live(url)) == url
+
+
+def test_the_acceptance_and_disposable_hosts_are_disjoint():
+    assert not nm.ACCEPTANCE_NEST_HOSTS & nm.DISPOSABLE_BOX_HOSTS
+
+
+def test_conftest_refuses_the_acceptance_nest_at_configure_time():
+    """Configure time, as a UsageError beside `--nest`'s own refusals — a
+    per-test check would let a misdirected run sign in before it stopped."""
+    source = (pathlib.Path(__file__).resolve().parents[1] / "conftest.py").read_text()
+    resolve = source.index("nest_mode_mod.resolve_nest_mode(config.getoption(\"nest\"))")
+    refuse = source.index("nest_mode_mod.refuse_acceptance_nest(mode)")
+    usage = source.index('raise pytest.UsageError(f"--nest: {exc}")')
+    assert resolve < refuse < usage
 
 
 def test_the_declaration_is_refused_for_a_box_the_tree_does_not_name():
@@ -9406,10 +9602,10 @@ def test_the_declaration_resolves_the_url_exactly_as_the_provider_does(monkeypat
     assert nm.declare_box(nm.parse_nest_mode("live"), nm.BOX_DISPOSABLE).disposable_box is True
 
     # The flag's URL beats the env, as for every other harness input.
-    monkeypatch.setenv("FAUNA_LIVE_NEST_URL", "https://fauna.build")
-    with pytest.raises(nm.NestModeError, match="https://fauna.build disposable"):
+    monkeypatch.setenv("FAUNA_LIVE_NEST_URL", "https://nest.example.org")
+    with pytest.raises(nm.NestModeError, match="https://nest.example.org disposable"):
         nm.declare_box(nm.parse_nest_mode("live"), nm.BOX_DISPOSABLE)
-    assert nm.live_url(_live("https://dev.example.com/")) == "https://dev.example.com"
+    assert nm.live_url(_live("https://dev.fauna.build/")) == "https://dev.fauna.build"
     assert nm.declare_box(_live(), nm.BOX_DISPOSABLE).disposable_box is True
 
 
@@ -9518,7 +9714,7 @@ def test_the_staging_boxes_are_the_ones_the_pipeline_verifies_against():
 
 
 # ── The live-mode harness gaps (2026-10-05) ──────────────────────────────────
-# A full tui sweep against dev.example.com recorded tests as failed live cells
+# A full tui sweep against the dev nest recorded tests as failed live cells
 # that live mode could never have passed. Each class below is decided at
 # collection; these pins hold the shape of each rule and its mode scope.
 

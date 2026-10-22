@@ -51,13 +51,17 @@ class SubscriptionSettingsVM @Inject constructor(
         }
     }
 
-    /** Unsubscribe from [authorId], then re-read so the list reflects nest state. */
-    fun unsubscribe(authorId: ByteArray) {
+    /**
+     * Leave [sub] — its row's tier and creator home ride the call, so a follow
+     * relayed across nests is left at its home (`federated-follow.md`
+     * § Decision 2) — then re-read so the list reflects nest state.
+     */
+    fun unsubscribe(sub: FfiMineSubscription) {
         viewModelScope.launch {
             errorMessage.value = null
             _working.value = true
             try {
-                api.subscriptionUnsubscribe(authorId)
+                api.subscriptionUnsubscribe(sub.authorId, sub.tier, sub.homeNestUrl)
                 _subscriptions.value = api.subscriptionMineList()
             } catch (e: Exception) {
                 errorMessage.value = e.message ?: "error"

@@ -3,7 +3,7 @@
 > **Status — this guide describes Fauna as it is taking shape.** Bluesky,
 > Nostr, and the Fediverse are all live today, each at a different level of
 > polish — the [table at the end](#where-this-stands-today) says exactly
-> what is available now, what is landing, and what is planned.
+what is available now and what is not.
 
 ---
 
@@ -17,7 +17,7 @@
 
 ## One feed, many networks
 
-Fauna's answer to "but everyone I know is on X-or-other" is bridges: your
+Fauna's answer to "but everyone I know is somewhere else" is bridges: your
 nest speaks other networks' protocols, and everything lands in **one feed**
 and **one conversations list**. A bridged post looks and behaves like any
 other post — same reply box, same like button — with a small badge showing
@@ -37,11 +37,7 @@ never looks like a removed feature.
 
 ### Keeping bridged posts out of — or in — your Search results
 
-Every bridge you link (Bluesky, Nostr, the Fediverse) has two settings on its
-card: **Show in search** — whether that network's public posts you receive
-show up when you search Fauna — and **Limit posts in search**, a cap on how
-many of a bridge's newest posts stay searchable at once (older ones drop off
-as new ones arrive, so a busy bridge doesn't crowd out everything else).
+The Bluesky card on Settings → AT Protocol and the ActivityPub card on the Bridges page each have two settings: **Show in search** — whether that network's public posts you receive show up when you search Fauna — and **Limit posts in search**, a cap on how many of a bridge's newest posts stay searchable at once (older ones drop off as new ones arrive, so a busy bridge doesn't crowd out everything else). The Nostr page doesn't offer them yet.
 Nothing private — DMs, gift-wrapped Nostr events — is ever searchable this
 way, on any bridge; the toggle only ever governs a bridge's public content.
 Both settings save the moment you change them.
@@ -56,10 +52,12 @@ nest a session, and from then on **your nest is your Bluesky client**:
 - **Bluesky notifications** (likes, replies, follows, mentions…) arrive in
   your unified notification stream.
 - **Bluesky DMs** appear in Conversations alongside everything else.
-- **Cross-posting** is a setting with three positions: off (default), every
-  post automatically, or manual per-post. Remember what "on" means: your
-  Fauna posts are published to Bluesky — public, searchable, and effectively
-  permanent there. A reply you write under one of your own cross-posted posts
+- **Cross-posting** is a setting with three positions: off (the default), every
+  public post you write automatically, or manual — only the public posts you tag `crosspost`. A cross-post
+  carries your post's text; its photos and video stay on Fauna. Remember what
+  "on" means: your public Fauna posts are published to Bluesky — public and
+  searchable. Deleting a post on Fauna deletes its Bluesky copy too, though
+  servers and apps that already copied it may keep it. A reply you write under one of your own cross-posted posts
   is threaded under it on Bluesky, so a thread you continue in Fauna stays a
   thread there.
 - **Your Bluesky timeline in your Fauna feed.** Posts from the people you
@@ -74,10 +72,7 @@ nest a session, and from then on **your nest is your Bluesky client**:
   linked, say — is refused on the spot with a message naming the page where
   you can fix it, and nothing is posted. A post shows its author the way Bluesky knows them — their
   display name, or their handle when they have not set one — and the same
-  goes for a post that reached you from the fediverse or from Nostr. Two
-  things still to come: the author's picture is not shown on their posts
-  yet, and the images a Bluesky post carries are not rendered in the feed
-  yet.
+  goes for a post that reached you from the fediverse or from Nostr. One thing still to come: the author's picture is not shown on their posts yet.
 - **The whole conversation around a Bluesky post.** Open a Bluesky post and
   choose **View Thread**: you see the posts it answers, oldest first, then
   the post itself, marked, then the replies to it — replies from people you
@@ -104,9 +99,7 @@ removes it.
 
 The next step goes further: instead of linking an account hosted on
 `bsky.social`, **your nest itself becomes your Bluesky server** (in AT
-Protocol terms, your PDS). Your AT Protocol identity would live on your box,
-your handle would be your own domain, and your public Fauna posts would
-appear on Bluesky natively — no second account anywhere.
+Protocol terms, your PDS). Your AT Protocol identity would live on your box, your handle would be at your nest's domain, and your public Fauna posts would appear on Bluesky natively — no second account anywhere.
 
 This is a real, working feature, not just a design: turn it on from
 Settings → AT Protocol and your nest mints the identity, holds the repo, and
@@ -146,10 +139,7 @@ selector offers four ordered choices —
 - **Hosted here — full access** — additionally, other Bluesky apps can sign
   in as you against your nest.
 
-Each level brings its own controls with it, right below the selector. Choose
-**Linked account** and the connect-your-account controls appear there — the
-same Connect / Disconnect button, cross-posting settings and follows list that
-used to live on the *Bridges* page, just moved to where Bluesky now lives.
+Each level brings its own controls with it, right below the selector. Choose **Linked account** and the connect-your-account controls appear there — the same Connect / Disconnect button and cross-posting settings that used to live on the Bridges page, just moved to where Bluesky now lives.
 (Bluesky has its own page for the same reason Nostr does: there is far more to
 it than a single on/off row. The *Bridges* page keeps the lighter-weight
 integrations.)
@@ -163,10 +153,7 @@ the same identity rather than making a new one. The two "hosted" levels are
 greyed out, with a reason, until your nest is reachable at a real public
 domain (they can't work on a `localhost` or IP-only box).
 
-The deepest level reveals the login-plane controls — **App credentials** and
-**Connected apps**, for signing other AT Protocol apps in against your
-nest, plus a single toggle that instantly shuts off every external app's
-access without touching any individual credential. Logging another AT Protocol
+The deepest level reveals **App credentials**, for signing other AT Protocol apps in against your nest, plus a single toggle that instantly shuts off every external app's access without touching any individual credential; the apps you connect are listed on Settings → **Connected apps**. Logging another AT Protocol
 app in to read, interact, post and edit your profile through your nest works
 end to end — posting and profile edits after you grant the separate approval
 described next.
@@ -202,10 +189,7 @@ bring it back — not you and not whoever runs your nest. If you turn AT
 Protocol hosting on again later, you get a new, different identity.
 
 While the box is ticked, the card says exactly this in place of "your identity
-is kept", so you never confirm with both promises in front of you. The box is
-greyed out, with the reason beside it, when there is nothing it could do: an
-identity tied to your own domain ends when your domain stops serving it, and an
-identity that has not been published yet has nothing to retire.
+is kept", so you never confirm with both promises in front of you. The box is greyed out, with the reason beside it, when there is nothing it could do: an identity tied to your nest's domain ends when that domain stops serving it, and an identity that has not been published yet has nothing to retire.
 
 If the deletion goes through but the retirement cannot be recorded, the card
 stays open and says so. Confirming again is safe: deleting what is already
@@ -233,9 +217,7 @@ misbehaving server cannot vouch for itself.
 
 Two things get checked. First, that the public record of your identity still
 names *your* recovery key as the senior one — if it named someone else's, that
-person could take the identity from you. Second, that your identity is still
-published under a handle at your own domain — if it were published under some
-other name, everyone searching for you would find a stranger instead.
+person could take the identity from you. Second, that your identity is still published under a handle at your nest's domain — if it were published under some other name, everyone searching for you would find a stranger instead.
 
 Both checks run whenever the AT Protocol settings page refreshes, which covers the
 moment the identity is created. They also run on their own in the background —
@@ -271,7 +253,7 @@ Two honest limits. There is a **time limit** — Bluesky's directory only accept
 this kind of reversal within 72 hours of the change, and after that the change
 stands for good, so do not sit on the banner. And undoing this does **not**
 evict your nest entirely: it keeps the separate key it uses to publish your
-posts, so it could still post as you. Replacing that key is a separate step.
+posts, so it could still post as you. Fauna has no way to replace that key today.
 
 Sometimes there is nothing to undo, and you will be told which of three reasons
 it is, instead of being offered a button that cannot work: the time limit has
@@ -298,16 +280,15 @@ credentials*: your nest shows the generated secret once, you paste it into the
 other app, and you can re-reveal or revoke it later from any Fauna app. Nothing
 about it is a password you chose — there is no such thing anywhere in Fauna.
 
+Before you make one, a switch beside **New app credential** — "Let this app password read and send my Bluesky direct messages" — decides whether the app that signs in with it can reach your direct messages. It starts off, so a password made without touching it never can. A password made with the switch on says "Direct messages allowed" in the list. The choice is fixed when the password is made: to change it, make a new one and revoke the old.
+
 Newer apps use the **modern sign-in**, and it is worth knowing what to expect
 because part of it happens in your Fauna app rather than in the app you started
 from. You type your handle over there; it opens a page in your browser. That
 page names the app asking, lists what it wants to do in plain language, and
 shows a short code like `K7M-P2X`. It then waits.
 
-Open Fauna on any device you're signed in on. A card is waiting under
-**Requests** on Settings → Connected apps (in apps that do not have that page
-yet, at the top of Settings → AT Protocol), showing the same app, the same list,
-and a code. **Check
+Open Fauna on any device you're signed in on. A card is waiting under **Requests** on Settings → Connected apps, showing the same app, the same list, and a code. **Check
 that the code matches the one in your browser**, then approve. The browser
 finishes the sign-in by itself within a second or two, and the app you started
 from is connected.
@@ -347,6 +328,10 @@ card shows this as its own row too. It still reaches public posts only: a post
 meant for paying subscribers or shared with a closed audience never reaches
 the app, even when it sits in your own feeds. It sees only your own
 feeds, never anyone else's, and no keys of yours are shared with it.
+
+An app can also ask to **read one person's posts** — the public posts of any one author on your nest, newest first, the list a profile's Posts tab shows. The card shows this as its own row. It reaches public posts only: a post meant for paying subscribers or shared with a closed audience never reaches the app. If the app may also read your feeds, it sees those posts as you do — which ones you liked and reposted, and nothing from people you blocked. No keys of yours are shared with it.
+
+An app that connects to your nest directly can also ask to **post as you** or to **edit your profile**. These are two more rows on the same card. Approving either one also turns on the posting permission described further down under **Posting from other apps**, if it is not on already — the two share one posting key — so a Bluesky app you have signed in can then post as you and edit your profile too. With the first, the app can publish public posts in your name and delete the ones it published — never a post meant for paying subscribers or shared with a closed audience, and never a post you wrote yourself. With the second, it can change your profile's display name, bio and links, and nothing else on it; it cannot change your profile picture or banner. Either way your key is never handed to the app: your nest signs for you with a key it keeps for posting that your approval set up, never your own. That stops the moment you disconnect the app under **Connected apps** — or, at the deepest level of Settings → AT Protocol, choose **Stop other apps posting as me**, which ends that posting key for every outside app at once. What the app did most recently shows on its row under **Connected apps**.
 
 An app can also ask to **keep its own records in your account** — notes, tasks,
 or whatever kinds of data it was built around, each one published under the
@@ -411,8 +396,8 @@ do anything, and your Fauna app updates while you are looking at it. Either
 end can end a connection, and neither needs the other's cooperation: if the app
 is gone, uninstalled, or simply not listening, revoking from Fauna still works.
 
-Signing in this way gets an app *read* access as you. Posting still needs the
-separate, device-signed permission described next.
+Signing in this way gets a Bluesky app *read* access as you. Posting from a
+Bluesky app still needs the separate, device-signed permission described next.
 
 Posts you write in the other app arrive as real Fauna posts — text, hashtags,
 links, replies, quotes and photos alike. Attach a photo the way you normally
@@ -421,8 +406,8 @@ every Fauna app, exactly as if you had posted it here.
 
 **Signing in is not permission to post.** Letting another Bluesky app sign in
 lets it *read* as you; posting on your behalf is a separate decision you make
-separately, under **Posting from other apps**. Until you grant it, other apps
-can sign in and browse, but every attempt to post is refused. Choose *Let
+separately, under **Posting from other apps**. Until it is granted — here, or by approving the posting or profile row of an app that connects to your nest directly, which sets up the same
+permission — other apps can sign in and browse, but every attempt to post is refused. Choose *Let
 other apps post as me* and the row fills in with what you allowed, when you
 allowed it, and when the permission runs out — roughly three months, after
 which it stops on its own rather than lasting forever. It warns you a couple
@@ -485,10 +470,7 @@ never see the banner unless something is genuinely wrong.
 
 ## Nostr: a personal Nostr home
 
-The Nostr integration is built deep rather than bolted on: the nest acts as
-your **personal relay** (`wss://yourdomain.com/nostr`), gives you a
-`you@yourdomain.com` NIP-05 identity for free (you already own the domain),
-syncs with the public relays you list, and bridges Nostr DMs into
+The Nostr integration is built deep rather than bolted on: the nest acts as your **personal relay** (`wss://example.com/nostr`), gives you a `you@example.com` NIP-05 identity at your nest's own domain, syncs with the public relays you list, and bridges Nostr DMs into
 Conversations. The relays you list — and the relay named in an external
 signer's connect string — have to be reachable on the public internet: your
 nest refuses to dial a relay on a private or local network address, the same
@@ -501,20 +483,12 @@ key you keep outside the nest has to be proven before it is linked: your
 browser extension asks you to approve one signature, and a NIP-46 signer is
 contacted and asked to sign while you link, so paste a fresh connection
 string and keep the signer reachable. A key that isn't proven is never
-linked, so nobody can claim your npub for their `@yourdomain.com` name. A
+linked, so nobody can claim your npub for their `@example.com` name. A
 Nostr key belongs to one account per nest: if another account on the same
 nest has already linked that key, linking it again is refused and their
 account is left untouched.
 
-Two things to know before planning around it:
-
-- **It shipped to the production server image on 2026-07-16.** The full page
-  is live in every Fauna app.
-- **It requires granting your nest access to your content.** Relaying and
-  signing on your behalf means the nest has to work with your post content —
-  sealed by default like everything else on Fauna. Turning Nostr on mints the
-  specific grant for it, from Settings → Nests, and you can revoke it the
-  same way if you ever turn Nostr off.
+One thing to know before planning around it: **it needs your Nostr key on your nest.** Signing for you, bringing the people you follow into your feed, and sending and receiving Nostr direct messages all need a key your nest holds — one you generated or imported on the Nostr page. Your personal relay is served only while a Nostr key is held on your nest, or while your nest is paired with a home box. Unlinking removes the key from your nest.
 
 **Follows catch up, not just keep up.** The people you follow on Nostr flow
 into your unified feed, and your nest asks each relay for what it missed — so
@@ -525,9 +499,7 @@ keep their original dates, so they sort into your feed where they belong
 instead of arriving at the top as if they were new.
 
 **Sign in to other Nostr apps with your nest.** If you generated or imported
-your key on the nest, your nest can also be the *signer* for the Nostr apps you
-already like — Damus, Amethyst, noStrudel, and anything else that speaks
-"Nostr Connect". Open the **Connected apps** section on the Nostr page and tap
+your key on the nest, your nest can also be the *signer* for the Nostr apps you already like — any app that supports "Nostr Connect" (NIP-46). Open the **Connected apps** section on the Nostr page and tap
 **Connect an app**: your nest shows a one-time connect code as a QR you scan (or
 text you paste) into the other app. From then on, when that app needs to post or
 sign, it asks your nest — **your key never leaves the box**. Each connected app
@@ -541,9 +513,7 @@ other box holds your key; here, *your* box signs for everyone else.)
 your feed the way you would any other post: your nest signs it with your key
 and sends it to your relays, and Nostr apps show it in the right thread (a
 quote embeds the post you quoted). Two switches on the Nostr page decide the
-rest: *Publish replies* lets your replies go out to Nostr at all, and
-*Automatically publish Fauna posts to Nostr relays* sends your ordinary posts
-there too. A reply or quote needs a key your nest holds and at least one relay
+rest: **Publish replies** lets your replies go out to Nostr at all, and **Auto-publish posts** sends your ordinary posts there too. A reply or quote needs a key your nest holds and at least one relay
 in your list — if either is missing, the reply button says what to fix and
 nothing is sent.
 
@@ -573,10 +543,7 @@ link step once more to switch it on — it's safe to repeat.)
 
 ## The Fediverse (Mastodon & friends)
 
-ActivityPub support — your nest federating with Mastodon and the rest —
-shipped to the production server image on 2026-07-16. Turn it on from the
-app's *Bridges* page and your nest mints a Mastodon-compatible actor
-(`@you@yourdomain.com`): remote fediverse accounts can find and follow you
+ActivityPub support lets your nest federate with Mastodon and the rest. Turn it on from the app's Bridges page and your nest mints a Mastodon-compatible actor (`@you@example.com`): remote fediverse accounts can find and follow you
 and receive your public posts, and you can follow remote accounts back into
 your unified feed. Delivery has been confirmed end-to-end against real
 Mastodon and GoToSocial servers.
@@ -599,23 +566,26 @@ arrives in Conversations as a private conversation with that person, not in
 your feed. Reply there and your answer goes to them alone. Posts someone
 shares only with their followers are not direct messages and are not shown.
 
+**Follow requests.** If you turn off **Auto-accept follows** on the ActivityPub card of the Bridges page, people who follow you are not accepted straight away: each one waits as a request on the same card, under a **Follow requests** heading that shows how many are waiting. A request shows the person's address and, when your nest knows it, their display name. Choose **Approve** and they start receiving your posts; choose **Refuse** and they are told no and receive nothing. Neither asks you to confirm — a person you approved can stop following you at any time, and a person you refused can ask again. Posts you made while a request was waiting are not sent to a follower you approve afterwards. A person who withdraws their request drops off the list by themselves, and if you turn **Auto-accept follows** back on, everyone still waiting is approved.
+
 ## Where this stands today
 
 | Feature | Status |
 |---|---|
 | Unified feed & conversations with per-network source badges | **Available** |
-| Show in search / limit posts in search, per bridge | **Available** |
+| Show in search / limit posts in search, on the Bluesky and ActivityPub cards | **Available** — not yet on the Nostr page |
 | Bluesky: link your existing account (OAuth) | **Available** |
-| Bluesky: timeline into your feed; custom-feed subscriptions | **Available** — polled every few minutes; author names, pictures and post images are not shown yet |
+| Bluesky: timeline into your feed; custom-feed subscriptions | **Available** — polled every few minutes; author pictures are not shown yet |
 | Bluesky: like/reply/repost/quote from Fauna | **Available** — on any Bluesky post in your feed; replies under your own cross-posted posts thread on Bluesky too |
 | Bluesky: notifications & DMs in Fauna | **Available** |
 | Bluesky: cross-posting (off / auto / per-post) | **Available** |
 | Bluesky: follow/block from Fauna | **Not bridged** — manage follows in a Bluesky app |
 | Bluesky: your nest as your own Bluesky server (PDS), domain handle | **Early** — the Settings → AT Protocol depth selector can mint your identity and publish your public posts today; not yet confirmed on a live deployment: whether Bluesky's network actually crawls and indexes it. App credentials + Connected apps let another AT Protocol app log in and read/interact; once you grant *Let other apps post as me*, it writes as you — posts with photos, replies, quotes and profile edits all arrive as the real thing |
-| Nostr: personal relay, NIP-05 identity, relay sync, DMs, key import or external signer | **Available** — shipped to the production server image 2026-07-16; requires minting a content grant for your nest, from Settings → Nests |
-| Nostr: sign in to other Nostr apps with your nest (Nostr Connect) | **Available** — the *Connected apps* section on the Nostr page, in every Fauna app |
+| Nostr: personal relay, NIP-05 identity, relay sync, DMs, key import or external signer | **Available** — signing, follow sync and DMs need your Nostr key held on your nest (generated or imported); the relay is served only while a key is held there, or while your nest is paired with a home box |
+| Nostr: sign in to other Nostr apps with your nest (Nostr Connect) | **Available** — needs your Nostr key held on your nest (generated or imported); connect an app from the **Connected apps** section on the Nostr page, and each one is then listed, and disconnected, under Settings → **Connected apps**, in every Fauna app |
 | Nostr: reply to and quote Nostr posts from Fauna | **Available** — needs a key your nest holds; *Publish replies* on the Nostr page controls replies |
 | Nostr: choose whose zap receipts you believe | **Available** — the *Zap signers* section on the Nostr page. Until you designate a signer, no zap counts as paid, which is the deliberate starting point |
-| Fediverse / ActivityPub federation | **Available** — shipped to the production server image 2026-07-16; confirmed against real Mastodon and GoToSocial servers |
+| Fediverse / ActivityPub federation | **Available** — confirmed against real Mastodon and GoToSocial servers |
 | Fediverse: reply to and quote fediverse posts from Fauna | **Available** — your reply reaches the person you answered and threads under their post |
+| Fediverse: approve or refuse follow requests | **Available** — on the ActivityPub card of the Bridges page, while **Auto-accept follows** is off |
 | Fediverse: direct messages in Conversations | **Early** — one-to-one messages arrive and your replies are sent; not yet confirmed against a live Mastodon server; start a new one by typing the person's `@name@server` address |

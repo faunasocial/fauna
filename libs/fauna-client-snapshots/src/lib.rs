@@ -18,28 +18,30 @@
 //! `SnapshotsClient<R: RpcRequester>`, one async method per kind, no
 //! state machine, wasm-clean (no `fauna-client` dependency).
 
+use fauna_core::identity::ActorId;
 use fauna_core::label_custody::{self, LabelCustody};
 use fauna_core::path_crypto::{LabelField, SealedLabelRender};
 use fauna_protocol::ByteBuf;
 use fauna_protocol::RpcRequester;
 use fauna_protocol::filesync::{
     SnapshotCheckReply, SnapshotCheckRequest, SnapshotCreateFolderReply,
-    SnapshotCreateFolderRequest, SnapshotDeleteImmediateReply, SnapshotDeleteImmediateRequest,
-    SnapshotDeleteReply, SnapshotDeleteRequest, SnapshotDiffReply, SnapshotDiffRequest,
-    SnapshotGetReply, SnapshotGetRequest, SnapshotListReply, SnapshotListRequest,
-    SnapshotPruneReply, SnapshotPruneRequest, SnapshotPruneSetPolicyReply,
-    SnapshotPruneSetPolicyRequest, SnapshotRestoreDivergenceListReply,
-    SnapshotRestoreDivergenceListRequest, SnapshotRestoreHistoryListReply,
-    SnapshotRestoreHistoryListRequest, SnapshotRestoreMessageKindReply,
-    SnapshotRestoreMessageKindRequest, SnapshotRetentionPolicy, SnapshotStampLabelsReply,
-    SnapshotStampLabelsRequest, SnapshotUndeleteReply, SnapshotUndeleteRequest,
+    SnapshotCreateFolderRequest, SnapshotCreateMessageKindReply, SnapshotCreateMessageKindRequest,
+    SnapshotDeleteImmediateReply, SnapshotDeleteImmediateRequest, SnapshotDeleteReply,
+    SnapshotDeleteRequest, SnapshotDiffReply, SnapshotDiffRequest, SnapshotGetReply,
+    SnapshotGetRequest, SnapshotListReply, SnapshotListRequest, SnapshotPruneReply,
+    SnapshotPruneRequest, SnapshotPruneSetPolicyReply, SnapshotPruneSetPolicyRequest,
+    SnapshotRestoreDivergenceListReply, SnapshotRestoreDivergenceListRequest,
+    SnapshotRestoreHistoryListReply, SnapshotRestoreHistoryListRequest,
+    SnapshotRestoreMessageKindReply, SnapshotRestoreMessageKindRequest, SnapshotRetentionPolicy,
+    SnapshotStampLabelsReply, SnapshotStampLabelsRequest, SnapshotUndeleteReply,
+    SnapshotUndeleteRequest,
 };
 use fauna_protocol::filesync::{
     SnapshotDiffEntry, SnapshotDiffSummary, SnapshotFileEntry, SnapshotModifiedEntry,
 };
 
 pub mod entry_reader;
-pub use entry_reader::{EntryLicence, SnapshotEntryReader, SnapshotSet};
+pub use entry_reader::{ManifestLicence, SnapshotEntryReader, SnapshotSet};
 
 /// A **rendered** snapshot diff — [`SnapshotDiffReply`] after the sealed-path
 /// and set-name renders, the shape every app's diff view consumes.
@@ -715,6 +717,67 @@ impl<R: RpcRequester> SnapshotsClient<R> {
             .await
     }
 
+    /// [`Self::prune_set_policy`] on a **kind entry** of the Backups selector
+    /// (`ui/backups.md` § Snapshot-list shape → *Kind entries*): the nest
+    /// resolves the bearer's reserved `__<kind>` row (conv: every channel the
+    /// bearer belongs to) and applies its policy — the kind default when none
+    /// is set (`backup-restore.md` § 8 → *Message-kind rows*).
+    pub async fn prune_set_policy_kind(
+        &self,
+        message_kind: impl Into<String>,
+        dry_run: bool,
+    ) -> Result<SnapshotPruneSetPolicyReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.filesync.snapshot.prune_set_policy",
+                SnapshotPruneSetPolicyRequest {
+                    message_kind: Some(message_kind.into()),
+                    dry_run,
+                    ..Default::default()
+                },
+            )
+            .await
+    }
+
+    /// `fauna.filesync.snapshot.create_message_kind` — the Backups page's
+    /// create action on a kind entry (`backup-restore.md` § 5 → *Creators*,
+    /// the manual creator). `actor_id: None` is the owner's own scope for
+    /// mail/post/calendar/card and the batched every-channel-I-belong-to form
+    /// for conv; `Some(channel)` captures one conv channel.
+    pub async fn create_message_kind(
+        &self,
+        kind: impl Into<String>,
+        actor_id: Option<ActorId>,
+    ) -> Result<SnapshotCreateMessageKindReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.filesync.snapshot.create_message_kind",
+                SnapshotCreateMessageKindRequest {
+                    kind: kind.into(),
+                    actor_id,
+                    extra: Default::default(),
+                },
+            )
+            .await
+    }
+
+    /// [`Self::check`] on a kind entry: verifies each active snapshot's pinned
+    /// content segments are on disk (a kind row has no chunk listing).
+    pub async fn check_kind(
+        &self,
+        message_kind: impl Into<String>,
+    ) -> Result<SnapshotCheckReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.filesync.snapshot.check",
+                SnapshotCheckRequest {
+                    message_kind: Some(message_kind.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+    }
+
     /// `fauna.filesync.snapshot.check` — integrity scan over the blob
     /// store for one folder. `backup_unavailable` if no backup service.
     pub async fn check(
@@ -881,6 +944,15 @@ mod tests {
                 fauna_protocol::encode_canonical(&SnapshotDeleteImmediateReply {
                     snapshot_id: 42,
                     segment_retention_days: 14,
+                    extra: Default::default(),
+                })
+            }
+            "fauna.filesync.snapshot.create_message_kind" => {
+                fauna_protocol::encode_canonical(&SnapshotCreateMessageKindReply {
+                    snapshot_id: 1,
+                    snapshot_ids: vec![1],
+                    kind: "mail".into(),
+                    actor_id: ActorId([0u8; 32]),
                     extra: Default::default(),
                 })
             }
@@ -1104,6 +1176,54 @@ mod tests {
         let req: SnapshotCheckRequest = fauna_protocol::decode_strict(&payload).expect("decodes");
         assert_eq!(req.folder, "__mail");
         assert!(req.verify_content);
+    }
+
+    /// A kind entry's create: the kind string and the `actor_id` form ride as
+    /// given — `None` is the owner's own scope (conv: the batched
+    /// every-channel form), `Some(channel)` one conv channel.
+    #[test]
+    fn create_message_kind_composes_kind_and_payload() {
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = SnapshotsClient::new(rec.clone());
+        block_on(client.create_message_kind("conv", None)).expect("infallible mock");
+        let (kind, payload) = rec.recorded();
+        assert_eq!(kind, "fauna.filesync.snapshot.create_message_kind");
+        let req: SnapshotCreateMessageKindRequest =
+            fauna_protocol::decode_strict(&payload).expect("decodes");
+        assert_eq!(req.kind, "conv");
+        assert_eq!(req.actor_id, None);
+
+        let channel = ActorId([7u8; 32]);
+        block_on(client.create_message_kind("conv", Some(channel.clone())))
+            .expect("infallible mock");
+        let (_, payload) = rec.recorded();
+        let req: SnapshotCreateMessageKindRequest =
+            fauna_protocol::decode_strict(&payload).expect("decodes");
+        assert_eq!(req.actor_id, Some(channel));
+    }
+
+    /// The kind forms address by `message_kind` alone: no folder name, hash
+    /// or row rides beside it, so the nest can never resolve a folder instead.
+    #[test]
+    fn prune_set_policy_kind_and_check_kind_address_by_message_kind_only() {
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = SnapshotsClient::new(rec.clone());
+
+        block_on(client.prune_set_policy_kind("mail", true)).expect("infallible mock");
+        let (kind, payload) = rec.recorded();
+        assert_eq!(kind, "fauna.filesync.snapshot.prune_set_policy");
+        let req: SnapshotPruneSetPolicyRequest =
+            fauna_protocol::decode_strict(&payload).expect("decodes");
+        assert_eq!(req.message_kind.as_deref(), Some("mail"));
+        assert!(req.dry_run);
+        assert!(req.folder.is_empty() && req.name_hash.is_none() && req.folder_id.is_none());
+
+        block_on(client.check_kind("calendar")).expect("infallible mock");
+        let (kind, payload) = rec.recorded();
+        assert_eq!(kind, "fauna.filesync.snapshot.check");
+        let req: SnapshotCheckRequest = fauna_protocol::decode_strict(&payload).expect("decodes");
+        assert_eq!(req.message_kind.as_deref(), Some("calendar"));
+        assert!(req.folder.is_empty() && req.name_hash.is_none() && req.folder_id.is_none());
     }
 
     /// The point of the kind: the request carries **no policy field at all**,

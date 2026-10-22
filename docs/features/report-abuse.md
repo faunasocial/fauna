@@ -12,11 +12,7 @@ Tell your nest's administrators about a post, a message someone sent you, or an
 account you think they should see. You pick a reason, can add a note, and can block
 the person in the same step. A private message stays private unless you tick the box
 that attaches its text. When the person lives on another nest, your report is passed
-on to that nest's administrators too, without your name. A report removes nothing and
-is never shown to the person you reported; what changes is your own view, where what
-you reported is replaced by a note that you reported it. You are told what became of
-your report, and your Moderation page lists your reports and lets you withdraw one
-while it is still open.
+on to that nest's administrators too, without your name. A report removes nothing by itself, and the person you report is never told who reported them; what changes is your own view, where what you reported is replaced by a note that you reported it. You are told what became of your report, and the Moderation page (in the web app, a section of Settings → Privacy) lists your reports and lets you withdraw one while it is still open.
 
 ## Coverage contract
 
@@ -72,8 +68,8 @@ Stamped 2026-10-01 at e5a7e5d758.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+cfad4af4 standalone |
-| linux | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| web | ✅ full | 0.1.5-dev+110d1248 standalone |
+| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
 | windows | ⚠ partial | 0.1.3-dev+60888d4e standalone |
 | macos | ⚠ partial | 0.1.3-dev+a5d2dc2b standalone |
 | ios | ⚠ partial | 0.1.3-dev+a5d2dc2b standalone |
@@ -84,16 +80,16 @@ Stamped 2026-10-01 at e5a7e5d758.
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_an_account_report_shows_in_the_ledger_and_can_be_withdrawn` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_received_message_is_reported_from_its_menu_and_its_text_goes_only_if_ticked` | linux (linux): failed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_received_message_is_reported_from_its_menu_and_its_text_goes_only_if_ticked` | linux (linux): failed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_received_message_is_reported_from_its_menu_and_its_text_goes_only_if_ticked` | web (linux): passed, linux (linux): failed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_received_message_is_reported_from_its_menu_and_its_text_goes_only_if_ticked` | web (linux): passed, linux (linux): failed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_restricted_posts_text_reaches_the_admins_when_ticked` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_reporting_a_post_can_block_its_author_in_the_same_step` | linux (linux): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_reporting_is_not_offered_on_your_own_post_or_profile` | linux (linux): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_received_message_is_reported_from_its_menu_and_its_text_goes_only_if_ticked` | linux (linux): failed, tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_reporting_a_post_can_block_its_author_in_the_same_step` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_reporting_is_not_offered_on_your_own_post_or_profile` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_received_message_is_reported_from_its_menu_and_its_text_goes_only_if_ticked` | web (linux): passed, linux (linux): failed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_on_a_foreign_post_reaches_its_home_nest_and_the_outcome_returns` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_reporting_an_account_hides_everything_it_wrote` | linux (linux): passed, tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_reporting_an_account_hides_everything_it_wrote` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 12 | nest | `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_the_reported_author_is_told_nothing` | nest (linux): passed |
 | 13 | nest | `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_a_report_changes_nothing_for_anyone_but_the_reporter` | nest (linux): passed |

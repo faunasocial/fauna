@@ -34,7 +34,6 @@ from tests.test_account_switcher_web import (
     REMOVE_BUTTON,
     SWITCHER_ITEM,
     _read_registry_index,
-    _seed_registry,
     _seed_two_accounts,
 )
 
@@ -117,14 +116,12 @@ def test_web_remove_account_refuses_an_account_another_tab_serves(nest_instance,
     )
 
     tab_a = create_driver("web")
-    tab_a.launch({"url": spa_url + "/app/"})
+    tab_a.launch({"url": spa_url + "/app/", "seed_credentials": seed})
     tab_b = None
     try:
         # (1) Tab A boots over the seeded profile, serving U (the active account),
         # and takes U's engine role — an ENABLED compose button is positive
         # evidence (`disabled={!manager}`).
-        _seed_registry(tab_a, seed)
-        tab_a.hard_reload()
         _wait_until(lambda: _session_actor(tab_a) == user_actor, what="tab A serving U")
         tab_a.set_state(CONVERSATIONS_NAV)
         tab_a.wait_for(NEW_CONVERSATION_BUTTON, timeout=BOOT_BUDGET_S)

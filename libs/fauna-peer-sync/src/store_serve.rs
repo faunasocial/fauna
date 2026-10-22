@@ -84,6 +84,8 @@ enum StoreCmd {
     HeldSegments {
         scope: String,
         kind: String,
+        /// Just this segment id, or every held one.
+        only: Option<u32>,
         reply: oneshot::Sender<Result<Vec<HeldSegment>>>,
     },
 }
@@ -188,10 +190,20 @@ impl ServeStoreHandle {
         rx.await.context("serving-store thread dropped a reply")?
     }
 
-    async fn held_segments(&self, scope: String, kind: String) -> Result<Vec<HeldSegment>> {
+    async fn held_segments(
+        &self,
+        scope: String,
+        kind: String,
+        only: Option<u32>,
+    ) -> Result<Vec<HeldSegment>> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(StoreCmd::HeldSegments { scope, kind, reply })
+            .send(StoreCmd::HeldSegments {
+                scope,
+                kind,
+                only,
+                reply,
+            })
             .await
             .context("serving-store thread is gone")?;
         rx.await.context("serving-store thread dropped a reply")?
@@ -238,8 +250,13 @@ async fn answer(store: &AccountStore<SqliteBackend>, cmd: StoreCmd) {
                 Some(e) => Err(e),
             });
         }
-        StoreCmd::HeldSegments { scope, kind, reply } => {
-            let _ = reply.send(held_segments(store, &scope, &kind).await);
+        StoreCmd::HeldSegments {
+            scope,
+            kind,
+            only,
+            reply,
+        } => {
+            let _ = reply.send(held_segments(store, &scope, &kind, only).await);
         }
     }
 }
@@ -248,15 +265,18 @@ async fn answer(store: &AccountStore<SqliteBackend>, cmd: StoreCmd) {
 /// holds, ascending by id. An evicted container (the metadata floor kept its
 /// row and sidecar, never its bytes) is not servable and is left out — a
 /// listing that advertised it would promise bytes the byte door cannot hand.
+/// `only` narrows it to one id — the byte door's lookup, which reads that one
+/// segment's sidecar rather than every held one's.
 async fn held_segments(
     store: &AccountStore<SqliteBackend>,
     scope: &str,
     kind: &str,
+    only: Option<u32>,
 ) -> Result<Vec<HeldSegment>> {
     let backend = store.backend();
     let mut out = Vec::new();
     for key in store.adopted_segments(scope).await? {
-        if key.kind != kind {
+        if key.kind != kind || only.is_some_and(|id| id != key.segment_id) {
             continue;
         }
         let Some(dat_path) = backend.held_segment_dat_path(&key)? else {
@@ -435,7 +455,7 @@ pub async fn serve_segment_listing(
     scope: String,
     kind: String,
 ) -> Result<SegmentsListReply> {
-    let held = store.held_segments(scope, kind).await?;
+    let held = store.held_segments(scope, kind, None).await?;
     let next_segment_id = held
         .iter()
         .map(|s| s.segment_id.saturating_add(1))
@@ -484,6 +504,19 @@ pub enum SegmentPart {
     Meta,
 }
 
+/// One half of an adopted segment pair as the byte door hands it out.
+#[derive(Debug)]
+pub enum SegmentPartBody {
+    /// The `.dat`, **open** — the door streams it, never reads it whole: a
+    /// segment has no size ceiling
+    /// (`docs/goal/architecture/message-segment-store.md` § Segment size).
+    Dat(tokio::fs::File),
+    /// The `.meta` sidecar, verbatim. The store keeps it in its own segment
+    /// row (the admission's index, decoded whole on adoption), so it is in
+    /// memory already.
+    Meta(Vec<u8>),
+}
+
 /// One half of an adopted segment pair, verbatim — `None` when the store holds
 /// no such segment, or no longer holds its container. The byte door's answer.
 pub async fn serve_segment_part(
@@ -492,18 +525,18 @@ pub async fn serve_segment_part(
     kind: String,
     segment_id: u32,
     part: SegmentPart,
-) -> Result<Option<Vec<u8>>> {
-    let held = store.held_segments(scope, kind).await?;
+) -> Result<Option<SegmentPartBody>> {
+    let held = store.held_segments(scope, kind, Some(segment_id)).await?;
     let Some(seg) = held.into_iter().find(|s| s.segment_id == segment_id) else {
         return Ok(None);
     };
     match part {
-        SegmentPart::Meta => Ok(Some(seg.meta)),
-        SegmentPart::Dat => match tokio::fs::read(&seg.dat_path).await {
-            Ok(bytes) => Ok(Some(bytes)),
+        SegmentPart::Meta => Ok(Some(SegmentPartBody::Meta(seg.meta))),
+        SegmentPart::Dat => match tokio::fs::File::open(&seg.dat_path).await {
+            Ok(file) => Ok(Some(SegmentPartBody::Dat(file))),
             // Evicted between the listing read and this one.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e).with_context(|| format!("read {}", seg.dat_path.display())),
+            Err(e) => Err(e).with_context(|| format!("open {}", seg.dat_path.display())),
         },
     }
 }

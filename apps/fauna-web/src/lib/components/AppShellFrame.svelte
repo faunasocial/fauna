@@ -1,6 +1,6 @@
 <script lang="ts">
   // Shared sidebar-shell chrome for web's three sidebar-swap layouts
-  // (routes/+layout.svelte, routes/admin/+layout.svelte,
+  // (lib/components/RootShell.svelte, routes/admin/+layout.svelte,
   // routes/settings/+layout.svelte) — the flex .shell/.sidebar/.content
   // frame every one of them used to hand-copy, each own style block naming
   // the other two and asking a human to keep them in sync by hand (named

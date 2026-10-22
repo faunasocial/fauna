@@ -97,6 +97,7 @@ from helpers import enrollment
 from helpers.bridge_enrollment import enroll_bridge
 from helpers.app_surface import app_name
 from helpers.waiting import await_device_removal_ready, wait_until
+from i18n.strings import S
 
 pytestmark = [pytest.mark.tier_3, pytest.mark.crash_recovery,
               pytest.mark.destructive]
@@ -290,6 +291,79 @@ def test_kill_client_mid_mail_enable_box_recovers(killable_app, crash_nest):
         f"relaunched client could not drive the box to 'mail enabled with a "
         f"credential' after a mid-enable crash (beacon: {beacon!r}; services "
         f"at kill: {services!r}). error={app.error_text()!r}"
+    )
+
+
+_SUBMISSION_TOKEN_KIND = "fauna.bridges.provision_wrapped_submission_token"
+
+
+@pytest.mark.feature("turn-on-mail")
+def test_kill_client_mid_first_enable_shows_partial_and_resume_finishes(
+    killable_app, crash_nest
+):
+    """turn-on-mail outcome 15: a first enable torn after the resume sentinel
+    is published but before the submission token lands reads, on relaunch, as
+    the pending banner (`mail-credentials.md` § Partial-state-during-minting —
+    first-enable is a degenerate rotation under the sentinel), and one tap on
+    Resume finishes it to a working mailbox. No new id: the banner and its
+    Resume button are the rotation's own.
+
+    The seam is the nest holding the token write (`rpc_hold`), not a timed
+    kill: a parked `provision_wrapped_submission_token` proves the sentinel
+    and steps 1–3 already landed and step 4 has not, and the client is
+    SIGKILL'd while it waits on that reply."""
+    app = killable_app
+
+    _relaunch_trusting_nest(app.driver, crash_nest)
+    inject_admin_session(app, crash_nest["url"], _admin_secret_hex(crash_nest))
+    app.mail_settings.navigate()
+    app.driver.wait_for("mail-settings-enabled-toggle", timeout=15.0)
+
+    port = crash_nest["port"]
+    arm_rpc_hold(port, _SUBMISSION_TOKEN_KIND)
+    try:
+        app.mail_settings.start_enable_mail("Default")
+        wait_for_held_rpc(
+            port, _SUBMISSION_TOKEN_KIND,
+            diagnose=lambda: f"error={app.error_text()!r}",
+        )
+        app.driver.kill_uncleanly()
+    finally:
+        release_rpc_hold(port, _SUBMISSION_TOKEN_KIND)
+
+    # Recovery through the UI: the relaunched page says the enable did not
+    # finish, and Resume finishes it.
+    app.driver.hard_reload()
+    inject_admin_session(app, crash_nest["url"], _admin_secret_hex(crash_nest))
+    app.mail_settings.navigate()
+    banner = "mail-settings-pending-rotation-banner"
+    assert wait_until(
+        lambda: app.driver.is_visible(banner),
+        app.mail_settings.ENABLE_SETTLE_S,
+        diagnose=lambda: (
+            f"a first enable torn before its submission token must read as the "
+            f"pending banner; status={app.mail_settings.status_text()!r} "
+            f"error={app.error_text()!r}"
+        ),
+    )
+    assert app.driver.get_text(banner) == S.settings.mail.banner_title
+
+    app.driver.click("mail-settings-pending-rotation-resume-button")
+    assert wait_until(
+        lambda: not app.driver.is_visible(banner),
+        app.mail_settings.ENABLE_SETTLE_S,
+        diagnose=lambda: (
+            f"Resume must finish the torn enable and clear the banner; "
+            f"status={app.mail_settings.status_text()!r} error={app.error_text()!r}"
+        ),
+    )
+    assert app.mail_settings.wait_for_enabled_status(timeout=app.mail_settings.ENABLE_SETTLE_S), (
+        f"the resumed enable reads up to date; status={app.mail_settings.status_text()!r} "
+        f"error={app.error_text()!r}"
+    )
+    assert app.mail_settings.credential_count() == 1, (
+        f"the resume never mints a second credential; "
+        f"count={app.mail_settings.credential_count()} error={app.error_text()!r}"
     )
 
 
@@ -1293,10 +1367,13 @@ def test_kill_client_mid_domain_remove_box_recovers(killable_app, crash_nest):
         f"can kill mid-remove. error={app.error_text()!r}"
     )
 
-    # Act: click that row's remove button, SIGKILL at the dispatch seam.
-    idx = app.admin.dns_domain_names().index(domain)
+    # Act: press that row's remove control, then the confirm it opens — the
+    # click that dispatches — and SIGKILL at the dispatch seam. An app not yet
+    # lifted onto the confirm dispatches on the press itself.
     watch = NestLogWatch(crash_nest)
-    app.driver.click("admin-dns-domain-remove-button", index=idx)
+    app.admin.press_domain_remove(domain)
+    if app.admin.remove_confirm_open():
+        app.admin.confirm_domain_remove()
     beacon = watch.wait_for_dispatch("fauna.bridges.remove_local_domain")
     app.driver.kill_uncleanly()
 
@@ -1950,7 +2027,7 @@ REMOVAL_RESUMED_S = 180.0
 _PUBLISH_KIND = "fauna.folders.content_key.put"
 
 #: The launch pass's own completion line, per app: the shared native trigger
-#: (`fauna_client_folders::launch_resume`) and web's (`$lib/conversations`).
+#: (`fauna_client_folders::launch_resume`) and web's (`#lib/conversations`).
 #: Logged only after `resume_pending_removals` returned `Ok`, which is after
 #: the sentinel settled — the app's own word that the staging is gone.
 _RESUMED_LINES = (

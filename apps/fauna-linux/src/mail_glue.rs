@@ -254,6 +254,17 @@ pub fn build_mail_policy_machine(client: &FaunaClient) -> MailPolicyMachine {
     fauna_client_mail_settings::rpc_glue::build_mail_policy_machine(client.nest_rpc().clone())
 }
 
+/// Build a `DmarcReportsMachine` for the `admin-mail-reports` page (the DMARC
+/// aggregate reports peers mail this nest). **Admin-class** (wraps
+/// `MailAdminClient`, no keypair): a thin `FaunaClient` -> `Arc<NestClient>`
+/// adaptation over the shared `rpc_glue` constructor (priority #2/#4). See
+/// `docs/goal/behavior/dmarc-reporting.md` § Admin pane summary surface.
+pub fn build_dmarc_reports_machine(
+    client: &FaunaClient,
+) -> fauna_client_mail_settings::dmarc_reports::DmarcReportsMachine {
+    fauna_client_mail_settings::rpc_glue::build_dmarc_reports_machine(client.nest_rpc().clone())
+}
+
 /// Build a `CaldavPolicyMachine` for the flat `admin-calendar` page — the
 /// CalDAV-enable sibling of `build_mail_policy_machine`. **Admin-class** (wraps
 /// `MailAdminClient`, no keypair). The toggle hydrates `caldav_enabled` from the

@@ -80,19 +80,33 @@ impl<'s> ArchiveReader<'s> {
     /// Reads the central directory (from the end of the source) and nothing
     /// else.
     pub fn open(source: &'s dyn ArchiveSource) -> Result<Self, ArchiveError> {
-        let mut zip = zip::ZipArchive::new(SourceCursor::new(source))
-            .map_err(|e| ArchiveError::Zip(e.to_string()))?;
+        // The archive is first opened at a known offset of 0 — an export has
+        // no data prepended — because zip 9's default offset detection read
+        // the WHOLE source at every open (measured: 100.96 MB read opening a
+        // 100.66 MB archive), and the importer opens once per record. Only an
+        // archive that does not open that way pays for the detection.
+        let config = zip::read::Config {
+            archive_offset: zip::read::ArchiveOffset::Known(0),
+        };
+        let mut zip = match zip::ZipArchive::with_config(config, SourceCursor::new(source)) {
+            Ok(zip) => zip,
+            Err(_) => zip::ZipArchive::new(SourceCursor::new(source))
+                .map_err(|e| ArchiveError::Zip(e.to_string()))?,
+        };
         let mut entries = Vec::with_capacity(zip.len());
         for index in 0..zip.len() {
             // `by_index_raw` exposes the header without preparing decompression.
             let file = zip
                 .by_index_raw(index)
                 .map_err(|e| ArchiveError::Zip(format!("member {index}: {e}")))?;
-            if file.is_dir() || file.name().ends_with('/') {
+            let name = file
+                .name()
+                .map_err(|e| ArchiveError::Zip(format!("member {index}: {e}")))?;
+            if file.is_dir() || name.ends_with('/') {
                 continue;
             }
             entries.push(ZipEntry {
-                name: file.name().to_string(),
+                name: name.into_owned(),
                 size: file.size(),
                 index,
             });

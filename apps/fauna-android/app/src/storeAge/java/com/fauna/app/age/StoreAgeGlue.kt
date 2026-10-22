@@ -19,15 +19,17 @@ import kotlin.coroutines.resumeWithException
  * (`installers/android.md` § Release channels; `family-safety.md` § The
  * account age band).
  *
- * This file is the complete list of android code that may name a
+ * This directory (this file and the store-consent round's [StoreConsentGlue])
+ * is the complete list of android code that may name a
  * `com.google.android.play` symbol: the two client libraries are proprietary
  * Google IPC shims to the Play Store app, so they live only in the artifacts
  * Play itself distributes — an F-Droid or direct-download build carries no
  * Play code at all and simply makes no claim (its admissions record
  * provenance `none`, the honest partial coverage D5 accepts). What Google
- * sees: one explicit age-signals question and one integrity verdict, both at
- * admission time only, over a nonce that is a SHA-256 digest — never the band
- * or the actor id.
+ * sees from this arm: one explicit age-signals question and one integrity
+ * verdict, both at admission time only, over a nonce that is a SHA-256 digest
+ * — never the band or the actor id. (The store-consent round's launch and
+ * foreground read is [StoreConsentGlue]'s, and sends Play nothing of Fauna's.)
  */
 object StoreAgeGlue : StoreAgeSignals {
     override suspend fun ageRange(activity: Activity): StoreAgeRange? {
@@ -60,8 +62,8 @@ object StoreAgeGlue : StoreAgeSignals {
     }
 }
 
-/** Play's `Task` as a suspending call, without pulling the coroutines-play-services artifact. */
-private suspend fun <T> Task<T>.await(): T = suspendCancellableCoroutine { cont ->
+/** Play's `Task` as a suspending call, without pulling the coroutines-play-services artifact (also [StoreConsentGlue]'s). */
+internal suspend fun <T> Task<T>.await(): T = suspendCancellableCoroutine { cont ->
     addOnSuccessListener { cont.resume(it) }
     addOnFailureListener { cont.resumeWithException(it) }
     addOnCanceledListener { cont.cancel() }

@@ -1195,6 +1195,14 @@ public final class DevicesMachineVM {
         await machine?.setFolderResidency(name: name, residency: residency)
     }
 
+    /// Turn one folder's exclusive editing on or off (`folder-exclusive-editing-toggle`,
+    /// owner row; `ui/folders.md` § Exclusive editing). **Non-optimistic**: the
+    /// machine refreshes on success and the toggle repaints `exclusiveEditing`
+    /// from the new snapshot; a refusal paints the snapshot's `error`.
+    public func setFolderExclusiveEditing(name: String, on: Bool) async {
+        await machine?.setFolderExclusiveEditing(name: name, on: on)
+    }
+
     /// The page-level default conflict policy stamped onto NEW sets
     /// (`sync-default-conflict-policy-select`), sealed into the owner's encrypted
     /// `fauna.state.sync-prefs`. `nil` until loaded / never set (nest default `auto`).
@@ -1205,6 +1213,27 @@ public final class DevicesMachineVM {
     public func loadDefaultConflictPolicy() async {
         guard let api else { return }
         defaultConflictPolicy = (try? await api.defaultConflictPolicy()) ?? nil
+    }
+
+    /// The store-change notice's re-read (account-runtime.md § Multi-instance
+    /// concurrency, the own-pump notice, part 4 — Devices and Folders): the
+    /// roster and folder rows through the shared machine's own `refresh()`
+    /// (the machine paints only a changed snapshot), the stored default
+    /// conflict policy, and the custody facet re-folded WITHOUT the ceremony
+    /// drive (a notice is not a page load, and the drive is itself a store
+    /// writer). Raises no banner, touches no wizard draft or armed row, and
+    /// each field is set only when it differs.
+    public func resyncStore() async {
+        guard let api, machine != nil else { return }
+        await machine?.refresh()
+        if let policy = try? await api.defaultConflictPolicy(), policy != defaultConflictPolicy {
+            defaultConflictPolicy = policy
+        }
+        if let facet = try? await api.loadCustodyFacet(), facet.rows != custodyRows
+            || facet.held != custodyHeld || facet.offers != custodyOffers
+        {
+            await applyCustodyFacet(facet, api: api)
+        }
     }
 
     /// Persist the default for new sets. Failure surfaces on `error-message`.

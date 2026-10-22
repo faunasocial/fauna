@@ -81,6 +81,7 @@ from helpers.xrpc_client import xrpc_post
 from helpers.oauth_client import (
     BC_AUTHORIZE_PATH,
     DEVICE_AUTHORIZATION_PATH,
+    GRANT_TYPE_CIBA,
     GRANT_TYPE_DEVICE_CODE,
     GRANT_TYPE_HANDOFF,
     OAuthClient,
@@ -152,6 +153,7 @@ _HANDOFF_DECLINE_PORT = 17795
 _PERMISSION_SET_PORT = 17797
 _LAST_USED_PORT = 17798
 _BAD_CODE_PORT = 17799
+_QUIET_DECLINE_PORT = 17801
 
 
 def _client(consent_nest, port: int, scope: str = "atproto") -> OAuthClient:
@@ -343,6 +345,39 @@ def test_a_quiet_push_lands_in_the_tray_and_never_show_blocks_the_app(
                 "fauna.oauth.consent.block_client",
                 {"client_id": stranger.client_id, "blocked": False},
             )
+
+
+@pytest.mark.tui
+@pytest.mark.web
+@pytest.mark.feature("connected-apps")
+def test_declining_a_quiet_push_tells_the_app_no(connected_app, consent_nest):
+    """(g'): outcome 14's second witness, through the door web has — declining
+    the card a quiet push lands in the tray answers the app's poll with
+    ``access_denied`` and connects nothing. (The handoff-link witness skips on
+    web, whose route intake is a declared absence.)"""
+    ca: ConnectedAppsActions = connected_app.connected_apps
+    stranger = _client(consent_nest, _QUIET_DECLINE_PORT)
+
+    status, pushed = stranger.start_polled(BC_AUTHORIZE_PATH, {"login_hint": "alice"})
+    assert status == 200 and pushed.get("auth_req_id"), f"push refused: {status} {pushed!r}"
+
+    index = ca.wait_for_request_from(stranger.client_id)
+    assert index is not None, (
+        "a quiet push must be findable in the Requests tray. "
+        f"error: {ca.current_error_text()!r}"
+    )
+
+    ca.decline_request(index)
+
+    status, body = stranger.poll_token(GRANT_TYPE_CIBA, "auth_req_id", pushed["auth_req_id"])
+    assert (status, body.get("error")) == (400, "access_denied"), (status, body)
+    assert ca.visit(), f"the page must re-read. error: {ca.current_error_text()!r}"
+    assert ca.item_index_containing(stranger.client_id) is None, (
+        "a declined request connects nothing"
+    )
+    assert ca.request_index_for_client(stranger.client_id) is None, (
+        "a declined request leaves the tray"
+    )
 
 
 @pytest.mark.tui
@@ -622,13 +657,16 @@ def test_a_declined_handoff_tells_the_app_no(handoff_app, consent_nest):
 _SWITCH_PORT = 17796
 
 
-@pytest.mark.tui
-@pytest.mark.android
+# The switch moved to this page 2026-10-17 (owner-ruled 2026-10-16); tui led,
+# web, linux, android, macos and ios followed, and windows re-adds its marker
+# in the batched trickle-down that lifts the toggle there (it still paints it
+# on the AT Protocol page until then).
 @pytest.mark.web
 @pytest.mark.linux
 @pytest.mark.macos
 @pytest.mark.ios
-@pytest.mark.windows
+@pytest.mark.android
+@pytest.mark.tui
 @pytest.mark.feature("connected-apps")
 def test_the_external_apps_switch_pauses_a_connected_app_and_on_restores_it(
     connected_app, consent_nest
@@ -652,7 +690,6 @@ def test_the_external_apps_switch_pauses_a_connected_app_and_on_restores_it(
 
     app = connected_app
     ca: ConnectedAppsActions = app.connected_apps
-    bs = app.atproto_settings
     client, tokens = ceremony(
         consent_nest, DECLARED, redirect_uri=f"http://127.0.0.1:{_SWITCH_PORT}/callback"
     )
@@ -667,11 +704,11 @@ def test_the_external_apps_switch_pauses_a_connected_app_and_on_restores_it(
         f"error: {ca.current_error_text()!r}"
     )
 
-    bs.navigate()
+    ca.navigate()
     try:
-        bs.set_external_apps_enabled(False)
-        assert bs.wait_for_external_apps_state("off"), (
-            f"the switch must flip off. error: {bs.page_error_text()!r}"
+        ca.set_external_apps_enabled(False)
+        assert ca.wait_for_external_apps_state("off"), (
+            f"the switch must flip off. error: {ca.current_error_text()!r}"
         )
         assert session.close_code() == CLOSE_AUTH_EXPIRED, (
             "turning external apps off closes the app's live socket with code 4401"
@@ -679,7 +716,6 @@ def test_the_external_apps_switch_pauses_a_connected_app_and_on_restores_it(
         status, _ = refused_status(consent_nest, client, token)
         assert status == 401, f"while off, a fresh dial is refused: {status}"
 
-        ca.navigate()
         row = ca.wait_for_item_status(client.client_id, "paused")
         assert row is not None, (
             "while off, the app's row must read paused. "
@@ -692,10 +728,10 @@ def test_the_external_apps_switch_pauses_a_connected_app_and_on_restores_it(
             f"a paused app says why, never the bare 'not connected': {text!r}"
         )
     finally:
-        bs.navigate()
-        bs.set_external_apps_enabled(True)
-    assert bs.wait_for_external_apps_state("on"), (
-        f"the switch must flip back on. error: {bs.page_error_text()!r}"
+        ca.navigate()
+        ca.set_external_apps_enabled(True)
+    assert ca.wait_for_external_apps_state("on"), (
+        f"the switch must flip back on. error: {ca.current_error_text()!r}"
     )
 
     session = PrincipalSession(upgrade(consent_nest, client, token))

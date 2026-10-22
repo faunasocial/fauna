@@ -20,6 +20,11 @@ pub enum SidecarScope {
     /// the relay attests its X25519 in the `fauna.sidecar.hello` and the nest
     /// seals the `relay.<apex>` cert to it (the relay never reads `/data/acme`).
     Relay,
+    /// The sni-router (`bins/fauna-sni-router`), the container's public :443
+    /// front. Its channel (`/internal/router/ws`) carries the sidecar log plane
+    /// only — no key in its hello, no cert fetch (`observability.md` § The
+    /// sidecar log plane → § Coverage).
+    Router,
 }
 
 impl SidecarScope {
@@ -31,6 +36,7 @@ impl SidecarScope {
             SidecarScope::Bridge => "bridge",
             SidecarScope::Dns => "dns",
             SidecarScope::Relay => "relay",
+            SidecarScope::Router => "router",
         }
     }
 
@@ -41,6 +47,7 @@ impl SidecarScope {
             "bridge" => Some(SidecarScope::Bridge),
             "dns" => Some(SidecarScope::Dns),
             "relay" => Some(SidecarScope::Relay),
+            "router" => Some(SidecarScope::Router),
             _ => None,
         }
     }
@@ -64,6 +71,10 @@ const SIDECARS: &[SidecarDef] = &[
     SidecarDef {
         name: "relay",
         scopes: &[SidecarScope::Relay],
+    },
+    SidecarDef {
+        name: "router",
+        scopes: &[SidecarScope::Router],
     },
 ];
 

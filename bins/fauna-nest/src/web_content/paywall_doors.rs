@@ -56,6 +56,7 @@ pub struct ReturnQuery {
 /// The one *not accepted* sentence: unknown code, another site's code, and a
 /// code whose tier does not entitle this resource all read the same, so the
 /// guessing surface learns nothing from the refusal (ruling (3)).
+// public-text: nest-paywall-doors
 const NOT_ACCEPTED: &str = "That code was not accepted for this page.";
 
 /// `POST /api/v1/paywall/redeem`.
@@ -346,6 +347,7 @@ fn internal(e: impl std::fmt::Display) -> Response {
         "",
     )
 }
+// public-text-end: nest-paywall-doors
 
 #[cfg(test)]
 mod tests {

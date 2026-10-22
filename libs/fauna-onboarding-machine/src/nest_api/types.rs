@@ -32,6 +32,9 @@ pub type ExpectedNestIdentity = std::sync::Arc<std::sync::RwLock<Option<(String,
 /// available alongside its `NatModeBody` consumer.
 pub use crate::state::NodeMode;
 
+/// The box's content-scanner declaration, carried on [`SetupStatus`].
+pub use crate::state::ContentScanners;
+
 /// The shared nest-HTTP error taxonomy our per-endpoint enums refine. Re-
 /// exported so `crate::nest_api::ApiError` resolves alongside them.
 pub use fauna_nest_http::ApiError;
@@ -59,6 +62,13 @@ pub struct SetupStatus {
     /// (`docs/goal/behavior/onboarding.md` § 3b-bis).
     #[serde(default)]
     pub node_mode: Option<NodeMode>,
+    /// The box's own content-scanner declaration (`wired` / `absent` /
+    /// `unknown`) — whether its compose wires the clamd/rspamd the MTA's scan
+    /// gate needs. `Unknown` for a nest outside the image or one predating the
+    /// field. The third axis of the claim-time mail intent
+    /// (`docs/goal/behavior/onboarding.md` § 3b → *Third axis*).
+    #[serde(default)]
+    pub content_scanners: ContentScanners,
 }
 
 /// `derive(thiserror::Error)` gives `Display` so this can cross the UniFFI
@@ -94,7 +104,7 @@ pub enum ProbeError {
 /// (`fauna_protocol::claim::ClaimAdminReply`), with the optional shape the
 /// wizard needs (token / expires_at / domain are optional so the trait can
 /// also represent the "ok=false" branch).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimAdminResponse {
     pub ok: bool,
     pub token: Option<String>,
@@ -111,6 +121,11 @@ pub struct ClaimAdminResponse {
     /// irreplaceable nest identity, hardened uniformly. Wire
     /// unchanged: `SecretString` serializes identically to `String`.
     pub deployment_seed: Option<SecretString>,
+    /// The address the nest handed the host for the SSH door at this claim —
+    /// the one address a door box admits (`installers/vps.md` § The SSH door
+    /// → *One address*). The machine puts it on the door's readout
+    /// (`SshDoorReadout.admitted_from`); `None` when the nest wrote none.
+    pub ssh_door_source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

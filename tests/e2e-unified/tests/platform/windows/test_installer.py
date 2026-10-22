@@ -178,14 +178,16 @@ def _build_msi(repo):
             "-p", "fauna-nest-service",
             "-p", "fauna-bridge-service",
             "-p", "fauna-shell-ext",
-            # The TerminalApp feature (TerminalApp.wxs, $(var.TuiBin)) ships the
-            # terminal app beside the agent — the same binary release.yml builds.
+            # The TerminalApp feature (TerminalApp.wxs, $(var.TuiBin) and
+            # $(var.CliBin)) ships the terminal app and the cli app's device
+            # shell beside the agent — the same binaries release.yml builds.
             "-p", "fauna-tui",
+            "-p", "fauna-cli-device",
         ],
         # Cold win-arm64 builds are slow: these crates (fauna-nest-service pulls in
         # the whole nest) build the full dep graph from scratch on the throwaway VM
         # this test targets. Unbounded on purpose (_run_build_step).
-        "Rust build (release service crates + fauna-tui)",
+        "Rust build (release service crates + fauna-tui + fauna-cli)",
     )
 
     # 1b. Build the Go mail-bridge MDA (cgo, gnullvm) — the Bridge feature SHIPS it.
@@ -299,6 +301,7 @@ def _build_msi(repo):
         # fauna_shell_ext.dll. (name, src_name): stage the built fauna_shell.dll as-is.
         ("fauna_shell.dll", "fauna_shell.dll"),
         ("fauna-tui.exe", "fauna-tui.exe"),
+        ("fauna-cli.exe", "fauna-cli.exe"),
     ]:
         src = os.path.join(target_dir, src_name)
         if not os.path.exists(src):
@@ -394,6 +397,7 @@ def _build_msi(repo):
             # without TuiBin dies with WIX0150 even for an install that
             # deselects TerminalApp.
             "-d", f"TuiBin={os.path.join(stage_dir, 'fauna-tui.exe')}",
+            "-d", f"CliBin={os.path.join(stage_dir, 'fauna-cli.exe')}",
             "-d", f"IconDir={os.path.join(stage_dir, 'icons')}\\",
             "-d", f"AppDir={os.path.join(stage_dir, 'app')}\\",
             "-d", f"SparsePackage={sparse_pkg}",
@@ -420,8 +424,11 @@ SOURCE_PATTERNS = [
     # + the gnullvm fauna_ffi.dll it links, so a change to either rebuilds the MSI.
     "bins/fauna-bridges/**/*.go",
     "libs/fauna-ffi/src/**/*.rs",
-    # The terminal app the TerminalApp feature ships.
+    # The terminal app the TerminalApp feature ships, and the cli app's device
+    # shell beside it (the catalog crate is its whole surface).
     "apps/fauna-tui/src/**/*.rs",
+    "apps/fauna-cli/src/**/*.rs",
+    "libs/fauna-cli/src/**/*.rs",
 ]
 
 

@@ -12,6 +12,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from actions.mail_import import MailImportActions
+from helpers import budgets
+from helpers.waiting import wait_until
 
 if TYPE_CHECKING:
     from fake_imap_source import FakeImapSource
@@ -43,6 +45,30 @@ def type_until_it_takes(setter, getter, value: str, *, timeout: float = 5.0) -> 
         setter(value)
 
 
+def set_message_allowance(app, nest: dict, count: int) -> None:
+    """The admin sets how many messages a mailbox may hold (`admin-mail`'s
+    `admin-mail-imap-message-count-input`) and presses Save; returns once the
+    nest has stored it. The precondition a full-mailbox journey needs, set
+    the way an admin sets it — through the app."""
+    from helpers.mail_import_evidence import message_allowance
+
+    field = "admin-mail-imap-message-count-input"
+    app.admin.navigate_mail()
+    assert wait_until(
+        lambda: app.admin.mail_field_present(field),
+        budgets.RPC_ROUNDTRIP_S,
+        diagnose=lambda: "admin-mail never rendered the IMAP group's message allowance",
+    )
+    app.admin.set_mail_field(field, str(count))
+    app.admin.save_mail_imap()
+    assert wait_until(
+        lambda: message_allowance(nest) == count,
+        budgets.RPC_ROUNDTRIP_S,
+        diagnose=lambda: f"the nest stored allowance {message_allowance(nest)!r}, not {count}; "
+        f"the page shows {app.admin.mail_field_text(field)!r}",
+    )
+
+
 def fill_generic_source(
     wizard: MailImportActions, source: FakeImapSource, *, password: str
 ) -> None:
@@ -61,6 +87,33 @@ def fill_generic_source(
     wizard.select_tls_mode("Implicit TLS (993)")
     wizard.set_username(source.username)
     wizard.set_password(password)
+
+
+def save_microsoft_registration(app, client_id: str, tenant: str) -> None:
+    """The admin enters the deployment's own Microsoft app registration on
+    `admin-mail` and presses Save; returns once the client-ID field reads back
+    what the nest stored (the GUID lowercased) — both empty clears it.
+
+    Precondition for every Outlook sign-in a suite walks: the project's own
+    client ID is still empty (`oauth_device.rs`'s `MICROSOFT` constant), so
+    without an admin registration the button stays inert with "not available
+    yet" (`mailbox-migration.md` § Microsoft sign-in — the device-code grant,
+    *An admin-supplied registration*).
+    """
+    app.admin.navigate_mail()
+    assert wait_until(
+        lambda: app.admin.mail_field_present("admin-mail-microsoft-client-id-input"),
+        budgets.RPC_ROUNDTRIP_S,
+        diagnose=lambda: "admin-mail never rendered the Microsoft registration section",
+    )
+    app.admin.save_mail_microsoft_registration(client_id, tenant)
+    assert wait_until(
+        lambda: app.admin.mail_field_text("admin-mail-microsoft-client-id-input")
+        == client_id.lower(),
+        budgets.RPC_ROUNDTRIP_S,
+        diagnose=lambda: "the saved registration never read back: field shows "
+        f"{app.admin.mail_field_text('admin-mail-microsoft-client-id-input')!r}",
+    )
 
 
 # The credential the mail-enable precondition mints. Nothing authenticates with

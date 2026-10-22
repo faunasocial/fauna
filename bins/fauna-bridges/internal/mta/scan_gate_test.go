@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/logplane"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mailfauna"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/metrics"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/scan"
@@ -362,6 +363,73 @@ func TestScanGate_CircuitBreakerRecoversAfterCooldown(t *testing.T) {
 	}
 	if _, ok := action.(mailfauna.ScanActionDeliver); !ok {
 		t.Fatalf("action = %T, want Deliver after recovery", action)
+	}
+}
+
+// The breaker reports exactly one admin-logs emission per real transition:
+// one on closed→open (not per tempfail, not on a failed half-open trial), one on
+// open→closed (not on a success that never followed an open).
+func TestScanGate_EmitsOncePerBreakerTransition(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	clk := func() time.Time { return now }
+	type edge struct {
+		scanner logplane.ScannerName
+		opened  bool
+	}
+	var edges []edge
+	g := &scanGate{
+		inflight: make(chan struct{}, maxInFlightScans),
+		clamd:    &scanBreaker{clock: clk},
+		rspamd:   &scanBreaker{clock: clk},
+		onTransition: func(s logplane.ScannerName, opened bool) {
+			edges = append(edges, edge{s, opened})
+		},
+	}
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	downAddr := ln.Addr().String()
+	_ = ln.Close()
+	downCfg := scan.Config{ClamdAddr: downAddr, Policy: defaultTestPolicy()}
+	downCfg.Policy.RspamdEnabled = false
+	// fakeClamd serves one connection, so each successful scan gets its own.
+	upCfg := func() scan.Config {
+		addr, stop := fakeClamd(t, "stream: OK\x00")
+		t.Cleanup(stop)
+		cfg := scan.Config{ClamdAddr: addr, Policy: defaultTestPolicy()}
+		cfg.Policy.RspamdEnabled = false
+		return cfg
+	}
+	run := func(cfg scan.Config) {
+		applyScanGate(g, context.Background(), []byte("x"), cfg, 0, "", "", nil)
+	}
+
+	// A success on a breaker that never opened is not a recovery.
+	run(upCfg())
+	if len(edges) != 0 {
+		t.Fatalf("edges after a plain success = %v, want none", edges)
+	}
+	// Failures below the threshold open nothing; the threshold-th opens it once.
+	for i := 0; i < scanBreakerThreshold; i++ {
+		run(downCfg)
+	}
+	if len(edges) != 1 || edges[0] != (edge{logplane.ScannerClamd, true}) {
+		t.Fatalf("edges after tripping = %v, want one clamd opened", edges)
+	}
+	// Tempfails while open (fast-fail, no dial) emit nothing.
+	for i := 0; i < 10; i++ {
+		run(downCfg)
+	}
+	// A half-open trial that fails re-arms an already-open breaker: no new edge.
+	now = now.Add(scanBreakerCooldown + time.Second)
+	run(downCfg)
+	if len(edges) != 1 {
+		t.Fatalf("edges after a failed half-open trial = %v, want still one", edges)
+	}
+	// The next trial succeeds: exactly one recovery.
+	now = now.Add(scanBreakerCooldown + time.Second)
+	run(upCfg())
+	run(upCfg())
+	if len(edges) != 2 || edges[1] != (edge{logplane.ScannerClamd, false}) {
+		t.Fatalf("edges after recovery = %v, want opened then closed", edges)
 	}
 }
 

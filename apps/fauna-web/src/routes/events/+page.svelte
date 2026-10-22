@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { identity, reconnectTick } from '$lib/store';
-  import { ensureWasm, attendeeDisplay, rsvpStatusLabel, reminderLabel, reminderPresets, resolveCalendarSelection, calendarIsDisplayed, workingDayStart, normalizeEventDatetimeInput, type ReminderPresetOption } from '$lib/wasm';
-  import { resolveLocalized } from '$lib/i18n/localized';
-  import { refusedChanges, dismissRefusedChange, type RefusedChange } from '$lib/conversations';
-  import { onStoreChange } from '$lib/store-change';
+  import { identity, reconnectTick } from '#lib/store';
+  import { ensureWasm, attendeeDisplay, rsvpStatusLabel, reminderLabel, reminderPresets, resolveCalendarSelection, calendarIsDisplayed, workingDayStart, normalizeEventDatetimeInput, type ReminderPresetOption } from '#lib/wasm';
+  import { resolveLocalized } from '#lib/i18n/localized';
+  import { refusedChanges, dismissRefusedChange, type RefusedChange } from '#lib/conversations';
+  import { onStoreChange } from '#lib/store-change';
   import {
     listCalendars,
     createCalendar,
@@ -17,26 +17,26 @@
     removeReminder,
     importCalendar,
     exportCalendar,
-  } from '$lib/api';
-  import { onPushEvent, staleSurfacesForPushKind } from '$lib/rpc';
+  } from '#lib/api';
+  import { onPushEvent, staleSurfacesForPushKind } from '#lib/rpc';
   import {
     loadEventDrafts,
     resumeEventDraft,
     scheduleEventDraftSave,
     clearEventDraft,
-  } from '$lib/event-drafts';
-  import type { Calendar, EventSummary, EventAttendee } from '$lib/api';
-  import MiniCalendar from '$lib/components/MiniCalendar.svelte';
-  import TimeGrid from '$lib/components/TimeGrid.svelte';
+  } from '#lib/event-drafts';
+  import type { Calendar, EventSummary, EventAttendee } from '#lib/api';
+  import MiniCalendar from '#lib/components/MiniCalendar.svelte';
+  import TimeGrid from '#lib/components/TimeGrid.svelte';
   import {
     pan,
     visibleDays,
     type CalendarViewMode,
     type PanDirection,
-  } from '$lib/caltime';
-  import MessageBanner from '$lib/components/MessageBanner.svelte';
-  import { t } from '$lib/i18n/strings';
-  import { IDS } from '$lib/generated/uiIds';
+  } from '#lib/caltime';
+  import MessageBanner from '#lib/components/MessageBanner.svelte';
+  import { t } from '#lib/i18n/strings';
+  import { IDS } from '#lib/generated/uiIds';
 
   // The Events page reads/writes the encrypted `bridge_caldav_*` store via the
   // `caldav*` wasm seam (events.md Decision B):
@@ -253,7 +253,7 @@
       void loadCalendars().then(refreshEvents);
     });
 
-    // The store-change notice (`$lib/store-change`): the refused-change list
+    // The store-change notice (`#lib/store-change`): the refused-change list
     // is this page's one store-backed render source, and a refusal is the
     // runtime's own background write to the store — a source of the notice
     // like a pump run (`account-runtime.md` § Multi-instance concurrency →
@@ -489,7 +489,7 @@
   // `events.md` § Persistence: the compose's five user-authored inputs rest in
   // `__drafts`, the New Event opener RESUMES them, and a day-cell gesture starts
   // fresh. Everything below is trigger glue — the encoding, the seal, the WS
-  // calls and the launch gate all live in `$lib/event-drafts` over the shared
+  // calls and the launch gate all live in `#lib/event-drafts` over the shared
   // wasm face.
 
   /** Hand the compose's current five inputs to the debounced autosave. Called

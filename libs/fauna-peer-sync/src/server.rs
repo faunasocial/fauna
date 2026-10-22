@@ -829,7 +829,9 @@ impl PeerSyncServer {
     /// sibling, by content hash. With no nest answering, the sibling that wrote
     /// a row is the only source of the manifest it names. Served / missing /
     /// deferred; a manifest over the reply budget is `deferred`, never
-    /// `missing`.
+    /// `missing`. A request names at most one page of hashes
+    /// ([`crate::ranged::MAX_ROWS_PER_PAGE`]) and the source is not read once
+    /// the reply is full — the rest is `deferred` unread.
     async fn handle_folder_manifests_get(
         &self,
         peer: &EndpointKey,
@@ -838,6 +840,14 @@ impl PeerSyncServer {
     ) -> Result<Value, RpcError> {
         let req: PeerSyncManifestsGetRequest = from_value(&payload)?;
         self.admitted_own_device(peer, slot)?;
+        // One page of hashes per request: each is a source read (a DB open in
+        // the sync agent) and a frame holds ~29k of them. The sibling client
+        // asks for one at a time.
+        if req.manifest_hashes.len() > crate::ranged::MAX_ROWS_PER_PAGE as usize {
+            return Err(unsupported(
+                "a manifests request names at most one page of hashes",
+            ));
+        }
         let mut hashes = Vec::with_capacity(req.manifest_hashes.len());
         for wanted in &req.manifest_hashes {
             let hash = <[u8; 32]>::try_from(wanted.as_ref())
@@ -846,14 +856,26 @@ impl PeerSyncServer {
         }
         let mut reply = PeerSyncManifestsGetReply::default();
         let mut budget = crate::ranged::MAX_BODY_BYTES_PER_REPLY;
+        // The reply is full once the budget is gone or a manifest has been
+        // turned away for exceeding what was left: the rest is `deferred`
+        // unread, as `chunks.pull` does, so the reads stay bounded by the
+        // reply, not by the request.
+        let mut full = false;
         for (hash, wanted) in hashes {
+            if full || budget == 0 {
+                reply.deferred.push(wanted.clone());
+                continue;
+            }
             let bytes = match &self.config.folder_manifests {
                 Some(source) => source(req.folder.clone(), hash).await,
                 None => None,
             };
             match bytes {
                 None => reply.missing.push(wanted.clone()),
-                Some(bytes) if bytes.len() > budget => reply.deferred.push(wanted.clone()),
+                Some(bytes) if bytes.len() > budget => {
+                    full = true;
+                    reply.deferred.push(wanted.clone());
+                }
                 Some(bytes) => {
                     budget -= bytes.len();
                     reply.manifests.push(PeerSyncManifest {
@@ -1379,6 +1401,136 @@ mod tests {
             .unwrap();
         let reply: PeerSyncManifestsGetReply = from_value(&reply).unwrap();
         assert_eq!(reply.missing.len(), 1);
+    }
+
+    /// A counting manifest source answering every hash with `len` bytes.
+    fn counting_manifests(
+        len: usize,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> FolderManifestFn {
+        Arc::new(move |_folder: String, _wanted: [u8; 32]| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move { Some(vec![7u8; len]) })
+        })
+    }
+
+    /// A counting manifest source answering the FIRST hash with a small
+    /// manifest and every later one with a full-budget manifest, so the reply
+    /// is stopped by a manifest turned away for size (`full`), never by the
+    /// budget reaching zero.
+    fn small_then_oversized_manifests(
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> FolderManifestFn {
+        Arc::new(move |_folder: String, _wanted: [u8; 32]| {
+            let nth = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let len = if nth == 0 {
+                8
+            } else {
+                crate::ranged::MAX_BODY_BYTES_PER_REPLY
+            };
+            Box::pin(async move { Some(vec![7u8; len]) })
+        })
+    }
+
+    fn distinct_hashes(n: usize) -> Vec<[u8; 32]> {
+        (0..n)
+            .map(|i| {
+                let mut h = [0u8; 32];
+                h[..8].copy_from_slice(&(i as u64).to_be_bytes());
+                h
+            })
+            .collect()
+    }
+
+    /// The reply budget bounds the READS, not just the answer: once one
+    /// manifest has spent it, the rest of the request is `deferred` unread
+    /// (`chunks.pull`'s rule), so a request costs at most about one reply's
+    /// worth of source calls (each a DB open in the sync agent).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_manifest_door_stops_reading_the_source_once_the_reply_budget_is_spent() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (_dir, server, owner) = admit_server_sourced(
+            None,
+            None,
+            FolderSources {
+                manifests: Some(counting_manifests(
+                    crate::ranged::MAX_BODY_BYTES_PER_REPLY,
+                    Arc::clone(&calls),
+                )),
+                ..Default::default()
+            },
+        )
+        .await;
+        let (peer, slot) = admitted_sibling(&server, &owner).await;
+        let n = crate::ranged::MAX_ROWS_PER_PAGE as usize;
+        let reply = server
+            .handle_folder_manifests_get(&peer, &slot, manifests_payload("7", &distinct_hashes(n)))
+            .await
+            .expect("a request at the cap is answered");
+        let reply: PeerSyncManifestsGetReply = from_value(&reply).unwrap();
+        assert!(
+            calls.load(std::sync::atomic::Ordering::SeqCst) <= 2,
+            "the source is read at most until the budget is gone"
+        );
+        assert_eq!(reply.manifests.len(), 1);
+        assert_eq!(reply.deferred.len(), n - 1);
+        assert!(reply.missing.is_empty());
+    }
+
+    /// The `full` arm of the stop is witnessed on its own: after one small
+    /// manifest the budget is NOT zero, so only a manifest turned away for
+    /// exceeding what is left can stop the reads. Without that arm one small
+    /// manifest followed by 63 large ones costs 64 reads instead of 2.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_manifest_door_stops_reading_at_the_first_oversized_manifest_with_budget_left() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (_dir, server, owner) = admit_server_sourced(
+            None,
+            None,
+            FolderSources {
+                manifests: Some(small_then_oversized_manifests(Arc::clone(&calls))),
+                ..Default::default()
+            },
+        )
+        .await;
+        let (peer, slot) = admitted_sibling(&server, &owner).await;
+        let n = crate::ranged::MAX_ROWS_PER_PAGE as usize;
+        let reply = server
+            .handle_folder_manifests_get(&peer, &slot, manifests_payload("7", &distinct_hashes(n)))
+            .await
+            .expect("a request at the cap is answered");
+        let reply: PeerSyncManifestsGetReply = from_value(&reply).unwrap();
+        assert!(
+            calls.load(std::sync::atomic::Ordering::SeqCst) <= 2,
+            "the source is read at most until the first oversized manifest"
+        );
+        assert_eq!(reply.manifests.len(), 1);
+        assert_eq!(reply.deferred.len(), n - 1);
+        assert!(reply.missing.is_empty());
+    }
+
+    /// A request names at most one page of hashes — a frame holds ~29k, each a
+    /// source call — and an over-cap request is refused before any read.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_manifest_door_refuses_a_request_over_the_page_bound_without_reading() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (_dir, server, owner) = admit_server_sourced(
+            None,
+            None,
+            FolderSources {
+                manifests: Some(counting_manifests(8, Arc::clone(&calls))),
+                ..Default::default()
+            },
+        )
+        .await;
+        let (peer, slot) = admitted_sibling(&server, &owner).await;
+        let n = crate::ranged::MAX_ROWS_PER_PAGE as usize + 1;
+        let err = server
+            .handle_folder_manifests_get(&peer, &slot, manifests_payload("7", &distinct_hashes(n)))
+            .await
+            .expect_err("an over-cap request is refused");
+        assert_eq!(err.code, ERR_UNSUPPORTED, "{err:?}");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     /// Folder rows and manifests go to this account's own devices only — a

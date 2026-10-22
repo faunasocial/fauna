@@ -1,13 +1,13 @@
 <script lang="ts">
-  import { page } from '$app/stores';
-  import { t } from '$lib/i18n/strings';
-  import { IDS } from '$lib/generated/uiIds';
-  import AppShellFrame from '$lib/components/AppShellFrame.svelte';
+  import { page } from '$app/state';
+  import { t } from '#lib/i18n/strings';
+  import { IDS } from '#lib/generated/uiIds';
+  import AppShellFrame from '#lib/components/AppShellFrame.svelte';
 
   // The Settings shell is a vertical **sidebar-swap** (settings.md § Navigation
   // model, ratified 2026-06-03 — the same shape as the admin shell): while in
   // `/app/settings` this layout renders its OWN shell whose vertical rail takes
-  // over the app's sidebar slot. The root layout (routes/+layout.svelte) yields
+  // over the app's sidebar slot. The root layout (lib/components/RootShell.svelte) yields
   // the full viewport for any `/app/settings` route (the same bare-canvas bypass
   // it uses for onboarding/admin), so the normal app nav (conversations / feed /
   // …) is replaced in place rather than sitting beside the settings content.
@@ -96,7 +96,7 @@
   // "status" normalizes to the same value as the bare root — see the matching
   // comment in [[subpage]]/+page.svelte — so the rail highlights Status active
   // for either URL form.
-  let rawSubpage = $derived($page.params.subpage ?? '');
+  let rawSubpage = $derived(page.params.subpage ?? '');
   let current = $derived(rawSubpage === 'status' ? '' : rawSubpage);
 
   function href(id: string): string {

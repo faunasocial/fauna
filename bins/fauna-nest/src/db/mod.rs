@@ -3,6 +3,7 @@
 pub mod account_state;
 pub mod actor_tables;
 pub mod admin;
+pub mod admin_block;
 pub mod atproto_identities;
 pub mod atproto_pds;
 pub mod atproto_projection;
@@ -26,11 +27,11 @@ pub mod caldav_enable;
 pub mod caldav_port;
 pub mod capability_grants;
 pub mod carddav_enable;
-pub mod chain_version;
 pub mod channels;
 pub mod contacts;
 pub mod content;
 pub mod content_index_rail;
+pub mod content_policy;
 pub mod conv_attachment_refs;
 pub mod custody_hosting;
 pub mod custody_receipts;
@@ -98,6 +99,7 @@ pub mod recovery_escrow;
 pub mod recovery_pending;
 pub mod recovery_registrations;
 pub mod region_tier;
+pub mod remote_follows;
 pub mod reports;
 pub mod room_labels;
 pub mod rooms;
@@ -347,6 +349,9 @@ pub struct OutboxEntry {
     /// The author the producer stamped — whose pairing rows say where the
     /// entry goes. `None` only for a row written before the stamp existed.
     pub author_id: Option<Vec<u8>>,
+    /// The one nest a follow-family entry goes to (`federated-follow.md`
+    /// § Decision 2); `None` on a forward entry.
+    pub peer_nest_id: Option<Vec<u8>>,
 }
 
 /// One author's view of the forward queue — what their app renders on the
@@ -375,8 +380,8 @@ pub struct NamespaceEntry {
 
 pub struct CacheDb {
     conn: Mutex<Connection>,
-    /// Test-only pause point between a pending-action pre-check and its
-    /// guarded write (see `pending_actions::PrecheckGate`).
+    /// Test-only pause point between a pre-check and its guarded write (see
+    /// `pending_actions::PrecheckGate`).
     #[cfg(test)]
     precheck_gate: std::sync::Mutex<Option<pending_actions::PrecheckGate>>,
 }
@@ -491,6 +496,16 @@ pub struct TierRow {
     pub max_feeds: i64,
 }
 
+/// What [`CacheDb::delete_tier`] decided: the tier is gone, there was no such
+/// tier, or something still names it (`docs/goal/behavior/admin.md` § 3.
+/// Settings → *Removing a tier*) — the referrer is named for the refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TierDeleteOutcome {
+    Deleted,
+    NotFound,
+    InUse(&'static str),
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserRow {
     pub actor_id: Vec<u8>,
@@ -532,7 +547,7 @@ pub struct AuditRow {
     pub prev_hash: String,
     pub entry_hash: String,
     /// Which preimage `entry_hash` was computed under
-    /// ([`chain_version::ChainVersion`]). Served alongside the hash because an
+    /// ([`fauna_core::chain_version::ChainVersion`]). Served alongside the hash because an
     /// admin verifies by recomputing from the columns they were served: without
     /// this, the recomputation is back to guessing the format, which is the one
     /// thing the record exists to prevent.
@@ -1293,6 +1308,10 @@ pub struct ContactRow {
     /// `Some("")` for a local user with no handle set. Populated by
     /// [`CacheDb::list_contacts_full`].
     pub handle: Option<String>,
+    /// The verified origin nest of the federation knock that formed the edge
+    /// (`contacts.peer_nest_id`); `None` for a local peer or an edge formed
+    /// otherwise. The list handler resolves it to the peer's home URL.
+    pub peer_nest_id: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1400,6 +1419,17 @@ pub struct FeedPostRow {
     /// apps' `content-label-badge`.
     #[serde(default)]
     pub labels: Vec<fauna_core::content_category::ContentLabelEntry>,
+    /// The home nest of a row this nest indexed from another
+    /// (`content.origin_nest_url` — a federated follow's delivered envelope or
+    /// a discovery stub). Drives the wire `FeedPostItem.home_nest_url` → the
+    /// client's by-content-address byte legs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub home_nest_url: Option<String>,
+    /// The verified identity of that home (`content.origin_nest_id`, hex) for
+    /// a row a federated follow delivered. Drives the wire
+    /// `FeedPostItem.home_nest_actor_id` → the byte plane's pin root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub home_nest_actor_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1542,6 +1572,9 @@ pub struct ObligationActionRow {
     pub confidence: f64,
     pub action_taken: u8,
     pub timestamp: i64,
+    /// The verified origin nest (hex) of a row another nest delivered; `None`
+    /// on this nest's own decision.
+    pub issuer_nest_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1689,6 +1722,9 @@ pub struct SubscribeRequestRow {
     /// The paid window the payment carried (epoch seconds; `None` = none),
     /// stamped onto the `subscribers` row at approval.
     pub valid_until: Option<i64>,
+    /// The subscriber's home nest URL when the follow was relayed from another
+    /// nest (`federated-follow.md` § Decision 2); `None` = a local subscriber.
+    pub home_nest_url: Option<String>,
 }
 
 /// One configured payment provider for an author (monetization.md § Pillar 3).
@@ -2206,26 +2242,41 @@ impl CacheDb {
     }
 
     /// List live conv records for one channel with `seq > after_seq`, oldest
-    /// first, up to `limit`. Returns `(seq, segment_id, record_cid)`.
+    /// first, up to `limit`. Returns `(seq, segment_id, record_cid, withhold)`.
     pub async fn segment_records_list_conv_after_seq(
         &self,
         scope_id: &[u8; 32],
         after_seq: i64,
         limit: i64,
-    ) -> anyhow::Result<Vec<(i64, u32, fauna_cbor::Cid, Option<String>)>> {
+    ) -> anyhow::Result<
+        Vec<(
+            i64,
+            u32,
+            fauna_cbor::Cid,
+            crate::segments::records_db::ConvWithhold,
+        )>,
+    > {
         let conn = self.conn.lock().await;
         crate::segments::records_db::list_conv_after_seq(&conn, scope_id, after_seq, limit)
     }
 
     /// List live conv records across many channels with `seq > after_seq`,
     /// oldest first, up to `limit` total. Returns `(seq, scope_id,
-    /// segment_id, record_cid, legal_takedown_ref)`.
+    /// segment_id, record_cid, withhold)`.
     pub async fn segment_records_list_conv_for_scopes_after_seq(
         &self,
         scope_ids: &[[u8; 32]],
         after_seq: i64,
         limit: i64,
-    ) -> anyhow::Result<Vec<(i64, [u8; 32], u32, fauna_cbor::Cid, Option<String>)>> {
+    ) -> anyhow::Result<
+        Vec<(
+            i64,
+            [u8; 32],
+            u32,
+            fauna_cbor::Cid,
+            crate::segments::records_db::ConvWithhold,
+        )>,
+    > {
         let conn = self.conn.lock().await;
         crate::segments::records_db::list_conv_for_scopes_after_seq(
             &conn, scope_ids, after_seq, limit,
@@ -2234,12 +2285,14 @@ impl CacheDb {
 
     /// Atomically apply (`reference = Some`) or overturn (`None`) a
     /// conversation record's legal-obligation takedown: the
-    /// `segment_records.legal_takedown_ref` flag write and the permanent audit
-    /// row commit in ONE SQLite transaction — the conv twin of
-    /// [`Self::post_legal_takedown_txn`] (no obligation row: conv records
-    /// persist no sender, so there is no author queue to key it to; the
-    /// in-thread tombstone is the member-visible transparency surface). The
-    /// flag write must match exactly one conv record, else the transaction
+    /// `segment_records.legal_takedown_ref` flag write, the author-facing
+    /// `obligation_action_records` row (takedown only, and only for a record
+    /// whose author the nest attested — `conv_record_authors`; a restore keeps
+    /// the historical row) and the permanent audit row commit in ONE SQLite
+    /// transaction — the conv twin of [`Self::post_legal_takedown_txn`]
+    /// (`moderation.md` § Legal takedown → *Conversations*). A record no
+    /// attestation names writes no queue row; its appeal stays any holder's.
+    /// The flag write must match exactly one conv record, else the transaction
     /// rolls back with an error — never a silent no-op that still audits
     /// (review 2026-07-06 §§ F1/F4; `nest/common.md` § single atomic decision
     /// point).
@@ -2248,18 +2301,35 @@ impl CacheDb {
         record_cid: &fauna_cbor::Cid,
         content_id_hex: &str,
         reference: Option<&str>,
+        admin_actor: &[u8],
         audit_detail: &str,
-    ) -> anyhow::Result<()> {
+        timestamp_us: i64,
+    ) -> anyhow::Result<Option<i64>> {
         use anyhow::Context;
         let conn = self.conn.lock().await;
         let tx = conn
             .unchecked_transaction()
             .context("begin conv legal-takedown tx")?;
+        let mut queued = None;
         let n = crate::segments::records_db::set_conv_legal_takedown(&tx, record_cid, reference)?;
         if n != 1 {
             anyhow::bail!(
                 "legal-takedown flag write matched {n} conv records for content {content_id_hex} (want exactly 1); rolled back"
             );
+        }
+        if reference.is_some()
+            && let Some(author) = crate::segments::records_db::conv_record_author(&tx, record_cid)?
+        {
+            queued = Some(moderation::insert_enforcement_row(
+                &tx,
+                "conversation",
+                content_id_hex,
+                &author,
+                admin_actor,
+                "illegal",
+                fauna_core::obligation::ObligationAction::TakenDown,
+                timestamp_us,
+            )?);
         }
         let audit_action = if reference.is_some() {
             "moderation:legal-takedown"
@@ -2273,7 +2343,8 @@ impl CacheDb {
             Some(content_id_hex),
             Some(audit_detail),
         )?;
-        tx.commit().context("commit conv legal-takedown tx")
+        tx.commit().context("commit conv legal-takedown tx")?;
+        Ok(queued)
     }
 
     /// Set (`Some(reference)`) or clear (`None`) the legal-obligation takedown
@@ -2469,6 +2540,69 @@ impl CacheDb {
         )
     }
 
+    /// [`Self::create_message_kind_snapshot_row`] recording the content cursor
+    /// the capture covered (`crate::db::snapshots::create_message_kind_snapshot_row_at_cursor`).
+    pub async fn create_message_kind_snapshot_row_at_cursor(
+        &self,
+        folder_id: i64,
+        message_kind: &str,
+        message_manifest: Option<&[u8]>,
+        placement_manifest: Option<&[u8]>,
+        max_change_seq: Option<i64>,
+    ) -> anyhow::Result<i64> {
+        let conn = self.conn.lock().await;
+        crate::db::snapshots::create_message_kind_snapshot_row_at_cursor(
+            &conn,
+            folder_id,
+            message_kind,
+            message_manifest,
+            placement_manifest,
+            max_change_seq,
+        )
+    }
+
+    /// Every `(scope_id, kind)` the segment mirror holds a record for, over
+    /// `kinds` (`crate::db::snapshots::list_message_kind_scopes`).
+    pub async fn list_message_kind_scopes(
+        &self,
+        kinds: &[&str],
+    ) -> anyhow::Result<Vec<([u8; 32], String)>> {
+        let conn = self.conn.lock().await;
+        crate::db::snapshots::list_message_kind_scopes(&conn, kinds)
+    }
+
+    /// The scope's `MAX(segment_records.changed_seq)` for `kind` (0 when none).
+    pub async fn message_kind_change_cursor(
+        &self,
+        scope_id: &[u8; 32],
+        kind: &str,
+    ) -> anyhow::Result<i64> {
+        let conn = self.conn.lock().await;
+        crate::db::snapshots::message_kind_change_cursor(&conn, scope_id, kind)
+    }
+
+    /// The scope's newest active snapshot of `kind`
+    /// (`crate::db::snapshots::newest_active_message_kind_snapshot`).
+    pub async fn newest_active_message_kind_snapshot(
+        &self,
+        scope_id: &[u8; 32],
+        kind: &str,
+    ) -> anyhow::Result<Option<crate::db::snapshots::NewestKindSnapshot>> {
+        let conn = self.conn.lock().await;
+        crate::db::snapshots::newest_active_message_kind_snapshot(&conn, scope_id, kind)
+    }
+
+    /// The scope's reserved kind row, if minted — never minting one
+    /// (`crate::db::snapshots::find_reserved_kind_folder_id`).
+    pub async fn find_reserved_kind_folder_id(
+        &self,
+        scope_id: &[u8; 32],
+        kind: &str,
+    ) -> anyhow::Result<Option<i64>> {
+        let conn = self.conn.lock().await;
+        crate::db::snapshots::find_reserved_kind_folder_id(&conn, scope_id, kind)
+    }
+
     /// Fetch the BARE-serialised `(message_manifest, placement_manifest)`
     /// blob pair for a snapshot row. T7 restore-dispatch reads this to load
     /// the pinned manifests before replay. Returns `(None, None)` if the
@@ -2637,7 +2771,10 @@ mod tests {
     /// (the free fn over raw columns) answer one predicate on every
     /// `(website_enabled, audience)` input, and the class both ride is the
     /// row's own `rests_plaintext_paths`. Shape 1 makes the free fn the shared
-    /// body; this pin keeps it from being re-inlined.
+    /// body; this pin keeps it from being re-inlined — for the audience values
+    /// listed below only. A re-inline that drifts on a value this list does not
+    /// spell (a class grown by a new audience) stays green here; the one body is
+    /// what rules that out, so never re-inline on the strength of this pin.
     #[test]
     fn the_serve_gate_and_the_marker_twin_agree_on_every_input() {
         for website_enabled in [false, true] {
@@ -3545,8 +3682,7 @@ mod tests {
         entries.reverse();
 
         // First entry's prev_hash should be the genesis constant
-        use sha2::Digest;
-        let genesis = format!("{:x}", sha2::Sha256::digest(b"fauna-audit-genesis-v1"));
+        let genesis = fauna_core::chain_version::audit_genesis_prev_hash();
         assert_eq!(entries[0].prev_hash, genesis);
 
         // Each subsequent entry's prev_hash should equal the previous entry's entry_hash
@@ -3566,13 +3702,12 @@ mod tests {
     /// The preimage comes from the version the row **records** — one format per
     /// row, and a version this binary does not know is refused rather than
     /// tried against another format. That refusal is the point:
-    /// [`crate::db::chain_version`] carries the argument, and
+    /// [`fauna_core::chain_version`] carries the argument, and
     /// `an_unknown_recorded_version_is_refused_not_retried` below is the pin
     /// that fails against a verifier written the other way.
     fn auditor_verifies(entries: &[AuditRow]) -> bool {
-        use crate::db::chain_version::{self, ChainVersion};
-        use sha2::Digest;
-        let mut expected_prev = format!("{:x}", sha2::Sha256::digest(b"fauna-audit-genesis-v1"));
+        use fauna_core::chain_version::{self, ChainVersion};
+        let mut expected_prev = chain_version::audit_genesis_prev_hash();
         for e in entries {
             if e.prev_hash != expected_prev {
                 return false;
@@ -8487,13 +8622,13 @@ mod tests {
         assert!(!db.is_pure_backup_destination("mail", &actor).await.unwrap());
     }
 
-    /// A re-seeded nest keeps the custody set in `backup` mode after the
-    /// materialize, but its scope now holds live records: it is the owner's live
-    /// account and must be served, snapshotted and compacted
-    /// (`behavior/backup-destinations.md` § Re-seed, "seeded means a live
-    /// account"). "Pure" is the corpus shape — opaque chunks, no local segments.
+    /// The live-record carve-out is retired (`reserved-folders.md` § __mail
+    /// Sync → *The landing set*): a re-seeded nest's delivered corpus rests
+    /// under `__landing/<kind>`, so a `__<kind>` custody copy is a pure-backup
+    /// destination whatever its scope holds, and a landing set alone makes no
+    /// nest one.
     #[tokio::test]
-    async fn a_materialized_backup_set_is_no_longer_a_pure_backup_destination() {
+    async fn a_custody_copy_stays_pure_and_a_landing_set_never_is() {
         let db = CacheDb::open_in_memory().unwrap();
         let actor = [0x66u8; 32];
         db.create_folder_with_options(
@@ -8506,8 +8641,6 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(db.is_pure_backup_destination("mail", &actor).await.unwrap());
-
         let cid = fauna_cbor::Cid::from_digest_dag_cbor([0x77u8; 32]);
         db.segment_records_insert_mail(
             &actor,
@@ -8526,8 +8659,25 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            !db.is_pure_backup_destination("mail", &actor).await.unwrap(),
-            "a custody-copy set whose scope holds live records is a live account"
+            db.is_pure_backup_destination("mail", &actor).await.unwrap(),
+            "a `__mail` custody copy is a pure destination, live records or not"
+        );
+
+        let other = [0x67u8; 32];
+        let landing = fauna_protocol::segments::landing_set_name("mail", &other).unwrap();
+        db.create_folder_with_options(
+            &landing,
+            &other,
+            crate::db::FolderOptions {
+                custody_copy: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            !db.is_pure_backup_destination("mail", &other).await.unwrap(),
+            "a landing set alone makes no nest a destination"
         );
     }
 

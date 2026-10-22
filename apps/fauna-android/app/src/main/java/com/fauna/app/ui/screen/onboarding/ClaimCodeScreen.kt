@@ -95,6 +95,8 @@ fun ClaimCodeScreen(
 
         Spacer(Modifier.weight(1f))
 
+        TermsNotice()
+
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,

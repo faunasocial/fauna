@@ -156,11 +156,13 @@ def _upload_and_open_detail(driver, tmp_path, name: str, data: bytes) -> None:
     media = MediaActions(driver)
     src = tmp_path / name
     src.write_bytes(data)
+    # The seeded item arrives with the page's first list read; a `before` taken
+    # earlier reads 0 and that load alone would satisfy `before + 1`.
+    media.ensure_loaded()
     before = media.item_count()
     media.upload_file(str(src))
     media.wait_for_item_count(before + 1)
-    index = media.item_names().index(name)
-    media.open_item_detail(index)
+    media.open_item_detail(media.index_of(name))
     got = media.wait_for_version_count(1)
     assert got == 1, f"the uploaded item's version rows never loaded (got {got})"
 

@@ -104,7 +104,7 @@ pub mod nest_identity;
 pub use nest_identity::*;
 
 // Multi-account registry glue (Stage 1 web) — wasm-only (depends on web-sys
-// `Storage`). The `LocalStorageSecretStore` + `WasmAccountRegistry` the Svelte
+// `Storage`). The `WebIdentityStore` + `WasmAccountRegistry` the Svelte
 // account-settings switcher drives; the shared account list / active pointer
 // is `fauna_client_accounts` (priority #2).
 // long-term-store.md § Multi-account evolution.
@@ -161,6 +161,14 @@ pub mod backup_audit;
 #[cfg(target_arch = "wasm32")]
 pub mod backup_recover;
 
+// The nest-held pull-back's web composition — `backupPullBackFromDestination`,
+// the browser twin of `fauna_sync_engine::reseed_pull::pull_back_from_destination`
+// over the shared `fauna_client_sync::reseed_pull` leg, plus the button's rows.
+// Wasm-only like the recovery door whose seams it shares. See
+// `docs/goal/ui/backups.md` § Restore after losing the nest.
+#[cfg(target_arch = "wasm32")]
+pub mod backup_reseed;
+
 // Browser WS-RPC façade — wasm-only (depends on `fauna-rpc-wasm`, which only
 // exists on wasm). Exposes the `WsRpcClient` handle + typed bridges/email
 // methods. Phase 4 of the WS-RPC adoption migration (tracked internally).
@@ -191,6 +199,15 @@ pub mod sessions;
 // Wasm-only, same reason as `rpc` (its reads and writes ride `WsRpcClient`).
 #[cfg(target_arch = "wasm32")]
 pub mod feature_editor;
+// The admin audit log section on `admin-logs` — `WasmAuditLog`, the web twin of
+// the UniFFI `FfiAuditLog`. Wasm-only, same reason as `rpc`.
+#[cfg(target_arch = "wasm32")]
+pub mod audit_log;
+// The shared rule editor (`nest-rules.md` § The shared rule editor).
+pub mod rule_editor;
+// The member's nest-rules book (`nest-rules.md` § Acceptance at joining, and a
+// change of rules).
+pub mod nest_rules;
 
 // This chunk's own critical-alerts registry — the session-start sweep's
 // second web source. Wasm-only, same
@@ -1600,18 +1617,22 @@ pub fn content_render_verdict(
         own_phishing_permille,
         JsValue::UNDEFINED,
     )?;
-    Ok(
-        fauna_core::obligation::render_verdict_composed(&labels, policy.as_ref(), own, &regions)
-            .verdict
-            .as_str()
-            .to_string(),
+    Ok(fauna_core::obligation::render_verdict_composed(
+        &labels,
+        policy.as_ref(),
+        own,
+        &regions,
+        &[],
     )
+    .verdict
+    .as_str()
+    .to_string())
 }
 
 /// The full render decision — the verdict **and** the source that drove it —
 /// composing all THREE strictest-wins sources, the region content policy
 /// included (`region-blocking.md` § Where it composes — the render seam).
-/// Returns `{ verdict, region }`, where `region` is
+/// Returns `{ verdict, region, nest, reported }`, where `region` is
 /// `{ region, authorityName, reasonCode, reason }` or `null`.
 ///
 /// The web twin of the native `content_render_composed`, and a separate export
@@ -1645,6 +1666,7 @@ pub fn content_render_composed(
         policy.as_ref(),
         own,
         &regions,
+        &[],
     ))
 }
 
@@ -1680,7 +1702,86 @@ pub fn content_render_for_item(
         policy.as_ref(),
         own,
         &regions,
+        &[],
     ))
+}
+
+/// `contentRenderComposed` with the FOURTH source: the published rules of the
+/// nest the item was **read through** (`nest-rules.md` § The nest source in the
+/// engine) — `nestPolicies` is `WasmNestRulesBook.ruleSetsFor` for the
+/// connection the item arrived on; `null`/`undefined` → no nest rule composes.
+/// The web twin of the native `content_render_composed_with_nest`; a new export
+/// beside the old one, the same swap on every app.
+#[wasm_bindgen(js_name = contentRenderComposedWithNest)]
+pub fn content_render_composed_with_nest(
+    labels: JsValue,
+    content_policy: JsValue,
+    own_spam_permille: Option<u16>,
+    own_phishing_permille: Option<u16>,
+    region_policies: JsValue,
+    nest_policies: JsValue,
+) -> Result<JsValue, JsValue> {
+    let (labels, policy, own, regions) = content_verdict_inputs(
+        labels,
+        content_policy,
+        own_spam_permille,
+        own_phishing_permille,
+        region_policies,
+    )?;
+    let nests = nest_rule_sets(nest_policies)?;
+    composed_to_js(&fauna_core::obligation::render_verdict_composed(
+        &labels,
+        policy.as_ref(),
+        own,
+        &regions,
+        &nests,
+    ))
+}
+
+/// `contentRenderForItem` with the nest source, as
+/// `contentRenderComposedWithNest` adds it to `contentRenderComposed`.
+#[wasm_bindgen(js_name = contentRenderForItemWithNest)]
+#[allow(clippy::too_many_arguments)]
+pub fn content_render_for_item_with_nest(
+    hidden_content: Vec<String>,
+    item_id: String,
+    author_id: Option<String>,
+    labels: JsValue,
+    content_policy: JsValue,
+    own_spam_permille: Option<u16>,
+    own_phishing_permille: Option<u16>,
+    region_policies: JsValue,
+    nest_policies: JsValue,
+) -> Result<JsValue, JsValue> {
+    let (labels, policy, own, regions) = content_verdict_inputs(
+        labels,
+        content_policy,
+        own_spam_permille,
+        own_phishing_permille,
+        region_policies,
+    )?;
+    let nests = nest_rule_sets(nest_policies)?;
+    composed_to_js(&fauna_core::obligation::render_verdict_for_item(
+        &hidden_content,
+        &item_id,
+        author_id.as_deref(),
+        &labels,
+        policy.as_ref(),
+        own,
+        &regions,
+        &nests,
+    ))
+}
+
+/// The nest rule sets a `...WithNest` face folds; absent → none.
+fn nest_rule_sets(
+    nest_policies: JsValue,
+) -> Result<Vec<fauna_core::obligation::NestRuleSet>, JsValue> {
+    if nest_policies.is_null() || nest_policies.is_undefined() {
+        Ok(Vec::new())
+    } else {
+        crate::rpc::from_js(nest_policies)
+    }
 }
 
 fn composed_to_js(composed: &fauna_core::obligation::ComposedVerdict) -> Result<JsValue, JsValue> {
@@ -1692,9 +1793,30 @@ fn composed_to_js(composed: &fauna_core::obligation::ComposedVerdict) -> Result<
             "reason": a.reason,
         })
     });
+    // Set when a rule of the nest the item was read through drove the verdict:
+    // `nest_rules.blocked_notice` / `.collapsed_notice` name the domain, and
+    // the admin's reason shows verbatim beside it.
+    let nest = composed.nest().map(|a| {
+        serde_json::json!({
+            "domain": a.domain,
+            "reasonCode": a.reason_code,
+            "reason": a.reason,
+        })
+    });
+    // Set when the guardian's policy drove it: the family-policy frame, with
+    // the guardian rule's reason verbatim beside it — `reasonCode` and
+    // `reason` null when a floor drove it.
+    let guardian = composed.guardian().map(|a| {
+        serde_json::json!({
+            "reasonCode": a.rule.as_ref().map(|r| &r.reason_code),
+            "reason": a.rule.as_ref().map(|r| &r.reason),
+        })
+    });
     crate::rpc::to_js(&serde_json::json!({
         "verdict": composed.verdict.as_str(),
         "region": region,
+        "nest": nest,
+        "guardian": guardian,
         "reported": composed.reported(),
     }))
 }
@@ -1790,7 +1912,7 @@ pub fn notify_report_min_interval_secs() -> u32 {
 /// web through it**: `wasm32-unknown-unknown` has no process environment, so
 /// `std::env::var` there is always `Err(NotPresent)` and this face answers the
 /// constant on every web build, test-capable or not. Web's own 150 ms
-/// `__faunaTestAgent` override in `$lib/{conversations,feed,event-drafts}` is
+/// `__faunaTestAgent` override in `#lib/{conversations,feed,event-drafts}` is
 /// today's substitute, and it SHORTENS where the seam lengthens, so web's
 /// leave-flush leg (`test_web_leave_flush.py`) still races the debounce rather
 /// than ruling it out.
@@ -2098,15 +2220,17 @@ pub fn media_sort_direction_label(descending: bool) -> Result<JsValue, JsValue> 
 
 /// `fauna_core::format::os_maintenance_status_label` → a `LocalizedText` `{ key, args }`
 /// the SPA resolves through `resolveLocalized` — the `admin-nest`
-/// `nest-os-maintenance-status` line (reboot-pending / updates-pending / up-to-date,
-/// from the `os_*` fields on `fauna.setup.status`), so web shares the state→key
+/// `nest-os-maintenance-status` line (no-host-data / reboot-pending / updates-pending /
+/// up-to-date, from the `os_*` fields on `fauna.setup.status`), so web shares the state→key
 /// decision instead of its own ternary. See `installers/vps.md` § Host OS Maintenance.
 #[wasm_bindgen(js_name = osMaintenanceStatusLabel)]
 pub fn os_maintenance_status_label(
+    host_status_present: bool,
     security_updates_pending: u32,
     reboot_pending: bool,
 ) -> Result<JsValue, JsValue> {
     crate::rpc::to_js(&fauna_core::format::os_maintenance_status_label(
+        host_status_present,
         security_updates_pending,
         reboot_pending,
     ))
@@ -2278,6 +2402,19 @@ pub fn dns_verdict_label(status: &str, observed: Vec<String>) -> Result<JsValue,
     crate::rpc::to_js(&fauna_core::format::dns_verdict_label(status, &observed))
 }
 
+/// `fauna_client_dns::cert_issuance_error_line` → the `admin-dns-cert-issuance-error`
+/// line for one `DnsSnapshot.cert_issuance_errors` entry (`row`, the serde-shaped
+/// `{ order, detail, failed_at_unix }` the snapshot carries) and the failure's date
+/// already rendered by the SPA (`formatCertExpiry`, the cert badge's own rendering).
+/// The SPA paints the string as plain text — the CA's `detail` is third-party data.
+/// See tls-certificates.md § Keeping the cert alive, *The admin sees why issuance is
+/// failing*.
+#[wasm_bindgen(js_name = certIssuanceErrorLine)]
+pub fn cert_issuance_error_line(row: JsValue, date: &str) -> Result<String, JsValue> {
+    let row: fauna_client_dns::CertIssuanceErrorRow = crate::rpc::from_js(row)?;
+    Ok(fauna_client_dns::cert_issuance_error_line(&row, date))
+}
+
 /// `fauna_core::format::cert_status_label` → a `LocalizedText` `{ key, args }` the SPA
 /// resolves through `resolveLocalized` — the `admin-dns` served-cert health badge's
 /// **state** word (`ValidTrusted` → `status_valid`, `Expiring` → `status_expiring`, else
@@ -2377,6 +2514,21 @@ pub fn bridge_display_name(role: &str) -> Result<JsValue, JsValue> {
     crate::rpc::to_js(&fauna_client_mail_settings::bridge_display_name(role))
 }
 
+/// `fauna_client_bridges::follow_display` — a follow's display name: the
+/// petname if set and non-blank, else the raw external id. The wasm twin of
+/// the UniFFI `follow_display`, so the bridge card's follow row reads the same
+/// on every app (`docs/goal/behavior/bridges.md` § Follows).
+#[wasm_bindgen(js_name = followDisplay)]
+pub fn follow_display(id: String, petname: Option<String>) -> String {
+    fauna_client_bridges::follow_display(&fauna_client_bridges::bridges_ui::BridgeFollow {
+        id,
+        petname,
+        created_at: None,
+        extra: None,
+        unknown_keys: Default::default(),
+    })
+}
+
 /// `fauna_client_bridges::nostr_key_source_label` → a `LocalizedText`
 /// `{ key, args }` the SPA resolves through `resolveLocalized` — the canonical
 /// Nostr signing-mode→label map (`generated`/`imported`/`remote`/`nip07` →
@@ -2410,13 +2562,31 @@ pub fn is_unified_bridges_page_bridge(id: &str) -> bool {
     fauna_client_bridges::is_unified_bridges_page_bridge(id)
 }
 
+/// `fauna_client_bridges::setting_control` — which control a bridge setting's
+/// `setting_type` paints: `"toggle"`, `"select"`, `"number"`, `"text"` or
+/// `"unknown"` (the read-only fallback). The wasm twin of the UniFFI
+/// `setting_control`, so the SPA stops hand-listing the spellings providers use
+/// (`docs/goal/behavior/bridges.md` § Bridge settings).
+#[wasm_bindgen(js_name = bridgeSettingControl)]
+pub fn bridge_setting_control(setting_type: &str) -> String {
+    use fauna_client_bridges::SettingControl as C;
+    match fauna_client_bridges::setting_control(setting_type) {
+        C::Toggle => "toggle",
+        C::Select => "select",
+        C::Number => "number",
+        C::Text => "text",
+        C::Unknown => "unknown",
+    }
+    .to_string()
+}
+
 /// `fauna_client_bridges::mode_applies` — does one declared link mode apply on
 /// `platform`? A mode with no `platform` is universal; a scoped one applies
 /// only on the app whose **canonical name** it names (the ui.yaml vocabulary —
 /// web passes `"web"`). The shared module's docs own the rule.
 ///
 /// Predicate-shaped like the UniFFI twin: web's bridge list lives in TS
-/// (`$lib/bridges.ts` decodes it, no wasm round-trip), so the SPA's filter
+/// (`#lib/bridges.ts` decodes it, no wasm round-trip), so the SPA's filter
 /// keeps its own objects and swaps only the condition — the piece that was
 /// hand-written seven times. Web's nip07 extension probe stays local, ANDed
 /// after this: a runtime capability no shared crate can observe.
@@ -2492,6 +2662,44 @@ pub fn alias_hits_label(hit_count: f64, last_hit_date: Option<String>) -> Result
     crate::rpc::to_js(&fauna_client_mail_settings::alias_hits_label(
         hit_count as u64,
         last_hit_date,
+    ))
+}
+
+/// `fauna_client_mail_settings::alias_expiry_label` → a `LocalizedText`
+/// (`mail_aliases.expires_on` / `mail_aliases.expired`), or `null` for an alias
+/// with no expiry — the `mail-aliases-list-item-expires-at` text. The expiry
+/// `date` is passed in pre-formatted in the viewer's local timezone, the
+/// `aliasHitsLabel` split. Millisecond times are `f64` (web's `number`).
+#[wasm_bindgen(js_name = aliasExpiryLabel)]
+pub fn alias_expiry_label(
+    expires_at_ms: Option<f64>,
+    now_ms: f64,
+    expiry_date: String,
+) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_mail_settings::alias_expiry_label(
+        expires_at_ms.map(|ms| ms as i64),
+        now_ms as i64,
+        expiry_date,
+    ))
+}
+
+/// `fauna_client_mail_settings::alias_is_extendable` — whether the row shows
+/// `mail-aliases-list-item-extend-button`: a disposable not yet expired with
+/// uses left (`mail-aliases.md` § Don't do these). `kind` is the serde
+/// variant-name string the aliases snapshot carries.
+#[wasm_bindgen(js_name = aliasIsExtendable)]
+pub fn alias_is_extendable(
+    kind: JsValue,
+    expires_at_ms: Option<f64>,
+    uses_remaining: Option<f64>,
+    now_ms: f64,
+) -> Result<bool, JsValue> {
+    let kind: fauna_client_mail_settings::AliasKind = crate::rpc::from_js(kind)?;
+    Ok(fauna_client_mail_settings::alias_is_extendable(
+        kind,
+        expires_at_ms.map(|ms| ms as i64),
+        uses_remaining.map(|n| n as i64),
+        now_ms as i64,
     ))
 }
 
@@ -2634,7 +2842,7 @@ pub fn mail_import_connect_actions(
 
 /// `fauna_client_mail_settings::credential_kind_badge` → a `LocalizedText`
 /// `{ key, args }` the SPA resolves through `resolveLocalized` — the canonical
-/// two-arm Password/Bearer label map (`mail-settings-credential-item-type`) the
+/// two-arm Password/Bearer label map (`connected-apps-item-type`) the
 /// native apps already consume, so web stops hard-coding the English
 /// `'Password'`/`'Bearer token'` strings (it had bypassed i18n entirely). `kind`
 /// is the serde variant-name string (`"Plain"` / `"OAuthBearer"`) the credential
@@ -2685,6 +2893,22 @@ pub fn search_clean_snippet(raw: &str) -> String {
 #[wasm_bindgen(js_name = notificationTypeGlyph)]
 pub fn notification_type_glyph(notif_type: &str) -> String {
     fauna_core::notification_glyph::notification_type_emoji(notif_type).to_string()
+}
+
+/// Whether a notification row's dismiss is greyed at `now_micros` (a
+/// `security.notice` inside its retention window) —
+/// `fauna_client_notifications::notification_retained` over wasm
+/// (`docs/goal/behavior/notifications.md` § Retention rule 2). `row` is one
+/// element of a `notificationsList` reply as it arrives; `now_micros` crosses as
+/// `f64` (epoch micros sit well within 2^53).
+#[wasm_bindgen(js_name = notificationRetained)]
+pub fn notification_retained(row: JsValue, now_micros: f64) -> Result<bool, JsValue> {
+    let item: fauna_client_notifications::notifications::NotifItem =
+        serde_wasm_bindgen::from_value(row).map_err(crate::rpc::err_to_js)?;
+    Ok(fauna_client_notifications::notification_retained(
+        &item,
+        now_micros as i64,
+    ))
 }
 
 /// Where a notification row goes when opened, or `null` for an honestly inert
@@ -2751,6 +2975,27 @@ pub fn notification_text(row: JsValue) -> Result<JsValue, JsValue> {
         NotificationText::Verbatim(text) => Text::Verbatim { text },
     };
     crate::rpc::to_js(&text)
+}
+
+/// Does a muted word collapse this notification row behind `notification-muted`
+/// and its reveal? `fauna_client_notifications::notification_muted` over wasm
+/// (`docs/goal/behavior/notifications.md` § Muted words) — the web twin of the
+/// FFI `notification_muted_for`.
+///
+/// `row` is one element of a `notificationsList` reply **as it arrives**, like
+/// [`notification_text`]'s; `muted_keywords` is the `keywords` of the
+/// muted-words page record, `[{ keyword, weight }]` — the one list the
+/// conversation collapse already reads, never a second read. The match runs
+/// over the row's relayed text, only a word muted at Hide collapses, and a
+/// `security.notice` never does — all of it decided here, not in the SPA.
+#[wasm_bindgen(js_name = notificationMuted)]
+pub fn notification_muted(row: JsValue, muted_keywords: JsValue) -> Result<bool, JsValue> {
+    let item: fauna_client_notifications::notifications::NotifItem =
+        serde_wasm_bindgen::from_value(row).map_err(crate::rpc::err_to_js)?;
+    let muted: Vec<fauna_core::data::MutedKeyword> = crate::rpc::from_js(muted_keywords)?;
+    Ok(fauna_client_notifications::notification_muted(
+        &muted, &item,
+    ))
 }
 
 /// The conversations rail / feed badge source icon: glyph **id** (the lowercase
@@ -2866,7 +3111,9 @@ pub fn encode_email_filter_rule(kind: &str, value: &str) -> Result<JsValue, JsVa
 
 /// `fauna_protocol::email::encode_filter_action` over the shared filter form's
 /// action inputs — a `FilterActionInputs` object (`{ kind, reject_reason,
-/// forward_address, keep_local_copy }`, every field optional) → the
+/// forward_address, keep_local_copy, file_into_mailbox, label,
+/// auto_reply_subject, auto_reply_body, auto_reply_interval_hours }`, every
+/// field optional) → the
 /// `EmailFilterAction` JS value. A `Forward` destination is checked with the
 /// nest's own rule-path predicate; an unknown tag or invalid destination throws.
 #[wasm_bindgen(js_name = encodeEmailFilterActionInputs)]
@@ -2929,6 +3176,46 @@ pub fn filter_is_editable_for(filter: JsValue, action_kinds: Vec<String>) -> Res
         &filter.action,
         &kinds,
     ))
+}
+
+/// `fauna_protocol::email::filter_is_editable` — whether a stored filter can
+/// open the full shared form (every condition's and every action's inputs).
+#[wasm_bindgen(js_name = filterIsEditable)]
+pub fn filter_is_editable(filter: JsValue) -> Result<bool, JsValue> {
+    let filter: fauna_protocol::email::EmailFilter = crate::rpc::from_js(filter)?;
+    Ok(fauna_protocol::email::filter_is_editable(&filter))
+}
+
+/// `fauna_protocol::email::encode_filter_rule_inputs` over the shared filter
+/// form's condition inputs — a `FilterRuleInputs` object (`{ kind, value,
+/// header_value, spam_score }`, every field optional) → the `EmailFilterRule`
+/// JS value. An unknown tag or an unparseable spam score throws.
+#[wasm_bindgen(js_name = encodeEmailFilterRuleInputs)]
+pub fn encode_email_filter_rule_inputs(inputs: JsValue) -> Result<JsValue, JsValue> {
+    let inputs: fauna_protocol::email::FilterRuleInputs = crate::rpc::from_js(inputs)?;
+    let rule =
+        fauna_protocol::email::encode_filter_rule_inputs(&inputs).map_err(crate::rpc::err_to_js)?;
+    crate::rpc::to_js(&rule)
+}
+
+/// `fauna_protocol::email::describe_filter_rule_inputs` — the reverse of
+/// `encodeEmailFilterRuleInputs`: the `FilterRuleInputs` object that reproduces
+/// a stored `EmailFilterRule`, or `null` for a condition a newer build added.
+#[wasm_bindgen(js_name = describeEmailFilterRuleInputs)]
+pub fn describe_email_filter_rule_inputs(rule: JsValue) -> Result<JsValue, JsValue> {
+    let rule: fauna_protocol::email::EmailFilterRule = crate::rpc::from_js(rule)?;
+    match fauna_protocol::email::describe_filter_rule_inputs(&rule) {
+        Some(inputs) => crate::rpc::to_js(&inputs),
+        None => Ok(JsValue::NULL),
+    }
+}
+
+/// `fauna_protocol::email::parse_filter_priority` — the `filter-priority-input`
+/// buffer → the rule's order (blank is `0`); throws on anything but a whole
+/// number.
+#[wasm_bindgen(js_name = parseFilterPriority)]
+pub fn parse_filter_priority(text: &str) -> Result<i32, JsValue> {
+    fauna_protocol::email::parse_filter_priority(text).map_err(crate::rpc::err_to_js)
 }
 
 /// `fauna_protocol::spam::spam_threshold_band` → the `aggressive`/`moderate`/
@@ -3053,6 +3340,31 @@ pub fn typed_address_display(addr: JsValue) -> Result<String, JsValue> {
     Ok(addr.display())
 }
 
+/// `fauna_conversations::message::warmup_deferred_text_at` → the
+/// `dm-message-warmup-deferred` line under a held sent mail
+/// (`mail-deliverability.md` § Enforcement at submission time): the shared
+/// wording, queue count and release-has-come rule, with the release time the
+/// SPA formatted in the viewer's local clock (`release_label`) — wasm has no OS
+/// timezone database, so the date is the one thing the web app formats; the
+/// native apps call the `local-clock` `warmup_deferred_text` over UniFFI.
+/// `hold` is the snapshot's serde `MessageSnapshot.warmup_hold` object;
+/// `now_secs` is `f64` under the wasm-time discipline. `undefined` when the
+/// line says nothing.
+#[wasm_bindgen(js_name = warmupDeferredTextAt)]
+pub fn warmup_deferred_text_at(
+    hold: JsValue,
+    now_secs: f64,
+    release_label: &str,
+) -> Result<Option<String>, JsValue> {
+    let hold: fauna_conversations::backend::MailWarmupHold =
+        serde_wasm_bindgen::from_value(hold).map_err(crate::rpc::err_to_js)?;
+    Ok(fauna_conversations::message::warmup_deferred_text_at(
+        &hold,
+        now_secs as i64,
+        release_label,
+    ))
+}
+
 /// `fauna_core::markdown::markdown_to_html` → the canonical HTML for a NIP-23 article
 /// body, so web's `markdown.ts` shares the one parser the native apps also render from
 /// (priority #1/#2/#4) instead of re-implementing the Markdown subset. Byte-identical to
@@ -3172,6 +3484,31 @@ pub fn render_document_proxied_videos(doc: JsValue) -> Result<JsValue, JsValue> 
         serde_wasm_bindgen::from_value(doc).map_err(crate::rpc::err_to_js)?;
     let owned: Vec<fauna_core::render::ProxiedVideoRefOwned> =
         doc.proxied_videos().into_iter().map(Into::into).collect();
+    crate::rpc::to_js(&owned)
+}
+
+/// `fauna_core::render::RenderDocument::proxied_post_image_ref` → the `{path, alt}` a post's
+/// `post-image` slot paints when it is a bridged picture (the first `ProxiedImage` of a post
+/// with no blob image), else `null` (render-model.md § D6c). The browser twin of the UniFFI
+/// `render_document_proxied_post_image` face.
+#[wasm_bindgen(js_name = renderDocumentProxiedPostImage)]
+pub fn render_document_proxied_post_image(doc: JsValue) -> Result<JsValue, JsValue> {
+    let doc: fauna_core::render::RenderDocument =
+        serde_wasm_bindgen::from_value(doc).map_err(crate::rpc::err_to_js)?;
+    let owned: Option<fauna_core::render::ProxiedImageRefOwned> =
+        doc.proxied_post_image_ref().map(Into::into);
+    crate::rpc::to_js(&owned)
+}
+
+/// `fauna_core::render::RenderDocument::proxied_post_video_ref` → the video twin of
+/// [`render_document_proxied_post_image`], for the `video-thumbnail` slot. The browser twin
+/// of the UniFFI `render_document_proxied_post_video` face.
+#[wasm_bindgen(js_name = renderDocumentProxiedPostVideo)]
+pub fn render_document_proxied_post_video(doc: JsValue) -> Result<JsValue, JsValue> {
+    let doc: fauna_core::render::RenderDocument =
+        serde_wasm_bindgen::from_value(doc).map_err(crate::rpc::err_to_js)?;
+    let owned: Option<fauna_core::render::ProxiedVideoRefOwned> =
+        doc.proxied_post_video_ref().map(Into::into);
     crate::rpc::to_js(&owned)
 }
 
@@ -3310,7 +3647,7 @@ pub fn note_line_map(value: &str, blocks: JsValue) -> Result<JsValue, JsValue> {
 /// `{block, offset}` `BlockCaret` (the gesture engine's caret: a block id + a byte offset into
 /// that block's `text`), or `null` when it can't be resolved (empty buffer). The block lookup /
 /// structural-prefix skip / code-body byte accumulation is shared Rust — web converts CodeMirror's
-/// UTF-16 caret to a byte offset first (the only seam web keeps; see `$lib/notes-editor`). `blocks`
+/// UTF-16 caret to a byte offset first (the only seam web keeps; see `#lib/notes-editor`). `blocks`
 /// is the `parseNote` array; the per-line projection is recomputed here from `(value, blocks)`.
 #[wasm_bindgen(js_name = caretToBlockCaret)]
 pub fn caret_to_block_caret(
@@ -4027,7 +4364,7 @@ fn app_outdated_js(detail: &str) -> JsValue {
 // the pre-identity surface (`bins/fauna-nest/src/pre_identity_allowlist.rs`) and
 // resolve the *same* `discovery_core` the HTTP twins did, so behavior is
 // identical. No keypair: discovery is unsigned. The replies are emitted as JSON
-// strings shaped for the existing `$lib/{api,resolve}.ts` consumers (no
+// strings shaped for the existing `#lib/{api,resolve}.ts` consumers (no
 // consumer-side churn). `fauna.handle.available` has no web caller (the wasm
 // `OnboardingMachine` owns handle validation), so it gets no face here.
 
@@ -4095,51 +4432,6 @@ async fn nest_resolve_inner(domain: &str, origin: &str) -> Result<JsValue, JsVal
         .await
         .map_err(map_silent_err)?;
     Ok(JsValue::from_str(&reply.url))
-}
-
-/// `fauna.actor.by_handle` — resolve a human-readable handle to an actor ID for
-/// addressing. Resolves the JSON `{ actor_id, handle, domain }` the SPA's
-/// `resolveHandle` consumer expects. Origin-agnostic: the anonymous WS is
-/// CORS-exempt, so a *cross-origin* (remote-nest) handle resolve works where the
-/// HTTP `/actor/by-handle` fetch was CORS-blocked.
-///
-/// `domain` is the optional typed `@domain` qualifier. Given, the resolved
-/// `handle`/`domain` are the TYPED pair — the dial names the peer and the reply's
-/// echo is never read for identity (`foreign-handle-resolution.md` § Peer-auth
-/// model; rule shared with the UniFFI face and linux in
-/// `fauna_client_core::find_user`) — and it travels as the multi-domain
-/// qualifier, so a nest that does not serve it rejects with
-/// `fauna.actor.domain_not_local` (`mail-multidomain.md` § Multi-domain handles
-/// § Resolution). `undefined` (a bare handle, resolved on the home nest) reports
-/// the identity domain.
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen(js_name = actorByHandle)]
-pub fn actor_by_handle(handle: String, origin: String, domain: Option<String>) -> js_sys::Promise {
-    wasm_bindgen_futures::future_to_promise(async move {
-        actor_by_handle_inner(&handle, &origin, domain).await
-    })
-}
-
-#[cfg(target_arch = "wasm32")]
-async fn actor_by_handle_inner(
-    handle: &str,
-    origin: &str,
-    domain: Option<String>,
-) -> Result<JsValue, JsValue> {
-    let client = fauna_rpc_wasm::AnonymousWsRpcClient::connect(origin)
-        .map_err(|e| transient_js(&format!("anonymous connect {origin}: {e}")))?;
-    let found =
-        fauna_client_core::find_user::find_user_by_handle(&client, handle, domain.as_deref())
-            .await
-            .map_err(map_silent_err)?;
-    Ok(JsValue::from_str(
-        &serde_json::json!({
-            "actor_id": found.actor_id,
-            "handle": found.handle,
-            "domain": found.domain,
-        })
-        .to_string(),
-    ))
 }
 
 /// The Contacts Find User lookup with cross-nest peer discovery — the wasm face of
@@ -4211,7 +4503,7 @@ async fn find_user_inner(
 /// plumbing is already here (`src/succession.rs` builds it verbatim), whereas
 /// the launch chunk's wasm32-scoped dependency table exists precisely to keep
 /// that chunk small — it loads on every page. The onboarding page already loads
-/// this chunk (`$lib/accounts` → `ensureWasm`), so the caller pays nothing new.
+/// this chunk (`#lib/accounts` → `ensureWasm`), so the caller pays nothing new.
 ///
 /// Rejects **only** on an unreadable actor id. Every expected failure —
 /// unreachable nest, empty lookup, a non-contiguous or hostile chain — resolves
@@ -4303,8 +4595,11 @@ pub fn rearm_owed_succession_kit(actor_id_hex: String) {
 /// at `succession::adopt_held_successor`.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen(js_name = adoptHeldSuccessor)]
-pub fn adopt_held_successor(predecessor_actor_id_hex: String, verified_successor: String) -> bool {
-    crate::succession::adopt_held_successor(&predecessor_actor_id_hex, &verified_successor)
+pub async fn adopt_held_successor(
+    predecessor_actor_id_hex: String,
+    verified_successor: String,
+) -> bool {
+    crate::succession::adopt_held_successor(&predecessor_actor_id_hex, &verified_successor).await
 }
 
 /// Whether this identity is owed a relaunch adoption's group sweep — a
@@ -4388,9 +4683,15 @@ pub fn build_post_with_media(
         .map_err(|e| JsValue::from_str(&e))
 }
 
-#[wasm_bindgen]
-pub fn decode_post(data: &[u8]) -> Result<String, JsValue> {
-    decode_post_inner(data).map_err(|e| JsValue::from_str(&e))
+/// Decode a post body fetched **by id** (`fauna.posts.get(requested_post_id)`):
+/// `fauna_client_core::post::decode_post_shaped_fetched_as`, so `valid` is
+/// signature ∧ `wire_post_id == requested_post_id`. The only by-id decode face
+/// this crate exports — an unbound one let web paint a substituted body under
+/// the feed manager's `Verified` badge (`security.md` § App display of
+/// unverified content).
+#[wasm_bindgen(js_name = decodePostFetchedAs)]
+pub fn decode_post_fetched_as(requested_post_id: &str, data: &[u8]) -> Result<String, JsValue> {
+    decode_post_fetched_as_inner(requested_post_id, data).map_err(|e| JsValue::from_str(&e))
 }
 
 /// `fauna_core::data::Post::decode_resolved_bytes(data).map(Post::body_text)` — the
@@ -4562,14 +4863,19 @@ pub fn build_post_with_media_inner(
         .map_err(|e| e.0)
 }
 
-/// Decode a dag-cbor-encoded Post and return JSON with author, body, created_at, references, tags.
-/// Mirrors the UniFFI `decode_post_full` in `libs/fauna-ffi/src/post.rs` — both
-/// marshal `fauna_client_core::post::decode_post_shaped`'s platform-neutral
-/// shape into their own binding's output. This face's JSON has never included
+/// Decode a dag-cbor-encoded Post fetched by id and return JSON with author, body,
+/// created_at, references, tags and `valid` (signed ∧ bound to `requested_post_id`).
+/// Shares its shaping with the UniFFI `decode_post_full` in `libs/fauna-ffi/src/post.rs`
+/// (both marshal `fauna_client_core::post`'s platform-neutral `DecodedPostShape` into
+/// their own binding's output), but unlike that face it is BOUND to the requested id. This face's JSON has never included
 /// `facets`/`content_warning`; that stays true here (the shaped struct carries
 /// them, this wrapper just doesn't serialize them).
-pub fn decode_post_inner(data: &[u8]) -> Result<String, String> {
-    let shaped = fauna_client_core::post::decode_post_shaped(data).map_err(|e| e.0)?;
+pub fn decode_post_fetched_as_inner(
+    requested_post_id: &str,
+    data: &[u8],
+) -> Result<String, String> {
+    let shaped = fauna_client_core::post::decode_post_shaped_fetched_as(requested_post_id, data)
+        .map_err(|e| e.0)?;
 
     let references: Vec<serde_json::Value> = shaped
         .references
@@ -4885,6 +5191,18 @@ pub fn legal_takedown_tombstone(reference: &str) -> Result<JsValue, JsValue> {
     crate::rpc::to_js(&fauna_core::obligation::legal_takedown_tombstone(reference))
 }
 
+/// `fauna_core::obligation::admin_block_notice` → a `LocalizedText` `{ key,
+/// args }` — the shared notice ("blocked by this nest's admin after a report:
+/// harassment", `moderation.md` § Admin block of a reported item) the web
+/// post/message view renders in the body position once a reply carries
+/// `admin_block`. `reason` is the marker's reason wire token; the returned
+/// `{reason}` value is itself a key, so resolve it with the SPA's nested
+/// lookup. The wasm twin of the UniFFI `adminBlockNotice` face.
+#[wasm_bindgen(js_name = adminBlockNotice)]
+pub fn admin_block_notice(reason: &str) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_core::obligation::admin_block_notice(reason))
+}
+
 /// `fauna_client_moderation::merge_queue` → the unified moderation-queue rows —
 /// the wasm twin of the UniFFI `moderation_queue` façade the natives use
 /// (`libs/fauna-ffi/src/moderation_client.rs`), so every app unions the queue's
@@ -5048,6 +5366,38 @@ pub fn report_takedown_prefill(subject: JsValue) -> Result<JsValue, JsValue> {
     )
 }
 
+/// `block::block_form_view` — the Block (queue row, `restore` false) /
+/// Unblock (blocked list) control: `{ can_submit, blocked_reason, arm_label,
+/// confirm_label }`. `subject` is the wire's tagged `AbuseReportSubject`.
+#[wasm_bindgen(js_name = reportBlockFormView)]
+pub fn report_block_form_view(subject: JsValue, restore: bool) -> Result<JsValue, JsValue> {
+    let subject: fauna_protocol::moderation::AbuseReportSubject = crate::rpc::from_js(subject)?;
+    crate::rpc::to_js(&fauna_client_moderation::block_form_view(&subject, restore))
+}
+
+/// `block::block_confirm_summary` — the armed confirm naming verb, item and
+/// reason (`reason` the wire token). `{item}` and `{reason}` are keys: resolve
+/// with the nested lookup.
+#[wasm_bindgen(js_name = reportBlockConfirmSummary)]
+pub fn report_block_confirm_summary(
+    subject: JsValue,
+    reason: String,
+    restore: bool,
+) -> Result<JsValue, JsValue> {
+    let subject: fauna_protocol::moderation::AbuseReportSubject = crate::rpc::from_js(subject)?;
+    crate::rpc::to_js(&fauna_client_moderation::block_confirm_summary(
+        &subject,
+        fauna_protocol::moderation::AbuseReportReason::from_token(&reason),
+        restore,
+    ))
+}
+
+/// `block::block_verdict` — `null` error on success.
+#[wasm_bindgen(js_name = reportBlockVerdict)]
+pub fn report_block_verdict(restore: bool, error: Option<String>) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_moderation::block_verdict(restore, error))
+}
+
 /// `report::resolve_verdict` — `acted` false is a dismissal.
 #[wasm_bindgen(js_name = reportResolveVerdict)]
 pub fn report_resolve_verdict(acted: bool, error: Option<String>) -> Result<JsValue, JsValue> {
@@ -5063,7 +5413,7 @@ pub fn report_resolve_verdict(acted: bool, error: Option<String>) -> Result<JsVa
 }
 
 /// `fauna_client_admin::issuer_key_row_label` → one
-/// `admin-nest-oauth-key-item-{n}` line. `row` is one entry of the
+/// `admin-nest-oauth-key-item` line. `row` is one entry of the
 /// `adminIssuerKeyStatus` view's `keys`, `now_secs` the SPA's clock at paint
 /// (epoch seconds — a retired key's countdown is the point of its line). Pure,
 /// so a free fn; the wasm twin of the UniFFI `issuer_key_row_label`.

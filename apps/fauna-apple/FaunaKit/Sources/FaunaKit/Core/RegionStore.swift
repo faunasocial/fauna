@@ -5,7 +5,7 @@ import SwiftUI
 /// → *How an app obtains its region's policy*, *The blocked render and the
 /// transparency surface*) — a paint of the shared `FfiRegionPlane`
 /// (`libs/fauna-ffi/src/region.rs`), the one face the four UniFFI apps drive.
-/// linux's `apps/fauna-linux/src/region.rs` and web's `$lib/region.svelte.ts`
+/// linux's `apps/fauna-linux/src/region.rs` and web's `#lib/region.svelte.ts`
 /// are the reference legs.
 ///
 /// Everything that decides — verify, fold, persist, the refresh cadence, the

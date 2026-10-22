@@ -217,11 +217,9 @@ def test_admin_dns_add_remove_restore_domain(admin_app, nest_instance):
         ),
     )
 
-    # --- Remove (soft-delete) --- click the remove button on the added domain's
-    # row. The remove-button is present on every active row (disabled on the
-    # primary), so its index aligns with admin-dns-domain-name.
-    idx = admin_app.admin.dns_domain_names().index(domain)
-    admin_app.driver.click("admin-dns-domain-remove-button", index=idx)
+    # --- Remove (soft-delete) --- the row's remove control, through the confirm
+    # it opens (mail-multidomain.md § Removing a local domain).
+    admin_app.admin.remove_domain(domain)
     removed = wait_until(
         lambda: admin_app.admin.dns_removed_domain_names() if domain in admin_app.admin.dns_removed_domain_names() else None,
         RPC_ROUNDTRIP_S,
@@ -354,11 +352,31 @@ def test_admin_dns_add_credential_shows_provider_error(admin_app, nest_instance)
         except Exception:
             return None
 
-    err = wait_until(
-        _err_text,
-        PROVIDER_VERIFY_S,
-        diagnose=lambda: "no admin-dns error-message text appeared after add-credential submit",
-    )
+    # The e2e clock compresses the page's background re-check to seconds
+    # (``FAUNA_DNS_RECHECK_SECS``), and every re-check dispatch clears the
+    # snapshot's prior error — so a verify failure that lands just before a tick
+    # can be gone before the first poll reads it (measured on tui: rejection
+    # logged, re-check 181 ms later, error never observable). Production's
+    # minutes-long cadence has no such window. Re-submit within the same budget
+    # until one failure's error is read: each attempt draws a fresh phase against
+    # the tick, so the assertion no longer depends on one lucky window
+    # (convention 14).
+    attempts = 4
+    err = None
+    for attempt in range(attempts):
+        try:
+            err = wait_until(_err_text, PROVIDER_VERIFY_S / attempts)
+            break
+        except AssertionError:
+            if attempt == attempts - 1:
+                raise AssertionError(
+                    f"no admin-dns error-message text appeared after {attempts} "
+                    "add-credential submits (each failure's error was cleared by a "
+                    "re-check before it could be read, or never surfaced)"
+                ) from None
+            admin_app.admin.add_dns_credential(
+                "cloudflare", {"api-token": "bogus-token-deadbeef"}
+            )
     # Accept either failure class — a provider rejection (reachable provider,
     # bad token) or a transient/unreachable error (proxied web path, provider
     # hop not reachable from the sandbox). Both are surfaced verify failures and
@@ -826,11 +844,6 @@ def test_admin_dns_row_shows_where_catch_all_and_role_addresses_go(
     )
 
 
-# The apps that render `admin-dns-domain-dmarc-policy-select` (tui leads; each
-# app's trickle-down lift adds itself here).
-_DMARC_POLICY_BUILT_APPS = {"tui", "windows", "linux", "android", "web"}
-
-
 @pytest.mark.feature("admin-dns-and-certificates")
 def test_admin_softens_one_domains_dmarc_policy_from_its_row(admin_app, nest_instance):
     """An admin softens one domain's DMARC policy from its row on the Domains
@@ -844,14 +857,7 @@ def test_admin_softens_one_domains_dmarc_policy_from_its_row(admin_app, nest_ins
        is read back from the nest, not the picker remembering a click.
     4. Choosing ``reject`` again clears the override rather than storing it.
     """
-    if app_name(admin_app.driver) not in _DMARC_POLICY_BUILT_APPS:
-        skip_unbuilt(
-            admin_app.driver,
-            surface="admin-dns-domain-dmarc-policy-select",
-            detail="the per-domain DMARC policy picker; tui leads",
-            tracked="",
-        )
-    soft = f"dmarc-soft-{secrets.token_hex(4)}.test"
+    soft =f"dmarc-soft-{secrets.token_hex(4)}.test"
     strict = f"dmarc-strict-{secrets.token_hex(4)}.test"
     seed_local_domain(nest_instance, strict)
     _open_domain(admin_app, nest_instance, soft)

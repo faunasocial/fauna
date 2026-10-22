@@ -14,7 +14,7 @@
 // through `write()` and assigns the result. Kept out of the `.svelte` file (and
 // injected rather than reading Svelte state directly) so it is unit-testable
 // under `just web-unit-test` — the Rust/Swift equivalents have their own native
-// test runners; web's only unit lane is Deno over `$lib`
+// test runners; web's only unit lane is Deno over `#lib`
 // (`recovery-error-guard.test.ts`).
 
 export class RecoveryErrorGuard {

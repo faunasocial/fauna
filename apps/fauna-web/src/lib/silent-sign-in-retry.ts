@@ -1,6 +1,6 @@
 //! When web's background silent sign-in tries again after a failure.
 //!
-//! `$lib/store`'s `refreshFromServer` is the only place a signed-in reload
+//! `#lib/store`'s `refreshFromServer` is the only place a signed-in reload
 //! reaches a working session: web has no launch surface on that path (the
 //! layout diverts to the launch flow only when the stored identity is
 //! MISSING), so the native launch machine's visible Retry CTA has no web

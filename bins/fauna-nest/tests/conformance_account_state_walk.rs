@@ -5101,6 +5101,7 @@ async fn write_mail_custody(seat: &Seat, rpc: &RouterRequester, keys: &AccountSt
                 created_at: 1_700_000_000,
                 updated_at: Timestamp::default(),
                 wrapped_under: Some(MsekFingerprint::of(&msek)),
+                token_minted_at: None,
                 revoked_at_unix: None,
                 burned: None,
             },

@@ -121,9 +121,15 @@ fun RoomLabelerRowsContent(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    "${entry.publisherActor} · ${entry.factor}",
-                    modifier = Modifier.weight(1f),
+                // The toggle's text names the labeler's kind and a prefix of its
+                // id (ui.yaml `room-labeler-toggle`; as linux/tui): the catalog
+                // row carries no name, and the full id is one inspect away.
+                val mark = stringResource(
+                    if (staged) {
+                        R.string.conversations_unified_room_labeler_on
+                    } else {
+                        R.string.conversations_unified_room_labeler_off
+                    },
                 )
                 TextButton(
                     onClick = {
@@ -131,18 +137,11 @@ fun RoomLabelerRowsContent(
                     },
                     enabled = live,
                     modifier = Modifier
+                        .weight(1f)
                         .testTag(Ids.ROOM_LABELER_TOGGLE)
                         .semantics { stateDescription = if (staged) "true" else "false" },
                 ) {
-                    Text(
-                        stringResource(
-                            if (staged) {
-                                R.string.conversations_unified_room_labeler_on
-                            } else {
-                                R.string.conversations_unified_room_labeler_off
-                            },
-                        ),
-                    )
+                    Text("${entry.artifactKind} · ${entry.labelerId.take(16)}… · $mark")
                 }
                 OutlinedButton(
                     onClick = { onInspect(index) },

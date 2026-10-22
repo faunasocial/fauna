@@ -144,6 +144,16 @@ fun AdminDashboardContent(
                             modifier = Modifier.testTag("${Ids.ADMIN_NAV_ROW}[admin-mail]").clickable { onNavigate("settings/admin-mail") }
                         )
                     }
+                    // admin-mail-reports: the DMARC aggregate-report summary
+                    // (dmarc-reporting.md § Admin pane summary surface), after admin-mail.
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        ListItem(
+                            headlineContent = { Text(stringResource(R.string.admin_mail_reports_page_title)) },
+                            leadingContent = { Icon(Icons.Default.Email, contentDescription = null) },
+                            trailingContent = { Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null) },
+                            modifier = Modifier.testTag("${Ids.ADMIN_NAV_ROW}[admin-mail-reports]").clickable { onNavigate("settings/admin-mail-reports") }
+                        )
+                    }
                     // admin-calendar: the deployment-wide CalDAV-enable toggle (admin.md
                     // § 8 Calendar), the sibling of admin-mail. No ui.yaml ID — the e2e
                     // navigates via the action layer's route.

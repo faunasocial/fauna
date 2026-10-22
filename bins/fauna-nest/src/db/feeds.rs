@@ -42,6 +42,46 @@ impl FeedAudience {
     }
 }
 
+/// Whose read a feed query is, for the post envelopes a **federated follow**
+/// delivered here (`content.follow_delivered = 1`; `federated-follow.md`
+/// § Decision 4) — the per-reader source beside [`FeedAudience`]. A delivered
+/// envelope is one reader's, never the nest's: it lists only to a reader who
+/// follows its author.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FeedLocality {
+    /// Every read that is not the account's own on its own box: no delivered
+    /// envelope at all.
+    NestWide,
+    /// The account on its own box: the nest-wide rows plus the delivered
+    /// envelopes of the authors it holds an `approved` remote follow of — or
+    /// of an identity one of those authors succeeded (stored posts keep their
+    /// author; `actor_successions` maps the retired id onto the successor).
+    ForReader([u8; 32]),
+}
+
+impl FeedLocality {
+    /// The SQL fragment the locality ANDs onto a feed query (`c` = `content`).
+    /// The reader is a fixed-width id this nest holds, spelled as a blob
+    /// literal so the fragment composes with every query's own placeholders.
+    fn guard(self) -> String {
+        match self {
+            FeedLocality::NestWide => "c.follow_delivered = 0".to_string(),
+            FeedLocality::ForReader(reader) => {
+                let followed = format!(
+                    "SELECT author_id FROM remote_follows \
+                     WHERE subscriber_id = X'{}' AND state = 'approved'",
+                    hex::encode(reader)
+                );
+                format!(
+                    "(c.follow_delivered = 0 OR c.author IN ({followed}) \
+                     OR c.author IN (SELECT old_actor_id FROM actor_successions \
+                     WHERE new_actor_id IN ({followed})))"
+                )
+            }
+        }
+    }
+}
+
 /// The `order=score` **keyset cursor**: the ordering key of the last row served
 /// plus that same row's `created_at` tiebreak.
 ///
@@ -902,6 +942,7 @@ impl CacheDb {
             cursor,
             limit,
             FeedAudience::OnBox,
+            FeedLocality::NestWide,
         )
         .await
     }
@@ -923,13 +964,15 @@ impl CacheDb {
             cursor,
             limit,
             FeedAudience::OffBox,
+            FeedLocality::NestWide,
         )
         .await
     }
 
-    /// [`Self::query_feed`] for a named reader's [`FeedAudience`] — a custom
-    /// feed read by the account or, held off the box, by a principal under
-    /// `fauna:feed:read:account`.
+    /// [`Self::query_feed`] for a named reader's [`FeedAudience`] and
+    /// [`FeedLocality`] — the local feed or a custom feed read by the account
+    /// or, held off the box, by a principal under `fauna:feed:read:account`.
+    #[allow(clippy::too_many_arguments)]
     pub async fn query_feed_for(
         &self,
         rules: &[fauna_core::scoring::FilterRule],
@@ -938,11 +981,21 @@ impl CacheDb {
         cursor: Option<i64>,
         limit: i64,
         audience: FeedAudience,
+        locality: FeedLocality,
     ) -> Result<Vec<FeedPostRow>> {
-        self.query_feed_impl(rules, combination, mandatory, cursor, limit, audience)
-            .await
+        self.query_feed_impl(
+            rules,
+            combination,
+            mandatory,
+            cursor,
+            limit,
+            audience,
+            locality,
+        )
+        .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn query_feed_impl(
         &self,
         rules: &[fauna_core::scoring::FilterRule],
@@ -951,6 +1004,7 @@ impl CacheDb {
         cursor: Option<i64>,
         limit: i64,
         audience: FeedAudience,
+        locality: FeedLocality,
     ) -> Result<Vec<FeedPostRow>> {
         use fauna_core::scoring::FilterCombination;
 
@@ -1006,7 +1060,7 @@ impl CacheDb {
         // item 1 — a taken-down post is withheld from every feed surface; the
         // visible tombstone lives at the direct-read path) — plus whatever the
         // reader's audience adds ([`FeedAudience::guard`]).
-        let guard = audience.guard();
+        let guard = format!("{} AND {}", audience.guard(), locality.guard());
         let where_clause = if where_clause.is_empty() {
             format!("WHERE {guard}")
         } else {
@@ -1095,6 +1149,8 @@ impl CacheDb {
                 score: None,
                 web_slug: None,
                 labels: Vec::new(),
+                home_nest_url: None,
+                home_nest_actor_id: None,
             });
         }
         drop(stmt);
@@ -1139,6 +1195,7 @@ impl CacheDb {
         // read here — this fn is viewer-independent; `augment_viewer_state`
         // fills it for the local query paths only.
         project_repost_targets(&conn, &mut results)?;
+        project_home_nest_urls(&conn, &mut results)?;
 
         // Per-row content-label projection (`moderation.md` § Per-row badge
         // data path): one entry per category, the highest-confidence row.
@@ -1281,6 +1338,7 @@ impl CacheDb {
             limit,
             composition,
             FeedAudience::OnBox,
+            FeedLocality::NestWide,
         )
         .await
     }
@@ -1307,6 +1365,7 @@ impl CacheDb {
             limit,
             composition,
             FeedAudience::PublicOnBox,
+            FeedLocality::NestWide,
         )
         .await
     }
@@ -1329,6 +1388,7 @@ impl CacheDb {
             limit,
             composition,
             FeedAudience::OffBox,
+            FeedLocality::NestWide,
         )
         .await
     }
@@ -1345,6 +1405,7 @@ impl CacheDb {
         limit: i64,
         composition: &[fauna_core::scoring::CompositionEntry],
         audience: FeedAudience,
+        locality: FeedLocality,
     ) -> Result<Vec<FeedPostRow>> {
         self.query_feed_scored_impl(
             rules,
@@ -1354,6 +1415,7 @@ impl CacheDb {
             limit,
             composition,
             audience,
+            locality,
         )
         .await
     }
@@ -1369,6 +1431,7 @@ impl CacheDb {
         limit: i64,
         composition: &[fauna_core::scoring::CompositionEntry],
         audience: FeedAudience,
+        locality: FeedLocality,
     ) -> Result<Vec<FeedPostRow>> {
         use fauna_core::scoring::FilterCombination;
 
@@ -1469,7 +1532,7 @@ impl CacheDb {
         // item 1 — a taken-down post is withheld from every feed surface; the
         // visible tombstone lives at the direct-read path) — plus whatever the
         // reader's audience adds ([`FeedAudience::guard`]).
-        let guard = audience.guard();
+        let guard = format!("{} AND {}", audience.guard(), locality.guard());
         let where_clause = if where_clause.is_empty() {
             format!("WHERE {guard}")
         } else {
@@ -1559,6 +1622,8 @@ impl CacheDb {
                 score: Some(score),
                 web_slug: None,
                 labels: Vec::new(),
+                home_nest_url: None,
+                home_nest_actor_id: None,
             });
         }
         drop(stmt);
@@ -1603,6 +1668,7 @@ impl CacheDb {
         // read here — this fn is viewer-independent; `augment_viewer_state`
         // fills it for the local query paths only.
         project_repost_targets(&conn, &mut results)?;
+        project_home_nest_urls(&conn, &mut results)?;
 
         // Per-row content-label projection (`moderation.md` § Per-row badge
         // data path): one entry per category, the highest-confidence row.
@@ -1615,7 +1681,11 @@ impl CacheDb {
     }
 
     /// Query the post index with filter rules, scoped to specific authors.
-    /// Used by the remote query (`fauna.federation.feed.query`).
+    /// Used by the remote query (`fauna.federation.feed.query`, `OnBox` — the
+    /// moderation gate alone) and the author read (`fauna.feed.author.posts`,
+    /// `feed.md` § The read model → *The author read*), whose off-box reader
+    /// is additionally held to the public predicate through `audience`.
+    #[allow(clippy::too_many_arguments)]
     pub async fn query_feed_for_authors(
         &self,
         rules: &[fauna_core::scoring::FilterRule],
@@ -1624,6 +1694,8 @@ impl CacheDb {
         authors: &[Vec<u8>],
         cursor: Option<i64>,
         limit: i64,
+        audience: FeedAudience,
+        locality: FeedLocality,
     ) -> Result<Vec<FeedPostRow>> {
         use fauna_core::scoring::FilterCombination;
 
@@ -1683,8 +1755,10 @@ impl CacheDb {
             // 2026-09-10 this read carried the takedown arm alone, and a peer
             // naming an author was handed that author's quarantined and
             // suppressed posts, with the references extracted from their bodies
-            // (moderation.md § Legal takedown → *Posts*).
-            super::public_servability::MODERATION_SERVABLE.to_string(),
+            // (moderation.md § Legal takedown → *Posts*). An off-box reader of
+            // the author read is held to the public predicate on top.
+            audience.guard(),
+            locality.guard(),
         ];
         where_parts.extend(must_conditions);
         if !rule_conditions.is_empty() {
@@ -1794,6 +1868,8 @@ impl CacheDb {
                 score: None,
                 web_slug: None,
                 labels: Vec::new(),
+                home_nest_url: None,
+                home_nest_actor_id: None,
             });
         }
         drop(stmt);
@@ -1838,6 +1914,7 @@ impl CacheDb {
         // read here — this fn is viewer-independent; `augment_viewer_state`
         // fills it for the local query paths only.
         project_repost_targets(&conn, &mut results)?;
+        project_home_nest_urls(&conn, &mut results)?;
 
         // Per-row content-label projection (`moderation.md` § Per-row badge
         // data path): one entry per category, the highest-confidence row.
@@ -1920,6 +1997,39 @@ fn project_web_slug(
 /// itself is public; every reader of `gated_tier` treats it as "this row is
 /// sealed"). A target this nest has not indexed (federated, or not yet
 /// arrived) leaves both `None` — the card then paints no badge, as before.
+/// The home nest of each row this nest indexed from another —
+/// `content.origin_nest_url` (a federated follow's delivered envelope, or a
+/// discovery stub) — so the reader's client fetches the sealed body and media
+/// by content address from there (`federated-follow.md` § Decision 3) — and,
+/// beside it, the home's identity a delivery verified (`content.
+/// origin_nest_id`), which the byte plane graduates its pin against
+/// (`transport-trust.md` § The post arm). `None` for every post this nest
+/// holds as its own; the identity is `None` too for a discovery stub, which
+/// no verified channel delivered, and never rides without its URL.
+fn project_home_nest_urls(conn: &rusqlite::Connection, results: &mut [FeedPostRow]) -> Result<()> {
+    use rusqlite::OptionalExtension;
+    let mut stmt = conn
+        .prepare("SELECT origin_nest_url, origin_nest_id FROM content WHERE id = ?1")
+        .context("prepare home nest lookup")?;
+    for result in results.iter_mut() {
+        let (url, id) = stmt
+            .query_row([result.post_id.as_slice()], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<Vec<u8>>>(1)?,
+                ))
+            })
+            .optional()
+            .context("query home nest")?
+            .unwrap_or_default();
+        result.home_nest_url = url.filter(|u| !u.is_empty());
+        result.home_nest_actor_id = id
+            .filter(|id| id.len() == 32 && result.home_nest_url.is_some())
+            .map(hex::encode);
+    }
+    Ok(())
+}
+
 fn project_repost_targets(conn: &rusqlite::Connection, results: &mut [FeedPostRow]) -> Result<()> {
     let mut stmt = conn
         .prepare(
@@ -1994,7 +2104,190 @@ fn project_content_labels(
 
 #[cfg(test)]
 mod tests {
+    use super::{FeedAudience, FeedLocality};
     use crate::db::CacheDb;
+    use crate::db::remote_follows::RemoteFollowState;
+    use fauna_core::data::{Post, PostBody, Timestamp};
+    use fauna_core::encoding::{EmbedAsBytes, canonical_encode, sign_envelope};
+    use fauna_core::identity::ActorKeypair;
+    use fauna_core::scoring::FilterCombination;
+
+    const HOME: [u8; 32] = [0xB0; 32];
+    const HOME_URL: &str = "https://home.example";
+
+    fn post_wire(author: &ActorKeypair, text: &str) -> (Vec<u8>, [u8; 32]) {
+        let post = Post {
+            author: author.actor_id(),
+            created_at: Timestamp::now(),
+            body: PostBody::Text {
+                content: text.into(),
+                facets: vec![],
+            },
+            references: vec![],
+            expires_at: None,
+            gated: None,
+            content_warning: None,
+            origin: None,
+        };
+        let (bytes, env) = sign_envelope(author, &post).unwrap();
+        let wire = canonical_encode(&EmbedAsBytes::from_signed(bytes, env)).unwrap();
+        let id = *blake3::hash(&wire).as_bytes();
+        (wire, id)
+    }
+
+    async fn follow(db: &CacheDb, reader: [u8; 32], author: [u8; 32]) {
+        db.upsert_remote_follow(
+            &reader,
+            &author,
+            fauna_core::subscription::FOLLOWERS_TIER,
+            &HOME,
+            HOME_URL,
+            RemoteFollowState::Approved,
+            None,
+            1,
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn listed(db: &CacheDb, locality: FeedLocality) -> Vec<[u8; 32]> {
+        db.query_feed_for(
+            &[],
+            FilterCombination::All,
+            &[],
+            None,
+            50,
+            FeedAudience::OnBox,
+            locality,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.post_id.try_into().unwrap())
+        .collect()
+    }
+
+    /// `federated-follow.md` § Decision 4: a delivered envelope is one
+    /// reader's. The nest-wide read never lists it, the follower's own read
+    /// does (carrying the home it rests at), a neighbour's does not, nothing
+    /// off the box ever does, and the Search corpus never holds it.
+    #[tokio::test]
+    async fn a_delivered_envelope_lists_only_to_the_reader_who_follows_its_author() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let (local, remote) = (ActorKeypair::generate(), ActorKeypair::generate());
+        let (follower, neighbour) = ([0xF1; 32], [0xF2; 32]);
+        let (own_wire, own_id) = post_wire(&local, "a local post");
+        db.put_post_index_only(&own_id, &own_wire).await.unwrap();
+        let (wire, delivered) = post_wire(&remote, "a followed author's post");
+        db.put_delivered_post_index_only(&delivered, &wire, HOME_URL, &HOME)
+            .await
+            .unwrap();
+        follow(&db, follower, remote.actor_id().0).await;
+
+        assert_eq!(listed(&db, FeedLocality::NestWide).await, vec![own_id]);
+        assert_eq!(
+            listed(&db, FeedLocality::ForReader(neighbour)).await,
+            vec![own_id]
+        );
+        let mine = db
+            .query_feed_for(
+                &[],
+                FilterCombination::All,
+                &[],
+                None,
+                50,
+                FeedAudience::OnBox,
+                FeedLocality::ForReader(follower),
+            )
+            .await
+            .unwrap();
+        let row = mine
+            .iter()
+            .find(|r| r.post_id == delivered)
+            .expect("the follower's own read lists the delivered envelope");
+        assert_eq!(row.home_nest_url.as_deref(), Some(HOME_URL));
+        // The delivery's verified origin rides beside the URL — the identity
+        // the reader's byte plane graduates its pin against.
+        assert_eq!(
+            row.home_nest_actor_id.as_deref(),
+            Some(hex::encode(HOME).as_str())
+        );
+        let own = mine.iter().find(|r| r.post_id == own_id).unwrap();
+        assert_eq!(
+            (own.home_nest_url.as_ref(), own.home_nest_actor_id.as_ref()),
+            (None, None)
+        );
+        assert_eq!(mine.len(), 2);
+
+        // Nothing leaves the box, and the author read is per-reader too.
+        let off_box = db.query_feed_off_box(&[], None, 50).await.unwrap();
+        assert!(off_box.iter().all(|r| r.post_id != delivered));
+        let authors = [remote.actor_id().0.to_vec()];
+        let by_author = |locality| {
+            db.query_feed_for_authors(
+                &[],
+                FilterCombination::All,
+                &[],
+                &authors,
+                None,
+                50,
+                FeedAudience::OnBox,
+                locality,
+            )
+        };
+        assert!(by_author(FeedLocality::NestWide).await.unwrap().is_empty());
+        assert_eq!(
+            by_author(FeedLocality::ForReader(follower))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let conn = db.conn().await;
+        let fts: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM content_fts_map WHERE content_id = ?1",
+                [delivered.as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fts, 0, "a delivered envelope is never in the Search corpus");
+    }
+
+    /// Stored posts keep their author across a succession, so the follower of
+    /// the successor still lists the retired identity's delivered envelopes.
+    #[tokio::test]
+    async fn a_retired_predecessors_envelope_lists_through_the_succession() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let retired = ActorKeypair::generate();
+        let successor = [0x5C; 32];
+        let follower = [0xF1; 32];
+        let (wire, delivered) = post_wire(&retired, "posted before the succession");
+        db.put_delivered_post_index_only(&delivered, &wire, HOME_URL, &HOME)
+            .await
+            .unwrap();
+        follow(&db, follower, successor).await;
+        assert!(
+            listed(&db, FeedLocality::ForReader(follower))
+                .await
+                .is_empty(),
+            "no succession recorded yet"
+        );
+        {
+            let conn = db.conn().await;
+            conn.execute(
+                "INSERT INTO actor_successions (old_actor_id, new_actor_id, statement, seq, succeeded_at)
+                 VALUES (?1, ?2, x'00', 1, 1)",
+                rusqlite::params![retired.actor_id().0.as_slice(), successor.as_slice()],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            listed(&db, FeedLocality::ForReader(follower)).await,
+            vec![delivered]
+        );
+    }
 
     /// One id, one plane — on the discovery poller's index stub too. A peer's
     /// feed-query candidate names whatever id it likes; one naming another

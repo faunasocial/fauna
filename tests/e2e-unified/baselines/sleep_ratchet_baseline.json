@@ -1,5 +1,5 @@
 {
-  "actions/admin.py": 48,
+  "actions/admin.py": 47,
   "actions/backups.py": 18,
   "actions/bridges.py": 2,
   "actions/contacts.py": 2,
@@ -14,7 +14,6 @@
   "actions/settings.py": 4,
   "drivers/inprocess_agent.py": 1,
   "drivers/linux.py": 1,
-  "drivers/web.py": 1,
   "drivers/windows.py": 1,
   "tests/api/test_delegation.py": 2,
   "tests/api/test_federation_exchange_originator.py": 1,

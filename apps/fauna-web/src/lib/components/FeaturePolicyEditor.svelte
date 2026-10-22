@@ -11,17 +11,17 @@
   // the editor cannot differ between hosts or across the 7 apps. The hosts
   // differ only in the tier they open it at, which decides the write kind the
   // offline gate reads.
-  import { connectionStatus } from '$lib/store';
-  import { featureEditorWrite } from '$lib/rpc';
+  import { connectionStatus } from '#lib/store';
+  import { featureEditorWrite } from '#lib/rpc';
   import {
     offlineAffordance,
     type FeatureAuthoringTier,
     type PolicyEditorHandle,
-  } from '$lib/wasm';
-  import { makeOfflineGate } from '$lib/offline-gate';
-  import { resolveLocalized, resolveLocalizedNested, editorNoteText } from '$lib/i18n/localized';
-  import { t } from '$lib/i18n/strings';
-  import { IDS } from '$lib/generated/uiIds';
+  } from '#lib/wasm';
+  import { makeOfflineGate } from '#lib/offline-gate';
+  import { resolveLocalized, resolveLocalizedNested, editorNoteText } from '#lib/i18n/localized';
+  import { t } from '#lib/i18n/strings';
+  import { IDS } from '#lib/generated/uiIds';
 
   let {
     secretHex,

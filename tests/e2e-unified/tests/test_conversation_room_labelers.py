@@ -50,6 +50,9 @@ pytestmark = [
     pytest.mark.tui,
     pytest.mark.linux,
     pytest.mark.windows,
+    pytest.mark.macos,
+    pytest.mark.ios,
+    pytest.mark.android,
 ]
 
 

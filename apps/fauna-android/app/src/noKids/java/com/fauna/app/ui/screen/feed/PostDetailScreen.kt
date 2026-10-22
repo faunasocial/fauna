@@ -1,5 +1,6 @@
 package com.fauna.app.ui.screen.feed
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
@@ -9,6 +10,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -18,9 +21,13 @@ import com.fauna.app.core.RegionPlaneHost
 import com.fauna.app.core.RegionSubject
 import com.fauna.app.core.post
 import com.fauna.app.ui.components.C2paBadge
+import com.fauna.app.ui.components.GuardianReason
+import com.fauna.app.ui.components.NestBlockWitness
+import com.fauna.app.ui.components.NestPlaceholder
 import com.fauna.app.ui.components.RegionBlockWitness
 import com.fauna.app.ui.components.RegionPlaceholder
 import com.fauna.app.ui.components.DocumentBlocks
+import com.fauna.app.ui.components.ContentLabelBadge
 import com.fauna.app.ui.components.GatedPostBadge
 import com.fauna.app.ui.components.ProtocolBadge
 import com.fauna.app.ui.components.DelegatedOriginBadge
@@ -29,8 +36,10 @@ import com.fauna.app.ui.components.documentHasBlockedRemoteImage
 import com.fauna.app.ui.components.documentMediaImageHash
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.localized
+import com.fauna.app.ui.util.localizedNested
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.viewmodel.FeedVM
+import com.fauna.ffi.adminBlockNotice
 import com.fauna.ffi.legalTakedownTombstone
 import uniffi.fauna_core.RenderDocument
 import uniffi.fauna_feed.PostSummary
@@ -55,6 +64,9 @@ fun PostDetailScreen(
     navController: NavController,
     postId: String,
     source: String,
+    // The post's home nest when the link names one (the room search's post hit on
+    // a foreign-homed room); blank = this nest's own post.
+    homeNestUrl: String = "",
     vm: FeedVM = hiltViewModel()
 ) {
     val snapshot by vm.snapshot.collectAsState()
@@ -83,10 +95,13 @@ fun PostDetailScreen(
     // early return), so this fires unconditionally rather than re-deriving
     // that check client-side.
     var resolving by remember(postId) { mutableStateOf(post == null) }
-    LaunchedEffect(postId) {
+    LaunchedEffect(postId, homeNestUrl) {
         if (post == null) {
             resolving = true
-            vm.resolvePost(postId)
+            // A link that names the post's home resolves through it
+            // (`resolve_post_from`: this nest first, then the home via the relay,
+            // `feed.md` § *A post homed on another nest*).
+            if (homeNestUrl.isNotBlank()) vm.resolvePostFrom(postId, homeNestUrl) else vm.resolvePost(postId)
         }
         resolving = false
     }
@@ -130,6 +145,7 @@ fun PostDetailScreen(
                         MainPostContent(
                             post,
                             vm,
+                            onOpenAuthor = { openAuthorProfile(navController, post, vm.ownActorIdHex()) },
                             bridgeRoster = snapshot?.bridgeRoster ?: emptyList(),
                             onQuoteClick = { vm.quote(post.postId, "") },
                             onViewThread = {
@@ -172,6 +188,7 @@ fun PostDetailScreen(
 private fun MainPostContent(
     post: PostSummary,
     vm: FeedVM,
+    onOpenAuthor: () -> Unit,
     bridgeRoster: List<uniffi.fauna_core.BridgeIdentitySnapshot>,
     onQuoteClick: () -> Unit,
     onViewThread: () -> Unit,
@@ -181,6 +198,7 @@ private fun MainPostContent(
     val authorLabel = remember(post.author, post.authorDisplay, overlayEpoch) {
         postAuthorLabel(overlaysVm.overlays(), post)
     }
+    AuthorFaceResolve(post, vm)
     // Legal-takedown tombstone (moderation.md § Legal takedown → *App render*):
     // the nest withheld the sealed envelope under a legal obligation, so the
     // detail body collapses to the shared localized tombstone — no author /
@@ -209,6 +227,22 @@ private fun MainPostContent(
         return
     }
 
+    // Admin-blocked post (moderation.md § Admin block of a reported item): for any
+    // viewer but its author the nest withheld the body, so the shared notice
+    // stands in the body area exactly as the tombstone above does. The author's
+    // own read keeps the body; the notice paints beside it (no dedicated id).
+    val adminBlockReason = post.adminBlockReason
+    if (adminBlockReason != null && post.body.isEmpty()) {
+        Column {
+            Text(
+                localizedNested(adminBlockNotice(adminBlockReason)).orEmpty(),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        return
+    }
+
     // The region placeholder in place of the detail body when a region policy
     // withholds the post — an unrevealed `collapse`, or a `block` (no reveal):
     // the same composed call the list card makes (region-blocking.md § Where it
@@ -220,6 +254,7 @@ private fun MainPostContent(
         RegionPlaneHost.render(post.labels, contentPolicyInputs, RegionSubject.post(post))
     }
     RegionBlockWitness("post-detail:${post.postId}", decision.isRegionBlocked)
+    NestBlockWitness("post-detail:${post.postId}", decision.isNestBlocked)
     var regionRevealed by remember(post.postId) { mutableStateOf(false) }
     val regionPlaceholder = decision.placeholder
     if (regionPlaceholder != null && (regionPlaceholder.verb == "block" || !regionRevealed)) {
@@ -228,6 +263,59 @@ private fun MainPostContent(
             witnessKey = "post-detail:${post.postId}",
             onReveal = { regionRevealed = true },
         )
+        return
+    }
+    // The nest's twin (nest-rules.md § The nest source in the engine): a rule of
+    // the nest the post was read through, naming the nest and the admin's reason.
+    val nestPlaceholder = decision.nestPlaceholder
+    if (nestPlaceholder != null && (nestPlaceholder.verb == "block" || !regionRevealed)) {
+        NestPlaceholder(
+            nestPlaceholder,
+            witnessKey = "post-detail:${post.postId}",
+            onReveal = { regionRevealed = true },
+        )
+        return
+    }
+    // The family arm composes here too (family-safety.md § Content policy): a
+    // guardian-blocked post opened from its placeholder card shows the same
+    // placeholder — the fixed frame and the guardian rule's reason beside it
+    // (`content-policy-blocked-reason`) — never its body. A `block` has no
+    // reveal; a `collapse` shares the detail's session-local reveal.
+    if (decision.verdict == "block") {
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                stringResource(
+                    if (decision.reported) R.string.moderation_report_hidden_placeholder
+                    else R.string.family_content_blocked_notice,
+                ),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .testTag(Ids.CONTENT_POLICY_BLOCKED_NOTICE)
+                    .semantics { stateDescription = "blocked" },
+            )
+            GuardianReason(decision.guardianReason)
+        }
+        return
+    }
+    if (decision.verdict == "collapse" && !regionRevealed) {
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                stringResource(R.string.family_content_collapsed_notice),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .testTag(Ids.CONTENT_POLICY_BLOCKED_NOTICE)
+                    .semantics { stateDescription = "collapsed" },
+            )
+            GuardianReason(decision.guardianReason)
+            TextButton(
+                onClick = { regionRevealed = true },
+                modifier = Modifier.testTag(Ids.CONTENT_POLICY_COLLAPSED_REVEAL_BUTTON),
+            ) {
+                Text(stringResource(R.string.family_content_reveal_button))
+            }
+        }
         return
     }
 
@@ -250,7 +338,10 @@ private fun MainPostContent(
                 authorLabel,
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.testTag(Ids.FEED_POST_DETAIL_AUTHOR)
+                // `click feed-post-detail-author → profile` (`feed.md` § User actions).
+                modifier = Modifier
+                    .clickable { onOpenAuthor() }
+                    .testTag(Ids.FEED_POST_DETAIL_AUTHOR)
             )
             Row(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -277,6 +368,15 @@ private fun MainPostContent(
                     vm = vm,
                 )
             }
+        }
+        // Content-label badge — the highest-confidence classifier verdict on the
+        // opened post (the shared `primaryContentLabel` pick, as the list card
+        // and the DM bubble use). A room's relayed verdicts fold onto a
+        // deep-linked post at unlock, so this is where a member sees them even
+        // with no timeline card (feed-read-model.md § the cross-nest deep-link relay).
+        com.fauna.ffi.primaryContentLabel(post.labels)?.let { entry ->
+            Spacer(Modifier.height(4.dp))
+            ContentLabelBadge(label = entry.category)
         }
         Spacer(Modifier.height(8.dp))
         // Body — walk the shared RenderDocument (PostSummary.document, render-model.md § D6),
@@ -321,7 +421,7 @@ private fun MainPostContent(
         if (post.hasMedia) {
             FeedPostImage(document = post.document, postId = post.postId, mediaHash = post.mediaHash, vm = vm)
             FeedPostVideo(document = post.document, postId = post.postId, vm = vm)
-            PostImageC2paBadge(document = post.document, checkC2pa = { vm.checkBlobC2pa(it) })
+            PostImageC2paBadge(document = post.document, checkC2pa = { vm.checkBlobC2pa(post.postId, it) })
             Spacer(Modifier.height(8.dp))
         }
 

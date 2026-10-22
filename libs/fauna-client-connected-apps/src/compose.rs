@@ -101,6 +101,13 @@ impl ComposedText {
 pub struct RosterRowText {
     pub lines: Vec<ComposedText>,
     pub facts: Vec<ComposedText>,
+    /// Whether the row links to its plugin's settings card
+    /// (`connected-apps-item-settings-link`;
+    /// [`crate::machine::opens_settings_card`]) — carried here so a UniFFI or
+    /// wasm shell paints the link without a class test of its own.
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    pub opens_settings_card: bool,
 }
 
 impl RosterRowText {
@@ -298,7 +305,11 @@ pub fn roster_row_text_with(
         Some(ms) => ComposedText::args("connected_apps.lasts_until", [("time", &format_time(ms))]),
         None => ComposedText::key("connected_apps.open_ended"),
     });
-    RosterRowText { lines, facts }
+    RosterRowText {
+        lines,
+        facts,
+        opens_settings_card: crate::machine::opens_settings_card(row),
+    }
 }
 
 /// A request card's lines, top to bottom: the heading, who is asking, the
@@ -333,6 +344,115 @@ pub fn request_card_lines(consent: &ConsentCardRow) -> Vec<ComposedText> {
         nested: HashMap::new(),
     }));
     lines
+}
+
+/// The install section of an admin's hosted-plugin install card
+/// (`third-party.md` § The runner contract → *The install-approval leg*),
+/// one field per `connected-apps-request-install-*` leaf so every app paints
+/// the same facts in the same words. The card's scope lines stay
+/// [`request_card_lines`]'s: an install card's scopes are the ceiling each
+/// user's own connection may later grant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct InstallSectionText {
+    /// `connected-apps-request-install`.
+    pub heading: ComposedText,
+    /// The admin framing line under the heading (an untagged line, no leaf):
+    /// installing grants nothing over anyone's private data. `None` on a
+    /// user's bind card, where the plugin is already installed.
+    pub framing: Option<ComposedText>,
+    /// `-form`: the execution form, verbatim.
+    pub form: ComposedText,
+    /// `-publisher`: the domain and `did:key`, or the development name —
+    /// never an empty key.
+    pub publisher: ComposedText,
+    /// `-digest`.
+    pub digest: ComposedText,
+    /// `-kinds`: a heading and one bullet per kind, or the one "none" line.
+    pub kinds: Vec<ComposedText>,
+    /// `-hosts`: the hosts it may dial (or "none"), then the ingress paths
+    /// it would answer on, when it declares any.
+    pub hosts: Vec<ComposedText>,
+    /// `-settings`: a heading and one bullet per field (label and type), or
+    /// the one "none" line.
+    pub settings: Vec<ComposedText>,
+}
+
+/// A card's install section, or `None` on every card but a hosted-plugin
+/// install card. Every string is the shared card row's, already
+/// control-stripped (`consent_card_row`).
+pub fn request_install_text(consent: &ConsentCardRow) -> Option<InstallSectionText> {
+    let install = consent.install.as_ref()?;
+    let listed = |heading: &str, none: &str, items: &[String]| -> Vec<ComposedText> {
+        if items.is_empty() {
+            return vec![ComposedText::key(none)];
+        }
+        let mut lines = vec![ComposedText::key(heading)];
+        lines.extend(items.iter().map(|i| ComposedText::bullet_verbatim(i)));
+        lines
+    };
+    let publisher = match (&install.publisher_key, install.development) {
+        (Some(key), false) => ComposedText::args(
+            "connected_apps.install_publisher",
+            [("domain", install.publisher_domain.as_str()), ("key", key)],
+        ),
+        _ => ComposedText::key("connected_apps.install_publisher_development"),
+    };
+    let mut hosts = listed(
+        "connected_apps.install_hosts_heading",
+        "connected_apps.install_hosts_none",
+        &install.hosts,
+    );
+    if !install.ingress_paths.is_empty() {
+        hosts.extend(listed(
+            "connected_apps.install_ingress_heading",
+            "connected_apps.install_ingress_heading",
+            &install.ingress_paths,
+        ));
+    }
+    let settings = if install.settings.is_empty() {
+        vec![ComposedText::key("connected_apps.install_settings_none")]
+    } else {
+        let mut lines = vec![ComposedText::key("connected_apps.install_settings_heading")];
+        lines.extend(install.settings.iter().map(|s| {
+            ComposedText::with_nested(
+                BULLET,
+                [],
+                [(
+                    "text",
+                    LocalizedText::key_args(
+                        "connected_apps.install_setting",
+                        [("label", s.label.as_str()), ("kind", &s.setting_type)],
+                    ),
+                )],
+            )
+        }));
+        lines
+    };
+    Some(InstallSectionText {
+        heading: ComposedText::key(if install.bind {
+            "connected_apps.install_heading_bind"
+        } else {
+            "connected_apps.install_heading"
+        }),
+        framing: (!install.bind).then(|| ComposedText::key("connected_apps.install_framing")),
+        form: ComposedText::args(
+            "connected_apps.install_form",
+            [("form", install.execution_form.as_str())],
+        ),
+        publisher,
+        digest: ComposedText::args(
+            "connected_apps.install_digest",
+            [("digest", install.module_digest.as_str())],
+        ),
+        kinds: listed(
+            "connected_apps.install_kinds_heading",
+            "connected_apps.install_kinds_none",
+            &install.requested_kinds,
+        ),
+        hosts,
+        settings,
+    })
 }
 
 #[cfg(all(test, feature = "local-clock"))]

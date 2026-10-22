@@ -15,7 +15,26 @@
     "none": "",
     "partial": "⚠"
   },
-  "releases": [],
+  "releases": [
+    {
+      "commit": "a40546da601a3ed0bd30c06bee0cdd43462477f9",
+      "date": "2026-10-20",
+      "image": "ghcr.io/faunasocial/nest:sha-a40546da601a3ed0bd30c06bee0cdd43462477f9",
+      "image_digest": "sha256:b0d2fd4b09d76226e34bc658a3bbb5d1739ca7aafd8390e0fedfe77fb4b838fd",
+      "promoted": false,
+      "verified": "2026-10-20",
+      "version": "0.1.5"
+    },
+    {
+      "commit": "5f525618c1dd972aa45653c59aaa08b18dfd30e7",
+      "date": "2026-10-21",
+      "image": "ghcr.io/faunasocial/nest:sha-5f525618c1dd972aa45653c59aaa08b18dfd30e7",
+      "image_digest": "sha256:13511846c66fe29eff2b7786b815c3b35a109c17bccb5c129a47cd196b64c9a4",
+      "promoted": false,
+      "verified": "2026-10-21",
+      "version": "0.1.5"
+    }
+  ],
   "schema": 1,
   "sections": [
     {
@@ -166,10 +185,10 @@
               "state": "partial"
             },
             "web": {
-              "date": "2026-09-24",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.2-dev+4bc2efab standalone",
-              "state": "full"
+              "stamp": "0.1.5-dev+110d1248 standalone",
+              "state": "partial"
             },
             "windows": {
               "date": "",
@@ -216,16 +235,16 @@
               "state": "partial"
             },
             "tui": {
-              "date": "2026-09-26",
+              "date": "2026-09-27",
               "dirty": false,
-              "stamp": "0.1.2-dev+38eef7c4 standalone",
+              "stamp": "0.1.2-dev+74b3bcbd standalone",
               "state": "partial"
             },
             "web": {
               "date": "",
               "dirty": false,
               "stamp": "",
-              "state": "none"
+              "state": "partial"
             },
             "windows": {
               "date": "2026-09-27",
@@ -254,21 +273,21 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
-              "state": "full"
+              "stamp": "0.1.4-dev+ea391d07 standalone",
+              "state": "partial"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "tui": {
@@ -281,12 +300,12 @@
               "date": "2026-09-24",
               "dirty": false,
               "stamp": "0.1.2-dev+4bc2efab standalone",
-              "state": "full"
+              "state": "partial"
             },
             "windows": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             }
           },
@@ -294,7 +313,23 @@
           "goal": "docs/goal/behavior/onboarding.md § 3. Invite request",
           "guide": "docs/guides/getting-started.md § Step 3a — Join with an invite",
           "nest_only": false,
-          "outcome_absences": {},
+          "outcome_absences": {
+            "linux": {
+              "12": "docs/goal/behavior/account-age-band.md § App surface"
+            },
+            "macos": {
+              "12": "docs/goal/behavior/account-age-band.md § App surface"
+            },
+            "tui": {
+              "12": "docs/goal/behavior/account-age-band.md § App surface"
+            },
+            "web": {
+              "12": "docs/goal/behavior/account-age-band.md § App surface"
+            },
+            "windows": {
+              "12": "docs/goal/behavior/account-age-band.md § App surface"
+            }
+          },
           "page": "docs/features/join-a-nest.md",
           "slug": "join-a-nest",
           "title": "Join an existing nest",
@@ -318,13 +353,13 @@
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "partial"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "tui": {
@@ -334,15 +369,15 @@
               "state": "partial"
             },
             "web": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "windows": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             }
           },
@@ -390,10 +425,10 @@
               "state": "full"
             },
             "web": {
-              "date": "2026-10-06",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.2-dev+a8404441 standalone",
-              "state": "full"
+              "stamp": "0.1.5-dev+110d1248 standalone",
+              "state": "failing"
             },
             "windows": {
               "date": "2026-09-26",
@@ -502,9 +537,9 @@
               "state": "full"
             },
             "web": {
-              "date": "2026-09-24",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.2-dev+4bc2efab standalone",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "full"
             },
             "windows": {
@@ -543,46 +578,52 @@
               "date": "2026-10-12",
               "dirty": false,
               "stamp": "0.1.4-dev+ea391d07 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "macos": {
               "date": "2026-10-08",
               "dirty": false,
               "stamp": "0.1.3-dev+1cf3db28 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "tui": {
               "date": "2026-10-10",
               "dirty": true,
               "stamp": "0.1.3-dev+e5c92300.dirty standalone",
-              "state": "full"
+              "state": "partial"
             },
             "web": {
-              "date": "",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "",
-              "state": "none"
+              "stamp": "0.1.5-dev+110d1248 standalone",
+              "state": "full"
             },
             "windows": {
               "date": "2026-10-08",
               "dirty": false,
               "stamp": "0.1.3-dev+74556739 standalone",
-              "state": "full"
+              "state": "partial"
             }
           },
-          "full": true,
+          "full": false,
           "goal": "docs/goal/architecture/product-version.md § The model (ratified 2026-08-23)",
           "guide": "docs/guides/install.md § What \"alpha\" means for you",
           "nest_only": false,
           "outcome_absences": {
             "android": {
-              "2": "docs/goal/architecture/installers/README.md § Knowing a newer version is out"
+              "2": "docs/goal/architecture/installers/README.md § Knowing a newer version is out",
+              "3": "docs/goal/architecture/installers/README.md § Knowing a newer version is out",
+              "4": "docs/goal/architecture/installers/README.md § Knowing a newer version is out"
             },
             "ios": {
-              "2": "docs/goal/architecture/installers/README.md § Knowing a newer version is out"
+              "2": "docs/goal/architecture/installers/README.md § Knowing a newer version is out",
+              "3": "docs/goal/architecture/installers/README.md § Knowing a newer version is out",
+              "4": "docs/goal/architecture/installers/README.md § Knowing a newer version is out"
             },
             "web": {
-              "2": "docs/goal/architecture/installers/README.md § Knowing a newer version is out"
+              "2": "docs/goal/architecture/installers/README.md § Knowing a newer version is out",
+              "3": "docs/goal/architecture/installers/README.md § Knowing a newer version is out",
+              "4": "docs/goal/architecture/installers/README.md § Knowing a newer version is out"
             }
           },
           "page": "docs/features/app-version-and-updates.md",
@@ -661,21 +702,21 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "partial"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "tui": {
@@ -685,15 +726,15 @@
               "state": "full"
             },
             "web": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "partial"
             },
             "windows": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             }
           },
@@ -717,21 +758,21 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "full"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "tui": {
@@ -741,15 +782,15 @@
               "state": "full"
             },
             "web": {
-              "date": "2026-09-24",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.2-dev+4bc2efab standalone",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "full"
             },
             "windows": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             }
           },
@@ -797,9 +838,9 @@
               "state": "partial"
             },
             "web": {
-              "date": "",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "full"
             },
             "windows": {
@@ -829,21 +870,21 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "full"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "tui": {
@@ -853,15 +894,15 @@
               "state": "partial"
             },
             "web": {
-              "date": "2026-09-24",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.2-dev+4bc2efab standalone",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "full"
             },
             "windows": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             }
           },
@@ -885,21 +926,21 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "full"
             },
             "linux": {
-              "date": "2026-10-12",
-              "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "date": "2026-10-17",
+              "dirty": true,
+              "stamp": "0.1.4-dev+d1096e50.dirty standalone",
               "state": "full"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "full"
             },
             "tui": {
@@ -909,9 +950,9 @@
               "state": "full"
             },
             "web": {
-              "date": "2026-09-24",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.2-dev+3677c3d4 standalone",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "full"
             },
             "windows": {
@@ -977,7 +1018,7 @@
               "state": "partial"
             }
           },
-          "full": false,
+          "full": true,
           "goal": "docs/goal/behavior/mail-app-surface.md § First-party client send",
           "guide": "docs/guides/own-your-mail.md § Mail in the Fauna app",
           "nest_only": false,
@@ -1021,9 +1062,9 @@
               "state": "full"
             },
             "web": {
-              "date": "",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "partial"
             },
             "windows": {
@@ -1077,9 +1118,9 @@
               "state": "full"
             },
             "web": {
-              "date": "2026-09-24",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.2-dev+72d6a508 standalone",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "full"
             },
             "windows": {
@@ -1133,10 +1174,10 @@
               "state": "full"
             },
             "web": {
-              "date": "",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "",
-              "state": "partial"
+              "stamp": "0.1.5-dev+110d1248 standalone",
+              "state": "full"
             },
             "windows": {
               "date": "2026-10-08",
@@ -1165,21 +1206,21 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "partial"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "tui": {
@@ -1189,9 +1230,9 @@
               "state": "full"
             },
             "web": {
-              "date": "2026-09-01",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.2-dev+b3bd74b7 standalone",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "partial"
             },
             "windows": {
@@ -1230,7 +1271,7 @@
               "date": "2026-10-12",
               "dirty": false,
               "stamp": "0.1.4-dev+ea391d07 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "macos": {
               "date": "",
@@ -1245,9 +1286,9 @@
               "state": "partial"
             },
             "web": {
-              "date": "",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "partial"
             },
             "windows": {
@@ -1277,21 +1318,21 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "full"
             },
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "full"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "full"
             },
             "tui": {
@@ -1301,9 +1342,9 @@
               "state": "full"
             },
             "web": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "full"
             },
             "windows": {
@@ -1333,21 +1374,21 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "partial"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "tui": {
@@ -1357,9 +1398,9 @@
               "state": "full"
             },
             "web": {
-              "date": "2026-09-24",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.2-dev+3677c3d4 standalone",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "full"
             },
             "windows": {
@@ -1383,27 +1424,27 @@
           "absences": {},
           "cells": {
             "android": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "full"
             },
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "full"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "full"
             },
             "tui": {
@@ -1413,9 +1454,9 @@
               "state": "full"
             },
             "web": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "full"
             },
             "windows": {
@@ -1563,27 +1604,27 @@
               "state": "none"
             },
             "linux": {
-              "date": "2026-10-12",
-              "dirty": false,
-              "stamp": "0.1.4-dev+ea391d07 standalone",
+              "date": "2026-10-17",
+              "dirty": true,
+              "stamp": "0.1.4-dev+d1096e50.dirty standalone",
               "state": "partial"
             },
             "macos": {
-              "date": "",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "",
-              "state": "none"
+              "stamp": "0.1.5-dev+61b844ca standalone",
+              "state": "partial"
             },
             "tui": {
               "date": "2026-10-13",
               "dirty": true,
               "stamp": "0.1.4-dev+899b58ab.dirty standalone",
-              "state": "partial"
+              "state": "full"
             },
             "web": {
-              "date": "",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "partial"
             },
             "windows": {
@@ -1593,7 +1634,7 @@
               "state": "none"
             }
           },
-          "full": false,
+          "full": true,
           "goal": "docs/goal/behavior/restricted-posts.md § Encryption at rest",
           "guide": "docs/guides/app-tour.md § Feeds",
           "nest_only": false,
@@ -1687,15 +1728,15 @@
               "state": "partial"
             },
             "tui": {
-              "date": "2026-09-14",
+              "date": "2026-10-16",
               "dirty": false,
-              "stamp": "0.1.2-dev+a20190e6 live",
+              "stamp": "0.1.4-dev+365ed28f standalone",
               "state": "full"
             },
             "web": {
-              "date": "2026-08-28",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.2-dev+55c383bf standalone",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "partial"
             },
             "windows": {
@@ -1725,39 +1766,39 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "linux": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "tui": {
               "date": "2026-09-21",
               "dirty": false,
               "stamp": "0.1.2-dev+4e31f706 standalone",
-              "state": "partial"
-            },
-            "web": {
-              "date": "2026-09-20",
-              "dirty": true,
-              "stamp": "0.1.2-dev+d034eec4.dirty standalone",
               "state": "full"
             },
-            "windows": {
-              "date": "2026-10-12",
+            "web": {
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+110d1248 standalone",
+              "state": "partial"
+            },
+            "windows": {
+              "date": "2026-10-20",
+              "dirty": false,
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             }
           },
@@ -1775,45 +1816,45 @@
           "absences": {},
           "cells": {
             "android": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "linux": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "tui": {
-              "date": "2026-10-12",
-              "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "date": "2026-10-13",
+              "dirty": true,
+              "stamp": "0.1.4-dev+899b58ab.dirty standalone",
               "state": "full"
             },
             "web": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "windows": {
-              "date": "2026-10-12",
+              "date": "2026-10-16",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+1b9205d6 standalone",
               "state": "partial"
             }
           },
@@ -1861,10 +1902,10 @@
               "state": "full"
             },
             "web": {
-              "date": "",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "",
-              "state": "partial"
+              "stamp": "0.1.5-dev+110d1248 standalone",
+              "state": "full"
             },
             "windows": {
               "date": "2026-10-08",
@@ -1917,9 +1958,9 @@
               "state": "partial"
             },
             "web": {
-              "date": "2026-09-01",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.2-dev+e48628f5 standalone",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "full"
             },
             "windows": {
@@ -1954,21 +1995,21 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "full"
             },
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "full"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "full"
             },
             "tui": {
@@ -1978,9 +2019,9 @@
               "state": "full"
             },
             "web": {
-              "date": "2026-08-30",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.2-dev+9bf9020c standalone",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "full"
             },
             "windows": {
@@ -2020,13 +2061,13 @@
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "partial"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "full"
             },
             "tui": {
@@ -2068,21 +2109,21 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "full"
             },
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "full"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "full"
             },
             "tui": {
@@ -2092,10 +2133,10 @@
               "state": "partial"
             },
             "web": {
-              "date": "2026-09-24",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.2-dev+72d6a508 standalone",
-              "state": "full"
+              "stamp": "0.1.5-dev+110d1248 standalone",
+              "state": "partial"
             },
             "windows": {
               "date": "2026-09-21",
@@ -2150,10 +2191,10 @@
               "state": "absent"
             },
             "web": {
-              "date": "",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "",
-              "state": "none"
+              "stamp": "0.1.5-dev+110d1248 standalone",
+              "state": "full"
             },
             "windows": {
               "date": "2026-10-08",
@@ -2203,18 +2244,18 @@
               "date": "2026-10-05",
               "dirty": false,
               "stamp": "0.1.2-dev+f872d502 live",
-              "state": "failing"
+              "state": "partial"
             },
             "web": {
-              "date": "2026-09-24",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.2-dev+72d6a508 standalone",
-              "state": "full"
+              "stamp": "0.1.5-dev+110d1248 standalone",
+              "state": "partial"
             },
             "windows": {
-              "date": "",
-              "dirty": false,
-              "stamp": "",
+              "date": "2026-10-16",
+              "dirty": true,
+              "stamp": "0.1.4-dev+874eb894.dirty standalone",
               "state": "full"
             }
           },
@@ -2238,9 +2279,9 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "linux": {
@@ -2250,27 +2291,27 @@
               "state": "partial"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "tui": {
               "date": "2026-09-28",
               "dirty": false,
               "stamp": "0.1.2-dev+7663afa6 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "web": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "partial"
             },
             "windows": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             }
           },
@@ -2377,10 +2418,10 @@
               "state": "partial"
             },
             "web": {
-              "date": "2026-09-24",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.2-dev+72d6a508 standalone",
-              "state": "full"
+              "stamp": "0.1.5-dev+110d1248 standalone",
+              "state": "partial"
             },
             "windows": {
               "date": "2026-10-09",
@@ -2412,7 +2453,7 @@
               "date": "",
               "dirty": false,
               "stamp": "",
-              "state": "full"
+              "state": "partial"
             },
             "linux": {
               "date": "2026-10-01",
@@ -2424,25 +2465,25 @@
               "date": "",
               "dirty": false,
               "stamp": "",
-              "state": "full"
+              "state": "partial"
             },
             "tui": {
               "date": "2026-10-05",
               "dirty": false,
               "stamp": "0.1.2-dev+831d48ef live",
-              "state": "full"
+              "state": "partial"
             },
             "web": {
               "date": "",
               "dirty": false,
               "stamp": "",
-              "state": "full"
+              "state": "partial"
             },
             "windows": {
               "date": "2026-09-14",
               "dirty": true,
               "stamp": "0.1.2-dev+068e152c.dirty standalone",
-              "state": "full"
+              "state": "partial"
             }
           },
           "full": true,
@@ -2460,6 +2501,68 @@
     },
     {
       "features": [
+        {
+          "absences": {
+            "android": "docs/goal/architecture/apps/common.md § Credential storage",
+            "linux": "docs/goal/architecture/apps/common.md § Credential storage",
+            "tui": "docs/goal/architecture/apps/common.md § Credential storage",
+            "web": "docs/goal/architecture/apps/common.md § Credential storage",
+            "windows": "docs/goal/architecture/apps/common.md § Credential storage"
+          },
+          "cells": {
+            "android": {
+              "date": "",
+              "dirty": false,
+              "stamp": "",
+              "state": "absent"
+            },
+            "ios": {
+              "date": "",
+              "dirty": false,
+              "stamp": "",
+              "state": "none"
+            },
+            "linux": {
+              "date": "",
+              "dirty": false,
+              "stamp": "",
+              "state": "absent"
+            },
+            "macos": {
+              "date": "",
+              "dirty": false,
+              "stamp": "",
+              "state": "none"
+            },
+            "tui": {
+              "date": "",
+              "dirty": false,
+              "stamp": "",
+              "state": "absent"
+            },
+            "web": {
+              "date": "",
+              "dirty": false,
+              "stamp": "",
+              "state": "absent"
+            },
+            "windows": {
+              "date": "",
+              "dirty": false,
+              "stamp": "",
+              "state": "absent"
+            }
+          },
+          "full": false,
+          "goal": "docs/goal/architecture/apps/common.md § Credential storage",
+          "guide": "docs/guides/identity-and-devices.md § Where the key lives — and where you should put a copy",
+          "nest_only": false,
+          "outcome_absences": {},
+          "page": "docs/features/identity-in-your-cloud-keychain.md",
+          "slug": "identity-in-your-cloud-keychain",
+          "title": "A copy of your identity in your cloud keychain",
+          "what": "On iPhone and Mac you can choose to keep a copy of your identity in your\niCloud Keychain as well as on the device. It is off until you turn it on, so\nby default your identity stays on the one device. With it on, a new iPhone or\nMac restored from your Apple account, with iCloud Keychain on, finds your\nidentity when the app first starts there. Turning it off removes the copy\nfrom iCloud Keychain and nothing more: every device that already has your\nidentity keeps it. Adding a device and your recovery kit remain the main ways\nto have your identity in more than one place; the cloud copy is an extra you\ncan opt into."
+        },
         {
           "absences": {
             "android": "docs/goal/architecture/apps/account-scoping.md § Concurrent instances",
@@ -2497,9 +2600,9 @@
               "state": "full"
             },
             "web": {
-              "date": "2026-09-26",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.2-dev+e7095c29 standalone",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "full"
             },
             "windows": {
@@ -2590,21 +2693,21 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "partial"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "tui": {
@@ -2614,15 +2717,15 @@
               "state": "partial"
             },
             "web": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "windows": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             }
           },
@@ -2646,21 +2749,21 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "linux": {
-              "date": "2026-10-12",
+              "date": "2026-10-13",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+e90727f2 standalone",
               "state": "partial"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "tui": {
@@ -2670,19 +2773,19 @@
               "state": "partial"
             },
             "web": {
-              "date": "2026-10-11",
-              "dirty": true,
-              "stamp": "0.1.4-dev+cb3799f4.dirty standalone",
+              "date": "2026-10-20",
+              "dirty": false,
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "partial"
             },
             "windows": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             }
           },
-          "full": false,
+          "full": true,
           "goal": "docs/goal/ui/backups.md § Goal",
           "guide": "docs/guides/cloud-backup.md § Snapshots: the time machine on your nest",
           "nest_only": false,
@@ -2758,15 +2861,15 @@
               "state": "none"
             },
             "ios": {
-              "date": "",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "",
-              "state": "none"
+              "stamp": "0.1.5-dev+61b844ca standalone",
+              "state": "partial"
             },
             "linux": {
-              "date": "2026-10-11",
+              "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+60e6f5d5 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "partial"
             },
             "macos": {
@@ -2782,9 +2885,9 @@
               "state": "partial"
             },
             "web": {
-              "date": "2026-10-11",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+60e6f5d5 standalone",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "partial"
             },
             "windows": {
@@ -2798,7 +2901,12 @@
           "goal": "docs/goal/ui/connected-apps.md § Goal",
           "guide": "docs/guides/app-tour.md § Settings",
           "nest_only": false,
-          "outcome_absences": {},
+          "outcome_absences": {
+            "web": {
+              "17": "docs/goal/architecture/apps/web.md § Implementation status today",
+              "18": "docs/goal/architecture/apps/web.md § Implementation status today"
+            }
+          },
           "page": "docs/features/connected-apps.md",
           "slug": "connected-apps",
           "title": "Connected apps",
@@ -2885,7 +2993,7 @@
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "full"
             },
             "macos": {
@@ -2901,9 +3009,9 @@
               "state": "full"
             },
             "web": {
-              "date": "2026-09-24",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.2-dev+72d6a508 standalone",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "full"
             },
             "windows": {
@@ -2924,7 +3032,9 @@
           "what": "One button in Settings gives you an archive of everything your nest holds for\nyou."
         },
         {
-          "absences": {},
+          "absences": {
+            "web": "docs/goal/behavior/p2p.md § Wormability walk"
+          },
           "cells": {
             "android": {
               "date": "",
@@ -2960,7 +3070,7 @@
               "date": "",
               "dirty": false,
               "stamp": "",
-              "state": "none"
+              "state": "absent"
             },
             "windows": {
               "date": "",
@@ -3047,39 +3157,39 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "partial"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "tui": {
               "date": "2026-09-28",
               "dirty": false,
               "stamp": "0.1.2-dev+7663afa6 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "web": {
-              "date": "2026-09-20",
-              "dirty": true,
-              "stamp": "0.1.2-dev+2cb6e915.dirty standalone",
+              "date": "2026-10-20",
+              "dirty": false,
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "partial"
             },
             "windows": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             }
           },
@@ -3111,7 +3221,7 @@
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "partial"
             },
             "macos": {
@@ -3127,9 +3237,9 @@
               "state": "full"
             },
             "web": {
-              "date": "2026-10-01",
-              "dirty": true,
-              "stamp": "0.1.2-dev+f3743cd5.dirty standalone",
+              "date": "2026-10-20",
+              "dirty": false,
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "partial"
             },
             "windows": {
@@ -3213,15 +3323,15 @@
           "absences": {},
           "cells": {
             "android": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "linux": {
@@ -3231,9 +3341,9 @@
               "state": "full"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "tui": {
@@ -3243,15 +3353,15 @@
               "state": "full"
             },
             "web": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "windows": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             }
           },
@@ -3275,21 +3385,21 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "full"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "tui": {
@@ -3299,10 +3409,10 @@
               "state": "full"
             },
             "web": {
-              "date": "2026-09-30",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.2-dev+4ca6f9ab standalone",
-              "state": "partial"
+              "stamp": "0.1.5-dev+110d1248 standalone",
+              "state": "full"
             },
             "windows": {
               "date": "2026-09-11",
@@ -3357,8 +3467,8 @@
             "web": {
               "date": "2026-09-24",
               "dirty": false,
-              "stamp": "0.1.2-dev+72d6a508 standalone",
-              "state": "full"
+              "stamp": "0.1.2-dev+b3cb40c5 docker",
+              "state": "partial"
             },
             "windows": {
               "date": "2026-09-11",
@@ -3471,9 +3581,9 @@
               "state": "partial"
             },
             "web": {
-              "date": "",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "partial"
             },
             "windows": {
@@ -3514,7 +3624,7 @@
               "date": "2026-10-12",
               "dirty": false,
               "stamp": "0.1.4-dev+ea391d07 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "macos": {
               "date": "2026-09-22",
@@ -3538,10 +3648,10 @@
               "date": "2026-09-30",
               "dirty": true,
               "stamp": "0.1.2-dev+2a213a2d.dirty standalone",
-              "state": "full"
+              "state": "partial"
             }
           },
-          "full": true,
+          "full": false,
           "goal": "docs/goal/behavior/p2p.md § Offline share initiation",
           "guide": "docs/guides/cloud-sharing-family.md § Sharing a folder with someone",
           "nest_only": false,
@@ -3657,7 +3767,28 @@
           "goal": "docs/goal/behavior/share-links.md § Flows",
           "guide": "docs/guides/app-tour.md § Media",
           "nest_only": false,
-          "outcome_absences": {},
+          "outcome_absences": {
+            "android": {
+              "28": "docs/goal/behavior/share-links.md § Windows Explorer's Share leaf",
+              "29": "docs/goal/behavior/share-links.md § Windows Explorer's Share leaf",
+              "30": "docs/goal/behavior/share-links.md § Windows Explorer's Share leaf"
+            },
+            "ios": {
+              "28": "docs/goal/behavior/share-links.md § Windows Explorer's Share leaf",
+              "29": "docs/goal/behavior/share-links.md § Windows Explorer's Share leaf",
+              "30": "docs/goal/behavior/share-links.md § Windows Explorer's Share leaf"
+            },
+            "tui": {
+              "28": "docs/goal/behavior/share-links.md § Windows Explorer's Share leaf",
+              "29": "docs/goal/behavior/share-links.md § Windows Explorer's Share leaf",
+              "30": "docs/goal/behavior/share-links.md § Windows Explorer's Share leaf"
+            },
+            "web": {
+              "28": "docs/goal/behavior/share-links.md § Windows Explorer's Share leaf",
+              "29": "docs/goal/behavior/share-links.md § Windows Explorer's Share leaf",
+              "30": "docs/goal/behavior/share-links.md § Windows Explorer's Share leaf"
+            }
+          },
           "page": "docs/features/share-links.md",
           "slug": "share-links",
           "title": "Share a link to a file",
@@ -3734,21 +3865,21 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "full"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "tui": {
@@ -3758,16 +3889,16 @@
               "state": "full"
             },
             "web": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "partial"
             },
             "windows": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
-              "state": "partial"
+              "stamp": "0.1.5-dev+61b844ca standalone",
+              "state": "full"
             }
           },
           "full": true,
@@ -3790,21 +3921,21 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "partial"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "tui": {
@@ -3814,15 +3945,15 @@
               "state": "partial"
             },
             "web": {
-              "date": "2026-09-20",
-              "dirty": true,
-              "stamp": "0.1.2-dev+d034eec4.dirty standalone",
+              "date": "2026-10-20",
+              "dirty": false,
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "partial"
             },
             "windows": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             }
           },
@@ -3870,10 +4001,10 @@
               "state": "partial"
             },
             "web": {
-              "date": "2026-09-01",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.2-dev+d2b9791b standalone",
-              "state": "full"
+              "stamp": "0.1.5-dev+110d1248 standalone",
+              "state": "partial"
             },
             "windows": {
               "date": "2026-09-11",
@@ -3882,7 +4013,7 @@
               "state": "partial"
             }
           },
-          "full": false,
+          "full": true,
           "goal": "docs/goal/architecture/apps/observability.md § 3. Surfaces",
           "guide": "docs/guides/app-tour.md § Settings",
           "nest_only": false,
@@ -3914,7 +4045,7 @@
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "partial"
             },
             "macos": {
@@ -3930,10 +4061,10 @@
               "state": "full"
             },
             "web": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
-              "state": "full"
+              "stamp": "0.1.5-dev+110d1248 standalone",
+              "state": "partial"
             },
             "windows": {
               "date": "",
@@ -3962,21 +4093,21 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "partial"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "tui": {
@@ -3986,15 +4117,15 @@
               "state": "partial"
             },
             "web": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "partial"
             },
             "windows": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             }
           },
@@ -4039,7 +4170,7 @@
               "date": "2026-09-15",
               "dirty": true,
               "stamp": "0.1.2-dev+4bfe5053.dirty standalone",
-              "state": "partial"
+              "state": "full"
             },
             "web": {
               "date": "2026-08-28",
@@ -4065,79 +4196,70 @@
           "what": "The Devices page lists every device signed in as you, exactly as your nest\nknows them, marks the one you are holding, shows which folders each takes part in,\nand lets you remove one. Your own identity is one tap away to hand to a new device."
         },
         {
-          "absences": {},
+          "absences": {
+            "android": "docs/goal/ui/settings.md § Credential store",
+            "ios": "docs/goal/ui/settings.md § Credential store",
+            "linux": "docs/goal/ui/settings.md § Credential store",
+            "macos": "docs/goal/ui/settings.md § Credential store",
+            "windows": "docs/goal/ui/settings.md § Credential store"
+          },
           "cells": {
             "android": {
               "date": "",
               "dirty": false,
               "stamp": "",
-              "state": "none"
+              "state": "absent"
             },
             "ios": {
               "date": "",
               "dirty": false,
               "stamp": "",
-              "state": "none"
+              "state": "absent"
             },
             "linux": {
-              "date": "2026-10-14",
-              "dirty": true,
-              "stamp": "0.1.4-dev+c9a30a7b.dirty standalone",
-              "state": "partial"
+              "date": "",
+              "dirty": false,
+              "stamp": "",
+              "state": "absent"
             },
             "macos": {
               "date": "",
               "dirty": false,
               "stamp": "",
-              "state": "none"
+              "state": "absent"
             },
             "tui": {
-              "date": "2026-09-28",
+              "date": "2026-10-19",
               "dirty": false,
-              "stamp": "0.1.2-dev+7663afa6 standalone",
+              "stamp": "0.1.5-dev+b128f06b standalone",
               "state": "partial"
             },
             "web": {
-              "date": "",
-              "dirty": false,
-              "stamp": "",
-              "state": "none"
+              "date": "2026-10-20",
+              "dirty": true,
+              "stamp": "0.1.5-dev+828e03a6.dirty standalone",
+              "state": "partial"
             },
             "windows": {
               "date": "",
               "dirty": false,
               "stamp": "",
-              "state": "none"
+              "state": "absent"
             }
           },
           "full": false,
-          "goal": "docs/goal/architecture/apps/common.md § Credential storage",
+          "goal": "docs/goal/architecture/apps/tui.md § Credential storage",
           "guide": "docs/guides/identity-and-devices.md § Where the key lives — and where you should put a copy",
           "nest_only": false,
           "outcome_absences": {
-            "android": {
-              "2": "docs/goal/ui/settings.md § Credential store"
-            },
-            "ios": {
-              "2": "docs/goal/ui/settings.md § Credential store"
-            },
-            "linux": {
-              "2": "docs/goal/ui/settings.md § Credential store"
-            },
-            "macos": {
-              "2": "docs/goal/ui/settings.md § Credential store"
-            },
-            "web": {
-              "2": "docs/goal/ui/settings.md § Credential store"
-            },
-            "windows": {
-              "2": "docs/goal/ui/settings.md § Credential store"
+            "tui": {
+              "18": "docs/goal/architecture/apps/tui.md § Declared platform absences"
             }
           },
-          "page": "docs/features/identity-protected-on-this-device.md",
-          "slug": "identity-protected-on-this-device",
-          "title": "Your identity is kept safe on this device",
-          "what": "Your identity is a secret key, and each device you use keeps its own copy\nwhere that device protects secrets — the keychain on iPhone and Mac, the\nequivalent stores on Windows, Linux and Android. The web app is the\nexception: a browser has no such store, so there the key sits in the\nbrowser's ordinary site storage, without that protection. On a server or over SSH, where there is no such\nstore, the terminal app asks you for a passphrase on first run and keeps the\nkey in a file sealed with it, asking for the passphrase again at each launch.\nEither way, reopening the app finds your identity where you left it:\nnothing to set up twice. Where the key is sealed under a passphrase, you can\nchange that passphrase from Settings, and the old one stops opening it.\n\nThe app never sends your key anywhere by itself — not into a backup, not\ninto a sync between your devices. It leaves a device only when you move it\nyourself: by adding a device, exporting your identity, or making a recovery\nkit. What your device's own backup then does with the place the key is kept\ndepends on the device: some keep the key on the device and out of the\nbackup, others carry it still locked under your sign-in password or your\npassphrase, and in the web app it goes wherever a copy of your browser's\ndata goes."
+          "page": "docs/features/identity-sealed-under-a-passphrase.md",
+          "slug": "identity-sealed-under-a-passphrase",
+          "title": "Your identity encrypted with a passphrase",
+          "what": "Where the app has no protected store of the device's own to keep your identity in — the terminal app on a server or over SSH, and the web app in any browser — Fauna keeps your identity encrypted with a passphrase you choose. You choose it before you set anything up, typing it twice, and the app asks for it again before it opens anything; in a browser, a new tab asks nothing while another Fauna tab is already open. What you type never shows, a wrong passphrase is refused, and you can change the passphrase from Settings without being signed out; the app reminds you to back up your identity first, because nobody can reset a forgotten passphrase — your identity then comes back from your recovery kit, an exported copy of your key, or another device where you're signed in. In the web app you can also start over from the unlock screen: that erases this browser's copy of your keys and nothing else. However the app stops, whatever it finds it cannot read, and however many copies of it are open, your encrypted identity is never cut short, emptied or lost. On a computer or phone that keeps your identity in its own protected store instead, there is no passphrase to choose."
         },
         {
           "absences": {},
@@ -4149,21 +4271,21 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "",
               "state": "partial"
             },
             "linux": {
-              "date": "2026-10-12",
-              "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "date": "2026-10-14",
+              "dirty": true,
+              "stamp": "0.1.4-dev+c9a30a7b.dirty standalone",
               "state": "partial"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "",
               "state": "partial"
             },
             "tui": {
@@ -4173,15 +4295,71 @@
               "state": "partial"
             },
             "web": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "partial"
             },
             "windows": {
+              "date": "",
+              "dirty": false,
+              "stamp": "",
+              "state": "none"
+            }
+          },
+          "full": true,
+          "goal": "docs/goal/architecture/apps/common.md § Credential storage",
+          "guide": "docs/guides/identity-and-devices.md § Where the key lives — and where you should put a copy",
+          "nest_only": false,
+          "outcome_absences": {},
+          "page": "docs/features/identity-protected-on-this-device.md",
+          "slug": "identity-protected-on-this-device",
+          "title": "Your identity is kept safe on this device",
+          "what": "Your identity is a secret key, and each device you use keeps its own copy where that device protects secrets — the keychain on iPhone and Mac, the equivalent stores on Windows, Linux and Android. Where there is no such store — in the web app, and in the terminal app on a server or over SSH — the app asks you to choose a passphrase the first time it opens and keeps the key encrypted with it, asking for the passphrase again at each launch (in a browser, once per session, as long as one Fauna tab stays open). Either way, reopening the app finds your identity where you left it: nothing to set up twice. Where the key is encrypted with a passphrase, you can change that passphrase from Settings, and the old one stops opening it.\n\nThe app never sends your key anywhere by itself — not into a backup, not into a sync between your devices. It leaves a device only when you move it yourself: by adding a device, exporting your identity, making a recovery kit, or — on iPhone and Mac — turning on the iCloud Keychain backup. What your device's own backup then does with the place the key is kept depends on the device: some keep the key on the device and out of the backup, others carry it still locked under your sign-in password or your passphrase — and a copy of your browser's data carries it encrypted with your passphrase, too."
+        },
+        {
+          "absences": {},
+          "cells": {
+            "android": {
+              "date": "",
+              "dirty": false,
+              "stamp": "",
+              "state": "none"
+            },
+            "ios": {
+              "date": "2026-10-20",
+              "dirty": false,
+              "stamp": "0.1.5-dev+61b844ca standalone",
+              "state": "partial"
+            },
+            "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
+              "state": "full"
+            },
+            "macos": {
+              "date": "2026-10-20",
+              "dirty": false,
+              "stamp": "0.1.5-dev+61b844ca standalone",
+              "state": "partial"
+            },
+            "tui": {
+              "date": "2026-09-28",
+              "dirty": false,
+              "stamp": "0.1.2-dev+7663afa6 standalone",
+              "state": "partial"
+            },
+            "web": {
+              "date": "2026-10-20",
+              "dirty": false,
+              "stamp": "0.1.5-dev+110d1248 standalone",
+              "state": "partial"
+            },
+            "windows": {
+              "date": "2026-10-20",
+              "dirty": false,
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             }
           },
@@ -4205,21 +4383,21 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "partial"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "tui": {
@@ -4229,15 +4407,15 @@
               "state": "full"
             },
             "web": {
-              "date": "2026-09-01",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.2-dev+e48628f5 standalone",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "partial"
             },
             "windows": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             }
           },
@@ -4263,7 +4441,7 @@
               "date": "",
               "dirty": false,
               "stamp": "",
-              "state": "partial"
+              "state": "none"
             },
             "ios": {
               "date": "",
@@ -4287,13 +4465,13 @@
               "date": "2026-10-11",
               "dirty": false,
               "stamp": "0.1.4-dev+2a0b03b4 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "web": {
-              "date": "",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "",
-              "state": "none"
+              "stamp": "0.1.5-dev+110d1248 standalone",
+              "state": "partial"
             },
             "windows": {
               "date": "",
@@ -4302,7 +4480,7 @@
               "state": "none"
             }
           },
-          "full": false,
+          "full": true,
           "goal": "docs/goal/behavior/mailbox-migration.md § Goal",
           "guide": "docs/guides/own-your-mail.md § Moving in from your old provider",
           "nest_only": false,
@@ -4331,7 +4509,7 @@
               "date": "2026-10-12",
               "dirty": false,
               "stamp": "0.1.4-dev+ea391d07 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "macos": {
               "date": "",
@@ -4343,12 +4521,12 @@
               "date": "2026-09-28",
               "dirty": false,
               "stamp": "0.1.2-dev+7663afa6 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "web": {
-              "date": "2026-08-31",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.2-dev+0d95e205 standalone",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "partial"
             },
             "windows": {
@@ -4358,7 +4536,7 @@
               "state": "partial"
             }
           },
-          "full": false,
+          "full": true,
           "goal": "docs/goal/behavior/mail-aliases.md § Aliases UX",
           "guide": "docs/guides/own-your-mail.md § Addresses: aliases, plus-addresses, and role addresses",
           "nest_only": false,
@@ -4399,7 +4577,7 @@
               "date": "2026-09-23",
               "dirty": false,
               "stamp": "0.1.2-dev+74e26248 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "web": {
               "date": "2026-09-23",
@@ -4414,7 +4592,7 @@
               "state": "partial"
             }
           },
-          "full": false,
+          "full": true,
           "goal": "docs/goal/behavior/email-filters.md § Email filter rules",
           "guide": "docs/guides/own-your-mail.md § Forwarding",
           "nest_only": false,
@@ -4458,10 +4636,10 @@
               "state": "full"
             },
             "web": {
-              "date": "2026-09-01",
-              "dirty": false,
-              "stamp": "0.1.2-dev+f42d08e7 standalone",
-              "state": "partial"
+              "date": "2026-10-04",
+              "dirty": true,
+              "stamp": "0.1.2-dev+42006402.dirty standalone",
+              "state": "full"
             },
             "windows": {
               "date": "2026-09-11",
@@ -4514,10 +4692,10 @@
               "state": "partial"
             },
             "web": {
-              "date": "2026-09-24",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.2-dev+730eca3d standalone",
-              "state": "full"
+              "stamp": "0.1.5-dev+110d1248 standalone",
+              "state": "partial"
             },
             "windows": {
               "date": "2026-09-27",
@@ -4557,8 +4735,8 @@
             },
             "linux": {
               "date": "2026-10-12",
-              "dirty": true,
-              "stamp": "0.1.4-dev+670184dc.dirty standalone",
+              "dirty": false,
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "partial"
             },
             "macos": {
@@ -4571,12 +4749,12 @@
               "date": "2026-10-11",
               "dirty": true,
               "stamp": "0.1.4-dev+d6e5448b.dirty standalone",
-              "state": "partial"
+              "state": "full"
             },
             "web": {
-              "date": "2026-10-03",
-              "dirty": true,
-              "stamp": "0.1.2-dev+765e666a.dirty standalone",
+              "date": "2026-10-20",
+              "dirty": false,
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "partial"
             },
             "windows": {
@@ -4586,7 +4764,7 @@
               "state": "partial"
             }
           },
-          "full": false,
+          "full": true,
           "goal": "docs/goal/behavior/mail-export.md § Goal",
           "guide": "docs/guides/own-your-mail.md § Taking your mail with you",
           "nest_only": false,
@@ -4642,7 +4820,7 @@
               "state": "partial"
             }
           },
-          "full": false,
+          "full": true,
           "goal": "docs/goal/ui/mail-settings.md § Goal",
           "guide": "docs/guides/own-your-mail.md § Turning mail on",
           "nest_only": false,
@@ -4689,7 +4867,7 @@
               "date": "2026-10-09",
               "dirty": true,
               "stamp": "0.1.3-dev+937bbf0c.dirty standalone",
-              "state": "full"
+              "state": "partial"
             },
             "windows": {
               "date": "2026-10-09",
@@ -4742,9 +4920,9 @@
               "state": "full"
             },
             "web": {
-              "date": "2026-09-01",
+              "date": "2026-10-08",
               "dirty": false,
-              "stamp": "0.1.2-dev+c9fb0cf1 standalone",
+              "stamp": "0.1.3-dev+862c7d57 standalone",
               "state": "full"
             },
             "windows": {
@@ -4830,21 +5008,21 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "partial"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "full"
             },
             "tui": {
@@ -4925,9 +5103,9 @@
               "state": "partial"
             },
             "web": {
-              "date": "",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "partial"
             },
             "windows": {
@@ -4937,7 +5115,7 @@
               "state": "partial"
             }
           },
-          "full": false,
+          "full": true,
           "goal": "docs/goal/ui/atproto.md § Goal",
           "guide": "docs/guides/bridges-bluesky-nostr.md § Bluesky, the destination: your nest as your Bluesky home",
           "nest_only": false,
@@ -4951,27 +5129,27 @@
           "absences": {},
           "cells": {
             "android": {
-              "date": "",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "ios": {
-              "date": "",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "linux": {
-              "date": "",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "macos": {
-              "date": "",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "tui": {
@@ -4981,15 +5159,15 @@
               "state": "partial"
             },
             "web": {
-              "date": "",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "windows": {
-              "date": "",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             }
           },
@@ -5049,7 +5227,7 @@
               "state": "partial"
             }
           },
-          "full": false,
+          "full": true,
           "goal": "docs/goal/behavior/bridges.md § Goal",
           "guide": "docs/guides/bridges-bluesky-nostr.md § One feed, many networks",
           "nest_only": false,
@@ -5069,28 +5247,28 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "partial"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "tui": {
               "date": "2026-09-14",
               "dirty": false,
               "stamp": "0.1.2-dev+d6ff0673 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "web": {
               "date": "2026-09-14",
@@ -5105,7 +5283,7 @@
               "state": "partial"
             }
           },
-          "full": false,
+          "full": true,
           "goal": "docs/goal/ui/nostr.md § Goal",
           "guide": "docs/guides/bridges-bluesky-nostr.md § Nostr: a personal Nostr home",
           "nest_only": false,
@@ -5161,7 +5339,7 @@
               "state": "none"
             }
           },
-          "full": false,
+          "full": true,
           "goal": "docs/goal/behavior/activitypub.md § Goal",
           "guide": "docs/guides/bridges-bluesky-nostr.md § The Fediverse (Mastodon & friends)",
           "nest_only": false,
@@ -5186,43 +5364,43 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "partial"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "tui": {
-              "date": "2026-10-09",
+              "date": "2026-10-18",
               "dirty": false,
-              "stamp": "0.1.3-dev+6e958b22 standalone",
-              "state": "partial"
+              "stamp": "0.1.4-dev+df282566 standalone",
+              "state": "full"
             },
             "web": {
-              "date": "2026-10-09",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.3-dev+a7a1fa35 standalone",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "partial"
             },
             "windows": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             }
           },
-          "full": false,
+          "full": true,
           "goal": "docs/goal/behavior/monetization.md § Per-post pay-to-unlock",
           "guide": "docs/guides/who-can-see-what.md § Paid posts — what is public and what is not",
           "nest_only": false,
@@ -5242,21 +5420,21 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "full"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "tui": {
@@ -5266,9 +5444,9 @@
               "state": "partial"
             },
             "web": {
-              "date": "2026-10-09",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.3-dev+a7a1fa35 standalone",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "partial"
             },
             "windows": {
@@ -5330,7 +5508,7 @@
               "date": "2026-09-11",
               "dirty": false,
               "stamp": "0.1.2-dev+13d662f5 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "windows": {
               "date": "2026-09-11",
@@ -5359,21 +5537,21 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "full"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "tui": {
@@ -5383,10 +5561,10 @@
               "state": "partial"
             },
             "web": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
-              "state": "full"
+              "stamp": "0.1.5-dev+110d1248 standalone",
+              "state": "partial"
             },
             "windows": {
               "date": "2026-09-14",
@@ -5403,7 +5581,7 @@
           "page": "docs/features/moderation-queue.md",
           "slug": "moderation-queue",
           "title": "Correct the classifier",
-          "what": "Your own moderation queue shows what your device flagged, including spam\ndetected in an encrypted message after it was decrypted, and lets you correct the\nclassifier. Where your nest's administrator has acted on your content under a\nlegal obligation, the queue also shows that decision and lets you appeal it with\na reason, which goes on the record for an administrator to review. Below the\nqueue, the page lists the reports you made about other people's content and lets\nyou withdraw one while it is still open."
+          "what": "Your own moderation queue shows what your device flagged, including spam\ndetected in an encrypted message after it was decrypted, and lets you correct the\nclassifier. Where an admin — of your nest, or of another nest that shows your post or is the home nest of a community room you are in — has acted on your content under a legal obligation, the queue also shows that decision, says which nest made it when it was another nest, and, for a post, lets you appeal it with a reason, which goes on that nest's record for an admin to review. Below the\nqueue, the page lists the reports you made about other people's content and lets\nyou withdraw one while it is still open."
         },
         {
           "absences": {},
@@ -5421,9 +5599,9 @@
               "state": "partial"
             },
             "linux": {
-              "date": "2026-10-12",
-              "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "date": "2026-10-14",
+              "dirty": true,
+              "stamp": "0.1.4-dev+5bf6e2c5.dirty standalone",
               "state": "partial"
             },
             "macos": {
@@ -5433,15 +5611,15 @@
               "state": "partial"
             },
             "tui": {
-              "date": "2026-10-12",
+              "date": "2026-10-14",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+a3bd9d85 standalone",
               "state": "partial"
             },
             "web": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "partial"
             },
             "windows": {
@@ -5507,7 +5685,7 @@
               "state": "partial"
             }
           },
-          "full": false,
+          "full": true,
           "goal": "docs/goal/behavior/moderation.md § Muted keywords",
           "guide": "docs/guides/app-tour.md § Personalization",
           "nest_only": false,
@@ -5515,7 +5693,7 @@
           "page": "docs/features/muted-words.md",
           "slug": "muted-words",
           "title": "Muted words",
-          "what": "Words you mute collapse any post or message that contains them behind a\nreveal, on every feed and in every conversation, on all your devices."
+          "what": "Words you mute collapse any post, message or notification that contains them behind a reveal — in every feed and conversation and in your notifications, on all your devices; a security notice always shows in full. A word you would rather see less of than not at all can instead only sink matching posts in your ranked feeds."
         },
         {
           "absences": {},
@@ -5535,7 +5713,7 @@
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "partial"
             },
             "macos": {
@@ -5551,10 +5729,10 @@
               "state": "full"
             },
             "web": {
-              "date": "2026-10-07",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.2-dev+cfad4af4 standalone",
-              "state": "partial"
+              "stamp": "0.1.5-dev+110d1248 standalone",
+              "state": "full"
             },
             "windows": {
               "date": "2026-10-08",
@@ -5571,7 +5749,7 @@
           "page": "docs/features/report-abuse.md",
           "slug": "report-abuse",
           "title": "Report a post, a message or an account",
-          "what": "Tell your nest's administrators about a post, a message someone sent you, or an\naccount you think they should see. You pick a reason, can add a note, and can block\nthe person in the same step. A private message stays private unless you tick the box\nthat attaches its text. When the person lives on another nest, your report is passed\non to that nest's administrators too, without your name. A report removes nothing and\nis never shown to the person you reported; what changes is your own view, where what\nyou reported is replaced by a note that you reported it. You are told what became of\nyour report, and your Moderation page lists your reports and lets you withdraw one\nwhile it is still open."
+          "what": "Tell your nest's administrators about a post, a message someone sent you, or an\naccount you think they should see. You pick a reason, can add a note, and can block\nthe person in the same step. A private message stays private unless you tick the box\nthat attaches its text. When the person lives on another nest, your report is passed\non to that nest's administrators too, without your name. A report removes nothing by itself, and the person you report is never told who reported them; what changes is your own view, where what you reported is replaced by a note that you reported it. You are told what became of your report, and the Moderation page (in the web app, a section of Settings → Privacy) lists your reports and lets you withdraw one while it is still open."
         },
         {
           "absences": {},
@@ -5604,12 +5782,12 @@
               "date": "2026-10-09",
               "dirty": false,
               "stamp": "0.1.2-dev+4baae748 docker",
-              "state": "partial"
+              "state": "full"
             },
             "web": {
-              "date": "2026-08-28",
+              "date": "2026-10-09",
               "dirty": false,
-              "stamp": "0.1.2-dev+019e87f9 standalone",
+              "stamp": "0.1.2-dev+4baae748 docker",
               "state": "partial"
             },
             "windows": {
@@ -5619,7 +5797,7 @@
               "state": "partial"
             }
           },
-          "full": false,
+          "full": true,
           "goal": "docs/goal/behavior/family-safety.md § Goal",
           "guide": "docs/guides/cloud-sharing-family.md § A family on one nest",
           "nest_only": false,
@@ -5657,15 +5835,15 @@
               "state": "partial"
             },
             "tui": {
-              "date": "2026-10-13",
-              "dirty": false,
-              "stamp": "0.1.4-dev+42065bc9 standalone",
+              "date": "2026-10-17",
+              "dirty": true,
+              "stamp": "0.1.4-dev+a8a82c72.dirty standalone",
               "state": "full"
             },
             "web": {
-              "date": "2026-10-10",
-              "dirty": true,
-              "stamp": "0.1.3-dev+64c66151.dirty standalone",
+              "date": "2026-10-20",
+              "dirty": false,
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "partial"
             },
             "windows": {
@@ -5724,9 +5902,9 @@
               "state": "full"
             },
             "web": {
-              "date": "2026-09-09",
+              "date": "2026-09-20",
               "dirty": false,
-              "stamp": "0.1.2-dev+cdb1bad0 standalone",
+              "stamp": "0.1.2-dev+8b423269 standalone",
               "state": "full"
             },
             "windows": {
@@ -5762,9 +5940,9 @@
               "state": "none"
             },
             "linux": {
-              "date": "2026-10-12",
-              "dirty": false,
-              "stamp": "0.1.4-dev+ea391d07 standalone",
+              "date": "2026-10-18",
+              "dirty": true,
+              "stamp": "0.1.4-dev+db13d1ca.dirty standalone",
               "state": "partial"
             },
             "macos": {
@@ -5774,15 +5952,15 @@
               "state": "partial"
             },
             "tui": {
-              "date": "2026-10-01",
+              "date": "2026-10-17",
               "dirty": true,
-              "stamp": "0.1.2-dev+9746302c.dirty standalone",
+              "stamp": "0.1.4-dev+b5779216.dirty standalone",
               "state": "partial"
             },
             "web": {
-              "date": "2026-09-09",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.2-dev+cdb1bad0 standalone",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "partial"
             },
             "windows": {
@@ -5792,7 +5970,7 @@
               "state": "partial"
             }
           },
-          "full": false,
+          "full": true,
           "goal": "docs/goal/behavior/admin.md § Approved-bridges roster",
           "guide": "docs/guides/admin-tour.md § Bridges",
           "nest_only": false,
@@ -5821,7 +5999,7 @@
               "date": "2026-09-21",
               "dirty": false,
               "stamp": "0.1.2-dev+c438a386 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "macos": {
               "date": "2026-09-21",
@@ -5833,7 +6011,7 @@
               "date": "2026-09-21",
               "dirty": false,
               "stamp": "0.1.2-dev+c438a386 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "web": {
               "date": "2026-09-21",
@@ -5848,7 +6026,7 @@
               "state": "partial"
             }
           },
-          "full": false,
+          "full": true,
           "goal": "docs/goal/behavior/admin.md § 8. Calendar",
           "guide": "docs/guides/admin-tour.md § Calendar, Contacts, and Files",
           "nest_only": false,
@@ -6004,9 +6182,9 @@
               "state": "full"
             },
             "web": {
-              "date": "2026-10-13",
-              "dirty": true,
-              "stamp": "0.1.4-dev+b811e865.dirty standalone",
+              "date": "2026-10-20",
+              "dirty": false,
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "full"
             },
             "windows": {
@@ -6045,7 +6223,7 @@
               "date": "2026-09-23",
               "dirty": false,
               "stamp": "0.1.2-dev+b3cb40c5 docker",
-              "state": "full"
+              "state": "partial"
             },
             "macos": {
               "date": "2026-09-20",
@@ -6057,13 +6235,13 @@
               "date": "2026-09-23",
               "dirty": false,
               "stamp": "0.1.2-dev+b3cb40c5 docker",
-              "state": "full"
+              "state": "partial"
             },
             "web": {
-              "date": "2026-09-09",
+              "date": "2026-09-23",
               "dirty": false,
-              "stamp": "0.1.2-dev+f3c1e99a standalone",
-              "state": "full"
+              "stamp": "0.1.2-dev+b3cb40c5 docker",
+              "state": "partial"
             },
             "windows": {
               "date": "2026-09-11",
@@ -6072,7 +6250,7 @@
               "state": "partial"
             }
           },
-          "full": true,
+          "full": false,
           "goal": "docs/goal/architecture/apps/observability.md § 3. Surfaces",
           "guide": "docs/guides/admin-tour.md § Logs",
           "nest_only": false,
@@ -6086,49 +6264,49 @@
           "absences": {},
           "cells": {
             "android": {
-              "date": "2026-10-12",
+              "date": "",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
-              "state": "partial"
+              "stamp": "",
+              "state": "none"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "linux": {
-              "date": "2026-10-12",
-              "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "date": "2026-10-14",
+              "dirty": true,
+              "stamp": "0.1.4-dev+fe81a038.dirty standalone",
               "state": "partial"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "tui": {
-              "date": "2026-10-12",
+              "date": "2026-10-19",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
-              "state": "partial"
+              "stamp": "0.1.5-dev+cab1c46a standalone",
+              "state": "full"
             },
             "web": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
-              "state": "partial"
+              "stamp": "0.1.5-dev+110d1248 standalone",
+              "state": "full"
             },
             "windows": {
-              "date": "2026-10-12",
-              "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "date": "2026-10-13",
+              "dirty": true,
+              "stamp": "0.1.4-dev+09f6a74e.dirty standalone",
               "state": "partial"
             }
           },
-          "full": false,
+          "full": true,
           "goal": "docs/goal/behavior/mail-deliverability.md § Admin-pane Deliverability surface",
           "guide": "docs/guides/admin-tour.md § Mail",
           "nest_only": false,
@@ -6172,9 +6350,9 @@
               "state": "partial"
             },
             "web": {
-              "date": "2026-09-09",
+              "date": "2026-09-20",
               "dirty": false,
-              "stamp": "0.1.2-dev+f3c1e99a standalone",
+              "stamp": "0.1.2-dev+8b423269 standalone",
               "state": "partial"
             },
             "windows": {
@@ -6204,39 +6382,39 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "partial"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "tui": {
-              "date": "2026-10-12",
+              "date": "2026-10-19",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+cab1c46a standalone",
               "state": "full"
             },
             "web": {
-              "date": "2026-10-09",
-              "dirty": true,
-              "stamp": "0.1.3-dev+23f5e0bc.dirty standalone",
-              "state": "partial"
+              "date": "2026-10-20",
+              "dirty": false,
+              "stamp": "0.1.5-dev+110d1248 standalone",
+              "state": "full"
             },
             "windows": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             }
           },
@@ -6284,9 +6462,9 @@
               "state": "partial"
             },
             "web": {
-              "date": "2026-10-09",
-              "dirty": true,
-              "stamp": "0.1.3-dev+23f5e0bc.dirty standalone",
+              "date": "2026-10-12",
+              "dirty": false,
+              "stamp": "0.1.4-dev+52904896 standalone",
               "state": "partial"
             },
             "windows": {
@@ -6340,10 +6518,10 @@
               "state": "full"
             },
             "web": {
-              "date": "2026-09-09",
+              "date": "2026-09-21",
               "dirty": false,
-              "stamp": "0.1.2-dev+f3c1e99a standalone",
-              "state": "partial"
+              "stamp": "0.1.2-dev+c438a386 standalone",
+              "state": "full"
             },
             "windows": {
               "date": "2026-09-21",
@@ -6380,7 +6558,7 @@
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "full"
             },
             "macos": {
@@ -6390,21 +6568,21 @@
               "state": "partial"
             },
             "tui": {
-              "date": "2026-09-28",
+              "date": "2026-10-19",
               "dirty": false,
-              "stamp": "0.1.2-dev+7663afa6 standalone",
+              "stamp": "0.1.5-dev+cab1c46a standalone",
               "state": "full"
             },
             "web": {
-              "date": "2026-09-09",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.2-dev+f3c1e99a standalone",
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "full"
             },
             "windows": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             }
           },
@@ -6428,21 +6606,21 @@
               "state": "none"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "linux": {
               "date": "2026-10-12",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.4-dev+ea391d07 standalone",
               "state": "full"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+52904896 standalone",
+              "stamp": "0.1.5-dev+61b844ca standalone",
               "state": "partial"
             },
             "tui": {
@@ -6452,9 +6630,9 @@
               "state": "full"
             },
             "web": {
-              "date": "2026-09-15",
-              "dirty": true,
-              "stamp": "0.1.2-dev+00c39e3e.dirty standalone",
+              "date": "2026-10-20",
+              "dirty": false,
+              "stamp": "0.1.5-dev+110d1248 standalone",
               "state": "full"
             },
             "windows": {
@@ -6595,49 +6773,49 @@
           "absences": {},
           "cells": {
             "android": {
-              "date": "2026-10-12",
+              "date": "",
               "dirty": false,
-              "stamp": "0.1.4-dev+ea391d07 standalone",
-              "state": "partial"
+              "stamp": "",
+              "state": "none"
             },
             "ios": {
-              "date": "2026-10-12",
+              "date": "",
               "dirty": false,
-              "stamp": "0.1.4-dev+ea391d07 standalone",
-              "state": "partial"
+              "stamp": "",
+              "state": "none"
             },
             "linux": {
-              "date": "2026-10-12",
-              "dirty": false,
-              "stamp": "0.1.4-dev+ea391d07 standalone",
-              "state": "partial"
+              "date": "2026-10-17",
+              "dirty": true,
+              "stamp": "0.1.4-dev+ce18d539.dirty standalone",
+              "state": "full"
             },
             "macos": {
-              "date": "2026-10-12",
+              "date": "",
               "dirty": false,
-              "stamp": "0.1.4-dev+ea391d07 standalone",
-              "state": "partial"
+              "stamp": "",
+              "state": "none"
             },
             "tui": {
-              "date": "2026-10-12",
+              "date": "2026-10-19",
               "dirty": false,
-              "stamp": "0.1.4-dev+ea391d07 standalone",
-              "state": "partial"
+              "stamp": "0.1.5-dev+cab1c46a standalone",
+              "state": "full"
             },
             "web": {
-              "date": "2026-10-12",
+              "date": "2026-10-20",
               "dirty": false,
-              "stamp": "0.1.4-dev+ea391d07 standalone",
-              "state": "partial"
+              "stamp": "0.1.5-dev+110d1248 standalone",
+              "state": "full"
             },
             "windows": {
-              "date": "2026-10-12",
+              "date": "",
               "dirty": false,
-              "stamp": "0.1.4-dev+ea391d07 standalone",
-              "state": "partial"
+              "stamp": "",
+              "state": "none"
             }
           },
-          "full": false,
+          "full": true,
           "goal": "docs/goal/behavior/dmarc-reporting.md § Aggregate-report receive (RUA)",
           "guide": "docs/guides/own-your-mail.md § Addresses: aliases, plus-addresses, and role addresses",
           "nest_only": false,
@@ -6645,7 +6823,7 @@
           "page": "docs/features/dmarc-reporting.md",
           "slug": "dmarc-reporting",
           "title": "DMARC reports are read for you, not mailed to you",
-          "what": "There is nothing to choose to get this. Every domain your nest serves asks the big mail providers for a daily report\non who sent mail in its name. Those reports come back to your nest, which reads\nthem itself and keeps them for 90 days. They never land in anyone's inbox. A\nbroken report, or one about a domain your nest does not serve, is dropped\nquietly, and the provider that sent it is never told to retry.\n\nTwo things are an admin's to choose, on the mail admin page: how long the\nreports are kept, and whether to also ask providers for *forensic* reports —\none per failed message, naming the people it was sent to. Those are off unless\nan admin turns them on, and the switch says what they carry."
+          "what": "There is nothing to choose to get this. Every domain your nest serves asks the big mail providers for a daily report\non who sent mail in its name. Those reports come back to your nest, which reads\nthem itself and keeps them for 90 days. They never land in anyone's inbox. A\nbroken report, or one about a domain your nest does not serve, is dropped\nquietly, and the provider that sent it is never told to retry.\n\nTwo things are an admin's to choose, on the mail admin page: how long the\nreports are kept, and whether to also ask providers for *forensic* reports —\none per failed message, naming the people it was sent to. Those are off unless\nan admin turns them on, and the switch says what they carry.\n\nAn admin reads the daily reports on the Mail reports page: the totals for a period and domain, the busiest sources and senders, and each report in full."
         },
         {
           "absences": {},
@@ -6654,43 +6832,43 @@
               "date": "2026-09-23",
               "dirty": false,
               "stamp": "0.1.2-dev+b3cb40c5 docker",
-              "state": "partial"
+              "state": "full"
             },
             "ios": {
               "date": "2026-09-23",
               "dirty": false,
               "stamp": "0.1.2-dev+b3cb40c5 docker",
-              "state": "partial"
+              "state": "full"
             },
             "linux": {
               "date": "2026-09-23",
               "dirty": false,
               "stamp": "0.1.2-dev+b3cb40c5 docker",
-              "state": "partial"
+              "state": "full"
             },
             "macos": {
               "date": "2026-09-23",
               "dirty": false,
               "stamp": "0.1.2-dev+b3cb40c5 docker",
-              "state": "partial"
+              "state": "full"
             },
             "tui": {
               "date": "2026-09-23",
               "dirty": false,
               "stamp": "0.1.2-dev+b3cb40c5 docker",
-              "state": "partial"
+              "state": "full"
             },
             "web": {
               "date": "2026-09-23",
               "dirty": false,
               "stamp": "0.1.2-dev+b3cb40c5 docker",
-              "state": "partial"
+              "state": "full"
             },
             "windows": {
               "date": "2026-09-23",
               "dirty": false,
               "stamp": "0.1.2-dev+b3cb40c5 docker",
-              "state": "partial"
+              "state": "full"
             }
           },
           "full": true,
@@ -6787,10 +6965,10 @@
               "state": "none"
             },
             "tui": {
-              "date": "2026-10-14",
+              "date": "2026-10-19",
               "dirty": true,
-              "stamp": "0.1.4-dev+e0aed9d5.dirty standalone",
-              "state": "partial"
+              "stamp": "0.1.5-dev+cab1c46a.dirty standalone",
+              "state": "full"
             },
             "web": {
               "date": "2026-10-12",
@@ -6805,7 +6983,7 @@
               "state": "none"
             }
           },
-          "full": false,
+          "full": true,
           "goal": "docs/goal/behavior/nest-retirement.md § Goal",
           "guide": "docs/guides/retire-a-nest.md",
           "nest_only": false,
@@ -6819,49 +6997,49 @@
           "absences": {},
           "cells": {
             "android": {
-              "date": "2026-10-12",
-              "dirty": false,
-              "stamp": "0.1.4-dev+ea391d07 standalone",
-              "state": "partial"
+              "date": "2026-10-21",
+              "dirty": true,
+              "stamp": "0.1.5-dev+5fa1147b.dirty standalone",
+              "state": "full"
             },
             "ios": {
-              "date": "2026-10-12",
-              "dirty": false,
-              "stamp": "0.1.4-dev+ea391d07 standalone",
-              "state": "partial"
+              "date": "2026-10-21",
+              "dirty": true,
+              "stamp": "0.1.5-dev+5fa1147b.dirty standalone",
+              "state": "full"
             },
             "linux": {
-              "date": "2026-10-12",
-              "dirty": false,
-              "stamp": "0.1.4-dev+ea391d07 standalone",
-              "state": "partial"
+              "date": "2026-10-21",
+              "dirty": true,
+              "stamp": "0.1.5-dev+5fa1147b.dirty standalone",
+              "state": "full"
             },
             "macos": {
-              "date": "2026-10-12",
-              "dirty": false,
-              "stamp": "0.1.4-dev+ea391d07 standalone",
-              "state": "partial"
+              "date": "2026-10-21",
+              "dirty": true,
+              "stamp": "0.1.5-dev+5fa1147b.dirty standalone",
+              "state": "full"
             },
             "tui": {
-              "date": "2026-10-12",
-              "dirty": false,
-              "stamp": "0.1.4-dev+ea391d07 standalone",
-              "state": "partial"
+              "date": "2026-10-21",
+              "dirty": true,
+              "stamp": "0.1.5-dev+5fa1147b.dirty standalone",
+              "state": "full"
             },
             "web": {
-              "date": "2026-10-12",
-              "dirty": false,
-              "stamp": "0.1.4-dev+ea391d07 standalone",
-              "state": "partial"
+              "date": "2026-10-21",
+              "dirty": true,
+              "stamp": "0.1.5-dev+5fa1147b.dirty standalone",
+              "state": "full"
             },
             "windows": {
-              "date": "2026-10-12",
-              "dirty": false,
-              "stamp": "0.1.4-dev+ea391d07 standalone",
-              "state": "partial"
+              "date": "2026-10-21",
+              "dirty": true,
+              "stamp": "0.1.5-dev+5fa1147b.dirty standalone",
+              "state": "full"
             }
           },
-          "full": false,
+          "full": true,
           "goal": "docs/goal/behavior/smtp-server.md § TLSRPT inbound report listener (RFC 8460)",
           "guide": "docs/guides/own-your-mail.md § Addresses: aliases, plus-addresses, and role addresses",
           "nest_only": true,

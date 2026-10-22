@@ -132,6 +132,27 @@ class AdminSettingsVM @Inject constructor(
     }
 
     /**
+     * Remove a tier via `fauna.admin.tiers.delete`, then refetch so the row
+     * disappears (admin.md § 3 → *Removing a tier*; no confirm, non-optimistic).
+     * The face words the nest's in-use refusal, so the failure text rides
+     * `delete_tier_error`'s `{message}` as is.
+     */
+    fun deleteTier(name: String) {
+        viewModelScope.launch {
+            _actionError.value = null
+            try {
+                api.adminTiersDelete(name)
+                _tiers.value = api.adminTiersList()
+            } catch (e: Exception) {
+                _actionError.value = appContext.getStringFmt(
+                    R.string.admin_settings_page_delete_tier_error,
+                    e.message ?: "",
+                )
+            }
+        }
+    }
+
+    /**
      * Designate/re-point a membership tier via `fauna.admin.membership_tiers.set`
      * (an upsert), then refetch so the row re-renders from persisted state
      * (mirrors [saveTier]). [lapseTier] always rides an explicit selection —

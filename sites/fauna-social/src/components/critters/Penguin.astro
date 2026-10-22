@@ -1,0 +1,31 @@
+---
+interface Props { size?: number; delay?: string; }
+const { size = 110, delay = '0s' } = Astro.props;
+---
+{/* Started life as a magpie; the user saw a penguin in it and asked to lean in
+    (2026-07-29). Hence no long tail, flippers rather than wings, and the orange
+    beak/feet borrowed from the fox's palette so it stays in the family. */}
+<svg viewBox="0 0 120 140" width={size} height={Math.round((size * 140) / 120)}
+  class="critter" style={`--wave-delay:${delay}`} aria-hidden="true">
+  <ellipse cx="60" cy="134" rx="25" ry="5" class="critter-shadow" />
+  <!-- waving flipper (behind body) -->
+  <g class="wave" style="transform-origin: 82px 92px;">
+    <ellipse cx="88" cy="82" rx="6" ry="20" transform="rotate(-25 88 82)" fill="#33312b" />
+  </g>
+  <!-- body -->
+  <ellipse cx="60" cy="96" rx="26" ry="34" fill="#33312b" />
+  <ellipse cx="60" cy="100" rx="18" ry="28" fill="#f3e6ce" />
+  <!-- folded flipper -->
+  <ellipse cx="33" cy="98" rx="7" ry="22" transform="rotate(10 33 98)" fill="#2b2a24" />
+  <!-- head, with the white face patch -->
+  <circle cx="60" cy="52" r="22" fill="#33312b" />
+  <ellipse cx="60" cy="58" rx="15" ry="13" fill="#f3e6ce" />
+  <circle cx="51" cy="49" r="5" fill="#ffffff" />
+  <circle cx="69" cy="49" r="5" fill="#ffffff" />
+  <circle cx="51" cy="49" r="2.6" fill="#2b2a24" />
+  <circle cx="69" cy="49" r="2.6" fill="#2b2a24" />
+  <path d="M53 60 L67 60 L60 71 Z" fill="#e8863a" />
+  <!-- webbed feet -->
+  <ellipse cx="49" cy="131" rx="8" ry="4.5" fill="#e8863a" />
+  <ellipse cx="71" cy="131" rx="8" ry="4.5" fill="#e8863a" />
+</svg>

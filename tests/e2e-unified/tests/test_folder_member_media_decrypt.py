@@ -84,6 +84,7 @@ from helpers.folder_content import (
     atomic_write,
     await_agent_upload,
     bind_location_under_set,
+    engine_restart_count,
 )
 from helpers.folder_share import (
     SHARE_ROSTER_S as _SHARE_ROSTER_S,
@@ -602,27 +603,6 @@ def test_member_decrypts_shared_set_content_through_their_own_media_page(
     )
 
 
-def _engine_restart_count(owner_app, set_name: str) -> int:
-    """How many times the owner's agent has restarted ``set_name``'s engine.
-
-    ``bins/fauna-sync-agent/src/engine_driver.rs`` logs ``"engine key material,
-    folder or mode changed; restarting engine"`` with the set name whenever the
-    engine's key-material stamp changes. **Binding the folder already produces
-    one** (unbound → keyed), so this must be counted, never merely matched: an
-    existence check returns instantly on the bind-time line and provides no
-    barrier at all against the rotation (found the first time this test ran).
-    """
-    try:
-        text = owner_app.driver.app_stderr_text()
-    except Exception:
-        return 0
-    return sum(
-        1
-        for line in text.splitlines()
-        if "restarting engine" in line and set_name in line
-    )
-
-
 def _await_owner_engine_rekey(owner_app, set_name: str, baseline: int) -> None:
     """Barrier: wait until the owner's agent restarts the set's engine *again*,
     i.e. under the post-rotation content-key generation.
@@ -635,7 +615,7 @@ def _await_owner_engine_rekey(owner_app, set_name: str, baseline: int) -> None:
     """
     deadline = time.monotonic() + _REKEY_S
     while time.monotonic() < deadline:
-        if _engine_restart_count(owner_app, set_name) > baseline:
+        if engine_restart_count(owner_app, set_name) > baseline:
             return
         time.sleep(2.0)
     pytest.fail(
@@ -798,7 +778,7 @@ def test_member_re_ingests_custody_across_owner_rotation_and_decrypts_gen2(
         f"the post-rotation assertion below proves nothing: {pre!r}"
     )
 
-    restarts_before_evict = _engine_restart_count(owner_app, set_name)
+    restarts_before_evict = engine_restart_count(owner_app, set_name)
     ob.remove_shared_member(index=third_index)
     deadline = time.monotonic() + _SHARE_ROSTER_S
     while time.monotonic() < deadline:
@@ -961,7 +941,7 @@ def test_a_removed_member_cannot_open_what_is_added_afterwards(
 
     # ── The owner removes the member, through the owner's own controls ────
     ob = owner_app.backups
-    restarts_before = _engine_restart_count(owner_app, set_name)
+    restarts_before = engine_restart_count(owner_app, set_name)
     ob.remove_shared_member(_roster_index(ob, member["handle"], row=row), row=row)
     wait_until(
         lambda: ob.shared_member_count() == 1,

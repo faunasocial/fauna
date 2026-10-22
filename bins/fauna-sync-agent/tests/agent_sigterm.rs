@@ -273,7 +273,7 @@ fn the_agent_binary_reaches_ready_with_an_unwritable_data_root() {
 /// underneath is entirely reachable, and it is the whole story: every
 /// 2026-07-20..2026-08-25 agent prompt came from a boot-path touch (log-init
 /// and config-read both resolved under the container). Red-verified by
-/// pointing `fauna_account_store::root::macos_user_domain_base` back at
+/// pointing `fauna_core::platform_ids::macos_sync_state_base` back at
 /// `apple_group_container` — the container dir appears and the assertion
 /// fires. macOS-only because the container is a macOS concept; the same
 /// production-path spawn on linux would additionally need `XDG_RUNTIME_DIR`,

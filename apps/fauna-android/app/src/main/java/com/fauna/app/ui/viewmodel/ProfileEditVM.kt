@@ -71,21 +71,59 @@ class ProfileEditVM @Inject constructor(
 
     val errorMessage = MutableStateFlow<String?>(null)
 
-    /** The stored signed profile bytes (read-modify-write base), `null` until [open]. */
-    private var baseBody: ByteArray? = null
+    /** The stored signed profile bytes (read-modify-write base) and the owner's
+     *  last identity-signed row served beside them, `null` until [open]. */
+    private var base: com.fauna.ffi.FfiProfileEditBase? = null
+
+    /** The audience a save signs over the base — what `profile-edit-audience-toggle` starts from. */
+    private var audienceBase = false
+
+    /**
+     * The toggle's staged value; `null` = untouched, which leaves the stored
+     * audience alone on save (one this build does not name included). A press
+     * that returns the toggle to the base is untouched again. Mirrors tui's
+     * `audience_base` / `audience_edit` (`apps/fauna-tui/src/profile/mod.rs`).
+     */
+    private var audienceStaged: Boolean? = null
+
+    private val _audienceEveryone = MutableStateFlow(false)
+
+    /** What `profile-edit-audience-toggle` shows: the staged value, else the base's. */
+    val audienceEveryone: StateFlow<Boolean> = _audienceEveryone.asStateFlow()
+
+    /** `profile-edit-audience-toggle` — stage opening (or closing) the profile to other nests; signed on [save]. */
+    fun toggleAudience() {
+        val next = !_audienceEveryone.value
+        audienceStaged = next.takeIf { it != audienceBase }
+        _audienceEveryone.value = next
+    }
 
     /**
      * Fetch the current profile (read-modify-write base) and project it to the
      * editable display fields, then reveal the form. A `not_found`/transport
-     * error starts from a blank first-publish (`baseBody == null`). The base
+     * error starts from a blank first-publish (`base == null`). The base
      * loads through the shared read-prove-record ([ApiClient.loadProfileEditBase]),
-     * so a linkless successor's first save never waits on a sign-in hop.
+     * so a linkless successor's first save never waits on a sign-in hop, and
+     * projects through the own form's resolver ([ApiClient.decodeOwnProfileDisplay]),
+     * so over an external app's edit the toggle opens on the owner's last
+     * identity-signed audience — what an untouched save signs.
      */
     fun open(actorIdHex: String?) {
+        // A fresh open stages nothing; a press made before the base lands (below)
+        // survives it unless it equals the base.
+        audienceStaged = null
+        audienceBase = false
+        _audienceEveryone.value = false
         viewModelScope.launch {
-            val body = if (actorIdHex == null) null else api.loadProfileEditBase()
-            baseBody = body
-            val display = body?.let { runCatching { api.decodeProfileDisplay(it) }.getOrNull() }
+            val loaded = if (actorIdHex == null) null else api.loadProfileEditBase()
+            val display = loaded?.let {
+                runCatching { api.decodeOwnProfileDisplay(it.body, it.lastDirectBody) }.getOrNull()
+            }
+            // A stored profile that won't decode starts a first publish.
+            base = loaded?.takeIf { display != null }
+            audienceBase = display?.audienceEveryone ?: false
+            if (audienceStaged == audienceBase) audienceStaged = null
+            _audienceEveryone.value = audienceStaged ?: audienceBase
             _avatarEdit.value = ImageEdit.Keep
             _bannerEdit.value = ImageEdit.Keep
             _state.value = State.Ready(
@@ -150,16 +188,20 @@ class ProfileEditVM @Inject constructor(
                     if (label.isEmpty() && uri.isEmpty()) null else FfiProfileLink(label, uri)
                 }
                 val body = api.buildEditedProfileWithImages(
-                    baseBody,
+                    base?.body,
+                    base?.lastDirectBody,
                     displayName.trim().ifBlank { null },
                     bio.trim().ifBlank { null },
                     cleanLinks,
                     toFfi(_avatarEdit.value),
                     toFfi(_bannerEdit.value),
+                    audienceStaged,
                 )
                 api.profileSet(body)
                 _avatarEdit.value = ImageEdit.Keep
                 _bannerEdit.value = ImageEdit.Keep
+                audienceBase = _audienceEveryone.value
+                audienceStaged = null
                 onSaved()
             } catch (e: Exception) {
                 errorMessage.value = e.message ?: "error"

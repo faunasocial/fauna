@@ -379,6 +379,8 @@ def _subscription_count(nest, actor_id_hex: str, labeler_id: bytes) -> int:
 @pytest.mark.tui
 @pytest.mark.windows
 @pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
 @pytest.mark.feature("community-labelers")
 def test_a_labeler_whose_signature_does_not_check_out_cannot_be_subscribed(
     logged_in_app, nest_instance, run_seal_helper, test_user
@@ -441,6 +443,8 @@ _NEWER_LABEL_ABI = 999
 @pytest.mark.tui
 @pytest.mark.android
 @pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
 @pytest.mark.feature("community-labelers")
 def test_a_labeler_newer_than_this_app_reads_inert_and_cannot_be_subscribed(
     logged_in_app, nest_instance, run_seal_helper, test_user
@@ -709,6 +713,8 @@ def test_subscribing_a_mail_labeler_trusts_the_mail_service_with_it_and_unsubscr
 @pytest.mark.tui
 @pytest.mark.windows
 @pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
 @pytest.mark.feature("community-labelers")
 def test_a_mail_labeler_that_cannot_run_says_so_and_a_keyless_labeler_trusts_nothing(
     app, labeler_grant_nest, run_seal_helper

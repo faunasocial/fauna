@@ -475,6 +475,58 @@ fn build_location_row(
         });
     }
 
+    // *Free up space* (`on-demand-files.md` § The free-up-space gesture where
+    // the OS offers none) — on the row the shared rule says carries it
+    // (`LocationBindingsModel::free_space_verb`): the switch above is on and the
+    // row's root stands. The button's `state` attr is the agent's `running`
+    // reading, and both lines are its reading too, so a press repaints nothing
+    // until the agent says what the sweep did (the status tick carries it).
+    if let Some(verb) = crate::sync_agent::free_space_verb_for(&mapping.path) {
+        let lookup = strings::lookup;
+        let space_line = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(12)
+            .build();
+        let on_device = gtk::Label::builder()
+            .label(verb.on_device_line(lookup))
+            .halign(gtk::Align::Start)
+            .hexpand(true)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        set_test_id(&on_device, ids::FOLDER_LOCATION_ON_DEVICE);
+        space_line.append(&on_device);
+
+        let free_btn = gtk::Button::builder()
+            .label(verb.button_label(lookup))
+            .valign(gtk::Align::Center)
+            .build();
+        set_test_id(&free_btn, ids::FOLDER_LOCATION_FREE_SPACE_BUTTON);
+        crate::testid::set_test_attr(
+            &free_btn,
+            "state",
+            if verb.running { "running" } else { "idle" },
+        );
+        space_line.append(&free_btn);
+        row.append(&space_line);
+
+        if let Some(result) = verb.result_line(lookup) {
+            let result_label = gtk::Label::builder()
+                .css_classes(["dim-label", "caption"])
+                .label(result)
+                .wrap(true)
+                .xalign(0.0)
+                .build();
+            set_test_id(&result_label, ids::FOLDER_LOCATION_FREE_SPACE_RESULT);
+            row.append(&result_label);
+        }
+
+        let free_path = mapping.path.display().to_string();
+        free_btn.connect_clicked(move |_| {
+            crate::sync_agent::free_location_space(free_path.clone());
+        });
+    }
+
     // The mass-delete floor's confirm affordance (`delete-propagation.md` § A
     // wholesale-vanished folder is infrastructure failure). Every tracked file
     // in this folder vanished at once — an unmounted volume, a folder moved

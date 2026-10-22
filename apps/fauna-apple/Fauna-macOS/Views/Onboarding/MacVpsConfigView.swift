@@ -27,6 +27,8 @@ struct MacVpsConfigView: View {
                     vpsProviderSection(vm: vm, provider: provider)
                 }
 
+                vpsUpdateChannelSection(vm: vm)
+
                 HStack {
                     Button(L.common.back) { vm.machine.back() }
                         .accessibilityIdentifier(Ids.vpsConfigBackButton)

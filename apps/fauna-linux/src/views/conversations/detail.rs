@@ -26,6 +26,7 @@ use gtk::prelude::*;
 use fauna_conversations::{
     ConversationsManager, SendState,
     message::MessageId,
+    room::{RoomSearchNav, RoomSearchStatus},
     snapshot::{ConversationsSnapshot, ThreadDetail},
 };
 
@@ -35,8 +36,15 @@ use crate::settings::member_review::Roster;
 use super::{
     add_participant_overlay, compose_bar::ComposeBar, message_bubble,
     recipient_picker::RecipientPicker, rename_overlay, room_labelers::LabelerSeams,
-    room_settings_overlay, subject_divider, thread_header::ThreadHeader,
+    room_search::RoomSearchStrip, room_settings_overlay, subject_divider,
+    thread_header::ThreadHeader,
 };
+
+/// What forces every reused bubble to rebuild: the content-policy epoch and the
+/// muted-keywords epoch, both monotonic, so their sum moves when either does.
+fn bubble_policy_epoch() -> u64 {
+    crate::content_policy::epoch() + crate::conversations::muted_keywords_epoch()
+}
 
 /// The room editor's catalog machine has no page of its own to repaint on a
 /// notification: every gesture it issues repaints from its own completion.
@@ -56,6 +64,9 @@ pub struct ConversationDetail {
     error_label: gtk::Label,
     // ── Thread page ────────────────────────────────────────────
     thread_header: ThreadHeader,
+    /// The room's search strip, between the header and the stream; its rows
+    /// replace the stream once a query is out.
+    room_search: RoomSearchStrip,
     messages_box: gtk::Box,
     messages_scroll: gtk::ScrolledWindow,
     /// The thread whose bubbles/dividers/snapshots the maps below hold —
@@ -98,9 +109,10 @@ pub struct ConversationDetail {
     /// old and new selected bubbles still repaint their `message-selected`
     /// class / `selected` timestamp attribute.
     selected_message_id_rendered: RefCell<Option<MessageId>>,
-    /// [`crate::content_policy::epoch`] as of the last render — a bubble's
-    /// content-policy verdict is decided at build time, so when the viewer's own
-    /// thresholds move (a reconnect re-read) every reused bubble must rebuild.
+    /// [`bubble_policy_epoch`] as of the last render — a bubble's content-policy
+    /// verdict and muted collapse are decided at build time, so when the viewer's
+    /// own thresholds move (a reconnect re-read) or the muted-word list does (a
+    /// level flipped on the Muted words page) every reused bubble must rebuild.
     content_policy_epoch_rendered: Cell<u64>,
     /// The `SearchNav::Mail` selected message already brought into view —
     /// once per selection, never per tick, so a per-tick bring-into-view
@@ -141,11 +153,14 @@ pub struct ConversationDetail {
 }
 
 impl ConversationDetail {
+    /// `open_room_post` is the feed's deep-link door for a room-search post hit
+    /// (`post_id`, the room's `home_nest_url` when another nest is its home).
     pub fn new(
         manager: Arc<ConversationsManager>,
         client: Rc<FaunaClient>,
         rt: tokio::runtime::Handle,
         member_reviews: Rc<Roster>,
+        open_room_post: Rc<dyn Fn(String, Option<String>)>,
     ) -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
 
@@ -166,6 +181,8 @@ impl ConversationDetail {
 
         let thread_header = ThreadHeader::new();
         thread_box.append(&thread_header.root);
+        let room_search = RoomSearchStrip::new();
+        thread_box.append(&room_search.root);
 
         let messages_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
         messages_box.set_margin_top(8);
@@ -346,16 +363,20 @@ impl ConversationDetail {
         {
             let m = manager.clone();
             let id = detail_thread_id.clone();
-            crate::region::register_block_counter(&messages_box, move || {
+            crate::region::register_block_counter(&messages_box, move |is_blocked| {
                 let Some(detail) = id.borrow().clone().and_then(|tid| m.thread_detail(tid)) else {
                     return 0;
                 };
                 detail
                     .messages
                     .iter()
-                    .filter(|msg| !msg.deleted && msg.legal_takedown_ref.is_none())
                     .filter(|msg| {
-                        crate::region::is_region_blocked(&crate::region::verdict_for(
+                        !msg.deleted
+                            && msg.legal_takedown_ref.is_none()
+                            && !msg.admin_block_in_place()
+                    })
+                    .filter(|msg| {
+                        is_blocked(&crate::region::verdict_for(
                             &msg.message_id.0,
                             &msg.labels,
                             || crate::region::message_input(&msg.body),
@@ -548,6 +569,61 @@ impl ConversationDetail {
                 });
             });
         }
+        // `room-search-button` → open the strip, or close it (which drops the
+        // query and the rows); the field's Enter / `room-search-submit-button`
+        // → `manager.room_search`; a row → its typed target
+        // (`room-search.md` § The surface → *Opening a hit*). Every word, the
+        // order and the empty state are the manager's.
+        {
+            let m = manager.clone();
+            let id = detail_thread_id.clone();
+            thread_header.on_room_search(move || {
+                let Some(tid) = id.borrow().clone() else {
+                    return;
+                };
+                let open = m
+                    .thread_detail(tid.clone())
+                    .and_then(|d| d.room)
+                    .is_some_and(|room| room.search.is_some());
+                if open {
+                    m.close_room_search(tid);
+                } else {
+                    m.open_room_search(tid);
+                }
+            });
+        }
+        {
+            let m = manager.clone();
+            let id = detail_thread_id.clone();
+            let rt = rt.clone();
+            room_search.on_submit(move |query| {
+                let Some(tid) = id.borrow().clone() else {
+                    return;
+                };
+                let m = m.clone();
+                rt.spawn(async move {
+                    m.room_search(tid, query).await;
+                });
+            });
+        }
+        {
+            let m = manager.clone();
+            room_search.on_open_hit(move |nav| match nav {
+                // The strip closes on its own: the manager clears the search
+                // when the selection moves, and the stream returns selected.
+                RoomSearchNav::Message {
+                    thread_id,
+                    message_id,
+                } => m.select_thread_and_message(thread_id, message_id),
+                // The feed's deep-link door, relayed to the room's home when
+                // the hit names one — a gated room post still unseals there.
+                RoomSearchNav::Post {
+                    post_id,
+                    home_nest_url,
+                } => open_room_post(post_id, home_nest_url),
+            });
+        }
+
         // `thread-room-settings-button` → the policy editor. Every rule the
         // editor obeys is the shared draft's; Save is one
         // `apply_room_settings` call, which stops at the first refusal — so
@@ -906,11 +982,30 @@ impl ConversationDetail {
             });
         }
 
+        // Coming back to the page re-reads the open thread's verdicts: the
+        // scan-result switch lives on another page, and the thread-switch
+        // read in `render` never fires for a thread that stayed open.
+        {
+            let m = manager.clone();
+            let tid = detail_thread_id.clone();
+            let rt = rt.clone();
+            root.connect_map(move |_| {
+                let Some(thread_id) = tid.borrow().clone() else {
+                    return;
+                };
+                let m = m.clone();
+                rt.spawn(async move {
+                    m.refresh_message_scan_results(thread_id).await;
+                });
+            });
+        }
+
         Self {
             root,
             stack,
             error_label,
             thread_header,
+            room_search,
             messages_box,
             messages_scroll,
             bubbles_thread_id: RefCell::new(None),
@@ -919,7 +1014,7 @@ impl ConversationDetail {
             latest_snapshot_by_id: Rc::new(RefCell::new(HashMap::new())),
             attachment_residency_by_id: RefCell::new(HashMap::new()),
             selected_message_id_rendered: RefCell::new(None),
-            content_policy_epoch_rendered: Cell::new(crate::content_policy::epoch()),
+            content_policy_epoch_rendered: Cell::new(bubble_policy_epoch()),
             brought_into_view_message_id: RefCell::new(None),
             detail_compose,
             detail_thread_id,
@@ -1054,6 +1149,12 @@ impl ConversationDetail {
         if let Some(d) = active_detail {
             self.thread_header
                 .render(d, self.member_reviews.reviews().as_slice());
+            // The room's search strip; once a query is out its rows replace
+            // the stream (an open strip with nothing submitted keeps it).
+            let search = d.room.as_ref().and_then(|room| room.search.as_ref());
+            self.room_search.render(search);
+            self.messages_scroll
+                .set_visible(search.is_none_or(|s| s.status == RoomSearchStatus::Idle));
             // Identity-keyed message stream (render-model.md § Implementation
             // status today): reconcile `messages_box` to `d.messages` instead
             // of clearing and rebuilding every bubble on every tick — `render`
@@ -1076,16 +1177,25 @@ impl ConversationDetail {
                 // (a thread with one of the account's own lists as its mail
                 // recipient shows the same notes as the new-thread compose).
                 let m = crate::conversations::manager();
+                // …and read the verdict of each received mail message in it
+                // (`dm-message-scan-result`; the snapshot notify repaints),
+                // and resolve the alias each one arrived on
+                // (`dm-message-delivered-to-alias`).
                 let tid = d.thread_id.clone();
                 self.rt.spawn(async move {
-                    m.refresh_list_send(Some(tid)).await;
+                    m.refresh_list_send(Some(tid.clone())).await;
+                    m.refresh_delivered_aliases(tid.clone()).await;
+                    // …and the queue rows each own withheld message's badge
+                    // (`dm-message-withheld-badge`) matches.
+                    m.refresh_withheld_messages(tid.clone()).await;
+                    m.refresh_message_scan_results(tid).await;
                 });
             }
             let prev_selected = self.selected_message_id_rendered.borrow().clone();
             let policy_changed = self
                 .content_policy_epoch_rendered
-                .replace(crate::content_policy::epoch())
-                != crate::content_policy::epoch();
+                .replace(bubble_policy_epoch())
+                != bubble_policy_epoch();
 
             // Reply-all is offered only on recipient-selection rails (mail);
             // gated per bubble via the shared capability.
@@ -1768,6 +1878,7 @@ mod member_review_tests {
                 Rc::clone(&client),
                 client.runtime_handle(),
                 Rc::clone(&roster),
+                Rc::new(|_, _| {}),
             );
             let detail = manager.thread_detail(thread).expect("the group is open");
             pane.render(

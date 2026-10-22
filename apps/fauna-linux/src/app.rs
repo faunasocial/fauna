@@ -48,6 +48,7 @@ fn rows_differ_by_id<T: PartialEq>(a: &[T], b: &[T], id: impl Fn(&T) -> &str) ->
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum UiMessage {
     Data(DataMessage),
     Action(ActionResult),
@@ -59,7 +60,7 @@ pub enum UiMessage {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[allow(dead_code, clippy::large_enum_variant)]
 pub enum DataMessage {
     AuthSuccess {
         actor_id: String,
@@ -265,6 +266,11 @@ pub enum DataMessage {
             Result<fauna_protocol::region::RegionArtifactGetReply, String>,
         )>,
     },
+    /// The nest's self-description (`FaunaClient::fetch_nest_rules`), folded
+    /// on the GTK main thread by `crate::nest_rules::apply_info`.
+    NestInfoRead {
+        info: Box<fauna_protocol::discovery::NestInfoReply>,
+    },
     AccountLoaded {
         handle: Option<String>,
     },
@@ -370,15 +376,35 @@ pub enum DataMessage {
     BridgesLoaded {
         bridges: Vec<fauna_client_bridges::bridges_ui::BridgeStatus>,
     },
+    /// The admin's installed plugins (`fauna.plugins.list`).
+    PluginsLoaded {
+        plugins: Vec<fauna_client_bridges::InstalledPluginRow>,
+    },
+    /// The account's plugin settings cards (`fauna.plugins.available`).
+    PluginCardsLoaded {
+        cards: Vec<fauna_client_bridges::PluginCard>,
+    },
     /// The connection actor's moderation queue — the union of the server
     /// `fauna.moderation.actions` obligation rows and the client's post-decrypt
     /// local detections, merged + deduped via `fauna_client_moderation::merge_queue`.
     ModerationActionsLoaded {
         rows: Vec<fauna_client_moderation::QueueRow>,
     },
+    /// A `dm-message-withheld-badge` tap: open the appeal of the author's queue row
+    /// whose `content_id` the badge was matched to (`MessageSnapshot::withheld`).
+    OpenWithheldAppeal {
+        content_id: String,
+    },
     BridgeFollowsLoaded {
         bridge_id: String,
         follows: Vec<fauna_client_bridges::bridges_ui::BridgeFollow>,
+    },
+    /// The waiting follow requests of a bridge that declares
+    /// `supports_follow_requests` (`bridges.md` § Follow requests), already
+    /// through the shared `follow_request_row` model.
+    BridgeFollowRequestsLoaded {
+        bridge_id: String,
+        rows: Vec<fauna_client_bridges::FollowRequestRow>,
     },
     /// The guardian gate refused a bridge link / follow with the TYPED
     /// `guardian_approval_required` error (`family-safety.md` § Feed-source
@@ -460,6 +486,11 @@ pub enum DataMessage {
         /// read-only summary shows — the same one their guardian sees.
         /// `None` when unsupervised or no daily budget is set.
         usage_today_minutes: Option<u32>,
+        /// The caller's OWN policy document (`status.policy`) — folded into
+        /// `crate::ward_asks` beside the asks, gated on `supervised_by`, for the
+        /// knock rows' `knock-guardian-pending` (`family-safety.md` § App
+        /// surface).
+        own_policy: Option<fauna_client_family::family::ReachPolicy>,
         /// The supervised caller's OWN pending contact asks
         /// (`status.contact_requests`) and feed-source asks
         /// (`status.feed_requests`) — folded into `crate::ward_asks`, gated on
@@ -500,6 +531,9 @@ pub enum DataMessage {
     /// A new tier was defined (`fauna.admin.tiers.create` ok) — clears the
     /// add-a-tier form and refetches `tiers.list` so the new row appears.
     AdminTierAdded,
+    /// A tier was removed (`fauna.admin.tiers.delete` ok) — refetches
+    /// `tiers.list` so the row disappears.
+    AdminTierDeleted,
     /// The calling admin's membership designations (`fauna.admin.membership_tiers.list`
     /// — monetization.md § Pillar 4). One of two sources the membership section
     /// renders from; races `OwnMembershipTierNamesLoaded` (both handlers
@@ -567,11 +601,19 @@ pub enum DataMessage {
     NestWebAppOriginLoaded {
         view: fauna_client_admin::AdminWebAppOriginView,
     },
+    /// The update channel (`fauna.admin.update_channel.get`, or the fresh read
+    /// after `.set`, folded through `fauna_client_admin::admin_update_channel_view`)
+    /// — fills the `admin-nest-update-channel-*` section (`nest/update-channel.md`
+    /// § The UI). Every rendering decision lives in the fold.
+    NestUpdateChannelLoaded {
+        view: fauna_client_admin::AdminUpdateChannelView,
+    },
     /// Host-OS-maintenance state (`fauna.setup.status` `os_*`) — fills the
     /// `nest-os-maintenance-status` line + the `nest-os-updates-count` badge +
     /// gates the `nest-os-restart-now-button` on admin-nest (installers/vps.md
     /// § Host OS Maintenance § 4).
     NestOsMaintenanceLoaded {
+        host_status_present: bool,
         security_updates_pending: u32,
         reboot_pending: bool,
     },
@@ -591,6 +633,12 @@ pub enum DataMessage {
     /// (observability.md § Surfaces), rendered with the client Logs widget.
     AdminLogsLoaded {
         reply: fauna_client_admin::admin::AdminLogsReply,
+    },
+    /// One read of the admin audit log section on `admin-logs`
+    /// (`fauna_client_admin::audit_log_page`); the error is the page's
+    /// `error-message` text.
+    AdminAuditLoaded {
+        result: Result<fauna_client_admin::AuditLogPage, String>,
     },
     /// Typed invite codes (`fauna.admin.invite_codes.list`) — the `admin-users`
     /// Invite section list. Replaces the `/admin/api/invite-codes` JSON twin.
@@ -692,6 +740,16 @@ pub enum DataMessage {
         name: String,
         folder_id: i64,
         places: Vec<fauna_client_config::FolderDestinationPlace>,
+    },
+    /// One of the four folder-row reads above failed for set `name`. Painted on
+    /// `error-message` like any failed read, and remembered as that read's own
+    /// text so the read's next good answer retires it
+    /// (`views::devices_folders::folders::RowReadErrors`). `read` is the wire
+    /// kind, which is also the banner's prefix.
+    FolderRowReadFailed {
+        name: String,
+        read: &'static str,
+        error: String,
     },
     /// The recipient-side **pending folder shares** — the staged ("knocked")
     /// cross-user shares a stranger sent, awaiting accept/decline (the page-level
@@ -905,6 +963,9 @@ pub struct AppState {
     /// rows. Either handler writes its own cache field, then both call the
     /// one combined [`views::devices_folders::folders::populate_pending_shares`].
     pub folder_pending_shares: Vec<crate::client::PendingShareView>,
+    /// The `error-message` texts the folder-row reads put up, so each read's
+    /// next good answer retires its own and never a gesture's.
+    pub folder_row_read_errors: views::devices_folders::folders::RowReadErrors,
     /// The co-present ceremony's group-share surface from the most recent
     /// `GroupSharesLoaded` — see [`Self::folder_pending_shares`] for why this
     /// is cached rather than painted inline.
@@ -966,6 +1027,9 @@ pub struct WidgetHandles {
     pub notifications_count_badge: gtk::Label,
     /// Per-row destinations of the painted list (the shared decision's answer).
     pub notifications_destinations: views::notifications::Destinations,
+    /// `notification-clear` and the bound it sends (the newest painted row).
+    pub notifications_clear_button: gtk::Button,
+    pub notifications_clear_up_to: Rc<std::cell::Cell<Option<i64>>>,
 
     // Contacts / knocks lists
     pub knocks_list_box: gtk::ListBox,
@@ -994,6 +1058,7 @@ pub struct WidgetHandles {
 
     // Bridges list + split view
     pub bridges_list_box: gtk::ListBox,
+    pub bridges_plugins: Rc<views::bridges::plugins::PluginsSection>,
     pub bridges_split: adw::NavigationSplitView,
     // Most-recent `fauna.bridges.list` snapshot (id → BridgeStatus), retained so
     // the detail pane renders the metadata-driven link form from `link_modes`.
@@ -1001,7 +1066,8 @@ pub struct WidgetHandles {
     // `(bridge_id, follows_list)` of the currently-open Bridges-page detail
     // pane, if any — consulted by the `BridgeFollowsLoaded` handler so a
     // `fauna.bridges.list_follows` reply repaints the right widget.
-    pub bridges_open_detail: Rc<RefCell<Option<(String, gtk::ListBox)>>>,
+    pub bridges_open_detail:
+        Rc<RefCell<Option<(String, views::bridges::detail::BridgeDetailHandles)>>>,
 
     // Moderation queue list (`moderation-queue`) — repainted on
     // `ModerationActionsLoaded`.
@@ -1036,7 +1102,7 @@ pub struct WidgetHandles {
     pub share_transfer: views::devices_folders::folders::ShareTransferHandles,
 
     // Page-level Devices state machine — refreshed on auth + page-visible.
-    pub devices_machine: std::sync::Arc<fauna_devices_machine::DevicesMachine>,
+    pub devices_machine: views::devices_folders::WiredDevicesMachine,
 
     // Page-level community-labeler-catalog state machine (Settings →
     // Personalization + Settings → Community labelers) — refreshed on auth +
@@ -1143,13 +1209,14 @@ pub struct MainWindowResult {
     /// The content stack — `visible_child_name()` gives the active sidebar section.
     pub stack: gtk::Stack,
     /// Rebuild the Profile page for a target and show it: `None` = the viewer's
-    /// own profile, `Some(hex)` = another actor's. This is *the* way to reach a
+    /// own profile, `Some(hex)` = another actor's, plus the optional home the
+    /// open carries. This is *the* way to reach a
     /// specific actor's profile — the page is built per target, so switching the
     /// stack alone always lands on SELF. Handed out so the launch/relaunch paths
     /// can give it to the test-command drain, whose `{"view":"profile",
     /// "actor_id":…}` nav needs the same rebuild the sidebar and the contacts
     /// tap-through get.
-    pub open_profile: Rc<dyn Fn(Option<String>)>,
+    pub open_profile: views::profile::OpenProfile,
 }
 
 // ---------------------------------------------------------------------------
@@ -1280,11 +1347,30 @@ pub fn build_main_window(
     // session-registered at AuthSuccess and reads the live self-address
     // cell at send time). The member-review roster is the one exception to
     // "owns its own state": it is this window's, shared with the contacts badge.
+    // A room-search post hit opens the feed page's `post_detail` through the
+    // relay door (`room-search.md` § The surface → *Opening a hit*). The feed
+    // view is built below, so the door is a slot filled once it exists; hits
+    // only happen after this function returns.
+    #[allow(clippy::type_complexity)]
+    let feed_post_detail_from_slot: Rc<RefCell<Option<Rc<dyn Fn(String, Option<String>)>>>> =
+        Rc::new(RefCell::new(None));
+    let open_room_post: Rc<dyn Fn(String, Option<String>)> = {
+        let stack = stack.clone();
+        let slot = Rc::clone(&feed_post_detail_from_slot);
+        Rc::new(move |post_id: String, home: Option<String>| {
+            let open = slot.borrow().clone();
+            if let Some(open) = open {
+                stack.set_visible_child_name("feed");
+                open(post_id, home);
+            }
+        })
+    };
     let conversations_view = conversations::build_conversations_view(
         crate::conversations::manager(),
         Rc::clone(fauna_client),
         fauna_client.runtime_handle(),
         Rc::clone(&state.borrow().member_reviews),
+        open_room_post,
     );
     stack.add_named(&conversations_view, Some("conversations"));
 
@@ -1315,34 +1401,67 @@ pub fn build_main_window(
         let stack = stack.clone();
         Rc::new(move || stack.set_visible_child_name("conversations"))
     };
+    // A Posts-tab card activation opens the feed page's `post_detail` through
+    // the door a search result uses (`profile.md` § The Posts tab → *What a row
+    // is*). The feed view is built below, so the door is a slot filled once it
+    // exists; activations only happen after this function returns.
+    #[allow(clippy::type_complexity)]
+    let feed_post_detail_slot: Rc<RefCell<Option<Rc<dyn Fn(String)>>>> =
+        Rc::new(RefCell::new(None));
+    let open_post_from_profile: Rc<dyn Fn(String)> = {
+        let stack = stack.clone();
+        let slot = Rc::clone(&feed_post_detail_slot);
+        Rc::new(move |post_id: String| {
+            let open = slot.borrow().clone();
+            if let Some(open) = open {
+                stack.set_visible_child_name("feed");
+                open(post_id);
+            }
+        })
+    };
+    // What the page's becoming visible re-reads: the Tiers tab's sections and
+    // the Posts tab's author window.
+    let on_profile_visible = |handles: views::profile::ProfileHandles| -> Rc<dyn Fn()> {
+        Rc::new(move || {
+            (handles.refresh_tiers)();
+            (handles.open_posts)();
+        })
+    };
     let profile_refresh_slot: Rc<RefCell<Rc<dyn Fn()>>> = {
         let (profile_view, profile_handles) = views::profile::build_profile_view(
             fauna_client,
             None,
+            None,
             Rc::clone(&on_open_conversations),
+            Rc::clone(&open_post_from_profile),
         );
         stack.add_named(&profile_view, Some("profile"));
-        Rc::new(RefCell::new(profile_handles.refresh_tiers))
+        Rc::new(RefCell::new(on_profile_visible(profile_handles)))
     };
-    let open_profile: Rc<dyn Fn(Option<String>)> = {
+    let open_profile: views::profile::OpenProfile = {
         let stack = stack.clone();
         let client = Rc::clone(fauna_client);
         let slot = Rc::clone(&profile_refresh_slot);
         let on_open_conversations = Rc::clone(&on_open_conversations);
-        Rc::new(move |target: Option<String>| {
+        let open_post_from_profile = Rc::clone(&open_post_from_profile);
+        Rc::new(move |target: Option<String>, home: Option<String>| {
             if let Some(existing) = stack.child_by_name("profile") {
                 stack.remove(&existing);
             }
             let (view, handles) = views::profile::build_profile_view(
                 &client,
                 target,
+                home,
                 Rc::clone(&on_open_conversations),
+                Rc::clone(&open_post_from_profile),
             );
             stack.add_named(&view, Some("profile"));
-            *slot.borrow_mut() = handles.refresh_tiers;
+            *slot.borrow_mut() = on_profile_visible(handles);
             stack.set_visible_child_name("profile");
         })
     };
+
+    views::profile::register_opener(Rc::clone(&open_profile));
 
     // Re-read the visible profile page when it becomes visible (mirrors the Peers
     // refresh above). The page is observer-free, so a pending subscribe request
@@ -1367,7 +1486,9 @@ pub fn build_main_window(
         contacts_list_box.connect_row_activated(move |_lb, row| {
             let actor_id = row.widget_name().to_string();
             if !actor_id.is_empty() {
-                open_profile(Some(actor_id));
+                // Door 3: the row carries the home the contact edge recorded.
+                let home = views::contacts::list::home_nest_url_of(&actor_id);
+                open_profile(Some(actor_id), home);
             }
         });
     }
@@ -1386,6 +1507,8 @@ pub fn build_main_window(
     crate::feed::host::init(fauna_client.nest_rpc().clone(), fauna_client.secret_bytes());
     let (feed_view, feed_handles) = views::feed::build_feed_view(fauna_client);
     stack.add_named(&feed_view, Some("feed"));
+    *feed_post_detail_slot.borrow_mut() = Some(feed_handles.open_post_detail.clone());
+    *feed_post_detail_from_slot.borrow_mut() = Some(feed_handles.open_post_detail_from.clone());
 
     // Build (or rebuild, on re-auth) the process-wide search manager before the
     // Search view consumes it — the same one-manager-per-login shape as the
@@ -1499,6 +1622,8 @@ pub fn build_main_window(
                     // Refresh the moderation queue (a flag may have landed since
                     // login / last visit — the actions are nest-authoritative).
                     "moderation" => client_for_nav.fetch_moderation_actions(),
+                    // The admin's installed plugins sit under the bridge list.
+                    "bridges" => views::bridges::plugins::refresh(&client_for_nav),
                     // Notifications are fetched per view (`notifications.md`
                     // § Persistence — apps hold no durable cache): a row minted
                     // while no push reached this session (an admin's doorbell
@@ -1584,7 +1709,7 @@ pub fn build_main_window(
         // The profile row always opens the viewer's OWN profile — rebuild as SELF
         // so a prior tap-through to another actor's profile is reset.
         if item.stack_name() == "profile" {
-            open_profile_for_sidebar(None);
+            open_profile_for_sidebar(None, None);
         } else {
             stack_for_sidebar.set_visible_child_name(item.stack_name());
         }
@@ -1604,6 +1729,20 @@ pub fn build_main_window(
             sidebar_list_box: sidebar_list.clone(),
         },
     );
+    // `notification-clear`: delete every row up to the newest one painted.
+    {
+        let (client, up_to) = (
+            Rc::clone(fauna_client),
+            Rc::clone(&notifications_handles.clear_up_to),
+        );
+        notifications_handles
+            .clear_button
+            .connect_clicked(move |_| {
+                if let Some(bound) = up_to.get() {
+                    client.clear_notifications(bound);
+                }
+            });
+    }
     // `fauna.family.status` can open the Family gate after the first paint:
     // re-derive which rows are controls the moment the row appears.
     if let Some(family_row) = sidebar_list.row_at_index(SidebarItem::ALL.len() as i32 + 1) {
@@ -1956,6 +2095,9 @@ pub fn build_main_window(
     content_box.append(&warning_label);
     content_box.append(&info_label);
     content_box.append(&report_status_label);
+    // The nest's one-line changed notice (`nest-rules.md` § A change is
+    // announced) — no element id of its own; a way to the rules surface.
+    content_box.append(&crate::nest_rules::build_notice());
     content_box.append(&split_view);
 
     // -----------------------------------------------------------------------
@@ -2185,6 +2327,8 @@ pub fn build_main_window(
         notifications_list_box: notifications_handles.list_box,
         notifications_count_badge: notifications_handles.count_badge,
         notifications_destinations: notifications_handles.destinations,
+        notifications_clear_button: notifications_handles.clear_button,
+        notifications_clear_up_to: notifications_handles.clear_up_to,
         knocks_list_box,
         contacts_list_box,
         find_results_list_box,
@@ -2192,6 +2336,7 @@ pub fn build_main_window(
         address_book,
         events_handles,
         bridges_list_box: bridges_handles.list_handles.list_box,
+        bridges_plugins: bridges_handles.plugins,
         bridges_split: bridges_handles.split,
         bridges_snapshot,
         bridges_open_detail: bridges_handles.open_detail,
@@ -2631,6 +2776,11 @@ pub fn handle_ui_message(
                 // cadence (`REFRESH_INTERVAL_SECS`) on a minute tick.
                 fauna_client.fetch_region(true);
                 start_region_refresh_poll(fauna_client);
+                // The session nest's published rules (`nest-rules.md` § The
+                // nest content policy → *Carriage*): read at sign-in through
+                // the connection's memo, again past it on each `nest_info`
+                // push and reconnect (`apply_stale`).
+                fauna_client.fetch_nest_rules(false);
                 // Initial Backups-page load — the snapshot half renders off the
                 // shared `BackupsMachine` snapshot; nav-to-Backups refreshes it
                 // again. This replaces the old pair of reads, one of which
@@ -3268,6 +3418,14 @@ pub fn handle_ui_message(
                 }
             }
 
+            DataMessage::PluginsLoaded { plugins } => {
+                widgets.bridges_plugins.update(plugins.clone());
+            }
+
+            DataMessage::PluginCardsLoaded { cards } => {
+                widgets.bridges_plugins.update_cards(cards.clone());
+            }
+
             DataMessage::BridgesLoaded { bridges } => {
                 // Retain the snapshot (id → BridgeStatus) for EVERY provider —
                 // including the dedicated-page ones the Bridges list itself
@@ -3310,6 +3468,13 @@ pub fn handle_ui_message(
                 views::moderation::update_moderation_queue(&widgets.moderation_page, rows);
             }
 
+            // The page's arrival re-reads the queue (the nav handler's
+            // "moderation" arm); `update_moderation_queue` then opens the draft.
+            DataMessage::OpenWithheldAppeal { content_id } => {
+                views::moderation::queue_appeal(&widgets.moderation_page, content_id);
+                widgets.content_stack.set_visible_child_name("moderation");
+            }
+
             DataMessage::BridgeFollowsLoaded { bridge_id, follows } => {
                 tracing::debug!(
                     "BridgeFollowsLoaded: bridge_id={}, {} follows",
@@ -3321,13 +3486,13 @@ pub fn handle_ui_message(
                 // user has since navigated away from must not repaint a
                 // follows_list that belongs to a different (or torn-down)
                 // detail.
-                if let Some((open_id, follows_list)) = widgets.bridges_open_detail.borrow().as_ref()
+                if let Some((open_id, open)) = widgets.bridges_open_detail.borrow().as_ref()
                     && open_id == bridge_id
                 {
                     let c = Rc::clone(fauna_client);
                     let bid = bridge_id.clone();
                     views::bridges::detail::populate_follows_list(
-                        follows_list,
+                        &open.follows_list,
                         follows,
                         move |follow_id| c.remove_bridge_follow(&bid, follow_id),
                     );
@@ -3336,6 +3501,23 @@ pub fn handle_ui_message(
                 // registered a hook — a no-op when that page has never been
                 // built this session.
                 crate::settings::notify_bridge_follows_loaded(bridge_id, follows);
+            }
+
+            DataMessage::BridgeFollowRequestsLoaded { bridge_id, rows } => {
+                views::bridges::detail::cache_follow_requests(bridge_id, rows);
+                // Same open-on-this-bridge guard as the follows repaint: a reply
+                // for a bridge the user has navigated away from paints nothing.
+                if let Some((open_id, open)) = widgets.bridges_open_detail.borrow().as_ref()
+                    && open_id == bridge_id
+                {
+                    let c = Rc::clone(fauna_client);
+                    let bid = bridge_id.clone();
+                    views::bridges::detail::populate_follow_requests(
+                        &open.follow_requests,
+                        rows,
+                        move |id, approve| c.resolve_bridge_follow_request(&bid, id, approve),
+                    );
+                }
             }
 
             DataMessage::FeedSourceRefused {
@@ -3355,7 +3537,12 @@ pub fn handle_ui_message(
                 // Desktop toast for each unread row, saying what the row says —
                 // the OS-level notification is localized exactly like the row
                 // it announces (`behavior/notifications.md` § Localized body).
-                for item in notifications.iter().filter(|n| !n.is_read) {
+                // A row a muted word collapses raises none (§ Muted words rule
+                // 6): a toast cannot be revealed.
+                let muted = crate::conversations::muted_keywords_cache();
+                for item in notifications.iter().filter(|n| {
+                    !n.is_read && !fauna_client_notifications::notification_muted(&muted, n)
+                }) {
                     crate::notifications::notify_unified(
                         &item.notif_type,
                         &crate::i18n::notification_text(item),
@@ -3373,6 +3560,9 @@ pub fn handle_ui_message(
                     &widgets.notifications_destinations,
                     views::sidebar::family_sidebar_row_shown(&widgets.sidebar_list_box),
                     notifications,
+                    &widgets.notifications_clear_button,
+                    &widgets.notifications_clear_up_to,
+                    fauna_client,
                 );
                 state.borrow_mut().notifications_unread_count = unread;
                 tracing::debug!(
@@ -3390,6 +3580,9 @@ pub fn handle_ui_message(
                     &widgets.notifications_destinations,
                     views::sidebar::family_sidebar_row_shown(&widgets.sidebar_list_box),
                     notifications,
+                    &widgets.notifications_clear_button,
+                    &widgets.notifications_clear_up_to,
+                    fauna_client,
                 );
                 state.borrow_mut().notifications_unread_count = unread;
             }
@@ -3402,6 +3595,7 @@ pub fn handle_ui_message(
             }
 
             DataMessage::FolderMembersLoaded { name, members } => {
+                retire_row_read_error(widgets, state, "fauna.folders.members.list", name);
                 // The device roster is a lazy row-detail read (not owned by the
                 // `DevicesMachine`); populate it into the expander row by name.
                 // It paints the place EDITOR, so it needs the machine (the
@@ -3421,6 +3615,7 @@ pub fn handle_ui_message(
                 members,
                 channel_id,
             } => {
+                retire_row_read_error(widgets, state, "fauna.folders.members.list_actors", name);
                 // The cross-user actor roster ("Shared with") is a lazy/eager
                 // row-detail read; populate the section + `folder-shared-badge`
                 // by name and wire each `folder-member-remove-button` (needs the
@@ -3444,6 +3639,7 @@ pub fn handle_ui_message(
             }
 
             DataMessage::FolderDevicesLoaded { name, devices } => {
+                retire_row_read_error(widgets, state, "fauna.folders.devices", name);
                 // The device-activity roster is a lazy/push-refreshed row-detail
                 // read (not owned by the `DevicesMachine`); populate it into the
                 // expander row by name — same shape as the member roster above,
@@ -3462,6 +3658,7 @@ pub fn handle_ui_message(
                 folder_id,
                 places,
             } => {
+                retire_row_read_error(widgets, state, "fauna.backup.destination.list", name);
                 // The destination-places section is a lazy/mutation-refreshed
                 // row-detail read; populate it into the expander row by name
                 // (needs `folder_id` + the client to wire the attach/detach
@@ -3473,6 +3670,21 @@ pub fn handle_ui_message(
                     places,
                     fauna_client,
                 );
+            }
+
+            DataMessage::FolderRowReadFailed { name, read, error } => {
+                // The banner text an `ActionResult::Failed` with this context
+                // painted before the read had its own message — same words,
+                // same toast — now also remembered as the read's own.
+                let message = format!("{read}: {error}");
+                show_toast(widgets, &message);
+                set_error_message(widgets, &message);
+                if widgets.error_label.text().as_str() == message {
+                    state
+                        .borrow_mut()
+                        .folder_row_read_errors
+                        .put(read, name, message);
+                }
             }
 
             DataMessage::FolderPendingSharesLoaded { shares } => {
@@ -3790,6 +4002,13 @@ pub fn handle_ui_message(
                 crate::region::paint_settings(&widgets.status_region_rows_box);
             }
 
+            DataMessage::NestInfoRead { info } => {
+                // Verified and kept in shared Rust; the book is persisted, the
+                // render engine re-armed, the social surfaces repainted, and
+                // the notice and the rules surface repainted inside.
+                crate::nest_rules::apply_info(info);
+            }
+
             DataMessage::SyncStatusSummaryLoaded { files_synced } => {
                 views::status::update_files_synced(&widgets.status_handles(), *files_synced);
             }
@@ -3990,7 +4209,9 @@ pub fn handle_ui_message(
 
             DataMessage::AdminStatusLoaded { is_admin } => {
                 tracing::debug!("AdminStatusLoaded: is_admin={}", is_admin);
+                widgets.bridges_plugins.set_admin(*is_admin);
                 if *is_admin {
+                    fauna_client.fetch_plugins();
                     // Show the Admin sidebar row.
                     views::sidebar::show_admin_sidebar_row(&widgets.sidebar_list_box);
                     // The admin auto-default (long-term-store.md § Multi-account
@@ -4017,6 +4238,7 @@ pub fn handle_ui_message(
                     fauna_client.fetch_nest_serving_port();
                     fauna_client.fetch_nest_region();
                     fauna_client.fetch_nest_web_app_origin();
+                    fauna_client.fetch_nest_update_channel();
                     fauna_client.fetch_feature_limits(crate::feature_editor::Host::Admin);
                     fauna_client.fetch_oauth_issuer_keys();
                     fauna_client.fetch_nest_os_maintenance();
@@ -4030,6 +4252,7 @@ pub fn handle_ui_message(
                     fauna_client.fetch_admin_services();
                     fauna_client.fetch_forwarders();
                     fauna_client.fetch_admin_logs();
+                    fauna_client.fetch_admin_audit(None);
                 }
             }
 
@@ -4039,6 +4262,7 @@ pub fn handle_ui_message(
                 incoming_transfer_count,
                 snapshot,
                 usage_today_minutes,
+                own_policy,
                 contact_requests,
                 feed_requests,
             } => {
@@ -4052,6 +4276,7 @@ pub fn handle_ui_message(
                 // graduated account has no guardian to be waiting on.
                 crate::ward_asks::set_from_status(
                     supervised_by.is_some(),
+                    own_policy.as_ref(),
                     contact_requests.clone(),
                     feed_requests.clone(),
                 );
@@ -4083,7 +4308,7 @@ pub fn handle_ui_message(
                 // flagged item. Set before the next render (status is read
                 // post-auth, ahead of feed/thread population); a rebuild after
                 // login/nav/inject enforces it via `content_policy::verdict_for`.
-                crate::content_policy::set_ward_content_policy(snapshot.content_policy);
+                crate::content_policy::set_ward_content_policy(snapshot.content_policy.clone());
                 // Guardian Notify (family-safety.md § Guardian Notify): the ward's
                 // client counts its guardian-floor enforcement events only while the
                 // knob is on, and the flush tick (started here, idempotently) reports
@@ -4168,6 +4393,12 @@ pub fn handle_ui_message(
                 fauna_client.fetch_admin_tiers();
             }
 
+            DataMessage::AdminTierDeleted => {
+                // A refusal left on the banner by an earlier attempt is stale now.
+                clear_error_message(widgets);
+                fauna_client.fetch_admin_tiers();
+            }
+
             DataMessage::AdminMembershipTiersLoaded { reply } => {
                 *widgets.admin_handles.last_membership_tiers.borrow_mut() = Some(reply.clone());
                 views::admin::update_membership_tiers(&widgets.admin_handles, fauna_client);
@@ -4226,12 +4457,18 @@ pub fn handle_ui_message(
                 views::admin::set_nest_web_app_origin(&widgets.admin_handles, view);
             }
 
+            DataMessage::NestUpdateChannelLoaded { view } => {
+                views::admin::set_nest_update_channel(&widgets.admin_handles, view);
+            }
+
             DataMessage::NestOsMaintenanceLoaded {
+                host_status_present,
                 security_updates_pending,
                 reboot_pending,
             } => {
                 views::admin::set_nest_os_maintenance(
                     &widgets.admin_handles,
+                    *host_status_present,
                     *security_updates_pending,
                     *reboot_pending,
                 );
@@ -4248,6 +4485,10 @@ pub fn handle_ui_message(
 
             DataMessage::AdminLogsLoaded { reply } => {
                 views::admin::update_admin_logs(&widgets.admin_handles, reply);
+            }
+
+            DataMessage::AdminAuditLoaded { result } => {
+                views::admin::update_admin_audit(&widgets.admin_handles, result);
             }
 
             DataMessage::AdminServiceUpdated => {
@@ -4489,6 +4730,19 @@ pub fn handle_ui_message(
                     || context == "bridge_follow_removed"
                 {
                     fauna_client.fetch_bridges();
+                }
+                if context == "plugin_install_opened" {
+                    widgets.bridges_plugins.install_opened();
+                }
+                if context == "plugin_uninstalled" {
+                    fauna_client.fetch_plugins();
+                    fauna_client.fetch_plugin_cards();
+                }
+                if context == "plugin_bind_opened" {
+                    widgets.bridges_plugins.bind_opened();
+                }
+                if context == "plugin_disconnected" || context == "plugin_setting_set" {
+                    fauna_client.fetch_plugin_cards();
                 }
                 if context == "bluesky_linked" {
                     // Start periodic notification polling now that a bridge
@@ -4769,6 +5023,25 @@ pub fn clear_error_message(widgets: &WidgetHandles) {
     crate::settings::render_error_label(&widgets.error_label, None);
 }
 
+/// A folder-row `read` answered for `set`: clear the banner when it still shows
+/// the text that read put up, and leave anything else on it standing
+/// ([`views::devices_folders::folders::RowReadErrors`]).
+fn retire_row_read_error(
+    widgets: &WidgetHandles,
+    state: &Rc<RefCell<AppState>>,
+    read: &'static str,
+    set: &str,
+) {
+    let shown = widgets.error_label.text();
+    let retire = state
+        .borrow_mut()
+        .folder_row_read_errors
+        .retire(read, set, shown.as_str());
+    if retire {
+        clear_error_message(widgets);
+    }
+}
+
 /// Update the global top-of-sidebar connection-status indicator
 /// (`connection-status`) from a WS event. Text is the user-facing signal;
 /// the icon mirrors it. `Push` events don't change connection state. The
@@ -4964,6 +5237,18 @@ fn apply_stale(stale: &StaleSurfaces, widgets: &Rc<WidgetHandles>, fauna_client:
         // (`notify_atproto_rehydrate` is a no-op with no handler registered).
         crate::settings::notify_atproto_rehydrate();
     }
+    // The Devices & Folders lists, and through them every folder row's reads:
+    // the machine's notify rebuilds the folder list, and the rebuild re-fires
+    // each open row's device / member / destination reads and each shared
+    // row's actor read (`folders::update_folder_list`'s restored expansion).
+    // A good answer then retires the "connection to the nest was lost" text
+    // those reads put up while the nest was down (`folders::RowReadErrors`).
+    if stale.devices {
+        let machine = std::sync::Arc::clone(&widgets.devices_machine);
+        fauna_client
+            .runtime_handle()
+            .spawn(async move { machine.refresh().await });
+    }
     if stale.events {
         // Re-list calendars — the Events page's fetch path, which cascades into
         // per-calendar event fetches; the visible-page poll remains the
@@ -5000,6 +5285,11 @@ fn apply_stale(stale: &StaleSurfaces, widgets: &Rc<WidgetHandles>, fauna_client:
     if stale.mail_export {
         crate::settings::notify_mail_export_rehydrate();
     }
+    // The import twin — see [`StaleSurfaces::mail_import`]; the handler checks
+    // the Import page is mapped (`settings::mail_import`).
+    if stale.mail_import {
+        crate::settings::notify_mail_import_rehydrate();
+    }
     if stale.family {
         // The ward's supervision read — the same `fauna.family.status` the
         // post-auth arm fires, so a guardian's edit binds at WS reconnect and
@@ -5010,6 +5300,12 @@ fn apply_stale(stale: &StaleSurfaces, widgets: &Rc<WidgetHandles>, fauna_client:
         // enforcement state on a successful reply. Until 2026-09-13 this arm did
         // not exist and linux re-read only at login.
         fauna_client.check_family_status();
+    }
+    if stale.nest_info {
+        // The nest's rules changed, or a reconnect may have missed the push
+        // (`nest-rules.md` § A change is announced): re-read the
+        // self-description past the per-connection memo.
+        fauna_client.fetch_nest_rules(true);
     }
     if stale.own_thresholds {
         // The viewer's own spam thresholds — re-read on reconnect so a login read that
@@ -5093,17 +5389,27 @@ fn handle_ws_event(
             // desktop toasts, the sync engine nudge, the per-folder roster.
             apply_stale(&push_event.invalidates(), widgets, fauna_client);
             match &**push_event {
+                // The two toasts ask the shared muted-word question first
+                // (`behavior/notifications.md` § Muted words rule 6): a toast
+                // paints the same relayed text as the row and cannot be
+                // revealed, so a push whose row would collapse raises none.
                 PushEvent::Knock(p) => {
-                    crate::notifications::notify_knock(&crate::i18n::knock_push_text(p));
+                    let muted = crate::conversations::muted_keywords_cache();
+                    if !fauna_client_notifications::knock_push_muted(&muted, p) {
+                        crate::notifications::notify_knock(&crate::i18n::knock_push_text(p));
+                    }
                 }
                 PushEvent::AccountUpdated(_) => {
                     // Nothing beyond the account re-read above.
                 }
                 PushEvent::Notification(p) => {
-                    crate::notifications::notify_unified(
-                        &p.notif_type,
-                        &crate::i18n::notification_push_text(p),
-                    );
+                    let muted = crate::conversations::muted_keywords_cache();
+                    if !fauna_client_notifications::notification_push_muted(&muted, p) {
+                        crate::notifications::notify_unified(
+                            &p.notif_type,
+                            &crate::i18n::notification_push_text(p),
+                        );
+                    }
                 }
                 PushEvent::PeerWake(_) => {
                     // P2P wake — no UI re-fetch. The hook lands when the p2p
@@ -5178,6 +5484,12 @@ fn handle_ws_event(
                     // for the connection that announced the folder — the
                     // serving engine's, never this UI's, which announces
                     // nothing and so is never asked.
+                }
+                PushEvent::NestInfoChanged(_) => {
+                    // The nest's rules changed (`nest-rules.md` § A change is
+                    // announced): the re-read is the seam's
+                    // `StaleSurfaces::nest_info` above, and nothing else is
+                    // linux's.
                 }
                 PushEvent::MailFlagsChanged(_) => {
                     // Mail read-state wake (`mail-app-surface.md` § Read state).
@@ -5342,13 +5654,13 @@ fn handle_ws_event(
                 PushEvent::BridgeImportProgress(_)
                 | PushEvent::BridgeImportError(_)
                 | PushEvent::BridgeImportComplete(_) => {
-                    // `fauna.bridges.push.import_{progress,error,complete}`
-                    // (mailbox-migration.md) — a mailbox-import session's
-                    // progress/outcome nudge. No linux import UI exists yet
-                    // (the nest-side wire + import surface landed ahead of the
-                    // client consume leg, mirroring
-                    // BridgeMailboxState / LeaseChanged above); no-op until
-                    // that view lands.
+                    // `fauna.bridges.push.import_{progress,error,complete}` —
+                    // an import of this actor's moved, here or on another
+                    // device. Consumed above via `invalidates()` →
+                    // `StaleSurfaces::mail_import` → `apply_stale`, which
+                    // re-reads the open Import page; the payload is a nudge,
+                    // never read. mailbox-migration.md § A failed import is a
+                    // record the wizard shows until the user moves on.
                 }
                 PushEvent::Unknown(u) => {
                     // Forward-compat: nest emitted a kind this client doesn't

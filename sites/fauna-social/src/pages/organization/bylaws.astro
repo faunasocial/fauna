@@ -1,0 +1,28 @@
+---
+import Base from '../../layouts/Base.astro';
+import { Content as BylawsEn } from '../../../../../docs/governance/bylaws-en.md';
+---
+{/* public-text: site-bylaws-page */}
+<Base
+  title="Bylaws — Fauna Social"
+  description="The bylaws of Fauna Social, published as § 17 requires."
+>
+  <div class="wrap page">
+    <div class="prose">
+      <h1>Bylaws</h1>
+      <p class="lead">
+        Published here and kept up to date, as § 17 of the bylaws
+        themselves requires.
+      </p>
+{/* public-text-end: site-bylaws-page */}
+
+      <section class="doc">
+        <BylawsEn />
+      </section>
+    </div>
+  </div>
+</Base>
+
+<style>
+  .doc { margin-top: 2rem; }
+</style>

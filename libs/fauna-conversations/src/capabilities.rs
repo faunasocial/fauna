@@ -112,6 +112,28 @@ pub struct ThreadCapabilities {
     #[cfg_attr(feature = "uniffi", uniffi(default = false))]
     #[serde(default)]
     pub can_leave_room: bool,
+    /// Search this room's words through its home nest — `room-search-button`
+    /// (`room-search.md` § The surface). True exactly for a **community** room
+    /// whose floor seats this account: the home nest's search door refuses
+    /// every other class, because an end-to-end room's words rest only on its
+    /// members' devices. Derived from the room, never declared by a rail or a
+    /// bridge — like `encryption` — so no app branches on class.
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    #[serde(default)]
+    pub can_search_room: bool,
+    /// Whether the reply bar is offered at all — `dm-text-field` and
+    /// `dm-send-button`. `true` on every rail; narrowed only where a send
+    /// could not leave: a bridged room no live bridge serves
+    /// ([`crate::room::RoomSnapshot::gate`] on
+    /// [`crate::room::RoomSnapshot::bridge_disconnected`]; `apps/bridges.md`
+    /// § Phase G → *When the bridge stops serving*, "readable, never
+    /// writable"), and a bridged thread whose bridge is not in the registry,
+    /// whose send the backend refuses. Derived from the room and the
+    /// registry, never declared by a bridge — like `encryption` — so an app
+    /// withholds the bar on `!can_send` and never branches on a rail.
+    #[cfg_attr(feature = "uniffi", uniffi(default = true))]
+    #[serde(default = "default_true")]
+    pub can_send: bool,
 }
 
 /// Is this `(rail, flavor)` a **bound FaunaMls group** — the one pairing whose
@@ -187,6 +209,9 @@ pub fn declared_bridge_capabilities(
         can_appoint_admins: on("can_appoint_admins", base.can_appoint_admins),
         can_transfer_ownership: on("can_transfer_ownership", base.can_transfer_ownership),
         can_leave_room: on("can_leave_room", base.can_leave_room),
+        // The room's class decides it, as `encryption`: never a bridge's word.
+        can_search_room: base.can_search_room,
+        can_send: base.can_send,
     }
 }
 
@@ -221,6 +246,8 @@ pub fn derive_capabilities(rail: Rail, flavor: ThreadFlavor) -> ThreadCapabiliti
             can_appoint_admins: false,
             can_transfer_ownership: false,
             can_leave_room: false,
+            can_search_room: false,
+            can_send: true,
         },
         (FaunaMls, MlsGroup) => ThreadCapabilities {
             supports_membership_change: true,
@@ -290,6 +317,8 @@ pub fn derive_capabilities(rail: Rail, flavor: ThreadFlavor) -> ThreadCapabiliti
             can_appoint_admins: false,
             can_transfer_ownership: false,
             can_leave_room: false,
+            can_search_room: false,
+            can_send: true,
         },
         // Every bridge, before its declared vector is overlaid: the most
         // restrictive answer — every affordance withheld, no membership, role
@@ -319,6 +348,8 @@ pub fn derive_capabilities(rail: Rail, flavor: ThreadFlavor) -> ThreadCapabiliti
             can_appoint_admins: false,
             can_transfer_ownership: false,
             can_leave_room: false,
+            can_search_room: false,
+            can_send: true,
         },
     }
 }

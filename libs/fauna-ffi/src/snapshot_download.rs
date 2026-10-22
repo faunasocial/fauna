@@ -20,14 +20,13 @@ use std::sync::Arc;
 use std::thread;
 
 use fauna_client::AuthClient;
-use fauna_sync_engine::engine_lifecycle::build_restore_engine;
+use fauna_sync_engine::engine_lifecycle::{build_restore_engine, snapshot_files_to_restore};
 use tokio::runtime::Builder;
 use tokio::sync::oneshot;
 
 use crate::FfiError;
 use crate::crypto::{device32, secret32};
 use crate::nest_client::FfiNestClient;
-use crate::sync_engine_host::snapshot_files_to_restore;
 
 /// Fetch one snapshot file's decrypted bytes via the shared client-side walk.
 ///

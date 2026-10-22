@@ -42,6 +42,9 @@ use crate::well_known_dav::{DavProtocol, well_known_dav_gate};
 /// whose admin had never touched the toggle served CardDAV on the MDA while its
 /// apex discovery answered `503` — the liveness predicate is
 /// `unwrap_or(mail_enabled)`, not `Some(true)`.
-pub async fn wellknown_carddav(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    well_known_dav_gate(&state, DavProtocol::CardDav).await
+pub async fn wellknown_carddav(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    well_known_dav_gate(&state, DavProtocol::CardDav, &headers).await
 }

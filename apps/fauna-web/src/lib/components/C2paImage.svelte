@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { readProvenanceFromUrl, readProvenanceFromBytes, type C2paResult } from "$lib/c2pa";
-  import { displaySrcFor } from "$lib/media-src";
+  import { readProvenanceFromUrl, readProvenanceFromBytes, type C2paResult } from "#lib/c2pa";
+  import { displaySrcFor } from "#lib/media-src";
   import Lightbox from "./Lightbox.svelte";
-  import { t } from '$lib/i18n/strings';
-  import { IDS } from '$lib/generated/uiIds';
+  import { t } from '#lib/i18n/strings';
+  import { IDS } from '#lib/generated/uiIds';
 
   interface Props {
     src: string;
@@ -19,7 +19,7 @@
   let { src, alt = "", class: className = "", bytes, mimeType, thumb = false, ...rest }: Props = $props();
 
   // Use thumbnail URL for display, full URL for C2PA detection. The `?thumb=1`
-  // rule (and why a `blob:` object URL is exempt from it) lives in `$lib/media-src`
+  // rule (and why a `blob:` object URL is exempt from it) lives in `#lib/media-src`
   // so it can be tested.
   const displaySrc = $derived(displaySrcFor(src, thumb));
 

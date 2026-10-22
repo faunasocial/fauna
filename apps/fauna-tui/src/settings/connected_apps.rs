@@ -37,7 +37,10 @@ use std::sync::Arc;
 use fauna_client_connected_apps::{
     ConnectedAppRow, ConnectedAppsMachine, ConnectedAppsObserver, ConnectedAppsSnapshot,
     ConsentCardRow,
-    compose::{request_card_lines, roster_row_text},
+    compose::{
+        ComposedText, LINE_SEPARATOR, request_card_lines, request_install_text, roster_row_text,
+    },
+    machine::opens_settings_card,
 };
 use fauna_client_mail_settings::{MailSettingsMachine, resolve_mua_username};
 use fauna_core::secret::SecretString;
@@ -72,6 +75,9 @@ pub(crate) enum ConnectedAppsGesture {
     /// Lift a per-client block, by the blocked client's id.
     Unblock(String),
     Revoke(String),
+    /// Set the account's external-apps switch to the carried value
+    /// (`atproto-external-apps-enable`).
+    SetExternalApps(bool),
 }
 
 impl ConnectedAppsGesture {
@@ -87,6 +93,7 @@ impl ConnectedAppsGesture {
             Self::Block(consent_id_hex) => machine.block_request(consent_id_hex).await,
             Self::Unblock(client_id) => machine.unblock(client_id).await,
             Self::Revoke(key) => machine.revoke(key).await,
+            Self::SetExternalApps(enabled) => machine.set_external_apps_enabled(enabled).await,
         }
     }
 }
@@ -195,7 +202,23 @@ pub(super) fn connected_apps_elements(state: &SettingsState) -> Vec<Element> {
         Gesture::Settings(Action::ConnectedAppsSubmitCode),
     ));
 
-    // ── 3. The roster ──
+    // ── 3. The external-apps switch and the roster it pauses ──
+    // At every integration level: the flag is the account's, and every app
+    // it pauses is listed just below (`connected-apps.md` § Layout & flow).
+    // Absent snapshot = the flag's own default, ON.
+    let external_apps_on = !snap.is_some_and(|s| s.external_apps_off);
+    els.push(
+        Element::checkbox_gesture(
+            ids::ATPROTO_EXTERNAL_APPS_ENABLE,
+            card_t::EXTERNAL_APPS_TOGGLE,
+            external_apps_on,
+            Gesture::Settings(Action::ConnectedAppsToggleExternalApps),
+        )
+        .attr("state", if external_apps_on { "on" } else { "off" }),
+    );
+    // What OFF pauses — every connected app, principals included. Untagged:
+    // ui.yaml gives the hint no id of its own.
+    els.push(Element::chrome(card_t::EXTERNAL_APPS_HINT));
     els.push(Element::chrome(t::ROSTER_HEADING));
     // The three-state list: nothing until the roster read has returned, then
     // either rows or the empty state (`ui/README.md` § List pages).
@@ -367,6 +390,20 @@ fn row_elements(
         );
     }
 
+    // A hosted plugin's row links to its settings card on the Bridges page —
+    // which rows link is the shared machine's (`opens_settings_card`).
+    if opens_settings_card(row) {
+        els.push(
+            Element::gesture_button(
+                ids::CONNECTED_APPS_ITEM_SETTINGS_LINK,
+                t::SETTINGS_LINK,
+                true,
+                Gesture::Bridges(crate::bridges::Action::Open),
+            )
+            .within(ITEM, i),
+        );
+    }
+
     if c.revoke_armed.as_deref() == Some(row.key.as_str()) {
         els.push(Element::chrome(t::revoke_prompt(&name)).within(ITEM, i));
         els.push(
@@ -450,6 +487,7 @@ fn consent_card_elements(consent: &ConsentCardRow, i: usize, els: &mut Vec<Eleme
         .collect::<Vec<_>>()
         .join("\n");
     els.push(Element::label(CARD, card_text));
+    install_section_elements(consent, i, els);
     els.push(
         Element::label(
             ids::CONNECTED_APPS_REQUEST_CODE,
@@ -495,6 +533,64 @@ fn consent_card_elements(consent: &ConsentCardRow, i: usize, els: &mut Vec<Eleme
         )
         .within(CARD, i),
     );
+}
+
+/// The install section of an admin's hosted-plugin install card
+/// (`third-party.md` § The runner contract → *The install-approval leg*): one
+/// leaf per fact, each the shared composition's text
+/// (`compose::request_install_text`) resolved here, between the card's scope
+/// lines and its binding code, so the admin reads what would run on the nest
+/// before the Approve. Absent on every other card.
+fn install_section_elements(consent: &ConsentCardRow, i: usize, els: &mut Vec<Element>) {
+    const CARD: &str = ids::CONNECTED_APPS_REQUEST_CARD;
+    let Some(section) = request_install_text(consent) else {
+        return;
+    };
+    let one = |text: &ComposedText| text.resolve(fauna_i18n::strings::lookup);
+    let many = |lines: &[ComposedText]| {
+        lines
+            .iter()
+            .map(|l| l.resolve(fauna_i18n::strings::lookup))
+            .collect::<Vec<_>>()
+            .join(LINE_SEPARATOR)
+    };
+    let form = consent
+        .install
+        .as_ref()
+        .map(|install| install.execution_form.clone())
+        .unwrap_or_default();
+    els.push(
+        Element::label(ids::CONNECTED_APPS_REQUEST_INSTALL, one(&section.heading)).within(CARD, i),
+    );
+    if let Some(framing) = &section.framing {
+        els.push(Element::chrome(one(framing)).within(CARD, i));
+    }
+    for element in [
+        Element::label(ids::CONNECTED_APPS_REQUEST_INSTALL_FORM, one(&section.form))
+            .attr("form", form),
+        Element::label(
+            ids::CONNECTED_APPS_REQUEST_INSTALL_PUBLISHER,
+            one(&section.publisher),
+        ),
+        Element::label(
+            ids::CONNECTED_APPS_REQUEST_INSTALL_DIGEST,
+            one(&section.digest),
+        ),
+        Element::label(
+            ids::CONNECTED_APPS_REQUEST_INSTALL_KINDS,
+            many(&section.kinds),
+        ),
+        Element::label(
+            ids::CONNECTED_APPS_REQUEST_INSTALL_HOSTS,
+            many(&section.hosts),
+        ),
+        Element::label(
+            ids::CONNECTED_APPS_REQUEST_INSTALL_SETTINGS,
+            many(&section.settings),
+        ),
+    ] {
+        els.push(element.within(CARD, i));
+    }
 }
 
 #[cfg(test)]

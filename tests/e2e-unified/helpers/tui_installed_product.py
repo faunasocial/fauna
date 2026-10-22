@@ -8,13 +8,14 @@ one module and not two: two copies of a path drift silently, and the failure is
 a suite driving a stale install.
 
 **The channel.** The terminal app ships as a per-OS archive — ``fauna-tui`` +
-``fauna-sync-agent`` + ``install.sh`` in one directory, built by
+``fauna-sync-agent`` + ``fauna-cli`` + ``install.sh`` in one directory, built by
 ``apps/fauna-tui/packaging/assemble-archive.sh`` for the release workflow
-(``installers/tui.md`` § The ratified channel). The user unpacks it and runs its
-``install.sh``, which copies the two binaries into ``$PREFIX/bin``. That is the
-exact path this module walks: the REAL ``assemble-archive.sh`` stages the archive
-layout, and the REAL ``install.sh`` inside it installs. Nothing test-only is
-added to either shipped script.
+(``installers/tui.md`` § The ratified channel; ``fauna-cli`` is the cli app's
+device shell, the archive's third member since decision 4). The user unpacks it
+and runs its ``install.sh``, which copies the three binaries into
+``$PREFIX/bin``. That is the exact path this module walks: the REAL
+``assemble-archive.sh`` stages the archive layout, and the REAL ``install.sh``
+inside it installs. Nothing test-only is added to either shipped script.
 
 **DEBUG binaries, and it must be** — the linux leg's substitution, for its
 reason: convention 15 compiles the automation surface out of release builds
@@ -53,8 +54,10 @@ _STAGING_RELPATH = "build/tui-installed-product-staging"
 #: directory reading like a real download.
 _SUFFIX = "e2e-local"
 
-#: The two binaries the archive carries and ``install.sh`` installs.
-STAGED_BINARIES = ("fauna-tui", "fauna-sync-agent")
+#: The three binaries the archive carries and ``install.sh`` installs. The first
+#: two are ``just tui-debug``'s; ``fauna-cli`` is ``just cli-debug``'s (the e2e
+#: flavor the cli's own tier_3 journey drives, built into the same target dir).
+STAGED_BINARIES = ("fauna-tui", "fauna-sync-agent", "fauna-cli")
 
 
 def install_prefix(repo_root: Path | str) -> Path:
@@ -75,6 +78,13 @@ def installed_agent_path(repo_root: Path | str) -> Path:
     Devices pages unable to provision sync for everyone who installed that way.
     """
     return install_prefix(repo_root) / "bin" / "fauna-sync-agent"
+
+
+def installed_cli_path(repo_root: Path | str) -> Path:
+    """The installed ``fauna-cli`` — the cli app's device shell, which the
+    archive carries as its third member and ``install.sh`` installs beside the
+    terminal app (``installers/tui.md`` § Decisions, decision 4)."""
+    return install_prefix(repo_root) / "bin" / "fauna-cli"
 
 
 def staged_archive_dir(repo_root: Path | str) -> Path:
@@ -129,7 +139,9 @@ def stage_archive(repo_root: Path | str, debug_dir: Path | str) -> Path:
         if not (debug_dir / name).is_file():
             raise RuntimeError(
                 f"{debug_dir / name} does not exist, so the archive would have "
-                f"nothing to carry. `just tui-debug` builds both {STAGED_BINARIES}."
+                f"nothing to carry. `just tui-debug` builds fauna-tui and "
+                f"fauna-sync-agent; `just cli-debug` builds fauna-cli — all three "
+                f"of {STAGED_BINARIES} must be in {debug_dir}."
             )
     out = repo_root / _STAGING_RELPATH
     out.mkdir(parents=True, exist_ok=True)

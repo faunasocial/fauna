@@ -143,7 +143,7 @@ pub enum BulkByteMintPurpose {
     /// A cross-nest **writer's** short-lived byte-plane token, minted **only** by
     /// the `fauna.federation.folder.write_token.mint` federation handler after
     /// its structural foreign-member + `access == 'writer'` gate — never by a
-    /// bridge (`federation.md` § Cross-nest…, contract point (ii)).
+    /// bridge (`federation-shared-folders.md` § Cross-nest…, contract point (ii)).
     /// Carried on the scope for audit/attribution ("who nest minted this for");
     /// no write route branches on it (the one route that reads it is the read
     /// door named on [`Self::ForeignFolderRead`]). Present in this wire enum so the
@@ -176,7 +176,7 @@ pub enum BulkByteMintPurpose {
     /// shared folder's bytes off its home nest, minted **only** by the
     /// `fauna.federation.folder.read_token.mint` federation handler after its
     /// structural foreign-member gate alone — a reader holds no write grant to
-    /// mint under (`federation.md` § Cross-nest shared folders + channel append
+    /// mint under (`federation-shared-folders.md` § Cross-nest shared folders + channel append
     /// → *Relay serving across nests*). Access `Read`, so every write route
     /// refuses it. Present here so the bridge mint handler's match is forced to
     /// refuse it explicitly.
@@ -1686,6 +1686,18 @@ pub struct GetCaldavPortReply {
     /// The effective CalDAV listener port (the admin-set singleton, or
     /// `bridge_routing::DEFAULT_CALDAV_PORT` = 8443 when unset).
     pub port: u16,
+    /// How the deployment serves its DAV listener (CalDAV, CardDAV and WebDAV
+    /// share it): `Some(true)` — bound **directly** on the box's own interface
+    /// at [`Self::port`], no SNI router in front (a home box whose bundle names
+    /// its LAN interface, with or without a domain); `Some(false)` — fronted by
+    /// the SNI router at `mail.<domain>:443` (the cloud domain box), where
+    /// `port` is inert. `None` — the nest's artifact declared neither (no
+    /// operator hatch: a desktop or test nest), or the nest predates the field;
+    /// the client then falls back to the host-name split. Read once at boot from
+    /// the deployment's operator hatch (`caldav-server.md` § Network exposure —
+    /// Any-locator serving). Additive: absent on the wire when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_listener: Option<bool>,
     /// Forward-compat catch-all: unknown keys from a newer peer are
     /// preserved here and re-emitted on encode (transport.md § Schema
     /// and forward-compat discipline, rule 4).
@@ -3226,14 +3238,28 @@ mod tests {
         let decoded: GetCaldavPortRequest = decode(&bytes).unwrap();
         assert_eq!(decoded, req);
         for port in [8443u16, 443, 9443, 65535, 1] {
-            let reply = GetCaldavPortReply {
-                port,
-                extra: Default::default(),
-            };
-            let bytes = encode_canonical(&reply).unwrap();
-            let decoded: GetCaldavPortReply = decode(&bytes).unwrap();
-            assert_eq!(decoded, reply);
+            for direct_listener in [None, Some(true), Some(false)] {
+                let reply = GetCaldavPortReply {
+                    port,
+                    direct_listener,
+                    extra: Default::default(),
+                };
+                let bytes = encode_canonical(&reply).unwrap();
+                let decoded: GetCaldavPortReply = decode(&bytes).unwrap();
+                assert_eq!(decoded, reply);
+            }
         }
+        // Additive both ways: an older nest's reply (no field) decodes as
+        // `None`, and a `None` reply carries no key an older client must skip.
+        let bare = encode_canonical(&GetCaldavPortReply {
+            port: 8443,
+            direct_listener: None,
+            extra: Default::default(),
+        })
+        .unwrap();
+        let decoded: GetCaldavPortReply = decode(&bare).unwrap();
+        assert_eq!(decoded.direct_listener, None);
+        assert!(decoded.extra.is_empty());
     }
 
     #[test]

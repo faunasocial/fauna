@@ -44,6 +44,8 @@ private func throwawayApi() -> APIClient {
     SubscriptionsAuthorCadence.shared.start(api: throwawayApi())
     GuardianNotifyCadence.shared.start(api: throwawayApi())
     FeedVM.revealedMutedPostIds = ["post-1"]
+    MutedWordsHolder.shared.publish([MutedKeyword(keyword: "spoiler", weight: -1000)])
+    NotificationsVM.revealedMutedIds = ["7"]
 
     #expect(DnsAutoRenewCadence.shared.isRunning)
     #expect(SubscriptionsAuthorCadence.shared.isRunning)
@@ -60,6 +62,10 @@ private func throwawayApi() -> APIClient {
     #expect(FeedVM.revealedMutedPostIds.isEmpty,
             "the outgoing account's muted-post reveals survived into the incoming session")
     #expect(FeedVM.lastLoadedPosts.isEmpty)
+    #expect(MutedWordsHolder.shared.words.isEmpty,
+            "the incoming account would collapse by the outgoing one's muted words")
+    #expect(NotificationsVM.revealedMutedIds.isEmpty,
+            "the outgoing account's notification reveals survived into the incoming session")
 }
 
 /// The Guardian Notify twin of `theLatchedDnsCadenceRebindsOnlyAfterTheDrop`

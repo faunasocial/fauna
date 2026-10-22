@@ -34,6 +34,7 @@ fun ProfilePrivateSection(
     onRemoveLabel: (Int) -> Unit,
     onSave: () -> Unit,
     modifier: Modifier = Modifier,
+    labelSuggestions: (typed: String) -> List<String> = { emptyList() },
 ) {
     var labelInput by remember { mutableStateOf("") }
     Column(
@@ -100,6 +101,16 @@ fun ProfilePrivateSection(
                 onClick = { if (onAddLabel(labelInput)) labelInput = "" },
                 modifier = Modifier.testTag(Ids.PROFILE_LABEL_ADD_BUTTON),
             ) { Text(stringResource(R.string.profile_private_label_add)) }
+        }
+        // The completion rows: nothing until something is typed; a pick stages
+        // the label exactly as if typed and added.
+        if (labelInput.isNotBlank()) {
+            labelSuggestions(labelInput).forEach { suggestion ->
+                TextButton(
+                    onClick = { if (onAddLabel(suggestion)) labelInput = "" },
+                    modifier = Modifier.testTag(Ids.PROFILE_LABEL_SUGGESTION),
+                ) { Text(suggestion) }
+            }
         }
         Button(
             onClick = onSave,

@@ -92,6 +92,7 @@ pub struct ConfirmSpec<'a> {
     cancel_test_id: Option<&'static str>,
     wire_kind: Option<&'static str>,
     on_dismissed: Option<Box<dyn Fn()>>,
+    on_declined: Option<Box<dyn Fn()>>,
 }
 
 impl<'a> ConfirmSpec<'a> {
@@ -117,6 +118,7 @@ impl<'a> ConfirmSpec<'a> {
             cancel_test_id: None,
             wire_kind: None,
             on_dismissed: None,
+            on_declined: None,
         }
     }
 
@@ -171,6 +173,17 @@ impl<'a> ConfirmSpec<'a> {
     }
 }
 
+impl ConfirmSpec<'_> {
+    /// Run `f` when the dialog is answered with anything BUT the named
+    /// response (cancel, Escape, close) — for a confirm whose arm lives in
+    /// shared state that the decline must close (the admin-bridges reject /
+    /// rotate confirms, `BridgeApprovalMachine::disarm`).
+    pub fn with_declined(mut self, f: impl Fn() + 'static) -> Self {
+        self.on_declined = Some(Box::new(f));
+        self
+    }
+}
+
 /// Present a confirm dialog — cancel plus one named response — running
 /// `on_confirm` if the user picks the named one. Any other outcome (cancel,
 /// Escape, the close button) is a pure no-op.
@@ -195,6 +208,7 @@ pub fn present_confirm(
         cancel_test_id,
         wire_kind,
         on_dismissed,
+        on_declined,
     } = spec;
 
     debug_assert!(
@@ -227,6 +241,8 @@ pub fn present_confirm(
         }
         if response == confirm_response {
             on_confirm();
+        } else if let Some(declined) = on_declined.as_ref() {
+            declined();
         }
     });
 

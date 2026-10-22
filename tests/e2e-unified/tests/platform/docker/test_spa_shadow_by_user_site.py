@@ -52,12 +52,11 @@ manifest bytes come from the cargo-built ``fauna_ffi`` cdylib
 exactly what that marker promises its CI runner it will not.
 
 Run against a **published** image (``:dev``, every image build's push —
-``:latest`` moves only on a production promote) rather than a local build (local nest-image
-builds are forbidden on dev VMs — ``helpers.docker_build``)::
+``:latest`` moves only on a production promote) rather than this tree's local build
+(``helpers.docker_build``)::
 
     docker pull ghcr.io/faunasocial/nest:dev
-    docker tag ghcr.io/faunasocial/nest:dev fauna-nest-test:local
-    pytest tests/e2e-unified/tests/platform/docker/test_spa_shadow_by_user_site.py -v
+    FAUNA_NEST_TEST_IMAGE=ghcr.io/faunasocial/nest:dev pytest tests/e2e-unified/tests/platform/docker/test_spa_shadow_by_user_site.py -v
 """
 
 import subprocess

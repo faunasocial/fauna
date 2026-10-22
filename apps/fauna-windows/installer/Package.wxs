@@ -9,6 +9,7 @@
       -o Fauna-Setup-x64.msi installer/*.wxs \
       -d SyncBin=stage/x64/fauna-sync-agent.exe \
       -d TuiBin=stage/x64/fauna-tui.exe \
+      -d CliBin=stage/x64/fauna-cli.exe \
       -d NestBin=stage/x64/fauna-nest-svc.exe \
       -d BridgeBin=stage/x64/fauna-bridge-svc.exe \
       -d ShellDll=stage/x64/fauna_shell.dll \
@@ -27,13 +28,15 @@
      xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util"
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
 
+  <!-- public-text: windows-installer-descriptions -->
   <Package
     Name="Fauna"
     Manufacturer="Fauna Social"
-    Version="0.1.4"
+    Version="0.1.5"
     UpgradeCode="4a7b8c00-f1e2-4d3a-b5c6-000000000001"
     Scope="perMachine"
     InstallerVersion="500">
+  <!-- public-text-end: windows-installer-descriptions -->
 
     <!-- AllowSameVersionUpgrades: every dev build (and any same-version hotfix
          reinstall) carries the current Version above with a fresh auto ProductCode but a
@@ -394,22 +397,26 @@
     -->
 
     <!-- Desktop App — optional, default on -->
+    <!-- public-text: windows-installer-descriptions -->
     <Feature Id="DesktopApp"
              Title="Fauna Desktop App"
              Description="Desktop application for messaging, contacts, and sync management."
              Level="1"
              AllowAbsent="yes">
+    <!-- public-text-end: windows-installer-descriptions -->
       <ComponentGroupRef Id="AppComponents" />
       <ComponentGroupRef Id="ProtocolComponents" />
       <ComponentGroupRef Id="StartMenuComponents" />
     </Feature>
 
     <!-- Sync — optional, default on (per-user logon agent, not a machine service) -->
+    <!-- public-text: windows-installer-descriptions -->
     <Feature Id="Sync"
              Title="Sync Service"
              Description="File sync engine with background synchronisation."
              Level="1"
              AllowAbsent="yes">
+    <!-- public-text-end: windows-installer-descriptions -->
       <ComponentGroupRef Id="SyncService" />
       <!-- DataDir registry metadata + ProgramData uninstall cleanup (see UI.wxs).
            Referenced by BOTH Sync and Nest so the DataDir value is written
@@ -431,28 +438,34 @@
            reboot-delete fallback for the locked). So
            the overlay icons + context menus ship by default (works-out-of-the-box). The user can
            untick it (it still requires Sync, its parent). -->
+      <!-- public-text: windows-installer-descriptions -->
       <Feature Id="ShellExt"
                Title="Explorer Integration"
                Description="Sync status overlay icons and context menus in File Explorer."
                Level="1"
                AllowAbsent="yes">
+      <!-- public-text-end: windows-installer-descriptions -->
         <ComponentGroupRef Id="ShellExtComponents" />
       </Feature>
 
     </Feature>
 
-    <!-- Terminal App — optional, default ON. fauna-tui.exe beside the agent, plus
-         the PATH entry that makes `fauna-tui` typeable (TerminalApp.wxs). The same
-         binary the per-OS release archive carries; the MSI is its signed form on
+    <!-- Terminal App — optional, default ON. fauna-tui.exe and fauna-cli.exe (the
+         cli app's device shell, the archive's third member — installers/tui.md
+         § Decisions, decision 4) beside the agent, plus the PATH entry that makes
+         `fauna-tui` and `fauna-cli` typeable (TerminalApp.wxs). The same binaries
+         the per-OS release archive carries; the MSI is their signed form on
          Windows (installers/tui.md § The ratified channel, user ruling 2026-09-26).
          A top-level feature, not a child of Sync or Desktop App: a user may want
          the terminal app on a box with neither (a headless nest box managed over
          SSH), and unticking either must not take it away. -->
+    <!-- public-text: windows-installer-descriptions -->
     <Feature Id="TerminalApp"
              Title="Fauna Terminal App"
              Description="The terminal (text-mode) Fauna app, usable over SSH; adds it to PATH."
              Level="1"
              AllowAbsent="yes">
+    <!-- public-text-end: windows-installer-descriptions -->
       <ComponentGroupRef Id="TerminalAppComponents" />
     </Feature>
 
@@ -464,11 +477,13 @@
          2026-06-21. (DataCleanup is still written for a default install via the
          Sync feature's ref; the Nest ref below covers a Sync-absent nest-only
          install.) -->
+    <!-- public-text: windows-installer-descriptions -->
     <Feature Id="Nest"
              Title="Nest Service"
              Description="Run a personal Fauna nest server on this machine."
              Level="1000"
              AllowAbsent="yes">
+    <!-- public-text-end: windows-installer-descriptions -->
       <ComponentGroupRef Id="NestService" />
       <!-- Re-home of DataCleanup (see the Sync feature): a nest-only install
            (Sync deselected) still writes the DataDir reg value + arms the
@@ -485,11 +500,13 @@
            install — so it wrongly collapses Bridge to level 0 (unavailable) and Bridge
            silently never installs (Request/Action: Null) even though ADDLOCAL requested it.
            That broke TestCalDAVImapServingAfterInstall (FaunaBridge service absent). -->
+      <!-- public-text: windows-installer-descriptions -->
       <Feature Id="Bridge"
                Title="Bridge Service"
-               Description="IMAP/SMTP bridge for accessing Fauna messages from email clients."
+               Description="Mail and calendar server components (IMAP and CalDAV) so standard mail and calendar apps can connect to this nest."
                Level="1000"
                AllowAbsent="yes">
+      <!-- public-text-end: windows-installer-descriptions -->
         <ComponentGroupRef Id="BridgeService" />
       </Feature>
 

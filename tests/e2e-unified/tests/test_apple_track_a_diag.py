@@ -261,7 +261,7 @@ def test_mail_mua_instructions_registration_macos(logged_in_app):
     ):
         print(f"[DIAG-MUA] child   {driver.diagnose(child)}")
     # Page-siblings that DID register (the 5/6 that pass) — for contrast.
-    for sib in ("mail-settings-keys-info", "mail-settings-credential-item-name"):
+    for sib in ("mail-settings-keys-info",):
         print(f"[DIAG-MUA] sibling {driver.diagnose(sib)}")
 
     # Diagnostic only — the trace IS the deliverable.

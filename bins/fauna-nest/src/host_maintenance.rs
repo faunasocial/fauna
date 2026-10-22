@@ -188,6 +188,10 @@ pub async fn readiness_writer_task(ws_state: Arc<WsState>, data_dir: PathBuf) {
 /// the client). Authority: `installers/vps.md` § Host OS Maintenance.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct HostStatus {
+    /// Whether a `host-status` file was read at all — `false` (the default) when
+    /// the mount/file is absent, so the client can tell "no host data" from
+    /// "nothing pending" (`installers/vps.md` § Host OS Maintenance § 4).
+    pub present: bool,
     /// Pending **security** updates on the host (the coordinator's `apt-check`
     /// security count).
     pub security_updates_pending: u32,
@@ -205,7 +209,10 @@ pub struct HostStatus {
 /// never trusts the file blindly; the worst case reads as "nothing pending".
 /// Pure + unit-testable (no filesystem).
 pub fn parse_host_status(body: &str) -> HostStatus {
-    let mut s = HostStatus::default();
+    let mut s = HostStatus {
+        present: true,
+        ..HostStatus::default()
+    };
     for line in body.lines() {
         let Some((key, value)) = line.split_once('=') else {
             continue;
@@ -309,6 +316,68 @@ pub fn request_host_restart(data_dir: &Path) -> std::io::Result<bool> {
     Ok(true)
 }
 
+// ── The SSH door (installers/vps.md § The SSH door) ──────────────────────────
+
+/// Filename the nest writes into the read-write [`MAINTENANCE_SUBDIR`] at the
+/// claim: `address=<ip>`, the claimant's source address. The root
+/// `fauna-ssh-door` pass reads it as `/opt/fauna/maintenance/ssh-door-source`
+/// (symlink-rejecting, value-validated) on a box whose admin opened the door,
+/// and ignores it on every other box.
+const SSH_DOOR_SOURCE_FILE: &str = "ssh-door-source";
+
+/// Filename the root `fauna-ssh-door` pass writes into the root-owned
+/// [`HOST_STATE_SUBDIR`] once it has admitted the claimant's address
+/// (`address=<ip>`, `at=<unix>`; `refused=malformed` instead of the address
+/// when it refused the value). Host side:
+/// `/opt/fauna/maintenance-host/ssh-door-admitted`.
+const SSH_DOOR_ADMITTED_FILE: &str = "ssh-door-admitted";
+
+/// Write the claimant's address to `<data_dir>/maintenance/ssh-door-source`
+/// (tmp + rename, so the host never reads a torn file) — **once**: an existing
+/// file is left as it is. Written on every claimed box, since the nest cannot
+/// tell whether the host carries the door; a door-less host never reads it.
+/// The address is canonicalised first, so a v4 client seen through a
+/// dual-stack socket (`::ffff:a.b.c.d`) is admitted as the IPv4 address it is.
+/// `Ok(false)` when there is no maintenance mount (dev / desktop / bare-metal)
+/// or the file already exists; `Ok(true)` when it was written.
+pub fn write_ssh_door_source(data_dir: &Path, ip: std::net::IpAddr) -> std::io::Result<bool> {
+    let maintenance_dir = data_dir.join(MAINTENANCE_SUBDIR);
+    if !maintenance_dir.is_dir() {
+        return Ok(false);
+    }
+    let final_path = maintenance_dir.join(SSH_DOOR_SOURCE_FILE);
+    if final_path.symlink_metadata().is_ok() {
+        return Ok(false);
+    }
+    let tmp_path = maintenance_dir.join(format!("{SSH_DOOR_SOURCE_FILE}.tmp"));
+    std::fs::write(&tmp_path, format!("address={}\n", ip.to_canonical()))?;
+    std::fs::rename(&tmp_path, &final_path)?;
+    Ok(true)
+}
+
+/// Parse the host's `ssh-door-admitted` body: the admitted address, when the
+/// pass admitted one that parses as an IP. A refusal or a malformed body reads
+/// as `None` — the door is not open.
+pub fn parse_ssh_door_admitted(body: &str) -> Option<std::net::IpAddr> {
+    body.lines()
+        .filter_map(|line| line.split_once('='))
+        .find(|(key, _)| key.trim() == "address")
+        .and_then(|(_, value)| value.trim().parse().ok())
+}
+
+/// The address the host's SSH door admits, read from the read-only root-owned
+/// mount — never the nest's own `ssh-door-source`, which a door-less host
+/// ignores. `None` on a door-less box, before the admission, and on a nest
+/// without the mount. The data dir is resolved as
+/// [`read_host_status_from_db_path`] does.
+pub fn read_ssh_door_admitted_from_db_path(db_path: &str) -> Option<std::net::IpAddr> {
+    let dir = crate::mail_enable::data_dir_from_db_path(db_path)?;
+    let path = dir.join(HOST_STATE_SUBDIR).join(SSH_DOOR_ADMITTED_FILE);
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|body| parse_ssh_door_admitted(&body))
+}
+
 fn rpc_internal(err: impl std::fmt::Display) -> RpcError {
     crate::rpc_errors::internal(err)
 }
@@ -362,6 +431,23 @@ fn request_host_restart_handler() -> RpcHandler {
             .map_err(|e| rpc_internal(format!("encode reply: {e}")))
         })
     })
+}
+
+/// This module's admin-plane kinds for an admin-consented principal —
+/// the nest page's host restart — each its actor handler behind
+/// [`crate::principal_handlers::admin_twin`] (`authorization-server.md`
+/// § Scope grammar → *The admin arms* names the set).
+pub(crate) fn principal_admin_handlers()
+-> Vec<(&'static str, crate::principal_handlers::PrincipalHandler)> {
+    use crate::principal_handlers::admin_twin;
+    let kinds: [(&'static str, crate::rpc_router::RpcHandler); 1] = [(
+        "fauna.admin.request_host_restart",
+        request_host_restart_handler(),
+    )];
+    kinds
+        .into_iter()
+        .map(|(kind, actor)| (kind, admin_twin(kind, actor)))
+        .collect()
 }
 
 /// Register the host-OS-maintenance admin kinds (currently just
@@ -442,6 +528,7 @@ mod tests {
         assert_eq!(
             s,
             HostStatus {
+                present: true,
                 security_updates_pending: 4,
                 reboot_pending: true,
                 reboot_deferred_since: Some(1_719_500_000),
@@ -461,7 +548,14 @@ mod tests {
              reboot_deferred_since=\n\
              last_patched_at=\n",
         );
-        assert_eq!(s, HostStatus::default());
+        // A file was read, so the host reported "nothing pending" (not "no data").
+        assert_eq!(
+            s,
+            HostStatus {
+                present: true,
+                ..HostStatus::default()
+            }
+        );
     }
 
     #[test]
@@ -474,7 +568,13 @@ mod tests {
              a line with no equals\n\
              reboot_pending=maybe\n",
         );
-        assert_eq!(s, HostStatus::default());
+        assert_eq!(
+            s,
+            HostStatus {
+                present: true,
+                ..HostStatus::default()
+            }
+        );
     }
 
     #[test]
@@ -482,6 +582,7 @@ mod tests {
         // No maintenance dir at all (dev / desktop / bare-metal) → default.
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(read_host_status(dir.path()), HostStatus::default());
+        assert!(!read_host_status(dir.path()).present);
     }
 
     #[test]
@@ -497,6 +598,7 @@ mod tests {
         )
         .unwrap();
         let s = read_host_status(dir.path());
+        assert!(s.present);
         assert_eq!(s.security_updates_pending, 2);
         assert!(s.reboot_pending);
     }
@@ -594,5 +696,42 @@ mod tests {
         // Re-requesting while the flag is still present is a no-op success.
         assert!(request_host_restart(dir.path()).unwrap());
         assert!(flag.exists());
+    }
+
+    #[test]
+    fn ssh_door_source_is_written_once_and_never_through_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        assert!(!write_ssh_door_source(dir.path(), ip("203.0.113.7")).unwrap());
+        std::fs::create_dir(dir.path().join(MAINTENANCE_SUBDIR)).unwrap();
+        let file = dir
+            .path()
+            .join(MAINTENANCE_SUBDIR)
+            .join(SSH_DOOR_SOURCE_FILE);
+        assert!(write_ssh_door_source(dir.path(), ip("203.0.113.7")).unwrap());
+        assert!(!write_ssh_door_source(dir.path(), ip("198.51.100.9")).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "address=203.0.113.7\n"
+        );
+        // A dangling symlink at the path counts as present: never written through.
+        std::fs::remove_file(&file).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(dir.path().join("elsewhere"), &file).unwrap();
+            assert!(!write_ssh_door_source(dir.path(), ip("203.0.113.7")).unwrap());
+            assert!(!dir.path().join("elsewhere").exists());
+        }
+    }
+
+    #[test]
+    fn parse_ssh_door_admitted_reads_only_an_admitted_address() {
+        assert_eq!(
+            parse_ssh_door_admitted("address=203.0.113.7\nat=1\n"),
+            Some("203.0.113.7".parse().unwrap())
+        );
+        assert_eq!(parse_ssh_door_admitted("refused=malformed\nat=1\n"), None);
+        assert_eq!(parse_ssh_door_admitted("address=nonsense\n"), None);
+        assert_eq!(parse_ssh_door_admitted(""), None);
     }
 }

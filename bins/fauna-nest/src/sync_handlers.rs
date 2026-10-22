@@ -160,7 +160,7 @@ async fn owned_folder(
 /// deliberately has no pre-enrollment write surface to make one through — so
 /// either the first custody record provisions it, or re-seed cannot start.
 ///
-/// Four things keep this narrow, and each is load-bearing:
+/// Five things keep this narrow, and each is load-bearing:
 ///
 /// 1. **Only a name the one shared derivation can produce**
 ///    ([`fauna_sync_engine::segment_backup::parse_reserved_backup_set_name`]) —
@@ -169,7 +169,7 @@ async fn owned_folder(
 ///    `changes_record_refuses_a_reserved_rail_so_no_client_writer_can_use_it`
 ///    true: those rails are non-custody-copy and `record_change_core` refuses
 ///    them, and this door will not hand a client a custody-copy one instead.
-/// 2. **Both reserved axes, and only those** — the segment axis
+/// 2. **The three reserved axes, and only those** — the segment axis
 ///    (`parse_reserved_backup_set_name`) and, since the re-seed leg landed, the
 ///    folder-mirror axis (`parse_folder_backup_set_name`). A folder set name
 ///    embeds a source nest id, which the **federated** arm must always re-derive
@@ -181,6 +181,13 @@ async fn owned_folder(
 ///    reaches nobody else (`message-segment-store.md` § Client-device custodian
 ///    → *Restore*, ratified 2026-08-22 — a custodian re-seeding a fresh nest
 ///    pushes its held mirrors under exactly these names).
+///    **And the landing axis** (`parse_landing_set_name`, ruled 2026-10-21):
+///    a delivered copy of the owner's own segment corpus — the re-seed
+///    delivery, the nest-held pull-back, the lived-in recovery — lands under
+///    `__landing/<kind>`, never the rail's `__<kind>`, because the nest mints
+///    that rail within a minute of holding mail and a record into it is the
+///    rail's own, seal-gated (`reserved-folders.md` § __mail Sync → *The
+///    landing set*).
 /// 3. **Only under the connection actor**, whose own quota pays for it — the
 ///    caller is the owner writing into their own custody, never a foreign writer.
 /// 4. **Never a co-mingle**: an existing set of that name in a non-backup mode is
@@ -213,7 +220,8 @@ async fn writable_or_provisioned_backup_set(
     let segment_axis =
         fauna_sync_engine::segment_backup::parse_reserved_backup_set_name(name).is_some();
     let folder_axis = fauna_core::data::parse_folder_backup_set_name(name).is_some();
-    if !segment_axis && !folder_axis {
+    let landing_axis = fauna_sync_engine::segment_backup::parse_landing_set_name(name).is_some();
+    if !segment_axis && !folder_axis && !landing_axis {
         return Err(coded("not_found", "folder not found"));
     }
 
@@ -1974,7 +1982,7 @@ fn changes_record_handler() -> RpcHandler {
             let fs = writable_or_provisioned_backup_set(&state, &actor_id, &req).await?;
 
             // The metering + floor + backup/web routing is IDENTICAL to the
-            // cross-nest federated record relay (`federation.md` § Cross-nest…):
+            // cross-nest federated record relay (`federation-shared-folders.md` § Cross-nest…):
             // both call this one core, so a same-nest and a federated write of
             // the same content behave identically (uniform shape — priority #2).
             // The gate differs (this plane's device write-capability check

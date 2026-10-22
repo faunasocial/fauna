@@ -24,7 +24,7 @@ async fn start_server() -> String {
 }
 
 /// The landing page `info_page` renders — what an unmatched path falls to.
-const LANDING_MARKER: &str = "Fauna Nest API";
+const LANDING_MARKER: &str = "<h1>Fauna nest</h1>";
 
 async fn get_body(url: &str) -> (u16, String, String) {
     let resp = reqwest::Client::new().get(url).send().await.unwrap();

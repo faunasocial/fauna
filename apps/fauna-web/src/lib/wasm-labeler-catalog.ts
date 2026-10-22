@@ -1,11 +1,11 @@
 import type { SharedRpcPort } from '../../static/fauna_wasm_labeler_catalog.js';
-import { base } from '$app/paths';
+import { asset } from '$app/paths';
 import type { LabelerCatalogMachine } from '../../static/fauna_wasm_labeler_catalog.js';
 import { hexToBytes } from './hex';
 import { sharedAccountPort } from './account-runtime';
 
 // Re-export so route/component files consume the machine type via
-// `$lib/wasm-labeler-catalog` rather than a fragile relative path into
+// `#lib/wasm-labeler-catalog` rather than a fragile relative path into
 // `static/` (mirrors `wasm-media.ts` / `wasm-folders.ts`).
 export type { LabelerCatalogMachine };
 
@@ -37,7 +37,7 @@ export function ensureLabelerCatalogWasm(): Promise<void> {
   if (!wasmInit) {
     wasmInit = (async () => {
       const mod = await import('../../static/fauna_wasm_labeler_catalog.js');
-      await mod.default(`${base}/fauna_wasm_labeler_catalog_bg.wasm`);
+      await mod.default(asset('fauna_wasm_labeler_catalog_bg.wasm'));
       wasmModule = mod;
     })().catch((e) => {
       wasmInit = null;
@@ -62,7 +62,7 @@ export interface LabelerCatalogMachineObserver {
 
 /**
  * Build the page-level `LabelerCatalogMachine` over the SPA singleton's
- * socket — `port` is `sharedRpcPort(secretHex)` from `$lib/rpc`; `secretHex`
+ * socket — `port` is `sharedRpcPort(secretHex)` from `#lib/rpc`; `secretHex`
  * is the actor's 32-byte ed25519 seed, which gives the machine its grant
  * seams (subscribing a `wasm` mail labeler mints the per-labeler grant,
  * unsubscribing revokes it — recorded through the account's succession

@@ -14,7 +14,7 @@ where
 ///
 /// `provider_json` must contain a `"provider"` field set to one of:
 /// - hetzner / digitalocean / vultr / linode: `token`
-/// - ovh: `app_key`, `app_secret`, `consumer_key`, `project_id`
+/// - ovh: `app_key`, `app_secret`, `consumer_key` (locations are `<project>/<region>`)
 ///
 /// Returns a JSON array of `{id, name, city, country}` objects.
 #[uniffi::export]

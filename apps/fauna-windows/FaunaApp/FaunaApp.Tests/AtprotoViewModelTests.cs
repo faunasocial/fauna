@@ -996,7 +996,7 @@ public class AtprotoViewModelTests
             Snapshot(level: "hosted_full", credentials: new[] { Credential(credentialId: "new-cred", label: label, revealable: true) }),
             "fresh-secret");
 
-        await vm.MintCredentialAsync("Ivory");
+        await vm.MintCredentialAsync("Ivory", false);
 
         Assert.Contains("Mint:Ivory:False", m.Calls);
         Assert.Single(vm.Credentials);
@@ -1024,7 +1024,7 @@ public class AtprotoViewModelTests
                 Credential(credentialId: "second", label: label, revealable: true),
             }),
             "second-secret");
-        await vm.MintCredentialAsync("Graysky");
+        await vm.MintCredentialAsync("Graysky", false);
 
         Assert.Equal(2, vm.Credentials.Count);
         Assert.Equal("first-secret", vm.Credentials.Single(c => c.CredentialId == "first").RevealText);

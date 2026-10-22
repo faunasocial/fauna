@@ -548,3 +548,48 @@ async fn an_oversized_success_body_is_refused_by_get_capped() {
         .expect("a body at the cap is read whole");
     assert_eq!(ok.len(), 4096);
 }
+
+/// An anonymous content API — another nest's public routes — never sends an
+/// `Authorization` header, on a GET, a capped GET or the C2PA HEAD alike, and a
+/// `401` surfaces once with no retry (there is no source to refresh).
+#[tokio::test]
+async fn an_anonymous_api_never_sends_a_bearer() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/blob/abc"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("bytes"))
+        .mount(&server)
+        .await;
+    Mock::given(method("HEAD"))
+        .and(path("/api/v1/blob/abc"))
+        .respond_with(ResponseTemplate::new(200).insert_header("x-c2pa", "true"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/quota"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+    let client = ReqwestNestContentApi::anonymous(server.uri(), reqwest::Client::new());
+    assert_eq!(&client.get("/api/v1/blob/abc").await.unwrap()[..], b"bytes");
+    assert_eq!(
+        &client
+            .get_capped("/api/v1/blob/abc", &[], 1024)
+            .await
+            .unwrap()[..],
+        b"bytes"
+    );
+    assert!(client.head_has_c2pa("/api/v1/blob/abc").await.unwrap());
+    assert!(matches!(
+        client.get("/api/v1/quota").await,
+        Err(ApiError::Status { code: 401, .. })
+    ));
+    let requests = server.received_requests().await.expect("recording is on");
+    assert_eq!(requests.len(), 4, "the 401 is not retried");
+    assert!(
+        requests
+            .iter()
+            .all(|r| !r.headers.contains_key("authorization")),
+        "an anonymous request carried a bearer"
+    );
+}

@@ -398,7 +398,7 @@ pub struct FolderPendingShare {
     /// The sharer's handle — bare for a same-nest sharer (nest-resolved from
     /// [`Self::shared_by`]), paired with [`Self::shared_by_domain`] for a
     /// cross-nest sharer whose domain the recipient's own nest verified
-    /// (`federation.md` § Cross-nest shared folders + channel append → *The
+    /// (`federation-shared-folders.md` § Cross-nest shared folders + channel append → *The
     /// cross-nest owner label*). `None` for a handle-less or unverified sharer;
     /// render [`Self::shared_by_display`], which already folds in the join and
     /// the fallback.
@@ -445,7 +445,7 @@ pub struct FolderPendingShare {
     /// so a cross-nest member's foreign-set row knows whether this client may
     /// offer a folder binding. `None` (no role row) ⇒ unknown ⇒ reader.
     /// **Advisory-for-UI only — never an authorization input**
-    /// (`docs/goal/architecture/federation.md` § Cross-nest → *Recipient-side
+    /// (`docs/goal/architecture/federation-shared-folders.md` § Cross-nest → *Recipient-side
     /// access discovery*).
     pub access: Option<String>,
     /// The home nest's deployment `nest_actor_id` (the staged
@@ -1339,7 +1339,7 @@ mod tests {
     }
 
     /// A cross-nest share whose owner label the recipient's own nest verified
-    /// (`federation.md` § … *The cross-nest owner label*) arrives with
+    /// (`federation-shared-folders.md` § … *The cross-nest owner label*) arrives with
     /// `shared_by` unstamped — the gate still knocks — and the pair beside it:
     /// the knock names the sharer by the canonical `handle@domain`, never a
     /// bare handle. One without the pair stays the empty unknown-sharer string.

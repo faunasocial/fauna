@@ -50,6 +50,10 @@ use fauna_core::obligation::{ComposedVerdict, ContentPolicy, ViewerThresholds};
 #[derive(Default)]
 pub struct ContentPolicyState {
     engine: std::cell::RefCell<fauna_core::obligation::ContentPolicyState>,
+    /// The guardian document's scorers, run on this (the ward's) device — fed
+    /// the same policy as the engine, so its labelers compile once per
+    /// document, never per render.
+    guardian: std::cell::RefCell<fauna_client_policy::GuardianRules>,
     /// This session's nest, bound by [`attach_session`] — what the reconnect
     /// sweep re-reads the viewer's own thresholds through
     /// ([`spawn_spam_preferences_check`]). Cleared with the rest of the state
@@ -99,6 +103,7 @@ impl ContentPolicyState {
     /// [`Self::verdict_for`]. `None` clears the floor (unsupervised, or a
     /// graduated ward).
     pub fn set_ward_content_policy(&self, policy: Option<ContentPolicy>) {
+        self.guardian.borrow_mut().set_policy(policy.as_ref());
         self.engine.borrow_mut().set_ward_content_policy(policy);
     }
 
@@ -118,6 +123,13 @@ impl ContentPolicyState {
         self.engine.borrow_mut().set_region_policies(policies);
     }
 
+    /// Set the published rules of the session nest — the engine's fourth
+    /// source (`nest-rules.md` § The nest source in the engine). Fed from
+    /// `crate::nest_rules::apply_rule_sets`; replaces, never merges.
+    pub fn set_nest_policies(&self, policies: Vec<fauna_core::obligation::NestRuleSet>) {
+        self.engine.borrow_mut().set_nest_policies(policies);
+    }
+
     /// The content-policy render verdict for a piece of content, keyed on the
     /// lightweight [`ContentLabelEntry`] list both surfaces already hold per
     /// post/message (§ Content policy).
@@ -133,6 +145,56 @@ impl ContentPolicyState {
     /// only needs the verb reads `.verdict`.
     pub fn verdict_for(&self, labels: &[ContentLabelEntry]) -> ComposedVerdict {
         self.engine.borrow().verdict_for(labels)
+    }
+
+    /// The number of rules in the guardian's rule document the engine holds,
+    /// or `None` with no document — the e2e witness that a guardian's save
+    /// reached this device (`crate::automation`'s `ward_rule_document_rules`).
+    pub fn ward_document_rule_count(&self) -> Option<usize> {
+        self.engine
+            .borrow()
+            .ward_content_policy()
+            .and_then(|p| p.document.as_ref())
+            .map(|d| d.rules.len())
+    }
+
+    /// Which sources the render engine holds right now — a failing render
+    /// test's self-diagnosis (`crate::automation`'s `content_policy_sources`):
+    /// whether a guardian policy, a guardian document and the viewer's own
+    /// thresholds are loaded, and how many region and nest rule sets.
+    pub fn sources_json(&self) -> serde_json::Value {
+        let engine = self.engine.borrow();
+        // The engine's own verdict for a confidently spam-labelled item — what
+        // the composed fold answers before any surface paints it.
+        let probe = engine.verdict_for(&[ContentLabelEntry {
+            category: "spam".to_string(),
+            confidence_per_mille: 900,
+        }]);
+        serde_json::json!({
+            "spam_probe": format!("{:?} {:?}", probe.verdict, probe.source),
+            "guardian_policy": engine.ward_content_policy().is_some(),
+            "guardian_document_rules": engine
+                .ward_content_policy()
+                .and_then(|p| p.document.as_ref())
+                .map(|d| d.rules.len()),
+            "own_thresholds": engine.own_thresholds().is_some(),
+            "region_sets": engine.region_policies().len(),
+            "nest_sets": engine.nest_policies().len(),
+        })
+    }
+
+    /// An item's labels with the factors the guardian document's keyword
+    /// rules and labelers produce over it joined — the shared
+    /// [`fauna_client_policy::GuardianRules::join_labels`].
+    pub fn join_guardian_labels<'a>(
+        &self,
+        content_id: Option<&[u8; 32]>,
+        labels: &'a [ContentLabelEntry],
+        input: impl FnOnce() -> fauna_core::scoring::LabelerPostInput,
+    ) -> std::borrow::Cow<'a, [ContentLabelEntry]> {
+        self.guardian
+            .borrow()
+            .join_labels(content_id, labels, input)
     }
 
     /// [`Self::verdict_for`] for one identified item, plus the viewer's own
@@ -183,6 +245,59 @@ impl ContentPolicyState {
             })
             .collect();
         Some((entries, offset))
+    }
+}
+
+/// The guardian's own reason, verbatim and in the app's language, when a rule
+/// of the guardian's document drove `verdict` — `None` for a floor, an
+/// unreadable document, the viewer's own threshold or any other source
+/// (`nest-rules.md` § The shared rule editor → *The reason is the member's to
+/// read*). The shared engine decides which; this only picks the language.
+pub fn guardian_reason(verdict: &ComposedVerdict) -> Option<String> {
+    let rule = verdict.guardian()?.rule.as_ref()?;
+    let text = fauna_core::content_policy::reason_text(&rule.reason, crate::nest_rules::UI_LANG);
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+/// The content-policy placeholder painted **in place of** an item's body for
+/// a `Block` or `Collapse` verdict not attributed to a region, a nest or the
+/// viewer's own report: `content-policy-blocked-notice` carrying the app's
+/// fixed frame (`state` names the verb), the guardian's reason beside it in
+/// `content-policy-blocked-reason` when a document rule drove it — never inside
+/// the notice's text — and, for a collapse, the reveal. `scope` is the item's
+/// own container (`post-card[i]`, the post detail dialog), or `None` for a
+/// flat surface (a conversation bubble). The [`crate::nest_rules::placeholder`]
+/// twin.
+pub fn placeholder(
+    verdict: &ComposedVerdict,
+    reveal: crate::element::Gesture,
+    scope: Option<(&str, usize)>,
+) -> Vec<crate::element::Element> {
+    use crate::element::Element;
+    use fauna_i18n::strings::family;
+    use fauna_ui_ids as ids;
+    let blocked = verdict.verdict == fauna_core::obligation::RenderVerdict::Block;
+    let (state, frame) = if blocked {
+        ("blocked", family::CONTENT_BLOCKED_NOTICE)
+    } else {
+        ("collapsed", family::CONTENT_COLLAPSED_NOTICE)
+    };
+    let mut els =
+        vec![Element::label(ids::CONTENT_POLICY_BLOCKED_NOTICE, frame).attr("state", state)];
+    if let Some(reason) = guardian_reason(verdict) {
+        els.push(Element::label(ids::CONTENT_POLICY_BLOCKED_REASON, reason));
+    }
+    if !blocked {
+        els.push(Element::gesture_button(
+            ids::CONTENT_POLICY_COLLAPSED_REVEAL_BUTTON,
+            family::CONTENT_REVEAL_BUTTON,
+            true,
+            reveal,
+        ));
+    }
+    match scope {
+        Some((container, i)) => els.into_iter().map(|e| e.within(container, i)).collect(),
+        None => els,
     }
 }
 

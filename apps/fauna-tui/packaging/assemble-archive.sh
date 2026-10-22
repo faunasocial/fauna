@@ -3,15 +3,18 @@ set -euo pipefail
 
 # Assemble the fauna-tui release archive — the ONE definition of what the
 # terminal app's channel ships (docs/goal/architecture/installers/tui.md § The
-# ratified channel): fauna-tui + fauna-sync-agent + install.sh, one directory,
-# one archive per target.
+# ratified channel): fauna-tui + fauna-sync-agent + fauna-cli + install.sh, one
+# directory, one archive per target. fauna-cli is the cli app's device shell
+# (docs/goal/architecture/apps/cli.md § The device shell) — the eighth app rides
+# the terminal app's channel as its third payload member (decision 4 of
+# installers/tui.md § Decisions): same targets, same signatures, same install.
 #
 # Usage:
 #   assemble-archive.sh --bin-dir <dir> --out <dir> --suffix <target-suffix> [--exe] [--no-tar]
 #
-#   --bin-dir  where the two built binaries are (a cargo target's release/ dir,
-#              or — for the install-then-drive witness — a staging copy of the
-#              DEBUG binaries; this script reads nothing but the two files).
+#   --bin-dir  where the three built binaries are (a cargo target's release/
+#              dir, or — for the install-then-drive witness — a staging copy of
+#              the DEBUG binaries; this script reads nothing but the three files).
 #   --out      where the staged directory and the archive land.
 #   --suffix   the target suffix the release names artifacts by
 #              (x86_64-linux, aarch64-darwin, x64-windows, …).
@@ -48,9 +51,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NAME="fauna-tui-$SUFFIX"
 STAGE="$OUT/$NAME"
 
-for bin in fauna-tui fauna-sync-agent; do
+for bin in fauna-tui fauna-sync-agent fauna-cli; do
     [ -f "$BIN_DIR/$bin$EXT" ] || {
-        echo "Error: $BIN_DIR/$bin$EXT not found — build fauna-tui AND fauna-sync-agent first (just tui-release)." >&2
+        echo "Error: $BIN_DIR/$bin$EXT not found — build fauna-tui, fauna-sync-agent AND fauna-cli first (just tui-release)." >&2
         exit 1
     }
 done
@@ -59,6 +62,7 @@ rm -rf "$STAGE"
 mkdir -p "$STAGE"
 install -m755 "$BIN_DIR/fauna-tui$EXT" "$STAGE/fauna-tui$EXT"
 install -m755 "$BIN_DIR/fauna-sync-agent$EXT" "$STAGE/fauna-sync-agent$EXT"
+install -m755 "$BIN_DIR/fauna-cli$EXT" "$STAGE/fauna-cli$EXT"
 if [ -z "$EXT" ]; then
     install -m755 "$SCRIPT_DIR/install.sh" "$STAGE/install.sh"
 fi

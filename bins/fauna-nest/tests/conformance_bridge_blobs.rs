@@ -712,7 +712,7 @@ async fn an_mta_may_not_mint_a_folder_token() {
 /// writer, so even a genuine MDA that hand-sets `purpose: ForeignFolderWrite`
 /// on its request is refused. The byte routes are purpose-blind, so the mint
 /// gate is the only place a caller-set purpose can be stopped from opening the
-/// byte plane under the bridge's identity (`federation.md` § Cross-nest…,
+/// byte plane under the bridge's identity (`federation-shared-folders.md` § Cross-nest…,
 /// contract point (ii)).
 #[tokio::test]
 async fn a_bridge_may_not_mint_a_foreign_folder_write_token() {

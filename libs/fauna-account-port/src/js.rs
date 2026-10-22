@@ -22,7 +22,7 @@ use crate::{PortFault, PortTransport};
 const SHARED_ACCOUNT_PORT_TS: &'static str = r#"
 /**
  * The tab's account runtime, lent to a wasm chunk other than the core chunk
- * as pure data in / pure data out. Minted per account by `$lib/account-runtime`
+ * as pure data in / pure data out. Minted per account by `#lib/account-runtime`
  * (`sharedAccountPort`) over the core chunk's `accountPortCall`; consumed by
  * every chunk machine that needs the store.
  */

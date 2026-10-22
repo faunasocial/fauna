@@ -24,9 +24,11 @@
 //!
 //! Spec tracked internally.
 
+use fauna_core::data::Timestamp;
 use fauna_core::encoding::EmbedAsBytes;
 use fauna_core::identity::{ActorId, ActorKeypair};
 use fauna_core::subscription::crypto::subscriber_mlkem_encaps_key;
+use fauna_core::subscription::types::{FollowIntent, FollowIntentKind};
 use fauna_protocol::RpcRequester;
 use fauna_protocol::discovery::{NestInfoReply, NestInfoRequest, capability};
 use fauna_protocol::subscriptions::{
@@ -58,6 +60,59 @@ pub fn encaps_key_publish_request(subscriber: &ActorKeypair) -> EncapsKeyPublish
         extra: Default::default(),
     }
 }
+
+/// The subscriber's own signed [`FollowIntent`] (`federated-follow.md`
+/// § Decision 2, *The intent*), in the embed-as-bytes wire shape
+/// `SubscribeRequest.intent` / `UnsubscribeRequest.intent` carry. Signed by
+/// `subscriber`'s identity key (which holds every capability, `Follow`
+/// included). `home_nest_id` is the subscriber's own nest — the only nest that
+/// may relay it — and `created_at` orders the subscriber's intents at the
+/// author's nest, so a caller passes now.
+pub fn mint_follow_intent(
+    subscriber: &ActorKeypair,
+    author: ActorId,
+    tier: &str,
+    kind: FollowIntentKind,
+    home_nest_id: [u8; 32],
+    created_at: Timestamp,
+) -> Result<EmbedAsBytes, fauna_core::error::Error> {
+    let intent = FollowIntent {
+        subscriber: subscriber.actor_id(),
+        author,
+        tier: tier.to_string(),
+        kind,
+        home_nest_id,
+        created_at,
+    };
+    let (bytes, envelope) = fauna_core::encoding::sign_envelope(subscriber, &intent)?;
+    Ok(EmbedAsBytes::from_signed(bytes, envelope))
+}
+
+/// An app-supplied home nest URL as the wire carries it: trimmed, without a
+/// trailing slash, `None` when blank (blank means this nest).
+fn normalize_home_nest_url(home: Option<String>) -> Option<String> {
+    home.map(|u| u.trim().trim_end_matches('/').to_string())
+        .filter(|u| !u.is_empty())
+}
+
+/// Why a follow that may cross nests failed: the nest's own error, or an
+/// intent this client could not mint (its nest names no well-formed id).
+#[derive(Debug)]
+pub enum FollowError<E> {
+    Nest(E),
+    Intent(String),
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for FollowError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Nest(e) => e.fmt(f),
+            Self::Intent(why) => write!(f, "follow intent: {why}"),
+        }
+    }
+}
+
+impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error for FollowError<E> {}
 
 pub mod custody;
 pub mod orchestration;
@@ -282,6 +337,8 @@ impl<R: RpcRequester> SubscriptionsClient<R> {
             .request(
                 "fauna.subscriptions.subscribe",
                 SubscribeRequest {
+                    home_nest_url: None,
+                    intent: None,
                     author_id,
                     tier,
                     mlkem_encaps_key,
@@ -289,6 +346,120 @@ impl<R: RpcRequester> SubscriptionsClient<R> {
                 },
             )
             .await
+    }
+
+    /// The follow gesture every app calls — [`Self::subscribe_publishing_ek`]
+    /// for an author on this nest, and the **federated follow** for an author
+    /// homed on another (`federated-follow.md` § Decision 2). `home_nest_url` is
+    /// the author's home as the app learned it (a profile reached by
+    /// `handle@domain`, a relayed or delivered post's
+    /// `PostSummary::home_nest_url`); `None` or blank is this nest. Naming a
+    /// home makes the subscriber mint their own signed [`FollowIntent`] — the
+    /// subscriber's act the author's nest must see, never their nest's word for
+    /// it — naming the nest this client is connected to as their home, and the
+    /// nest relays it verbatim. An author hosted here is a local follow
+    /// whatever home is named (the nest's first arm), so a stale home costs
+    /// one `fauna.nest.info` read and nothing else.
+    pub async fn subscribe_across_nests(
+        &self,
+        author_id: ActorId,
+        tier: impl Into<String>,
+        subscriber: &ActorKeypair,
+        home_nest_url: Option<String>,
+    ) -> Result<SubscribeReply, FollowError<R::Error>> {
+        let tier = tier.into();
+        let mlkem_encaps_key = Some(fauna_protocol::ByteBuf::from(
+            subscriber_mlkem_encaps_key(subscriber).to_vec(),
+        ));
+        let Some(home) = normalize_home_nest_url(home_nest_url) else {
+            return self
+                .subscribe_inner(author_id, tier, mlkem_encaps_key)
+                .await
+                .map_err(FollowError::Nest);
+        };
+        let intent = self
+            .follow_intent(subscriber, author_id, &tier, FollowIntentKind::Subscribe)
+            .await?;
+        self.nest
+            .request(
+                "fauna.subscriptions.subscribe",
+                SubscribeRequest {
+                    home_nest_url: Some(home),
+                    intent: Some(intent),
+                    author_id,
+                    tier,
+                    mlkem_encaps_key,
+                    extra: Default::default(),
+                },
+            )
+            .await
+            .map_err(FollowError::Nest)
+    }
+
+    /// The leave twin of [`Self::subscribe_across_nests`]: [`Self::unsubscribe`]
+    /// for an author on this nest, the federated unsubscribe for one homed on
+    /// another. `tier` is the tier being left — the unsubscribe intent names it
+    /// and the home stamps its replay floor under it (the leave itself still
+    /// covers every paid tier, as the local door's does).
+    pub async fn unsubscribe_across_nests(
+        &self,
+        author_id: ActorId,
+        tier: impl Into<String>,
+        subscriber: &ActorKeypair,
+        home_nest_url: Option<String>,
+    ) -> Result<UnsubscribeReply, FollowError<R::Error>> {
+        let Some(home) = normalize_home_nest_url(home_nest_url) else {
+            return self.unsubscribe(author_id).await.map_err(FollowError::Nest);
+        };
+        let intent = self
+            .follow_intent(
+                subscriber,
+                author_id,
+                &tier.into(),
+                FollowIntentKind::Unsubscribe,
+            )
+            .await?;
+        self.nest
+            .request(
+                "fauna.subscriptions.unsubscribe",
+                UnsubscribeRequest {
+                    home_nest_url: Some(home),
+                    intent: Some(intent),
+                    author_id,
+                    extra: Default::default(),
+                },
+            )
+            .await
+            .map_err(FollowError::Nest)
+    }
+
+    /// Mint the subscriber's intent naming the nest this client is connected
+    /// to — its id as `fauna.nest.info` states it, the id the nest compares
+    /// against its own key before relaying.
+    async fn follow_intent(
+        &self,
+        subscriber: &ActorKeypair,
+        author: ActorId,
+        tier: &str,
+        kind: FollowIntentKind,
+    ) -> Result<EmbedAsBytes, FollowError<R::Error>> {
+        let info: NestInfoReply = self
+            .nest
+            .request("fauna.nest.info", NestInfoRequest::default())
+            .await
+            .map_err(FollowError::Nest)?;
+        let home_nest_id = fauna_core::hex32::decode(&info.nest_id).map_err(|e| {
+            FollowError::Intent(format!("this nest's id is not a 32-byte hex key: {e}"))
+        })?;
+        mint_follow_intent(
+            subscriber,
+            author,
+            tier,
+            kind,
+            home_nest_id,
+            Timestamp::now(),
+        )
+        .map_err(|e| FollowError::Intent(e.to_string()))
     }
 
     /// `fauna.subscriptions.encaps_key.publish` — publish the caller's
@@ -333,6 +504,8 @@ impl<R: RpcRequester> SubscriptionsClient<R> {
             .request(
                 "fauna.subscriptions.unsubscribe",
                 UnsubscribeRequest {
+                    home_nest_url: None,
+                    intent: None,
                     author_id,
                     extra: Default::default(),
                 },
@@ -737,6 +910,7 @@ mod tests {
             "fauna.subscriptions.mine.list" => fauna_protocol::encode_canonical(&MineListReply {
                 extra: Default::default(),
                 subscriptions: vec![MineSubscription {
+                    home_nest_url: None,
                     extra: Default::default(),
                     author_id: ActorId([0xAB; 32]),
                     tier: "gold".into(),
@@ -745,11 +919,19 @@ mod tests {
                     since: Timestamp(1000),
                 }],
             }),
+            "fauna.nest.info" => fauna_protocol::encode_canonical(&NestInfoReply {
+                nest_id: hex::encode(OWN_NEST_ID),
+                ..Default::default()
+            }),
             other => panic!("RecordingRequester: unhandled kind {other}"),
         }
         .expect("encode reply")
         .to_vec()
     }
+
+    /// The nest id the reply table's `fauna.nest.info` answers with — the id a
+    /// minted follow intent must name as the subscriber's home.
+    const OWN_NEST_ID: [u8; 32] = [0x42; 32];
 
     /// A 32-byte actor id with a distinguishable fill.
     fn actor() -> ActorId {
@@ -1018,5 +1200,144 @@ mod tests {
         let req: DelegateUploadRequest = fauna_protocol::decode_strict(&payload).expect("decodes");
         assert_eq!(req.authorization.envelope.len(), 100);
         assert_eq!(req.authorization.bytes, vec![0xAA; 4]);
+    }
+
+    // ── The federated follow (`federated-follow.md` § Decision 2) ───────────
+
+    /// Decode and verify a carried intent exactly as both nests do: the
+    /// authoring envelope under `Capability::Follow`.
+    fn verified_intent(wire: &EmbedAsBytes) -> FollowIntent {
+        let (bytes, env) = wire.clone().into_signed().expect("embed-as-bytes");
+        let intent: FollowIntent =
+            fauna_core::encoding::decode_signed_bytes(&bytes).expect("decodes");
+        fauna_core::encoding::verify_authoring_envelope(
+            &intent,
+            &bytes,
+            &env,
+            wire.signer_auth.as_deref(),
+            &fauna_core::data::Capability::Follow,
+            intent.created_at,
+        )
+        .expect("the intent verifies under Capability::Follow");
+        intent
+    }
+
+    /// A follow of an author on this nest names no home and carries no
+    /// intent — today's subscribe, ek published — and never reads the nest id.
+    #[test]
+    fn a_follow_naming_no_home_is_the_local_subscribe() {
+        let me = ActorKeypair::generate();
+        for home in [None, Some("   ".to_string())] {
+            let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+            let client = SubscriptionsClient::new(rec.clone());
+            block_on(client.subscribe_across_nests(actor(), "followers", &me, home))
+                .expect("infallible mock");
+            assert_eq!(rec.kinds(), vec!["fauna.subscriptions.subscribe"]);
+            let (_, payload) = rec.recorded();
+            let req: SubscribeRequest = fauna_protocol::decode_strict(&payload).expect("decodes");
+            assert_eq!(req.home_nest_url, None);
+            assert!(req.intent.is_none(), "a local follow carries no intent");
+            assert!(req.mlkem_encaps_key.is_some(), "the ek is still published");
+        }
+    }
+
+    /// A follow of an author homed elsewhere carries the home and the
+    /// subscriber's own signed intent, naming the nest the client is
+    /// connected to — the one nest that may relay it.
+    #[test]
+    fn a_follow_naming_a_home_carries_the_subscribers_signed_intent_naming_this_nest() {
+        let me = ActorKeypair::generate();
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = SubscriptionsClient::new(rec.clone());
+        block_on(client.subscribe_across_nests(
+            actor(),
+            "followers",
+            &me,
+            Some(" https://home.test/ ".into()),
+        ))
+        .expect("infallible mock");
+
+        assert_eq!(
+            rec.kinds(),
+            vec!["fauna.nest.info", "fauna.subscriptions.subscribe"]
+        );
+        let (_, payload) = rec.recorded();
+        let req: SubscribeRequest = fauna_protocol::decode_strict(&payload).expect("decodes");
+        assert_eq!(req.home_nest_url.as_deref(), Some("https://home.test"));
+        assert_eq!(req.author_id, actor());
+        assert_eq!(req.tier, "followers");
+        assert!(req.mlkem_encaps_key.is_some());
+        let intent = verified_intent(req.intent.as_ref().expect("the intent rides"));
+        assert_eq!(intent.subscriber, me.actor_id());
+        assert_eq!(intent.author, actor());
+        assert_eq!(intent.tier, "followers");
+        assert_eq!(intent.kind, FollowIntentKind::Subscribe);
+        assert_eq!(intent.home_nest_id, OWN_NEST_ID);
+    }
+
+    /// The leave twin: the intent states `unsubscribe` and the tier being left
+    /// (the home stamps its replay floor under it).
+    #[test]
+    fn an_unfollow_naming_a_home_carries_an_unsubscribe_intent_for_the_tier_left() {
+        let me = ActorKeypair::generate();
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = SubscriptionsClient::new(rec.clone());
+        block_on(client.unsubscribe_across_nests(
+            actor(),
+            "followers",
+            &me,
+            Some("https://home.test".into()),
+        ))
+        .expect("infallible mock");
+
+        let (kind, payload) = rec.recorded();
+        assert_eq!(kind, "fauna.subscriptions.unsubscribe");
+        let req: UnsubscribeRequest = fauna_protocol::decode_strict(&payload).expect("decodes");
+        assert_eq!(req.home_nest_url.as_deref(), Some("https://home.test"));
+        let intent = verified_intent(req.intent.as_ref().expect("the intent rides"));
+        assert_eq!(intent.kind, FollowIntentKind::Unsubscribe);
+        assert_eq!(intent.tier, "followers");
+        assert_eq!(intent.subscriber, me.actor_id());
+        assert_eq!(intent.home_nest_id, OWN_NEST_ID);
+
+        // No home: the plain leave, no intent and no nest-id read.
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = SubscriptionsClient::new(rec.clone());
+        block_on(client.unsubscribe_across_nests(actor(), "followers", &me, None))
+            .expect("infallible mock");
+        assert_eq!(rec.kinds(), vec!["fauna.subscriptions.unsubscribe"]);
+        let req: UnsubscribeRequest =
+            fauna_protocol::decode_strict(&rec.recorded().1).expect("decodes");
+        assert!(req.intent.is_none() && req.home_nest_url.is_none());
+    }
+
+    /// A nest whose `nest.info` names no well-formed id gets no intent: an
+    /// intent naming a guessed home would be refused there anyway, so the
+    /// follow fails before anything is sent.
+    #[test]
+    fn a_malformed_own_nest_id_sends_no_follow() {
+        fn bad_info(kind: &'static str) -> Vec<u8> {
+            match kind {
+                "fauna.nest.info" => fauna_protocol::encode_canonical(&NestInfoReply {
+                    nest_id: "not-hex".into(),
+                    ..Default::default()
+                })
+                .expect("encode")
+                .to_vec(),
+                other => reply(other),
+            }
+        }
+        let me = ActorKeypair::generate();
+        let rec = std::sync::Arc::new(RecordingRequester::new(bad_info));
+        let client = SubscriptionsClient::new(rec.clone());
+        let err = block_on(client.subscribe_across_nests(
+            actor(),
+            "followers",
+            &me,
+            Some("https://home.test".into()),
+        ))
+        .expect_err("no intent without this nest's id");
+        assert!(matches!(err, FollowError::Intent(_)), "{err}");
+        assert_eq!(rec.kinds(), vec!["fauna.nest.info"]);
     }
 }

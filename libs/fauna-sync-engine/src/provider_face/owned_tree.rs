@@ -807,7 +807,10 @@ fn check_rel(rel: &str) -> Result<&str> {
             .split('/')
             .any(|c| c.is_empty() || c == "." || c == "..");
     if bad {
-        return Err(anyhow!("not a document path: {rel:?}"));
+        return Err(anyhow!(
+            "not a document path: {}",
+            fauna_core::log_redact::log_path(rel)
+        ));
     }
     Ok(rel)
 }
@@ -824,9 +827,12 @@ fn refuse_ignored<E: ProviderEngine>(engine: &E, rel: &str) -> Result<()> {
 
 fn remove_if_present(path: &Path) -> Result<()> {
     match std::fs::remove_file(path) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-            Err(e).with_context(|| format!("removing {}", path.display()))
-        }
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e).with_context(|| {
+            format!(
+                "removing {}",
+                fauna_core::log_redact::log_path(&path.to_string_lossy())
+            )
+        }),
         _ => Ok(()),
     }
 }
@@ -839,7 +845,14 @@ fn kept_rels(root: &Path) -> Result<Vec<String>> {
         let entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e).with_context(|| format!("listing {}", dir.display())),
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!(
+                        "listing {}",
+                        fauna_core::log_redact::log_path(&dir.to_string_lossy())
+                    )
+                });
+            }
         };
         for entry in entries {
             let entry = entry?;

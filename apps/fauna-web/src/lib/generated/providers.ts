@@ -366,14 +366,19 @@ export const PROVIDERS: ProviderMeta[] = [
       }
     ],
     "postVerifySelect": {
-      "id": "project-select",
-      "labelKey": "provisioning.ovh.project",
-      "source": "projects",
+      "id": "location-select",
+      "labelKey": "provisioning.ovh.location",
+      "source": "regions",
       "required": true
     },
     "registrarRequiresContact": null,
     "registrarNotesKey": null,
-    "curatedOffers": [],
+    "curatedOffers": [
+      "d2-2",
+      "d2-4",
+      "d2-8",
+      "b2-7"
+    ],
     "tldPricingEndpoint": null
   },
   {

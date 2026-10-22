@@ -13,7 +13,7 @@ use fauna_mls::wrapped_blob::{
 
 use fauna_core::grant_event::GrantEvent;
 
-use crate::error::{NestError, SignerError};
+use crate::error::{NestError, SetMailEnabledError, SignerError};
 use crate::machine::{FetchedSpamModel, IdentitySigner, NestClient};
 use fauna_protocol::bridge_routing::EpochSealKey;
 use fauna_protocol::wrapped_blob::{
@@ -81,6 +81,13 @@ pub struct FakeNestState {
     /// call. `Rejected` simulates a non-admin actor (design A's server-enforced
     /// scoping); `Transient` simulates a connectivity failure.
     pub fail_set_mail_enabled_with: Option<NestError>,
+    /// The box's `fauna.setup.status` report says it cannot enable mail: the
+    /// fake's `mail_unavailable_here` reads it, and `set_mail_enabled(true)`
+    /// answers the typed refusal, as the nest does. Default `false`.
+    pub mail_unavailable_here: bool,
+    /// The flip alone answers the typed refusal while the read still says
+    /// available — the box changed between the machine's read and its enable.
+    pub refuse_set_mail_enabled_unavailable: bool,
     /// The effective CalDAV port the fake reads back via `get_caldav_port`.
     /// `None` ⇒ unset ⇒ returns `DEFAULT_CALDAV_PORT`, mirroring the nest's
     /// `.unwrap_or(DEFAULT_CALDAV_PORT)` for the admin-set port singleton.
@@ -89,6 +96,9 @@ pub struct FakeNestState {
     /// read of `get_caldav_port` (the machine must
     /// degrade to the for-node-URL default, not fail hydrate).
     pub fail_get_caldav_port_with: Option<NestError>,
+    /// What `get_caldav_port` reports as the nest's DAV listener shape
+    /// (`GetCaldavPortReply.direct_listener`). Default `None` (undeclared).
+    pub dav_direct_listener: Option<bool>,
     /// What `serves_any_webdav_set` reports — the per-actor "serves ≥1 folder
     /// over WebDAV" fold of `fauna.folders.list`. Default `false` (no served
     /// set), the state of a fresh actor.
@@ -275,13 +285,19 @@ impl NestClient for FakeNestClient {
             token,
         ))
     }
-    async fn set_mail_enabled(&self, enabled: bool) -> Result<(), NestError> {
+    async fn set_mail_enabled(&self, enabled: bool) -> Result<(), SetMailEnabledError> {
         let mut s = self.inner.lock().unwrap();
         if let Some(err) = s.fail_set_mail_enabled_with.clone() {
-            return Err(err);
+            return Err(err.into());
+        }
+        if enabled && (s.mail_unavailable_here || s.refuse_set_mail_enabled_unavailable) {
+            return Err(SetMailEnabledError::UnavailableHere);
         }
         s.set_mail_enabled.push(enabled);
         Ok(())
+    }
+    async fn mail_unavailable_here(&self) -> Result<bool, NestError> {
+        Ok(self.inner.lock().unwrap().mail_unavailable_here)
     }
     async fn set_mail_serving_enabled(&self, enabled: bool) -> Result<(), NestError> {
         let mut s = self.inner.lock().unwrap();
@@ -298,14 +314,18 @@ impl NestClient for FakeNestClient {
             .mail_serving_enabled
             .unwrap_or(true))
     }
-    async fn get_caldav_port(&self) -> Result<u16, NestError> {
+    async fn get_caldav_port(&self) -> Result<crate::state::DavListener, NestError> {
         let s = self.inner.lock().unwrap();
         if let Some(err) = s.fail_get_caldav_port_with.clone() {
             return Err(err);
         }
         // None ⇒ the shared default, mirroring the nest's `.unwrap_or(DEFAULT)`.
-        Ok(s.caldav_port
-            .unwrap_or(fauna_protocol::bridge_routing::DEFAULT_CALDAV_PORT))
+        Ok(crate::state::DavListener {
+            port: s
+                .caldav_port
+                .unwrap_or(fauna_protocol::bridge_routing::DEFAULT_CALDAV_PORT),
+            direct: s.dav_direct_listener,
+        })
     }
     async fn serves_any_webdav_set(&self) -> Result<bool, NestError> {
         let s = self.inner.lock().unwrap();
@@ -480,6 +500,7 @@ pub fn a_mail_import_snapshot(step: crate::ImportStep) -> crate::MailImportSnaps
         mailboxes: Vec::new(),
         date_from: String::new(),
         max_size_bytes: 50 * 1024 * 1024,
+        import_duplicates: false,
         session_state: None,
         imported_count: 0,
         skipped_count: 0,
@@ -492,9 +513,11 @@ pub fn a_mail_import_snapshot(step: crate::ImportStep) -> crate::MailImportSnaps
         status: crate::ImportStatus::Idle,
         error: None,
         pause_reason: None,
+        rebuilt_mailboxes: Vec::new(),
         resume_needs_credentials: false,
         microsoft_signin_available: false,
         microsoft_signin: None,
+        source_remembered: false,
     }
 }
 

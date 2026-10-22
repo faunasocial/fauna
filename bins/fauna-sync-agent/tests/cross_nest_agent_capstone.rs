@@ -1455,7 +1455,7 @@ async fn a_cross_nest_readers_host_is_read_only_and_records_nothing_on_the_home_
 ///
 /// A cross-nest engine's chunk and manifest GETs take a bearer, and the write
 /// mint refuses a reader — so before a reader's engine took the read token
-/// (`fauna.federation.folder.read_token.mint`, `federation.md` § Cross-nest
+/// (`fauna.federation.folder.read_token.mint`, `federation-shared-folders.md` § Cross-nest
 /// shared folders + channel append → *Relay serving across nests*) its first
 /// read failed `403 write_token.get refused` and parked the engine as a
 /// demoted writer. `engine_lifecycle::assemble_engine` now gives a

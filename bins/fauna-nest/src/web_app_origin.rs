@@ -159,6 +159,23 @@ pub const KIND_WEB_APP_ORIGIN_SET: &str = "fauna.admin.web_app_origin.set";
 
 const AUDIT_WEB_APP_ORIGIN_SET: &str = "admin:web_app_origin.set";
 
+/// This module's admin-plane kinds for an admin-consented principal —
+/// the nest page's web-app origin — each its actor handler behind
+/// [`crate::principal_handlers::admin_twin`] (`authorization-server.md`
+/// § Scope grammar → *The admin arms* names the set).
+pub(crate) fn principal_admin_handlers()
+-> Vec<(&'static str, crate::principal_handlers::PrincipalHandler)> {
+    use crate::principal_handlers::admin_twin;
+    let kinds: [(&'static str, crate::rpc_router::RpcHandler); 2] = [
+        ("fauna.admin.web_app_origin.get", get_handler()),
+        ("fauna.admin.web_app_origin.set", set_handler()),
+    ];
+    kinds
+        .into_iter()
+        .map(|(kind, actor)| (kind, admin_twin(kind, actor)))
+        .collect()
+}
+
 pub fn register_web_app_origin_handlers(b: &mut crate::rpc_router::RpcRouterBuilder) {
     // Mirror any change in `KindRegistry::register_admin_kinds`.
     b.add(

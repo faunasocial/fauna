@@ -10,6 +10,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
+import uniffi.fauna_backups_machine.BackupFolderRow
 import uniffi.fauna_backups_machine.BackupOp
 import uniffi.fauna_backups_machine.RowIntegrity
 import uniffi.fauna_backups_machine.SnapshotRow
@@ -97,5 +98,31 @@ class SnapshotRowTextTest {
     fun implicatedIntegrityRendersItsVerdict() {
         val text = snapshotRowText(context, row(SnapshotState.Active, RowIntegrity.IMPLICATED))
         assertTrue(text.contains(context.getString(R.string.backups_snapshot_integrity_implicated)))
+    }
+
+    /** `ui/backups.md` § Snapshot-list shape → *Kind entries*: the value stays
+     *  the locale-stable key, the label is that key resolved — no raw key
+     *  painted, and a folder keeps its own name. */
+    @Test
+    fun aKindEntryPaintsItsResolvedLabelAndKeepsItsKeyAsTheValue() {
+        val options = folderSelectorOptions(
+            context,
+            listOf(
+                BackupFolderRow(name = "alpha", snapshotCount = 1, lastSnapshotAt = null, messageKind = null),
+                BackupFolderRow(
+                    name = "backups.reseed_set_mail",
+                    snapshotCount = 0,
+                    lastSnapshotAt = null,
+                    messageKind = "mail",
+                ),
+            ),
+        )
+        assertEquals(
+            listOf(
+                "alpha" to "alpha",
+                "backups.reseed_set_mail" to context.getString(R.string.backups_reseed_set_mail),
+            ),
+            options,
+        )
     }
 }

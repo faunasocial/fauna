@@ -161,9 +161,25 @@ public partial class FamilyViewModel : ObservableObject
     /// any user can be a proposed guardian, which is what widens the <c>family-tab</c> gate.</summary>
     public ObservableCollection<FamilyIncomingTransferRow> IncomingTransfers { get; } = new();
 
+    /// <summary>The guardian host of the shared <c>feature-policy-editor</c> — the
+    /// SELECTED ward's <i>Feature limits</i> rows and open editor (guardian tier;
+    /// <c>family-safety.md</c> § App surface → <i>Feature limits</i>). Both calls
+    /// read the ward live from <see cref="SelectedWardActorId"/>; the page resets
+    /// and re-reads the host whenever the selected ward changes (an editor is one
+    /// ward's).</summary>
+    internal FeatureAuthoringHost FeatureLimits { get; }
+
     internal FamilyViewModel(INestRpcClient rpc)
     {
         _rpc = rpc;
+        FeatureLimits = new FeatureAuthoringHost(
+            () => SelectedWardActorId is { } ward
+                ? rpc.FeaturesWardAuthoredRowsAsync(ward)
+                : Task.FromResult<IReadOnlyList<uniffi.fauna_ffi.FfiAuthoredRow>>(
+                    Array.Empty<uniffi.fauna_ffi.FfiAuthoredRow>()),
+            feature => SelectedWardActorId is { } ward
+                ? rpc.FeaturesOpenEditorForWardAsync(ward, feature)
+                : throw new InvalidOperationException("no ward is selected"));
     }
 
     /// <summary>Load <c>fauna.family.status</c> (both sides) + the approvals

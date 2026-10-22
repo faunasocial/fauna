@@ -21,8 +21,9 @@ import SwiftUI
 /// **The room** (`conversation-rooms.md` § The three classes, § Roles and
 /// authorization): where the rail models one (`detail.room` non-nil) the
 /// header states its class (`thread-room-class`, with a `class` attribute) and
-/// paints the policy editor's door (`thread-room-settings-button`, greyed —
-/// never hidden — unless `capabilities.canSetPolicy`); each chip carries its
+/// paints the policy editor's door (`thread-room-settings-button`, live for any
+/// member — the greying moves inside the editor, per control, off
+/// `capabilities.canSetPolicy`); each chip carries its
 /// member's role (`role` attribute + the localized owner/admin mark). All of it
 /// is read off the projected room and the shared-Rust label/token twins, never
 /// computed here; the roles table itself becomes `capabilities.*` in shared Rust
@@ -45,6 +46,9 @@ public struct ThreadHeader: View {
     /// `thread-room-settings-button` — open the room policy editor
     /// (`RoomSettingsSheet`, hosted by `ThreadDetailView`).
     public var onRoomSettings: () -> Void
+    /// `room-search-button` — open or close the room's search strip
+    /// (`room-search.md` § The surface); painted iff `capabilities.canSearchRoom`.
+    public var onRoomSearch: () -> Void
     /// `thread-member-keep-button` — closes every open review item for this
     /// person with no group changes (`fauna_client_config::decide_member_review`
     /// via `APIClient.memberReviewKeep`). Remove is not rendered beside it —
@@ -66,6 +70,7 @@ public struct ThreadHeader: View {
         onAddParticipant: @escaping () -> Void = {},
         onRename: @escaping () -> Void = {},
         onRoomSettings: @escaping () -> Void = {},
+        onRoomSearch: @escaping () -> Void = {},
         onKeepMember: @escaping (Data) -> Void = { _ in },
         onRemoveMember: @escaping (TypedAddress) -> Void = { _ in }
     ) {
@@ -74,6 +79,7 @@ public struct ThreadHeader: View {
         self.onAddParticipant = onAddParticipant
         self.onRename = onRename
         self.onRoomSettings = onRoomSettings
+        self.onRoomSearch = onRoomSearch
         self.onKeepMember = onKeepMember
         self.onRemoveMember = onRemoveMember
     }
@@ -110,13 +116,15 @@ public struct ThreadHeader: View {
 
     public var body: some View {
         HStack(spacing: 8) {
-            Text(ConversationsUI.glyphEmoji(detail.glyph))
+            let iconText = ConversationsUI.protocolIconText(detail.glyph, bridge: detail.bridge)
+            Text(iconText)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier(Ids.protocolIcon)
                 // Read-only glyph — expose the D5 concept emoji as a stable
-                // presence/value read.
-                .automationValue(Ids.protocolIcon, text: { ConversationsUI.glyphEmoji(detail.glyph) })
+                // presence/value read (bridge label + `bridge` attribute on a
+                // bridged room).
+                .automationValue(Ids.protocolIcon, text: { iconText }, value: { detail.bridge?.id })
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
@@ -139,6 +147,35 @@ public struct ThreadHeader: View {
                             .automationValue(Ids.threadRoomClass, text: { classLabel }, value: { classToken })
                     }
                 }
+                // The family gate's marker — held/blocked bridged room only.
+                if let state = detail.guardianState {
+                    let stateLabel = guardianStateLabel(state: state)
+                    let stateToken = guardianStateAttrToken(state: state)
+                    Text(stateLabel)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .lineLimit(1)
+                        .accessibilityIdentifier(Ids.conversationGuardianState)
+                        .automationValue(Ids.conversationGuardianState, text: { stateLabel }, value: { stateToken })
+                }
+                // The room's standing notice — present iff one of the three room
+                // facts holds (`ui/conversations.md` § Element IDs →
+                // `thread-room-notice`). Which notice speaks, its words and its
+                // `state` token are all shared Rust; absent otherwise.
+                if let room = detail.room,
+                   let notice = roomNoticeFor(
+                       awaitingKey: room.awaitingKey, moderationUnverified: room.moderationUnverified,
+                       bridgeDisconnected: room.bridgeDisconnected)
+                {
+                    let noticeLabel = roomNoticeLabel(notice: notice)
+                    let noticeToken = roomNoticeAttrToken(notice: notice)
+                    Text(noticeLabel)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .accessibilityIdentifier(Ids.threadRoomNotice)
+                        .automationValue(Ids.threadRoomNotice, text: { noticeLabel }, value: { noticeToken })
+                }
                 memberChips
             }
 
@@ -160,20 +197,32 @@ public struct ThreadHeader: View {
                     }
             }
 
-            // The policy editor's door — painted whenever the thread is a room,
-            // greyed unless the viewer may set policy (a policy-less room greys it
-            // too, having no policy to edit).
+            // The policy editor's door — painted AND live whenever the thread is
+            // a room: any member opens it to read the policy and to leave. The
+            // greying is per control inside (`RoomSettingsSheet`).
             if detail.room != nil {
                 Button {
                     onRoomSettings()
                 } label: { Image(systemName: "slider.horizontal.3") }
                     .buttonStyle(.borderless)
                     .help(L.conversations.unified.threadRoomSettings)
-                    .disabled(!caps.canSetPolicy)
                     .accessibilityIdentifier(Ids.threadRoomSettingsButton)
-                    .automationActivate(Ids.threadRoomSettingsButton, isEnabled: { caps.canSetPolicy }) {
+                    .automationActivate(Ids.threadRoomSettingsButton) {
                         onRoomSettings()
                     }
+            }
+
+            // The room's search door — painted and live iff the shared manager says
+            // the viewer may search this room (`capabilities.canSearchRoom`,
+            // `room-search.md` § The surface); absent off a community room.
+            if caps.canSearchRoom {
+                Button {
+                    onRoomSearch()
+                } label: { Image(systemName: "magnifyingglass") }
+                    .buttonStyle(.borderless)
+                    .help(L.conversations.unified.roomSearch)
+                    .accessibilityIdentifier(Ids.roomSearchButton)
+                    .automationActivate(Ids.roomSearchButton) { onRoomSearch() }
             }
 
             if caps.supportsRename {

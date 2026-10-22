@@ -62,8 +62,15 @@ class ArchiveImportActions:
         self.driver.select("archive-import-source-picker", label)
 
     def source_help(self) -> str:
-        """How to request the export — and where: the platform's own page."""
+        """How to request the export on the chosen platform."""
         return self._text_or_empty("archive-import-source-help")
+
+    def source_export_link(self) -> str:
+        """The link to the platform's own export page — it names the address."""
+        return self._text_or_empty("archive-import-source-export-link")
+
+    def open_source_export_link(self) -> None:
+        self.driver.click("archive-import-source-export-link")
 
     def next(self) -> None:
         self.driver.wait_for("wizard-next-button", timeout=10.0)

@@ -45,10 +45,13 @@ public struct RoomSettingsSheet: View {
     /// that did not land every commit.
     @State private var refusal: String = ""
     @State private var saving = false
+    /// The walk-out's confirm is open (`room-leave-confirm` is painted).
+    @State private var confirmingLeave = false
 
     /// `seed` is `roomSettingsSeed(detail:)`'s answer; the host opens the
     /// editor only when there is one (a policy-less room or a non-room has no
-    /// policy to edit — the door is greyed there, so that is the belt).
+    /// policy to edit, so that is the belt). The door is live for any member;
+    /// each policy control greys off `canSetPolicy` inside.
     public init(detail: ThreadDetail, seed: RoomSettingsDraft, onClose: @escaping () -> Void) {
         self.threadId = detail.threadId
         self.onClose = onClose
@@ -74,6 +77,35 @@ public struct RoomSettingsSheet: View {
         VStack(alignment: .leading, spacing: 12) {
             Text(L.conversations.unified.threadRoomSettings).font(.headline)
 
+            // The staged content scrolls; Save/Cancel stay put below it.
+            ScrollView {
+                content
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(minHeight: 240, idealHeight: 360, maxHeight: 520)
+
+            ErrorBanner(message: refusal)
+
+            HStack {
+                Spacer()
+                Button(L.common.cancel) { onClose() }
+                    .keyboardShortcut(.cancelAction)
+                Button(L.common.save) { save() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(saving || !canSetPolicy)
+                    .accessibilityIdentifier(Ids.roomSettingsSaveButton)
+                    .automationActivate(Ids.roomSettingsSaveButton, isEnabled: { !saving && canSetPolicy }) { save() }
+            }
+
+            leaveSection
+        }
+        .padding(20)
+        .frame(minWidth: 360)
+    }
+
+    private var content: some View {
+        VStack(alignment: .leading, spacing: 12) {
+
             // The two token pickers, the `event-detail-reminder-select` way: the
             // selection is the driver-facing TOKEN (so `select`/`get_text`
             // round-trip it, the cross-app contract) and each row paints the
@@ -85,11 +117,13 @@ public struct RoomSettingsSheet: View {
                     }
                 }
                 .labelsHidden()
+                .disabled(!canSetPolicy)
                 .accessibilityIdentifier(Ids.roomJoinRuleSelect)
                 .automationSelect(
                     Ids.roomJoinRuleSelect,
                     value: { joinRuleToken },
                     options: { joinRuleTokens },
+                    isEnabled: { canSetPolicy },
                     set: { setJoinRule($0) })
             }
 
@@ -100,11 +134,13 @@ public struct RoomSettingsSheet: View {
                     }
                 }
                 .labelsHidden()
+                .disabled(!canSetPolicy)
                 .accessibilityIdentifier(Ids.roomHistoryPolicySelect)
                 .automationSelect(
                     Ids.roomHistoryPolicySelect,
                     value: { historyPolicyToken },
                     options: { historyPolicyTokens },
+                    isEnabled: { canSetPolicy },
                     set: { setHistoryPolicy($0) })
             }
 
@@ -119,21 +155,133 @@ public struct RoomSettingsSheet: View {
                 }
             }
 
-            ErrorBanner(message: refusal)
+            // The home nest's read, only where there is one to stage (a
+            // community room whose answer this device has read).
+            if draft.nestRead != nil {
+                nestReadToggle
+            }
 
-            HStack {
-                Spacer()
-                Button(L.common.cancel) { onClose() }
-                    .keyboardShortcut(.cancelAction)
-                Button(L.common.save) { save() }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(saving)
-                    .accessibilityIdentifier(Ids.roomSettingsSaveButton)
-                    .automationActivate(Ids.roomSettingsSaveButton, isEnabled: { !saving }) { save() }
+            pendingInvitesSection
+
+            #if !FAUNA_KIDS
+            // Present only where the draft stages a labeler set; the kids flavor
+            // compiles the catalog plane out, so the rows are a declared kids
+            // absence (`account-age-band.md`, the kids-app bullet).
+            if draft.labelers != nil {
+                RoomLabelerRows(draft: $draft, canSetPolicy: canSetPolicy)
+            }
+            #endif
+        }
+    }
+
+    private var canSetPolicy: Bool { vm.detail(threadId)?.capabilities.canSetPolicy ?? false }
+    /// The live `can_leave_room` (owner ✗) — read again when the confirm opens,
+    /// not only at paint, so a role that changed under the open editor is
+    /// honoured.
+    private var canLeaveRoom: Bool { vm.detail(threadId)?.capabilities.canLeaveRoom ?? false }
+
+    /// `room-leave-button` + `room-leave-confirm` — the walk-out
+    /// (`ui/conversations.md` § Element IDs → *The walk-out*). Below Save and
+    /// OUTSIDE its staged set: leaving acts at once, it is not a policy edit.
+    /// Greyed — never hidden — off `can_leave_room`, so the owner sees it dead
+    /// and hands the room over first. The confirm is the `thread-rename-confirm`
+    /// shape; the whole control is online-only, so the confirm carries the gate.
+    @ViewBuilder
+    private var leaveSection: some View {
+        VStack(alignment: .trailing, spacing: 8) {
+            Button(L.conversations.unified.roomLeave) { openLeaveConfirm() }
+                .buttonStyle(.bordered)
+                .disabled(!canLeaveRoom)
+                .accessibilityIdentifier(Ids.roomLeaveButton)
+                .automationActivate(Ids.roomLeaveButton, isEnabled: { canLeaveRoom }) { openLeaveConfirm() }
+            if confirmingLeave {
+                HStack(spacing: 8) {
+                    Button(L.common.cancel) { confirmingLeave = false }
+                    Button(L.common.leave) { confirmLeave() }
+                        .buttonStyle(.borderedProminent)
+                        .accessibilityIdentifier(Ids.roomLeaveConfirm)
+                        .automationActivate(Ids.roomLeaveConfirm) { confirmLeave() }
+                        .faunaGate("fauna.conversations.room.leave")
+                }
             }
         }
-        .padding(20)
-        .frame(minWidth: 360)
+        .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+
+    private func openLeaveConfirm() {
+        guard canLeaveRoom else { return }
+        confirmingLeave = true
+    }
+
+    /// Re-checks `can_leave_room` (the open is not the commit), closes the
+    /// editor, then makes the one manager call; a refusal rides the page's
+    /// `error-message`.
+    private func confirmLeave() {
+        confirmingLeave = false
+        guard canLeaveRoom else { return }
+        onClose()
+        Task { await vm.leaveRoom(threadId) }
+    }
+
+    /// `room-nest-read-toggle` — whether the home nest reads the room. Staged
+    /// through the draft; greyed unless the viewer may set policy.
+    private var nestReadToggle: some View {
+        let reads = draft.nestRead ?? false
+        return Button(reads ? L.conversations.unified.roomNestReadYes : L.conversations.unified.roomNestReadNo) {
+            toggleNestRead()
+        }
+        .buttonStyle(.bordered)
+        .tint(reads ? Color.accentColor : nil)
+        .disabled(!canSetPolicy)
+        .accessibilityIdentifier(Ids.roomNestReadToggle)
+        .automationActivate(
+            Ids.roomNestReadToggle,
+            isEnabled: { canSetPolicy },
+            text: { (draft.nestRead ?? false) ? L.conversations.unified.roomNestReadYes : L.conversations.unified.roomNestReadNo },
+            attributes: { ["checked": (draft.nestRead ?? false) ? "true" : "false"] }
+        ) { toggleNestRead() }
+    }
+
+    /// What stands pending on the room, only once the home nest has served this
+    /// viewer a list and only while it is not empty (absent for `nil` and for an
+    /// empty answer alike). Every row is one the nest served *because* this viewer
+    /// may withdraw it, so the button is live on every row — online-only, so
+    /// gated on the revoke kind; it acts at once, with no confirm.
+    @ViewBuilder
+    private var pendingInvitesSection: some View {
+        if let pending = vm.detail(threadId)?.room?.pendingInvites, !pending.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(L.conversations.unified.roomPendingInvitesLabel).font(.subheadline)
+                ForEach(pending, id: \.inviteeActorHex) { invite in
+                    let sentence = roomPendingInviteText(invite: invite)
+                    let lapsed = invite.lapsed ? "true" : "false"
+                    HStack(spacing: 8) {
+                        Text(sentence)
+                            .font(.callout)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .accessibilityIdentifier(Ids.roomPendingInvite)
+                            .automationValue(Ids.roomPendingInvite, text: { sentence }, value: { lapsed })
+                        Button(L.conversations.unified.roomPendingInviteWithdraw) {
+                            withdraw(invite.inviteeActorHex)
+                        }
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier(Ids.roomPendingInviteWithdrawButton)
+                        .automationActivate(Ids.roomPendingInviteWithdrawButton) {
+                            withdraw(invite.inviteeActorHex)
+                        }
+                        .faunaGate("fauna.conversations.room.revoke_invite")
+                    }
+                }
+            }
+        }
+    }
+
+    private func toggleNestRead() {
+        draft = roomSettingsToggleNestRead(draft: draft)
+    }
+
+    private func withdraw(_ inviteeActorHex: String) {
+        Task { await vm.withdrawRoomInvite(threadId, inviteeActorHex: inviteeActorHex) }
     }
 
     // Each row's reads resolve through the draft's identity column
@@ -170,13 +318,13 @@ public struct RoomSettingsSheet: View {
                 .tint(stagedAdmin(i) ? Color.accentColor : nil)
                 .disabled(!adminLive(i))
                 .accessibilityIdentifier(Ids.roomAdminToggle)
-                // `checked` (like every other attribute a driver names here)
-                // reads the entry's value; the text is the painted label.
+                // `checked` is a NAMED attribute (the server maps a bare value
+                // only for "on"/"off"); the text is the painted label.
                 .automationActivate(
                     Ids.roomAdminToggle,
                     isEnabled: { adminLive(i) },
                     text: { adminLabel(i) },
-                    value: { stagedAdmin(i) ? "true" : "false" }
+                    attributes: { ["checked": stagedAdmin(i) ? "true" : "false"] }
                 ) { toggleAdmin(i) }
             Button(transferLabel(i)) { toggleTransfer(i) }
                 .buttonStyle(.bordered)
@@ -187,7 +335,7 @@ public struct RoomSettingsSheet: View {
                     Ids.roomOwnerTransferButton,
                     isEnabled: { transferLive(i) },
                     text: { transferLabel(i) },
-                    value: { stagedOwner(i) ? "true" : "false" }
+                    attributes: { ["checked": stagedOwner(i) ? "true" : "false"] }
                 ) { toggleTransfer(i) }
         }
     }
@@ -246,3 +394,91 @@ public struct RoomSettingsSheet: View {
         }
     }
 }
+
+#if !FAUNA_KIDS
+/// The room's labeler set — `room-labeler-toggle[i]` +
+/// `room-labeler-inspect-button[i]` per catalog labeler a room may name
+/// (`ui/conversations.md` § Element IDs → *The room's labeler set*; behavior
+/// owner `community-rooms.md` § The three classes, purpose 2).
+///
+/// **Every decision is shared Rust**: which kinds a room may name
+/// (`roomMayNameLabelerKind`), the `checked` mark (`roomSettingsLabelerStaged`)
+/// and whether a row may act (`roomSettingsLabelerToggleLive`: a full set greys
+/// only the rows it does not name). This paints them and adds the one capability
+/// term. The catalog is the page's own `LabelerCatalogVM` — the same machine the
+/// Community labelers page drives — and its inspect view opens IN PLACE through
+/// the shared `LabelerInspectPanel`, so the staged draft survives an inspect.
+/// The kids flavor compiles the catalog plane out, so this whole view is a
+/// declared kids absence (android's `kids/RoomLabelerRows.kt` twin).
+private struct RoomLabelerRows: View {
+    @Binding var draft: RoomSettingsDraft
+    let canSetPolicy: Bool
+
+    @Environment(FaunaClient.self) private var client: FaunaClient?
+    @State private var catalog = LabelerCatalogVM()
+
+    private var entries: [LabelerCatalogEntry] { catalog.snapshot?.entries ?? [] }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(L.conversations.unified.roomLabelersLabel).font(.subheadline)
+            ForEach(Array(entries.enumerated()), id: \.offset) { index, entry in
+                if roomMayNameLabelerKind(kind: entry.artifactKind) {
+                    row(index: index, entry: entry)
+                }
+            }
+            if let inspecting = catalog.snapshot?.inspecting {
+                LabelerInspectPanel(view: inspecting, onClose: { catalog.closeInspect() })
+            }
+        }
+        .task {
+            guard let client else { return }
+            await catalog.configure(api: client.api)
+        }
+    }
+
+    // Reads go through the LIVE `draft`, so a `checked` read straight after a
+    // click does not see the frame before it.
+    private func staged(_ id: String) -> Bool { roomSettingsLabelerStaged(draft: draft, labeler: id) }
+    private func live(_ id: String) -> Bool {
+        canSetPolicy && roomSettingsLabelerToggleLive(draft: draft, labeler: id)
+    }
+    private func label(_ entry: LabelerCatalogEntry) -> String {
+        // The kind and a prefix of the id: the catalog row carries no name, and
+        // the full id sits one gesture away in the inspect view.
+        let short = String(entry.labelerId.prefix(16))
+        let mark = staged(entry.labelerId) ? L.conversations.unified.roomLabelerOn : L.conversations.unified.roomLabelerOff
+        return "\(entry.artifactKind) · \(short)… · \(mark)"
+    }
+
+    @ViewBuilder
+    private func row(index: Int, entry: LabelerCatalogEntry) -> some View {
+        let id = entry.labelerId
+        HStack(spacing: 8) {
+            Button(label(entry)) { toggle(id) }
+                .buttonStyle(.bordered)
+                .tint(staged(id) ? Color.accentColor : nil)
+                .disabled(!live(id))
+                .accessibilityIdentifier(Ids.roomLabelerToggle)
+                .automationActivate(
+                    Ids.roomLabelerToggle,
+                    isEnabled: { live(id) },
+                    text: { label(entry) },
+                    attributes: { ["checked": staged(id) ? "true" : "false"] }
+                ) { toggle(id) }
+            // Inspecting is a read any member may make; the index is the catalog
+            // SNAPSHOT index the machine's `inspect` is addressed by.
+            Button(L.labelerCatalog.inspect) { Task { await catalog.inspect(index: index) } }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier(Ids.roomLabelerInspectButton)
+                .automationActivate(Ids.roomLabelerInspectButton) {
+                    Task { await catalog.inspect(index: index) }
+                }
+        }
+    }
+
+    private func toggle(_ id: String) {
+        draft = roomSettingsToggleLabeler(draft: draft, labeler: id)
+    }
+}
+#endif // !FAUNA_KIDS

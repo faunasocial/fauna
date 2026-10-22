@@ -11,11 +11,11 @@
 // A `.svelte.ts` module so the cache is `$state`: a page reading it in its
 // template re-renders when a late status read lands.
 
-import { familyStatus, type FamilyStatus } from '$lib/rpc';
-import { registerActorScopedReset } from '$lib/actorScope';
-import { keepOnEmptyReread, wardAsksFromStatus, type WardAsks } from '$lib/ward-asks';
+import { familyStatus, type FamilyStatus } from '#lib/rpc';
+import { registerActorScopedReset } from '#lib/actorScope';
+import { keepOnEmptyReread, wardAsksFromStatus, type WardAsks } from '#lib/ward-asks';
 
-let asks = $state<WardAsks>({ contact: [], feed: [] });
+let asks = $state<WardAsks>({ contact: [], feed: [], policy: null });
 
 /** The current cache (reactive when read inside a component). */
 export function wardAsks(): WardAsks {
@@ -50,6 +50,8 @@ export async function rereadAfterAsk(secretHex: string): Promise<void> {
     asks = {
       contact: keepOnEmptyReread(asks.contact, fresh.contact),
       feed: keepOnEmptyReread(asks.feed, fresh.feed),
+      // A policy is never "empty on failure" — a failed read throws.
+      policy: fresh.policy,
     };
   } catch {
     // Keep the held lists; the local flag carries the render.
@@ -59,5 +61,5 @@ export async function rereadAfterAsk(secretHex: string): Promise<void> {
 // Class-1 account-scoped state (`account-scoping.md` § The scoping taxonomy):
 // one ward's asks must never render for the next account.
 registerActorScopedReset(() => {
-  asks = { contact: [], feed: [] };
+  asks = { contact: [], feed: [], policy: null };
 });

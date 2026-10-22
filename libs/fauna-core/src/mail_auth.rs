@@ -137,6 +137,101 @@ pub enum ArcVerdict {
     TempError,
 }
 
+// The RFC-canonical lowercase result tokens (RFC 7208 §2.6 / 6376 §6 / 7489 §A.1 / 8617 — no
+// separators: `softfail`, never `soft_fail`). One owner for the name each verdict is recorded and
+// reported under; the nest's flat DB rows and `fauna-mail`'s DMARC observation both read these, and
+// each used to hand-copy the match.
+impl SpfVerdict {
+    /// The RFC 7489 §A.1 `SPFResultType` token.
+    pub fn rfc_token(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Pass => "pass",
+            Self::Fail => "fail",
+            Self::SoftFail => "softfail",
+            Self::Neutral => "neutral",
+            Self::PermError => "permerror",
+            Self::TempError => "temperror",
+        }
+    }
+}
+
+impl DkimVerdict {
+    /// The RFC 7489 §A.1 `DKIMResultType` token; a `Fail`'s diagnostic reason is not part of the
+    /// result name.
+    pub fn rfc_token(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Pass => "pass",
+            Self::Fail { .. } => "fail",
+            Self::Neutral => "neutral",
+            Self::PermError => "permerror",
+            Self::TempError => "temperror",
+        }
+    }
+}
+
+impl DmarcPolicy {
+    /// The published policy name (`p=` tag value).
+    pub fn rfc_token(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Quarantine => "quarantine",
+            Self::Reject => "reject",
+        }
+    }
+}
+
+impl DmarcVerdict {
+    /// `(result, policy)` tokens. A non-fail verdict reports policy `"none"`: there is no
+    /// published policy to honor.
+    pub fn rfc_tokens(&self) -> (&'static str, &'static str) {
+        match self {
+            Self::None => ("none", "none"),
+            Self::Pass => ("pass", "none"),
+            Self::Fail { policy } => ("fail", policy.rfc_token()),
+            Self::PermError => ("permerror", "none"),
+            Self::TempError => ("temperror", "none"),
+        }
+    }
+}
+
+impl ArcVerdict {
+    /// The ARC chain-validation result token.
+    pub fn rfc_token(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Pass => "pass",
+            Self::Fail => "fail",
+            Self::PermError => "permerror",
+            Self::TempError => "temperror",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rfc_tokens_are_the_separator_free_rfc_names() {
+        assert_eq!(SpfVerdict::SoftFail.rfc_token(), "softfail");
+        assert_eq!(SpfVerdict::TempError.rfc_token(), "temperror");
+        assert_eq!(DkimVerdict::Fail { reason: "x".into() }.rfc_token(), "fail");
+        assert_eq!(DkimVerdict::PermError.rfc_token(), "permerror");
+        assert_eq!(DmarcPolicy::Quarantine.rfc_token(), "quarantine");
+        assert_eq!(
+            DmarcVerdict::Fail {
+                policy: DmarcPolicy::Reject
+            }
+            .rfc_tokens(),
+            ("fail", "reject")
+        );
+        assert_eq!(DmarcVerdict::Pass.rfc_tokens(), ("pass", "none"));
+        assert_eq!(ArcVerdict::PermError.rfc_token(), "permerror");
+    }
+}
+
 /// The four verdicts as one set.
 ///
 /// ⚠ `deny_unknown_fields` is carried over **verbatim** from both prior copies,

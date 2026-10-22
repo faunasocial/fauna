@@ -39,8 +39,8 @@ import pytest
 
 from common.auth import register_handled_actor
 from conftest import MAIL_PRIMARY_DOMAIN
+from common.accounts import single_account_seed
 from drivers import create_driver
-from helpers import web_store
 
 pytestmark = [pytest.mark.tier_3, pytest.mark.web]
 
@@ -83,17 +83,18 @@ def test_web_set_state_switch_clears_tab_pin(handled_nest, handled_spa_url):
     secret_b = bytes(actor_b["signing_key"]).hex()
 
     driver = create_driver("web")
-    driver.launch({"url": spa + "/app/"})
+    driver.launch({
+        "url": spa + "/app/",
+        "seed_credentials": single_account_seed(secret_a, nest_url=spa),
+    })
     try:
-        # ── Pin the tab to A via TWO real page loads. The first seeds the
-        #    registry identity and reloads: `accounts.ts`'s UNPINNED branch resolves
+        # ── Pin the tab to A via TWO real page loads. The first is the launch's
+        #    own boot over the seeded registry: `accounts.ts`'s UNPINNED branch resolves
         #    it and pins the tab, but does not write the nest-url sibling —
         #    only the PINNED branch does that (it re-derives the pinned
         #    account's own nest url on every boot). So a second reload, now
         #    already pinned, is what actually populates both halves of the
         #    pin this test exercises. ──
-        web_store.seed_identity(driver, secret_a, nest_url=spa)
-        driver.hard_reload()
         driver.wait_for("feed-tab", timeout=30)
         pin = _wait_tab_pin(driver)
         assert pin == actor_a["actor_id_hex"].lower(), (
@@ -147,7 +148,7 @@ def test_web_set_state_switch_clears_tab_pin(handled_nest, handled_spa_url):
             f"boot resolution (`resolved === active` guard) — `agent.js`'s "
             f"account-switch branch must clear the pin through the SPA's own "
             f"synchronous erase (`window.__fauna_clearTabPinForTest`, "
-            f"`$lib/tabPin.ts`'s `clearTabPin`), not leave it for the "
+            f"`#lib/tabPin.ts`'s `clearTabPin`), not leave it for the "
             f"registry's `localStorage`-only sweep to miss."
         )
     finally:

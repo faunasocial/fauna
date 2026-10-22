@@ -16,6 +16,8 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
+from helpers.waiting import wait_until
+
 #: A real >300x300 PNG — an *image*, so the upload gesture also drives the
 #: thumbnail producer, which is what gives a journey a byte-plane witness at all.
 FIXTURE_IMAGE = Path(__file__).parent.parent / "fixtures" / "test-image.png"
@@ -94,5 +96,75 @@ def seed_an_image_under_this_identity(app, tmp_path: Path) -> tuple[str, str]:
             "the image's thumbnail must paint BEFORE the ceremony, or a later "
             "paint assertion cannot distinguish a broken read from a thumbnail "
             f"that was never produced; got {painted}. error={app.error_text()!r}"
+        )
+    return set_name, file_name
+
+
+def seed_an_image_in_a_bound_set(
+    app, tmp_path: Path, *, serve_over_webdav: bool = False
+) -> tuple[str, str]:
+    """Create a set, bind a real local folder to it, drop a real image into
+    the folder, and prove the app's own engine uploaded it: listed and painted.
+    Returns ``(set_name, file_name)``.
+
+    The corpus a succession carries across **only** where a sync engine runs
+    for the set on the owner's own host: the take-over (``succession-cut.md``
+    ruling (11)(d)) re-records what the device holds, and a set no engine runs
+    on stays history (residual (j)(6)). So a journey asking the successor to
+    read its inherited corpus seeds it here, in the shape the ruling promises
+    the corpus survives, rather than through a Media-page upload into a set no
+    engine runs on (:func:`seed_an_image_under_this_identity`).
+
+    Same non-vacuity duty as that helper: the item must list and paint before
+    the ceremony. Convention 8: the set is made through the wizard and the
+    folder bound through the row's binding form; the file is the user's own,
+    dropped on disk where the engine watches.
+
+    ``serve_over_webdav`` flips the row's ``folder-webdav-toggle`` before the
+    folder is bound, so the set's chunks rest under content keys while its
+    thumbnail still seals under the owner's bare ``BackupKey`` (the engine's
+    ``maybe_upload_thumbnail``). The caller enables mail first: serving needs
+    the MSEK the first mail enable mints.
+    """
+    require_folder_wizard(app)
+    set_name = f"succession-bound-{uuid.uuid4().hex[:8]}"
+    app.backups.create_folder_via_wizard(set_name)
+    if serve_over_webdav:
+        app.backups.find_and_expand_folder(set_name)
+        app.backups.toggle_webdav()
+        assert not app.has_error(), (
+            f"serving {set_name!r} over WebDAV raised: {app.error_text()!r}"
+        )
+    watch_dir = tmp_path / "bound-corpus"
+    watch_dir.mkdir()
+    app.backups.bind_location(set_name, str(watch_dir))
+
+    assert FIXTURE_IMAGE.exists(), f"missing image fixture: {FIXTURE_IMAGE}"
+    file_name = f"inherited-{uuid.uuid4().hex[:8]}.png"
+    (watch_dir / file_name).write_bytes(FIXTURE_IMAGE.read_bytes())
+
+    # Each poll is a fresh visit: a Media page that refreshes on becoming
+    # visible and does not poll (linux) would otherwise keep a list read
+    # before the engine's upload landed.
+    def _listed() -> bool:
+        app.media.navigate()
+        return file_name in app.media.item_names()
+
+    wait_until(
+        _listed,
+        CORPUS_READ_S,
+        diagnose=lambda: (
+            f"the engine bound to {set_name!r} must upload {file_name!r} BEFORE "
+            "the ceremony or the journey proves nothing; "
+            f"items={app.media.item_names()!r} error={app.error_text()!r}"
+        ),
+    )
+    painted = app.media.wait_for_painted_thumbnails(1, timeout=CORPUS_READ_S)
+    if painted is not None:
+        assert painted == 1, (
+            "the engine-uploaded image's thumbnail must paint BEFORE the "
+            "ceremony, or a later paint assertion cannot tell a broken read "
+            f"from a thumbnail never produced; got {painted}. "
+            f"error={app.error_text()!r}"
         )
     return set_name, file_name

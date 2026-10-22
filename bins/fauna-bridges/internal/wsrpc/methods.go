@@ -4512,8 +4512,11 @@ func FetchRecipientFilters(ctx context.Context, c Caller, actorID []byte) ([]Ema
 }
 
 // ForwardCopyMode is the wire enum for forward_message's copy_mode (Rust
-// `ForwardCopyMode`, serde rename_all=snake_case). Forward-all is always
-// `Copy`; `Redirect` is the per-rule / admin-forwarder no-local-copy shape.
+// `ForwardCopyMode`, serde rename_all=snake_case). The mode follows the
+// message, never the class: `Redirect` whenever the recipient keeps no local
+// copy (a fired redirect rule sends its copy rules and forward-all as
+// `Redirect` too; the admin forwarder is always `Redirect`), else `Copy`. The
+// nest persists it on the queued row and a succession burns only `Copy` rows.
 type ForwardCopyMode string
 
 const (

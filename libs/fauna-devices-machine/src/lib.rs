@@ -38,9 +38,9 @@ pub mod snapshots;
 pub mod this_device;
 
 pub use machine::{
-    DevicesMachine, FleetMembersView, FleetRemoval, FleetRemovalRefusal, FollowedFoldersSource,
-    ForeignSetRow, ForeignSetsSource, MlsQuery, NestDeletion, P2pParticipation, UnaccountedMember,
-    devices_refreshes_json,
+    DevicesMachine, FleetMembersView, FleetRemoval, FleetRemovalRefusal, FolderChannelOwners,
+    FollowedFoldersSource, ForeignSetRow, ForeignSetsSource, MlsQuery, NestDeletion,
+    P2pParticipation, UnaccountedMember, devices_refreshes_json,
 };
 #[cfg(feature = "rpc-glue")]
 pub use nest_api::build_devices_machine;

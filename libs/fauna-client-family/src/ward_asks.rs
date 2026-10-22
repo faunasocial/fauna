@@ -8,12 +8,16 @@
 //! (`bridge-source-request-state`). Lifted from tui's `FamilyState` so no app
 //! re-derives the id compare or the triple key.
 //!
-//! Neither function tests supervision: both inputs are supervised-only by
-//! construction (the caller folds them from a status read gated on
+//! A third question rides the same reply: "does every knock waiting on me wait
+//! on my guardian?" (`knock-guardian-pending`, § App surface — "pending approval
+//! states render on the blocked surfaces themselves (the knock row …)").
+//!
+//! None of the functions tests supervision: every input is supervised-only by
+//! construction (the caller folds it from a status read gated on
 //! `supervised_by`), so deriving the answer from the data alone keeps the
 //! surfaces in step with what the nest enforces.
 
-use fauna_protocol::family::{FamilyContactRequestInfo, FamilyFeedRequestInfo};
+use fauna_protocol::family::{FamilyContactRequestInfo, FamilyFeedRequestInfo, ReachPolicy};
 
 /// The two live states a ward's feed-source ask can be in, as
 /// `bridge-source-request-state` renders them (`family-safety.md` § Feed-source
@@ -83,6 +87,23 @@ pub fn feed_request_state(
         .map(FeedRequestState::of)
 }
 
+/// Whether every knock in the caller's own list is waiting on their guardian —
+/// what `knock-guardian-pending` renders from, on each knock row.
+///
+/// `own_policy` is the caller's OWN active policy off `fauna.family.status`
+/// (`FamilyStatusReply::policy`), present only while the caller is supervised.
+/// With `contact_approval` on, acceptance authority for every inbound knock has
+/// moved to the guardian: the ward's own accept is refused approval-pending and
+/// the knock sits in the guardian's queue (`family-safety.md` § Guardian policy,
+/// the `contact_approval` row; § Reach approvals — "the ward still *sees* the
+/// knock with an approval-pending state"). So the state is derived here from
+/// what the ward already holds, with no per-knock wire field: `KnockItem`
+/// carries none, and none is needed while the knob decides for all knocks at
+/// once.
+pub fn knocks_await_guardian(own_policy: Option<&ReachPolicy>) -> bool {
+    own_policy.is_some_and(|p| p.contact_approval)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,6 +165,23 @@ mod tests {
             None,
             "a follow grant must not satisfy the bridge's LINK gate"
         );
+    }
+
+    #[test]
+    fn knocks_await_the_guardian_only_under_contact_approval() {
+        assert!(
+            !knocks_await_guardian(None),
+            "an unsupervised caller carries no policy, and decides its own knocks"
+        );
+        assert!(
+            !knocks_await_guardian(Some(&ReachPolicy::default())),
+            "a supervised caller with contact approval off decides its own knocks"
+        );
+        let approval_on = ReachPolicy {
+            contact_approval: true,
+            ..ReachPolicy::default()
+        };
+        assert!(knocks_await_guardian(Some(&approval_on)));
     }
 
     #[test]

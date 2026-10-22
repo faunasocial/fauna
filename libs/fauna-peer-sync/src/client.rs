@@ -363,6 +363,86 @@ pub async fn pull_file_chunks(
     })
 }
 
+/// The same-account folder row page (`fauna.peer.sync.changes.list`): the rows
+/// an admitted sibling holds for `folder` (its `FolderRef` wire string) above
+/// `since`, pending rows on the tail page (`p2p.md` § Same-account nest-down
+/// folder transfer). Rows walk any path — metadata-sized; only chunk bodies
+/// keep the relay byte gate. The page is DATA: the engine's ingest judges
+/// every row before it lands anything.
+pub async fn pull_folder_changes(
+    channel: &PeerChannel,
+    folder: &str,
+    since: i64,
+) -> Result<fauna_protocol::peer_sync::PeerSyncChangesListReply> {
+    use fauna_protocol::peer_sync::{KIND_PEER_SYNC_CHANGES_LIST, PeerSyncChangesListRequest};
+    let req: Value = decode_strict(
+        &encode_canonical(&PeerSyncChangesListRequest {
+            folder: folder.to_string(),
+            since,
+            extra: Default::default(),
+        })
+        .context("encode changes.list")?,
+    )
+    .context("changes.list as Value")?;
+    let reply = channel
+        .request(KIND_PEER_SYNC_CHANGES_LIST, req)
+        .await
+        .context("peer changes.list")?;
+    decode_strict(&encode_canonical(&reply).context("encode changes reply")?)
+        .context("decode changes reply")
+}
+
+/// One of `folder`'s chunk manifests from an admitted sibling
+/// (`fauna.peer.sync.manifests.get`), checked against the hash it was asked
+/// by (wormability rule 4). `Ok(None)` — the sibling retains no manifest by
+/// that hash — is the nest path's to serve. An error means the sibling
+/// misbehaved (bytes hashing elsewhere) or the channel failed; a single-hash
+/// `deferred` is an error too — no smaller want list exists to retry with,
+/// as on the share leg's fetcher.
+pub async fn fetch_folder_manifest(
+    channel: &PeerChannel,
+    folder: &str,
+    hash: &ContentHash,
+) -> Result<Option<Vec<u8>>> {
+    use fauna_protocol::peer_sync::{
+        KIND_PEER_SYNC_MANIFESTS_GET, PeerSyncManifestsGetReply, PeerSyncManifestsGetRequest,
+    };
+    let req: Value = decode_strict(
+        &encode_canonical(&PeerSyncManifestsGetRequest {
+            folder: folder.to_string(),
+            manifest_hashes: vec![serde_bytes::ByteBuf::from(hash.digest().to_vec())],
+            extra: Default::default(),
+        })
+        .context("encode manifests.get")?,
+    )
+    .context("manifests.get as Value")?;
+    let reply = channel
+        .request(KIND_PEER_SYNC_MANIFESTS_GET, req)
+        .await
+        .context("peer manifests.get")?;
+    let reply: PeerSyncManifestsGetReply =
+        decode_strict(&encode_canonical(&reply).context("encode manifests reply")?)
+            .context("decode manifests reply")?;
+    let Some(served) = reply.manifests.into_iter().next() else {
+        if !reply.deferred.is_empty() {
+            bail!(
+                "the sibling holds manifest {} but it exceeds one reply's byte budget",
+                hex::encode(hash.digest())
+            );
+        }
+        return Ok(None);
+    };
+    let actual = ContentHash::of_raw(&served.bytes);
+    if actual != *hash {
+        bail!(
+            "sibling-served manifest hash mismatch: asked for {}, got bytes hashing to {}",
+            hex::encode(hash.digest()),
+            hex::encode(actual.digest())
+        );
+    }
+    Ok(Some(served.bytes.into_vec()))
+}
+
 /// The want-list pull: fetch every indexed-but-absent block of `scope` from
 /// the admitted peer, hydrating each through the store's content-address
 /// check (a poisoned block fails there and is refused — wormability rule 4).

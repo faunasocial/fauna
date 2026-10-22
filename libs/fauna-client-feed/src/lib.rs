@@ -17,13 +17,13 @@
 use fauna_core::scoring::FilterRule;
 use fauna_protocol::RpcRequester;
 use fauna_protocol::feed::{
-    FeedContributorGrantReply, FeedContributorGrantRequest, FeedContributorRevokeReply,
-    FeedContributorRevokeRequest, FeedContributorsListReply, FeedContributorsListRequest,
-    FeedCreateReply, FeedCreateRequest, FeedDeleteReply, FeedDeleteRequest, FeedFactorsGetReply,
-    FeedFactorsGetRequest, FeedFactorsSetReply, FeedFactorsSetRequest, FeedGetReply,
-    FeedGetRequest, FeedListReply, FeedListRequest, FeedLocalPostsReply, FeedLocalPostsRequest,
-    FeedPostsReply, FeedPostsRequest, FeedTrendingPostsReply, FeedTrendingPostsRequest,
-    FeedUpdateReply, FeedUpdateRequest,
+    FeedAuthorPostsReply, FeedAuthorPostsRequest, FeedContributorGrantReply,
+    FeedContributorGrantRequest, FeedContributorRevokeReply, FeedContributorRevokeRequest,
+    FeedContributorsListReply, FeedContributorsListRequest, FeedCreateReply, FeedCreateRequest,
+    FeedDeleteReply, FeedDeleteRequest, FeedFactorsGetReply, FeedFactorsGetRequest,
+    FeedFactorsSetReply, FeedFactorsSetRequest, FeedGetReply, FeedGetRequest, FeedListReply,
+    FeedListRequest, FeedLocalPostsReply, FeedLocalPostsRequest, FeedPostsReply, FeedPostsRequest,
+    FeedTrendingPostsReply, FeedTrendingPostsRequest, FeedUpdateReply, FeedUpdateRequest,
 };
 
 pub use fauna_protocol::feed;
@@ -257,6 +257,29 @@ impl<R: RpcRequester> FeedClient<R> {
             .await
     }
 
+    /// `fauna.feed.author.posts` — one author's posts (`feed.md` § The read
+    /// model → *The author read*): the profile page's Posts tab, always
+    /// chronological on the `created_at` keyset `cursor`. `author` is the
+    /// hex actor id.
+    pub async fn feed_author_posts(
+        &self,
+        author: impl Into<String>,
+        cursor: Option<i64>,
+        limit: Option<i64>,
+    ) -> Result<FeedAuthorPostsReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.feed.author.posts",
+                FeedAuthorPostsRequest {
+                    author: author.into(),
+                    cursor,
+                    limit,
+                    extra: std::collections::BTreeMap::new(),
+                },
+            )
+            .await
+    }
+
     /// `fauna.feed.trending.posts` — query the built-in **Trending** virtual
     /// feed (`trending.md` § The Trending feed): the *scored* sibling of
     /// `fauna.feed.local.posts` over **public posts only**, ordered by the
@@ -408,6 +431,11 @@ mod tests {
                 extra: Default::default(),
             }),
             "fauna.feed.local.posts" => fauna_protocol::encode_canonical(&FeedLocalPostsReply {
+                posts: vec![],
+                cursor: None,
+                extra: Default::default(),
+            }),
+            "fauna.feed.author.posts" => fauna_protocol::encode_canonical(&FeedAuthorPostsReply {
                 posts: vec![],
                 cursor: None,
                 extra: Default::default(),
@@ -653,6 +681,20 @@ mod tests {
         assert_eq!(req.cursor, Some(1_700_000_000_000_000));
         assert_eq!(req.limit, Some(25));
         assert_eq!(req.search, None);
+    }
+
+    #[test]
+    fn feed_author_posts_composes_kind_and_payload() {
+        let (rec, c) = client();
+        block_on(c.feed_author_posts("ab".repeat(32), Some(1_700_000_000_000_000), Some(25)))
+            .expect("infallible mock");
+        let (kind, payload) = rec.recorded();
+        assert_eq!(kind, "fauna.feed.author.posts");
+        let req: feed::FeedAuthorPostsRequest =
+            fauna_protocol::decode_strict(&payload).expect("decodes");
+        assert_eq!(req.author, "ab".repeat(32));
+        assert_eq!(req.cursor, Some(1_700_000_000_000_000));
+        assert_eq!(req.limit, Some(25));
     }
 
     #[test]

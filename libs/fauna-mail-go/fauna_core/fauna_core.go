@@ -369,6 +369,24 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_core_checksum_func_mail_unavailable_here()
+		})
+		if checksum != 51221 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_core: uniffi_fauna_core_checksum_func_mail_unavailable_here: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_core_checksum_func_mta_can_run()
+		})
+		if checksum != 59027 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_core: uniffi_fauna_core_checksum_func_mta_can_run: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_core_checksum_func_perimeter_mail_score_rows()
 		})
 		if checksum != 592 {
@@ -380,7 +398,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_core_checksum_func_is_safe_payment_url()
 		})
-		if checksum != 18091 {
+		if checksum != 4734 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_core: uniffi_fauna_core_checksum_func_is_safe_payment_url: UniFFI API checksum mismatch")
 		}
@@ -1907,11 +1925,19 @@ type PolicySummaryLine struct {
 	Label LocalizedText
 	// The knob's current value, already fail-closed for the two string knobs.
 	Value LocalizedText
+	// The guardian's own reason (`{ lang → text }`, with a required `default`
+	// entry), shown **verbatim** beside the line when a rule of the guardian's
+	// document makes it (`nest-rules.md` § The shared rule editor → *The
+	// reason is the member's to read*); pick the entry with
+	// [`Self::reason_text`]. `None` on every other line — a reach knob, a
+	// floor, an unreadable document.
+	Reason *map[string]string
 }
 
 func (r *PolicySummaryLine) Destroy() {
 	FfiDestroyerLocalizedText{}.Destroy(r.Label)
 	FfiDestroyerLocalizedText{}.Destroy(r.Value)
+	FfiDestroyerOptionalMapStringString{}.Destroy(r.Reason)
 }
 
 type FfiConverterPolicySummaryLine struct{}
@@ -1926,6 +1952,7 @@ func (c FfiConverterPolicySummaryLine) Read(reader io.Reader) PolicySummaryLine 
 	return PolicySummaryLine{
 		FfiConverterLocalizedTextINSTANCE.Read(reader),
 		FfiConverterLocalizedTextINSTANCE.Read(reader),
+		FfiConverterOptionalMapStringStringINSTANCE.Read(reader),
 	}
 }
 
@@ -1940,6 +1967,7 @@ func (c FfiConverterPolicySummaryLine) LowerExternal(value PolicySummaryLine) Ex
 func (c FfiConverterPolicySummaryLine) Write(writer io.Writer, value PolicySummaryLine) {
 	FfiConverterLocalizedTextINSTANCE.Write(writer, value.Label)
 	FfiConverterLocalizedTextINSTANCE.Write(writer, value.Value)
+	FfiConverterOptionalMapStringStringINSTANCE.Write(writer, value.Reason)
 }
 
 type FfiDestroyerPolicySummaryLine struct{}
@@ -2109,6 +2137,9 @@ type QuotedPostEmbedOwned struct {
 	// See [`RenderBlock::QuotedPost`]'s `not_found`. Defaulted on every face, so
 	// a binding or a payload from before the field keeps reading `false`.
 	NotFound bool
+	// See [`RenderBlock::QuotedPost`]'s `admin_block_reason`. Defaulted on
+	// every face, as `not_found` is.
+	AdminBlockReason *string
 }
 
 func (r *QuotedPostEmbedOwned) Destroy() {
@@ -2119,6 +2150,7 @@ func (r *QuotedPostEmbedOwned) Destroy() {
 	FfiDestroyerAuthoringOriginStatus{}.Destroy(r.AuthoringOrigin)
 	FfiDestroyerOptionalString{}.Destroy(r.LegalTakedownRef)
 	FfiDestroyerBool{}.Destroy(r.NotFound)
+	FfiDestroyerOptionalString{}.Destroy(r.AdminBlockReason)
 }
 
 type FfiConverterQuotedPostEmbedOwned struct{}
@@ -2138,6 +2170,7 @@ func (c FfiConverterQuotedPostEmbedOwned) Read(reader io.Reader) QuotedPostEmbed
 		FfiConverterAuthoringOriginStatusINSTANCE.Read(reader),
 		FfiConverterOptionalStringINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
+		FfiConverterOptionalStringINSTANCE.Read(reader),
 	}
 }
 
@@ -2157,6 +2190,7 @@ func (c FfiConverterQuotedPostEmbedOwned) Write(writer io.Writer, value QuotedPo
 	FfiConverterAuthoringOriginStatusINSTANCE.Write(writer, value.AuthoringOrigin)
 	FfiConverterOptionalStringINSTANCE.Write(writer, value.LegalTakedownRef)
 	FfiConverterBoolINSTANCE.Write(writer, value.NotFound)
+	FfiConverterOptionalStringINSTANCE.Write(writer, value.AdminBlockReason)
 }
 
 type FfiDestroyerQuotedPostEmbedOwned struct{}
@@ -3160,6 +3194,51 @@ type FfiDestroyerClamavVerdict struct{}
 
 func (_ FfiDestroyerClamavVerdict) Destroy(value ClamavVerdict) {
 	value.Destroy()
+}
+
+// The deployment's content-scanner declaration. Serde uses the wire strings
+// and is open like [`ContentScanners::from_wire`]: an unrecognised value
+// decodes as `Unknown`, and `Default` is `Unknown` (a client record that has
+// not heard from the box yet).
+type ContentScanners uint
+
+const (
+	// Both scanner addresses are wired — the MTA's scan gate can run.
+	ContentScannersWired ContentScanners = 1
+	// The artifact declared no scanners — inbound mail cannot be accepted.
+	ContentScannersAbsent ContentScanners = 2
+	// Nothing declared anything (no hatch, an unreadable one, or a wire
+	// value this build does not know) — today's behaviour stands.
+	ContentScannersUnknown ContentScanners = 3
+)
+
+type FfiConverterContentScanners struct{}
+
+var FfiConverterContentScannersINSTANCE = FfiConverterContentScanners{}
+
+func (c FfiConverterContentScanners) Lift(rb RustBufferI) ContentScanners {
+	return LiftFromRustBuffer[ContentScanners](c, rb)
+}
+
+func (c FfiConverterContentScanners) Lower(value ContentScanners) C.RustBuffer {
+	return LowerIntoRustBuffer[ContentScanners](c, value)
+}
+
+func (c FfiConverterContentScanners) LowerExternal(value ContentScanners) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[ContentScanners](c, value))
+}
+func (FfiConverterContentScanners) Read(reader io.Reader) ContentScanners {
+	id := readInt32(reader)
+	return ContentScanners(id)
+}
+
+func (FfiConverterContentScanners) Write(writer io.Writer, value ContentScanners) {
+	writeInt32(writer, int32(value))
+}
+
+type FfiDestroyerContentScanners struct{}
+
+func (_ FfiDestroyerContentScanners) Destroy(value ContentScanners) {
 }
 
 // Contextual display bucket for a conversation/thread last-activity time,
@@ -4349,6 +4428,7 @@ type RenderBlockQuotedPost struct {
 	AuthoringOrigin  AuthoringOriginStatus
 	LegalTakedownRef *string
 	NotFound         bool
+	AdminBlockReason *string
 }
 
 func (e RenderBlockQuotedPost) Destroy() {
@@ -4359,6 +4439,7 @@ func (e RenderBlockQuotedPost) Destroy() {
 	FfiDestroyerAuthoringOriginStatus{}.Destroy(e.AuthoringOrigin)
 	FfiDestroyerOptionalString{}.Destroy(e.LegalTakedownRef)
 	FfiDestroyerBool{}.Destroy(e.NotFound)
+	FfiDestroyerOptionalString{}.Destroy(e.AdminBlockReason)
 }
 
 // A first-class in-bubble reply-quote node — the conversations analogue of
@@ -4476,6 +4557,7 @@ func (FfiConverterRenderBlock) Read(reader io.Reader) RenderBlock {
 			FfiConverterAuthoringOriginStatusINSTANCE.Read(reader),
 			FfiConverterOptionalStringINSTANCE.Read(reader),
 			FfiConverterBoolINSTANCE.Read(reader),
+			FfiConverterOptionalStringINSTANCE.Read(reader),
 		}
 	case 15:
 		return RenderBlockQuotedMessage{
@@ -4552,6 +4634,7 @@ func (FfiConverterRenderBlock) Write(writer io.Writer, value RenderBlock) {
 		FfiConverterAuthoringOriginStatusINSTANCE.Write(writer, variant_value.AuthoringOrigin)
 		FfiConverterOptionalStringINSTANCE.Write(writer, variant_value.LegalTakedownRef)
 		FfiConverterBoolINSTANCE.Write(writer, variant_value.NotFound)
+		FfiConverterOptionalStringINSTANCE.Write(writer, variant_value.AdminBlockReason)
 	case RenderBlockQuotedMessage:
 		writeInt32(writer, 15)
 		FfiConverterStringINSTANCE.Write(writer, variant_value.AuthorDisplay)
@@ -5114,6 +5197,47 @@ func (_ FfiDestroyerOptionalRspamdScore) Destroy(value *RspamdScore) {
 	}
 }
 
+type FfiConverterOptionalMapStringString struct{}
+
+var FfiConverterOptionalMapStringStringINSTANCE = FfiConverterOptionalMapStringString{}
+
+func (c FfiConverterOptionalMapStringString) Lift(rb RustBufferI) *map[string]string {
+	return LiftFromRustBuffer[*map[string]string](c, rb)
+}
+
+func (_ FfiConverterOptionalMapStringString) Read(reader io.Reader) *map[string]string {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterMapStringStringINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalMapStringString) Lower(value *map[string]string) C.RustBuffer {
+	return LowerIntoRustBuffer[*map[string]string](c, value)
+}
+
+func (c FfiConverterOptionalMapStringString) LowerExternal(value *map[string]string) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*map[string]string](c, value))
+}
+
+func (_ FfiConverterOptionalMapStringString) Write(writer io.Writer, value *map[string]string) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterMapStringStringINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalMapStringString struct{}
+
+func (_ FfiDestroyerOptionalMapStringString) Destroy(value *map[string]string) {
+	if value != nil {
+		FfiDestroyerMapStringString{}.Destroy(*value)
+	}
+}
+
 type FfiConverterSequenceString struct{}
 
 var FfiConverterSequenceStringINSTANCE = FfiConverterSequenceString{}
@@ -5623,6 +5747,25 @@ func LowerToExternalTypeSecretString(value SecretString) ExternalCRustBuffer {
 	return RustBufferFromC(FfiConverterTypeSecretStringINSTANCE.Lower(value))
 }
 
+// Would enabling mail need an MTA this box cannot run?
+// `node_mode != Private && scanners == Absent` — the condition under which
+// `fauna.bridges.set_mail_enabled(true)` is refused and the Mail pages read
+// unavailable. Never true on the private axis (the home box's enable brings
+// up the MDA alone).
+func MailUnavailableHere(nodeMode NodeMode, scanners ContentScanners) bool {
+	return FfiConverterBoolINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.int8_t {
+		return C.uniffi_fauna_core_fn_func_mail_unavailable_here(FfiConverterNodeModeINSTANCE.Lower(nodeMode), FfiConverterContentScannersINSTANCE.Lower(scanners), _uniffiStatus)
+	}))
+}
+
+// Can the MTA run on this box? `node_mode != Private && scanners != Absent`.
+// The nest's `mta_should_run` is `mail_enabled && mta_can_run(..)`.
+func MtaCanRun(nodeMode NodeMode, scanners ContentScanners) bool {
+	return FfiConverterBoolINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.int8_t {
+		return C.uniffi_fauna_core_fn_func_mta_can_run(FfiConverterNodeModeINSTANCE.Lower(nodeMode), FfiConverterContentScannersINSTANCE.Lower(scanners), _uniffiStatus)
+	}))
+}
+
 // The built-in mail perimeter's bus rows — the ONE per-kind verdict → row
 // mapping (`content-scoring.md` § The scoring-metadata bus, the contract
 // phase). The Go MTA calls it over UniFFI at the ingest edge, once per
@@ -5669,7 +5812,7 @@ func PerimeterMailScoreRows(spamScoreMilli int32, clamav ClamavVerdict, rspamd *
 // user to an attacker-chosen scheme (the F-CL2 anti-phishing-redirect class; see
 // `docs/goal/architecture/security.md`). This is a plain scheme-prefix check,
 // not full URL parsing: it matches the check web's
-// `$lib/safe-url.ts::isSafeNavUrl` already applies (`parsed.protocol ===
+// `#lib/safe-url.ts::isSafeNavUrl` already applies (`parsed.protocol ===
 // 'https:'`), and native callers just need the same "https or refuse" gate
 // before invoking their platform's opener.
 //

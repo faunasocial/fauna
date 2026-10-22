@@ -1,10 +1,15 @@
 package imap
 
 import (
+	"bufio"
 	"context"
+	"crypto/tls"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -84,6 +89,7 @@ func mustUnwrapPlainFixture(t *testing.T) *mailfauna.MLSCapability {
 		fixtureActorID,
 		fixtureCredentialID,
 		mailfauna.KdfKindArgon2id,
+		"",
 	)
 	if err != nil {
 		t.Fatalf("unwrap PLAIN fixture: %v", err)
@@ -922,6 +928,7 @@ func TestErrorWordingSurface(t *testing.T) {
 		fixtureActorID,
 		fixtureCredentialID,
 		mailfauna.KdfKindArgon2id,
+		"",
 	)
 	if err == nil {
 		t.Fatal("malformed blob must error")
@@ -945,4 +952,124 @@ var _ wsrpcCaller = (*authCaller)(nil)
 // matters.
 type wsrpcCaller interface {
 	Call(ctx context.Context, method string, body, reply any) error
+}
+
+// A busy credential-KDF gate checked no password, so it is
+// `NO [UNAVAILABLE]`, never the user's wrong password: no lockout failure and
+// no result=fail audit row. A limit-1 lockout makes "no failure recorded"
+// observable — one booked failure would lock the correct-password retry. LOGIN
+// passes the same reply through. Not t.Parallel: it holds the process-wide gate.
+func TestPLAINBusyKDFIsUnavailableNotAFailure(t *testing.T) {
+	blob := mustReadFixture(t, "wrapped_msek.bin")
+	lockout := authlock.New(1, time.Minute, nil)
+	newSess := func() (*Session, *authCaller) {
+		c := &authCaller{
+			validateRecipientReplyHex: hex.EncodeToString(fixtureActorID),
+			blobBytes:                 blob,
+			mlsPubkey:                 fixtureMLSPubkey,
+		}
+		return newLockedTestSession(c, lockout, "203.0.113.7"), c
+	}
+
+	restore := mailfauna.SaturateKDFGateForTest(20 * time.Millisecond)
+	s, c := newSess()
+	err := s.authenticate("PLAIN", plainPayload("", "alice@example.com", string(fixturePlainPassword)))
+	sLogin, cLogin := newSess()
+	loginErr := sLogin.Login("alice@example.com", string(fixturePlainPassword))
+	restore()
+
+	if err != errAuthUnavailable {
+		t.Fatalf("busy gate: got %v, want errAuthUnavailable", err)
+	}
+	var imapErr *imap.Error
+	if !errors.As(loginErr, &imapErr) || imapErr.Code != imap.ResponseCodeUnavailable {
+		t.Fatalf("busy gate via LOGIN: got %v, want NO [UNAVAILABLE]", loginErr)
+	}
+	if got := len(c.callsOf(wsrpc.MethodReportAuthEvent)) + len(cLogin.callsOf(wsrpc.MethodReportAuthEvent)); got != 0 {
+		t.Fatalf("busy gate fired %d report_auth_event rows, want 0", got)
+	}
+	sOK, _ := newSess()
+	if err := sOK.authenticate("PLAIN", plainPayload("", "alice@example.com", string(fixturePlainPassword))); err != nil {
+		t.Fatalf("correct password after a busy gate: %v (the busy attempt was booked as a failure)", err)
+	}
+}
+
+// The unknown-user dummy KDF answers a busy gate the same UNAVAILABLE, so a
+// saturated gate cannot tell a prober which accounts exist (F3 under load).
+func TestPLAINBusyKDFUnknownUserIsUnavailableToo(t *testing.T) {
+	mailfauna.PrewarmDummyKDF()
+	c := &authCaller{} // nest rejects the recipient
+	s := newLockedTestSession(c, authlock.New(1, time.Minute, nil), "203.0.113.8")
+
+	restore := mailfauna.SaturateKDFGateForTest(20 * time.Millisecond)
+	err := s.authenticate("PLAIN", plainPayload("", "nobody@example.com", "any"))
+	restore()
+	if err != errAuthUnavailable {
+		t.Fatalf("busy gate, unknown user: got %v, want errAuthUnavailable", err)
+	}
+	if got := len(c.callsOf(wsrpc.MethodReportAuthEvent)); got != 0 {
+		t.Fatalf("busy gate fired %d report_auth_event rows, want 0", got)
+	}
+}
+
+// The wire witness for the busy-gate reply: AUTHENTICATE PLAIN runs the
+// authenticator inside the go-imap fork's SASL dispatch, so the tagged reply
+// is the fork's, not ours. A busy credential-KDF gate must still reach the
+// client as `NO [UNAVAILABLE]` — and book no failure and no audit row. Not
+// t.Parallel: it holds the process-wide gate.
+func TestAuthenticatePLAINBusyKDFIsUnavailableOnTheWire(t *testing.T) {
+	blob := mustReadFixture(t, "wrapped_msek.bin")
+	c := &authCaller{
+		validateRecipientReplyHex: hex.EncodeToString(fixtureActorID),
+		blobBytes:                 blob,
+		mlsPubkey:                 fixtureMLSPubkey,
+	}
+	listener := newTLSListener(t, selfSignedCert(t))
+	defer listener.Close()
+	backend := NewBackend(c, slog.Default(), 0, 0, 1, nil, nil)
+	srv := NewServer(ServerConfig{}, backend)
+	go func() { _ = srv.Serve(listener) }()
+	defer func() { _ = srv.Close() }()
+
+	conn, err := tls.Dial("tcp", listener.Addr().String(), &tls.Config{InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	r := bufio.NewReader(conn)
+	if _, err := r.ReadString('\n'); err != nil {
+		t.Fatalf("read greeting: %v", err)
+	}
+
+	restore := mailfauna.SaturateKDFGateForTest(20 * time.Millisecond)
+	defer restore()
+	if _, err := io.WriteString(conn, "A001 AUTHENTICATE PLAIN\r\n"); err != nil {
+		t.Fatalf("write AUTHENTICATE: %v", err)
+	}
+	if line, err := r.ReadString('\n'); err != nil || !strings.HasPrefix(line, "+") {
+		t.Fatalf("want a '+' continuation, got %q (%v)", line, err)
+	}
+	resp := base64.StdEncoding.EncodeToString([]byte(plainPayload("", "alice@example.com", string(fixturePlainPassword))))
+	if _, err := io.WriteString(conn, resp+"\r\n"); err != nil {
+		t.Fatalf("write PLAIN response: %v", err)
+	}
+	var reply string
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read tagged reply: %v", err)
+		}
+		if strings.HasPrefix(line, "A001 ") {
+			reply = strings.TrimSpace(line)
+			break
+		}
+	}
+
+	if !strings.HasPrefix(reply, "A001 NO [UNAVAILABLE]") {
+		t.Fatalf("busy gate on the wire: got %q, want \"A001 NO [UNAVAILABLE] …\"", reply)
+	}
+	if got := len(c.callsOf(wsrpc.MethodReportAuthEvent)); got != 0 {
+		t.Fatalf("busy gate fired %d report_auth_event rows, want 0", got)
+	}
 }

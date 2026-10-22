@@ -205,14 +205,20 @@ pub struct FeedDeleteReply {
 
 // ── shared post item ───────────────────────────────────────────────────
 
-/// A **bridged** author's face — the handle, display name and avatar the
-/// origin bridge served for a synthetic actor (`docs/goal/behavior/bridges.md`
-/// § Unified feed ingestion → *Bridged authors*, ruled 2026-09-26). Projected
-/// by the nest from its `bridge_authors` table onto every local feed page
-/// after the query, never joined into it; a native author has no row and the
-/// carrying field stays `None`.
+/// A post author's face — for a **bridged** author, the handle, display name
+/// and avatar the origin bridge served for a synthetic actor
+/// (`docs/goal/behavior/bridges.md` § Unified feed ingestion → *Bridged
+/// authors*, ruled 2026-09-26), projected by the nest from its
+/// `bridge_authors` table onto every local feed page after the query, never
+/// joined into it. A **local native** author (one hosted on the serving nest)
+/// gets the same field from the nest's own reads in the same pass — the
+/// `users` row's handle and the `display_name` of their latest stored signed
+/// profile, verified at projection; `avatar_url` stays `None` for them
+/// (*Bridged authors* → *The local native author*). A remote native author
+/// arrives `None` and is filled client-side from their own signed profile
+/// (`docs/goal/ui/feed.md` § The read model → *The remote author's byline*).
 ///
-/// **Trust class: bridge-asserted, nest-relayed** — the same class as the
+/// **Trust class (bridged): bridge-asserted, nest-relayed** — the same class as the
 /// post's `source` badge, never a signed `Profile`. Apps hand `display_name`
 /// and `handle` to `fauna_core::format::peer_display_label` in the
 /// self-published-name slot, so the viewer's own nickname still wins.
@@ -223,7 +229,8 @@ pub struct FeedDeleteReply {
 pub struct AuthorDisplay {
     /// The bridge's own user-facing handle: `@user@host` (ActivityPub), a
     /// NIP-05 address or the kind-0 `name` (nostr), `alice.bsky.social`
-    /// (Bluesky).
+    /// (Bluesky). For a local native author, the bare handle on their `users`
+    /// row (`alice` — bare means one of the serving nest's own users).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handle: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -371,11 +378,31 @@ pub struct FeedPostItem {
     /// a post with no labels deserializes an empty `Vec` (no badge).
     #[serde(default)]
     pub labels: Vec<fauna_core::content_category::ContentLabelEntry>,
-    /// The face of a **bridged** author — see [`AuthorDisplay`]. `None` for a
-    /// native author (the card then paints the short id). Additive +
-    /// `None`-default.
+    /// The author's face — see [`AuthorDisplay`]: a bridged author's, or a
+    /// local native author's projected by the serving nest. `None` for a
+    /// remote native author (the client fills it from their signed profile)
+    /// and for an author with neither a handle nor a profile (the card then
+    /// paints the short id). Additive + `None`-default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author_display: Option<AuthorDisplay>,
+    /// The post's **home nest** when this nest indexed it from another — a
+    /// post envelope a federated follow delivered here
+    /// (`docs/goal/behavior/federated-follow.md` § Decision 3), projected from
+    /// `content.origin_nest_url`. The sealed body and every attachment rest
+    /// there: the client fetches them by content address from that nest's
+    /// public blob route. `None` for every post this nest holds as its own.
+    /// Additive + `None`-default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_nest_url: Option<String>,
+    /// The home nest's identity (hex 32-byte `nest_actor_id`) beside
+    /// [`home_nest_url`](Self::home_nest_url) — the delivery's **verified**
+    /// origin, which the serving nest dial-proved, never a peer's word: the
+    /// root the reader's foreign byte plane graduates its pin against before
+    /// the first byte (`docs/goal/architecture/transport-trust.md` § The post
+    /// arm). `None` when the home is unknown or unverified (a discovery stub)
+    /// — the plane then keeps the WebPKI floor. Additive + `None`-default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_nest_actor_id: Option<String>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -459,6 +486,34 @@ pub struct FeedLocalPostsRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FeedLocalPostsReply {
+    pub posts: Vec<FeedPostItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<i64>,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+// ── fauna.feed.author.posts ────────────────────────────────────────────
+
+/// One author's posts (`fauna.feed.author.posts`) — the profile page's Posts
+/// tab read (`feed.md` § The read model → *The author read*). The
+/// `FeedLocalPosts*` twin narrowed to one `author` (hex actor id): no rules,
+/// the local feed's mandatory set (spam guard, the viewer's block list),
+/// always chronological on the `created_at` keyset `cursor`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FeedAuthorPostsRequest {
+    /// The author whose posts to list — a hex-encoded 32-byte actor id.
+    pub author: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FeedAuthorPostsReply {
     pub posts: Vec<FeedPostItem>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<i64>,
@@ -1179,6 +1234,31 @@ mod tests {
         };
         let bytes = encode_canonical(&reply).unwrap();
         let decoded: FeedLocalPostsReply = decode(&bytes).unwrap();
+        assert_eq!(reply, decoded);
+    }
+
+    #[test]
+    fn feed_author_posts_request_round_trips() {
+        let req = FeedAuthorPostsRequest {
+            author: "22".repeat(32),
+            cursor: Some(1_700_000_000_000_000),
+            limit: Some(25),
+            extra: BTreeMap::new(),
+        };
+        let bytes = encode_canonical(&req).unwrap();
+        let decoded: FeedAuthorPostsRequest = decode(&bytes).unwrap();
+        assert_eq!(req, decoded);
+    }
+
+    #[test]
+    fn feed_author_posts_reply_round_trips() {
+        let reply = FeedAuthorPostsReply {
+            posts: vec![sample_post_item(false)],
+            cursor: Some(1_700_000_000_000_000),
+            extra: BTreeMap::new(),
+        };
+        let bytes = encode_canonical(&reply).unwrap();
+        let decoded: FeedAuthorPostsReply = decode(&bytes).unwrap();
         assert_eq!(reply, decoded);
     }
 

@@ -637,6 +637,9 @@ pub struct SetupStatus {
     /// Always present nest-side and on the wire. Seeds the `nat_mode_choice` wizard pre-selection
     /// (`docs/goal/behavior/onboarding.md` § 3b-bis).
     pub node_mode: crate::config::NodeMode,
+    /// The artifact's content-scanner declaration (`AppState.content_scanners`,
+    /// read once at boot; see [`SetupStatusReply::content_scanners`]).
+    pub content_scanners: fauna_core::mail_availability::ContentScanners,
     pub version: &'static str,
     /// Whether the mail subsystem's config query is healthy (see
     /// [`SetupStatusReply::mail_subsystem_ok`]).
@@ -645,6 +648,11 @@ pub struct SetupStatus {
     /// [`SetupStatusReply::auto_enable_mail_for_new_users`]). Effective ON when
     /// the admin has never toggled it.
     pub auto_enable_mail_for_new_users: bool,
+    /// Deployment policy: the admin's own Microsoft app registration for the
+    /// Outlook import (see [`SetupStatusReply::microsoft_registration`]).
+    /// `None` ⇒ the project's registration.
+    pub microsoft_registration:
+        Option<fauna_protocol::microsoft_registration::MicrosoftRegistrationStatus>,
     /// Deployment policy: the live client-set registration posture (wire string)
     /// + the orthogonal free-tier ceiling.
     pub registration_mode: Option<String>,
@@ -688,10 +696,15 @@ pub struct SetupStatus {
     /// bare-metal).
     /// See [`SetupStatusReply::os_security_updates_pending`] +
     /// `installers/vps.md` § Host OS Maintenance.
+    pub os_host_status_present: bool,
     pub os_security_updates_pending: u32,
     pub os_reboot_pending: bool,
     pub os_reboot_deferred_since: Option<i64>,
     pub os_last_patched_at: Option<i64>,
+    /// The address the host's SSH door admits, admin-gated like the `os_*`
+    /// fields (`host_maintenance::read_ssh_door_admitted_from_db_path`). See
+    /// [`SetupStatusReply::ssh_door_admitted_from`].
+    pub ssh_door_admitted_from: Option<String>,
     /// The admin's web-app origin choice and what `/app/` answers because of
     /// it — the shared projection `fauna.admin.web_app_origin.get` answers
     /// (`web_app_origin::projection`). See [`SetupStatusReply::web_app_origin`].
@@ -773,6 +786,25 @@ pub async fn setup_status_core(state: &AppState, caller_is_admin: bool) -> Setup
         .ok()
         .flatten()
         .unwrap_or(true);
+
+    // The deployment's own Microsoft app registration for the Outlook import —
+    // another client-read deployment default (`mailbox-migration.md`
+    // § Microsoft sign-in, *An admin-supplied registration*). A failed read
+    // reports none, as the auto-enable read above degrades: the import then
+    // signs in through the project's registration.
+    let microsoft_registration = state
+        .db
+        .get_microsoft_registration()
+        .await
+        .ok()
+        .flatten()
+        .map(|(client_id, tenant)| {
+            fauna_protocol::microsoft_registration::MicrosoftRegistrationStatus {
+                client_id,
+                tenant,
+                extra: Default::default(),
+            }
+        });
 
     // Client-set `[nest]`-policy gates — the live `AppState` values (boot-resolved
     // from the `nest_{registration_mode,subhandles,max_storage_bytes,cors_origins}`
@@ -860,6 +892,14 @@ pub async fn setup_status_core(state: &AppState, caller_is_admin: bool) -> Setup
     } else {
         crate::host_maintenance::HostStatus::default()
     };
+    // The SSH door's admitted address — admin-gated on the same reasoning: it
+    // names where the admin connects from.
+    let ssh_door_admitted_from = if caller_is_admin {
+        crate::host_maintenance::read_ssh_door_admitted_from_db_path(&state.config.nest.db_path)
+            .map(|ip| ip.to_string())
+    } else {
+        None
+    };
 
     SetupStatus {
         domain,
@@ -873,6 +913,7 @@ pub async fn setup_status_core(state: &AppState, caller_is_admin: bool) -> Setup
         admin_exists,
         claimed,
         node_mode,
+        content_scanners: state.content_scanners,
         // Coarsened to `major.minor` — `setup.status` is anonymous like
         // `nest.info`, so the same version-fingerprinting rule applies (spec
         // § 8.1 / `federation.md` § Security).
@@ -883,6 +924,7 @@ pub async fn setup_status_core(state: &AppState, caller_is_admin: bool) -> Setup
         ),
         mail_subsystem_ok,
         auto_enable_mail_for_new_users,
+        microsoft_registration,
         registration_mode,
         max_free_users,
         subhandles,
@@ -892,10 +934,12 @@ pub async fn setup_status_core(state: &AppState, caller_is_admin: bool) -> Setup
         serving_port,
         fronted_by_router,
         dkim_records,
+        os_host_status_present: os.present,
         os_security_updates_pending: os.security_updates_pending,
         os_reboot_pending: os.reboot_pending,
         os_reboot_deferred_since: os.reboot_deferred_since,
         os_last_patched_at: os.last_patched_at,
+        ssh_door_admitted_from,
         web_app_origin: crate::web_app_origin::projection(state),
     }
 }

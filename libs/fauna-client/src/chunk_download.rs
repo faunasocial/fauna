@@ -135,13 +135,11 @@ impl NestPublicChunkFetcher {
 /// then dials through the pin-or-WebPKI [`crate::pinned_http_client`]. Built per
 /// download by the `fauna-media-machine` foreign-fetcher factory.
 pub struct ForeignPublicChunkFetcher {
-    base_url: String,
+    /// The home and its record-delivered identity, graduated lazily on the
+    /// first fetch (no identity ⇒ nothing to graduate: the WebPKI floor, or a
+    /// caller-supplied client).
+    home: GraduatedHome,
     http: reqwest::Client,
-    /// The record-delivered home identity, graduated lazily on the first fetch
-    /// (`None` ⇒ nothing to graduate: the WebPKI floor, or a caller-supplied
-    /// client).
-    home_nest_actor_id: Option<String>,
-    graduated: tokio::sync::OnceCell<()>,
 }
 
 impl ForeignPublicChunkFetcher {
@@ -162,10 +160,8 @@ impl ForeignPublicChunkFetcher {
     /// fails the first fetch closed, before anything is dialed.
     pub fn for_home(base_url: &str, home_nest_actor_id: Option<&str>) -> Self {
         Self {
-            base_url: base_url.trim_end_matches('/').to_string(),
+            home: GraduatedHome::new(base_url, home_nest_actor_id),
             http: crate::pinned_http_client(base_url),
-            home_nest_actor_id: home_nest_actor_id.map(str::to_string),
-            graduated: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -174,41 +170,73 @@ impl ForeignPublicChunkFetcher {
     /// identity to graduate against.
     pub fn with_http(base_url: &str, http: reqwest::Client) -> Self {
         Self {
-            base_url: base_url.trim_end_matches('/').to_string(),
+            home: GraduatedHome::new(base_url, None),
             http,
-            home_nest_actor_id: None,
-            graduated: tokio::sync::OnceCell::new(),
         }
-    }
-
-    /// Graduate the home's pin once, before the first byte is fetched. An
-    /// `http://` home has no TLS to pin (the loopback test rig) and skips it,
-    /// exactly as the sync agent's bind does.
-    async fn ensure_graduated(&self) -> anyhow::Result<()> {
-        let Some(actor_id) = self.home_nest_actor_id.as_deref() else {
-            return Ok(());
-        };
-        if !self.base_url.starts_with("https://") {
-            return Ok(());
-        }
-        self.graduated
-            .get_or_try_init(|| graduate_home_nest_pin(&self.base_url, actor_id))
-            .await
-            .map(|_| ())
     }
 
     /// GET `path`, reading at most `max_bytes` of the body (the home is a
     /// stranger's nest, so it does not choose how much this client allocates;
     /// the content-address check runs only after the read).
     async fn get(&self, path: &str, max_bytes: u64) -> anyhow::Result<Vec<u8>> {
-        self.ensure_graduated().await?;
-        let url = format!("{}{path}", self.base_url);
+        self.home.ensure_graduated().await?;
+        let url = format!("{}{path}", self.home.url());
         let resp = self.http.get(&url).send().await?;
         anyhow::ensure!(resp.status().is_success(), "GET {url}: {}", resp.status());
         let max = usize::try_from(max_bytes).unwrap_or(usize::MAX);
         fauna_nest_http::capped::read_capped(resp, max)
             .await
             .map_err(|e| anyhow::anyhow!("GET {url}: {e}"))
+    }
+}
+
+/// A foreign **home** nest a byte plane dials with no account there, and the
+/// record-delivered identity its pin graduates against — once, lazily, before
+/// the first byte ([`Self::ensure_graduated`]). The one piece every such plane
+/// holds (`transport-trust.md` § Mechanism for the federation-granted row):
+/// [`ForeignPublicChunkFetcher`] (a foreign shared set, a followed folder) and
+/// the post plane ([`crate::post_blob::pinned_plane`], a post homed on another
+/// nest), so no leg can be the one that forgot to graduate.
+pub struct GraduatedHome {
+    /// The home's base URL, trailing slash trimmed.
+    url: String,
+    /// The home's hex `nest_actor_id` — `None` keeps the WebPKI floor.
+    actor_id: Option<String>,
+    graduated: tokio::sync::OnceCell<()>,
+}
+
+impl GraduatedHome {
+    /// The home at `url`, to be verified against `actor_id` (64-hex; `None`
+    /// graduates nothing and keeps the WebPKI floor, never weaker).
+    pub fn new(url: &str, actor_id: Option<&str>) -> Self {
+        Self {
+            url: url.trim_end_matches('/').to_string(),
+            actor_id: actor_id.map(str::to_string),
+            graduated: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    /// The home's base URL, trailing slash trimmed.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Graduate the home's pin once, before the first byte is fetched
+    /// ([`graduate_home_nest_pin`]). An `http://` home has no TLS to pin (the
+    /// loopback test rig) and skips it, exactly as the sync agent's bind does;
+    /// no identity skips it too. A failure is returned for the caller to fail
+    /// closed on, and a later call tries again — never the floor in its place.
+    pub async fn ensure_graduated(&self) -> anyhow::Result<()> {
+        let Some(actor_id) = self.actor_id.as_deref() else {
+            return Ok(());
+        };
+        if !self.url.starts_with("https://") {
+            return Ok(());
+        }
+        self.graduated
+            .get_or_try_init(|| graduate_home_nest_pin(&self.url, actor_id))
+            .await
+            .map(|_| ())
     }
 }
 
@@ -237,9 +265,10 @@ impl ForeignPublicChunkFetcher {
 /// download (or the folder, for the sync agent's bind) inert rather than dial
 /// an unverified byte plane.
 ///
-/// Shared by [`ForeignPublicChunkFetcher::for_home`] (every app's Media
-/// download of a foreign set or a followed folder) and `fauna-sync-agent`'s
-/// bind (`engine_driver`), which used to hold this body itself.
+/// Shared by [`GraduatedHome`] (every app's Media download of a foreign set or
+/// a followed folder, and a post's own bytes from its foreign home) and
+/// `fauna-sync-agent`'s bind (`engine_driver`), which used to hold this body
+/// itself.
 pub async fn graduate_home_nest_pin(
     home_nest_url: &str,
     home_nest_actor_id: &str,

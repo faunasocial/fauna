@@ -111,7 +111,6 @@ def test_cross_nest_knock_reaches_the_peers_own_queue(
 ):
     """Adding ``bob@<other-nest>`` lands a pending knock in Bob's queue THERE."""
     app = logged_in_app
-    app.contacts.require_cross_nest_knock()
 
     foreign = cross_nest_foreign
     foreign_url = foreign["url"]

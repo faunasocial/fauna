@@ -10,15 +10,15 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use crate::db::outbound::{InboundVerdictsSnapshot, NewOutbound, OutboundRow};
-use crate::domain_hash::{HashField, write_fields};
 use fauna_core::data::{MailIngress, MailVerdict, UnknownSenderMail, supervised_mail_verdict};
+use fauna_core::domain_hash::{HashField, write_fields};
 use fauna_mls::wrapped_blob::SealedRecordBytes;
 use fauna_protocol::{
     RpcError, Value,
     bridge_routing::{
         ALIAS_NOT_EXTENDABLE_CODE, AbortPrimaryDomainRenameReply, AbortPrimaryDomainRenameRequest,
         AddLocalDomainReply, AddLocalDomainRequest, AliasControls, AliasHitRow, AliasPolicy,
-        AliasRow, ArcVerdict, BlocklistSelfCheckHistoryRow, BlocklistSelfCheckRunReply,
+        AliasRow, BlocklistSelfCheckHistoryRow, BlocklistSelfCheckRunReply,
         BlocklistSelfCheckRunRequest, BlocklistServerResult, CheckGreylistReply,
         CheckGreylistRequest, CheckSubmissionQuotaReply, CheckSubmissionQuotaRequest,
         ClamavVerdict, CompletePrimaryDomainRenameReply, CompletePrimaryDomainRenameRequest,
@@ -28,15 +28,14 @@ use fauna_protocol::{
         DMARC_FORENSIC_RETENTION_DAYS_MAX, DecodeSrsBounceReply, DecodeSrsBounceRequest,
         DeleteAccountAliasReply, DeleteAccountAliasRequest, DeleteForwarderReply,
         DeleteForwarderRequest, DeliverSealedSchedulingReply, DeliverSealedSchedulingRequest,
-        DiagnosticCheckResult, DiagnosticRunHistoryRow, DkimVerdict, DmarcPolicy,
-        DmarcReportingPolicy, DmarcVerdict, DomainDkimSelector, EnableAccountAliasReply,
-        EnableAccountAliasRequest, EnqueueOutboundMailReply, EnqueueOutboundMailRequest,
-        ExtendPrimaryDomainRenameGraceReply, ExtendPrimaryDomainRenameGraceRequest,
-        FetchConfigReply, FetchConfigRequest, FetchMtaStsPolicyReply, FetchMtaStsPolicyRequest,
-        FetchOutboundDueReply, FetchOutboundDueRequest, FetchRecipientFiltersReply,
-        FetchRecipientFiltersRequest, FetchRecipientForwardConfigReply,
-        FetchRecipientForwardConfigRequest, FetchRecipientIndexKeyReply,
-        FetchRecipientIndexKeyRequest, FetchRecipientMlsPubkeyReply,
+        DiagnosticCheckResult, DiagnosticRunHistoryRow, DmarcReportingPolicy, DomainDkimSelector,
+        EnableAccountAliasReply, EnableAccountAliasRequest, EnqueueOutboundMailReply,
+        EnqueueOutboundMailRequest, ExtendPrimaryDomainRenameGraceReply,
+        ExtendPrimaryDomainRenameGraceRequest, FetchConfigReply, FetchConfigRequest,
+        FetchMtaStsPolicyReply, FetchMtaStsPolicyRequest, FetchOutboundDueReply,
+        FetchOutboundDueRequest, FetchRecipientFiltersReply, FetchRecipientFiltersRequest,
+        FetchRecipientForwardConfigReply, FetchRecipientForwardConfigRequest,
+        FetchRecipientIndexKeyReply, FetchRecipientIndexKeyRequest, FetchRecipientMlsPubkeyReply,
         FetchRecipientMlsPubkeyRequest, FetchTlsaReply, FetchTlsaRequest, ForceRotateDkimReply,
         ForceRotateDkimRequest, ForwardMessageReply, ForwardMessageRequest,
         GenerateDisposableAliasReply, GenerateDisposableAliasRequest, GetAliasPolicyRequest,
@@ -76,7 +75,7 @@ use fauna_protocol::{
         SetForwardPerHourReply, SetForwardPerHourRequest, SetMailSwitchesReply,
         SetMailSwitchesRequest, SetRoleAddressReply, SetRoleAddressRequest,
         SetSpamThresholdOverrideReply, SetSpamThresholdOverrideRequest, SpamDisposition,
-        SpamPolicyThresholds, SpfVerdict, StampedHeader, StartPrimaryDomainRenameReply,
+        SpamPolicyThresholds, StampedHeader, StartPrimaryDomainRenameReply,
         StartPrimaryDomainRenameRequest, TlsaRecordWire, UpdateAccountAliasReply,
         UpdateAccountAliasRequest, UpdateLocalDomainConfigReply, UpdateLocalDomainConfigRequest,
         ValidateRecipientReply, ValidateRecipientRequest, WhoamiReply, WhoamiRequest,
@@ -589,56 +588,7 @@ pub(crate) fn invalid_grace_days() -> RpcError {
 //   For non-fail verdicts we report policy `"none"` since there is no
 //   published policy to honor.
 
-fn spf_to_flat(v: &SpfVerdict) -> &'static str {
-    match v {
-        SpfVerdict::None => "none",
-        SpfVerdict::Pass => "pass",
-        SpfVerdict::Fail => "fail",
-        SpfVerdict::SoftFail => "softfail",
-        SpfVerdict::Neutral => "neutral",
-        SpfVerdict::PermError => "permerror",
-        SpfVerdict::TempError => "temperror",
-    }
-}
-
-fn dkim_to_flat(v: &DkimVerdict) -> &'static str {
-    match v {
-        DkimVerdict::None => "none",
-        DkimVerdict::Pass => "pass",
-        DkimVerdict::Fail { .. } => "fail",
-        DkimVerdict::Neutral => "neutral",
-        DkimVerdict::PermError => "permerror",
-        DkimVerdict::TempError => "temperror",
-    }
-}
-
-fn dmarc_to_flat(v: &DmarcVerdict) -> (&'static str, &'static str) {
-    match v {
-        DmarcVerdict::None => ("none", "none"),
-        DmarcVerdict::Pass => ("pass", "none"),
-        DmarcVerdict::Fail { policy } => ("fail", dmarc_policy_to_flat(policy)),
-        DmarcVerdict::PermError => ("permerror", "none"),
-        DmarcVerdict::TempError => ("temperror", "none"),
-    }
-}
-
-fn dmarc_policy_to_flat(p: &DmarcPolicy) -> &'static str {
-    match p {
-        DmarcPolicy::None => "none",
-        DmarcPolicy::Quarantine => "quarantine",
-        DmarcPolicy::Reject => "reject",
-    }
-}
-
-fn arc_to_flat(v: &ArcVerdict) -> &'static str {
-    match v {
-        ArcVerdict::None => "none",
-        ArcVerdict::Pass => "pass",
-        ArcVerdict::Fail => "fail",
-        ArcVerdict::PermError => "permerror",
-        ArcVerdict::TempError => "temperror",
-    }
-}
+// The token owners are `fauna_core::mail_auth`'s `rfc_token(s)` methods.
 
 pub(crate) async fn require_class(
     state: &Arc<AppState>,
@@ -1138,6 +1088,22 @@ pub(crate) async fn resolve_local_recipient_unstamped(
             .map_err(internal)?
             .is_some();
 
+    // Handle candidate (resolver step 2, closing the exact-key tier) — a
+    // registered handle is its actor's address on every active local domain,
+    // canonical row or not (`mail-aliases.md` § Resolution order step 2,
+    // `mail-multidomain.md` § Multi-domain handles). Looked up only when the
+    // stored exact-key rows all missed, and only on a domain this nest serves.
+    let exact_key_missed = exact.is_none() && forwarder.is_none() && !list_address;
+    let handle_owner = if exact_key_missed && mail_domain.is_some() {
+        state
+            .db
+            .resolve_handle(&local_part)
+            .await
+            .map_err(internal)?
+    } else {
+        None
+    };
+
     let subaddressing_enabled = alias_policy.subaddressing_enabled;
     let subaddress_base = match (subaddressing_enabled, &exact) {
         // Only look up the base when we have a valid sub-address and
@@ -1152,6 +1118,20 @@ pub(crate) async fn resolve_local_recipient_unstamped(
                 .map(record_to_exact_candidate),
             _ => None,
         },
+        _ => None,
+    };
+
+    // The `+suffix` base's handle, when the stored base row missed (step 3
+    // retries the whole exact-key match on the base).
+    let subaddress_handle_owner = match (subaddressing_enabled, &subaddress_base) {
+        (true, None) if exact_key_missed && handle_owner.is_none() && mail_domain.is_some() => {
+            match fauna_mail::aliases::split_subaddress(&local_part) {
+                fauna_mail::aliases::SubaddressSplit::Valid { base, .. } => {
+                    state.db.resolve_handle(&base).await.map_err(internal)?
+                }
+                _ => None,
+            }
+        }
         _ => None,
     };
 
@@ -1279,6 +1259,8 @@ pub(crate) async fn resolve_local_recipient_unstamped(
         wildcards: &wildcards,
         role_address_target,
         list_address,
+        handle_owner,
+        subaddress_handle_owner,
     };
     match fauna_mail::aliases::resolve_recipient(&input) {
         fauna_mail::aliases::RecipientResolution::Resolved {
@@ -1296,11 +1278,12 @@ pub(crate) async fn resolve_local_recipient_unstamped(
             // domain's duty rather than the routed user's mailbox. A probe
             // asks only who owns the address and is never refused for it.
             if purpose == ResolvePurpose::Delivery {
-                let (receive_enabled, _) = state
+                let receive_enabled = state
                     .db
                     .get_mail_switches(&actor_id)
                     .await
-                    .map_err(internal)?;
+                    .map_err(internal)?
+                    .receive_enabled;
                 if !receive_enabled {
                     return Ok(LocalRecipientOutcome::Reject {
                         smtp_code: 550,
@@ -1722,9 +1705,7 @@ pub(crate) fn validate_alias_controls(c: &AliasControls) -> Result<(), RpcError>
 fn map_alias_write_err_rpc(e: crate::db::mail_aliases::AliasWriteError) -> RpcError {
     match e {
         crate::db::mail_aliases::AliasWriteError::Conflict
-        | crate::db::mail_aliases::AliasWriteError::KeyHeldByOtherKind => {
-            conflicts_with_existing_alias()
-        }
+        | crate::db::mail_aliases::AliasWriteError::KeyHeld => conflicts_with_existing_alias(),
         // An expiry move on anything but a still-alive disposable
         // (`mail-aliases.md` § Don't do these: extend before expiry).
         crate::db::mail_aliases::AliasWriteError::NotExtendable => RpcError::new(
@@ -1808,10 +1789,11 @@ fn create_account_alias_handler() -> RpcHandler {
             match req.kind.as_str() {
                 ALIAS_KIND_EXACT => {
                     validate_alias_pattern(&req.pattern, &reserved)?;
-                    // Exact, forwarder and list are mutually exclusive on a
-                    // key (`mail-aliases.md` § Resolution order): the insert
-                    // below refuses a key another tier kind holds
-                    // (`exact_key_held_by_other_kind`).
+                    // Exact, forwarder, list and handle are mutually
+                    // exclusive on a key (`mail-aliases.md` § Cross-user
+                    // uniqueness): the insert below refuses a key another tier
+                    // kind or another account's handle holds
+                    // (`exact_key_held`).
                     // Per-account exact-alias cap (per actor, across all domains).
                     let count = state
                         .db
@@ -1983,10 +1965,11 @@ fn import_account_aliases_handler() -> RpcHandler {
                             reason: None,
                         });
                     }
-                    // An admin forwarder or another user's list already holds
-                    // the key (the exact-key tier's one-holder rule, which the
-                    // UNIQUE index cannot see across kinds) → report, don't abort.
-                    Err(AliasWriteError::KeyHeldByOtherKind) => {
+                    // An admin forwarder, another user's list or another
+                    // account's handle already holds the key (the exact-key
+                    // tier's one-holder rule, which the UNIQUE index cannot
+                    // see) → report, don't abort.
+                    Err(AliasWriteError::KeyHeld) => {
                         results.push(ImportAliasOutcome {
                             line_index: idx,
                             address: line.to_string(),
@@ -2384,11 +2367,11 @@ fn generate_disposable_alias_handler() -> RpcHandler {
                         break;
                     }
                     // A disposable token is outside the exact-key tier, so
-                    // `KeyHeldByOtherKind` cannot fire; a fresh token is the
+                    // `KeyHeld` cannot fire; a fresh token is the
                     // answer to either collision.
                     Err(
                         crate::db::mail_aliases::AliasWriteError::Conflict
-                        | crate::db::mail_aliases::AliasWriteError::KeyHeldByOtherKind,
+                        | crate::db::mail_aliases::AliasWriteError::KeyHeld,
                     ) => continue,
                     // A mint moves no expiry, so `NotExtendable` cannot fire.
                     Err(
@@ -2613,24 +2596,28 @@ fn set_forward_per_hour_handler() -> RpcHandler {
     })
 }
 
-/// The caller's own receive and send switches (`mail-policy-config.md`
-/// § Tier 3: `mail.account.receive_enabled` / `send_enabled`, both on by
-/// default). The resolver reads `receive_enabled` on every delivery
+/// The caller's own on/off mail switches (`mail-policy-config.md` § Tier 3:
+/// `mail.account.receive_enabled` / `send_enabled` / `scan_result_visible`,
+/// all on by default). The resolver reads `receive_enabled` on every delivery
 /// ([`ResolvePurpose::Delivery`]); every door the user's own act sends through
-/// reads `send_enabled` ([`refuse_if_send_disabled`]).
+/// reads `send_enabled` ([`refuse_if_send_disabled`]); `scan_result_visible`
+/// is read only by the app's shared projection, which hides the scan-verdict
+/// row while it is off (`mail-content-scanning.md` § Per-account opt-out for
+/// visible scan details).
 fn get_mail_switches_handler() -> RpcHandler {
     Box::new(|state, actor_id, payload| {
         Box::pin(async move {
             require_class(&state, &actor_id, "fauna.bridges.get_mail_switches").await?;
             let _req: GetMailSwitchesRequest = decode(&payload).map_err(malformed)?;
-            let (receive_enabled, send_enabled) = state
+            let switches = state
                 .db
                 .get_mail_switches(&actor_id)
                 .await
                 .map_err(internal)?;
             encode_reply(&GetMailSwitchesReply {
-                receive_enabled,
-                send_enabled,
+                receive_enabled: switches.receive_enabled,
+                send_enabled: switches.send_enabled,
+                scan_result_visible: switches.scan_result_visible,
                 ..Default::default()
             })
         })
@@ -2644,7 +2631,14 @@ fn set_mail_switches_handler() -> RpcHandler {
             let req: SetMailSwitchesRequest = decode(&payload).map_err(malformed)?;
             state
                 .db
-                .set_mail_switches(&actor_id, req.receive_enabled, req.send_enabled)
+                .set_mail_switches(
+                    &actor_id,
+                    crate::db::mail_account::MailSwitchesUpdate {
+                        receive_enabled: req.receive_enabled,
+                        send_enabled: req.send_enabled,
+                        scan_result_visible: req.scan_result_visible,
+                    },
+                )
                 .await
                 .map_err(internal)?;
             encode_reply(&SetMailSwitchesReply {})
@@ -2663,7 +2657,12 @@ pub(crate) async fn refuse_if_send_disabled(
     state: &Arc<AppState>,
     sender: &[u8; 32],
 ) -> Result<(), RpcError> {
-    let (_, send_enabled) = state.db.get_mail_switches(sender).await.map_err(internal)?;
+    let send_enabled = state
+        .db
+        .get_mail_switches(sender)
+        .await
+        .map_err(internal)?
+        .send_enabled;
     if send_enabled {
         Ok(())
     } else {
@@ -4379,7 +4378,7 @@ pub(crate) async fn ensure_canonical_handle_alias(
             Ok(()) => {}
             // A forwarder or list holds the key — leave it too: an exact row
             // there would shadow it (exact resolves first).
-            Err(crate::db::mail_aliases::AliasWriteError::KeyHeldByOtherKind) => {}
+            Err(crate::db::mail_aliases::AliasWriteError::KeyHeld) => {}
             Err(e) => return Err(map_alias_write_err_rpc(e)),
         },
     }
@@ -5442,8 +5441,9 @@ fn report_rejected_scan_handler() -> RpcHandler {
 // the DB read itself filters on `delivered_to_actor = caller`, so another
 // user's row, a forensic reject row (no recipient) and a message no scanner
 // touched are one indistinguishable `not_found`. The per-account
-// `scan_result_visible` toggle is NOT consulted here — it suppresses only the
-// app's rendering of the row (§ Per-account opt-out).
+// `scan_result_visible` switch is NOT consulted here — it suppresses only the
+// row the apps' shared conversations projection paints, which skips this read
+// while the switch is off (§ Per-account opt-out).
 
 async fn get_message_scan_result(
     state: Arc<AppState>,
@@ -6260,7 +6260,13 @@ fn get_tlsrpt_inbound_report_handler() -> RpcHandler {
 /// the daily mail sweep in `main.rs`, beside the DMARC aggregate prune
 /// (`dmarc-reporting.md` § Retention).
 pub async fn run_tlsrpt_inbound_report_gc(state: &Arc<AppState>) {
-    let cutoff = now_epoch_secs() - TLSRPT_INBOUND_RETENTION_DAYS * 86_400;
+    run_tlsrpt_inbound_report_gc_at(state, now_epoch_secs()).await;
+}
+
+/// [`run_tlsrpt_inbound_report_gc`] at a supplied `now` (Unix seconds): the
+/// production prune, so a test hook can run it at a scripted instant.
+pub async fn run_tlsrpt_inbound_report_gc_at(state: &Arc<AppState>, now: i64) {
+    let cutoff = now - TLSRPT_INBOUND_RETENTION_DAYS * 86_400;
     match state.db.prune_tlsrpt_inbound_reports(cutoff).await {
         Ok(0) => {}
         Ok(pruned) => tracing::info!(
@@ -6953,7 +6959,7 @@ pub(crate) async fn persist_decoded_inbound_mail(
     // 7208/6376/7489: no underscores — "softfail" not "soft_fail",
     // "permerror" not "perm_error"). Flatten the nested-enum wire
     // verdicts into those strings here.
-    let (dmarc_str, dmarc_policy_str) = dmarc_to_flat(&req.verdicts.dmarc);
+    let (dmarc_str, dmarc_policy_str) = req.verdicts.dmarc.rfc_tokens();
     let fields = InboundMailFields {
         actor_id: target,
         timestamp: req.public_metadata.timestamp,
@@ -6961,11 +6967,11 @@ pub(crate) async fn persist_decoded_inbound_mail(
         encrypted_body: body,
         encrypted_index_hint: hint,
         sender_domain: req.public_metadata.sender_domain,
-        spf: spf_to_flat(&req.verdicts.spf).into(),
-        dkim: dkim_to_flat(&req.verdicts.dkim).into(),
+        spf: req.verdicts.spf.rfc_token().into(),
+        dkim: req.verdicts.dkim.rfc_token().into(),
         dmarc: dmarc_str.into(),
         dmarc_policy: dmarc_policy_str.into(),
-        arc: arc_to_flat(&req.verdicts.arc).into(),
+        arc: req.verdicts.arc.rfc_token().into(),
         spam_score: req.spam_score,
         spam_disposition: disposition_str.to_string(),
         is_own_submission,
@@ -7526,8 +7532,13 @@ fn fetch_outbound_due_handler() -> RpcHandler {
                 // original From, which the forwarder does not own, so a `d=`
                 // of ours on it would vouch for an authorship the nest never
                 // checked; the original signature it carries intact is what
-                // DMARC passes on downstream. Skipped before the signer, so it
-                // is not counted as an unsigned hand-out either.
+                // DMARC passes on downstream. Unsigned is not unvouched,
+                // though: the SRS envelope below is on our primary domain, so
+                // a forwarded `From:` on a served domain SPF-aligns and passes
+                // DMARC anyway. The MX door's spoof floor therefore forwards
+                // no local `From:` that failed DMARC on arrival
+                // (`mail-forwarding.md` § Spoof floor). Skipped before the
+                // signer, so it is not counted as an unsigned hand-out either.
                 if !r.is_forwarded
                     && let Some(signed) = signer.as_ref().and_then(|s| s.sign(&r.raw_message))
                 {
@@ -10055,6 +10066,123 @@ pub async fn run_spam_training_history_gc(state: &Arc<AppState>) {
 
 // ── Registration entry point ──────────────────────────────────
 
+/// This module's admin-plane kinds for an admin-consented principal —
+/// the DNS page's local domains, catch-all, role addresses, DKIM rotation interval and the primary-domain rename's reads (the rename itself is sovereign and absent), and the mail page's policies, health and warm-up, the reports page and the forwarders (the mail secrets' rotations are sovereign and absent) — each its actor handler behind
+/// [`crate::principal_handlers::admin_twin`] (`authorization-server.md`
+/// § Scope grammar → *The admin arms* names the sets).
+pub(crate) fn principal_admin_handlers()
+-> Vec<(&'static str, crate::principal_handlers::PrincipalHandler)> {
+    use crate::principal_handlers::admin_twin;
+    let kinds: [(&'static str, crate::rpc_router::RpcHandler); 36] = [
+        (
+            "fauna.bridges.list_local_domains",
+            list_local_domains_handler(),
+        ),
+        (
+            "fauna.bridges.get_primary_domain_rename_status",
+            get_primary_domain_rename_status_handler(),
+        ),
+        (
+            "fauna.bridges.list_primary_domain_renames",
+            list_primary_domain_renames_handler(),
+        ),
+        ("fauna.bridges.add_local_domain", add_local_domain_handler()),
+        (
+            "fauna.bridges.remove_local_domain",
+            remove_local_domain_handler(),
+        ),
+        (
+            "fauna.bridges.restore_local_domain",
+            restore_local_domain_handler(),
+        ),
+        (
+            "fauna.bridges.update_local_domain_config",
+            update_local_domain_config_handler(),
+        ),
+        (
+            "fauna.bridges.set_catch_all_actor",
+            set_catch_all_actor_handler(),
+        ),
+        ("fauna.bridges.set_role_address", set_role_address_handler()),
+        (
+            "fauna.bridges.set_dkim_rotation_days",
+            set_dkim_rotation_days_handler(),
+        ),
+        ("fauna.bridges.get_mail_config", get_mail_config_handler()),
+        ("fauna.bridges.get_alias_policy", get_alias_policy_handler()),
+        ("fauna.bridges.get_dmarc_policy", get_dmarc_policy_handler()),
+        ("fauna.bridges.mail_health", mail_health_handler()),
+        (
+            "fauna.bridges.outbound_warmup_status",
+            outbound_warmup_status_handler(),
+        ),
+        ("fauna.bridges.put_spam_policy", put_spam_policy_handler()),
+        ("fauna.bridges.put_auth_policy", put_auth_policy_handler()),
+        (
+            "fauna.bridges.put_submission_policy",
+            put_submission_policy_handler(),
+        ),
+        ("fauna.bridges.put_imap_policy", put_imap_policy_handler()),
+        (
+            "fauna.bridges.put_outbound_policy",
+            put_outbound_policy_handler(),
+        ),
+        ("fauna.bridges.put_alias_policy", put_alias_policy_handler()),
+        ("fauna.bridges.put_dmarc_policy", put_dmarc_policy_handler()),
+        (
+            "fauna.bridges.run_deliverability_diagnostics",
+            run_deliverability_diagnostics_handler(),
+        ),
+        (
+            "fauna.bridges.blocklist_self_check_run",
+            blocklist_self_check_run_handler(),
+        ),
+        (
+            "fauna.bridges.outbound_warmup_reset",
+            outbound_warmup_reset_handler(),
+        ),
+        (
+            "fauna.bridges.list_dmarc_aggregate_reports",
+            list_dmarc_aggregate_reports_handler(),
+        ),
+        (
+            "fauna.bridges.get_dmarc_aggregate_report",
+            get_dmarc_aggregate_report_handler(),
+        ),
+        (
+            "fauna.bridges.list_dmarc_forensic_reports",
+            list_dmarc_forensic_reports_handler(),
+        ),
+        (
+            "fauna.bridges.get_dmarc_forensic_report",
+            get_dmarc_forensic_report_handler(),
+        ),
+        (
+            "fauna.bridges.list_tlsrpt_inbound_reports",
+            list_tlsrpt_inbound_reports_handler(),
+        ),
+        (
+            "fauna.bridges.get_tlsrpt_inbound_report",
+            get_tlsrpt_inbound_report_handler(),
+        ),
+        (
+            "fauna.bridges.list_blocklist_self_check_history",
+            list_blocklist_self_check_history_handler(),
+        ),
+        (
+            "fauna.bridges.list_deliverability_diagnostic_runs",
+            list_deliverability_diagnostic_runs_handler(),
+        ),
+        ("fauna.bridges.create_forwarder", create_forwarder_handler()),
+        ("fauna.bridges.list_forwarders", list_forwarders_handler()),
+        ("fauna.bridges.delete_forwarder", delete_forwarder_handler()),
+    ];
+    kinds
+        .into_iter()
+        .map(|(kind, actor)| (kind, admin_twin(kind, actor)))
+        .collect()
+}
+
 pub fn register_bridge_routing_handlers(b: &mut RpcRouterBuilder) {
     // Deliverability diagnostics + blocklist self-check (Admin, on-demand).
     b.add(
@@ -10915,6 +11043,7 @@ mod tests {
     use crate::db::{CacheDb, bridge_service_users::BridgeRole};
     use fauna_protocol::bridge_routing::ForwardCopyMode;
     use fauna_protocol::bridge_routing::SubmissionPolicyThresholds;
+    use fauna_protocol::bridge_routing::{DkimVerdict, DmarcVerdict, SpfVerdict};
     use fauna_protocol::bridge_routing::{DmarcMode, DmarcOverrides};
 
     async fn fixture_state() -> Arc<AppState> {
@@ -13755,8 +13884,10 @@ mod tests {
             .unwrap();
         state.db.set_handle(&actor_b, "test").await.unwrap();
 
-        // Admin creates a registered mail-domain `domain-x` and a colliding
-        // exact alias `test@domain-x → actor A` (a DIFFERENT actor).
+        // A registered mail-domain `domain-x` and a colliding exact alias
+        // `test@domain-x → actor A` (a DIFFERENT actor). Every alias door now
+        // refuses that pair (`mail-aliases.md` § Cross-user uniqueness), so it
+        // is seeded raw: the state a pre-exclusion box can still hold.
         let actor_a = [0xAAu8; 32];
         state
             .db
@@ -13765,13 +13896,14 @@ mod tests {
             .unwrap();
         state
             .db
-            .put_exact_alias(
-                "domain-x",
-                "test",
-                crate::db::mail_aliases::ALIAS_KIND_EXACT,
-                &actor_a,
-            )
+            .conn()
             .await
+            .execute(
+                "INSERT INTO account_aliases
+                    (alias_id, actor_id, local_domain, kind, pattern, created_at)
+                 VALUES (?1, ?2, 'domain-x', 'exact', 'test', 0)",
+                rusqlite::params![&[0xA1u8; 16][..], &actor_a[..]],
+            )
             .unwrap();
 
         // Bare-handle login on an UNREGISTERED domain → resolves to B (the
@@ -18104,7 +18236,15 @@ mod tests {
     /// a real Ed25519 actor with a wrapped submission token on file, and the
     /// canonical plaintext of a token it signed, valid for a day.
     async fn proven_submitter(state: &Arc<AppState>) -> ([u8; 32], serde_bytes::ByteBuf) {
-        let key = ed25519_dalek::SigningKey::from_bytes(&[2u8; 32]);
+        proven_submitter_seeded(state, 2).await
+    }
+
+    /// [`proven_submitter`] for a second submitter: the key is `[seed; 32]`.
+    async fn proven_submitter_seeded(
+        state: &Arc<AppState>,
+        seed: u8,
+    ) -> ([u8; 32], serde_bytes::ByteBuf) {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
         let actor = key.verifying_key().to_bytes();
         state
             .db
@@ -18357,6 +18497,298 @@ mod tests {
         );
     }
 
+    /// One address, one owner (`mail-aliases.md` § Cross-user uniqueness;
+    /// `mail-multidomain.md` § From: header ownership): a registered handle and
+    /// another account's exact alias cannot name the same local part.
+    /// Alias-after-handle: alice's `create_account_alias {exact, "bob"}` is
+    /// refused while bob (handle `bob`) has not enabled mail, and the enqueue
+    /// door holds `From: bob@` to bob alone.
+    #[tokio::test]
+    async fn exact_alias_on_another_accounts_handle_is_refused_and_from_has_one_owner() {
+        let state = fixture_state_with_email_domain("example.com").await;
+        let mta = [1u8; 32];
+        approve_bridge(&state.db, &mta, BridgeRole::Mta).await;
+        let (alice, alice_token) = proven_submitter_seeded(&state, 2).await;
+        let (bob, bob_token) = proven_submitter_seeded(&state, 7).await;
+        for (actor, handle) in [(&alice, "alice"), (&bob, "bob")] {
+            state
+                .db
+                .create_user_with_handle(actor, "free", handle, None)
+                .await
+                .unwrap();
+        }
+
+        for pattern in ["bob", "BOB"] {
+            let err = create_account_alias_handler()(
+                state.clone(),
+                alice,
+                create_alias_req("exact", "example.com", pattern),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                err.code, "fauna.bridges.conflicts_with_existing_alias",
+                "pattern={pattern}"
+            );
+        }
+        assert!(list_aliases(&state, alice).await.is_empty());
+        // The handle owner's own exact row on its handle is its canonical
+        // address, never a conflict.
+        create_alias(&state, bob, "bob").await;
+
+        let send = |actor: [u8; 32], token: serde_bytes::ByteBuf| {
+            let req = EnqueueOutboundMailRequest {
+                original_msgid: "m@example.com".into(),
+                original_sender: "bob@example.com".into(),
+                recipients: vec!["carol@dest.test".into()],
+                raw_message: b"From: bob@example.com\r\nTo: carol@dest.test\r\n\r\nhi\r\n".to_vec(),
+                on_behalf_of_actor: Some(actor.to_vec()),
+                submission_token: Some(token),
+                ..Default::default()
+            };
+            let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
+            enqueue_outbound_mail_handler()(state.clone(), mta, payload)
+        };
+        let err = send(alice, alice_token).await.unwrap_err();
+        assert_eq!(err.code, SENDER_NOT_OWNED_CODE);
+        send(bob, bob_token).await.expect("bob sends as bob@");
+    }
+
+    /// Handle-after-alias: a handle an exact alias already holds is refused at
+    /// every handle door — registration's writer and the handle change — while
+    /// the alias's own holder may still take that name as its handle.
+    #[tokio::test]
+    async fn handle_on_a_held_alias_key_is_refused() {
+        let state = fixture_state_with_email_domain("example.com").await;
+        let alice = [2u8; 32];
+        let bob = [7u8; 32];
+        let carol = [8u8; 32];
+        for (actor, handle) in [(&alice, "alice"), (&bob, "bob")] {
+            state
+                .db
+                .create_user_with_handle(actor, "free", handle, None)
+                .await
+                .unwrap();
+        }
+        create_alias(&state, alice, "carol").await;
+
+        // Registration's writer (every admission door lands here).
+        assert!(
+            state
+                .db
+                .create_user_with_handle(&carol, "free", "Carol", None)
+                .await
+                .is_err()
+        );
+        assert!(state.db.get_handle(&carol).await.unwrap().is_none());
+        // The handle change, at the request door and at the writer.
+        let req = Bytes::from(
+            encode_canonical(&fauna_protocol::account::ChangeHandleRequest {
+                handle: "carol".into(),
+                extra: Default::default(),
+            })
+            .unwrap()
+            .to_vec(),
+        );
+        let err = crate::account_handlers::change_handle_handler()(state.clone(), bob, req)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "fauna.profile.handle_taken");
+        assert!(state.db.set_handle(&bob, "carol").await.is_err());
+        assert_eq!(
+            state.db.get_handle(&bob).await.unwrap().as_deref(),
+            Some("bob")
+        );
+        // The alias's own holder takes the name: still one owner.
+        state.db.set_handle(&alice, "carol").await.unwrap();
+    }
+
+    /// A forwarder or a list is never a handle's address — not even the
+    /// creating admin's own handle.
+    #[tokio::test]
+    async fn forwarder_and_list_on_a_handle_are_refused() {
+        let state = fixture_state_with_email_domain("example.com").await;
+        let admin = [2u8; 32];
+        let bob = [7u8; 32];
+        for (actor, handle) in [(&admin, "root"), (&bob, "bob")] {
+            state
+                .db
+                .create_user_with_handle(actor, "free", handle, None)
+                .await
+                .unwrap();
+        }
+        for pattern in ["bob", "root"] {
+            assert!(matches!(
+                state
+                    .db
+                    .create_forwarder_alias(&admin, "example.com", pattern, "x@ext.test")
+                    .await,
+                Err(crate::db::mail_aliases::AliasWriteError::KeyHeld)
+            ));
+            assert!(
+                state
+                    .db
+                    .create_list(&admin, "example.com", pattern, None, None, None, None, None)
+                    .await
+                    .is_err(),
+                "list {pattern}"
+            );
+        }
+    }
+
+    /// A collision that predates the exclusion (0.1.x: reported, never
+    /// reassigned) does not grant `From:` to both: the handle arm yields to the
+    /// key's holder, and boot reports the pair once on the admin audit log.
+    #[tokio::test]
+    async fn preexisting_handle_alias_collision_has_one_from_owner_and_is_audited() {
+        let state = fixture_state_with_email_domain("example.com").await;
+        let alice = [2u8; 32];
+        let bob = [7u8; 32];
+        for (actor, handle) in [(&alice, "alice"), (&bob, "bob")] {
+            state
+                .db
+                .create_user_with_handle(actor, "free", handle, None)
+                .await
+                .unwrap();
+        }
+        state
+            .db
+            .conn()
+            .await
+            .execute(
+                "INSERT INTO account_aliases
+                    (alias_id, actor_id, local_domain, kind, pattern, created_at)
+                 VALUES (?1, ?2, 'example.com', 'exact', 'bob', 0)",
+                rusqlite::params![&[1u8; 16][..], &alice[..]],
+            )
+            .unwrap();
+        use crate::mail_from_ownership::{FromOwnership, from_ownership};
+        assert_eq!(
+            from_ownership(&state, &alice, "bob", "example.com")
+                .await
+                .unwrap(),
+            FromOwnership::Owned
+        );
+        assert!(matches!(
+            from_ownership(&state, &bob, "bob", "example.com")
+                .await
+                .unwrap(),
+            FromOwnership::NotOwned { .. }
+        ));
+
+        for _ in 0..2 {
+            crate::mail_enable::report_handle_alias_collisions(&state).await;
+        }
+        let audit = state.db.list_audit(100, None).await.unwrap();
+        let hits: Vec<_> = audit
+            .iter()
+            .filter(|r| r.action == "mail.alias.handle_collision")
+            .collect();
+        assert_eq!(hits.len(), 1, "{audit:?}");
+        assert_eq!(hits[0].target.as_deref(), Some("bob@example.com"));
+    }
+
+    /// A handle is its actor's address on every active local domain, canonical
+    /// row or not (`mail-aliases.md` § Resolution order step 1): where the
+    /// exact-key tier is empty, the handle — bare or `+suffix`ed — resolves to
+    /// its actor ahead of another account's wildcard, a disposable whose token
+    /// it happens to spell, and the domain's catch-all, so inbound and `From:`
+    /// name the same one owner.
+    #[tokio::test]
+    async fn handle_without_canonical_row_outranks_wildcard_disposable_and_catch_all() {
+        let state = fixture_state_with_email_domain("example.com").await;
+        let mta = [1u8; 32];
+        approve_bridge(&state.db, &mta, BridgeRole::Mta).await;
+        let alice = [2u8; 32];
+        let bob = [7u8; 32];
+        let zed = [8u8; 32];
+        let catch_all = [9u8; 32];
+        state
+            .db
+            .add_mail_domain(
+                "second.test",
+                false,
+                "enforce",
+                "expand_primary",
+                Some(&catch_all),
+                None,
+            )
+            .await
+            .unwrap();
+        let dan = [10u8; 32];
+        for (actor, handle) in [
+            (&alice, "alice"),
+            (&bob, "bob-x"),
+            (&zed, "zed-temp-abcdef"),
+            (&dan, "dan"),
+        ] {
+            state
+                .db
+                .create_user_with_handle(actor, "free", handle, None)
+                .await
+                .unwrap();
+        }
+        // One wildcard per actor: alice holds `bob-*` on the secondary domain,
+        // dan on the primary.
+        for (actor, domain) in [(alice, "second.test"), (dan, "example.com")] {
+            create_account_alias_handler()(
+                state.clone(),
+                actor,
+                create_wildcard_req(domain, "bob-"),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("wildcard on {domain}: {}", e.code));
+        }
+        for domain in ["example.com", "second.test"] {
+            state
+                .db
+                .create_disposable_alias(&alice, domain, "abcdef", "", None, i64::MAX, 0)
+                .await
+                .unwrap();
+        }
+
+        let owner = |reply: ResolveRecipientReply| match reply {
+            ResolveRecipientReply::Resolved { actor_id, .. } => {
+                <[u8; 32]>::try_from(actor_id.as_ref()).unwrap()
+            }
+            other => panic!("expected a mailbox, got {other:?}"),
+        };
+        for (domain, wildcard_owner) in [("example.com", dan), ("second.test", alice)] {
+            for (local, want) in [
+                ("bob-x", bob),
+                ("bob-x+news", bob),
+                ("zed-temp-abcdef", zed),
+                ("bob-y", wildcard_owner),
+            ] {
+                assert_eq!(
+                    owner(resolve(&state, mta, local, domain).await),
+                    want,
+                    "{local}@{domain}"
+                );
+            }
+        }
+        assert_eq!(
+            owner(resolve(&state, mta, "nobody", "second.test").await),
+            catch_all
+        );
+
+        use crate::mail_from_ownership::{FromOwnership, from_ownership};
+        for local in ["bob-x", "bob-x+news"] {
+            assert!(matches!(
+                from_ownership(&state, &alice, local, "second.test")
+                    .await
+                    .unwrap(),
+                FromOwnership::NotOwned { .. }
+            ));
+        }
+        assert!(matches!(
+            from_ownership(&state, &catch_all, "bob-x+news", "second.test")
+                .await
+                .unwrap(),
+            FromOwnership::NotOwned { .. }
+        ));
+    }
+
     #[tokio::test]
     async fn enqueue_outbound_mail_mda_denied_when_sender_not_local() {
         let state = fixture_state().await;
@@ -18467,6 +18899,7 @@ mod tests {
             &channel_id,
             0,
             100,
+            None,
         )
         .await
         .unwrap();
@@ -22481,7 +22914,7 @@ mod tests {
     /// `UNIQUE(local_domain, pattern, kind)` constraint cannot keep one
     /// address to one holder (`mail-mass-mailing.md` § Reserved local-part:
     /// `unsubscribe@` — a taken list address is refused). Each create refuses
-    /// the other two kinds, in both directions (`exact_key_held_by_other_kind`).
+    /// the other two kinds, in both directions (`exact_key_held`).
     #[tokio::test]
     async fn list_and_exact_or_forwarder_are_mutually_exclusive_on_a_key() {
         use fauna_protocol::bridge_routing::CreateAccountListRequest;
@@ -23971,6 +24404,50 @@ mod tests {
         assert_eq!(get_switches(&state, alice).await, (false, false));
         // The handler writes only the caller's own row.
         assert_eq!(get_switches(&state, bob).await, (true, true));
+    }
+
+    #[tokio::test]
+    async fn the_scan_result_switch_round_trips_alone_and_defaults_on() {
+        // `mail-content-scanning.md` § Per-account opt-out for visible scan
+        // details: the third switch rides the same pair of kinds.
+        let state = fixture_state().await;
+        let alice = [5u8; 32];
+        state.db.create_user(&alice, "free", "test").await.unwrap();
+        let read = |state: Arc<AppState>| async move {
+            let bytes = get_mail_switches_handler()(
+                state,
+                alice,
+                Bytes::from(
+                    encode_canonical(&GetMailSwitchesRequest {})
+                        .unwrap()
+                        .to_vec(),
+                ),
+            )
+            .await
+            .expect("get ok");
+            decode::<GetMailSwitchesReply>(&bytes).unwrap()
+        };
+        assert!(read(state.clone()).await.scan_result_visible);
+        let req = SetMailSwitchesRequest {
+            scan_result_visible: Some(false),
+            ..Default::default()
+        };
+        set_mail_switches_handler()(
+            state.clone(),
+            alice,
+            Bytes::from(encode_canonical(&req).unwrap().to_vec()),
+        )
+        .await
+        .expect("set ok");
+        let reply = read(state.clone()).await;
+        assert!(!reply.scan_result_visible);
+        assert!(
+            reply.receive_enabled && reply.send_enabled,
+            "the other switches keep their values"
+        );
+        // A write of the other switches leaves it off.
+        set_switches(&state, alice, Some(false), None).await;
+        assert!(!read(state.clone()).await.scan_result_visible);
     }
 
     #[tokio::test]

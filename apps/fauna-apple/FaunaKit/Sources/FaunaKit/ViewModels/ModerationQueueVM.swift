@@ -12,12 +12,12 @@ import Foundation
 /// — the encrypted-mode social-content signal the nest can't produce), merged +
 /// deduped by `content_id` through the shared `moderationQueue(server:local:)`
 /// façade so the rule never drifts per client. A server row's
-/// `train-correction-button` submits a training correction; a local row's removes
-/// the client-side flag. Both routes additionally prefer the **sealed tier-1
-/// client-write path** (`MailSettingsMachine.trainSpamModelClient`) over the
-/// server-side train when the nest advertises `spam-model-sealed-at-rest`
-/// (mail-spam.md § Encrypted-mode interaction — the 1d surface switch), mirroring
-/// linux `client.rs::{correct_moderation_row, train_moderation_flow}` and windows'
+/// `train-correction-button` submits a training correction through the one shared
+/// flow `MailSettingsMachine.trainModerationCorrection` (sealed tier-1 model write
+/// when the nest advertises `spam-model-sealed-at-rest`, then `fauna.moderation.train`
+/// always — moderation.md § State & data shape → *Training correction*); a local
+/// row's removes the client-side flag and feeds the retained text to the sealed
+/// model. Mirrors linux `client.rs::correct_moderation_row` and windows'
 /// `ModerationViewModel`.
 @MainActor @Observable
 public final class ModerationQueueVM {
@@ -37,6 +37,28 @@ public final class ModerationQueueVM {
     /// The line the last withdraw painted (`""` before one).
     public private(set) var reportStatus = ""
 
+    // ── Appeal (moderation.md § Legal takedown — the transparency triple's second
+    //    leg). Every decision is pre-made in shared Rust: `rowIsAppealable` picks
+    //    the rows that offer a handle, `appealFormView` owns the guard and the
+    //    wording, `appealVerdict` the outcome sentence. This VM paints that fold and
+    //    dispatches; it decides and words nothing. Mirrors windows'
+    //    `ModerationViewModel` and android's `ModerationQueueVM.openAppeal`/`submitAppeal`.
+
+    /// The decision being appealed, captured when the form OPENED. The queue
+    /// refetches, so a dispatch keyed on the row's index could appeal the wrong
+    /// decision.
+    public private(set) var appealContentId: String?
+    /// Whether the appeal form is open (`appeal-reason-input`,
+    /// `appeal-submit-button` and `appeal-cancel-button` paint only then).
+    public var appealOpen: Bool { appealContentId != nil }
+    /// `appeal-reason-input` — the reason as typed.
+    public var appealReason = ""
+    /// `appeal-status` — the last attempt's outcome. Page-level, so it survives the
+    /// form closing on success, and deliberately NOT `errorMessage`: a refused appeal
+    /// is form feedback, and the page error would blank the queue the user is reading.
+    public private(set) var appealStatus: String?
+    private var appealBusy = false
+
     private var moderation: FfiModerationClient?
     /// The client half of the queue — `nil` when no conversations session is
     /// active yet, matching linux's `active_session()` → `None` (the queue is then
@@ -46,7 +68,7 @@ public final class ModerationQueueVM {
     /// interaction). `nil` ⇒ no sealed-write path ⇒ every correction takes the
     /// server-side / flag-removal route unchanged (e.g. mail not enabled).
     #if !FAUNA_KIDS
-    private var mailSettings: MailSettingsMachine?
+    private var mailSettings: (any ModerationTraining)?
     #endif
     private var api: APIClient?
 
@@ -87,7 +109,18 @@ public final class ModerationQueueVM {
         reports = []
         reportsLoaded = false
         reportStatus = ""
+        appealContentId = nil
+        appealReason = ""
+        appealStatus = nil
+        appealBusy = false
     }
+
+    #if DEBUG && !FAUNA_KIDS
+    /// Unit-test seam: stand in for the mail-settings machine `configure` vends.
+    func seedMailSettingsForTest(_ trainer: (any ModerationTraining)?) {
+        mailSettings = trainer
+    }
+    #endif
 
     #if DEBUG
     /// Unit-test seam: stand in for a completed load, which a real one cannot be
@@ -198,13 +231,15 @@ public final class ModerationQueueVM {
 
     /// Submit a `train-correction-button` correction for one merged row. A
     /// **server** row (carries an enforcement `action`) submits "false positive →
-    /// not spam" (`verdict: "ham"`) — preferring the sealed client-write path over
-    /// `fauna.moderation.train` when available. A **local** row (blank action) has
-    /// no server obligation to train against — the content is client-only — so the
-    /// correction removes the client-side flag and, when the sealed write path is
-    /// available, additionally feeds the retained post-decrypt text to the tier-1
-    /// model as a ham correction. The queue is enforcement *history*, so the row
-    /// stays server-side; only a failure surfaces.
+    /// not spam" through the shared `trainModerationCorrection` flow — the sealed
+    /// model write when available, then the nest's `fauna.moderation.train`
+    /// always — so every correction reaches report capture. The Kids build has no
+    /// mail machine and runs the nest half alone. A **local** row (blank action)
+    /// has no server obligation to train against — the content is client-only —
+    /// so the correction removes the client-side flag and, when the sealed write
+    /// path is available, additionally feeds the retained post-decrypt text to the
+    /// tier-1 model as a ham correction. The queue is enforcement *history*, so the
+    /// row stays server-side; only a failure surfaces.
     public func correct(row: QueueRow) async {
         // The identity this correction is issued under. Every await below can suspend
         // across a switch, and a correction is a WRITE — so each step re-checks before
@@ -222,28 +257,73 @@ public final class ModerationQueueVM {
             await load()
             return
         }
-        var trainedClientSide = false
-        #if !FAUNA_KIDS
-        if let mailSettings, (try? await mailSettings.sealedSpamWriteAvailable()) == true,
-            let text = await api?.postBodyText(contentId: row.contentId)
-        {
+        do {
+            #if FAUNA_KIDS
+            try await moderation?.train(contentId: row.contentId, verdict: "ham")
+            #else
+            guard let mailSettings else {
+                throw ModerationCorrectionError.noMailSettingsMachine
+            }
+            _ = try await mailSettings.trainModerationCorrection(contentId: row.contentId, isSpam: false)
+            #endif
+        } catch {
             guard self.api === issuedApi else { return }
-            if let result = try? await mailSettings.trainSpamModelClient(text: text, isSpam: false) {
-                trainedClientSide = result.sealed
-            }
-        }
-        #endif
-        guard self.api === issuedApi else { return }
-        if !trainedClientSide {
-            do {
-                try await moderation?.train(contentId: row.contentId, verdict: "ham")
-            } catch {
-                guard self.api === issuedApi else { return }
-                errorMessage = DisplayError.message(error)
-            }
+            errorMessage = DisplayError.message(error)
         }
         guard self.api === issuedApi else { return }
         await load()
+    }
+
+    /// Whether `row` offers an `appeal-button` — the shared fold's call (a server
+    /// row only; a local detection's lever is the train-correction button).
+    public nonisolated static func isAppealable(_ row: QueueRow) -> Bool {
+        rowIsAppealable(row: row)
+    }
+
+    /// The form's per-keystroke fold over the captured content id and the reason as
+    /// typed (`canSubmit`, `blockedReason`, `submitLabel`, `summary`).
+    public var appealForm: FfiAppealFormView {
+        appealFormView(contentId: appealContentId ?? "", reason: appealReason)
+    }
+
+    /// `appeal-button`: open the form on `row`, capturing its `content_id` now.
+    public func openAppeal(row: QueueRow) {
+        appealContentId = row.contentId
+        appealReason = ""
+        appealStatus = nil
+    }
+
+    /// `appeal-cancel-button`: drop the draft and the stale status.
+    public func cancelAppeal() {
+        appealContentId = nil
+        appealReason = ""
+        appealStatus = nil
+    }
+
+    /// `appeal-submit-button`: dispatch the captured draft. Re-gates on the shared
+    /// `canSubmit` rather than trusting the control's enabled state. There is no
+    /// offline gate: `fauna.moderation.appeal` is `OfflineQueued`. Success CLOSES the
+    /// form (the decision is with an administrator now; the row stays — appeals are
+    /// additive history); failure KEEPS it open with the reason intact so it can be
+    /// fixed and resent.
+    public func submitAppeal() async {
+        guard !appealBusy, let moderation, let api, let contentId = appealContentId else { return }
+        let reason = appealReason
+        guard appealFormView(contentId: contentId, reason: reason).canSubmit else { return }
+        appealBusy = true
+        defer { appealBusy = false }
+        var failure: String?
+        do {
+            _ = try await moderation.appeal(contentId: contentId, reason: reason)
+        } catch {
+            failure = DisplayError.message(error)
+        }
+        guard self.api === api else { return }   // the in-flight clause
+        appealStatus = renderLocalizedText(appealVerdict(error: failure))
+        if failure == nil {
+            appealContentId = nil
+            appealReason = ""
+        }
     }
 
     /// Whole-percent confidence from the wire's per-mille `u16` (0–1000; the
@@ -255,4 +335,42 @@ public final class ModerationQueueVM {
     public nonisolated static func confidencePercent(_ perMille: UInt16) -> Int {
         Int(FaunaFFISwift.confidencePercent(perMille: perMille))
     }
+
+    /// The queue row's `content-label-badge` automation facts (moderation.md
+    /// § Element IDs → *Queue row facts*): `confidence`, the whole percent with its
+    /// `%` exactly as the row paints it, and `action`, the resolved action label —
+    /// absent on a local detection, which carries none. The shared category key
+    /// the badge styles from rides with them, the fleet-uniform fact set windows
+    /// and android pack into one carrier.
+    public nonisolated static func badgeFacts(
+        category: String, confidencePerMille: UInt16, action: UInt8?
+    ) -> [String: String] {
+        var facts = [
+            "category": category,
+            "confidence": "\(confidencePercent(confidencePerMille))%",
+        ]
+        if let action {
+            facts["action"] = renderLocalizedText(obligationActionLabel(action: action))
+        }
+        return facts
+    }
 }
+
+#if !FAUNA_KIDS
+/// The slice of `MailSettingsMachine` the queue drives — a seam so the VM's
+/// routing is unit-testable without a live machine.
+protocol ModerationTraining: Sendable {
+    func trainModerationCorrection(contentId: String, isSpam: Bool) async throws -> SpamModelClientWrite
+    func trainSpamModelClient(text: String, isSpam: Bool) async throws -> SpamModelClientWrite
+}
+
+extension MailSettingsMachine: ModerationTraining {}
+
+/// A server-row correction with no mail-settings machine to run the shared flow.
+enum ModerationCorrectionError: Error, CustomStringConvertible {
+    case noMailSettingsMachine
+
+    // `DisplayError.message` paints `"\(error)"` for a non-Ffi error.
+    var description: String { "no mail settings machine to run the training correction" }
+}
+#endif

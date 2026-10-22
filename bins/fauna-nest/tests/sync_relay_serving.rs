@@ -166,9 +166,8 @@ async fn start() -> Harness {
     let stranger_folder_id = db.create_folder(FOLDER, &stranger).await.unwrap();
     let stranger_token = tokens.insert(stranger_kp.actor_id(), 3600).await;
 
-    let blob_dir = tempfile::tempdir().unwrap();
-    let blob_path = blob_dir.path().to_path_buf();
-    std::mem::forget(blob_dir);
+    let base = AppState::for_test(db.clone());
+    let blob_path = base.test_scratch_path("blobs");
     let backup_svc =
         Arc::new(BackupService::new(db.clone(), None, false, blob_path, None).unwrap());
     let store = backup_svc.local_blob_store();
@@ -194,7 +193,7 @@ async fn start() -> Harness {
         sync: fauna_nest::state::SyncState {
             chunk_resolver: resolver,
         },
-        ..AppState::for_test(db.clone())
+        ..base
     });
 
     let app = fauna_nest::build_router(Arc::clone(&state));

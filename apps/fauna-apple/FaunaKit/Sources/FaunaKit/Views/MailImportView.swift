@@ -487,10 +487,10 @@ public struct MailImportView: View {
         Task { await vm.dispatch(.toggleMailbox(mailbox: name)) }
     }
 
-    /// The cancel button's label: `Cancel`, relabelled `Confirm` once armed.
+    /// The cancel button's label: `Cancel`, relabelled `Confirm?` once armed.
     /// Shared by the `Button` title and its `.automationActivate` `text:`.
     private var cancelLabel: String {
-        cancelArmed ? L.common.confirm : L.mailImport.cancelButton
+        cancelArmed ? L.common.confirmQ : L.mailImport.cancelButton
     }
 
     /// Two-click inline cancel arm-then-confirm (no modal). Shared by the

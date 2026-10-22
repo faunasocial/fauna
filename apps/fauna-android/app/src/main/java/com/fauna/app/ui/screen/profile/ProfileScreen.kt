@@ -1,5 +1,7 @@
 package com.fauna.app.ui.screen.profile
 
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -9,6 +11,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -31,7 +35,8 @@ import com.fauna.app.ui.viewmodel.ProfilePrivateVM
 import com.fauna.app.ui.viewmodel.ProfileVM
 import social.fauna.generated.Ids
 
-/** Which Profile tab is showing. Posts is the default landmark (content TBD). */
+/** Which Profile tab is showing. Posts is the default (`profile.md` § Layout & flow →
+ *  *The Posts tab*). */
 private enum class ProfileTab { POSTS, TIERS }
 
 /**
@@ -40,7 +45,9 @@ private enum class ProfileTab { POSTS, TIERS }
  * drawer row) **or** another actor's (OTHER, reached by tap-through — a contact
  * row → `profile/{actorId}`), branching on [ProfileVM.isSelf] (mirrors linux
  * `build_profile_view(target)`). Both show an identity header + a tab strip
- * (`profile-posts-tab` landmark · `profile-tiers-tab`).
+ * (`profile-posts-tab` · `profile-tiers-tab`). The Posts tab is the viewed actor's
+ * posts as the feed paints them — [ProfilePostsSection], supplied through the
+ * noKids/kids seam (the kids twin is empty: no feed in a kids artifact).
  *
  * The header renders the viewed actor's published **display_name**
  * (`fauna.profile.get`, via [ProfileVM.refreshHeader]), falling back to the
@@ -74,6 +81,8 @@ fun ProfileScreen(
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
     val displayName by vm.displayName.collectAsState()
+    val avatar by vm.avatar.collectAsState()
+    val banner by vm.banner.collectAsState()
     // OTHER: the header's two names are the shared resolver's over the viewer's
     // nickname, the published display name, then the canonical short id — the
     // OTHER header holds no handle (mirrors linux `HeaderNames::label`). SELF
@@ -135,24 +144,39 @@ fun ProfileScreen(
         shownPrivateError = msg
     }
 
+    // Hoisted so the Posts tab's cards (hosted in this scroll) can read the
+    // feed's load-more gesture off it.
+    val scrollState = rememberScrollState()
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(scrollState)
             .testTag(Ids.PROFILE_VIEW),
     ) {
         // ── Identity header (the shared user-header shape) ──────────────────
+        banner?.let {
+            HeaderPictureElement(
+                it,
+                Ids.PROFILE_BANNER,
+                Modifier.fillMaxWidth().height(120.dp).padding(horizontal = 16.dp),
+            )
+        }
         Row(
             modifier = Modifier.fillMaxWidth().padding(16.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Icon(
-                Icons.Filled.AccountCircle,
-                contentDescription = null,
-                modifier = Modifier.size(48.dp),
-                tint = MaterialTheme.colorScheme.primary,
-            )
+            val shownAvatar = avatar
+            if (shownAvatar != null) {
+                HeaderPictureElement(shownAvatar, Ids.PROFILE_AVATAR, Modifier.size(48.dp))
+            } else {
+                Icon(
+                    Icons.Filled.AccountCircle,
+                    contentDescription = null,
+                    modifier = Modifier.size(48.dp),
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+            }
             ProfileHeaderNames(
                 primary = otherLabel?.primary ?: displayName,
                 publicName = otherLabel?.public,
@@ -242,6 +266,7 @@ fun ProfileScreen(
                 onAddLabel = privateVm::addLabel,
                 onRemoveLabel = privateVm::removeLabel,
                 onSave = privateVm::save,
+                labelSuggestions = { typed -> privateVm.labelSuggestions(typed, privateForm.labels) },
             )
         }
 
@@ -276,12 +301,13 @@ fun ProfileScreen(
         }
 
         when (tab) {
-            ProfileTab.POSTS -> Text(
-                stringResource(R.string.profile_no_posts),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(16.dp),
-            )
+            ProfileTab.POSTS -> vm.profileActorIdHex?.let { actor ->
+                ProfilePostsSection(
+                    navController = navController,
+                    actorIdHex = actor,
+                    scrollState = scrollState,
+                )
+            }
             ProfileTab.TIERS ->
                 if (BuildConfig.KIDS) {
                     // Unreachable: the Tiers chip is not composed in Fauna Kids.
@@ -383,5 +409,39 @@ fun ProfileSecondaryActionsRow(
             }
             GuardianAskPair(render = askRender, askInFlight = askInFlight, onAsk = onAskGuardian)
         }
+    }
+}
+
+/** `profile-avatar` / `profile-banner`'s `state` tokens (their `stateDescription`) —
+ *  the `post-image` contract `ProfileActions.picture_state` reads. */
+internal const val HEADER_PICTURE_PAINTED = "painted"
+internal const val HEADER_PICTURE_PLACEHOLDER = "placeholder"
+
+/**
+ * One stored header picture (`profile.md` § Layout & flow, the `user-header`
+ * component): rendered only while the profile names it — the caller passes a
+ * [ProfileVM.HeaderPicture] then — and painted once its bytes decode; empty
+ * (`placeholder`) while loading or after a failed fetch, never `error-message`.
+ */
+@Composable
+internal fun HeaderPictureElement(picture: ProfileVM.HeaderPicture, testTag: String, modifier: Modifier) {
+    val bitmap = remember(picture.bytes) {
+        picture.bytes?.let { bytes -> BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap() }
+    }
+    if (bitmap != null) {
+        Image(
+            bitmap = bitmap,
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = modifier
+                .testTag(testTag)
+                .semantics { stateDescription = HEADER_PICTURE_PAINTED },
+        )
+    } else {
+        Box(
+            modifier = modifier
+                .testTag(testTag)
+                .semantics { stateDescription = HEADER_PICTURE_PLACEHOLDER },
+        )
     }
 }

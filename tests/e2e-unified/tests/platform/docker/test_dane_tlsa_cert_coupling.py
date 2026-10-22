@@ -52,7 +52,7 @@ import time
 import pytest
 from cryptography import x509
 
-from helpers.tls_spki import served_leaf_spki_sha256_hex, spki_sha256_hex
+from helpers.tls_spki import spki_sha256_hex
 
 from .helpers import (
     IMAGE_TAG,
@@ -63,6 +63,7 @@ from .helpers import (
     get_repo_root,
     install_acme_default_cert,
     make_ca_issued_leaf_pem,
+    nest_served_leaf,
     register_primary_domain,
     remove_container,
     start_container_with_ports,
@@ -106,7 +107,7 @@ def dane_nest(docker_image):
     name = f"fauna-dane-{http_port}"
     start_container_with_ports(
         name,
-        {3000: http_port},
+        {443: http_port},
         env={"FAUNA_CLAIM_CODE": CLAIM_CODE, "FAUNA_PORT": "3000"},
         add_hosts={"host.docker.internal": "host-gateway"},
     )
@@ -157,7 +158,7 @@ def test_dane_tlsa_floor_present_then_trusted_withdraws(dane_nest):
     assert rdata.startswith("3 1 1 "), f"DANE-EE/SPKI/SHA-256 record, got {rdata!r}"
     pinned_hex = rdata.split()[-1].lower()
 
-    served_hex = served_leaf_spki_sha256_hex(host, port, MX_SNI)
+    served_hex = spki_sha256_hex(nest_served_leaf(name, MX_SNI))
     assert pinned_hex == served_hex, (
         "the published floor-MX TLSA must pin the SPKI of the leaf the image "
         f"actually serves for {MX_SNI}: published {pinned_hex}, served {served_hex}"
@@ -174,13 +175,13 @@ def test_dane_tlsa_floor_present_then_trusted_withdraws(dane_nest):
     while True:
         # Confirm the hot-reload actually took before asserting the withdrawal,
         # so a still-floor cert can't masquerade as a withdrawal failure.
-        if served_leaf_spki_sha256_hex(host, port, MX_SNI) == trusted_served_hex:
+        if spki_sha256_hex(nest_served_leaf(name, MX_SNI)) == trusted_served_hex:
             rows = _floor_mx_tlsa_rows(_list_records(dane_nest))
             if not rows:
                 break
         if time.monotonic() > deadline:
             rows = _floor_mx_tlsa_rows(_list_records(dane_nest))
-            now_served = served_leaf_spki_sha256_hex(host, port, MX_SNI)
+            now_served = spki_sha256_hex(nest_served_leaf(name, MX_SNI))
             assert now_served == trusted_served_hex, (
                 f"cert-watcher never reloaded the trusted leaf (still serving "
                 f"{now_served}, expected {trusted_served_hex})"

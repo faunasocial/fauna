@@ -4,7 +4,7 @@
 // (`fauna_client_capabilities::trust_clock`).
 //
 // This module exists ONLY in builds made for testing (testing.md § convention
-// 15): its one importer, `$lib/e2e-automation`, sits behind `+layout.svelte`'s
+// 15): its one importer, `#lib/e2e-automation`, sits behind `+layout.svelte`'s
 // `if (__FAUNA_E2E_AUTOMATION__)`, so a production `vite build` folds it away.
 //
 // The repaint: the Nests page's hydrate reads the clock, and on tui/linux the
@@ -12,7 +12,7 @@
 // same settings route never remounts `NestsSection` — so the mounted page
 // installs a rehydrate hook this command calls after moving the clock: the
 // page's own `hydrate()` → snapshot → render chain, only the clock moved (the
-// `$lib/atproto-delegation-e2e` shape). Unlike that command, a missing hook is
+// `#lib/atproto-delegation-e2e` shape). Unlike that command, a missing hook is
 // NOT an error: a journey resets the clock before it ever opens the Nests page,
 // and the next mount hydrates against the moved clock anyway.
 //
@@ -21,8 +21,8 @@
 // its freshness is not moved here — the only journey that ages a receipt is the
 // custody ceremony, tui-only (`CustodyActions.require_supported`).
 
-import { trustSetClockOffsetForTest } from '$lib/wasm';
-import { registerE2eCommands } from '$lib/e2e-commands';
+import { trustSetClockOffsetForTest } from '#lib/wasm';
+import { registerE2eCommands } from '#lib/e2e-commands';
 
 /** The Nests page's own re-hydrate callback, installed while it is mounted. */
 let rehydrateHook: (() => Promise<void>) | null = null;
@@ -35,7 +35,7 @@ export function setTrustClockRehydrateHook(hook: (() => Promise<void>) | null): 
 
 const TRUST_CLOCK_COMMANDS = ['trust_facet_advance_clock'] as const;
 
-/** Register `trust_facet_advance_clock`. Called once from `$lib/e2e-automation`. */
+/** Register `trust_facet_advance_clock`. Called once from `#lib/e2e-automation`. */
 export function registerTrustClockCommands(): void {
   registerE2eCommands(TRUST_CLOCK_COMMANDS, async (_action, p) => {
     // `0` is the reset every lapse test owes its successor — the offset is

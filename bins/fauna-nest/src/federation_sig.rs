@@ -21,10 +21,10 @@
 //! (`FEDERATION_HELLO_V1 ‖ cid`), so it cannot delegate to
 //! `SignedEnvelope::verify_permissive` (which signs the untagged CID, the generic
 //! app-layer sign-over-CID used by posts/etc. with *actor* keys). No encoder
-//! sits in the verify path beyond re-deriving the canonical bytes. Federation
-//! is **not live in alpha** (no external peers), so there is no legacy untagged
-//! federation signature to accept — unlike the additive/versioned cert-binding
-//! compat shim, the tag here is enforced with no fallback.
+//! sits in the verify path beyond re-deriving the canonical bytes. The tag
+//! predates every external peer, so there is no legacy untagged federation
+//! signature to accept — unlike the additive/versioned cert-binding compat
+//! shim, the tag here is enforced with no fallback.
 //!
 //! The bespoke per-request signing payloads for the HTTP federation twins
 //! (key-package fetch, Welcome delivery, namespace/MLS sync) were retired with
@@ -87,7 +87,7 @@ pub fn sign_payload<T: Serialize>(payload: &T, sk: &SigningKey) -> Result<String
 /// `blake3(bytes) == cid` then an Ed25519 verify — but the signature is verified
 /// over the **domain-tagged** `FEDERATION_HELLO_V1 ‖ cid`, so it cannot delegate
 /// to `SignedEnvelope::verify_permissive` (which checks the untagged CID). The tag is
-/// enforced with no legacy fallback (federation is not live in alpha).
+/// enforced with no legacy fallback (the tag predates every external peer).
 pub fn verify_payload<T: Serialize>(envelope_hex: &str, payload: &T, pk: &VerifyingKey) -> bool {
     let Some(env) = decode_envelope_hex(envelope_hex) else {
         return false;
@@ -102,8 +102,11 @@ pub fn verify_payload<T: Serialize>(envelope_hex: &str, payload: &T, pk: &Verify
     }
     // (2) Ed25519 verify over the domain-tagged CID. Through the one primitive:
     // a federation peer supplies its own key at hello, so this IS the
-    // attacker-chosen-key shape — inert today only because federation
-    // is not live in alpha, which is not a property to depend on.
+    // attacker-chosen-key shape, by design: open federation admits any
+    // keypair, and the verify proves only which key is calling — attribution,
+    // never authorization (`federation.md` § Trust model). What stands against a
+    // stranger is the channel's own defenses — the kind allowlist, the per-IP
+    // hello and per-kind throttles, and the per-target key-package budget.
     let msg = domain_separated(FEDERATION_HELLO_V1, env.cid().as_bytes());
     fauna_core::identity::verify_detached(&pk.to_bytes(), &msg, env.sig())
 }
@@ -234,5 +237,55 @@ mod tests {
         let sig = sk.sign(cid.as_bytes()).to_bytes();
         let legacy = encode_envelope_hex(&SignedEnvelope::from_parts(cid, sig));
         assert!(!verify_payload(&legacy, &payload, &pk));
+    }
+
+    // Property tests: the hello envelope is a stranger's hex string, decoded and
+    // verified before any relationship exists. Never panic, and only the exact
+    // envelope the signer produced verifies.
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn decode_envelope_hex_never_panics(s in "\\PC{0,400}") {
+            let _ = decode_envelope_hex(&s);
+        }
+
+        #[test]
+        fn verify_payload_rejects_arbitrary_hex(
+            hex_str in "[0-9a-fA-F]{0,240}",
+            nonce in "\\PC{0,16}",
+            seq in any::<i64>(),
+            pk_bytes in any::<[u8; 32]>(),
+        ) {
+            let payload = TestSig { nest_id: "aa", nonce: &nonce, seq };
+            // An arbitrary 32-byte string may not be a curve point; either way no panic.
+            if let Ok(pk) = VerifyingKey::from_bytes(&pk_bytes) {
+                prop_assert!(!verify_payload(&hex_str, &payload, &pk));
+            }
+        }
+
+        /// A genuine envelope verifies; flipping any one hex digit, or changing
+        /// the payload, does not.
+        #[test]
+        fn only_the_exact_envelope_verifies(
+            secret in any::<[u8; 32]>(),
+            nonce in "[a-z0-9]{0,16}",
+            seq in any::<i64>(),
+            flip in 0usize..200,
+        ) {
+            let sk = SigningKey::from_bytes(&secret);
+            let pk = sk.verifying_key();
+            let payload = TestSig { nest_id: "aa", nonce: &nonce, seq };
+            let env = sign_payload(&payload, &sk).unwrap();
+            prop_assert!(verify_payload(&env, &payload, &pk));
+
+            let mut bad = env.clone().into_bytes();
+            bad[flip] = if bad[flip] == b'0' { b'1' } else { b'0' };
+            let bad = String::from_utf8(bad).unwrap();
+            prop_assert!(!verify_payload(&bad, &payload, &pk));
+
+            let other = TestSig { nest_id: "aa", nonce: &nonce, seq: seq.wrapping_add(1) };
+            prop_assert!(!verify_payload(&env, &other, &pk));
+        }
     }
 }

@@ -719,14 +719,11 @@ def test_no_one_else_on_the_nest_can_read_or_change_your_calendar(
 def _apex_dav(nest, protocol: str) -> tuple[int, str | None]:
     """GET the nest's apex `/.well-known/<protocol>`, no redirect-following."""
     import urllib.error
-    import urllib.request
 
-    class NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, *args, **kwargs):
-            return None
+    from common.auth import no_redirect_opener
 
     try:
-        resp = urllib.request.build_opener(NoRedirect).open(
+        resp = no_redirect_opener().open(
             f"{nest['url']}/.well-known/{protocol}", timeout=budgets.RPC_ROUNDTRIP_S)
         return resp.status, resp.headers.get("Location")
     except urllib.error.HTTPError as err:

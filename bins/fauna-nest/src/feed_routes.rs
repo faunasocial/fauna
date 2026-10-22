@@ -133,12 +133,20 @@ pub(crate) struct FeedPostOut {
     /// data path); the WS handler copies them onto `FeedPostItem.labels` →
     /// the apps' `content-label-badge`.
     pub labels: Vec<fauna_core::content_category::ContentLabelEntry>,
-    /// A **bridged** author's face (`bridges.md` § Unified feed ingestion →
-    /// *Bridged authors*), filled by [`decorate_bridged_authors_best_effort`]
-    /// after the page is queried — never by the query itself; the WS handler
-    /// copies it onto `FeedPostItem.author_display`. `None` for a native
-    /// author.
+    /// The author's face — a bridged author's, or a local native author's
+    /// (`bridges.md` § Unified feed ingestion → *Bridged authors*), filled by
+    /// [`decorate_authors_best_effort`] after the page is queried — never by
+    /// the query itself; the WS handler copies it onto
+    /// `FeedPostItem.author_display`. `None` for a remote native author and
+    /// for an author with neither a handle nor a profile.
     pub author_display: Option<fauna_protocol::feed::AuthorDisplay>,
+    /// The home nest of a row this nest indexed from another
+    /// (`FeedPostRow::home_nest_url`); the WS handler copies it onto
+    /// `FeedPostItem.home_nest_url`.
+    pub home_nest_url: Option<String>,
+    /// That home's verified identity (`FeedPostRow::home_nest_actor_id`); the
+    /// WS handler copies it onto `FeedPostItem.home_nest_actor_id`.
+    pub home_nest_actor_id: Option<String>,
 }
 
 impl From<&crate::db::FeedPostRow> for FeedPostOut {
@@ -168,74 +176,184 @@ impl From<&crate::db::FeedPostRow> for FeedPostOut {
             web_slug: p.web_slug.clone(),
             labels: p.labels.clone(),
             author_display: None,
+            home_nest_url: p.home_nest_url.clone(),
+            home_nest_actor_id: p.home_nest_actor_id.clone(),
         }
     }
 }
 
-/// Fill `author_display` on every bridged row of a queried page from the
-/// `bridge_authors` projection — the post-query decoration `bridges.md`
-/// § Unified feed ingestion → *Bridged authors* rules: one batched read for the
-/// page's distinct bridged authors, never a JOIN in `query_feed` (`feed.md`
-/// § The read model's index-only `SELECT` is untouched). A page with no
-/// bridged row costs nothing. Best-effort, mirroring
+/// Fill `author_display` on every row of a queried page whose author has a
+/// face — the post-query decoration `bridges.md` § Unified feed ingestion →
+/// *Bridged authors* rules, never a JOIN in `query_feed` (`feed.md` § The read
+/// model's index-only `SELECT` is untouched). Two halves, each one batched
+/// read set over the page's distinct authors of its kind:
+///
+/// - a **bridged** row (`source` not `fauna`) takes its author's
+///   `bridge_authors` projection row;
+/// - a **local native** row (`source = 'fauna'`, no `home_nest_url`) takes the
+///   author's `users` handle and the `display_name` of their latest stored
+///   signed profile (*The local native author*) — see [`NativeAuthorRows`].
+///
+/// A row this nest indexed from another nest (`home_nest_url: Some`) is a
+/// remote author's and is left `None` for the client's own resolve (`feed.md`
+/// § The read model → *The remote author's byline*). Every reader class gets
+/// the same face: it is public profile state on this nest, outside the
+/// off-box post predicate. Best-effort, mirroring
 /// [`augment_viewer_state_best_effort`]: the face is a display nicety, so a
 /// read failure serves the feed faceless rather than failing a query that
 /// already succeeded.
-///
-/// Only rows whose `source` is not `fauna` are looked up: a native author has
-/// no projection row today. Should a native profile projection ever fill the
-/// same field, this filter is the one line to widen.
-pub(crate) async fn decorate_bridged_authors_best_effort(
-    state: &Arc<AppState>,
-    posts: &mut [FeedPostOut],
-) {
-    let mut ids: Vec<[u8; 32]> = posts
-        .iter()
-        .filter(|p| p.source != "fauna")
-        .filter_map(|p| <[u8; 32]>::try_from(p.author.as_slice()).ok())
-        .collect();
-    ids.sort_unstable();
-    ids.dedup();
-    if ids.is_empty() {
+pub(crate) async fn decorate_authors_best_effort(state: &Arc<AppState>, posts: &mut [FeedPostOut]) {
+    let distinct = |of_kind: fn(&FeedPostOut) -> bool| {
+        let mut ids: Vec<[u8; 32]> = posts
+            .iter()
+            .filter(|p| of_kind(p))
+            .filter_map(|p| <[u8; 32]>::try_from(p.author.as_slice()).ok())
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    };
+    let (bridged, native) = (distinct(is_bridged), distinct(is_local_native));
+    if bridged.is_empty() && native.is_empty() {
         return;
     }
-    let conn = state.db.conn().await;
-    let faces = match crate::db::bridge_authors::get_many(&conn, &ids) {
-        Ok(faces) => faces,
-        Err(e) => {
-            tracing::warn!("bridge_authors decoration: {e}");
-            return;
-        }
+    let (bridged_faces, native_rows) = {
+        let conn = state.db.conn().await;
+        let bridged_faces = if bridged.is_empty() {
+            Default::default()
+        } else {
+            crate::db::bridge_authors::get_many(&conn, &bridged).unwrap_or_else(|e| {
+                tracing::warn!("bridge_authors decoration: {e}");
+                Default::default()
+            })
+        };
+        (bridged_faces, NativeAuthorRows::read(&conn, &native))
     };
+    // The verifies run off the connection lock.
+    let native_faces = native_rows.faces();
     for post in posts.iter_mut() {
-        if let Ok(id) = <[u8; 32]>::try_from(post.author.as_slice())
-            && let Some(author) = faces.get(&id)
-        {
-            post.author_display = Some(author.display());
+        let Ok(id) = <[u8; 32]>::try_from(post.author.as_slice()) else {
+            continue;
+        };
+        if is_local_native(post) {
+            post.author_display = native_faces.get(&id).cloned();
+        } else if is_bridged(post) {
+            post.author_display = bridged_faces.get(&id).map(|a| a.display());
         }
     }
 }
 
-/// The one-post twin of [`decorate_bridged_authors_best_effort`], for the
-/// single-post read (`fauna.posts.get`): the bridged author's face for the post
-/// whose stored `body` this is, or `None`. The author comes from decoding the
-/// body (the read outcome carries no row), and only a bridged author has a
-/// `bridge_authors` row — a native author yields `None`, so a native reply
-/// stays byte-identical. Best-effort like the page decoration: an undecodable
-/// body or a failed read serves the post faceless rather than failing the read.
-pub(crate) async fn bridged_author_display_best_effort(
+/// A row a bridge carried in.
+fn is_bridged(post: &FeedPostOut) -> bool {
+    post.source != "fauna"
+}
+
+/// A row by an author hosted on this nest: native, and not indexed from
+/// another nest.
+fn is_local_native(post: &FeedPostOut) -> bool {
+    post.source == "fauna" && post.home_nest_url.is_none()
+}
+
+/// The raw reads behind local native faces — taken under the connection lock,
+/// decoded and verified after it is released ([`Self::faces`]).
+struct NativeAuthorRows {
+    handles: std::collections::HashMap<[u8; 32], String>,
+    profiles: std::collections::HashMap<[u8; 32], Vec<u8>>,
+}
+
+impl NativeAuthorRows {
+    /// One `users` read and one latest-profile read for `ids` (empty → no
+    /// read). Best-effort: a failed read is logged and contributes nothing.
+    fn read(conn: &rusqlite::Connection, ids: &[[u8; 32]]) -> Self {
+        if ids.is_empty() {
+            return Self {
+                handles: Default::default(),
+                profiles: Default::default(),
+            };
+        }
+        let handles = crate::db::admin::handles_many(conn, ids).unwrap_or_else(|e| {
+            tracing::warn!("native author decoration (handles): {e}");
+            Default::default()
+        });
+        let profiles =
+            crate::profile_handlers::latest_profile_payloads(conn, ids).unwrap_or_else(|e| {
+                tracing::warn!("native author decoration (profiles): {e}");
+                Default::default()
+            });
+        Self { handles, profiles }
+    }
+
+    /// Pair each author's `users` handle with the `display_name` of their
+    /// verified profile: a handle alone is a face, a display name alone is a
+    /// face, neither is none. Each profile goes through the one shared
+    /// signed-only verify (`decode_profile`) and must name the row's author;
+    /// one that does not verify, or names someone else, contributes no display
+    /// name. `avatar_url` stays `None` — a native avatar is a content address,
+    /// never a nest-relative URL.
+    fn faces(self) -> std::collections::HashMap<[u8; 32], fauna_protocol::feed::AuthorDisplay> {
+        let Self {
+            mut handles,
+            profiles,
+        } = self;
+        let mut names = std::collections::HashMap::new();
+        for (author, payload) in profiles {
+            match fauna_core::encoding::decode_profile(&payload) {
+                Ok((profile, _)) if profile.actor_id.0 == author => {
+                    if let Some(name) = profile.display_name.filter(|n| !n.trim().is_empty()) {
+                        names.insert(author, name);
+                    }
+                }
+                Ok(_) => tracing::warn!(
+                    author = %hex::encode(author),
+                    "native author decoration: stored profile names another actor"
+                ),
+                Err(e) => tracing::warn!(
+                    author = %hex::encode(author),
+                    "native author decoration: stored profile does not verify: {e}"
+                ),
+            }
+        }
+        let mut authors: Vec<[u8; 32]> = handles.keys().chain(names.keys()).copied().collect();
+        authors.sort_unstable();
+        authors.dedup();
+        authors
+            .into_iter()
+            .map(|author| {
+                let face = fauna_protocol::feed::AuthorDisplay {
+                    handle: handles.remove(&author),
+                    display_name: names.remove(&author),
+                    ..Default::default()
+                };
+                (author, face)
+            })
+            .collect()
+    }
+}
+
+/// The one-post twin of [`decorate_authors_best_effort`], for the single-post
+/// read (`fauna.posts.get`): the face of the author of the post whose stored
+/// `body` this is, or `None`. The author comes from decoding the body (the
+/// read outcome carries no row): a `bridge_authors` row first, else the local
+/// native face by the same two reads as the page's native half. An author with
+/// neither — a remote author included, who has no `users` or profile row here —
+/// yields `None`, so their reply stays byte-identical. Best-effort like the
+/// page decoration: an undecodable body or a failed read serves the post
+/// faceless rather than failing the read.
+pub(crate) async fn author_display_best_effort(
     state: &Arc<AppState>,
     body: &[u8],
 ) -> Option<fauna_protocol::feed::AuthorDisplay> {
-    let post = crate::db::posts::decode_stored_post(body)?;
-    let conn = state.db.conn().await;
-    match crate::db::bridge_authors::get(&conn, &post.author.0) {
-        Ok(author) => author.map(|a| a.display()),
-        Err(e) => {
-            tracing::warn!("bridge_authors single-post decoration: {e}");
-            None
+    let author = crate::db::posts::decode_stored_post(body)?.author.0;
+    let native_rows = {
+        let conn = state.db.conn().await;
+        match crate::db::bridge_authors::get(&conn, &author) {
+            Ok(Some(bridged)) => return Some(bridged.display()),
+            Ok(None) => {}
+            Err(e) => tracing::warn!("bridge_authors single-post decoration: {e}"),
         }
-    }
+        NativeAuthorRows::read(&conn, &[author])
+    };
+    native_rows.faces().remove(&author)
 }
 
 /// Result of a feed-posts query. Exactly one cursor is `Some`, set by the
@@ -576,6 +694,18 @@ impl FeedReader {
         }
     }
 
+    /// Which delivered envelopes the read may list (`federated-follow.md`
+    /// § Decision 4): the account on its own box reads the posts of the remote
+    /// authors it follows; every other reader is nest-wide.
+    fn locality(self) -> crate::db::feeds::FeedLocality {
+        match self {
+            FeedReader::Account(actor) => crate::db::feeds::FeedLocality::ForReader(actor),
+            FeedReader::PrincipalAccount(_) | FeedReader::Principal => {
+                crate::db::feeds::FeedLocality::NestWide
+            }
+        }
+    }
+
     /// Whether the read leaves the box — held to
     /// [`crate::db::feeds::FeedAudience::OffBox`] whatever the feed.
     fn off_box(self) -> bool {
@@ -625,7 +755,15 @@ pub(crate) async fn query_local_feed_core(
     } else {
         state
             .db
-            .query_feed(&[], FilterCombination::All, &mandatory, cursor, limit)
+            .query_feed_for(
+                &[],
+                FilterCombination::All,
+                &mandatory,
+                cursor,
+                limit,
+                crate::db::feeds::FeedAudience::OnBox,
+                reader.locality(),
+            )
             .await
     };
     match read {
@@ -635,7 +773,7 @@ pub(crate) async fn query_local_feed_core(
             }
             let cursor = posts.last().map(|p| p.created_at);
             let mut posts: Vec<FeedPostOut> = posts.iter().map(FeedPostOut::from).collect();
-            decorate_bridged_authors_best_effort(state, &mut posts).await;
+            decorate_authors_best_effort(state, &mut posts).await;
             Ok(FeedPostsOut {
                 posts,
                 cursor,
@@ -645,6 +783,67 @@ pub(crate) async fn query_local_feed_core(
         }
         Err(e) => {
             tracing::error!("query_local_feed error: {e}");
+            Err(ApiError::internal("query error"))
+        }
+    }
+}
+
+/// Shared core behind `fauna.feed.author.posts` — one author's posts, the
+/// profile page's Posts tab (`feed.md` § The read model → *The author read*).
+/// No rules: the local feed's mandatory set (the spam guard, the viewer's
+/// block list) over `query_feed_for_authors`, always chronological on the
+/// `created_at` keyset cursor. Every moderation flag binds; an off-box reader
+/// is additionally held to the public predicate (`FeedAudience::OffBox`),
+/// while the account on its own box lists a gated envelope as the local feed
+/// lists it.
+pub(crate) async fn query_author_feed_core(
+    state: &Arc<AppState>,
+    reader: FeedReader,
+    author: [u8; 32],
+    cursor: Option<i64>,
+    limit: Option<i64>,
+) -> Result<FeedPostsOut, ApiError> {
+    let limit = limit.unwrap_or(50).clamp(1, 200);
+    let mut mandatory: Vec<FilterRule> = Vec::new();
+    ensure_spam_filter(&[], &mut mandatory);
+    if let Some(caller) = reader.account() {
+        push_viewer_block(&caller, &mut mandatory);
+    }
+    let audience = if reader.off_box() {
+        crate::db::feeds::FeedAudience::OffBox
+    } else {
+        crate::db::feeds::FeedAudience::OnBox
+    };
+    let read = state
+        .db
+        .query_feed_for_authors(
+            &[],
+            FilterCombination::All,
+            &mandatory,
+            &[author.to_vec()],
+            cursor,
+            limit,
+            audience,
+            reader.locality(),
+        )
+        .await;
+    match read {
+        Ok(mut posts) => {
+            if let Some(caller) = reader.account() {
+                augment_viewer_state_best_effort(state, &caller, &mut posts).await;
+            }
+            let cursor = posts.last().map(|p| p.created_at);
+            let mut posts: Vec<FeedPostOut> = posts.iter().map(FeedPostOut::from).collect();
+            decorate_authors_best_effort(state, &mut posts).await;
+            Ok(FeedPostsOut {
+                posts,
+                cursor,
+                score_cursor: None,
+                score_cursor_created_at: None,
+            })
+        }
+        Err(e) => {
+            tracing::error!("query_author_feed error: {e}");
             Err(ApiError::internal("query error"))
         }
     }
@@ -729,7 +928,7 @@ pub(crate) async fn query_trending_feed_core(
             let score_cursor = last.and_then(|p| p.score);
             let score_cursor_created_at = last.map(|p| p.created_at);
             let mut posts: Vec<FeedPostOut> = posts.iter().map(FeedPostOut::from).collect();
-            decorate_bridged_authors_best_effort(state, &mut posts).await;
+            decorate_authors_best_effort(state, &mut posts).await;
             Ok(FeedPostsOut {
                 posts,
                 cursor: None,
@@ -839,6 +1038,7 @@ pub(crate) async fn query_feed_core(
                 limit,
                 &composition,
                 audience,
+                reader.locality(),
             )
             .await
         {
@@ -851,7 +1051,7 @@ pub(crate) async fn query_feed_core(
                 let score_cursor = last.and_then(|p| p.score);
                 let score_cursor_created_at = last.map(|p| p.created_at);
                 let mut posts: Vec<FeedPostOut> = posts.iter().map(FeedPostOut::from).collect();
-                decorate_bridged_authors_best_effort(state, &mut posts).await;
+                decorate_authors_best_effort(state, &mut posts).await;
                 Ok(FeedPostsOut {
                     posts,
                     cursor: None,
@@ -867,14 +1067,22 @@ pub(crate) async fn query_feed_core(
     } else {
         match state
             .db
-            .query_feed_for(&rules, combination, &mandatory, cursor, limit, audience)
+            .query_feed_for(
+                &rules,
+                combination,
+                &mandatory,
+                cursor,
+                limit,
+                audience,
+                reader.locality(),
+            )
             .await
         {
             Ok(mut posts) => {
                 augment_viewer_state_best_effort(state, &caller, &mut posts).await;
                 let cursor = posts.last().map(|p| p.created_at);
                 let mut posts: Vec<FeedPostOut> = posts.iter().map(FeedPostOut::from).collect();
-                decorate_bridged_authors_best_effort(state, &mut posts).await;
+                decorate_authors_best_effort(state, &mut posts).await;
                 Ok(FeedPostsOut {
                     posts,
                     cursor,
@@ -1198,7 +1406,16 @@ pub(crate) async fn remote_query_feed_core(
     let posts = if let Some(authors) = &authors {
         state
             .db
-            .query_feed_for_authors(&rules, combination, &mandatory, authors, req.cursor, limit)
+            .query_feed_for_authors(
+                &rules,
+                combination,
+                &mandatory,
+                authors,
+                req.cursor,
+                limit,
+                crate::db::feeds::FeedAudience::OnBox,
+                crate::db::feeds::FeedLocality::NestWide,
+            )
             .await
     } else {
         state
@@ -1681,6 +1898,81 @@ mod tests {
         assert!(bare.posts.iter().all(|p| !p.viewer_liked));
     }
 
+    /// The author arm's two readers (`authorization-server.md` § Scope grammar
+    /// → *The author arm*): under `fauna:feed:read:author` alone the author
+    /// read is `FeedReader::Principal` — that author's public posts only, a
+    /// gated one withheld, no viewer state; with the account arm too it is
+    /// `FeedReader::PrincipalAccount` — the same public posts with the
+    /// account's like state filled and its block list applied.
+    #[tokio::test]
+    async fn the_author_arm_reads_one_authors_public_posts() {
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        let state = Arc::new(AppState::for_test(db.clone()));
+        let (account, author, someone) = ([9u8; 32], [7u8; 32], [6u8; 32]);
+        let (public, gated, elsewhere) = ([0xA7u8; 32], [0xB7u8; 32], [0xC7u8; 32]);
+        seed_trending_post(&db, public, author, 1_000_000, 300).await;
+        seed_trending_post(&db, gated, author, 2_000_000, 900).await;
+        seed_trending_post(&db, elsewhere, someone, 3_000_000, 600).await;
+        db.execute_batch(&format!(
+            "UPDATE content_meta SET gated_tier = 'premium' WHERE content_id = x'{}'",
+            hex::encode(gated)
+        ))
+        .await
+        .unwrap();
+        let like = fauna_core::engagement::compute_toggle_event_id(
+            &fauna_core::identity::ActorId(account),
+            &fauna_core::data::ContentHash::from_digest_raw(public),
+            "like",
+        );
+        db.insert_engagement_event(
+            like.digest().as_slice(),
+            &public,
+            Some(&account),
+            "like",
+            None,
+            4_000_000,
+        )
+        .await
+        .unwrap();
+        let read = |reader: FeedReader| {
+            let state = state.clone();
+            async move {
+                query_author_feed_core(&state, reader, author, None, Some(10))
+                    .await
+                    .ok()
+                    .expect("author read")
+            }
+        };
+        let ids = |out: &FeedPostsOut| -> Vec<Vec<u8>> {
+            out.posts.iter().map(|p| p.post_id.clone()).collect()
+        };
+
+        let own = read(FeedReader::Account(account)).await;
+        assert_eq!(ids(&own).len(), 2, "the account on its box — the control");
+
+        let bare = read(FeedReader::Principal).await;
+        assert_eq!(ids(&bare), vec![public.to_vec()], "public posts only");
+        assert!(bare.posts.iter().all(|p| !p.viewer_liked));
+
+        let as_account = read(FeedReader::PrincipalAccount(account)).await;
+        assert_eq!(ids(&as_account), vec![public.to_vec()]);
+        assert!(as_account.posts[0].viewer_liked, "the account's like state");
+
+        db.block_contact(&account, &author).await.unwrap();
+        assert!(
+            read(FeedReader::PrincipalAccount(account))
+                .await
+                .posts
+                .is_empty(),
+            "the account's block list applies"
+        );
+        assert_eq!(
+            ids(&read(FeedReader::Principal).await),
+            vec![public.to_vec()],
+            "the bare reader has no block list"
+        );
+    }
+
     /// The compound keyset cursor paginates the trending read with no dupes or
     /// gaps — `(score_cursor, score_cursor_created_at)` echoed from the last row.
     #[tokio::test]
@@ -1770,23 +2062,270 @@ mod tests {
             .unwrap();
         }
 
-        let face = bridged_author_display_best_effort(&state, &bare_post_bytes(bridged))
+        let face = author_display_best_effort(&state, &bare_post_bytes(bridged))
             .await
             .expect("the bridged author's face rides the single-post read");
         assert_eq!(face.display_name.as_deref(), Some("Alice"));
         assert_eq!(face.handle.as_deref(), Some("@alice@remote.example"));
 
         assert!(
-            bridged_author_display_best_effort(&state, &bare_post_bytes(native))
+            author_display_best_effort(&state, &bare_post_bytes(native))
                 .await
                 .is_none(),
-            "a native author has no projection row"
+            "a native author with neither a users row nor a profile has no face"
         );
         assert!(
-            bridged_author_display_best_effort(&state, b"not a post")
+            author_display_best_effort(&state, b"not a post")
                 .await
                 .is_none(),
             "an undecodable body serves faceless, never fails the read"
+        );
+    }
+
+    // ── the local native author's face (`bridges.md` § Unified feed
+    //    ingestion → *Bridged authors* → *The local native author*) ──────
+
+    /// A signed profile for `kp` naming `display_name`, as `fauna.profile.set`
+    /// stores it.
+    fn signed_profile(kp: &fauna_core::identity::ActorKeypair, display_name: &str) -> Vec<u8> {
+        let profile = fauna_core::data::Profile {
+            actor_id: kp.actor_id(),
+            display_name: Some(display_name.into()),
+            bio: None,
+            avatar: None,
+            banner: None,
+            links: vec![],
+            nests: vec![],
+            admin_nests: vec![],
+            load_hint: None,
+            inbox_mode: fauna_core::data::InboxMode::Closed,
+            recovery_head: None,
+            audience: fauna_core::data::ProfileAudience::ThisNest,
+            updated_at: fauna_core::data::Timestamp(0),
+        };
+        fauna_core::encoding::sign_and_pack(kp, &profile).expect("sign+pack")
+    }
+
+    async fn store_profile(db: &CacheDb, author: [u8; 32], created_at: i64, payload: &[u8]) {
+        db.conn()
+            .await
+            .execute(
+                "INSERT INTO content (id, author, schema, created_at, payload)
+                 VALUES (?1, ?2, 'profile', ?3, ?4)",
+                rusqlite::params![
+                    blake3::hash(payload).as_bytes().as_slice(),
+                    author.as_slice(),
+                    created_at,
+                    payload
+                ],
+            )
+            .expect("seed profile row");
+    }
+
+    async fn seed_native_post(db: &CacheDb, post_id: [u8; 32], author: [u8; 32], at: i64) {
+        db.insert_post_index_entry(&post_id, &author, at, false, false, "fauna", &[])
+            .await
+            .unwrap();
+    }
+
+    /// Four local native authors — profiled + handled, handle-only, neither,
+    /// and one whose stored profile is signed by someone else — plus a bridged
+    /// author: the page names the first two (display name and handle, handle
+    /// alone), leaves the other two faceless and still serves the page, and the
+    /// bridged face is untouched. Every reader class gets the same face, and so
+    /// does the author read.
+    #[tokio::test]
+    async fn local_native_authors_carry_their_handle_and_signed_display_name() {
+        use fauna_core::identity::ActorKeypair;
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        let state = Arc::new(AppState::for_test(db.clone()));
+        let caller = [9u8; 32];
+        let (alice, mallory) = (ActorKeypair::generate(), ActorKeypair::generate());
+        let alice_id = alice.actor_id().0;
+        let (handle_only, bare, forged, bridged) =
+            ([0x42u8; 32], [0x43u8; 32], [0x44u8; 32], [0x45u8; 32]);
+        db.create_user_with_handle(&alice_id, "free", "alice", None)
+            .await
+            .unwrap();
+        db.create_user_with_handle(&handle_only, "free", "hana", None)
+            .await
+            .unwrap();
+        db.create_user(&bare, "free", "").await.unwrap();
+        // An older profile the newest one supersedes, then the current one.
+        store_profile(&db, alice_id, 1, &signed_profile(&alice, "Old Alice")).await;
+        store_profile(&db, alice_id, 2, &signed_profile(&alice, "Alice")).await;
+        // A row filed under `forged` but signed by (and naming) mallory.
+        store_profile(&db, forged, 1, &signed_profile(&mallory, "Not Forged")).await;
+        seed_native_post(&db, [0xA4u8; 32], alice_id, 1_000_000).await;
+        seed_native_post(&db, [0xB4u8; 32], handle_only, 2_000_000).await;
+        seed_native_post(&db, [0xC4u8; 32], bare, 3_000_000).await;
+        seed_native_post(&db, [0xD4u8; 32], forged, 4_000_000).await;
+        db.insert_post_index_entry(
+            &[0xE4u8; 32],
+            &bridged,
+            5_000_000,
+            false,
+            false,
+            "activitypub",
+            &[],
+        )
+        .await
+        .unwrap();
+        crate::db::bridge_authors::upsert(
+            &*db.conn().await,
+            &crate::db::bridge_authors::BridgeAuthor {
+                actor_id: bridged,
+                bridge: crate::db::bridge_authors::BRIDGE_ACTIVITYPUB.into(),
+                external_id: "https://remote.example/users/bob".into(),
+                handle: Some("@bob@remote.example".into()),
+                display_name: Some("Bob".into()),
+                avatar_url: None,
+                updated_at: 1,
+            },
+        )
+        .unwrap();
+
+        for reader in [
+            FeedReader::Account(caller),
+            FeedReader::PrincipalAccount(caller),
+            FeedReader::Principal,
+        ] {
+            let out = query_local_feed_core(&state, reader, None, Some(10), None)
+                .await
+                .ok()
+                .expect("local read");
+            let face = |id: [u8; 32]| {
+                out.posts
+                    .iter()
+                    .find(|p| p.author == id.to_vec())
+                    .expect("the row is on the page")
+                    .author_display
+                    .clone()
+            };
+            let a = face(alice_id).expect("alice has a face");
+            assert_eq!(
+                a.display_name.as_deref(),
+                Some("Alice"),
+                "the newest profile"
+            );
+            assert_eq!(a.handle.as_deref(), Some("alice"));
+            assert_eq!(a.avatar_url, None, "a native avatar is never a URL");
+            let h = face(handle_only).expect("a handle alone is a face");
+            assert_eq!(h.handle.as_deref(), Some("hana"));
+            assert_eq!(h.display_name, None);
+            assert_eq!(face(bare), None, "neither handle nor profile");
+            assert_eq!(face(forged), None, "a foreign signer is no face");
+            assert_eq!(
+                face(bridged).and_then(|f| f.display_name).as_deref(),
+                Some("Bob"),
+                "the bridged face is untouched"
+            );
+        }
+
+        let out = query_author_feed_core(&state, FeedReader::Principal, alice_id, None, Some(10))
+            .await
+            .ok()
+            .expect("author read");
+        assert_eq!(
+            out.posts[0]
+                .author_display
+                .as_ref()
+                .and_then(|f| f.display_name.as_deref()),
+            Some("Alice"),
+            "the author read carries the face"
+        );
+    }
+
+    /// A post this nest indexed from another nest (`home_nest_url: Some`) is a
+    /// remote author's: it stays faceless, so the client-side remote resolve's
+    /// guard (`feed.md` § The read model → *The remote author's byline*) is
+    /// untouched — even should a same-id account exist here.
+    #[tokio::test]
+    async fn a_remote_native_authors_row_stays_faceless() {
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        let state = Arc::new(AppState::for_test(db.clone()));
+        let remote = [0x51u8; 32];
+        db.create_user_with_handle(&remote, "free", "lookalike", None)
+            .await
+            .unwrap();
+        let mut posts = vec![FeedPostOut {
+            post_id: vec![0xA5; 32],
+            author: remote.to_vec(),
+            body: String::new(),
+            created_at: 1,
+            tags: vec![],
+            has_media: false,
+            is_reply: false,
+            source: "fauna".into(),
+            like_count: 0,
+            reply_count: 0,
+            repost_count: 0,
+            quote_count: 0,
+            quoted_post_id: None,
+            reposted_post_id: None,
+            reposted_gated_tier: None,
+            reposted_gated_room: None,
+            viewer_repost_id: None,
+            viewer_liked: false,
+            score: None,
+            gated_tier: None,
+            gated_room: None,
+            web_slug: None,
+            labels: vec![],
+            author_display: None,
+            home_nest_url: Some("https://remote.example".into()),
+            home_nest_actor_id: None,
+        }];
+        decorate_authors_best_effort(&state, &mut posts).await;
+        assert_eq!(posts[0].author_display, None);
+    }
+
+    /// The single-post twin names a local native author exactly as the page
+    /// does: display name and handle, a handle alone, nothing for neither or
+    /// for a profile whose signature does not verify — the read still served.
+    #[tokio::test]
+    async fn single_post_read_carries_the_local_native_face() {
+        use fauna_core::identity::ActorKeypair;
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        let state = Arc::new(AppState::for_test(db.clone()));
+        let (alice, tampered) = (ActorKeypair::generate(), ActorKeypair::generate());
+        let (alice_id, tampered_id) = (alice.actor_id().0, tampered.actor_id().0);
+        let (handle_only, bare) = ([0x62u8; 32], [0x63u8; 32]);
+        db.create_user_with_handle(&alice_id, "free", "alice", None)
+            .await
+            .unwrap();
+        db.create_user_with_handle(&handle_only, "free", "hana", None)
+            .await
+            .unwrap();
+        store_profile(&db, alice_id, 1, &signed_profile(&alice, "Alice")).await;
+        // Flip a bit inside the signed payload: the verify must refuse it.
+        let mut broken = signed_profile(&tampered, "Tampered");
+        let at = broken
+            .windows(8)
+            .position(|w| w == b"Tampered")
+            .expect("the name rides the signed bytes");
+        broken[at] ^= 0x01;
+        store_profile(&db, tampered_id, 1, &broken).await;
+
+        let a = author_display_best_effort(&state, &bare_post_bytes(alice_id))
+            .await
+            .expect("the native author's face rides the single-post read");
+        assert_eq!(a.display_name.as_deref(), Some("Alice"));
+        assert_eq!(a.handle.as_deref(), Some("alice"));
+        let h = author_display_best_effort(&state, &bare_post_bytes(handle_only))
+            .await
+            .expect("a handle alone is a face");
+        assert_eq!((h.handle.as_deref(), h.display_name), (Some("hana"), None));
+        assert!(
+            author_display_best_effort(&state, &bare_post_bytes(bare))
+                .await
+                .is_none()
+        );
+        assert!(
+            author_display_best_effort(&state, &bare_post_bytes(tampered_id))
+                .await
+                .is_none(),
+            "a profile that does not verify is no face"
         );
     }
 }

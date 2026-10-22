@@ -79,12 +79,29 @@ pub async fn from_ownership(
     }
     // The handle is the actor's own address on every active local domain
     // (`mail-multidomain.md` § Multi-domain handles), compared
-    // case-insensitively with no resolver call.
+    // case-insensitively — unless an exact / forwarder / list key on this
+    // domain names someone or something else. The alias doors keep a handle
+    // and such a key apart (`mail-aliases.md` § Cross-user uniqueness), so
+    // that is only a pair predating the exclusion; the key's holder is the
+    // one the resolver delivers the address's mail to, so the handle arm
+    // yields and one address keeps one owner.
     if handle
         .as_deref()
         .is_some_and(|h| h.eq_ignore_ascii_case(local))
     {
-        return Ok(FromOwnership::Owned);
+        let holder = state
+            .db
+            .exact_key_tier_holder(&host, local)
+            .await
+            .map_err(|e| crate::rpc_errors::internal(format!("exact_key_tier_holder: {e}")))?;
+        return Ok(match holder {
+            Some((owner, kind))
+                if owner != *actor || kind != crate::db::mail_aliases::ALIAS_KIND_EXACT =>
+            {
+                FromOwnership::NotOwned { handle }
+            }
+            _ => FromOwnership::Owned,
+        });
     }
     // Not the handle: an alias the actor owns is theirs to send from too. The
     // SAME in-process resolver the MTA reaches over

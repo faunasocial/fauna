@@ -2,7 +2,7 @@
 
 > **Status — this guide describes Fauna as it is taking shape.** Most of it is
 > built and tested; the [table at the end](#where-this-stands-today) says
-> exactly what is available now, what is landing, and what is planned.
+exactly what is available now, what is on its way, and what is planned.
 >
 > Part of the [Your own cloud](your-own-cloud.md) series.
 
@@ -51,31 +51,16 @@ for what snapshots give you.
 
 ## Setting up a second device
 
-There is no pairing dance. Install the Fauna app, choose **Sign in**, and enter
-your key (scan the QR / recovery phrase from a device you already use). That's
-it — the nest already knows your folders. Pick which ones this device should
-carry and where to put them on disk.
+There is no pairing dance. Install the Fauna app, choose **Import from Another Device**, and give it your key — paste it, or scan it as a QR code from a device you are already signed in on. That's it — the nest already knows your folders. Pick which ones this device should carry and where to put them on disk.
 
-Every device you add shows up on the **Devices** list with its name, whether
-it's online right now, and which folders it participates in. From there you
-can also:
+Every device you add shows up on the **Devices** page in Settings with its name and whether it's online right now. From there you can remove a device you've retired or lost: removal disconnects it on the spot, and your nest keeps every folder's files — except a folder whose **Content kept on the nest** is set to **Metadata only — content stays on my devices**, whose files live only on your devices. If a device is stolen, remove it here first; [Your identity and devices](identity-and-devices.md#if-a-device-is-lost-or-stolen) walks through the steps, including when to use **Lock for 24 Hours** on the **Sessions** page next to it.
 
-- make a device **read-only** for a set (it receives changes but can't push
-  any — right for a media center or a display kiosk);
-- **remove a device** you've retired or lost. Removal disconnects it and drops
-  it from every folder. (Fauna refuses to remove the only device that still
-  holds a set's files until you've designated another source — it will not let
-  you orphan your own data.)
-- **revoke sessions** or trigger an emergency lockout if a device is stolen.
+What each device does with a folder is set per folder under **Device places** in Settings → Folders, as above: untick **Uploads what I change here** there to make a device **read-only** for that folder — right for a media center or a display kiosk.
 
 ## What syncing feels like
 
-- **Real time.** Save a file; other online devices have it seconds later. Under
-  the hood only the *changed pieces* travel: files are split into
-  content-addressed chunks, encrypted on your device, compressed, and uploaded
-  — the nest stores ciphertext and never sees file contents.
-- **Deduplicated.** The same content — a copied folder, the same photo twice —
-  is stored once on the nest, no matter how many files or sets contain it.
+- **Real time.** Save a file; other online devices have it seconds later. Under the hood only the *changed pieces* travel: files are split into content-addressed chunks, compressed, encrypted on your device (except in a folder you make public), and uploaded — the nest stores them encrypted and can't read a file's contents, unless you choose otherwise: a folder you make public, serve over WebDAV (below) or put behind a paywall is readable by the box that serves it.
+- **Deduplicated.** The same content — a copied subfolder, the same photo twice — is stored once on the nest, within a folder.
 - **Offline is normal.** A laptop that spent the flight editing files just
   catches up when it reconnects: it fetches what it missed, uploads what it
   queued. No "resolve 400 conflicts" fireworks — changes apply in order.
@@ -92,10 +77,7 @@ can also:
 If two devices edit the same file while apart, Fauna resolves it automatically
 — nothing blocks on you. Text files get a real three-way merge when the edits
 don't overlap; anything that can't merge cleanly (overlapping text edits,
-binary files) falls back to latest-save-wins. Either way, the losing version
-is never thrown away — it's kept in the file's version history, and the file
-set's page lists every auto-resolved conflict with a one-tap "use the other
-version" if the automatic choice wasn't the one you wanted.
+binary files) falls back to latest-save-wins. Either way, the losing version is never thrown away — it's kept in the file's version history, and the folder's conflict review list, in Settings → Folders, lists every auto-resolved conflict with a one-tap **Use the other version** if the automatic choice wasn't the one you wanted.
 
 For folders holding files that fundamentally can't merge — a
 password-manager database, a video project, a disk image — turn on **One
@@ -118,15 +100,15 @@ On-Demand or Dropbox's online-only files — a 2 TB library browsable on a
 256 GB laptop — except the server holding the dehydrated bytes is yours.
 
 On Windows this is native File Explorer integration: an on-demand folder shows
-up as a cloud location (with your set's name), files carry the familiar
+up as a cloud location (with the folder's name), files carry the familiar
 cloud-status marks, and the right-click menu has **Free up space** — reclaim a
 file's disk space while keeping it visible — and **Always keep on this
 device** — pin it so it's available offline. Your edits upload either way; if
 a file has changes that haven't reached your nest yet, freeing its space
 waits until they have. A folder you sync to a location of your own choosing
 starts on-demand: files already in that folder stay put and upload, and the
-rest of the set appears as placeholders. If you would rather keep the whole
-set on this machine, flip the folder's **on-demand** switch in Settings →
+rest of the folder appears as placeholders. If you would rather keep the whole
+folder on this machine, flip the folder's **on-demand** switch in Settings →
 Folders; Fauna downloads everything and remembers the choice for that folder
 on that device.
 
@@ -143,23 +125,18 @@ there (Flatpak and Snap installs can't offer on-demand at all). And the folder
 has to be somewhere your system allows it — on Ubuntu, inside your home folder
 or under `/mnt` or `/media`; anywhere else the folder's row tells you
 on-demand can't be used there and keeps syncing the files already on the
-device. There is no **Free up space** menu on Linux yet, so a file you have
-opened stays on the device.
+device. On Linux there is no right-click menu for this, so the folder's row in Settings → Folders carries it: it shows how much of the folder is on this device and has a **Free up space** button. Pressing it frees every file your nest or your other devices can give back, and keeps any file this device may hold the only copy of — one with changes still uploading, or one you added or changed in a folder whose **Content kept on the nest** is set to **Metadata only — content stays on my devices**. To keep the whole folder on the device instead, turn on-demand off.
 
 On Mac and iPhone/iPad, a folder appears as a **Fauna location** — in the
 Finder sidebar on a Mac, and under Browse in the Files app on iOS. It's on by
 default for every folder this device **receives changes from elsewhere** in:
 the files show up as
 placeholders (names and sizes, no disk space) and download when you open
-them. Each set has a **"Show in Finder"** / **"Show in Files"** switch in
-Settings → Folders if you'd rather keep a set out of your file browser on
-that device; a set you've synced to a location of your own choosing shows up
-there instead of as a Fauna location. Every folder you own has the switch,
+them. Each folder has a **"Show in Finder"** / **"Show in Files"** switch in Settings → Folders if you'd rather keep a folder out of your file browser on that device; a folder you've synced to a location of your own choosing shows up there instead of as a Fauna location. Every folder you own has the switch,
 including one you left this device out of when you created it: turning the
 switch on there adds this device to the folder's devices, with the usual
 defaults, and does nothing more on later flips. Your edits are never lost to flipping
-the switch: if you turn a set off (or sign out) while an edit hasn't reached
-your nest yet — say you edited in the Files app offline — Fauna keeps it
+the switch: if you turn a folder off (or sign out) while an edit hasn't reached your nest yet — say you edited in the Files app offline — Fauna keeps it
 safe, either holding the location open until the upload finishes or setting
 the file aside on disk, so nothing you wrote is discarded. A folder someone
 has shared with you appears as a Fauna location too once you have accepted
@@ -184,15 +161,9 @@ only, and back on to bring it back — your other devices aren't affected. On a
 folder shared with you the switch only hides or shows it. A folder this phone
 already keeps in sync from one of your own phone folders shows a note instead
 of the switch, because that folder is already on the phone.
-Editing, creating, renaming and deleting files there is on its way: until it
-arrives, a change you make there stays safely on your phone rather than
-reaching your nest.
+You can edit, create, rename and delete files there too, and your changes reach your nest — an edit as soon as you close the file.
 
-Platform status differs today: Windows has the full experience, the macOS/iOS
-Finder and Files integration is built and being polished, the Android file
-browser integration lets you browse and open files (editing is coming), and Linux
-has the per-folder on-demand switch without a free-up-space menu yet —
-see the [status table](#where-this-stands-today).
+Platform status differs today: Windows has the full experience, the macOS/iOS Finder and Files integration is built and being polished, the Android file browser integration lets you browse, open and edit files, and Linux has the per-folder on-demand switch and a **Free up space** button on the folder's row — see the [status table](#where-this-stands-today).
 
 ## Mount it like a network drive (WebDAV)
 
@@ -205,24 +176,16 @@ folder "serve over WebDAV" (off by default, per folder), and then:
   read *and write* the files;
 - **Windows Explorer** can browse read-only for now (native write needs file
   locking, which is on the list);
-- anything that can speak WebDAV — scanners, backup tools, media players —
-  gets a doorway to exactly the sets you flagged, and nothing else. Un-flag a
-  set and access is cryptographically revoked, not just password-walled.
+- anything that can speak WebDAV — scanners, backup tools, media players — gets a doorway to exactly the folders you flagged, and nothing else. Un-flag a folder and access is cryptographically revoked, not just password-walled.
 
-Flagging a set that already holds files makes those files reachable too: the
-app you flip the switch in re-locks the set's existing files to the set's
-WebDAV key before it finishes, even on a phone or in the browser, with no
-computer syncing the set.
+Flagging a folder that already holds files makes those files reachable too: the app you flip the switch in re-locks the folder's existing files to its WebDAV key before it finishes, even on a phone or in the browser, with no computer syncing the folder.
 
 Your storage quota is visible over WebDAV too, so tools that show "space
 remaining" work.
 
 ## A NAS or server as a sync device
 
-A NAS or home server can carry all your folders around the clock. A natural
-pattern: laptop and phone carry the small sets, the server carries everything,
-and doubles as an always-on source so two rarely-on devices never have to be
-awake at the same time to sync.
+A NAS or home server can carry all your folders around the clock. A natural pattern: laptop and phone carry the small folders, the server carries everything, and doubles as an always-on source so two rarely-on devices never have to be awake at the same time to sync.
 
 You set one up the same way you set up any other device — there is no config
 file to hand-edit. Fauna's **terminal app** runs over SSH and gives you the
@@ -301,14 +264,14 @@ them; Fauna will tell you to turn serving off first.)
 |---|---|
 | Real-time encrypted sync across devices | **Available** — including offline catch-up and delta upload |
 | Zero-config second-device setup (sign in with your key) | **Available** |
-| Per-set device participation + read-only devices | **Available** |
-| Device list, removal with sole-source guard, session revocation, emergency lockout | **Available** |
+| Per-folder device participation + read-only devices | **Available** |
+| Device list, removal, session revocation, emergency lockout | **Available** |
 | A NAS or server as a sync device, set up from the terminal app over SSH | **Available** — it keeps syncing after you log out once you turn that on |
 | Keep a folder's contents off the nest ("Metadata only") | **Available** on every app. Contents are relayed through the nest without resting there, from a computer that holds them to any app that opens them; a phone as the device holding them is **on its way** |
-| Per-file status badges | **Full per-file status Available** on macOS/iOS; Windows additionally shows real per-file status as native File Explorer cloud-icon overlays; web, Android, and the Linux media page show simplified status (a file always reads as synced there) |
+| Per-file status badges | **Available** — on Windows also as File Explorer's own cloud-status icons |
 | One device at a time (exclusive editing) for unmergeable files | **Available** — switched on per folder; the folder's row names the device editing it |
-| Conflict detection + automatic resolution | **Available** — text merge or latest-wins, with a per-set review list to override the automatic choice |
-| On-demand files / free-up-space | **Available on Windows**; **macOS Finder + iOS Files-app locations built** (per-set Show in Finder / Show in Files switch, on by default); **Android file-browser location built** (per-folder Show in Files switch, on by default; browse and open; editing on its way); **Linux per-folder on-demand switch built** (needs the `fuse3` package; no free-up-space menu yet) |
-| WebDAV serving (Finder/Dolphin/rclone read-write) | **Server complete & tested**; the per-set toggle is available on every app (web, Windows, macOS, iOS, Linux, Android, terminal app); Windows Explorer's own native write **planned** (needs locking) |
-| Selective sync (include/exclude paths inside a set) | **Available** — an edit reaches every signed-in device within a scan cycle, no restart |
+| Conflict detection + automatic resolution | **Available** — text merge or latest-wins, with a per-folder review list to override the automatic choice |
+| On-demand files / free-up-space | **Available on Windows**; **macOS Finder + iOS Files-app locations built** (per-folder Show in Finder / Show in Files switch, on by default); **Android file-browser location built** (per-folder Show in Files switch, on by default; browse, open and edit); **Linux per-folder on-demand switch built** (needs the `fuse3` package; **Free up space** on the folder's row) |
+| WebDAV serving (Finder/Dolphin/rclone read-write) | **Server complete & tested**; the per-folder toggle is available on every app; Windows Explorer's own native write **planned** (needs locking) |
+| Selective sync (include/exclude paths inside a folder) | **Available** — an edit reaches every signed-in device within a scan cycle, no restart |
 | Per-file version history browser | **Available on every app** — Windows also gets a File Explorer right-click → Fauna → Version history shortcut; every app can restore an older version in place |

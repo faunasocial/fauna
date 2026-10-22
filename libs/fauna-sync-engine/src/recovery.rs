@@ -92,24 +92,9 @@ pub async fn recover_from_destination(
         return Ok(RecoveryOutcome::default());
     }
 
-    let keypair = ActorKeypair::from_secret(input.owner_secret);
-    let scope_id = keypair.actor_id().0;
+    let scope_id = ActorKeypair::from_secret(input.owner_secret).actor_id().0;
     let url = destination.destination_nest_url.clone();
-    let dest = NestClient::new(url.clone(), keypair);
-    dest.connect()
-        .await
-        .map_err(|e| format!("connect to backup destination {url}: {e}"))?;
-    let bound = fauna_client::trust::connection_bound_identity(&*dest, &url)
-        .await
-        .map_err(|e| format!("backup destination {url} identity: {e}"))?;
-    if bound != destination.destination_actor_pubkey {
-        return Err(format!(
-            "{url} proved identity {}, not the destination enrolled as {} — refusing \
-             to recover from it",
-            fauna_core::hex32::encode(&bound),
-            fauna_core::hex32::encode(&destination.destination_actor_pubkey),
-        ));
-    }
+    let dest = connect_enrolled_destination(destination, input.owner_secret, "recover").await?;
 
     let seam = DestinationSeam {
         client: fauna_client_backup::BackupClient::new(Arc::clone(&dest)),
@@ -144,6 +129,34 @@ pub async fn recover_from_destination(
         &record,
     ));
     run_recovery(&leg, &sets).await.map_err(|e| e.to_string())
+}
+
+/// The owner's own authenticated connection to a nest destination, held to the
+/// identity the owner enrolled it under — the refusal
+/// `fauna_client_backup::trust::connect_destination` makes. `act` names the
+/// run in the refusal ("recover", "restore").
+pub(crate) async fn connect_enrolled_destination(
+    destination: &BackupDestination,
+    owner_secret: [u8; 32],
+    act: &str,
+) -> Result<Arc<NestClient>, String> {
+    let url = destination.destination_nest_url.clone();
+    let dest = NestClient::new(url.clone(), ActorKeypair::from_secret(owner_secret));
+    dest.connect()
+        .await
+        .map_err(|e| format!("connect to backup destination {url}: {e}"))?;
+    let bound = fauna_client::trust::connection_bound_identity(&*dest, &url)
+        .await
+        .map_err(|e| format!("backup destination {url} identity: {e}"))?;
+    if bound != destination.destination_actor_pubkey {
+        return Err(format!(
+            "{url} proved identity {}, not the destination enrolled as {} — refusing \
+             to {act} from it",
+            fauna_core::hex32::encode(&bound),
+            fauna_core::hex32::encode(&destination.destination_actor_pubkey),
+        ));
+    }
+    Ok(dest)
 }
 
 /// Everything one recovery from this device's own custodian store needs from

@@ -91,6 +91,15 @@ impl ExecutionForm {
     pub fn is_hosted(self) -> bool {
         matches!(self, Self::Wasm)
     }
+
+    /// The column's spelling as the form gate reads it (TP4,
+    /// `encryption-at-rest.md` § Capability tiering → *Third-party holders*):
+    /// a spelling this build does not know is held to the `remote` bound —
+    /// the gate fails closed, never trusting an unknown form to run on the
+    /// user's device or the nest.
+    pub fn parse_for_gate(s: &str) -> Self {
+        Self::parse(s).unwrap_or(Self::Remote)
+    }
 }
 
 /// What the install leg hands the mint (`third-party.md` § The runner
@@ -897,13 +906,121 @@ impl CacheDb {
         ops.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
         Ok(ops)
     }
+
+    /// Keep the operations a **device** custodian performed for one of
+    /// `actor_id`'s own principals (`fauna.principals.ops.record`;
+    /// `conversations-oracle.md` § The per-operation record), trimming the
+    /// principal's record to the newest [`PRINCIPAL_OPS_PAGE`]. `None` when
+    /// the principal is not the account's — nothing is written. A resubmitted
+    /// `op_id` keeps its one row and counts nothing; the reply is the number
+    /// of rows newly kept. `window` is the custodian's ceiling position the
+    /// batch carried, which the roster's count in window reads when it is the
+    /// newest reported. The caller has validated every row and the window.
+    ///
+    /// [`PRINCIPAL_OPS_PAGE`]: fauna_protocol::principals::PRINCIPAL_OPS_PAGE
+    pub async fn record_device_principal_ops(
+        &self,
+        actor_id: &[u8; 32],
+        principal_id: &[u8],
+        ops: &[fauna_protocol::principals::RecordedPrincipalOp],
+        window: Option<&fauna_protocol::principals::RecordedWindow>,
+    ) -> Result<Option<u32>> {
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction().context("begin record device ops")?;
+        let owned: bool = tx
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM third_party_principals
+                                 WHERE actor_id = ?1 AND principal_id = ?2)",
+                rusqlite::params![&actor_id[..], principal_id],
+                |r| r.get(0),
+            )
+            .context("read the principal's owner")?;
+        if !owned {
+            return Ok(None);
+        }
+        let actor_hex = hex::encode(actor_id);
+        let mut recorded = 0u32;
+        let mut newest: Option<i64> = None;
+        for op in ops {
+            let n = tx
+                .execute(
+                    "INSERT OR IGNORE INTO device_oracle_ops
+                         (actor_id, principal_id, op_id, at, class, detail)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    rusqlite::params![
+                        actor_hex,
+                        principal_id,
+                        op.op_id,
+                        op.at,
+                        op.class,
+                        op.detail
+                    ],
+                )
+                .context("insert device oracle op")?;
+            if n > 0 {
+                recorded += 1;
+                newest = Some(newest.map_or(op.at, |t| t.max(op.at)));
+            }
+        }
+        // The ceiling's position, kept when it is the newest any batch has
+        // reported — by window start, then count — so a batch that arrives
+        // late never winds the roster's count back. (0, 0) is no window.
+        let (window_start, window_count) = window.map_or((0, 0), |w| {
+            (
+                i64::try_from(w.window_start).unwrap_or(i64::MAX),
+                i64::from(w.count),
+            )
+        });
+        if recorded > 0 || window.is_some() {
+            tx.execute(
+                "INSERT INTO device_oracle_principals
+                     (actor_id, principal_id, last_used_at, use_count,
+                      window_start, window_count)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT (actor_id, principal_id) DO UPDATE SET
+                     last_used_at = COALESCE(MAX(last_used_at, excluded.last_used_at),
+                                             last_used_at, excluded.last_used_at),
+                     use_count = use_count + excluded.use_count,
+                     window_count = CASE
+                         WHEN (excluded.window_start, excluded.window_count)
+                              > (window_start, window_count)
+                         THEN excluded.window_count ELSE window_count END,
+                     window_start = MAX(window_start, excluded.window_start)",
+                rusqlite::params![
+                    actor_hex,
+                    principal_id,
+                    newest,
+                    recorded,
+                    window_start,
+                    window_count
+                ],
+            )
+            .context("count device oracle ops")?;
+        }
+        if recorded > 0 {
+            tx.execute(
+                "DELETE FROM device_oracle_ops
+                  WHERE actor_id = ?1 AND principal_id = ?2 AND id NOT IN
+                    (SELECT id FROM device_oracle_ops WHERE actor_id = ?1 AND principal_id = ?2
+                      ORDER BY id DESC LIMIT ?3)",
+                rusqlite::params![
+                    actor_hex,
+                    principal_id,
+                    fauna_protocol::principals::PRINCIPAL_OPS_PAGE
+                ],
+            )
+            .context("trim device oracle ops")?;
+        }
+        tx.commit().context("commit record device ops")?;
+        Ok(Some(recorded))
+    }
 }
 
 /// Each custodian's per-principal summary read — `(principal_id, use_count,
 /// window_start, window_count, newest op's at/class/detail)` for every
 /// principal it served on the account `?1` — keyed by the table whose
 /// existence says the custodian is compiled in.
-const ORACLE_SUMMARY_SOURCES: [(&str, &str); 5] = [
+const ORACLE_SUMMARY_SOURCES: [(&str, &str); 7] = [
     (
         "nostr_oracle_clients",
         "SELECT c.principal_id, c.use_count, c.window_start, c.window_count,
@@ -930,6 +1047,16 @@ const ORACLE_SUMMARY_SOURCES: [(&str, &str); 5] = [
            FROM post_author_principals p
            LEFT JOIN post_author_ops o ON o.id =
              (SELECT MAX(id) FROM post_author_ops
+               WHERE actor_id = p.actor_id AND principal_id = p.principal_id)
+          WHERE p.actor_id = ?1",
+    ),
+    (
+        "profile_author_principals",
+        "SELECT p.principal_id, p.use_count, p.window_start, p.window_count,
+                o.at, o.class, o.detail
+           FROM profile_author_principals p
+           LEFT JOIN profile_author_ops o ON o.id =
+             (SELECT MAX(id) FROM profile_author_ops
                WHERE actor_id = p.actor_id AND principal_id = p.principal_id)
           WHERE p.actor_id = ?1",
     ),
@@ -964,11 +1091,24 @@ const ORACLE_SUMMARY_SOURCES: [(&str, &str); 5] = [
                WHERE actor_id = s.actor_id AND session_id = s.session_id)
           WHERE lower(hex(p.actor_id)) = ?1",
     ),
+    // A device custodian's record (`conversations-oracle.md` § The
+    // per-operation record). Its ceiling window lives on the device; the row
+    // holds the newest position a record batch reported.
+    (
+        "device_oracle_principals",
+        "SELECT p.principal_id, p.use_count, p.window_start, p.window_count,
+                o.at, o.class, o.detail
+           FROM device_oracle_principals p
+           LEFT JOIN device_oracle_ops o ON o.id =
+             (SELECT MAX(id) FROM device_oracle_ops
+               WHERE actor_id = p.actor_id AND principal_id = p.principal_id)
+          WHERE p.actor_id = ?1",
+    ),
 ];
 
 /// Each custodian's per-operation record for one principal (`?1` the
 /// account, `?2` the principal, `?3` the limit), newest first.
-const ORACLE_OPS_SOURCES: [(&str, &str); 5] = [
+const ORACLE_OPS_SOURCES: [(&str, &str); 7] = [
     (
         "nostr_oracle_clients",
         "SELECT o.at, o.class, o.detail
@@ -995,6 +1135,14 @@ const ORACLE_OPS_SOURCES: [(&str, &str); 5] = [
           LIMIT ?3",
     ),
     (
+        "profile_author_principals",
+        "SELECT at, class, detail
+           FROM profile_author_ops
+          WHERE actor_id = ?1 AND principal_id = ?2
+          ORDER BY id DESC
+          LIMIT ?3",
+    ),
+    (
         "atproto_oracle_principals",
         "SELECT at, class, detail
            FROM atproto_oracle_ops
@@ -1015,6 +1163,14 @@ const ORACLE_OPS_SOURCES: [(&str, &str); 5] = [
              ON w.actor_id = g.actor_id AND w.session_id = g.grant_id
           WHERE lower(hex(p.actor_id)) = ?1 AND p.principal_id = ?2
           ORDER BY w.id DESC
+          LIMIT ?3",
+    ),
+    (
+        "device_oracle_principals",
+        "SELECT at, class, detail
+           FROM device_oracle_ops
+          WHERE actor_id = ?1 AND principal_id = ?2
+          ORDER BY id DESC
           LIMIT ?3",
     ),
 ];
@@ -1087,21 +1243,24 @@ fn merge_oracle_summaries(
 impl CacheDb {
     /// The live half of one principal row a principal session dispatches
     /// under: its granted scopes (the latest ceremony's, space-separated as
-    /// recorded) and its two attested keys. `None` when the account holds no
-    /// such principal — revoked, or never minted. Read per RPC, so a revoke or
-    /// a narrowing re-consent bites at the session's next call.
+    /// recorded), its two attested keys and its execution form (read as the
+    /// form gate reads it, [`ExecutionForm::parse_for_gate`]). `None` when the
+    /// account holds no such principal — revoked, or never minted. Read per
+    /// RPC, so a revoke or a narrowing re-consent bites at the session's next
+    /// call.
     pub async fn get_third_party_principal_reach(
         &self,
         actor_id: &[u8; 32],
         principal_id: &[u8],
-    ) -> Result<Option<(String, AttestedKeys)>> {
+    ) -> Result<Option<(String, AttestedKeys, ExecutionForm)>> {
         let conn = self.conn.lock().await;
         // A key the row holds is 32 bytes by construction (the consent wrote
         // it from a `[u8; 32]`); anything else reads as no key, which serves
         // nothing.
         let key = |k: Option<Vec<u8>>| k.and_then(|k| <[u8; 32]>::try_from(k.as_slice()).ok());
         conn.query_row(
-            "SELECT granted_scopes, holder_x25519, writer_ed25519 FROM third_party_principals
+            "SELECT granted_scopes, holder_x25519, writer_ed25519, execution_form
+               FROM third_party_principals
               WHERE actor_id = ?1 AND principal_id = ?2",
             rusqlite::params![&actor_id[..], principal_id],
             |r| {
@@ -1111,11 +1270,47 @@ impl CacheDb {
                         holder_x25519: key(r.get(1)?),
                         writer_ed25519: key(r.get(2)?),
                     },
+                    ExecutionForm::parse_for_gate(&r.get::<_, String>(3)?),
                 ))
             },
         )
         .optional()
         .context("read third-party principal reach")
+    }
+
+    /// The execution form of the owner's principal whose row attests
+    /// `holder` — what the form gate at `fauna.capabilities.mint` reads (TP4,
+    /// `encryption-at-rest.md` § Capability tiering → *Third-party holders*).
+    /// `None` when no row of the owner's attests the key: a bridge or
+    /// `ContentProcessor` holder, or a principal whose redemption has not yet
+    /// written its row (the principal fetch gates that one). `refuse_foreign_holder`
+    /// keeps a key to one row per account; were two ever to attest it, any
+    /// `remote` one decides — the gate reads the widest reach the key has.
+    pub async fn principal_form_for_holder(
+        &self,
+        actor_id: &[u8; 32],
+        holder: &[u8],
+    ) -> Result<Option<ExecutionForm>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT execution_form FROM third_party_principals
+                  WHERE actor_id = ?1 AND holder_x25519 = ?2",
+            )
+            .context("prepare principal form for holder")?;
+        let forms = stmt
+            .query_map(rusqlite::params![&actor_id[..], holder], |r| {
+                r.get::<_, String>(0)
+            })
+            .context("read principal form for holder")?
+            .map(|f| f.map(|f| ExecutionForm::parse_for_gate(&f)))
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("read principal form for holder")?;
+        Ok(forms
+            .iter()
+            .copied()
+            .find(|f| *f == ExecutionForm::Remote)
+            .or_else(|| forms.first().copied()))
     }
 
     /// Admit one `fauna:follow:write` write for the principal at `now` (unix
@@ -1878,11 +2073,33 @@ fn revoke_principal_in_tx(
             .with_context(|| format!("delete the principal's {table} rows"))?;
         }
     }
+    // The profile class's record of the principal (TP11), the same way.
+    if super::table_exists(tx, "profile_author_principals")? {
+        let actor_hex = hex::encode(actor_id);
+        for table in ["profile_author_ops", "profile_author_principals"] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE actor_id = ?1 AND principal_id = ?2"),
+                rusqlite::params![actor_hex, principal_id],
+            )
+            .with_context(|| format!("delete the principal's {table} rows"))?;
+        }
+    }
     // The ATProto class's record of the principal (TP11), the same way and
     // for the same reason; core tables, the existence check kept uniform.
     if super::table_exists(tx, "atproto_oracle_principals")? {
         let actor_hex = hex::encode(actor_id);
         for table in ["atproto_oracle_ops", "atproto_oracle_principals"] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE actor_id = ?1 AND principal_id = ?2"),
+                rusqlite::params![actor_hex, principal_id],
+            )
+            .with_context(|| format!("delete the principal's {table} rows"))?;
+        }
+    }
+    // A device custodian's record of the principal, the same way.
+    if super::table_exists(tx, "device_oracle_principals")? {
+        let actor_hex = hex::encode(actor_id);
+        for table in ["device_oracle_ops", "device_oracle_principals"] {
             tx.execute(
                 &format!("DELETE FROM {table} WHERE actor_id = ?1 AND principal_id = ?2"),
                 rusqlite::params![actor_hex, principal_id],
@@ -2584,7 +2801,7 @@ mod tests {
                 .unwrap()
         );
         assert!(!db.principal_declares_kind(&BOB, KIND).await.unwrap());
-        let (_, keys) = db
+        let (_, keys, _) = db
             .get_third_party_principal_reach(&ALICE, &row.principal_id)
             .await
             .unwrap()
@@ -2684,7 +2901,7 @@ mod tests {
             .iter()
             .chain(BRIDGE_CAPABILITY_OPTIONAL)
             .copied()
-            .chain(["encryption"])
+            .chain(["encryption", "can_search_room", "can_send"])
             .collect();
         want.sort_unstable();
         assert_eq!(got, want);

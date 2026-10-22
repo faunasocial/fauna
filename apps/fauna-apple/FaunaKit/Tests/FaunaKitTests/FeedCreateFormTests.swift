@@ -193,3 +193,25 @@ private func select(_ value: String) -> FfiRuleTypeOption {
     #expect(form.factors.count == 1)
     #expect(form.factors[0].weightPermille == 2000)
 }
+
+// MARK: - The factor picker paints labels, selects by key (topic-factors.md §
+// Authoring surface & picker)
+
+@Test func factorOptionLabelsPaintATrainedTopicByItsNameNeverItsKey() {
+    var form = FeedCreateForm()
+    form.trainedFactorOptions = [TrainedFactorOption(key: "topic:abc123", label: "Orange cats")]
+    #expect(form.factorOptionLabels.last == "Orange cats")
+    #expect(!form.factorOptionLabels.contains("topic:abc123"))
+    #expect(form.factorOptionKeys.last == "topic:abc123")
+    #expect(form.factorOptionLabels.count == form.factorOptionKeys.count)
+}
+
+@Test func selectFactorTakesAKeyOrThePaintedLabel() {
+    var form = FeedCreateForm()
+    form.trainedFactorOptions = [TrainedFactorOption(key: "topic:abc123", label: "Orange cats")]
+    form.selectFactor("Orange cats")
+    #expect(form.selectedFactorKey == "topic:abc123")
+    let builtin = FeedCreateForm.builtinFactors[0].value
+    form.selectFactor(builtin)
+    #expect(form.selectedFactorKey == builtin)
+}

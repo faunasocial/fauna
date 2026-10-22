@@ -43,10 +43,16 @@ public struct NotificationItem: Identifiable {
     /// itself. Dropped here until 2026-09-25, which is why no apple row could
     /// carry the off-app destination.
     public let subjectUri: String?
+    /// The row's wire `LocalizedText` as it arrived — never painted (`body` is
+    /// the resolved sentence), carried raw so the shared muted-word decision
+    /// (`notificationMutedFor`, `notifications.md` § Muted words rule 1) can
+    /// match the relayed `args` rather than the catalog sentence around them.
+    public let localizedBody: LocalizedText?
 
     public init(id: String, body: String, summary: String = "", createdAt: Int, read: Bool,
                 notifType: String = "", source: String = "", contentId: String? = nil,
-                senderId: String? = nil, subjectUri: String? = nil) {
+                senderId: String? = nil, subjectUri: String? = nil,
+                localizedBody: LocalizedText? = nil) {
         self.id = id
         self.body = body
         self.summary = summary
@@ -57,5 +63,6 @@ public struct NotificationItem: Identifiable {
         self.contentId = contentId
         self.senderId = senderId
         self.subjectUri = subjectUri
+        self.localizedBody = localizedBody
     }
 }

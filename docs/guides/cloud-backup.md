@@ -2,7 +2,7 @@
 
 > **Status — this guide describes Fauna as it is taking shape.** Most of it is
 > built and tested; the [table at the end](#where-this-stands-today) says
-> exactly what is available now, what is landing, and what is planned.
+exactly what is available now, what is not yet, and what is planned.
 >
 > Part of the [Your own cloud](your-own-cloud.md) series.
 
@@ -13,11 +13,8 @@ apart:
 
 1. **"I deleted / mangled a file last Tuesday"** → point-in-time **snapshots**
    kept on your nest, per folder, with retention you set.
-2. **"My nest's disk died"** → **backup destinations**: your nest's data,
-   encrypted, mirrored to *another* location — a second nest you own, or a
-   friend's.
-3. **"I lost my devices"** → your **key**. This one has no technological
-   substitute, so it gets its own section below.
+2. **"My nest's disk died"** → **backup destinations**: your nest's data, encrypted (apart from a folder you have made public), mirrored to *another* location — a second nest you control, a friend's, or one of your own devices.
+3. **"I lost my devices"** → your **key**, and the **recovery kit** that stands behind it. No backup can stand in for them, so they get their own section below.
 
 ## Snapshots: the time machine on your nest
 
@@ -47,9 +44,7 @@ case), open its row in Settings → Folders, and set how your nest should keep i
   happened elsewhere is a per-device choice on the folder — leave it off and that
   device keeps every file it has ever seen. That is what an archive is, and it no
   longer requires a whole separate kind of folder.
-- **A richer schedule** — "keep hourly for a day, daily for a month, monthly for
-  a year", the pattern borg/restic users know — is the ratified target the
-  current setting grows into.
+- **A richer schedule** — "keep hourly for a day, daily for a month, monthly for a year", the pattern borg/restic users know — is planned.
 - **Browsable and verifiable.** The Backups page lists every snapshot with when
   it was taken, how many files it holds and how big it is; open one to see the
   files inside. Running the integrity check marks the snapshots it found a
@@ -58,19 +53,12 @@ case), open its row in Settings → Folders, and set how your nest should keep i
   as an error.
 - **Tidying up is a preview, then a confirmation.** "Apply retention policy"
   first shows you exactly which snapshots would go and how many would remain,
-  and only then offers to delete them. If the set has no retention policy yet,
-  it says so and points you at the folder settings where you set one, instead
-  of quietly doing nothing.
+  and only then offers to delete them. If the folder has no retention policy yet, it says so and points you at the folder settings where you set one, instead of quietly doing nothing.
 - **Snapshots on the way out say so.** One you have deleted shows the deadline
   it can still be cancelled before, and one already in its recovery window
   shows how long it stays recoverable — so the month of regret-room below is
   visible on the row, not just a promise in this guide.
-- **Restore** a single file straight back — open a snapshot, find the file in
-  its list, press the download button next to it, and pick where to save it —
-  or restore a whole snapshot into a folder you choose. Either way the files
-  are decrypted on your device as they land. Mail and calendar have their own
-  snapshot/restore path on the same page. If a download cannot go ahead, the
-  page says why rather than looking like it worked.
+- **Restore** a single file straight back — open a snapshot, find the file in its list, press the download button next to it, and pick where to save it — or, on a computer, restore a whole snapshot into a folder you choose (the terminal app takes the folder's path); phones and the web app have no folder tree to write a whole snapshot into, so there you download files one at a time. When it finishes, the page tells you how many files it wrote and where, names any file it could not restore, and says everything else was written. Either way the files are decrypted on your device as they land. If a download cannot go ahead, the page says why rather than looking like it worked.
 
 ### Deleting backups is deliberately hard
 
@@ -81,23 +69,19 @@ path is built against it:
   **30-day soft-delete**, then the purge — about a month of regret-room end to
   end. A snapshot in that 30-day window stays in the list, labelled with the
   date it stops being recoverable, and carries a **Recover** button that brings
-  it straight back. Snapshots the retention policy prunes land in the same
-  window, so an over-eager retention setting is undoable too.
-- The nest **refuses to drop below the last 3 snapshots** of a set, ever.
+  it straight back. Snapshots the retention policy prunes on its own wait seven days (you can cancel), then enter the same 30-day recovery window; ones you prune with **Apply retention policy** go straight into that window. Either way, an over-eager retention setting is undoable too.
+- The nest **refuses to drop below the last 3 snapshots** of a folder, ever.
 - The owner-only "delete immediately" override exists (for the day you really
   mean it), but it demands re-typing the snapshot ID and an acknowledgement
   sentence — never one click.
 
 ## Backup destinations: surviving the loss of the nest itself
 
-Snapshots on the nest don't help if the nest's disk dies. A **backup
-destination** is another location your data is continuously mirrored to,
-encrypted. Add one on the Backups page with just a URL; from then on the
+Snapshots on the nest don't help if the nest's disk dies. A **backup destination** is another location your data is continuously mirrored to, encrypted apart from a folder you have made public. Add one on the Backups page with just a URL; from then on the
 uploads run in the background on their own schedule, and each destination row
 shows when it last synced and how much is still queued.
 
-What travels is **ciphertext, sealed on your device** with a key derived from
-your identity — the destination stores opaque chunks it cannot open, ever.
+What travels is **encrypted**: your mail, calendar, contacts and posts with a backup key derived from your identity, which you grant your own nest so it can keep the uploads going on its own, and any folder you attach exactly as it is already stored, encrypted — a nest destination stores blocks it cannot open, ever, apart from a folder you have made public, which is public by design.
 
 A destination keeps your account's backup from **one box at a time**. If you
 try to add a destination that already keeps your backup from another of your
@@ -212,31 +196,26 @@ Only the device that holds the copy offers the button — another of your device
 shows the banner without it. The banner goes away once the recovery is complete,
 or by itself if your nest gets everything back some other way.
 
-Three shapes today, one more ratified for later:
+Three kinds of destination today, and one more planned:
 
-- **A second nest you own** — if you run a nest at home with an internet nest
+- **A second nest you control** — if you run a nest at home with an internet nest
   in front of it, that internet nest is the obvious one: already yours, already
   on, already paid for. Otherwise a box at your parents', an office machine, a
   second small VPS. Off-site in the real sense.
 - **A friend's nest** — the interesting one, next section.
-- **One of your own devices** — a laptop or tablet with room to spare can hold a
-  full sealed copy itself. See just below.
-- **S3-compatible object storage** (any provider) is a ratified future
-  destination kind, for people who want a commercial deep-archive as the
-  last-resort copy.
+- **One of your own devices** — a laptop or tablet with room to spare can hold a copy of everything a destination keeps itself, encrypted apart from a folder you have made public. See just below.
+- **S3-compatible object storage** (any provider) is a planned destination kind, for people who want a commercial deep-archive as the last-resort copy.
 
 **Your own device can be a destination, and it is the only kind that can
-restore with no nest alive anywhere.** Pick *This device* when you add a
-destination, set a storage limit, and that device quietly pulls a complete
-sealed copy of your data whenever it is awake. Two things to know before you
+restore with no nest alive anywhere.** Pick **This device** when you add a destination, set a storage limit, and that device quietly pulls a copy of everything a destination keeps — your mail, calendar, contacts and posts, and any folder you attach, encrypted apart from a folder you have made public — whenever it is awake. Two things to know before you
 lean on it:
 
 - **A device copy is not off-site.** Devices get lost, wiped, stolen and
   replaced. If every destination you have is one of your own devices, the app
   says so with a standing warning — that warning is asking you to add a nest
   destination as well, not instead.
-- **It is a complete offline copy.** Anyone who can unlock that device can read
-  all of your data, not just what is on screen. That is a genuinely different
+- **It is an offline copy of everything it holds.** Anyone who can unlock that device can read
+  all of it, not just what is on screen. That is a genuinely different
   exposure from an ordinary signed-in device, and it is the trade you are making
   for a copy that survives your nest.
 
@@ -259,69 +238,45 @@ disappears from all of them. Avoiding exactly that is what your nest's snapshots
 backup destinations.
 
 **Using your internet nest as the destination is worth spelling out**, because
-it sounds like it shouldn't work. That nest never keeps a readable copy of mail
-passing through it — that's the point of the relay design. Adding it as a
-backup destination is a separate, deliberate choice, and it doesn't weaken
-that: what lands there is sealed with a key it does not have, so it stores your
-backup blind, exactly like a friend's nest would. The one thing to check is
+it sounds like it shouldn't work. Linked as [the relay guide](nest-relay-setup.md) shows, that nest keeps no readable copy of the mail you receive — that's the point of the relay design. Adding it as a backup destination is a separate, deliberate choice, and it doesn't weaken that: what lands there is encrypted with a key it does not have (apart from any folder you have made public), so it stores your backup blind, exactly like a friend's nest would. The one thing to check is
 disk — a front-door nest is usually provisioned small.
 
-**Your folders can ride along too.** Out of the box a destination protects
-your mail. An ordinary folder (a photo library, a documents folder) joins only
+**Your folders can ride along too.** Out of the box a destination protects your mail, calendar, contacts and posts. An ordinary folder (a photo library, a documents folder) joins only
 when you ask it to: open Settings → Folders, expand the folder, and under
-**Destination places** attach one of your enrolled destinations. From then on
-your nest keeps that folder's current contents mirrored at the destination —
-still sealed, so the destination stores it blind — and **Detach** stops the
-mirroring again. It's per-folder on purpose: folders can be large, and which
+**Destination places** attach one of your enrolled destinations. From then on your nest keeps that folder's current contents mirrored at the destination — still encrypted, so a nest destination cannot read it (a folder you have made public stays public there too) — and **Detach** stops the mirroring again. It's per-folder on purpose: folders can be large, and which
 ones deserve an offsite copy is your call, folder by folder.
 
 ## Friend-hosted backup: "you hold mine, I'll hold yours"
 
 This is a feature no commercial cloud offers, and it falls out of Fauna's
-design naturally: because backups are unreadable ciphertext, **anyone with
-spare disk can hold them for you — including someone you'd never show the
-files themselves.**
+design naturally: because backups are encrypted — apart from a folder you have
+made public, which is public by design — **anyone with spare disk can hold them
+for you, including someone you'd never show the files themselves.**
 
 How it works, both directions:
 
 - **A friend stores your backup.** Your friend (the admin of their own nest)
   admits you as a **storage-only guest**: an account that can hold backup
   bytes up to a quota they choose — and do nothing else: no mailbox, no feeds,
-  no logging into their apps. You add their nest as a backup destination, and
-  your encrypted chunks flow over. Two households doing this for each other
+  no logging into their apps. You add their nest as a backup destination, and your backup flows over, encrypted apart from a folder you have made public. Two households doing this for each other
   get true off-site backup for the one-time price of some extra disk.
 - **You store a friend's.** The same picture from the admin chair: create a
-  storage-only guest for them, set the quota ("you get 200 GB"), done. Stop
-  hosting any time by removing the guest — it's non-destructive on your side
-  and their own data is unaffected (they still have their originals and any
-  other destinations).
+  storage-only guest for them, set the quota ("you get 200 GB"), done. To stop hosting, **Evict** the guest. Nothing goes at once: the account is closed in stages, and about four weeks later the backup you held for them is deleted from your nest — until then, **Cancel Eviction** undoes it. Their own data is unaffected (they still have their originals and any other destinations).
 
 **What the friend can and cannot see** — stated honestly, because this is the
 whole point:
 
-- **Cannot, ever:** read any file's contents, see your file or folder names,
-  restore your data, or decrypt anything — no grant they could hold would
-  change that, because the encryption happened on *your* device with *your*
-  key, and their nest never has it. Your file names, folder structure, and the
-  rest of the catalogue travel *inside* the sealed backup, as unreadable to
-  your friend as the file contents themselves.
-- **Can see:** that it's you, how much space you use, and the minimal
-  bookkeeping a storage service needs to keep your backup alive — how many
-  sealed blocks you store, how big each one is, and when it last changed. The
-  blocks carry generated names (your account identifier plus a running
-  number), never your file names.
+- **Cannot, ever:** read any file's contents, see your file or folder names, restore your data, or decrypt anything — no grant they could hold would change that, because everything you send them is encrypted before it reaches their nest, with keys their nest never has — except a folder you have made public, which is public by design. Your file names, folder structure, and the rest of the catalogue travel *inside* the encrypted backup, as unreadable to your friend as the file contents themselves.
+- **Can see:** that it's you, how much space you use, and the minimal bookkeeping a storage service needs to keep your backup alive — how many blocks you store, how big each one is, and when it last changed. The blocks holding your mail, calendar, contacts and posts carry generated names (your account identifier plus a running number), and an attached folder's file names stay encrypted — except in a folder you have made public, whose names are public by design.
 
-The nest that *does* know your file names is the one your devices sync with
-day to day: it keeps names and folder structure as plain bookkeeping so your
-other devices — and pages like Media — can browse your files. A backup
-destination never needs that catalogue and never receives it, whether it's a
-friend's nest or your own.
+Your own nest — the one your devices sync with day to day — keeps your file names and folder structure too, encrypted with your key, and your apps decrypt them to show you pages like Media — unless you choose otherwise: a folder you make public has public names by design, and a folder you serve over WebDAV or put behind a paywall is readable by the box that serves it. A nest you back up to receives them only inside the encrypted backup, where it cannot read them (a public folder's names are public anyway), whether it's a friend's nest or another of your own.
 
 ## Restoring after disaster
 
 If your nest dies, the plan is: stand up a fresh nest (same guides you used
-the first time), sign in to it with your key, and bring your data back from the
-copy a destination holds.
+the first time) — or rebuild the lost one with its own identity, which a
+copy held by a nest you back up to needs — sign in to it with your key, and bring your
+data back from the copy a destination holds.
 
 **From a copy on one of your own devices**, it is one button. Sign in on the
 device that holds the copy and open Backups. The device's copy shows up there,
@@ -334,6 +289,8 @@ either on the device or on the nest. If the nest already holds your data, it
 stops rather than mixing the two. When the copy has arrived in full, the device
 signs up again as that nest's backup, so you keep an offline copy from then on.
 
+**From a copy a nest you back up to holds**, it is the same button, once your lost nest is rebuilt with its own identity (**Recover a lost box** in the app does this — for a server you set up by hand, it gives you the line its setup guide's *Rebuilding after a total loss* uses). Sign in to it and open Backups: the nest you back up to is still listed, and next to it is **Restore my data to this nest**. Confirm once and the app copies that nest's backup onto the rebuilt nest and makes it live again, the mail back in the folders it was in. Nothing is deleted on either nest. When the copy has arrived in full, that nest goes back to backing up the rebuilt one. (Copies of your account that a friend's nest holds for you under Settings → Nests come back another way, onto a new nest too: see [If you lose every device and your nest](identity-and-devices.md#if-you-lose-every-device-and-your-nest).)
+
 If something is missing, for example the copy ran into the new nest's storage
 limit or part of it had not finished backing up, the Backups page lists what
 did not come back and what to do about it. Running the restore again picks up
@@ -342,43 +299,33 @@ nest restarted, and new mail arrived before you ran it again: the restore
 finishes, and the new mail stays in the folder it arrived in, beside the mail
 that came back.
 
-Two honest notes on today's state. Restoring from a copy held by *another nest*
-is still landing; the button above covers a copy on your own device. And
-destination mirroring is rolling out by data type: mail flows to destinations
-today, with conversations, files and photos next and calendar and posts after
-them. A restore brings back what the copy holds. (Snapshots on your own nest
-already cover files, photos, mail, conversations and calendar; the mirroring
-rollout is about the *off-site* copy.)
+One honest note on today's state. A destination receives your mail, calendar, contacts and posts, and any folder you attach to it — a photo library included; conversations are not copied to a destination yet. A restore brings back what the copy holds. (Snapshots on your own nest cover your files and photos; this note is about the *off-site* copy.)
 
 ## The key that matters more than the backup
 
 Every encrypted byte in this guide is opened by keys derived from your one
 identity key. That leads to the only rule in this series worth printing out:
 
-> **A backup of everything + a lost key = a backup of nothing.**
-> Keep your key on at least two devices, and keep the recovery phrase
-> somewhere a house fire doesn't take along with the devices.
+> **A backup of everything + a lost key and no recovery kit = a backup of nothing.** > Keep your key on at least two devices, and keep your recovery kit > somewhere a house fire doesn't take along with the devices.
 
-There is deliberately no back door here: no "forgot password" flow, no support
-desk that can be talked into resetting your account — those would be exactly
-the holes attackers use. Possession of the key is the account.
+There is deliberately no back door here: no "forgot password" flow, no support desk that can be talked into resetting your account — those would be exactly the holes attackers use. What you have instead is your **recovery kit**, which only you hold: kept offline, it gets your account back if you lose every device, and takes it back if someone steals your key. See [Your recovery kit](identity-and-devices.md#your-recovery-kit).
 
 ## Where this stands today
 
 | Feature | Status |
 |---|---|
 | Per-folder snapshots on your nest, automatic + manual | **Available** |
-| Retention (per set: count + age) | **Available**; richer keep-hourly/daily/monthly schedule **planned** (ratified) |
+| Retention (per folder: count + age) | **Available**; richer keep-hourly/daily/monthly schedule **planned** |
 | Snapshot browse, integrity check, prune | **Available** |
-| Single-file and full-snapshot (restore-into-a-folder) restore; mail/calendar snapshot restore | **Available** |
+| Single-file restore; full-snapshot restore into a folder on computers | **Available** |
 | Delete protection (48 h + 30-day soft-delete + 3-snapshot floor + friction on immediate delete) | **Available** |
 | Backup destinations (add/edit/remove + status rows, across the apps) | **Available** |
 | Your app's own check of each destination ("Last checked", plus a banner when one falls behind) | **Available** |
-| Continuous encrypted upload to destinations | **Available** — your nest keeps the uploads flowing on its own, even with every app closed; mail, calendar, contacts and posts go through the pipe (see the mirroring row below) |
-| Friend-hosted storage (storage-only guest + quota, unreadable by host) | **Available** (nest + enrollment landed) |
-| Restore onto a fresh nest from a copy on your own device | **Available**: **Restore my data to this nest** on the Backups page brings your mail, calendar, contacts and posts back onto the nest, the mail into the folders it was in |
-| Restore onto a fresh nest from a copy held by another nest | **Landing** |
-| Snapshot coverage on your own nest: files/photos/mail/conversations/calendar | **Available**; posts **landing** |
-| Destination mirroring, by data type | Mail, calendar, contacts and posts **available**; conversations, files and photos **landing** |
-| One of your own devices as a destination | **Available** on desktop (Linux, Windows, and macOS — a laptop enrolled as a destination pulls and keeps a real sealed copy), Android, and iOS |
-| S3-compatible destinations | **Planned** (ratified, not yet designed in detail) |
+| Continuous encrypted upload to destinations | **Available** — your nest keeps the uploads flowing on its own, even with every app closed; mail, calendar, contacts, posts and any folder you attach go through the pipe — encrypted, apart from a folder you have made public (see the mirroring row below) |
+| Friend-hosted storage (storage-only guest + quota; unreadable by the host, apart from a folder you have made public) | **Available** |
+| Restore onto a fresh nest from a copy on your own device | **Available**: **Restore my data to this nest** on the Backups page brings your mail, calendar, contacts and posts, and any folder you attached, back onto the nest, the mail into the folders it was in |
+| Restore onto your rebuilt nest from a copy held by a nest you back up to | **Available**: **Restore my data to this nest** on that nest's row brings the copy back |
+| Snapshot coverage on your own nest: files/photos | **Available**; mail, calendar, contacts, posts and conversations **not yet** |
+| Destination mirroring, by data type | Mail, calendar, contacts, posts and any folder you attach (photos included) **available**; conversations **not yet** |
+| One of your own devices as a destination | **Available** on computers and phones — a device enrolled as a destination pulls and keeps a real copy, encrypted apart from a folder you have made public (a web browser cannot hold one) |
+| S3-compatible destinations | **Planned** |

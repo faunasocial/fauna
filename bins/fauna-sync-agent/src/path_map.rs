@@ -155,17 +155,34 @@ pub struct ResolvedFolder {
 /// Resolve an absolute path to the bound folder serving it plus its folder
 /// relative path. Only **on-demand** folders with a **binding** are served;
 /// always-resident and unbound on-demand folders return `None`. A bound
-/// resident root keeps its state DB at the same identity-keyed path, but no
-/// shell verb answers for one yet. First matching
-/// folder wins.
+/// resident root keeps its state DB at the same identity-keyed path; only the
+/// share arm answers for one ([`resolve_bound_location`]), the other shell
+/// verbs not yet. First matching folder wins.
 ///
 /// The single resolver for the IPC read/write sites: it carries the binding's
 /// `folder_ref` so no consumer re-reads config to recover the identity it
 /// needs for the state-DB path (one-resolver rule, as `engine_driver` resolves
 /// once per engine).
 pub fn resolve_to_folder_rel(config: &SyncConfig, abs_path: &str) -> Option<ResolvedFolder> {
+    resolve_bound(config, abs_path, |mode| *mode == LocationMode::OnDemand)
+}
+
+/// [`resolve_to_folder_rel`] over **every** bound location, whatever its mode —
+/// the `ShareFile` arm's resolver alone: a set's identity does not depend on
+/// how its files are present, and on linux the common presence is a bound
+/// always-resident root (`apps/linux.md` § The file manager's Share entry,
+/// link 1). The other verbs keep the on-demand scope above.
+pub fn resolve_bound_location(config: &SyncConfig, abs_path: &str) -> Option<ResolvedFolder> {
+    resolve_bound(config, abs_path, |_| true)
+}
+
+fn resolve_bound(
+    config: &SyncConfig,
+    abs_path: &str,
+    serves: impl Fn(&LocationMode) -> bool,
+) -> Option<ResolvedFolder> {
     config.locations.iter().find_map(|f| {
-        if f.mode != LocationMode::OnDemand {
+        if !serves(&f.mode) {
             return None;
         }
         let binding = f.binding()?;
@@ -521,6 +538,42 @@ mod tests {
             Some(("ignored", 2)),
         )]);
         assert_eq!(resolve_to_folder_rel(&config, r"C:\always\a.txt"), None);
+    }
+
+    /// The share arm's resolver answers for every bound location whatever its
+    /// mode — a set's identity does not depend on how its files are present
+    /// (`apps/linux.md` § The file manager's Share entry, link 1) — while the
+    /// other verbs' resolver keeps its on-demand scope.
+    #[test]
+    fn bound_location_resolver_answers_for_an_always_resident_root() {
+        let config = config_with(vec![folder(
+            "/home/u/Site",
+            LocationMode::Always,
+            Some(("site", 2)),
+        )]);
+        assert_eq!(
+            resolve_bound_location(&config, "/home/u/Site/img/a.jpg"),
+            Some(ResolvedFolder {
+                folder: "site".to_string(),
+                folder_ref: FolderRef::Local(2),
+                rel: "img/a.jpg".to_string(),
+                mode: LocationMode::Always,
+            })
+        );
+        assert_eq!(
+            resolve_bound_location(&config, "/home/u/Site").map(|r| r.rel),
+            Some(String::new())
+        );
+        assert_eq!(
+            resolve_to_folder_rel(&config, "/home/u/Site/img/a.jpg"),
+            None
+        );
+    }
+
+    #[test]
+    fn bound_location_resolver_still_refuses_an_unbound_root() {
+        let config = config_with(vec![folder("/home/u/Loose", LocationMode::Always, None)]);
+        assert_eq!(resolve_bound_location(&config, "/home/u/Loose/a.jpg"), None);
     }
 
     #[test]

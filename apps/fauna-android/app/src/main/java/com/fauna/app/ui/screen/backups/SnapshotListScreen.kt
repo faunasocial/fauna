@@ -31,13 +31,16 @@ import androidx.navigation.NavController
 import com.fauna.app.R
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.components.TokenSelect
 import com.fauna.app.ui.util.ValueFormat
 import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.getStringFmt
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.viewmodel.BackupsVM
+import uniffi.fauna_backups_machine.BackupFolderRow
 import uniffi.fauna_backups_machine.BackupOp
+import uniffi.fauna_core.LocalizedText
 import uniffi.fauna_backups_machine.BackupsSnapshot
 import uniffi.fauna_backups_machine.PolicyState
 import uniffi.fauna_backups_machine.PrunePreview
@@ -59,9 +62,9 @@ fun SnapshotListScreen(
     val snap by vm.snapshot.collectAsState()
     val context = LocalContext.current
     val immediateDeleteTargetId by vm.immediateDeleteTargetId.collectAsState()
+    val snapshotsChanged by vm.snapshotsChanged.collectAsState()
     val appMessages = LocalAppMessages.current
 
-    var dropdownExpanded by remember { mutableStateOf(false) }
     var snapshotPendingDelete by remember { mutableStateOf<Long?>(null) }
 
     // The machine owns the error text. A completed check with errors is a
@@ -143,41 +146,34 @@ fun SnapshotListScreen(
                 // state used to tag its placeholder Text as well, so the page
                 // painted `backup-folder-selector` twice and an indexed read
                 // could land on either.
-                ExposedDropdownMenuBox(
-                    expanded = dropdownExpanded && folders.isNotEmpty(),
-                    onExpandedChange = { if (folders.isNotEmpty()) dropdownExpanded = !dropdownExpanded },
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                ) {
-                    OutlinedTextField(
-                        value = snap?.selectedFolder ?: "",
-                        onValueChange = {},
-                        readOnly = true,
-                        enabled = folders.isNotEmpty() && !busy,
-                        label = { Text(stringResource(R.string.backups_folder)) },
-                        // A disabled control the user can see states why (Copy
-                        // comprehensibility rule 5).
-                        supportingText = if (folders.isEmpty()) {
-                            { Text(stringResource(R.string.common_no_folders_configured)) }
-                        } else null,
-                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = dropdownExpanded) },
-                        modifier = Modifier
-                            .menuAnchor()
-                            .fillMaxWidth()
-                            .testTag(Ids.BACKUP_FOLDER_SELECTOR)
+                //
+                // The token-round-tripping select every raw-value picker on this
+                // app shares: a kind entry's name is its i18n label key (§
+                // Snapshot-list shape → *Kind entries*), which stays the value
+                // the driver picks and reads back, while the human reads the
+                // resolved label.
+                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                    Text(
+                        stringResource(R.string.backups_folder),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    ExposedDropdownMenu(
-                        expanded = dropdownExpanded && folders.isNotEmpty(),
-                        onDismissRequest = { dropdownExpanded = false }
-                    ) {
-                        folders.forEach { fs ->
-                            DropdownMenuItem(
-                                text = { Text(fs.name) },
-                                onClick = {
-                                    vm.selectFolder(fs.name)
-                                    dropdownExpanded = false
-                                }
-                            )
-                        }
+                    TokenSelect(
+                        testTagValue = Ids.BACKUP_FOLDER_SELECTOR,
+                        selected = snap?.selectedFolder ?: "",
+                        options = folderSelectorOptions(context, folders),
+                        enabled = folders.isNotEmpty() && !busy,
+                        onSelect = { name -> vm.selectFolder(name) },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    // A disabled control the user can see states why (Copy
+                    // comprehensibility rule 5).
+                    if (folders.isEmpty()) {
+                        Text(
+                            stringResource(R.string.common_no_folders_configured),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                 }
 
@@ -305,7 +301,7 @@ fun SnapshotListScreen(
                     // local-restore action card first, then the read-only history
                     // + forensic divergence (mirrors linux build_restore_section).
                     item { HorizontalDivider() }
-                    item { LocalRestoreSection() }
+                    item { LocalRestoreSection(snapshotsChanged = snapshotsChanged) }
                     item { HorizontalDivider() }
                     item { RestoreHistorySection() }
                 }
@@ -580,6 +576,21 @@ private fun Caption(text: String, modifier: Modifier = Modifier) {
  *  logic lives). */
 internal fun busyText(context: android.content.Context, op: BackupOp): String =
     resolveLocalized(context, com.fauna.ffi.busyText(op)).orEmpty()
+
+/** The selector's `(value, label)` options: a folder paints its own name, and a
+ *  kind entry its label key resolved (§ Snapshot-list shape → *Kind entries*) —
+ *  the key stays the value. */
+internal fun folderSelectorOptions(
+    context: android.content.Context,
+    folders: List<BackupFolderRow>,
+): List<Pair<String, String>> = folders.map { fs ->
+    val label = if (fs.messageKind != null) {
+        resolveLocalized(context, LocalizedText(key = fs.name, args = emptyMap())) ?: fs.name
+    } else {
+        fs.name
+    }
+    fs.name to label
+}
 
 /**
  * The visible row text: file count + formatted size + time, plus the non-`Active`

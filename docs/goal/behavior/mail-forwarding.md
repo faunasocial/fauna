@@ -97,7 +97,7 @@ Where:
 - **`sender_domain`** — the original sender's domain, dot-replaced as needed (the address localpart can contain literal `=` characters; we URL-style escape `=` and `@` in the encoded form per the SRS spec).
 - **`sender_localpart`** — the original sender's localpart.
 
-**SRS secret** — a per-deployment random 32-byte value stored in nest, never visible to users; rotated on admin action only (knob `mail.forward.rotate_srs_secret` — action button, not a value: `admin-mail-forward-srs-secret-rotate-button` on the flat `admin-mail` page, a PROPOSED id since 2026-10-01 that waits on the user's rule-A sign-off together with its unsubscribe-secret twin, with the same two-click confirm — `mail-mass-mailing.md` § Secret rotation; the nest kind is built and witnessed end to end by the tier_3 SRS-rotation bounce test, and no app has the button). On rotation, in-flight SRS-encoded bounces issued under the old secret are decodable until they expire (a 2-secret window is held during the rotation overlap, per the SRS-spec'd rotation pattern).
+**SRS secret** — a per-deployment random 32-byte value stored in nest, never visible to users; rotated on admin action only (knob `mail.forward.rotate_srs_secret` — action button, not a value: `admin-mail-forward-srs-secret-rotate-button` on the flat `admin-mail` page beside its unsubscribe-secret twin, approved by the user 2026-10-16 and built on tui 2026-10-17, then web, linux and android 2026-10-18, with the same two-click confirm — `mail-mass-mailing.md` § Secret rotation; the nest kind is witnessed end to end by the tier_3 SRS-rotation bounce test, and the button by the tui journey that rotates through it). On rotation, in-flight SRS-encoded bounces issued under the old secret are decodable until they expire (a 2-secret window is held during the rotation overlap, per the SRS-spec'd rotation pattern).
 
 ### SRS1= (chained SRS)
 
@@ -170,6 +170,18 @@ Loop suppression is a per-forward decision: the local mailbox still receives the
 - First inbound from the real sender: local-delivered + forwarded outbound to peer.
 - Bounceback from peer: local-delivered + forward attempt detected as a loop → suppressed.
 - Net result: 2 messages in the local INBOX (the original + the peer's forward of our forward); no tornado.
+
+## Spoof floor — a local `From:` must have authenticated
+
+A forward is never DKIM-signed by us (`mail-multidomain.md` § From: header ownership → *Per door, nest-side*, the Forward bullet) and its envelope is SRS-rewritten onto the **primary** mail domain (§ SRS on outbound). So a forwarded message whose `From:` lies under the primary's organizational domain (RFC 7489 relaxed alignment) SPF-aligns through our own envelope and **passes DMARC downstream** — on our IP's say-so, whether or not the message ever authenticated as that domain. Forwarding a spoof of such a name would launder it into mail the downstream MX accepts as ours. A served domain outside the primary's organizational domain does not align with the envelope; the floor holds it all the same, conservatively.
+
+**The rule:** the MX door forwards no message whose `From:` names a served domain — the domain itself, a subdomain of it, or a parent of it holding at least two labels (the same-domain-or-one-beneath-the-other test, as `fauna_mail::outbound::dmarc::discover_policy` does) — or any name at or beneath the primary mail domain's **last two labels**, unless its DMARC verdict on arrival was **pass**. The second arm stands in for the primary's organizational domain without a public-suffix list: every organizational domain keeps at least two labels, so the primary's lies at or beneath its last two, and a sibling of the primary (`hr.example.com` beside a primary `mail.example.com`) is caught however deep the primary sits. Under a multi-label public suffix (a primary under `co.uk`) the arm reaches the whole suffix: that refuses more forwards than a public-suffix list would — mail from the rest of the suffix that did not pass DMARC — and never forwards a spoof. A pass means the domain vouched for the message at our perimeter (its own DKIM signature, or SPF the domain's owner authorized), and it forwards as before; mail of local origin that comes back through the MX carries the deployment's signature from its own hand-out, so it passes. Every other verdict trips the floor: no DMARC record published (none), temperror/permerror, and every fail the perimeter admits — the stage running log-only, DMARC enforcement off, or the domain's own `p=quarantine` or `p=none` (only an enforced `p=reject` is refused at DATA, `smtp-server.md` § Inbound policy stack). A `From:` naming several mailboxes trips it when any one is local; a `From:` with no parseable mailbox aligns with nothing and does not.
+
+Like the loop floors it is a per-forward decision: the forward is dropped and the local delivery still completes; a `redirect` rule whose every forward is suppressed falls back to local delivery (§ Per-rule "forward to"); an admin external forwarder, which keeps no local copy, relays nothing — the same outcome as its other floors. Log `verdict=forward_suppressed_unauthenticated_local_from`. Rewriting the `From:` instead of refusing is not an option (§ Don't do these).
+
+**Scope.** Only the MX door applies the floor. The submission door's forwarder redirect (a local user emailing a forwarder address) carries a `From:` already held to its authenticated submitter (`mail-multidomain.md` § From: header ownership), and forwards it unsigned through the same envelope legitimately. The floor runs in the MTA, so a compromised MTA's own forward is not held by it (`mail-multidomain.md`, the Forward bullet).
+
+Shared logic: `fauna_mail::forward_loop::unauthenticated_local_from` (the predicate, given the served domains and the primary), `fauna_ffi::forward_unauthenticated_local_from` (reads the `From:` mailboxes with `fauna_mail::envelope::from_mailboxes`, the reader the submission door and the signer use); `dispatchForward` computes the floor itself from the `forwardDoor` its caller names (`internal/mta/server.go`: the MX door's `inboundSession.forwardDoor()`, or the one named exemption `submissionForwardDoor`) and suppresses on it.
 
 ---
 
@@ -246,7 +258,7 @@ The forward *decision* runs at the MTA perimeter (above); this section answers w
 | `fauna.bridges.fetch_outbound_forwards_due` | MTA | poll for queued forwards ready to dispatch | **Realized as a nest-internal promotion step folded into `fetch_outbound_due`, not a separate wire kind** (N5): forwards dispatch through the unified `outbound_mail_queue` path (the N2 reuse decision), so each poll first promotes parked `forward_queue` rows up to each actor's remaining hourly allowance into `outbound_mail_queue`, then returns due rows. nest applies the per-actor rate-cap window during that promotion. |
 | `fauna.bridges.decode_srs_bounce` | MTA | decode + verify a `SRS0=` / `SRS1=` inbound recipient | `(local_part)` → `(forwarder_actor_id, original_sender, original_destination)` or decode-fail-reason |
 | `fauna.bridges.forward_completed` | MTA | confirm a forward was delivered (or permanently failed) | **Subsumed by the existing outbound completion RPCs, not a separate kind:** a forward is an `outbound_mail_queue` row (`is_forwarded = 1`), so the MTA's normal `mark_outbound_{delivered,failed,bounced}` already drive completion, and the NDR decision (§ NDR routing) fires in `mark_outbound_bounced` / give-up (N4b). |
-| `fauna.bridges.rotate_srs_secret` | admin client | issue a new SRS secret (2-secret window) | (action button — no app UI today; its home on the flat `admin-mail` page and its PROPOSED id are in § SRS scheme) |
+| `fauna.bridges.rotate_srs_secret` | admin client | issue a new SRS secret (2-secret window) | `admin-mail-forward-srs-secret-rotate-button` on the flat `admin-mail` page (built on tui, web, linux and android; § SRS scheme) |
 
 Wire-level shape lives in the nest implementation track (`docs/goal/architecture/apps/bridges.md` § Bridge-kind catalogue (caller classes)); this doc owns which RPCs exist and what each carries.
 
@@ -441,9 +453,17 @@ The forwarding pipeline is being built shared-Rust-first
   the action but never supplies or reads the bytes (§ Don't do these); `decode_srs_bounce` already tries
   every retained secret so an in-flight bounce minted under the prior secret still verifies.
 
+**Landed — the spoof floor (2026-10-15):**
+
+- § Spoof floor is built as stated: the shared predicate, its FFI wrapper, the MX door's three forward
+  paths (forward-all, per-rule Forward, admin forwarder) and the submission door's exemption. Pinned by
+  `forward_loop`'s unit tests and `internal/mta/forward_spoof_floor_test.go`, which forwards an admitted
+  spoof of the served domain under every admitting verdict (no record, own `p=none`, own `p=quarantine`,
+  enforcement off, log-only, subdomain `From:`) and asserts the forward refused and the local copy delivered. Its per-rule cases (`TestForwardSpoofFloorPerRuleCopy`, `TestForwardSpoofFloorPerRuleRedirect`) pin the rule arm: a copy rule delivers locally and forwards nothing, a redirect rule forwards nothing and falls back to local delivery. `TestForwardSpoofFloorSiblingOfPrimary` pins the primary arm: under a primary `mail.corp.example`, a sibling and the parent are refused while a foreign and a label-boundary look-alike forward. That case assigns the session's primary by hand, so `TestForwardSpoofFloorSiblingArmReachedThroughNewSession` pins `NewSession`'s copy of the primary from the live config: over a real listener with the primary set in the config alone, a sibling spoof with no DMARC pass forwards nothing and a DMARC-`pass` sibling forwards.
+
 **Not yet built (target-state above; tracked internally):**
 
-- **The per-account forward-all and hourly-limit app UI is built on tui, web, linux, android and windows (tui 2026-09-27; web, linux, android 2026-10-11; windows 2026-10-13).** tui's
+- **The per-account forward-all and hourly-limit app UI is built on all seven apps (tui 2026-09-27; web, linux, android 2026-10-11; windows 2026-10-13; macOS and iOS 2026-10-21).** tui's
   `mail-settings` page carries the Forwarding section — `mail-settings-forward-all-to-input` and
   `mail-settings-forward-per-hour-input` (ui.yaml, allocated with this track), each committed on Enter
   over `MailAccountClient::set_forward_all_to_and_reload` / `set_forward_per_hour_and_reload` and
@@ -455,10 +475,11 @@ The forwarding pipeline is being built shared-Rust-first
   `forward_all_to_draft_outcome` / `forward_per_hour_draft_outcome` / `forward_per_hour_hint` (UniFFI +
   WASM) and the four `forward_all_to_*` / `forward_per_hour_*` calls (`fauna-ffi`'s `mail_forwarding.rs`,
   `fauna-wasm`'s `forwardAllToGet/Set`, `forwardPerHourGet/Set`). The journey
-  `test_mail_forwarding_settings.py` is green on tui, web and linux; android's emulator run is not yet
+  `test_mail_forwarding_settings.py` is green on tui, web, linux, macOS and iOS; android's emulator run is not yet
   witnessed. windows paints the same two inputs over the same calls through its `INestRpcClient`
-  seam; its e2e run is not yet witnessed. macOS and iOS have neither field yet —
-  they are built and tested on their own machines.
+  seam; its e2e run is not yet witnessed. macOS and iOS paint them in the one shared `FaunaKit`
+  `MailSettingsView` / `MailSettingsVM` (the VM wraps the exported calls and parsers through
+  `APIClient`), declaring both `set_forward_*` gate kinds on the fields.
 - **The per-rule `forward` dispatch arm is WIRED (2026-09-24), in both copy modes (redirect 2026-09-25).** Each fired
   Forward is stashed during composition and, after the recipient's local delivery commits, dispatched
   through the shared `dispatchForward` (`bins/fauna-bridges/internal/mta/server.go` `dispatchFilterForwards`) attributed to

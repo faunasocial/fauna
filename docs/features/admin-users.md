@@ -114,13 +114,13 @@ Stamped 2026-10-01 at e129e78aa0.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.3-dev+23f5e0bc.dirty standalone |
-| linux | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| windows | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| macos | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| ios | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| web | ✅ full | 0.1.5-dev+110d1248 standalone |
+| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
+| windows | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| macos | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| ios | ⚠ partial | 0.1.5-dev+61b844ca standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.4-dev+52904896 standalone |
+| tui | ✅ full | 0.1.5-dev+cab1c46a standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -144,7 +144,7 @@ Stamped 2026-10-01 at e129e78aa0.
 | 9 | nest | `tests/e2e-unified/tests/api/test_admin_auth.py::test_admin_management` | nest (linux): passed |
 | 10 | app | `tests/e2e-unified/tests/test_admin_picker_label_collision.py::test_admin_users_guardian_picker_stays_injective_when_labels_collide` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_admin_picker_all_accounts.py::test_admin_users_guardian_picker_offers_an_account_older_than_the_newest_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_admin_pending_actions.py::test_a_scheduled_grant_is_listed_and_cancellable_from_the_admin_console` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_admin_pending_actions.py::test_a_scheduled_grant_is_listed_and_cancellable_from_the_admin_console` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 13 | nest | `tests/e2e-unified/tests/api/test_pending_action_audience.py::test_the_target_of_an_admin_deletion_is_told_and_can_cancel_it` | nest (linux): passed |
 | 14 | app | `tests/e2e-unified/tests/test_admin_users_hub.py::test_mint_code_with_guardian_and_age_band` | web (linux): passed, linux (linux): passed, windows (windows): passed, ios (macos): passed, tui (linux): passed |
 | 14 | app | `tests/e2e-unified/tests/test_admin_registration_posture.py::test_age_verification_knob_rides_the_section_save_and_bites` | web (linux): passed, linux (linux): passed, windows (windows): passed, ios (macos): passed, tui (linux): passed |
@@ -164,7 +164,7 @@ Stamped 2026-10-01 at e129e78aa0.
 | 28 | app | `tests/e2e-unified/tests/test_admin_users_hub.py::test_a_suspended_member_is_never_offered_as_a_guardian` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 29 | nest | `tests/e2e-unified/tests/api/test_admin_users_cut_off.py::test_an_evicted_member_keeps_access_fourteen_days_is_cut_off_fourteen_more_then_deleted` | nest (linux): passed |
 | 30 | nest | `tests/e2e-unified/tests/api/test_admin_users_cut_off.py::test_suspending_a_member_being_evicted_cuts_them_off_and_calls_the_deletion_off` | nest (linux): passed |
-| 31 | app | `tests/e2e-unified/tests/test_admin_users_hub.py::test_a_row_whose_deletion_has_begun_offers_no_restore` | tui (linux): passed |
+| 31 | app | `tests/e2e-unified/tests/test_admin_users_hub.py::test_a_row_whose_deletion_has_begun_offers_no_restore` | web (linux): passed, tui (linux): passed |
 | 32 | nest | `tests/e2e-unified/tests/api/test_admin_roster.py::test_an_admins_account_cannot_be_deleted_until_the_role_is_removed` | nest (linux): passed |
 | 33 | nest | `tests/e2e-unified/tests/api/test_admin_roster.py::test_a_removal_that_would_leave_no_admin_waits_until_another_admin_exists` | nest (linux): passed |
 | 34 | nest | `tests/e2e-unified/tests/api/test_admin_roster.py::test_with_two_admins_no_roster_change_is_unilateral_and_a_short_action_lapses` | nest (linux): passed |
@@ -173,5 +173,5 @@ Stamped 2026-10-01 at e129e78aa0.
 | 37 | nest | `tests/e2e-unified/tests/api/test_admin_users_cut_off.py::test_a_suspended_member_is_cut_off_at_once_their_open_connection_closed` | nest (linux): passed |
 | 38 | nest | `tests/e2e-unified/tests/api/test_admin_users_cut_off.py::test_a_restored_member_comes_back_as_they_were` | nest (linux): passed |
 | 39 | nest | `tests/e2e-unified/tests/api/test_invite_requests.py::test_admin_list_shows_submitted` | nest (linux): passed |
-| 40 | app | `tests/e2e-unified/tests/test_admin_pending_actions.py::test_a_co_admin_sees_who_scheduled_an_action_and_approves_it_in_one_click` | tui (linux): passed |
+| 40 | app | `tests/e2e-unified/tests/test_admin_pending_actions.py::test_a_co_admin_sees_who_scheduled_an_action_and_approves_it_in_one_click` | web (linux): passed, windows (windows): passed, tui (linux): passed |
 <!-- features-render:end -->

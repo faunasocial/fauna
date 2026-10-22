@@ -42,11 +42,14 @@ export interface AftermathProgress {
    *
    *  ⚠ Unlike every other leg here, this one does NOT report from
    *  `runSuccessionAftermath`. It is a barrier inside the conversations
-   *  replica's own load, so its sink is registered in `$lib/conversations`
+   *  replica's own load, so its sink is registered in `#lib/conversations`
    *  BEFORE the manager is built — registering it later misses the pass. */
   mlsReseal: LocalizedText | null;
   /** Leg 4 — the capability-grant re-mint. */
   grantRemint: LocalizedText | null;
+  /** Leg 8 — the subscriber-tier period-key rotation. Rendered right after leg 4;
+   *  its "nest too old" line is an exposure still open, so it must show. */
+  periodRotation: LocalizedText | null;
   /** Leg 5 — the file-corpus re-seal. Stays null on every app in this store:
    *  the only aftermath arm whose work does not run in the app process at all
    *  (it is the sync agent's), so it reports from where the work happens. */
@@ -62,6 +65,7 @@ function nothingReported(): AftermathProgress {
     backupRegrant: null,
     mlsReseal: null,
     grantRemint: null,
+    periodRotation: null,
     corpusReseal: null,
     draftsReseal: null,
     mailBurn: null,
@@ -80,6 +84,7 @@ const REPORTING_LEGS: readonly ReportingLeg[] = [
   'backupRegrant',
   'mlsReseal',
   'grantRemint',
+  'periodRotation',
   'corpusReseal',
   'draftsReseal',
   'mailBurn',

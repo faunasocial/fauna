@@ -16,7 +16,10 @@ being discovered mid-provision:
   * where the box's admin credentials live between runs
     (:func:`load_or_create_state`);
   * which update channel the box follows, and the image tag that channel
-    pulls (:func:`staging_channel`, :func:`image_tag_for`).
+    pulls (:func:`staging_channel`, :func:`image_tag_for`);
+  * whether a dev machine may make a complex connection to the acceptance
+    nest now (:func:`admit_complex_connection`, over the re-creation record
+    :func:`record_recreation` writes).
 """
 from __future__ import annotations
 
@@ -24,7 +27,10 @@ import json
 import os
 import re
 import secrets
+from datetime import datetime, timedelta
 from pathlib import Path
+
+from helpers.nest_mode import ACCEPTANCE_NEST_HOSTS
 
 #: Provider-side label the kept box carries. Deliberately NOT the throwaway
 #: ``fauna-e2e=1`` label: every live test's teardown deletes any server with
@@ -49,7 +55,10 @@ class StagingPlanError(ValueError):
 #: The one place a channel becomes an image tag (`UpdateChannel::image_tag`).
 #: Read, never restated: a Python copy of the table would be a second one.
 _UPDATE_CHANNEL_RS = (Path(__file__).resolve().parents[3]
-                      / "libs" / "fauna-provisioning" / "src" / "cloud_init.rs")
+                      / "libs" / "fauna-provisioning" / "src" / "update_channel.rs")
+
+#: The cloud-init compose template, whose `image:` line names the repository.
+_CLOUD_INIT_RS = _UPDATE_CHANNEL_RS.with_name("cloud_init.rs")
 
 
 def _match_arms(source: str, fn: str) -> dict[str, str]:
@@ -98,11 +107,11 @@ def nest_image_ref(tag: str) -> str:
     """The nest image a freshly provisioned box pulls on ``tag``, read from
     the cloud-init compose template (``image: <repo>:{image_tag}``) — never
     restated, so a moved repository moves this with it."""
-    source = _UPDATE_CHANNEL_RS.read_text()
+    source = _CLOUD_INIT_RS.read_text()
     m = re.search(r"image:\s*(\S+):\{image_tag\}", source)
     if not m:
         raise StagingPlanError(
-            f"no `image: <repo>:{{image_tag}}` line in {_UPDATE_CHANNEL_RS}"
+            f"no `image: <repo>:{{image_tag}}` line in {_CLOUD_INIT_RS}"
         )
     return f"{m.group(1)}:{tag}"
 
@@ -149,19 +158,21 @@ def zone_for(domain: str, zone_names: list[str]) -> str | None:
 
 def no_zone_message(domain: str, zone_names: list[str]) -> str:
     """The preflight's failure when ``domain`` sits in none of the token's
-    zones. A box in the uat zone names the set-up step: the uat project must
-    hold the zone ``fauna.build`` and the registrar must point the domain's
-    nameservers at the provider's (``org-nests.md`` § One zone, one project)."""
+    zones. A box in the organisation's zone names the set-up step: the zone
+    project must hold the zone ``fauna.build`` and the registrar must point the
+    domain's nameservers at the provider's (``org-nests.md`` § One zone, one
+    project)."""
     from helpers.live_provision import cloud_project
 
     domain = domain.rstrip(".").lower()
     msg = (f"{domain!r} is in none of the token's DNS zones ({sorted(zone_names)}) — "
            "wrong token/project, or wrong name")
-    if cloud_project.project_for(domain) == cloud_project.UAT:
-        msg += (f". {domain} belongs to the uat project: the token must be that project's "
-                f"({cloud_project.token_file(cloud_project.UAT)}), the project must hold the "
-                f"zone {cloud_project.UAT_ZONE}, and the registrar must point that domain's "
-                f"nameservers at the provider's nameservers for the zone (the set-up step)")
+    if cloud_project.project_for(domain, purpose=cloud_project.DNS) == cloud_project.ZONE:
+        msg += (f". {domain}'s records belong to the zone project: the DNS token must be "
+                f"that project's ({cloud_project.token_file(cloud_project.ZONE)}), the project "
+                f"must hold the zone {cloud_project.ORG_ZONE}, and the registrar must point "
+                f"that domain's nameservers at the provider's nameservers for the zone (the "
+                f"set-up step)")
     return msg
 
 
@@ -240,6 +251,15 @@ def rrsets_under(rrsets: list[dict], rel: str) -> list[dict]:
     return [r for r in rrsets if r.get("name") == rel or r.get("name", "").endswith(suffix)]
 
 
+def is_recorded_server(server: dict, recorded) -> bool:
+    """Whether the provider's ``server`` is the one the state file records.
+
+    The state file takes its id from the provisioning snapshot, which carries
+    it as a string; the Cloud API lists servers by integer id. Compare the text."""
+    return recorded is not None and server.get("id") is not None \
+        and str(server["id"]) == str(recorded)
+
+
 def decide_start(*, state: dict, servers: list[dict], rrsets: list[dict], rel: str) -> str:
     """What a run does given what already exists at the box's name.
 
@@ -265,7 +285,7 @@ def decide_start(*, state: dict, servers: list[dict], rrsets: list[dict], rel: s
     if not servers and not rrsets:
         return PROVISION
     recorded = state.get("server_id")
-    if recorded is not None and any(s.get("id") == recorded for s in servers):
+    if any(is_recorded_server(s, recorded) for s in servers):
         return RESUME
     raise StagingPlanError(
         f"{state.get('domain')} already exists, in whole or in part, and this "
@@ -344,3 +364,189 @@ def save_state(state: dict) -> Path:
         f.write("\n")
     os.chmod(path, 0o600)
     return path
+
+
+# ── The fresh-box guard: one complex connection per re-creation ─────────────
+#
+# `org-nests.md` § fauna.build: a dev machine makes a complex connection to the
+# acceptance nest — anything beyond a plain HTTPS probe: a sign-in, a seeded
+# load, a log pull — only to a box re-created since its last such connection,
+# because a box a stranger can hold may already have fallen, and a fresh box
+# from the signed image is the only one a dev machine trusts that far. The
+# record lives in the box's state file beside its identity, so the machine that
+# re-creates the box is the machine that can connect to it.
+
+#: The boxes the guard holds to it — the acceptance nest alone, the one set
+#: the live harness also refuses outright. A staging or throwaway box takes
+#: its complex connections without one.
+FRESH_BOX_HOSTS = ACCEPTANCE_NEST_HOSTS
+
+#: The calendar half of the rule: a box re-created longer ago than this is
+#: overdue its weekly re-creation, and takes no complex connection until it has
+#: had one. A constant in the tree, never a setting (`org-nests.md` § fauna.build).
+RECREATION_CADENCE = timedelta(days=7)
+
+
+class StaleBoxError(StagingPlanError):
+    """A complex connection to a box that has not been re-created since the
+    last one — raised BEFORE anything connects, so the refusal costs nothing."""
+
+
+def _instant(value: str, what: str) -> datetime:
+    """An ISO-8601 time with its zone, or a refusal — the guard never admits
+    a connection on a time it cannot read."""
+    try:
+        when = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        when = None
+    if when is None or when.tzinfo is None:
+        raise StagingPlanError(f"{what} {value!r} is not an ISO-8601 time with a zone")
+    return when
+
+
+def record_recreation(state: dict, *, at: str, image: str) -> dict:
+    """``state`` with a re-creation recorded: when it finished and the image
+    the box serves, and no complex connection made since.
+
+    Written once, at the END of a re-creation — after the box serves, its
+    accounts sign in and its firewall is verified. Every connection the
+    re-creation itself makes (the claim, the re-admissions, the seeding) is
+    the re-creation, not a connection to a box that has been running, so none
+    of them consumes the record.
+    """
+    if not at or not image:
+        raise StagingPlanError("a re-creation record needs its time and the image it serves")
+    out = {**state, "recreated_at": at, "recreated_image": image, "complex_connection": None}
+    out.pop("recreation_started_at", None)
+    return out
+
+
+def admit_complex_connection(state: dict, *, purpose: str, at: str) -> dict:
+    """``state`` with this complex connection recorded — or a refusal.
+
+    For a box outside :data:`FRESH_BOX_HOSTS`, ``state`` unchanged. For the
+    acceptance nest: refused when no re-creation is recorded, when the last one
+    is older than :data:`RECREATION_CADENCE`, or when a complex connection has
+    already been made since it. The caller
+    saves the returned state BEFORE it connects, so a run that dies mid-way
+    has still used the box up — the failure leaves a refusal behind, never a
+    second connection to a box that has been talked to.
+    """
+    domain = (state.get("domain") or "").lower().rstrip(".")
+    if domain not in FRESH_BOX_HOSTS:
+        return state
+    if not purpose or not at:
+        raise StagingPlanError("a complex connection names its purpose and time")
+    recreated = state.get("recreated_at")
+    if not recreated:
+        raise StaleBoxError(
+            f"refusing {purpose} to {domain}: no re-creation of it is recorded on "
+            "this machine. A complex connection goes only to a box re-created "
+            "since the last one (org-nests.md § fauna.build) — re-create it first."
+        )
+    age = _instant(at, "the connection time") - _instant(recreated, "the re-creation time")
+    if age > RECREATION_CADENCE:
+        raise StaleBoxError(
+            f"refusing {purpose} to {domain}: its last re-creation, at {recreated}, "
+            f"is older than the {RECREATION_CADENCE.days}-day cadence and the box is "
+            "overdue its calendar re-creation. Re-create it first "
+            "(org-nests.md § fauna.build)."
+        )
+    used = state.get("complex_connection")
+    if used:
+        raise StaleBoxError(
+            f"refusing {purpose} to {domain}: it was re-created at {recreated} and "
+            f"has had its one complex connection since ({used.get('purpose')} at "
+            f"{used.get('at')}). Re-create it first (org-nests.md § fauna.build)."
+        )
+    return {**state, "complex_connection": {"purpose": purpose, "at": at}}
+
+
+def admit_drive_resume(state: dict, *, at: str) -> dict:
+    """The provisioning drive about to sign in to a box it finds already built.
+
+    Mid re-creation (a teardown has started and no record closed it) the
+    sign-in is the re-creation's own and ``state`` comes back unchanged. On a
+    box that has been running, it is a complex connection like any other
+    (:func:`admit_complex_connection`)."""
+    if state.get("recreation_started_at"):
+        return state
+    return admit_complex_connection(state, purpose="provisioning drive resume", at=at)
+
+
+# ── The re-creation of the acceptance nest ──────────────────────────────────
+#
+# 
+#
+# Teardown → the provisioning drive (a fresh box, its accounts re-admitted and
+# re-seeded) → the box's own firewall re-applied → the serving gate → the
+# record. The state file carries the re-creation across those steps, so a run
+# that dies anywhere is re-run from the top: the teardown finds what is left.
+
+
+def begin_recreation(*, state: dict, servers: list[dict], rrsets: list[dict],
+                     rel: str, at: str) -> dict:
+    """What the teardown removes, and the state it saves BEFORE removing it.
+
+    Returns ``{"servers", "rrsets", "state"}``. The servers are those at the
+    box's name — refused unless each is the one this machine's state file
+    records (a box someone else built is never deleted); the RRsets are the
+    box's own (:func:`rrsets_under`), never the zone's NS/SOA.
+
+    The state keeps the admin identity and the mail password (minting one if
+    a run dropped it — the drive turns mail on with it), remembers the ids of
+    the firewalls applied to the old server (the box's own firewall outlives
+    its server and is re-applied to the new one), voids the old re-creation
+    record and marks the re-creation begun."""
+    domain = (state.get("domain") or "").lower().rstrip(".")
+    if domain not in FRESH_BOX_HOSTS:
+        raise StagingPlanError(
+            f"{domain!r} is not the acceptance nest: the calendar re-creation is "
+            f"fauna.build's alone ({sorted(FRESH_BOX_HOSTS)})"
+        )
+    recorded = state.get("server_id")
+    strangers = [s for s in servers if not is_recorded_server(s, recorded)]
+    if strangers:
+        raise StagingPlanError(
+            f"refusing to tear down {domain}: this machine's state file does not "
+            f"record the server(s) {[(s.get('id'), s.get('name')) for s in strangers]} "
+            f"at its name (recorded: {recorded!r}). Removing them is a person's act."
+        )
+    firewall_ids = list(state.get("firewall_ids") or [])
+    for s in servers:
+        for fw in (s.get("public_net") or {}).get("firewalls", []):
+            if fw.get("id") is not None and fw["id"] not in firewall_ids:
+                firewall_ids.append(fw["id"])
+    new = {**state, "recreation_started_at": at, "firewall_ids": firewall_ids,
+           "complex_connection": None,
+           "mail_password": state.get("mail_password") or secrets.token_urlsafe(24),
+           "mail_enabled_by_this_test": False}
+    new.pop("recreated_at", None)
+    return {"servers": list(servers), "rrsets": rrsets_under(rrsets, rel), "state": new}
+
+
+def finish_teardown(state: dict) -> dict:
+    """``state`` once the old server and records are gone: no server recorded,
+    so the drive's :func:`decide_start` provisions afresh."""
+    return {**state, "server_id": None, "ipv4": None}
+
+
+def recreation_record_refusal(state: dict) -> str | None:
+    """Why the re-creation may not be recorded yet, or None when it may.
+
+    The record is what admits the next complex connection, so it is written
+    only once the drive has built a new box and re-admitted and re-seeded its
+    accounts (``accounts_seeded_at``, written by the drive, later than the
+    teardown's start). The firewall and the serving gate are checked by the
+    caller, at the provider and on the wire."""
+    started = state.get("recreation_started_at")
+    if not started:
+        return "no re-creation is in progress: run the teardown first"
+    if state.get("server_id") is None:
+        return "the provisioning drive provisioned no box since the teardown"
+    seeded = state.get("accounts_seeded_at")
+    if not seeded or _instant(seeded, "the seeding time") < _instant(started, "the teardown time"):
+        return ("the provisioning drive has not re-admitted and re-seeded the reviewer and "
+                "tester accounts since the teardown (no accounts_seeded_at after "
+                f"{started})")
+    return None

@@ -48,6 +48,9 @@ func hermeticVerifyInbound(raw []byte, _, _, _ string) (mailfauna.InboundAuthOut
 	case bytes.Contains(raw, []byte(hermeticDmarcHeader+": reject\r\n")):
 		// policy=reject: the DMARC enforce gate refuses it (550 5.7.1).
 		dmarc = faunaCore.DmarcVerdictFail{Policy: faunaCore.DmarcPolicyReject}
+	case bytes.Contains(raw, []byte(hermeticDmarcHeader+": quarantine\r\n")):
+		// policy=quarantine: no gate rejects it; the spam gate files it in Junk.
+		dmarc = faunaCore.DmarcVerdictFail{Policy: faunaCore.DmarcPolicyQuarantine}
 	}
 	return mailfauna.InboundAuthOutcome{
 		Verdicts: mailfauna.AuthVerdicts{

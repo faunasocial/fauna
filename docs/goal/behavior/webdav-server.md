@@ -55,7 +55,7 @@ One row added to the shared-MDA table (`carddav-server.md` § Process topology):
 
 - **Shared listener:** the `internal/mda/dav` `:443` server gains a third mux arm (`/webdav/…`); it runs on `caldav_enabled || carddav_enabled || webdav_enabled`, each handler gated by its own flag.
 - **go-webdav root package:** `webdav.Handler` over a `webdav.FileSystem` backend at `internal/mda/webdav/backend.go` (already linked; no new dependency).
-- **AUTH / lockout / auth-material cache / connection caps / PROXY-v2:** `caldav-server.md` §§ Authentication + Network exposure verbatim via the shared `davauth`/`connlimit`/`proxyproto` machinery. **Deviation:** the 16 MiB DAV body cap is calendar/card-specific — WebDAV PUT is bounded by a **fixed v1 per-file cap of 512 MiB** (`internal/mda/webdav/middleware.go`; deriving it from the set's tier max-blob limit is a recorded follow-on), with transfer-sized timeouts. Total *storage* stays tier-metered at `webdav_record_change` (below), so the fixed body cap is a per-request DoS bound, not the storage-quota mechanism.
+- **AUTH / lockout / auth-material cache / connection caps / PROXY-v2:** `caldav-server.md` §§ Authentication + Network exposure (and § Size cap's authenticated-before-buffered chain order) verbatim via the shared `davauth`/`connlimit`/`proxyproto` machinery. **Deviation:** the 16 MiB DAV body cap is calendar/card-specific — WebDAV PUT is bounded by a **fixed v1 per-file cap of 512 MiB** (`internal/mda/webdav/middleware.go`; deriving it from the set's tier max-blob limit is a recorded follow-on), with transfer-sized timeouts. Total *storage* stays tier-metered at `webdav_record_change` (below), so the fixed body cap is a per-request DoS bound, not the storage-quota mechanism.
 - **Allowlist arms** (default-deny): `fetch_webdav_keys_blob`, `webdav_list_folders`, `webdav_list_files`, `webdav_record_change`, `mint_bulk_byte_token`, `webdav_admit_principal` (the bearer door's admission relay, ruled and built 2026-10-05) → `BridgeMda`; `provision_webdav_keys_blob` → `User|Admin`; `set_webdav_enabled` + the per-set serve-flag setter → per the sibling toggles.
 
 ## Bulk-byte plane — the HTTP carve-out, not WS-RPC
@@ -85,8 +85,8 @@ Concrete `ui.yaml` IDs + page placement are the client slice's TDD scope (the Ca
 
 ## Network exposure & discovery
 
-- Same posture as the siblings, verbatim: `mail.<domain>:443` behind the SNI-passthrough router (nest never terminates WebDAV TLS); desktop/bare-IP boxes serve directly on the admin-set DAV port family with the floor cert + any-locator handle login (`caldav-server.md` §§ Network exposure / Desktop-IP / Any-locator).
-- **Apex `/.well-known/webdav`** — `301` → `https://mail.<domain>/webdav/`; `503` until enabled. (A NextCloud-ecosystem convention, not RFC 6764.)
+- Same posture as the siblings, verbatim: `mail.<domain>:443` behind the SNI-passthrough router (nest never terminates WebDAV TLS); desktop, bare-IP and LAN-bound home boxes (a domain or not) serve directly on the admin-set DAV port family with the floor cert + any-locator handle login (`caldav-server.md` §§ Network exposure / Desktop-IP / Any-locator).
+- **Apex `/.well-known/webdav`** — `301` → `https://mail.<domain>/webdav/` (on a direct-listener box, to the request's own host at the admin-set DAV port — `caldav-server.md` § Network exposure owns the ruling); `503` until enabled. (A NextCloud-ecosystem convention, not RFC 6764.)
 - **No SRV record — deliberate.** No mainstream client queries a `_webdavs._tcp`; publishing a dead record is noise. The admin UI + MUA panel surface the URL. (Recorded so no session "completes the symmetry".)
 - **No anonymous WebDAV.** Everything requires auth.
 

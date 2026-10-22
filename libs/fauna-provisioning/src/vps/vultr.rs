@@ -101,6 +101,8 @@ struct VultrPlan {
     ram: u32,          // MB
     disk: u32,         // GB
     monthly_cost: f64, // USD
+    /// Region ids that sell this plan.
+    locations: Vec<String>,
 }
 
 impl Vultr {
@@ -165,7 +167,7 @@ impl VpsProvider for Vultr {
             "label": name,
             "region": location,
             "plan": server_type,
-            "os_id": 2284, // os_id 2284 = Ubuntu 24.04 x64
+            "os_id": 2760, // os_id 2760 = "Ubuntu 26.04 LTS x64" in GET /v2/os
             "user_data": user_data_b64,
         });
         if let Some(tags) = crate::vps::kv_tags(labels) {
@@ -205,6 +207,7 @@ impl VpsProvider for Vultr {
         &self,
         client: &Client,
         curated_ids: &[&str],
+        location: &str,
     ) -> Result<Vec<ServerTypeInfo>, ProvisionError> {
         let resp = crate::vps::get_bearer(
             client,
@@ -217,7 +220,11 @@ impl VpsProvider for Vultr {
         let data: PlansResponse = resp.json().await?;
         let mut out = Vec::with_capacity(curated_ids.len());
         for curated in curated_ids {
-            if let Some(p) = data.plans.iter().find(|p| p.id == *curated) {
+            if let Some(p) = data
+                .plans
+                .iter()
+                .find(|p| p.id == *curated && p.locations.iter().any(|l| l == location))
+            {
                 out.push(ServerTypeInfo {
                     id: p.id.clone(),
                     vcpu: p.vcpu_count,
@@ -400,12 +407,14 @@ mod tests {
                     "vcpu_count": 1,
                     "ram": 1024,
                     "disk": 25,
-                    "monthly_cost": 6.0
+                    "monthly_cost": 6.0,
+                    "locations": ["ewr", "fra"]
                 }
             ]
         }"#;
         let parsed: PlansResponse = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.plans[0].id, "vc2-1c-1gb");
+        assert_eq!(parsed.plans[0].locations, ["ewr", "fra"]);
     }
 
     #[test]

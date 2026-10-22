@@ -8,7 +8,7 @@
 //! bucket-driven rotation. The *outer* manifest (live/tombstoned
 //! lists, atomic save) is the caller's responsibility.
 
-use crate::{FramedSegment, SegmentHeader, SegmentStoreError};
+use crate::{FramedSegment, KindManifest, SegmentHeader, SegmentStoreError, TailRecovery};
 use fauna_cbor::Cid;
 use std::path::PathBuf;
 
@@ -41,6 +41,46 @@ impl FramedSegmentStore {
 
     pub fn segment_path(&self, segment_id: u32) -> PathBuf {
         self.root.join(format!("seg-{segment_id:08}.dat"))
+    }
+
+    /// Reconcile a crash tail on a scope's first touch in a process — the one
+    /// home of the rule every store over this type applies, the content
+    /// `SegmentManager` and the nest's placement journals alike
+    /// (`message-segment-store.md` § Segment size). The caller guarantees no
+    /// writer holds a segment of the scope open (a store that has opened none).
+    ///
+    /// `km`'s newest live segment with no `.meta` sidecar is a crash tail. It is
+    /// rebuilt from its append journal ([`FramedSegment::recover_unfinalized`]);
+    /// one with no journal cannot be rebuilt and its id is tombstoned in `km` —
+    /// `next_seg_id` untouched, so the counter never rewinds — its bytes left
+    /// for tombstone GC. Only the newest id can be the tail: a rotation
+    /// finalizes the open segment before it creates the next, and compaction
+    /// writes finalized pairs.
+    ///
+    /// Returns the segment id and what was done when a tail was reconciled;
+    /// on [`TailRecovery::NoJournal`] the caller persists its manifest.
+    pub fn reconcile_crash_tail(
+        &self,
+        km: &mut KindManifest,
+    ) -> Result<Option<(u32, TailRecovery)>, SegmentStoreError> {
+        debug_assert!(self.open.is_none(), "reconcile under an open segment");
+        let Some(&segment_id) = km.live_segments.last() else {
+            return Ok(None);
+        };
+        let dat = self.segment_path(segment_id);
+        let finalized = crate::segment::meta_path_for(&dat).exists();
+        if !dat.exists() || (finalized && !crate::segment::tail_path_for(&dat).exists()) {
+            return Ok(None);
+        }
+        let recovery = FramedSegment::recover_unfinalized(&dat)?;
+        match recovery {
+            TailRecovery::AlreadyFinalized => return Ok(None),
+            TailRecovery::Rebuilt { .. } => {}
+            TailRecovery::NoJournal { .. } => {
+                km.tombstone_segment(segment_id);
+            }
+        }
+        Ok(Some((segment_id, recovery)))
     }
 
     /// Bucket of the currently-open segment, if any. Plan 5 T6 callers
@@ -94,12 +134,8 @@ impl FramedSegmentStore {
             // all mail for the actor). Reclaim the `.dat` (+ any stale `.meta`).
             if path.exists() {
                 std::fs::remove_file(&path)?;
-                let meta = path.with_extension("meta");
-                if let Err(e) = std::fs::remove_file(&meta)
-                    && e.kind() != std::io::ErrorKind::NotFound
-                {
-                    return Err(SegmentStoreError::Io(e));
-                }
+                crate::segment::remove_if_exists(&crate::segment::meta_path_for(&path))?;
+                crate::segment::remove_if_exists(&crate::segment::tail_path_for(&path))?;
             }
             let segment = FramedSegment::create(&path, header)?;
             self.open = Some(OpenContext {
@@ -153,14 +189,11 @@ impl FramedSegmentStore {
     /// cleanup, in case a prior partial delete left only the `.dat`).
     pub fn delete_segment(&self, segment_id: u32) -> Result<(), SegmentStoreError> {
         let dat_path = self.segment_path(segment_id);
-        let meta_path = dat_path.with_extension("meta");
         std::fs::remove_file(&dat_path)?;
-        if let Err(e) = std::fs::remove_file(&meta_path)
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            return Err(SegmentStoreError::Io(e));
-        }
-        Ok(())
+        crate::segment::remove_if_exists(&crate::segment::meta_path_for(&dat_path))?;
+        // A tombstoned crash tail the reconcile could not rebuild still has
+        // its journal (`SegmentManager`'s first-touch reconcile).
+        crate::segment::remove_if_exists(&crate::segment::tail_path_for(&dat_path))
     }
 }
 

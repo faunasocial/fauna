@@ -708,10 +708,9 @@ pub(crate) async fn collect_reachable_hashes(
     // ask the same walk two different questions — the GC pin is deliberately
     // NOT gated on the flag, because withheld is not deleted.
     let mut withhold = crate::moderation_withhold::WithholdSets::default();
-    let taken_down_posts = db
-        .taken_down_post_ids()
+    let post_withholds = crate::moderation_withhold::PostWithholds::load(db)
         .await
-        .context("listing taken-down post ids for the GC record walk")?;
+        .context("listing withheld post ids for the GC record walk")?;
     let record_blob_refs = {
         let before = referenced.len();
         let post_ids = db
@@ -741,7 +740,7 @@ pub(crate) async fn collect_reachable_hashes(
                 Some(post) => {
                     referenced.extend(post.blob_refs().iter().map(|h| h.digest().to_vec()));
                     withhold.add_record(
-                        taken_down_posts.contains(post_id),
+                        post_withholds.ground(post_id),
                         post.blob_refs().into_iter().map(|h| h.digest()),
                     );
                 }
@@ -1496,6 +1495,7 @@ mod tests {
                 load_hint: None,
                 inbox_mode: fauna_core::data::InboxMode::default(),
                 recovery_head: None,
+                audience: fauna_core::data::ProfileAudience::ThisNest,
                 updated_at: fauna_core::data::Timestamp(1),
             };
         for (created_at, profile) in [
@@ -1605,6 +1605,58 @@ mod tests {
         assert!(
             !db.blob_is_legally_withheld(&photo.digest()).await.unwrap(),
             "a restore must re-serve the attachment, not only the body"
+        );
+    }
+
+    /// The admin block's blob leg (`moderation.md` § Admin block of a reported
+    /// item): a blocked post's photo is withheld on the block's own ground (the
+    /// door answers 403, never 451), through both rebuild legs — the handler's
+    /// and the GC sweep's — and an unblock re-serves it.
+    #[tokio::test]
+    async fn a_blocked_posts_photo_is_withheld_as_a_block_and_an_unblock_re_serves() {
+        use crate::db::blob_withhold::WithholdGround;
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(DiskBlobStore::new(tmp.path()).unwrap());
+        let (_segs_dir, segs) = post_segments();
+
+        let photo = put_blob(&db, &store, b"a reported photo").await;
+        let post = post_with_body(0x73, photo_body(photo, None));
+        let post_id = seed_post(&db, &segs, &post).await;
+        db.index_post(&post_id, &post).await.unwrap();
+
+        db.set_post_admin_block(&post_id, Some("report-1"))
+            .await
+            .unwrap();
+        crate::moderation_withhold::recompute(&db, records(&segs))
+            .await
+            .unwrap();
+        assert_eq!(
+            db.blob_withhold_ground(&photo.digest()).await.unwrap(),
+            Some(WithholdGround::AdminBlock),
+            "a blocked post's photo is withheld on the block's ground"
+        );
+        // The sweep's own walk agrees.
+        let dyn_store: Arc<dyn BlobStoreBackend> = store.clone();
+        garbage_collect(&db, &dyn_store, records(&segs), 0, None, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.blob_withhold_ground(&photo.digest()).await.unwrap(),
+            Some(WithholdGround::AdminBlock)
+        );
+        assert!(
+            store.exists(&photo).await.unwrap(),
+            "withheld is NOT deleted"
+        );
+
+        db.set_post_admin_block(&post_id, None).await.unwrap();
+        crate::moderation_withhold::recompute(&db, records(&segs))
+            .await
+            .unwrap();
+        assert!(
+            !db.blob_is_legally_withheld(&photo.digest()).await.unwrap(),
+            "an unblock re-serves the attachment"
         );
     }
 

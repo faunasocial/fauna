@@ -51,7 +51,7 @@ pub struct FfiPendingShare {
     /// [`Self::shared_by_display`], never this.
     pub shared_by_handle: Option<String>,
     /// The cross-nest sharer's handle domain (`None` same-nest) — the half of
-    /// the owner label the display joins (`federation.md` § Cross-nest shared
+    /// the owner label the display joins (`federation-shared-folders.md` § Cross-nest shared
     /// folders + channel append → *The cross-nest owner label*).
     #[uniffi(default = None)]
     pub shared_by_domain: Option<String>,
@@ -179,7 +179,7 @@ pub async fn folders_leave(
     session: Arc<ConversationsSession>,
     group_id: String,
 ) -> Result<(), FfiError> {
-    fauna_client_folders::leave_share(nest.nest_arc(), &session, group_id)
+    fauna_client_folders::leave_share(nest.nest_arc(), &session.backend(), group_id)
         .await
         .map_err(general_err)
 }

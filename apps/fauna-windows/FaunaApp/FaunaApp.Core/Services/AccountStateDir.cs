@@ -257,7 +257,12 @@ public static class AccountStateDir
         catch (Exception ex)
         {
             ShellLog.Warn("AccountStateDir", $"erase all scopes failed outright: {ex.Message}");
-            return null;
+            // Never null / empty: that paints CLEAN ("NothingSwept") over an erase
+            // that may not have run. One survivor keeps the sign-out residue view up.
+            return new FfiEraseSweep(
+                erased: 0,
+                survivors: new[] { $"<erase failed: {ex.Message}>" },
+                residue: new FfiEraseResidueView(survivors: 1, credentialsSurvived: false, owesWork: true));
         }
     }
 

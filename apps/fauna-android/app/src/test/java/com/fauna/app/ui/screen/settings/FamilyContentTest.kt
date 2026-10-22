@@ -20,7 +20,11 @@ import com.fauna.ffi.FfiFamilyWardDevice
 import com.fauna.ffi.FfiFamilyWardInfo
 import com.fauna.ffi.FfiReachPolicy
 import com.fauna.ffi.FfiScreenTimePolicy
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Rule
 import org.junit.Test
@@ -173,6 +177,7 @@ class FamilyContentTest {
         onCancelTransfer: (ByteArray) -> Unit = {},
         onAcceptIncomingTransfer: (ByteArray) -> Unit = {},
         onDeclineIncomingTransfer: (ByteArray) -> Unit = {},
+        rulesSection: @androidx.compose.runtime.Composable (com.fauna.ffi.FfiFamilyWardInfo) -> Unit = {},
     ) {
         composeTestRule.setContent {
             FamilyContent(
@@ -192,6 +197,7 @@ class FamilyContentTest {
                 onCancelTransfer = onCancelTransfer,
                 onAcceptIncomingTransfer = onAcceptIncomingTransfer,
                 onDeclineIncomingTransfer = onDeclineIncomingTransfer,
+                rulesSection = rulesSection,
             )
         }
     }
@@ -218,6 +224,34 @@ class FamilyContentTest {
         composeTestRule.onNodeWithTag("family-guardian-handle")
             .assertTextEquals(ctx.getStringFmt(R.string.family_guardian_label, "Guardian1"))
         composeTestRule.onNodeWithTag("family-policy-summary").assertExists()
+    }
+
+    // The line a guardian-document rule makes carries that rule's reason verbatim
+    // (nest-rules.md § The shared rule editor → *The reason is the member's to
+    // read*); the reach lines carry none.
+    @Test
+    fun supervisedSummaryLineCarriesTheGuardianRulesReason() {
+        val editor = com.fauna.ffi.FfiRuleEditor.forGuardian(null)
+        val row = editor.addRule(uniffi.fauna_client_policy.RuleKind.CATEGORY)!!
+        org.junit.Assert.assertTrue(editor.setCategory(row, "spam"))
+        org.junit.Assert.assertTrue(editor.setReason(row, editor.view().reasonDefaultKey, "Not for this account"))
+        val guardian = FfiFamilyGuardianInfo(actorId = ByteArray(32) { 5 }, handle = "Guardian1")
+        render(
+            status = status(
+                supervisedBy = guardian,
+                policy = policy(
+                    contentPolicy = FfiContentPolicy(
+                        "inherit", "inherit", "inherit", "inherit", document = editor.documentBytes(),
+                    ),
+                ),
+            ),
+        )
+        val lines = composeTestRule.onNodeWithTag("family-policy-summary")
+            .fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsProperties.Text]
+            .joinToString("") { it.text }
+            .lines()
+        assertEquals(1, lines.count { it.endsWith(" — Not for this account") })
+        assertEquals(1, lines.count { it.contains(" — ") })
     }
 
     // ── Age-band readouts (family-safety.md § App surface → *Age-band surfaces*):
@@ -442,56 +476,35 @@ class FamilyContentTest {
         assertEquals("hold", saved?.unknownPeerDm)
     }
 
-    // ── Content policy (Slice C, family-safety.md § Content policy): the four ──
-    // per-category floors + the Notify toggle, over the shared content-floor
-    // catalog. Same fail-closed label-round-trip rule as the reach knobs above.
+    // ── Content rules (nest-rules.md § The shared rule editor (b)): the shared ──
+    // rule editor's mounting stands where the four floor selects stood, with its
+    // own save; the policy form keeps the Notify toggle and sends the content
+    // pillar absent.
 
     @Test
-    fun guardianEditorRendersContentPolicyControls() {
+    fun guardianEditorHostsTheRulesSectionInPlaceOfTheFloorSelects() {
         val w = ward("Ward1")
+        var hosted: ByteArray? = null
         render(
             status = status(supervisedBy = null, policy = null, wards = listOf(w), incomingTransfers = emptyList(), usageTodayMinutes = null),
             selectedWardActorId = w.actorId,
+            rulesSection = { ward ->
+                hosted = ward.actorId
+                androidx.compose.material3.Text("rules", modifier = Modifier.testTag("family-policy-rules-section"))
+            },
         )
-        composeTestRule.onNodeWithTag("family-policy-content-nsfw-select").assertExists()
-        composeTestRule.onNodeWithTag("family-policy-content-spam-select").assertExists()
-        composeTestRule.onNodeWithTag("family-policy-content-phishing-select").assertExists()
-        composeTestRule.onNodeWithTag("family-policy-content-commercial-select").assertExists()
+        composeTestRule.onNodeWithTag("family-policy-rules-section").assertExists()
+        assertArrayEquals(w.actorId, hosted)
+        for (floor in listOf("nsfw", "spam", "phishing", "commercial")) {
+            composeTestRule.onNodeWithTag("family-policy-content-$floor-select").assertDoesNotExist()
+        }
         composeTestRule.onNodeWithTag("family-policy-content-notify-toggle").assertExists()
     }
 
     @Test
-    fun unsetContentFloorSeedsInherit() {
-        // A ward with no content policy (`null`) seeds every floor to `inherit`
-        // ("Use my settings"), the ward's-own-preferences-decide default.
-        val w = ward("Ward1", policy = policy(contentPolicy = null))
-        render(
-            status = status(supervisedBy = null, policy = null, wards = listOf(w), incomingTransfers = emptyList(), usageTodayMinutes = null),
-            selectedWardActorId = w.actorId,
-        )
-        composeTestRule.onNodeWithTag("family-policy-content-nsfw-select")
-            .assert(hasText(ctx.getString(R.string.family_value_inherit)))
-    }
-
-    @Test
-    fun unparseableContentFloorRendersFailClosedToBlock() {
-        // A floor value this build cannot name (a newer nest) renders `block`,
-        // this knob's strict option, never the permissive `inherit`.
-        val w = ward("Ward1", policy = policy(contentPolicy = FfiContentPolicy("some_future_v2", "inherit", "collapse", "inherit")))
-        render(
-            status = status(supervisedBy = null, policy = null, wards = listOf(w), incomingTransfers = emptyList(), usageTodayMinutes = null),
-            selectedWardActorId = w.actorId,
-        )
-        composeTestRule.onNodeWithTag("family-policy-content-nsfw-select")
-            .assert(hasText(ctx.getString(R.string.family_value_block)))
-        composeTestRule.onNodeWithTag("family-policy-content-phishing-select")
-            .assert(hasText(ctx.getString(R.string.family_value_collapse)))
-    }
-
-    @Test
-    fun policySaveIncludesAssembledContentPolicy() {
-        // An untouched Save round-trips the seeded content floors + notify as a
-        // present (replace-semantics) policy, not the prior "leave unchanged" null.
+    fun policySaveLeavesTheContentRulesToTheirOwnSave() {
+        // The form never writes floors over the guardian's document: the content
+        // pillar rides out ABSENT ("leave unchanged"), Notify as seeded.
         val w = ward(
             "Ward1",
             policy = policy(
@@ -506,9 +519,8 @@ class FamilyContentTest {
             onSavePolicy = { _, p -> saved = p },
         )
         composeTestRule.onNodeWithTag("family-policy-save-button").performScrollTo().performClick()
-        assertEquals("block", saved?.contentPolicy?.nsfw)
-        assertEquals("collapse", saved?.contentPolicy?.spam)
-        assertEquals("inherit", saved?.contentPolicy?.phishing)
+        assertNotNull(saved)
+        assertNull(saved?.contentPolicy)
         assertEquals(true, saved?.contentNotify)
     }
 

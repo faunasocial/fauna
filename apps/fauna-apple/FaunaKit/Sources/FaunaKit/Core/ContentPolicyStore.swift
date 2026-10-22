@@ -180,6 +180,16 @@ public final class ContentPolicyStore {
 
     public init() {}
 
+    /// Bumped by every ``seed(from:)`` — the session-establish / teardown hook
+    /// every identity change passes through — so a `refresh` fired under one
+    /// signed-in identity can tell, after its awaits, that the identity moved
+    /// and drop its reply instead of landing the outgoing account's thresholds,
+    /// floor or hide list on the next one (`family-client-enforcement.md`
+    /// § Content policy, own-threshold bullet; linux and windows stamp the same
+    /// way with their actor generation).
+    @ObservationIgnored
+    private var scopeGeneration = 0
+
     /// Replace the reporter-side hide list (a `hide_reported` reply, or the
     /// `load_hidden_content` read) — the stored list is the whole truth.
     @MainActor
@@ -201,6 +211,7 @@ public final class ContentPolicyStore {
     /// see `seedSupervisionSnapshot`).
     @MainActor
     func seed(from snapshot: FfiSupervisionSnapshot?) {
+        scopeGeneration &+= 1
         let half = Self.guardianHalf(of: snapshot)
         inputs.contentPolicy = half.policy
         inputs.contentNotify = half.notify
@@ -243,7 +254,12 @@ public final class ContentPolicyStore {
         // policy).
         guard let api else { return }
 
-        // `contentPolicy` + `contentNotify` come off the SAME `status` read, so a
+        // Stamp the identity this refresh was fired under; every landing below
+        // re-checks it, because a reply that outlives a switch must never land
+        // on the next account.
+        let generation = scopeGeneration
+
+        // `contentPolicy` +`contentNotify` come off the SAME `status` read, so a
         // failed read must leave BOTH at their previous values together — not
         // just the floor while Notify silently reverts to off (or vice versa).
         let policyResult: ContentPolicyReadResult<(policy: FfiContentPolicy?, notify: Bool)>
@@ -264,13 +280,16 @@ public final class ContentPolicyStore {
             ownResult = .failed
         }
 
+        guard generation == scopeGeneration else { return }
         inputs = Self.merged(previous: inputs, policy: policyResult, own: ownResult)
 
         // The reporter-side hide list, keep-on-failure like the halves above:
         // a failed read leaves the last-known list in force. Awaited HERE, on
         // the refresh trigger — never on a surface's mount path (web's first
         // run hung the feed behind it).
-        if let hidden = try? await loadHiddenContent() {
+        let hiddenResult = try? await loadHiddenContent()
+        guard generation == scopeGeneration else { return }
+        if let hidden = hiddenResult {
             inputs.hiddenContent = hidden
         }
 

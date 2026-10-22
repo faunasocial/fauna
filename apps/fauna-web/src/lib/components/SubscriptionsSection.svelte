@@ -14,19 +14,19 @@
   // re-read reflects the nest's state. Lifts the linux lead
   // (apps/fauna-linux/src/settings/subscriptions.rs). Reuses the settings page's
   // single `error-message` surface via the bindable `error` (no duplicate IDs).
-  import { identity } from '$lib/store';
+  import { identity } from '#lib/store';
   import {
     subscriptionsMineList,
     subscriptionsUnsubscribe,
     type SubscriptionMine,
-  } from '$lib/rpc';
-  import { ensureWasm } from '$lib/wasm';
-  import { contactOverlays, contactsRevision } from '$lib/conversations';
-  import { hexToBytes } from '$lib/hex';
+  } from '#lib/rpc';
+  import { ensureWasm } from '#lib/wasm';
+  import { contactOverlays, contactsRevision } from '#lib/conversations';
+  import { hexToBytes } from '#lib/hex';
   import { onMount } from 'svelte';
-  import { t } from '$lib/i18n/strings';
+  import { t } from '#lib/i18n/strings';
   import ClaimRedeem from './payments/ClaimRedeem.svelte';
-  import { IDS } from '$lib/generated/uiIds';
+  import { IDS } from '#lib/generated/uiIds';
 
   // The parent settings page owns the single error surface; our errors flow in.
   let { error = $bindable('') } = $props();

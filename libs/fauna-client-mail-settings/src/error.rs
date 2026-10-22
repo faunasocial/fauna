@@ -95,6 +95,68 @@ impl DispatchError {
     }
 }
 
+/// What a `fauna.bridges.set_mail_enabled` seam call failed with: the shared
+/// two-class [`NestError`], plus the one refusal both Mail-page machines read
+/// by its exact code — the box cannot enable mail
+/// ([`fauna_protocol::RpcError::CODE_BRIDGES_MAIL_UNAVAILABLE_HERE`],
+/// `mail-bridge-lifecycle.md` § Default-off on first claim → *A box with no
+/// content scanners cannot enable mail*). The nest classes that code
+/// `Rejected`, so without its own arm it would fold into the non-admin
+/// `Rejected` the user's enable swallows.
+#[derive(Debug, Clone, Error)]
+pub enum SetMailEnabledError {
+    #[error(transparent)]
+    Nest(#[from] NestError),
+    /// `fauna.bridges.mail_unavailable_here` — nothing was persisted.
+    #[error("{}", mail_unavailable_here_sentence())]
+    UnavailableHere,
+}
+
+impl SetMailEnabledError {
+    /// Classify a transport error: the exact unavailable code first, then the
+    /// shared [`nest_error`] classifier.
+    pub fn classify<E>(e: E) -> Self
+    where
+        E: fauna_protocol::RpcErrorClass + core::fmt::Display,
+    {
+        let unavailable = e.as_rpc_error().is_some_and(|rpc| {
+            rpc.code == fauna_protocol::RpcError::CODE_BRIDGES_MAIL_UNAVAILABLE_HERE
+        });
+        match unavailable {
+            true => Self::UnavailableHere,
+            false => Self::Nest(nest_error(e)),
+        }
+    }
+}
+
+/// The page's sentence for a box that cannot enable mail — the nest refusal's
+/// own string (`error.bridges.mail_unavailable_here`), one spelling for the
+/// machine's local refusal and the nest's.
+fn mail_unavailable_here_sentence() -> &'static str {
+    fauna_protocol::RpcError::new(
+        fauna_protocol::RpcError::CODE_BRIDGES_MAIL_UNAVAILABLE_HERE,
+        "",
+    )
+    .localized()
+}
+
+impl DispatchError {
+    /// The refusal of an enable on a box that cannot enable mail — the
+    /// machine's local refusal, worded as the nest's.
+    pub(crate) fn mail_unavailable_here() -> Self {
+        Self::InvalidState(mail_unavailable_here_sentence().to_owned())
+    }
+}
+
+impl From<SetMailEnabledError> for DispatchError {
+    fn from(e: SetMailEnabledError) -> Self {
+        match e {
+            SetMailEnabledError::Nest(e) => Self::Nest(e),
+            SetMailEnabledError::UnavailableHere => Self::mail_unavailable_here(),
+        }
+    }
+}
+
 impl From<WrapError> for DispatchError {
     fn from(e: WrapError) -> Self {
         Self::Wrap(e.to_string())

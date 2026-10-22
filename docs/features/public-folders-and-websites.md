@@ -51,12 +51,12 @@ Stamped 2026-09-19 at 25eff180d4.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| web | ⚠ partial | 0.1.5-dev+61b844ca standalone |
 | linux | ✅ full | 0.1.2-dev+ce6fd0a0 standalone |
-| windows | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| macos | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| ios | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| android | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| windows | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| macos | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| ios | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| android | ⚠ partial | 0.1.5-dev+61b844ca standalone |
 | tui | ✅ full | 0.1.2-dev+15971055.dirty standalone |
 
 | Outcome | Surface | Witness | Newest outcome |

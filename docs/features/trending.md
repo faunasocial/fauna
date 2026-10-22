@@ -36,18 +36,18 @@ Stamped 2026-09-19 at 23b3189e2b.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.2-dev+72d6a508 standalone |
-| linux | ✅ full | 0.1.4-dev+52904896 standalone |
+| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
+| linux | ✅ full | 0.1.4-dev+ea391d07 standalone |
 | windows | ✅ full | 0.1.2-dev+301434f2.dirty standalone |
-| macos | ✅ full | 0.1.4-dev+52904896 standalone |
-| ios | ✅ full | 0.1.4-dev+52904896 standalone |
+| macos | ✅ full | 0.1.5-dev+61b844ca standalone |
+| ios | ✅ full | 0.1.5-dev+61b844ca standalone |
 | android |  no run recorded | |
 | tui | ⚠ partial | 0.1.2-dev+831d48ef live |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_feed.py::test_trending_feed_selection` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_feed.py::test_trending_selection_survives_a_feed_re_pull` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): failed |
+| 1 | app | `tests/e2e-unified/tests/test_feed.py::test_trending_feed_selection` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_feed.py::test_trending_selection_survives_a_feed_re_pull` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): failed |
 | 2 | nest | `tests/e2e-unified/tests/api/test_trending_federation.py::test_trending_cycle_fetches_peer_only_post_and_surfaces_it` | nest (linux): passed |
 | 3 | nest | `tests/e2e-unified/tests/api/test_trending_federation.py::test_trending_cycle_fetches_peer_only_post_and_surfaces_it` | nest (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_feed_creation.py::test_trending_is_offered_as_a_factor_for_one_feed_or_every_feed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |

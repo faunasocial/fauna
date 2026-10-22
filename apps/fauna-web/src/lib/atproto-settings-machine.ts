@@ -1,13 +1,13 @@
 // Shared snapshot shapes for the page-level `AtprotoSettingsMachine`
 // (`libs/fauna-atproto-settings-machine`, WASM twin
 // `libs/fauna-wasm-atproto-settings`), consumed by
-// `$lib/components/AtprotoSettingsSection.svelte`. See
+// `#lib/components/AtprotoSettingsSection.svelte`. See
 // docs/goal/behavior/atproto-pds-full.md § App surface.
 //
 // Mirrors `fauna_atproto_settings_machine::snapshots::{AppCredentialRow,
 // AtprotoSessionRow, AtprotoSettingsSnapshot}` serde JSON (snake_case across
 // the serde_json boundary).
-import type { LocalizedText } from '$lib/i18n/localized';
+import type { LocalizedText } from '#lib/i18n/localized';
 
 /** One app credential (`atproto-app-credential-item` row). */
 export interface AppCredentialRow {
@@ -142,6 +142,11 @@ export interface ConsentCardRow {
    *  roster's for the same client; `null` otherwise. Rendered after the
    *  scope lines. */
   ends?: LocalizedText | null;
+  /** The install section of an admin's hosted-plugin install card (and of a
+   *  user's bind card, flagged `bind`); `null` on every other card. Composed
+   *  into leaves by `composeRequestInstall` — this shell only reads the raw
+   *  execution form off it. */
+  install?: { execution_form: string; bind?: boolean } | null;
 }
 
 /** The verified D10 authoring delegation (`atproto-delegation-row`) — what

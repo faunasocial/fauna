@@ -240,6 +240,13 @@ KNOWN_SEAMS: list[dict[str, str]] = [
         "why": "fakes the wall clock the nest-trust facet reads",
     },
     {
+        "name": "set_mail_token_refresh_clock_offset_secs",
+        "kind": "method",
+        "why": "fakes the wall clock the submission-token refresh measures its "
+        "7-day re-mint cadence against, for the mail_token_refresh_advance_clock "
+        "agent command",
+    },
+    {
         "name": "offline_share_advance_clock",
         "kind": "method",
         "why": "fakes the offline-share ceremony clock",

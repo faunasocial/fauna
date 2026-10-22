@@ -17,8 +17,11 @@
 //!   `list_service_users(status="approved")`, each with a **Rotate
 //!   service-user key** button.
 //!
-//! The rotate confirm is an **inline reveal in this page's own element list**,
-//! never a modal or a route. That is not cosmetic: the shared e2e asserts
+//! Both confirms — reject (`admin-bridges-reject-confirm`,
+//! `mail-bridge-lifecycle.md` § Pending approval) and rotate
+//! (`admin-bridges-rotate-confirm`) — are one shape: which one is open is the
+//! shared machine's `armed` field, painted as an **inline reveal in this page's
+//! own element list**, never a modal or a route. That is not cosmetic: the shared e2e asserts
 //! `is_visible` on `admin-bridges-rotate-warning-text` *synchronously* right
 //! after the rotate click, and an async-opening dialog loses that race — which
 //! is why all six other apps converged on an inline reveal too (`admin.md`
@@ -29,11 +32,11 @@
 //! (the shared `bridge_display_name`, never a local map). The shell (`super`) owns the machine, op and fold; this file is
 //! paint only.
 
-use fauna_client_mail_settings::bridge_approval::bridge_display_name;
+use fauna_client_mail_settings::bridge_approval::{BridgeConfirm, bridge_display_name};
 use fauna_i18n::strings::admin as t;
 use fauna_ui_ids as ids;
 
-use super::{Action, AdminState};
+use super::{Action, AdminState, BridgeConfirmKind};
 use crate::element::{Element, Gesture};
 use crate::pages::Page;
 
@@ -152,9 +155,9 @@ pub(super) fn bridges_elements(state: &AdminState) -> Vec<Element> {
             ids::ADMIN_BRIDGES_PENDING_REJECT_BUTTON,
             t::bridges_pending::REJECT,
             true,
-            Gesture::Admin(Action::RejectBridge {
+            Gesture::Admin(Action::OpenBridgeConfirm(BridgeConfirm::Reject {
                 pubkey_hex: bridge.pubkey_hex.clone(),
-            }),
+            })),
         ));
     }
 
@@ -200,36 +203,68 @@ pub(super) fn bridges_elements(state: &AdminState) -> Vec<Element> {
             ids::ADMIN_BRIDGES_APPROVED_ROTATE_BUTTON,
             t::bridges_pending::ROTATE,
             true,
-            Gesture::Admin(Action::OpenRotateConfirm {
+            Gesture::Admin(Action::OpenBridgeConfirm(BridgeConfirm::Rotate {
                 pubkey_hex: bridge.pubkey_hex.clone(),
-            }),
+            })),
         ));
     }
 
-    // ── The inline rotate confirm ───────────────────────────────────────────
+    // ── The inline confirm (reject or rotate) ───────────────────────────────
     //
     // Painted into THIS page's element list (not a modal), so it registers in
     // the same frame as the click that armed it — see the module docs.
-    if state.rotate_confirm.is_some() {
-        els.push(Element::label(
-            ids::ADMIN_BRIDGES_ROTATE_CONFIRM,
-            t::bridges_rotate::TITLE,
-        ));
-        els.push(Element::label(
-            ids::ADMIN_BRIDGES_ROTATE_WARNING_TEXT,
-            t::bridges_rotate::WARNING,
+    let dialog = match snap.and_then(|s| s.armed.as_ref()) {
+        Some(BridgeConfirm::Reject { .. }) => Some((
+            BridgeConfirmKind::Reject,
+            [
+                ids::ADMIN_BRIDGES_REJECT_CONFIRM,
+                ids::ADMIN_BRIDGES_REJECT_WARNING_TEXT,
+                ids::ADMIN_BRIDGES_REJECT_CONFIRM_BUTTON,
+                ids::ADMIN_BRIDGES_REJECT_CANCEL_BUTTON,
+            ],
+            [
+                t::bridges_reject::TITLE,
+                t::bridges_reject::WARNING,
+                t::bridges_reject::CONFIRM,
+                t::bridges_reject::CANCEL,
+            ],
+        )),
+        Some(BridgeConfirm::Rotate { .. }) => Some((
+            BridgeConfirmKind::Rotate,
+            [
+                ids::ADMIN_BRIDGES_ROTATE_CONFIRM,
+                ids::ADMIN_BRIDGES_ROTATE_WARNING_TEXT,
+                ids::ADMIN_BRIDGES_ROTATE_CONFIRM_BUTTON,
+                ids::ADMIN_BRIDGES_ROTATE_CANCEL_BUTTON,
+            ],
+            [
+                t::bridges_rotate::TITLE,
+                t::bridges_rotate::WARNING,
+                t::bridges_rotate::CONFIRM,
+                t::bridges_rotate::CANCEL,
+            ],
+        )),
+        None => None,
+    };
+    if let Some((
+        kind,
+        [dialog_id, warning_id, confirm_id, cancel_id],
+        [title, warning, confirm, cancel],
+    )) = dialog
+    {
+        els.push(Element::label(dialog_id, title));
+        els.push(Element::label(warning_id, warning));
+        els.push(Element::gesture_button(
+            confirm_id,
+            confirm,
+            true,
+            Gesture::Admin(Action::ConfirmBridge(kind)),
         ));
         els.push(Element::gesture_button(
-            ids::ADMIN_BRIDGES_ROTATE_CONFIRM_BUTTON,
-            t::bridges_rotate::CONFIRM,
+            cancel_id,
+            cancel,
             true,
-            Gesture::Admin(Action::ConfirmRotate),
-        ));
-        els.push(Element::gesture_button(
-            ids::ADMIN_BRIDGES_ROTATE_CANCEL_BUTTON,
-            t::bridges_rotate::CANCEL,
-            true,
-            Gesture::Admin(Action::CancelRotate),
+            Gesture::Admin(Action::CancelBridgeConfirm),
         ));
     }
 
@@ -252,7 +287,7 @@ pub(super) fn page_error(state: &AdminState) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::admin::{AdminPage, RotateConfirm};
+    use crate::admin::AdminPage;
     use fauna_client_mail_settings::bridge_approval::{
         ApprovedBridgeView, BridgeApprovalSnapshot, BridgeApprovalStatus, PendingBridgeView,
     };
@@ -287,6 +322,7 @@ mod tests {
             webdav_enabled: None,
             status: BridgeApprovalStatus::Idle,
             error: None,
+            armed: None,
         }
     }
 
@@ -449,11 +485,11 @@ mod tests {
     #[test]
     fn armed_rotate_shows_base_warning_and_no_dkim_warning() {
         for (role, pubkey) in [("mta", "cc33"), ("mda", "dd44")] {
-            let mut app = app_with(snapshot(Vec::new(), vec![approved(role, pubkey)]));
-            app.admin.rotate_confirm = Some(RotateConfirm {
+            let mut snap = snapshot(Vec::new(), vec![approved(role, pubkey)]);
+            snap.armed = Some(BridgeConfirm::Rotate {
                 pubkey_hex: pubkey.to_string(),
             });
-            let els = bridges_elements(&app.admin);
+            let els = bridges_elements(&app_with(snap).admin);
             assert_eq!(
                 texts(&els, "admin-bridges-rotate-warning-text"),
                 vec![t::bridges_rotate::WARNING]
@@ -472,6 +508,49 @@ mod tests {
                     .any(|e| e.id == "admin-bridges-rotate-cancel-button")
             );
         }
+    }
+
+    /// An armed reject paints the reject dialog — its warning and both
+    /// buttons, the confirm dispatching the shared `Confirm` — and no rotate
+    /// dialog; nothing of it paints before the reject click.
+    #[test]
+    fn armed_reject_shows_the_reject_dialog_only() {
+        let unarmed = app_with(snapshot(vec![pending("mta", "aa11")], Vec::new()));
+        assert!(
+            !bridges_elements(&unarmed.admin)
+                .iter()
+                .any(|e| e.id.starts_with("admin-bridges-reject-")),
+            "no reject dialog before the reject click"
+        );
+
+        let mut snap = snapshot(vec![pending("mta", "aa11")], Vec::new());
+        snap.armed = Some(BridgeConfirm::Reject {
+            pubkey_hex: "aa11".to_string(),
+        });
+        let els = bridges_elements(&app_with(snap).admin);
+        assert_eq!(
+            texts(&els, "admin-bridges-reject-warning-text"),
+            vec![t::bridges_reject::WARNING]
+        );
+        let confirm = els
+            .iter()
+            .find(|e| e.id == "admin-bridges-reject-confirm-button")
+            .expect("reject confirm button");
+        assert!(matches!(
+            confirm.gesture(),
+            Some(Gesture::Admin(Action::ConfirmBridge(
+                BridgeConfirmKind::Reject
+            )))
+        ));
+        assert!(
+            els.iter()
+                .any(|e| e.id == "admin-bridges-reject-cancel-button")
+        );
+        assert!(
+            !els.iter()
+                .any(|e| e.id.starts_with("admin-bridges-rotate-")),
+            "an armed reject must not paint the rotate dialog"
+        );
     }
 
     /// A machine error bridges onto the page's `error-message` (rule 2).

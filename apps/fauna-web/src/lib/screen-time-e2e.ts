@@ -4,7 +4,7 @@
 // `screen_time_heartbeat` test-agent command.
 //
 // This module exists ONLY in builds made for testing (testing.md § convention
-// 15). Its sole importer is `$lib/e2e-automation`, itself reached only through
+// 15). Its sole importer is `#lib/e2e-automation`, itself reached only through
 // `+layout.svelte`'s `if (__FAUNA_E2E_AUTOMATION__)` branch, which a production
 // `vite build` constant-folds away — so `advanceTestClock` has no caller in a
 // production bundle and the skew it writes stays 0.
@@ -30,13 +30,13 @@
 
 import { get } from 'svelte/store';
 
-import { registerE2eCommands } from '$lib/e2e-commands';
-import { identity } from '$lib/store';
-import { advanceTestClock, tickUsageHeartbeat } from '$lib/screenTime.svelte';
+import { registerE2eCommands } from '#lib/e2e-commands';
+import { identity } from '#lib/store';
+import { advanceTestClock, tickUsageHeartbeat } from '#lib/screenTime.svelte';
 
 const SCREEN_TIME_COMMANDS = ['screen_time_heartbeat'] as const;
 
-/** Register `screen_time_heartbeat`. Called once from `$lib/e2e-automation`. */
+/** Register `screen_time_heartbeat`. Called once from `#lib/e2e-automation`. */
 export function registerScreenTimeCommands(): void {
   registerE2eCommands(SCREEN_TIME_COMMANDS, async (action, payload) => {
     const raw = (payload as { minutes?: unknown })?.minutes ?? 0;

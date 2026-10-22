@@ -357,20 +357,14 @@ pub fn version_title(resp: Option<&Response>) -> String {
 /// (`apps/windows.md` § Shell Extension → *The Share hand-off*): a file target
 /// → `fauna://share-link`, the set's own root → `fauna://folder-share`. `None`
 /// — no target (the agent refused, or is unreachable) — hides the leaf. The
-/// agent never returns a link: it is seedless, and the app mints.
+/// agent never returns a link: it is seedless, and the app mints. The mapping
+/// itself is the shared `AppRoute::for_share_target`, which the Linux file
+/// manager's leaf calls too.
 pub fn share_route(resp: Option<&Response>) -> Option<AppRoute> {
     match resp.map(|r| &r.result) {
-        Some(ResponseResult::Ok(ResponsePayload::ShareTarget(target))) => {
-            Some(match &target.path {
-                Some(path) => AppRoute::ShareLink {
-                    folder_id: target.folder_id,
-                    path: path.clone(),
-                },
-                None => AppRoute::FolderShare {
-                    folder_id: target.folder_id,
-                },
-            })
-        }
+        Some(ResponseResult::Ok(ResponsePayload::ShareTarget(target))) => Some(
+            AppRoute::for_share_target(target.folder_id, target.path.clone()),
+        ),
         _ => None,
     }
 }

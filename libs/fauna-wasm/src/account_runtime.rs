@@ -36,7 +36,7 @@ use fauna_account_plane::account_driver::{
 use fauna_account_plane::web_host::{self, WebRuntimeParams};
 use fauna_account_seams::spawner::LocalSpawner;
 use fauna_account_store::root::StoreRoot;
-use fauna_client_accounts::{LocalStorageSecretStore, RemovedAccountCredentials};
+use fauna_client_accounts::{RemovedAccountCredentials, WebIdentityStore};
 use fauna_client_core::nest_trust::{LocalStoragePinStore, NestIdentityPinStore};
 use fauna_client_recovery::LinkedNestDial;
 use fauna_core::identity::ActorKeypair;
@@ -217,7 +217,7 @@ pub(crate) async fn start(
     });
     let registry = crate::succession::account_registry();
     let enrollment_target_device_id = registry
-        .device_id_for_actor(&LocalStorageSecretStore, &actor_id_hex)
+        .device_id_for_actor(&WebIdentityStore, &actor_id_hex)
         .map_err(|e| JsValue::from_str(&format!("account runtime: device id: {e}")))?;
     let memberships: MembershipSource = {
         let fauna_mls = Arc::clone(&fauna_mls);
@@ -256,8 +256,10 @@ pub(crate) async fn start(
         // The road: the seed holder's predecessor seeds, which a chain replay
         // at an owed nest signs in with.
         owed_nests: Some(owed_nest_deliverer(road_seeds)),
+        // The restore gesture's dial of a custodian nest.
+        custodian_dial: Some(WebCustodianDial),
     };
-    let handle = web_host::start(params, Arc::new(LocalStorageSecretStore))
+    let handle = web_host::start(params, Arc::new(WebIdentityStore))
         .await
         .map_err(|e| {
             tracing::warn!("account runtime: not started — this tab has no account store: {e:#}");
@@ -325,6 +327,132 @@ fn linked_nest_connector(
                 .map_err(|e| anyhow::anyhow!(e))
         })
     })
+}
+
+/// The restore gesture's web custodian dial (`account-replica-posture.md`
+/// § Replica posture → *Corollary — the cold device*, the web clause: *the
+/// dial is the host's seam*): an anonymous browser socket to the custodian,
+/// the identity it is bound to (the origin's pin, else a possession proof over
+/// that socket — the nest id the handshake signs over), the custodied-fleet
+/// handshake built by the one shared builder
+/// (`fauna_client_core::auth::build_custodied_fleet_handshake`), then a
+/// one-shot bearer socket whose actor is the device key, and the segment byte
+/// route streamed under the same bearer ([`WebSegmentBytes`]). Web graduates
+/// no certificate binding (no cert in hand, as `crate::succession::sign_in`),
+/// so bound (c) on web is what the browser's TLS proves of the named host.
+pub(crate) struct WebCustodianDial;
+
+impl fauna_account_plane::custodian_restore::CustodianDial for WebCustodianDial {
+    type Rpc = fauna_rpc_wasm::TokenWsRpcClient;
+    type Bytes = WebSegmentBytes;
+
+    async fn connect(
+        &self,
+        url: &str,
+        owner: [u8; 32],
+        writer_key: &ed25519_dalek::SigningKey,
+        authorization: &fauna_core::encoding::EmbedAsBytes,
+    ) -> anyhow::Result<
+        fauna_account_plane::custodian_restore::CustodianSession<Self::Rpc, Self::Bytes>,
+    > {
+        use fauna_protocol::RpcRequester;
+        use fauna_protocol::auth::{CUSTODIED_FLEET_HANDSHAKE_KIND, HandshakeReply};
+
+        let anon = fauna_rpc_wasm::AnonymousWsRpcClient::connect(url)
+            .map_err(|e| anyhow::anyhow!("custodian nest {url}: connect: {e}"))?;
+        let nest_id = fauna_client_core::nest_trust::read_bound_identity(
+            &anon,
+            LocalStoragePinStore.get(url),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("custodian nest {url}: bound identity: {e}"))?;
+        let mut nonce = [0u8; 32];
+        getrandom::fill(&mut nonce)
+            .map_err(|e| anyhow::anyhow!("custodied-fleet handshake nonce: {e}"))?;
+        let req = fauna_client_core::auth::build_custodied_fleet_handshake(
+            &owner,
+            writer_key,
+            authorization,
+            &nest_id,
+            &nonce,
+        );
+        let reply: HandshakeReply = anon
+            .request(CUSTODIED_FLEET_HANDSHAKE_KIND, req)
+            .await
+            .map_err(|e| anyhow::anyhow!("custodian nest {url}: handshake: {e}"))?;
+        drop(anon);
+        let device_key_hex = hex::encode(writer_key.verifying_key().to_bytes());
+        let rpc = fauna_rpc_wasm::TokenWsRpcClient::connect(url, &device_key_hex, &reply.token)
+            .map_err(|e| anyhow::anyhow!("custodian nest {url}: bearer connect: {e}"))?;
+        Ok(fauna_account_plane::custodian_restore::CustodianSession {
+            rpc,
+            bytes: WebSegmentBytes {
+                base_url: url.trim_end_matches('/').to_string(),
+                bearer: reply.token,
+            },
+        })
+    }
+
+    fn pinned_identity(&self, url: &str) -> Option<[u8; 32]> {
+        LocalStoragePinStore.get(url)
+    }
+}
+
+/// The custodian session's byte plane on web: the segment byte route at the
+/// custodian's origin under the fleet bearer, streamed into the store's
+/// segment area a chunk at a time (`fauna_rpc_wasm::segment_half`) — the
+/// browser twin of the native `SyncClient` byte plane.
+pub(crate) struct WebSegmentBytes {
+    base_url: String,
+    bearer: String,
+}
+
+impl fauna_account_plane::bootstrap_source::SegmentBytes for WebSegmentBytes {
+    async fn fetch_half(
+        &self,
+        kind: &str,
+        actor_hex: &str,
+        segment_id: u32,
+        half: fauna_account_store::segments::SegmentHalf,
+        max_bytes: u64,
+        into: &mut impl fauna_account_store::segments::SegmentSink,
+    ) -> anyhow::Result<()> {
+        use fauna_account_store::segments::{SegmentBodyTooLarge, SegmentHalf};
+        use fauna_rpc_wasm::{SegmentHalfPath, SegmentHttpError};
+
+        let (path, label) = match half {
+            SegmentHalf::Dat => (SegmentHalfPath::Dat, ".dat"),
+            SegmentHalf::Meta => (SegmentHalfPath::Meta, ".meta"),
+        };
+        // The over-bound refusal typed as the native byte plane types it.
+        let refused = |e: SegmentHttpError| -> anyhow::Error {
+            match e {
+                SegmentHttpError::TooLarge { .. } => SegmentBodyTooLarge {
+                    kind: kind.to_string(),
+                    segment_id,
+                    half: label,
+                    max_bytes,
+                }
+                .into(),
+                e => anyhow::anyhow!("segment {kind}/{segment_id} {label}: {e}"),
+            }
+        };
+        let mut body = fauna_rpc_wasm::segment_half(
+            &self.base_url,
+            &self.bearer,
+            kind,
+            actor_hex,
+            segment_id,
+            path,
+            max_bytes,
+        )
+        .await
+        .map_err(refused)?;
+        while let Some(chunk) = body.next_chunk().await.map_err(refused)? {
+            into.write(half, &chunk).await?;
+        }
+        Ok(())
+    }
 }
 
 /// The owner-authenticated connection to a linked nest and the identity it is
@@ -629,7 +757,7 @@ where
     // never back into the registry.
     let enrollment_target_device_id =
         fauna_client_accounts::AccountRegistry::new(Arc::clone(removed) as _)
-            .device_id_for_actor(&LocalStorageSecretStore, &actor_id_hex)
+            .device_id_for_actor(&WebIdentityStore, &actor_id_hex)
             .map_err(|e| format!("device id: {e}"))?;
     let rpc = connect.await?;
     let nest_url = removed.nest_url().unwrap_or_default();
@@ -650,6 +778,7 @@ where
         pushes: None,
         linked_nests: None,
         owed_nests: None,
+        custodian_dial: None::<WebCustodianDial>,
     };
     web_host::start(params, Arc::clone(removed))
         .await
@@ -879,6 +1008,45 @@ pub fn account_pump_now() -> js_sys::Promise {
     })
 }
 
+/// Restore from the custodian NEST at `url` — the Nests page's restore
+/// gesture (`ui/nests.md` § Trust facet — restore from a custodian nest):
+/// `AccountStoreHandle::restore_from_custodian`, the one runtime command every
+/// app dispatches, run by this tab's host over [`WebCustodianDial`] and the
+/// shared walk. Resolves to JSON: `{"outcome": <CustodianRestoreOutcome>,
+/// "notice": [<LocalizedText>…], "closes_form": <bool>}` (the outcome in
+/// serde's externally tagged form) for every answer the user is told, or
+/// `{"failed": "<why>"}` when the gesture could not run at all — no runtime in
+/// the tab, a device not yet enrolled, or a store failure. `notice` is
+/// `CustodianRestoreOutcome::notice_parts` — the one copy decision, resolved
+/// nested and joined by a space against the SPA's own string table (the
+/// UniFFI apps' shape; linking `fauna_i18n`'s table for `notice()` would ship
+/// a second string table in the wasm) — and `closes_form` is the outcome's
+/// own form decision, so the shell decides neither.
+#[wasm_bindgen(js_name = accountRestoreFromCustodian, unchecked_return_type = "Promise<string>")]
+pub fn account_restore_from_custodian(url: String) -> js_sys::Promise {
+    wasm_bindgen_futures::future_to_promise(async move {
+        let answer = match handle() {
+            None => serde_json::json!({ "failed": "the account runtime is not running" }),
+            Some(handle) => match handle.restore_from_custodian(url).await {
+                Ok(outcome) => restore_answer(outcome),
+                Err(e) => serde_json::json!({ "failed": format!("{e:#}") }),
+            },
+        };
+        Ok(JsValue::from_str(&answer.to_string()))
+    })
+}
+
+/// [`account_restore_from_custodian`]'s answer for an outcome the user is told.
+fn restore_answer(
+    outcome: fauna_account_plane::custodian_restore::CustodianRestoreOutcome,
+) -> serde_json::Value {
+    serde_json::json!({
+        "notice": outcome.notice_parts(),
+        "closes_form": outcome.closes_form(),
+        "outcome": outcome,
+    })
+}
+
 /// The mechanism proof of ruling (4)'s decision (g): the driver hosted by
 /// `web_host` over the REAL IndexedDB backend, with `NoLegs` and a fake
 /// requester, the seams registered through `wire_parts` on a real manager,
@@ -1041,6 +1209,14 @@ mod tests {
     }
 
     fn params_over(root: &StoreRoot, rpc: EscrowOnly) -> WebRuntimeParams<EscrowOnly> {
+        params_with(root, rpc, None)
+    }
+
+    fn params_with<D>(
+        root: &StoreRoot,
+        rpc: EscrowOnly,
+        custodian_dial: Option<D>,
+    ) -> WebRuntimeParams<EscrowOnly, D> {
         let keypair = ActorKeypair::from_secret(SEED);
         WebRuntimeParams {
             store_root: root.clone(),
@@ -1058,6 +1234,7 @@ mod tests {
             pushes: None,
             linked_nests: None,
             owed_nests: None,
+            custodian_dial,
         }
     }
 
@@ -1642,5 +1819,131 @@ mod tests {
         assert_eq!(field("public").as_deref(), Some("alice"));
         assert!(face.matches_filter("fam", Some("alice".into()), None, &mum));
         shutdown().await;
+    }
+
+    /// A dial no test here may reach: the URL policy refuses first.
+    struct NeverDials;
+
+    impl fauna_account_plane::custodian_restore::CustodianDial for NeverDials {
+        type Rpc = fauna_account_plane::custodian_restore::NoCustodianDial;
+        type Bytes = fauna_account_plane::custodian_restore::NoCustodianDial;
+
+        async fn connect(
+            &self,
+            url: &str,
+            _: [u8; 32],
+            _: &SigningKey,
+            _: &fauna_core::encoding::EmbedAsBytes,
+        ) -> anyhow::Result<
+            fauna_account_plane::custodian_restore::CustodianSession<Self::Rpc, Self::Bytes>,
+        > {
+            panic!("{url} was dialed — the URL policy must refuse before any dial")
+        }
+
+        fn pinned_identity(&self, _: &str) -> Option<[u8; 32]> {
+            None
+        }
+    }
+
+    /// The restore gesture runs on web while a runtime runs: a plaintext
+    /// address off loopback answers the policy's refusal as an outcome — never
+    /// the `"failed"` fallback — with nothing dialed (`account-replica-posture.md`
+    /// § *Corollary — the cold device*, bound (a); the web clause).
+    #[wasm_bindgen_test]
+    async fn the_restore_gesture_refuses_a_plaintext_address_before_any_dial() {
+        crate::logs::install_logging();
+        shutdown().await;
+        let mut nonce = [0u8; 8];
+        getrandom::fill(&mut nonce).expect("randomness");
+        let root = StoreRoot::at(format!(
+            "fauna-test-custodian-restore-{}",
+            hex::encode(nonce)
+        ));
+        let handle = web_host::start(
+            params_with(&root, EscrowOnly::default(), Some(NeverDials)),
+            Arc::new(MemSecrets::default()),
+        )
+        .await
+        .expect("the runtime assembles over IndexedDB");
+        install_for_test(ActorKeypair::from_secret(SEED).actor_id_hex(), handle).await;
+
+        let answer = wasm_bindgen_futures::JsFuture::from(account_restore_from_custodian(
+            "http://10.0.0.1:1".into(),
+        ))
+        .await
+        .expect("the gesture answers")
+        .as_string()
+        .expect("a JSON string");
+        let answer: serde_json::Value = serde_json::from_str(&answer).expect("JSON");
+        assert!(
+            answer["outcome"]["AddressRefused"]["reason"].is_string(),
+            "{answer}"
+        );
+        shutdown().await;
+    }
+
+    /// Every outcome the SPA reads, in serde's externally tagged form — the
+    /// shape `accountRestoreFromCustodian` hands it under `"outcome"`.
+    #[wasm_bindgen_test]
+    fn every_restore_outcome_serializes_externally_tagged() {
+        use fauna_account_plane::custodian_restore::CustodianRestoreOutcome as O;
+        let tagged = |o: O| serde_json::json!({ "outcome": super::restore_answer(o)["outcome"] });
+        assert_eq!(
+            tagged(O::AddressRefused { reason: "r".into() }),
+            serde_json::json!({ "outcome": { "AddressRefused": { "reason": "r" } } })
+        );
+        assert_eq!(
+            tagged(O::Revoked),
+            serde_json::json!({ "outcome": "Revoked" })
+        );
+        assert_eq!(
+            tagged(O::NotAdmitted),
+            serde_json::json!({ "outcome": "NotAdmitted" })
+        );
+        assert_eq!(
+            tagged(O::Restored {
+                applied: 3,
+                sealed_rows: 1
+            }),
+            serde_json::json!({ "outcome": { "Restored": { "applied": 3, "sealed_rows": 1 } } })
+        );
+        assert_eq!(
+            tagged(O::NothingNew),
+            serde_json::json!({ "outcome": "NothingNew" })
+        );
+        let mismatch = tagged(O::IdentityMismatch {
+            expected: [1; 32],
+            got: [2; 32],
+        });
+        assert_eq!(mismatch["outcome"]["IdentityMismatch"]["expected"][0], 1);
+        assert_eq!(mismatch["outcome"]["IdentityMismatch"]["got"][31], 2);
+    }
+
+    /// The answer carries the outcome's own notice parts and form decision,
+    /// so the SPA authors neither (`ui/nests.md` § Trust facet — restore from
+    /// a custodian nest).
+    #[wasm_bindgen_test]
+    fn every_restore_answer_carries_the_notice_parts_and_the_form_decision() {
+        use fauna_account_plane::custodian_restore::CustodianRestoreOutcome as O;
+        let restored = super::restore_answer(O::Restored {
+            applied: 3,
+            sealed_rows: 1,
+        });
+        assert_eq!(restored["closes_form"], true);
+        assert_eq!(
+            restored["notice"][0]["key"],
+            "nests.custody_restore_restored"
+        );
+        assert_eq!(restored["notice"][0]["args"]["count"], "3");
+        assert_eq!(restored["notice"][1]["key"], "nests.custody_restore_sealed");
+        let refused = super::restore_answer(O::AddressRefused { reason: "r".into() });
+        assert_eq!(refused["closes_form"], false);
+        assert_eq!(refused["notice"][0]["key"], "nests.custody_restore_refused");
+        assert_eq!(refused["notice"][0]["args"]["reason"], "r");
+        let revoked = super::restore_answer(O::Revoked);
+        assert_eq!(
+            revoked["notice"][0]["args"]["reason"],
+            "nests.custody_restore_revoked"
+        );
     }
 }

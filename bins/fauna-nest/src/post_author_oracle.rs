@@ -6,7 +6,8 @@
 //! deployment infrastructure → *The oracle* (the `post.author` row); the key
 //! and its delegation: `docs/goal/behavior/atproto-pds-full.md` § D10. The
 //! vocabulary is `fauna_core::identity_op`, the wire
-//! `fauna_protocol::post_author`. Both kinds run, in this order:
+//! `fauna_protocol::post_author`, the authorization path shared with the
+//! profile class (`authoring_oracle`). Both kinds run, in this order:
 //!
 //! 1. the request's own shape — a create carries no member this build does
 //!    not name (an unknown member may be a restriction the custodian cannot
@@ -40,9 +41,9 @@
 use std::sync::Arc;
 
 use fauna_core::data::{Capability, Post, PostId, Reference, Timestamp, Tombstone};
-use fauna_core::encoding::{EmbedAsBytes, canonical_decode, canonical_encode, sign_envelope};
-use fauna_core::identity::{ActorId, ActorKeypair};
-use fauna_core::identity_op::{IdentityOpClass, RateWindow};
+use fauna_core::encoding::{EmbedAsBytes, canonical_encode, sign_envelope};
+use fauna_core::identity::ActorId;
+use fauna_core::identity_op::IdentityOpClass;
 use fauna_protocol::RpcError;
 use fauna_protocol::post_author::{
     KIND_CREATE, KIND_DELETE, PostAuthorCreateReply, PostAuthorCreateRequest,
@@ -50,42 +51,24 @@ use fauna_protocol::post_author::{
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
+pub use crate::authoring_oracle::OPS_KEPT_PER_PRINCIPAL;
+use crate::authoring_oracle::{AuthoringClass, Refusal, authorize_and_load, count_use, now_secs};
 use crate::routes::AppState;
 use crate::rpc_errors::{encode_reply, internal, malformed};
 use crate::rpc_router::{RpcHandler, RpcKindMeta, RpcRouterBuilder};
 
-/// The class this custodian performs.
-const CLASS: IdentityOpClass = IdentityOpClass::PostAuthor;
-
-/// How many operation rows the custodian keeps per principal — the other
-/// custodians' constant (`activitypub::oracle::OPS_KEPT_PER_PRINCIPAL`).
-pub const OPS_KEPT_PER_PRINCIPAL: i64 = 256;
+/// The class this custodian performs, and where its state lives.
+const CLASS: AuthoringClass = AuthoringClass {
+    class: IdentityOpClass::PostAuthor,
+    capability: Capability::Post,
+    principals_table: "post_author_principals",
+    ns: "posts",
+};
 
 /// The record's `op` column for a create.
 const OP_CREATE: &str = "create";
 /// The record's `op` column for a delete.
 const OP_DELETE: &str = "delete";
-
-/// Why the custodian refused. The wire answer is deliberately coarse.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Refusal {
-    /// Any policy or authority check.
-    Unauthorized(&'static str),
-    /// The rate ceiling.
-    RateLimited,
-}
-
-impl Refusal {
-    fn rpc(self, kind: &'static str) -> RpcError {
-        match self {
-            Refusal::Unauthorized(why) => {
-                tracing::info!(target: "permission_gate", kind, why, "oracle refused");
-                crate::rpc_errors::permission_denied_ns("posts", "refused")
-            }
-            Refusal::RateLimited => crate::rpc_errors::rate_limited_ns("posts"),
-        }
-    }
-}
 
 /// Step 1 for a create, the pure half: no member this build does not name,
 /// and only the reference arms this class carries. Returns the reply,
@@ -123,26 +106,6 @@ pub fn build_post(account: &[u8; 32], req: PostAuthorCreateRequest, now: Timesta
     }
 }
 
-/// Step 2: the owner's live grant to the principal's attested key.
-fn grant_is_live(
-    conn: &Connection,
-    account: &[u8; 32],
-    holder: &[u8; 32],
-    now: u64,
-) -> anyhow::Result<bool> {
-    let now_i64 = i64::try_from(now).unwrap_or(i64::MAX);
-    let mut stmt = conn.prepare_cached(
-        "SELECT blob FROM capability_grants
-          WHERE owner_actor_id = ?1 AND holder_pubkey = ?2 AND epoch_end > ?3",
-    )?;
-    let blobs: Vec<Vec<u8>> = stmt
-        .query_map(params![&account[..], &holder[..], now_i64], |r| r.get(0))?
-        .collect::<Result<_, _>>()?;
-    Ok(blobs
-        .iter()
-        .any(|b| crate::identity_op_grant::grant_blob_admits(b, CLASS, now)))
-}
-
 /// Does this principal's record show it authored `post_id`?
 fn principal_authored(
     conn: &Connection,
@@ -162,41 +125,6 @@ fn principal_authored(
         .is_some())
 }
 
-/// Step 4: admit one operation against the principal's window, storing the
-/// advanced position; a refused operation does not consume the window.
-fn admit_rate(
-    conn: &Connection,
-    account: &[u8; 32],
-    principal_id: &[u8],
-    now: u64,
-) -> anyhow::Result<bool> {
-    let actor_hex = hex::encode(account);
-    let (window_start, count): (u64, u32) = conn
-        .query_row(
-            "SELECT window_start, window_count FROM post_author_principals
-              WHERE actor_id = ?1 AND principal_id = ?2",
-            params![actor_hex, principal_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?
-        .unwrap_or((0, 0));
-    let Ok(next) = (RateWindow {
-        window_start,
-        count,
-    })
-    .admit(now) else {
-        return Ok(false);
-    };
-    conn.execute(
-        "INSERT INTO post_author_principals (actor_id, principal_id, window_start, window_count)
-         VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT (actor_id, principal_id)
-         DO UPDATE SET window_start = excluded.window_start, window_count = excluded.window_count",
-        params![actor_hex, principal_id, next.window_start, next.count],
-    )?;
-    Ok(true)
-}
-
 /// Record a performed operation: the principal's counters and one
 /// `post_author_ops` row, trimming to the newest [`OPS_KEPT_PER_PRINCIPAL`]
 /// in the same write.
@@ -208,12 +136,8 @@ fn record(
     post_id: &[u8; 32],
     now: u64,
 ) -> anyhow::Result<()> {
+    count_use(conn, CLASS.principals_table, account, principal_id, now)?;
     let actor_hex = hex::encode(account);
-    conn.execute(
-        "UPDATE post_author_principals SET use_count = use_count + 1, last_used_at = ?3
-          WHERE actor_id = ?1 AND principal_id = ?2",
-        params![actor_hex, principal_id, now],
-    )?;
     conn.execute(
         "INSERT INTO post_author_ops (actor_id, principal_id, at, class, op, post_id, detail)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -221,7 +145,7 @@ fn record(
             actor_hex,
             principal_id,
             now,
-            CLASS.name(),
+            CLASS.class.name(),
             op,
             &post_id[..],
             format!("{op} {}", hex::encode(post_id))
@@ -237,50 +161,6 @@ fn record(
     Ok(())
 }
 
-/// Steps 2–4, shared by both kinds once step 1 passed: the grant, the
-/// delegation (loaded as the signer), the ceiling. `Ok(Err(_))` is a
-/// refusal; `Err` is infrastructure.
-async fn authorize_and_load(
-    state: &Arc<AppState>,
-    caller: &crate::principal_handlers::PrincipalCaller,
-    now: u64,
-) -> Result<Result<(ActorKeypair, EmbedAsBytes), Refusal>, RpcError> {
-    let Some(holder) = caller.holder_x25519 else {
-        return Ok(Err(Refusal::Unauthorized("the principal attested no key")));
-    };
-    // `K` is sealed under the deployment seed the database holds (the mint,
-    // `atproto_authoring_key::mint_or_fetch`), read here on the same terms —
-    // never a serving generation's copy (`nest_kek`'s module docs).
-    let nest_key = {
-        let conn = state.db.conn().await;
-        if !grant_is_live(&conn, &caller.account, &holder, now).map_err(internal)? {
-            return Ok(Err(Refusal::Unauthorized("no live grant")));
-        }
-        crate::nest_kek::require_deployment_seed(&conn).map_err(internal)?
-    };
-    // `load_signer` answers `None` for no key, no cert, or a lapsed cert —
-    // the wall-clock expiry point of D10.
-    let Some((signer, cert)) =
-        crate::atproto_authoring_key::load_signer(&state.db, &nest_key, &caller.account)
-            .await
-            .map_err(internal)?
-    else {
-        return Ok(Err(Refusal::Unauthorized("no live authoring delegation")));
-    };
-    if !crate::atproto_authoring_key::delegation_grants(&cert, &Capability::Post) {
-        return Ok(Err(Refusal::Unauthorized(
-            "the delegation does not carry Post",
-        )));
-    }
-    let cert: EmbedAsBytes = canonical_decode(&cert)
-        .map_err(|e| internal(format!("stored delegation cert is not embed-as-bytes: {e}")))?;
-    let conn = state.db.conn().await;
-    if !admit_rate(&conn, &caller.account, &caller.principal_id, now).map_err(internal)? {
-        return Ok(Err(Refusal::RateLimited));
-    }
-    Ok(Ok((signer, cert)))
-}
-
 /// Is the post `id` public, as far as this nest knows? A post it holds is
 /// public when it carries no `gated` block (a gate tier, a room or a sale
 /// all ride there); a post it does not hold is someone else's to keep
@@ -292,17 +172,15 @@ async fn target_is_public(
 ) -> Result<bool, RpcError> {
     let digest = crate::db::posts::cid_to_digest(id);
     match crate::routes::get_post_core(state, Some(*account), digest).await {
-        crate::routes::GetPostOutcome::Found(bytes) => {
-            Ok(Post::decode_resolved_bytes(&bytes).is_some_and(|p| p.gated.is_none()))
-        }
+        crate::routes::GetPostOutcome::Found(bytes)
+        | crate::routes::GetPostOutcome::AdminBlocked {
+            body: Some(bytes), ..
+        } => Ok(Post::decode_resolved_bytes(&bytes).is_some_and(|p| p.gated.is_none())),
+        crate::routes::GetPostOutcome::AdminBlocked { body: None, .. } => Ok(false),
         crate::routes::GetPostOutcome::NotFound => Ok(true),
         crate::routes::GetPostOutcome::LegalTakedown { .. } => Ok(false),
         crate::routes::GetPostOutcome::Error => Err(internal("reading a referenced post")),
     }
-}
-
-fn now_secs() -> u64 {
-    crate::db::now_epoch_secs().max(0) as u64
 }
 
 /// `fauna.posts.author.create` for a third-party **principal**.
@@ -313,19 +191,18 @@ pub(crate) fn principal_create_handler() -> crate::principal_handlers::Principal
                 fauna_protocol::decode_strict(&payload).map_err(malformed)?;
             let targets = match check_create_shape(&req) {
                 Ok(t) => t,
-                Err(r) => return Err(r.rpc(KIND_CREATE)),
+                Err(r) => return Err(r.rpc(KIND_CREATE, CLASS.ns)),
             };
             for target in &targets {
                 if !target_is_public(&state, &caller.account, target).await? {
-                    return Err(
-                        Refusal::Unauthorized("a reference to a non-public post").rpc(KIND_CREATE)
-                    );
+                    return Err(Refusal::Unauthorized("a reference to a non-public post")
+                        .rpc(KIND_CREATE, CLASS.ns));
                 }
             }
             let now = now_secs();
-            let (signer, cert) = match authorize_and_load(&state, &caller, now).await? {
+            let (signer, cert) = match authorize_and_load(&state, &caller, &CLASS, now).await? {
                 Ok(s) => s,
-                Err(r) => return Err(r.rpc(KIND_CREATE)),
+                Err(r) => return Err(r.rpc(KIND_CREATE, CLASS.ns)),
             };
             let post = build_post(&caller.account, req, Timestamp::now());
             let (bytes, env) = sign_envelope(&signer, &post)
@@ -385,13 +262,13 @@ pub(crate) fn principal_delete_handler() -> crate::principal_handlers::Principal
                     .map_err(internal)?
                 {
                     return Err(Refusal::Unauthorized("not a post this principal authored")
-                        .rpc(KIND_DELETE));
+                        .rpc(KIND_DELETE, CLASS.ns));
                 }
             }
             let now = now_secs();
-            let (signer, cert) = match authorize_and_load(&state, &caller, now).await? {
+            let (signer, cert) = match authorize_and_load(&state, &caller, &CLASS, now).await? {
                 Ok(s) => s,
-                Err(r) => return Err(r.rpc(KIND_DELETE)),
+                Err(r) => return Err(r.rpc(KIND_DELETE, CLASS.ns)),
             };
             let tombstone = Tombstone {
                 author: ActorId(caller.account),
@@ -417,7 +294,9 @@ pub(crate) fn principal_delete_handler() -> crate::principal_handlers::Principal
             {
                 Ok(o) => o,
                 Err(crate::routes::PostDeleteError::NotAuthor) => {
-                    return Err(Refusal::Unauthorized("not the account's post").rpc(KIND_DELETE));
+                    return Err(
+                        Refusal::Unauthorized("not the account's post").rpc(KIND_DELETE, CLASS.ns)
+                    );
                 }
                 Err(crate::routes::PostDeleteError::Internal(msg)) => return Err(internal(msg)),
             };

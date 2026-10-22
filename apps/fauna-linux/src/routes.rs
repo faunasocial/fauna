@@ -13,7 +13,11 @@
 //! **One door, [`offer`].** It holds a route while no signed-in main window is
 //! up and applies it once [`signed_in`] registers one; applying the consent
 //! route lands on Settings → Connected apps, whose visit runs the shared
-//! machine's `open_handoff` (`settings::connected_apps::open_handoff`).
+//! machine's `open_handoff` (`settings::connected_apps::open_handoff`); the
+//! two share routes — the GNOME Files Share entry's — land on Media's
+//! detail + create surface (`views::media::open_share_route`) and on the
+//! Folders page's member-share flow
+//! (`views::devices_folders::folders::open_share_route`).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -116,12 +120,27 @@ fn apply(window: &adw::ApplicationWindow, route: AppRoute, then: Then) {
             });
             crate::show_window(window);
         }
-        // No producer of the two share routes exists on this platform yet
-        // (today only the Windows Explorer leaf mints them); they take this
-        // door the day one does.
-        AppRoute::ShareLink { .. } | AppRoute::FolderShare { .. } => {
-            tracing::warn!(target: "fauna_linux::routes", "dropping a share route: linux has no producer for it");
-            then();
+        // The file manager's Share entry (`apps/linux.md` § The file manager's
+        // Share entry (GNOME Files), link 4): navigation only — each arm opens
+        // a surface the user still acts on, and a set or file this account
+        // cannot see leaves the page with nothing open.
+        AppRoute::ShareLink { folder_id, path } => {
+            let nav_window = window.clone();
+            crate::views::media::open_share_route(
+                window.upcast_ref(),
+                folder_id,
+                path,
+                then,
+                move || crate::app::navigate_to_section(&nav_window, "media"),
+            );
+            crate::show_window(window);
+        }
+        AppRoute::FolderShare { folder_id } => {
+            let nav_window = window.clone();
+            crate::views::devices_folders::folders::open_share_route(folder_id, then, move || {
+                crate::app::navigate_to_settings_subpage(&nav_window, "folders");
+            });
+            crate::show_window(window);
         }
     }
 }

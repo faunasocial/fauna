@@ -16,6 +16,7 @@ pub mod nip05;
 pub mod oracle;
 pub mod publish;
 pub mod relay_endpoint;
+pub mod relay_pool;
 pub mod relays;
 pub mod store;
 pub mod sync_worker;

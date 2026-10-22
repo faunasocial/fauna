@@ -280,7 +280,7 @@ contract has five clauses:
   **(iv) The echo whose bytes no seat serves is ACCOUNTED FROM ITS
   MANIFEST, and where it would re-adopt it RE-ASSERTS (ruled 2026-10-09).** An own echo's bytes come from the
   local file while it still hashes to the manifest, else from the byte plane
-  ([`file-sync.md`](file-sync.md) § Relay serving, *The self-echo reads the
+  ([`relay-serving.md`](relay-serving.md) § Relay serving, *The self-echo reads the
   local body*); when neither answers — a superseded own write in a
   metadata-only folder: the nest never held a chunk and the writing seat has
   moved on — the echo still proves the log holds this device's row at `s`,
@@ -1217,7 +1217,7 @@ frontiers and the per-path version ledger lived in the `fauna-sync` daemon's chu
 `hex(path_hash(relative_path))` alone — **no folder or actor component**. That directory used to
 default to `{config_dir}/chunk_cache`, so two daemons whose config files resolved to one directory
 overwrote each other's ancestors for every same-named relative path (`notes.txt` in two folders is
-one key). `bins/fauna-sync/src/main.rs` documented the rule ("each daemon instance must use its own
+one key). the daemon's own `main.rs` (removed with `bins/fauna-sync`, 2026-10-02) documented the rule ("each daemon instance must use its own
 chunk_cache_dir") and nothing enforced it.
 
 ⚠ **That is a data-loss shape, not a tidiness note**, which is why it is stated here rather than
@@ -1333,7 +1333,7 @@ internally; slices 1–3 landed 2026-07-10, slice 4 2026-07-11):
   *Concurrent resolution & ancestor freshness* above — so first-publication is
   the bootstrap, not the ceiling). Now pinned where a same-shaped fixture cannot hide it:
   `tests/test_filesync_seats.py` leg 4, whose two seats each author one
-  side, plus the tier_1 `bins/fauna-sync/tests/merge_base_of_a_local_write.rs`.
+  side (a tier_1 test in the legacy daemon pinned the same shape until its removal, 2026-10-02).
 - **App review list + policy surfaces (slice 4, landed 2026-07-11).** The
   shared `DevicesMachine` reads conflicts with `include_resolved` and carries
   the resolution fields; its `use_other_version` gesture re-points the file at
@@ -1461,7 +1461,7 @@ word "legacy" was pre-sweep, and it left the code comments the same day.
 > change carried — and reports via `fauna.sync.conflicts.report`. The
 > **in-process engine** (Linux) reports at `write_conflict_copy` /
 > `maybe_merge_http` (`libs/fauna-sync-engine/src/engine.rs`
-> `report_conflict_with_candidates`). **Headless daemon, WS path (2026-06-08):**
+> `report_conflict_with_candidates`). **Headless daemon, WS path (2026-06-08; the daemon `bins/fauna-sync` was removed 2026-10-02, so this is the record):**
 > the Track-C HTTP rip deleted the daemon's `bins/fauna-sync/src/engine.rs`
 > (`run_http_mode`), which had carried the report path, so the headless daemon
 > briefly stopped reporting conflicts. It is **restored on the reconnect catch-up

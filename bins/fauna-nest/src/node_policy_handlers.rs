@@ -290,6 +290,52 @@ fn set_serving_port_handler() -> RpcHandler {
 /// Register the client-set `[nest]`-policy kinds (Admin-class, `@5 s`,
 /// `forbid_replay = false` — re-setting the same value is idempotent and the
 /// per-connection idempotency cache replays the first reply on recovery).
+/// This module's admin-plane writes for an admin-consented principal — the
+/// registration posture's two under `fauna:admin:rw:users`, the serving port,
+/// subhandles, the storage cap and the CORS origins under
+/// `fauna:admin:rw:nest` — each its actor handler behind
+/// [`crate::principal_handlers::admin_twin`] (`authorization-server.md`
+/// § Scope grammar → *The admin arms*).
+pub(crate) fn principal_admin_handlers()
+-> Vec<(&'static str, crate::principal_handlers::PrincipalHandler)> {
+    use crate::principal_handlers::admin_twin;
+    vec![
+        (
+            "fauna.admin.set_registration_mode",
+            admin_twin(
+                "fauna.admin.set_registration_mode",
+                set_registration_mode_handler(),
+            ),
+        ),
+        (
+            "fauna.admin.set_age_verification_required",
+            admin_twin(
+                "fauna.admin.set_age_verification_required",
+                set_age_verification_required_handler(),
+            ),
+        ),
+        (
+            "fauna.admin.set_serving_port",
+            admin_twin("fauna.admin.set_serving_port", set_serving_port_handler()),
+        ),
+        (
+            "fauna.admin.set_subhandles",
+            admin_twin("fauna.admin.set_subhandles", set_subhandles_handler()),
+        ),
+        (
+            "fauna.admin.set_max_storage_bytes",
+            admin_twin(
+                "fauna.admin.set_max_storage_bytes",
+                set_max_storage_bytes_handler(),
+            ),
+        ),
+        (
+            "fauna.admin.set_cors_origins",
+            admin_twin("fauna.admin.set_cors_origins", set_cors_origins_handler()),
+        ),
+    ]
+}
+
 pub fn register_node_policy_handlers(b: &mut RpcRouterBuilder) {
     b.add(
         "fauna.admin.set_registration_mode",

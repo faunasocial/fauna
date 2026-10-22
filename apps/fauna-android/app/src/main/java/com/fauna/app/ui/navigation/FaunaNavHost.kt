@@ -29,6 +29,7 @@ import com.fauna.app.BuildConfig
 import com.fauna.app.core.AppMessages
 import com.fauna.app.core.AppState
 import com.fauna.app.ui.components.ReportHost
+import com.fauna.app.ui.screen.KidsIneligibleScreen
 import com.fauna.app.ui.screen.LaunchAccountIndexUnreadableScreen
 import com.fauna.app.ui.screen.LaunchIdentityChangedScreen
 import com.fauna.app.ui.screen.LaunchIdentityForkedScreen
@@ -158,6 +159,30 @@ fun SupervisedIndicator(navController: NavController, vm: SupervisedIndicatorVM 
                 .clickable { navController.navigate("settings/family") }
                 .padding(horizontal = 16.dp, vertical = 8.dp)
                 .testTag(Ids.SUPERVISED_INDICATOR),
+        )
+    }
+}
+
+/**
+ * The one-line notice when the session nest changed its rules (`nest-rules.md`
+ * § Acceptance at joining, and a change of rules): names the nest, and a tap is
+ * the way to the rules surface — Settings → Status, where opening the surface
+ * reads the change and clears it ([com.fauna.app.core.NestRulesHost.dismissNotice]).
+ * Mounted with the shell's other global chrome; the text is the shared frame
+ * (`nest_rules.changed_notice`) and the notice adds no element id — web's
+ * `NestRulesNotice.svelte`.
+ */
+@Composable
+fun NestRulesChangedNotice(navController: NavController) {
+    val domain by com.fauna.app.core.NestRulesHost.changedNotice.collectAsState()
+    domain?.let { nest ->
+        Text(
+            text = stringResourceFmt(R.string.nest_rules_changed_notice, nest),
+            style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { navController.navigate("settings/status") }
+                .padding(horizontal = 16.dp, vertical = 8.dp),
         )
     }
 }
@@ -348,7 +373,9 @@ fun NavController.navigateToDrawerRoute(route: String) {
     val current = currentDestination?.route
     val alreadyInside = current == route || current?.startsWith("$route/") == true
     val enteringShell = route in SHELL_ROUTES && !alreadyInside
-    val targetingPushStackPage = route in PUSH_STACK_PAGES
+    // An OTHER profile's args (the actor, its carried home) are the destination's
+    // identity: restoring a saved entry would show the previous actor's page.
+    val targetingPushStackPage = route in PUSH_STACK_PAGES || route.startsWith("profile/")
     navigate(route) {
         popUpTo(graph.startDestinationId) { saveState = true }
         launchSingleTop = true
@@ -405,14 +432,18 @@ private fun OnboardingWizardNavHost(
         composable("onboarding/invite-request") {
             InviteRequestScreen(navController, onWizardExit)
         }
-        composable("onboarding/dns-config") {
-            DnsConfigScreen(navController)
-        }
-        composable("onboarding/vps-config") {
-            VpsConfigScreen(navController, onWizardExit)
-        }
-        composable("onboarding/nest-provisioning") {
-            NestProvisioningScreen(navController, onWizardExit)
+        // Nest setup talks to a hosting or DNS provider the user names; the kids
+        // build never registers it (a child joins their guardian's nest by invite).
+        if (!BuildConfig.KIDS) {
+            composable("onboarding/dns-config") {
+                DnsConfigScreen(navController)
+            }
+            composable("onboarding/vps-config") {
+                VpsConfigScreen(navController, onWizardExit)
+            }
+            composable("onboarding/nest-provisioning") {
+                NestProvisioningScreen(navController, onWizardExit)
+            }
         }
         composable("onboarding/dns-post-instructions") {
             DnsPostInstructionsScreen(navController, onWizardExit)
@@ -546,7 +577,7 @@ fun FaunaNavHost(
                 // `nest_retire` is hosted over the retry surface (`launch-retire-button`);
                 // leaving it puts the surface back as it was.
                 var retiring by remember { mutableStateOf(false) }
-                if (retiring) {
+                if (!BuildConfig.KIDS && retiring) {
                     NestRetireScreen(
                         entry = RetireEntry.Launch,
                         onExit = { retiring = false },
@@ -765,6 +796,35 @@ fun FaunaNavHost(
         // shared post-succession pass, every authenticated start.
         LaunchedEffect(Unit) { postAuthGlue.runSuccessionAftermath() }
 
+        // The Fauna Kids build refuses an account that is not supervised
+        // (`account-age-band.md` § The account age band, the kids-app bullet,
+        // item (3)): one explanatory surface with a sign-out replaces the whole
+        // shell. The verdict is the shared `kidsAppEligible`, re-read with every
+        // family status read. `BuildConfig.KIDS`-gated, so R8 folds this out of
+        // the other build types.
+        if (BuildConfig.KIDS) {
+            val kidsEligibilityVm: com.fauna.app.ui.viewmodel.KidsEligibilityVM = hiltViewModel()
+            val kidsEligible by kidsEligibilityVm.eligible.collectAsState()
+            if (kidsEligible == false) {
+                val kidsAccountVm: AccountSettingsVM = hiltViewModel()
+                var signOutError by remember { mutableStateOf<String?>(null) }
+                KidsIneligibleScreen(
+                    onSignOut = {
+                        try {
+                            kidsAccountVm.signOut { residue ->
+                                appState.signOutResidue = residue
+                                appState.isOnboarding = true
+                            }
+                        } catch (e: Exception) {
+                            signOutError = e.message
+                        }
+                    },
+                    error = signOutError,
+                )
+                return
+            }
+        }
+
         var searchQuery by remember { mutableStateOf("") }
         var isSearchActive by remember { mutableStateOf(false) }
 
@@ -910,6 +970,7 @@ fun FaunaNavHost(
                         MessageBanner()
                         CriticalAlertsBanner()
                         SupervisedIndicator(navController)
+                        NestRulesChangedNotice(navController)
                         // The one shared report sheet + its acknowledgement
                         // (moderation.md § User-initiated reporting): mounted
                         // once, over whatever page is showing, so a report filed
@@ -963,9 +1024,21 @@ fun FaunaNavHost(
                         composable("profile") { ProfileScreen(navController) }
                         // OTHER actor's profile (tap-through from a contact row): the
                         // actorId arg drives ProfileVM.isSelf=false (offers + follow).
+                        //
+                        // The optional `home` arg is the open target's carried home nest
+                        // ([profileRoute], hex-encoded), the seed of ProfileVM's
+                        // actor-home slot (`profile.md` § Layout & flow → *Reaching
+                        // another actor's profile with their home carried*).
                         composable(
-                            "profile/{actorId}",
-                            arguments = listOf(navArgument("actorId") { type = NavType.StringType }),
+                            PROFILE_OTHER_ROUTE,
+                            arguments = listOf(
+                                navArgument("actorId") { type = NavType.StringType },
+                                navArgument("home") {
+                                    type = NavType.StringType
+                                    nullable = true
+                                    defaultValue = null
+                                },
+                            ),
                         ) { ProfileScreen(navController) }
                         composable("events") { EventsScreen(navController) }
                         composable("media") { MediaScreen(navController) }
@@ -1095,7 +1168,7 @@ fun FaunaNavHost(
                         // Layout & flow; entered from `admin-nest-retire-button`).
                         // Retiring the box this session is signed into drops the
                         // session (credentials kept) and re-enters launch routing.
-                        composable("settings/admin-nest-retire") {
+                        if (!BuildConfig.KIDS) composable("settings/admin-nest-retire") {
                             NestRetireScreen(
                                 entry = RetireEntry.Admin,
                                 onExit = { sessionDropped ->

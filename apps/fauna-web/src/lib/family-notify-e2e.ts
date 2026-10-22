@@ -1,8 +1,8 @@
 // The `family_notify_check_now` e2e command — testing.md convention 14's
-// "run_now poke" for `$lib/familyNotify`'s flush cadence.
+// "run_now poke" for `#lib/familyNotify`'s flush cadence.
 //
 // This module exists ONLY in builds made for testing (testing.md § convention 15).
-// Its sole importer is `$lib/e2e-automation`, itself reached only through
+// Its sole importer is `#lib/e2e-automation`, itself reached only through
 // `+layout.svelte`'s `if (__FAUNA_E2E_AUTOMATION__)` branch, which a production
 // `vite build` constant-folds away.
 //
@@ -17,12 +17,12 @@
 // no clock offset, because the buffer's first flush is eager (no prior flush),
 // which is the only case any test here needs.
 
-import { notifyBuffer } from '$lib/familyNotify';
-import { registerE2eCommands } from '$lib/e2e-commands';
+import { notifyBuffer } from '#lib/familyNotify';
+import { registerE2eCommands } from '#lib/e2e-commands';
 
 const FAMILY_NOTIFY_COMMANDS = ['family_notify_check_now'] as const;
 
-/** Register `family_notify_check_now`. Called once from `$lib/e2e-automation`. */
+/** Register `family_notify_check_now`. Called once from `#lib/e2e-automation`. */
 export function registerFamilyNotifyCommands(): void {
   registerE2eCommands(FAMILY_NOTIFY_COMMANDS, async (_action, _payload) => {
     notifyBuffer.checkNow();

@@ -16,14 +16,14 @@
   // setter) are driven by the shared machine; a row's undo runs client-side
   // (its delta is sealed to the actor) and rides `put_spam_model`. A refusal
   // renders via `error`, never faked green.
-  import { identity, reconnectTick } from '$lib/store';
-  import { mailSpamMachine, onPushEvent, spamThresholdOverrideGet, spamThresholdOverrideSet, staleSurfacesForPushKind } from '$lib/rpc';
-  import { ensureWasm, trainingLabelBadge, trainingSourceBadge, parseCount } from '$lib/wasm';
-  import { resolveLocalized } from '$lib/i18n/localized';
+  import { identity, reconnectTick } from '#lib/store';
+  import { mailSpamMachine, onPushEvent, spamThresholdOverrideGet, spamThresholdOverrideSet, staleSurfacesForPushKind } from '#lib/rpc';
+  import { ensureWasm, trainingLabelBadge, trainingSourceBadge, parseCount } from '#lib/wasm';
+  import { resolveLocalized } from '#lib/i18n/localized';
   import { onMount, onDestroy } from 'svelte';
-  import { t } from '$lib/i18n/strings';
+  import { t } from '#lib/i18n/strings';
   import type { WasmMailSpamMachine } from '../../../static/fauna_wasm.js';
-  import { IDS } from '$lib/generated/uiIds';
+  import { IDS } from '#lib/generated/uiIds';
 
   // The parent settings page owns the single error surface; spam dispatch errors
   // flow into it (the same surface the other mail-settings sections bind to).

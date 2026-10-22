@@ -40,6 +40,15 @@ import pytest
 
 from drivers.machine_test_setter import set_handle_check_snapshot, set_recovery_boxes
 from helpers.app_surface import skip_unbuilt
+from helpers.indexed_rows import (
+    click_row,
+    diagnose_row,
+    row_absent,
+    row_visible,
+    wait_for_row,
+)
+
+RECOVER_BOX_ITEM = "recover-box-item"  # indexed; read via helpers.indexed_rows
 
 pytestmark = pytest.mark.tier_2
 
@@ -171,14 +180,14 @@ def test_nest_recovery_renders_box_list(app):
     the method buttons and the back button."""
     _require_recovery_ui(app)
     set_recovery_boxes(app, [_BOX_A, _BOX_B])
-    app.driver.wait_for("recover-box-item-0", timeout=15)
-    assert app.is_visible("recover-box-item-0"), (
+    wait_for_row(app.driver, RECOVER_BOX_ITEM, 0, timeout=15)
+    assert row_visible(app.driver, RECOVER_BOX_ITEM, 0), (
         "nest_recovery should render the first box row: "
-        f"{app.driver.diagnose('recover-box-item-0')}"
+        f"{diagnose_row(app.driver, RECOVER_BOX_ITEM, 0)}"
     )
-    assert app.is_visible("recover-box-item-1"), (
+    assert row_visible(app.driver, RECOVER_BOX_ITEM, 1), (
         "nest_recovery should render the second box row: "
-        f"{app.driver.diagnose('recover-box-item-1')}"
+        f"{diagnose_row(app.driver, RECOVER_BOX_ITEM, 1)}"
     )
     assert app.is_visible("recover-method-cloud-button"), (
         "nest_recovery should render the cloud re-provision button: "
@@ -203,9 +212,9 @@ def test_nest_recovery_empty_shows_empty_message(app):
         "an empty seed map should surface the empty message: "
         f"{app.driver.diagnose('recover-box-empty-message')}"
     )
-    assert app.is_absent("recover-box-item-0"), (
+    assert row_absent(app.driver, RECOVER_BOX_ITEM, 0), (
         "no box rows should render when the seed map is empty: "
-        f"{app.driver.diagnose('recover-box-item-0')}"
+        f"{diagnose_row(app.driver, RECOVER_BOX_ITEM, 0)}"
     )
 
 
@@ -214,7 +223,7 @@ def test_nest_recovery_method_buttons_gated_on_selection(app):
     guards require_selected_recovery_box); selecting a row enables them."""
     _require_recovery_ui(app)
     set_recovery_boxes(app, [_BOX_A, _BOX_B])
-    app.driver.wait_for("recover-box-item-0", timeout=15)
+    wait_for_row(app.driver, RECOVER_BOX_ITEM, 0, timeout=15)
     assert not app.is_enabled("recover-method-cloud-button"), (
         "cloud method should be disabled before a box is selected: "
         f"{app.driver.diagnose('recover-method-cloud-button')}"
@@ -223,7 +232,7 @@ def test_nest_recovery_method_buttons_gated_on_selection(app):
         "self-hosted method should be disabled before a box is selected: "
         f"{app.driver.diagnose('recover-method-selfhosted-button')}"
     )
-    app.click("recover-box-item-0")
+    click_row(app.driver, RECOVER_BOX_ITEM, 0)
     assert app.is_enabled("recover-method-cloud-button"), (
         "selecting a box should enable the cloud method: "
         f"{app.driver.diagnose('recover-method-cloud-button')}"
@@ -240,8 +249,8 @@ def test_nest_recovery_cloud_method_advances_to_vps_config(app):
     (recovery mode — reuses the existing provisioning surface)."""
     _require_recovery_ui(app)
     set_recovery_boxes(app, [_BOX_A, _BOX_B])
-    app.driver.wait_for("recover-box-item-0", timeout=15)
-    app.click("recover-box-item-0")
+    wait_for_row(app.driver, RECOVER_BOX_ITEM, 0, timeout=15)
+    click_row(app.driver, RECOVER_BOX_ITEM, 0)
     app.click("recover-method-cloud-button")
     app.driver.wait_for("vps-config-back-button", timeout=15)
     assert app.is_visible("vps-config-back-button"), (
@@ -257,8 +266,8 @@ def test_nest_recovery_selfhosted_method_advances_to_instructions(app):
     button, continue button, and restore CTA."""
     _require_recovery_ui(app)
     set_recovery_boxes(app, [_BOX_A, _BOX_B])
-    app.driver.wait_for("recover-box-item-0", timeout=15)
-    app.click("recover-box-item-0")
+    wait_for_row(app.driver, RECOVER_BOX_ITEM, 0, timeout=15)
+    click_row(app.driver, RECOVER_BOX_ITEM, 0)
     app.click("recover-method-selfhosted-button")
     app.driver.wait_for("recover-selfhosted-continue-button", timeout=15)
     assert app.is_visible("recover-selfhosted-command"), (

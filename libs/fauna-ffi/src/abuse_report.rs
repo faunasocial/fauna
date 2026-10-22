@@ -273,6 +273,11 @@ pub struct FfiReportQueueRow {
     pub subject: FfiReportSubject,
     pub subject_actor: Option<String>,
     pub reason: LocalizedText,
+    /// The reason's wire token — what the block confirm summary
+    /// ([`report_block_confirm_summary`]) takes. Defaulted so a binding
+    /// constructing the record by hand keeps compiling.
+    #[uniffi(default = "")]
+    pub reason_token: String,
     pub note: Option<String>,
     pub excerpt: Option<String>,
     pub origin: LocalizedText,
@@ -281,6 +286,9 @@ pub struct FfiReportQueueRow {
     /// Whether `admin-nest-report-open-takedown-button` renders — posts and
     /// messages only (`report::takedown_prefill`).
     pub can_open_takedown: bool,
+    /// Whether `admin-nest-report-block-button` renders — posts and messages
+    /// only (`block::block_form_view`).
+    pub can_block: bool,
 }
 
 fn queue_row(entry: AbuseReportQueueEntry) -> FfiReportQueueRow {
@@ -290,11 +298,89 @@ fn queue_row(entry: AbuseReportQueueEntry) -> FfiReportQueueRow {
         subject: entry.subject.into(),
         subject_actor: entry.subject_actor,
         reason: view.reason,
+        reason_token: entry.reason.token().to_string(),
         note: view.note,
         excerpt: view.excerpt,
         origin: view.origin,
         created_at: entry.created_at,
         can_open_takedown: view.can_open_takedown,
+        can_block: view.can_block,
+    }
+}
+
+// ── The admin block of a reported item (moderation.md § Admin block of a
+//    reported item) — the shared `fauna_client_moderation::block` folds. ──────
+
+/// UniFFI mirror of [`fauna_client_moderation::BlockFormView`].
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiBlockFormView {
+    pub can_submit: bool,
+    pub blocked_reason: Option<LocalizedText>,
+    pub arm_label: LocalizedText,
+    pub confirm_label: LocalizedText,
+}
+
+impl From<fauna_client_moderation::BlockFormView> for FfiBlockFormView {
+    fn from(v: fauna_client_moderation::BlockFormView) -> Self {
+        Self {
+            can_submit: v.can_submit,
+            blocked_reason: v.blocked_reason,
+            arm_label: v.arm_label,
+            confirm_label: v.confirm_label,
+        }
+    }
+}
+
+/// The Block (queue row) / Unblock (blocked list) control's fold.
+#[uniffi::export]
+pub fn report_block_form_view(subject: FfiReportSubject, restore: bool) -> FfiBlockFormView {
+    fauna_client_moderation::block_form_view(&subject.into(), restore).into()
+}
+
+/// The armed confirm's summary — names the verb, the item and the reason
+/// (`reason` is the wire token). `{item}` and `{reason}` are keys: render
+/// through the app's nested lookup.
+#[uniffi::export]
+pub fn report_block_confirm_summary(
+    subject: FfiReportSubject,
+    reason: String,
+    restore: bool,
+) -> LocalizedText {
+    fauna_client_moderation::block_confirm_summary(
+        &subject.into(),
+        AbuseReportReason::from_token(&reason),
+        restore,
+    )
+}
+
+/// The line the verb paints after a dispatch — `None` on success.
+#[uniffi::export]
+pub fn report_block_verdict(restore: bool, error: Option<String>) -> LocalizedText {
+    fauna_client_moderation::block_verdict(restore, error)
+}
+
+/// One `admin-nest-blocked-item` row.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiBlockedRow {
+    pub report_id: String,
+    pub subject: FfiReportSubject,
+    /// The reason's wire token — what the confirm summary takes.
+    pub reason_token: String,
+    pub reason: LocalizedText,
+    /// Microsecond epoch of the block.
+    pub blocked_at: i64,
+    pub unblock: FfiBlockFormView,
+}
+
+fn blocked_row(entry: fauna_protocol::moderation::AdminBlockEntry) -> FfiBlockedRow {
+    let view = fauna_client_moderation::blocked_row_view(&entry);
+    FfiBlockedRow {
+        report_id: view.report_id,
+        reason_token: entry.reason.token().to_string(),
+        subject: entry.subject.into(),
+        reason: view.reason,
+        blocked_at: view.blocked_at,
+        unblock: view.unblock.into(),
     }
 }
 
@@ -412,6 +498,29 @@ impl FfiModerationClient {
             .await
             .map_err(stringify)?;
         Ok(())
+    }
+}
+
+#[fauna_uniffi_async::export]
+impl FfiModerationClient {
+    /// `fauna.moderation.admin_block` — block the item an open report names,
+    /// or with `restore` unblock it. Returns the reply's `status`
+    /// (`"blocked"` / `"restored"`); errors surface for
+    /// [`report_block_verdict`] to word. Admin-class.
+    pub async fn admin_block(&self, report_id: String, restore: bool) -> Result<String, FfiError> {
+        let reply = self
+            .client()
+            .admin_block(report_id, restore)
+            .await
+            .map_err(stringify)?;
+        Ok(reply.status)
+    }
+
+    /// `fauna.moderation.admin_block.list` — every blocked item, newest
+    /// first, worded. Admin-class.
+    pub async fn admin_block_list(&self) -> Result<Vec<FfiBlockedRow>, FfiError> {
+        let reply = self.client().admin_block_list().await.map_err(stringify)?;
+        Ok(reply.items.into_iter().map(blocked_row).collect())
     }
 }
 

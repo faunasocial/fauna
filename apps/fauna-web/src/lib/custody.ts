@@ -11,8 +11,8 @@
 //
 // Both impure edges are PARAMETERS rather than imports — the timestamp
 // formatter and the degraded badge's key — which keeps this module free of
-// `$lib/wasm-folders` (and so of `$app/paths`), hence loadable under plain
-// `deno test`. The imports below are relative for the same reason: the `$lib`
+// `#lib/wasm-folders` (and so of `$app/paths`), hence loadable under plain
+// `deno test`. The imports below are relative for the same reason: the `#lib`
 // alias is a SvelteKit/vite one `deno test` cannot resolve, as the file header
 // of `./i18n/localized.ts` records for itself.
 import { resolveLocalized } from './i18n/localized.ts';

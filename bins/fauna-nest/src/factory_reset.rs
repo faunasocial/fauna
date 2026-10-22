@@ -41,7 +41,7 @@
 //! `fauna.admin.factory_reset` handler signals the supervisor sidekick socket to
 //! `s6-svc -d` both role services *before* it exits (same path as
 //! `set_mail_enabled(false)` —
-//! `mail_enable::reconcile_supervisor(node_mode, false, false, false, false)`).
+//! `mail_enable::reconcile_supervisor(node_mode, scanners, false, false, false, false)`).
 //! The freshly-claimed nest therefore starts mail-off (matching the default-off
 //! invariant); the next `set_mail_enabled(true)` `s6-svc -u`'s the services into
 //! a clean cold boot, where they re-`request_enrollment` PENDING against the

@@ -10,15 +10,15 @@
 // native dispatcher answers with.
 //
 // This module exists ONLY in builds made for testing (testing.md § convention
-// 15): its sole importer is `$lib/e2e-automation`.
+// 15): its sole importer is `#lib/e2e-automation`.
 
 import {
   accountDeviceSetState,
   accountPumpCycles,
   accountPumpNow,
   accountReadMarkerState,
-} from '$lib/wasm';
-import { registerE2eCommands } from '$lib/e2e-commands';
+} from '#lib/wasm';
+import { registerE2eCommands } from '#lib/e2e-commands';
 
 const ACCOUNT_RUNTIME_COMMANDS = [
   'account_pump_now',
@@ -27,7 +27,7 @@ const ACCOUNT_RUNTIME_COMMANDS = [
 ] as const;
 
 /** Register the account runtime's commands and install the
- *  `account_pump_cycles` accessor. Called once from `$lib/e2e-automation`. */
+ *  `account_pump_cycles` accessor. Called once from `#lib/e2e-automation`. */
 export function registerAccountRuntimeCommands(): void {
   registerE2eCommands(ACCOUNT_RUNTIME_COMMANDS, async (action, payload) => {
     if (action === 'device_set_state') {

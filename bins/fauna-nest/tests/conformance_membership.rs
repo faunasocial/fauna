@@ -54,7 +54,7 @@ use fauna_protocol::{
     admin::{
         AdminMembershipTierClearRequest, AdminMembershipTierSetRequest,
         AdminMembershipTiersListReply, AdminMembershipTiersListRequest, AdminOkReply,
-        AdminTiersListReply, AdminTiersListRequest,
+        AdminTierDeleteRequest, AdminTiersListReply, AdminTiersListRequest,
     },
     decode_strict as decode,
     node_policy::RegistrationMode,
@@ -1506,15 +1506,23 @@ async fn a_frozen_lapse_tier_that_no_longer_exists_degrades_to_free() {
     .await
     .expect("clear succeeds");
     let _: AdminOkReply = decode(&out).unwrap();
-    // No `fauna.admin.tiers.delete` kind exists today (list/create/update only),
-    // so this state is only reachable by construction — which is exactly why the
-    // guard is worth pinning: a future session adding tier deletion would
-    // otherwise silently break the sweep for every member, not just this one.
-    {
-        let conn = state.db.conn().await;
-        conn.execute("DELETE FROM tiers WHERE name = 'personal'", [])
-            .unwrap();
-    }
+    // The admin removes the tier through `fauna.admin.tiers.delete`: with the
+    // designation cleared nothing that removal checks still names `personal`
+    // (the stamps are not referrers — that is the point of the frozen value),
+    // so the state the sweep must survive is one any admin can reach.
+    let out = dispatch(
+        &router,
+        state.clone(),
+        admin,
+        "fauna.admin.tiers.delete",
+        encode(&AdminTierDeleteRequest {
+            name: "personal".to_string(),
+            extra: Default::default(),
+        }),
+    )
+    .await
+    .expect("a tier only frozen stamps name is removable");
+    let _: AdminOkReply = decode(&out).unwrap();
 
     let n = state.db.reconcile_lapsed_memberships(None).await.unwrap();
     assert_eq!(n, 2, "a vanished lapse tier must not abort the sweep");

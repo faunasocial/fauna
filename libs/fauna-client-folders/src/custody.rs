@@ -1513,7 +1513,7 @@ pub struct ForeignReplyStamps<'a> {
 }
 
 /// Refresh a foreign set's advisory fields from the stamps a federated read
-/// reply carried (`../architecture/federation.md` § Cross-nest → *Recipient-side
+/// reply carried (`../architecture/federation-shared-folders.md` § Cross-nest → *Recipient-side
 /// access discovery*): the caller's `access` grant, the home nest's
 /// `home_nest_actor_id` (byte-plane SPKI-pin trust root), and the set's
 /// owner-stamped `content_key_floor` (`../behavior/on-demand-files-shared-sets.md` § Shared sets on a
@@ -1522,7 +1522,7 @@ pub struct ForeignReplyStamps<'a> {
 /// (`../behavior/file-sync.md` § Relay serving → *A member on another nest*,
 /// step (1) — what it arms the upload skip and the holder-keeps gate from),
 /// and the set's `owner` label (`handle`, `domain`) as the member's own nest
-/// verified it (`../architecture/federation.md` § Cross-nest shared folders +
+/// verified it (`../architecture/federation-shared-folders.md` § Cross-nest shared folders +
 /// channel append → *The cross-nest owner label*), written as one pair.
 /// Unlike [`record_foreign_set`] each is a
 /// **last-writer-wins overwrite** where the stamp is `Some`: the home nest just
@@ -1576,7 +1576,7 @@ pub fn refresh_foreign_set_from_reply(
         existing.home_nest_actor_id = Some(actor_id.to_string());
         advisory = true;
     }
-    // The cross-nest owner label (`federation.md` § … *The cross-nest owner
+    // The cross-nest owner label (`federation-shared-folders.md` § … *The cross-nest owner
     // label*, join rule): the pair the member's own nest verified, written
     // whole — a renamed owner relabels on the next poll.
     if let Some((handle, domain)) = owner
@@ -2266,7 +2266,7 @@ mod tests {
         );
     }
 
-    /// The cross-nest owner label (`federation.md` § Cross-nest shared
+    /// The cross-nest owner label (`federation-shared-folders.md` § Cross-nest shared
     /// folders + channel append → *The cross-nest owner label*, join rule): the read
     /// reply's verified pair refreshes the record whole and stamps
     /// `updated_at` like `access`; an unchanged pair CAS-skips; an absent pair

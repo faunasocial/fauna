@@ -399,6 +399,30 @@ pub fn create_message_kind_snapshot_row(
     message_manifest: Option<&[u8]>,
     placement_manifest: Option<&[u8]>,
 ) -> Result<i64> {
+    create_message_kind_snapshot_row_at_cursor(
+        conn,
+        folder_id,
+        message_kind,
+        message_manifest,
+        placement_manifest,
+        None,
+    )
+}
+
+/// [`create_message_kind_snapshot_row`] recording the scope's content cursor
+/// the capture covered in `snapshots.max_change_seq` — the folder watermark's
+/// own column, with the same meaning (`backup-restore.md` § 5 → *Creators*):
+/// the automatic arm compares the scope's `MAX(segment_records.changed_seq)`
+/// against it to tell whether anything changed since. `None` writes NULL, which
+/// that comparison reads as "covers nothing".
+pub fn create_message_kind_snapshot_row_at_cursor(
+    conn: &Connection,
+    folder_id: i64,
+    message_kind: &str,
+    message_manifest: Option<&[u8]>,
+    placement_manifest: Option<&[u8]>,
+    max_change_seq: Option<i64>,
+) -> Result<i64> {
     let tx = conn
         .unchecked_transaction()
         .context("begin create_message_kind_snapshot_row transaction")?;
@@ -407,14 +431,15 @@ pub fn create_message_kind_snapshot_row(
         "INSERT INTO snapshots
              (folder_id, created_at, file_count, total_bytes,
               parent_id, device_id, deletion_pending, soft_deleted,
-              message_kind, message_manifest, placement_manifest)
-         VALUES (?1, ?2, 0, 0, NULL, NULL, 0, 0, ?3, ?4, ?5)",
+              message_kind, message_manifest, placement_manifest, max_change_seq)
+         VALUES (?1, ?2, 0, 0, NULL, NULL, 0, 0, ?3, ?4, ?5, ?6)",
         rusqlite::params![
             folder_id,
             now,
             message_kind,
             message_manifest,
             placement_manifest,
+            max_change_seq,
         ],
     );
     let id = match insert {
@@ -441,9 +466,15 @@ pub fn create_message_kind_snapshot_row(
                 )
             })?;
             tx.execute(
-                "UPDATE snapshots SET message_manifest = ?1, placement_manifest = ?2
-                 WHERE id = ?3",
-                rusqlite::params![message_manifest, placement_manifest, existing_id],
+                "UPDATE snapshots
+                 SET message_manifest = ?1, placement_manifest = ?2, max_change_seq = ?3
+                 WHERE id = ?4",
+                rusqlite::params![
+                    message_manifest,
+                    placement_manifest,
+                    max_change_seq,
+                    existing_id
+                ],
             )
             .context("refresh same-second message-kind snapshot manifests")?;
             existing_id
@@ -453,6 +484,126 @@ pub fn create_message_kind_snapshot_row(
     tx.commit()
         .context("commit create_message_kind_snapshot_row")?;
     Ok(id)
+}
+
+// ---------------------------------------------------------------------------
+// Message-kind automatic capture DAO (`backup-restore.md` § 5 → *Creators*)
+// ---------------------------------------------------------------------------
+
+/// Every `(scope_id, kind)` the segment mirror holds a record for, over the
+/// message kinds `kinds` — the automatic arm's scope enumeration. Read from
+/// the stores, never from `folders`: the reserved `__<kind>` row is minted by
+/// a scope's first capture, so a scope never captured has none. Tombstoned
+/// rows count — a scope whose every record was deleted still owes the capture
+/// that records the delete.
+pub fn list_message_kind_scopes(
+    conn: &Connection,
+    kinds: &[&str],
+) -> Result<Vec<([u8; 32], String)>> {
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT scope_id, kind FROM segment_records ORDER BY kind, scope_id")
+        .context("prepare list_message_kind_scopes")?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?))
+        })
+        .context("query_map list_message_kind_scopes")?;
+    let mut out = Vec::new();
+    for r in rows {
+        let (scope, kind) = r.context("row list_message_kind_scopes")?;
+        if !kinds.contains(&kind.as_str()) {
+            continue;
+        }
+        let Ok(scope) = <[u8; 32]>::try_from(scope.as_slice()) else {
+            continue;
+        };
+        out.push((scope, kind));
+    }
+    Ok(out)
+}
+
+/// The scope's content cursor: `MAX(changed_seq)` over its `segment_records`
+/// rows of `kind` (0 when it has none).
+pub fn message_kind_change_cursor(
+    conn: &Connection,
+    scope_id: &[u8; 32],
+    kind: &str,
+) -> Result<i64> {
+    conn.query_row(
+        "SELECT COALESCE(MAX(changed_seq), 0) FROM segment_records
+         WHERE scope_id = ?1 AND kind = ?2",
+        rusqlite::params![&scope_id[..], kind],
+        |r| r.get(0),
+    )
+    .context("message_kind_change_cursor")
+}
+
+/// What the automatic arm compares a scope against: its newest **active**
+/// (neither soft-deleted nor deletion-pending) message-kind snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewestKindSnapshot {
+    pub created_at: i64,
+    /// The content cursor the capture covered; `None` on a row no creator
+    /// recorded one for (a restore's own row, a capture before the creators).
+    pub max_change_seq: Option<i64>,
+    pub placement_manifest: Option<Vec<u8>>,
+}
+
+/// The newest active snapshot of `kind` on the scope's own reserved row — a
+/// custody copy of the same name is another location's mirror, never this
+/// scope's rail.
+pub fn newest_active_message_kind_snapshot(
+    conn: &Connection,
+    scope_id: &[u8; 32],
+    kind: &str,
+) -> Result<Option<NewestKindSnapshot>> {
+    let Some(name) = fauna_protocol::segments::reserved_backup_set_name(kind, scope_id) else {
+        return Ok(None);
+    };
+    conn.query_row(
+        "SELECT s.created_at, s.max_change_seq, s.placement_manifest
+         FROM snapshots s
+         JOIN folders f ON s.folder_id = f.id
+         WHERE f.actor_id = ?1
+           AND f.name = ?2
+           AND f.custody_copy = 0
+           AND s.message_kind = ?3
+           AND s.soft_deleted = 0
+           AND s.deletion_pending = 0
+         ORDER BY s.created_at DESC, s.id DESC
+         LIMIT 1",
+        rusqlite::params![&scope_id[..], name, kind],
+        |r| {
+            Ok(NewestKindSnapshot {
+                created_at: r.get(0)?,
+                max_change_seq: r.get(1)?,
+                placement_manifest: r.get(2)?,
+            })
+        },
+    )
+    .optional()
+    .context("newest_active_message_kind_snapshot")
+}
+
+/// The scope's own reserved `__<kind>` row (conv: `__conv/<channel_hex>`), if
+/// a capture has minted it — never a custody copy of the same name. The
+/// non-minting lookup the kind-addressed `prune_set_policy`/`check` use, so a
+/// read of a kind with no snapshot yet leaves no row behind.
+pub fn find_reserved_kind_folder_id(
+    conn: &Connection,
+    scope_id: &[u8; 32],
+    kind: &str,
+) -> Result<Option<i64>> {
+    let Some(name) = fauna_protocol::segments::reserved_backup_set_name(kind, scope_id) else {
+        return Ok(None);
+    };
+    conn.query_row(
+        "SELECT id FROM folders WHERE name = ?1 AND actor_id = ?2 AND custody_copy = 0",
+        rusqlite::params![name, &scope_id[..]],
+        |r| r.get(0),
+    )
+    .optional()
+    .context("find_reserved_kind_folder_id")
 }
 
 // ---------------------------------------------------------------------------

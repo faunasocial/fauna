@@ -116,6 +116,12 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
     error_label.set_visible(false);
     root.append(&error_label);
 
+    // -- By-continuing terms notice: only while Continue signs in, read from
+    // the shared snapshot's `terms_notice_visible` (never re-derived here) --
+    let terms_notice = super::widgets::terms_notice();
+    terms_notice.set_visible(false);
+    root.append(&terms_notice);
+
     // -- Back / Continue button row --
     let btn_row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -167,6 +173,7 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
         let control_checkbox = control_checkbox.clone();
         let continue_btn = continue_btn.clone();
         let error_label = error_label.clone();
+        let terms_notice = terms_notice.clone();
         let last_handle = last_handle.clone();
         move || {
             // Mirror handle into entry (without clobbering in-progress typing).
@@ -191,6 +198,7 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
             }
 
             continue_btn.set_sensitive(snap.continue_enabled);
+            terms_notice.set_visible(snap.terms_notice_visible);
 
             // error-message
             let msg = m.error_message().filter(|msg| !msg.is_empty());

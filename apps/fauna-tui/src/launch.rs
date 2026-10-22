@@ -149,7 +149,7 @@ pub enum LaunchSurface {
     },
     /// The sealed headless credential store exists and is locked: passphrase
     /// entry **before** [`start`] may read the long-term store (`tui.md`
-    /// § Credential storage; ui.yaml page `tui-unlock`). Elements/title/error
+    /// § Credential storage; ui.yaml page `unlock`). Elements/title/error
     /// live on `App` (`crate::unlock`), like the `Wizard` arm — the inputs
     /// paint `App::unlock`'s buffers, which this enum cannot reach.
     Unlock,

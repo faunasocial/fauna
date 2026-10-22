@@ -502,6 +502,17 @@ struct SessionMlsQuery {
     session: std::sync::Weak<ConversationsSession>,
 }
 
+/// The member-row declassification anchor over the same engine: the channel's
+/// MLS-recorded folder owner (a departed session records none — the row seals).
+impl fauna_media_machine::FolderChannelOwners for SessionMlsQuery {
+    fn folder_channel_owner(&self, channel_id: &[u8; 32]) -> Option<fauna_core::identity::ActorId> {
+        self.session
+            .upgrade()?
+            .engine()
+            .folder_channel_owner(&fauna_mls::types::ChannelId(*channel_id))
+    }
+}
+
 impl MlsQuery for SessionMlsQuery {
     fn is_joined_shared_set(&self, mls_group_id_hex: &str) -> bool {
         let Some(session) = self.session.upgrade() else {

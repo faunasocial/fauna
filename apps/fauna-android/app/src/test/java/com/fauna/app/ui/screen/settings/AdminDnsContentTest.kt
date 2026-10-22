@@ -13,6 +13,8 @@ import org.junit.runner.RunWith
 import com.fauna.app.testing.FaunaRobolectricTestRunner
 import org.robolectric.annotation.Config
 import uniffi.fauna_client_dns.CertHealthState
+import uniffi.fauna_client_dns.CertIssuanceErrorRow
+import uniffi.fauna_client_dns.CertIssuanceOrder
 import uniffi.fauna_client_dns.CertStatusRow
 import uniffi.fauna_client_dns.CredentialSummary
 import uniffi.fauna_client_dns.DelegationView
@@ -158,18 +160,22 @@ class AdminDnsContentTest {
         activeRename: PrimaryDomainRenameView? = null,
         renameAvailable: Boolean = false,
         addingFirstDomain: Boolean = false,
+        removeConfirmDomain: String? = null,
         dnsDomains: List<DomainView> = emptyList(),
         credentials: List<CredentialSummary> = emptyList(),
         actors: List<ActorOption> = emptyList(),
         manageAll: Boolean = false,
         certStatuses: List<CertStatusRow> = emptyList(),
+        certIssuanceErrors: List<CertIssuanceErrorRow> = emptyList(),
         delegations: List<DelegationView> = emptyList(),
         pendingCert: PendingCertIssue? = null,
         working: Boolean = false,
         error: String? = null,
         onRefresh: () -> Unit = {},
         onAddDomain: (String) -> Unit = {},
-        onRemoveDomain: (String) -> Unit = {},
+        onArmRemoveDomain: (String) -> Unit = {},
+        onConfirmRemoveDomain: () -> Unit = {},
+        onCancelRemoveDomain: () -> Unit = {},
         onRestoreDomain: (String) -> Unit = {},
         onStartRename: (ByteArray, Long?) -> Unit = { _, _ -> },
         onCompleteRename: (ByteArray, Boolean) -> Unit = { _, _ -> },
@@ -197,11 +203,13 @@ class AdminDnsContentTest {
                 activeRename = activeRename,
                 renameAvailable = renameAvailable,
                 addingFirstDomain = addingFirstDomain,
+                removeConfirmDomain = removeConfirmDomain,
                 dnsDomains = dnsDomains,
                 credentials = credentials,
                 actors = actors,
                 manageAll = manageAll,
                 certStatuses = certStatuses,
+                certIssuanceErrors = certIssuanceErrors,
                 delegations = delegations,
                 pendingCert = pendingCert,
                 working = working,
@@ -209,7 +217,9 @@ class AdminDnsContentTest {
                 onBack = {},
                 onRefresh = onRefresh,
                 onAddDomain = onAddDomain,
-                onRemoveDomain = onRemoveDomain,
+                onArmRemoveDomain = onArmRemoveDomain,
+                onConfirmRemoveDomain = onConfirmRemoveDomain,
+                onCancelRemoveDomain = onCancelRemoveDomain,
                 onRestoreDomain = onRestoreDomain,
                 onStartRename = onStartRename,
                 onCompleteRename = onCompleteRename,
@@ -343,7 +353,7 @@ class AdminDnsContentTest {
         render(
             activeDomains = listOf(localDomain(domain = "extra.org", primary = false)),
             dnsDomains = listOf(dnsDomain(domain = "extra.org")),
-            onRemoveDomain = { removed = it },
+            onArmRemoveDomain = { removed = it },
         )
         composeTestRule.onNodeWithTag("admin-dns-domain-remove-button").performScrollTo().performClick()
         assertEquals("extra.org", removed)
@@ -381,13 +391,14 @@ class AdminDnsContentTest {
 
     // A domainless nest's first add is a one-way door (`deployment-home-with-
     // public-relay.md` § MUA reach): the primary it becomes can never be
-    // removed from any app. No testTag on the warning — untagged chrome, not a
-    // ui.yaml id — so it is asserted by its rendered text.
+    // removed from any app. The warning is the element
+    // `admin-dns-add-domain-primary-warning`, asserted by tag and by its text.
     @Test
     fun firstDomainAddWarnsOfIrreversibilityOnlyWhenDomainless() {
         val ctx = ApplicationProvider.getApplicationContext<Context>()
         render(addingFirstDomain = true)
         composeTestRule.onNodeWithTag("admin-dns-add-domain-button").performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("admin-dns-add-domain-primary-warning").assertExists()
         composeTestRule.onNodeWithText(
             ctx.getString(R.string.admin_dns_add_domain_primary_warning),
         ).assertExists()
@@ -398,9 +409,42 @@ class AdminDnsContentTest {
         val ctx = ApplicationProvider.getApplicationContext<Context>()
         render(addingFirstDomain = false)
         composeTestRule.onNodeWithTag("admin-dns-add-domain-button").performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("admin-dns-add-domain-primary-warning").assertDoesNotExist()
         composeTestRule.onNodeWithText(
             ctx.getString(R.string.admin_dns_add_domain_primary_warning),
         ).assertDoesNotExist()
+    }
+
+    // The remove-confirm dialog paints only while the shared machine holds a
+    // domain armed, names it, and its confirm / cancel fire their own callbacks
+    // (`mail-multidomain.md` § Removing a local domain).
+    @Test
+    fun removeConfirmIsAbsentUntilADomainIsArmed() {
+        render(
+            activeDomains = listOf(localDomain(domain = "extra.org", primary = false)),
+            dnsDomains = listOf(dnsDomain(domain = "extra.org")),
+        )
+        composeTestRule.onNodeWithTag("admin-dns-domain-remove-confirm-modal").assertDoesNotExist()
+    }
+
+    @Test
+    fun removeConfirmNamesTheDomainAndItsButtonsFire() {
+        var confirmed = 0
+        var cancelled = 0
+        render(
+            activeDomains = listOf(localDomain(domain = "extra.org", primary = false)),
+            dnsDomains = listOf(dnsDomain(domain = "extra.org")),
+            removeConfirmDomain = "extra.org",
+            onConfirmRemoveDomain = { confirmed++ },
+            onCancelRemoveDomain = { cancelled++ },
+        )
+        composeTestRule.onNodeWithTag("admin-dns-domain-remove-confirm-modal").assertExists()
+        composeTestRule.onNodeWithText("Remove extra.org?").assertExists()
+        composeTestRule.onNodeWithTag("admin-dns-domain-remove-cancel-button").performScrollTo().performClick()
+        assertEquals(1, cancelled)
+        assertEquals(0, confirmed)
+        composeTestRule.onNodeWithTag("admin-dns-domain-remove-confirm-button").performScrollTo().performClick()
+        assertEquals(1, confirmed)
     }
 
     @Test
@@ -492,6 +536,35 @@ class AdminDnsContentTest {
             ),
         )
         composeTestRule.onNodeWithTag("admin-dns-cert-status").assertTextContains("self-signed", substring = true)
+    }
+
+    @Test
+    fun certIssuanceErrorLineNamesTheFailingOrderAndKeepsCaTextAsData() {
+        // One line per failing order, worded by the shared `certIssuanceErrorLine`;
+        // the CA's markup shows as plain characters and a newline cannot forge a
+        // second line.
+        render(
+            activeDomains = listOf(localDomain(primary = true)),
+            dnsDomains = listOf(dnsDomain()),
+            certIssuanceErrors = listOf(
+                CertIssuanceErrorRow(
+                    order = CertIssuanceOrder.DOMAIN,
+                    detail = "<b>Timeout</b> during connect\nFORGED: all fine",
+                    failedAtUnix = 1_784_678_400L,
+                ),
+            ),
+        )
+        composeTestRule.onNodeWithTag("admin-dns-cert-issuance-error")
+            .assertTextContains("<b>Timeout</b> during connect FORGED: all fine", substring = true)
+    }
+
+    @Test
+    fun noCertIssuanceErrorLineWhenNoOrderFails() {
+        render(
+            activeDomains = listOf(localDomain(primary = true)),
+            dnsDomains = listOf(dnsDomain()),
+        )
+        composeTestRule.onAllNodesWithTag("admin-dns-cert-issuance-error").assertCountEquals(0)
     }
 
     @Test

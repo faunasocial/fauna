@@ -7,10 +7,8 @@ use fauna_nest::token_store::TokenStore;
 
 async fn start_server() -> (String, Arc<fauna_nest::routes::AppState>) {
     let db = Arc::new(CacheDb::open_in_memory().unwrap());
-    let dir = tempfile::tempdir().unwrap();
-    // Leak the tempdir so it lives long enough
-    let dir_path = dir.path().to_path_buf();
-    std::mem::forget(dir);
+    let base = fauna_nest::routes::AppState::for_test(db.clone());
+    let dir_path = base.test_scratch_path("blobs");
     let backup_svc = Arc::new(BackupService::new(db.clone(), None, false, dir_path, None).unwrap());
     let tokens = Arc::new(TokenStore::new());
     let state = Arc::new(fauna_nest::routes::AppState {
@@ -19,7 +17,7 @@ async fn start_server() -> (String, Arc<fauna_nest::routes::AppState>) {
             token_store: tokens.clone(),
             ..Default::default()
         },
-        ..fauna_nest::routes::AppState::for_test(db.clone())
+        ..base
     });
 
     let app = fauna_nest::build_router(state.clone());

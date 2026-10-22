@@ -79,8 +79,8 @@ use crate::personalization::{
 use crate::quote;
 use crate::sealed_compose::{adjusted_score_micro, rerank_loaded_window};
 use crate::snapshot::{
-    AvailableBridge, BridgeFeedView, FeedSnapshot, FeedStatus, FeedSummaryView, PlaybackSource,
-    PostResolution, PostSummary, QuotedPostView, ReplyAudience, UnlockOfferView,
+    AuthorDisplayView, AvailableBridge, BridgeFeedView, FeedSnapshot, FeedStatus, FeedSummaryView,
+    PlaybackSource, PostResolution, PostSummary, QuotedPostView, ReplyAudience, UnlockOfferView,
 };
 use crate::thread::{ThreadPage, ThreadStatus};
 use fauna_protocol::bluesky::BlueskyThreadRequest;
@@ -159,6 +159,13 @@ struct PageState {
     in_flight: bool,
 }
 
+/// One `(author, home)` slot of [`FeedManager`]'s face memo — an in-flight
+/// relay, or its answer (an empty view for every no-face outcome).
+enum FaceSlot {
+    InFlight,
+    Resolved(AuthorDisplayView),
+}
+
 /// Which feed the manager is currently querying — the doc's "variant of the
 /// selection" (`trending.md` § The Trending feed), derived from the two
 /// snapshot fields (`selected_feed` + `trending_selected`) so the sum-type
@@ -177,6 +184,10 @@ enum Selection {
     Trending,
     /// A user-defined feed (`fauna.feed.posts`), keyed by hex feed id.
     Custom(String),
+    /// One author's posts (`fauna.feed.author.posts`), keyed by hex actor id —
+    /// the selection of an [`author_window`](FeedManager::author_window),
+    /// always chronological, never composed.
+    Author(String),
 }
 
 /// The shared feed manager. Construct over an authed transport + the local
@@ -323,6 +334,15 @@ pub struct FeedManager<R> {
     /// surface is `PostSummary.document`, never a parallel sibling field.
     /// **In-memory only** (the no-persistence posture is unchanged).
     resolved_previews: RwLock<HashMap<String, PreviewState>>,
+    /// A remote author's signed face, keyed `(author, home)` — the memo behind
+    /// [`resolve_author_face`](Self::resolve_author_face) (`feed.md` § The read
+    /// model → *The remote author's byline*). The in-flight slot folds the N
+    /// cards of one author into one relay; a resolved slot is re-written onto
+    /// every post of that author a later reload brings back. Held for the
+    /// manager's life and never cleared on `reload`, like the preview memo: it
+    /// is this window's snapshot, re-read from zero at the next open (§
+    /// Architectural rules, rule 1), never a cache.
+    resolved_faces: RwLock<HashMap<(String, String), FaceSlot>>,
     /// `post_id` → the nest-served composed ordering key (`FeedPostItem.score`,
     /// micro-units) — the base [`crate::sealed_compose`] adds sealed
     /// contributions to.
@@ -630,6 +650,15 @@ pub fn feed_posts_json(
                         .into_iter()
                         .map(|(url, state)| serde_json::json!({ "url": url, "state": state.name() }))
                         .collect::<Vec<_>>(),
+                    // The author face (`feed.md` § The read model → *The remote
+                    // author's byline*): `null` until a remote author's resolve has
+                    // answered, then the face — an empty one when the author shows
+                    // none. What lets a test wait for that answer before it reads
+                    // the card's id fallback as final.
+                    "author_display": p.author_display.as_ref().map(|a| serde_json::json!({
+                        "handle": a.handle,
+                        "display_name": a.display_name,
+                    })),
                 })
             })
             .collect(),
@@ -762,6 +791,7 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             revealed_remote: RwLock::new(HashSet::new()),
             unlock_purchase_requested: RwLock::new(HashSet::new()),
             resolved_previews: RwLock::new(HashMap::new()),
+            resolved_faces: RwLock::new(HashMap::new()),
             base_scores: RwLock::new(HashMap::new()),
             sealed: RwLock::new(SealedScorers::default()),
             wasm_memos: Mutex::new(HashMap::new()),
@@ -781,6 +811,29 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             period_keys: RwLock::new(None),
             preferences: RwLock::new(None),
         }
+    }
+
+    /// A second manager over ONE author's posts — the profile page's Posts tab
+    /// (`feed.md` § State & data shape → *The author window*). Same transport,
+    /// same signing secret, the installed seams (room-post keys, period-key
+    /// store, preferences) cloned in, so every per-post lazy resolve, the room
+    /// label, the unseal and the interaction verbs work on its rows as on the
+    /// timeline; its own fresh list state and no observers. Its selection is
+    /// `Selection::Author` (surfaced as
+    /// [`author_selected`](crate::FeedSnapshot::author_selected)), and it pages
+    /// through `fauna.feed.author.posts` on the ordinary
+    /// [`refresh_current_feed`](Self::refresh_current_feed) /
+    /// [`load_more`](Self::load_more) path — the caller loads the first page.
+    /// It never composes. A window rather than a selection on this manager:
+    /// switching this manager to an author would clear the timeline on screen
+    /// and re-fetch it on return.
+    pub fn author_window(&self, actor_id: String) -> FeedManager<R> {
+        let window = FeedManager::new(self.nest.clone(), self.actor_secret);
+        *window.room_post_keys.write().unwrap() = self.room_post_keys.read().unwrap().clone();
+        *window.period_keys.write().unwrap() = self.period_keys.read().unwrap().clone();
+        *window.preferences.write().unwrap() = self.preferences.read().unwrap().clone();
+        window.state.write().unwrap().author_selected = Some(actor_id);
+        window
     }
 
     /// Install the room-post key seam (see the field's docs) — the
@@ -1319,6 +1372,7 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             let mut s = self.state.write().unwrap();
             s.selected_feed = feed_id;
             s.trending_selected = false;
+            s.author_selected = None;
         }
         self.reload().await;
     }
@@ -1334,6 +1388,7 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             let mut s = self.state.write().unwrap();
             s.trending_selected = true;
             s.selected_feed = None;
+            s.author_selected = None;
         }
         self.reload().await;
     }
@@ -1354,15 +1409,24 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
     /// so re-selecting "the current feed" would quietly drop a viewer out of
     /// Trending back into Local.
     pub async fn refresh_current_feed(&self) {
+        // An author window has no feed page whose `refresh_feeds` would load
+        // the rooms its cards' labels derive from (`label_room_posts`), so its
+        // own read does — a local read through the cloned seam.
+        if self.state.read().unwrap().author_selected.is_some() {
+            self.refresh_own_rooms().await;
+        }
         self.reload().await;
     }
 
-    /// The current [`Selection`], derived from the snapshot's two selection
-    /// fields. `trending_selected` wins (it and `selected_feed` are never both
-    /// set), then a `Some(feed_id)`, else the local feed.
+    /// The current [`Selection`], derived from the snapshot's selection
+    /// fields. An author window's `author_selected` wins, then
+    /// `trending_selected` (it and `selected_feed` are never both set), then a
+    /// `Some(feed_id)`, else the local feed.
     fn current_selection(&self) -> Selection {
         let s = self.state.read().unwrap();
-        if s.trending_selected {
+        if let Some(author) = &s.author_selected {
+            Selection::Author(author.clone())
+        } else if s.trending_selected {
             Selection::Trending
         } else if let Some(fid) = &s.selected_feed {
             Selection::Custom(fid.clone())
@@ -1514,7 +1578,8 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
         // the composition decides the ordering mode the query must ask for.
         let selection = self.current_selection();
         let composition = match &selection {
-            Selection::Local => Vec::new(),
+            // The author read is always chronological and never composes.
+            Selection::Local | Selection::Author(_) => Vec::new(),
             // Trending has no feed row, but the caller's GLOBAL factor set still
             // composes with it (`trending.md` § The Trending feed — "composes
             // with every tier-1 factor they own"): the nest folds the
@@ -2000,6 +2065,15 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
                     .map_err(|e| e.to_string())?;
                 let next_score = r.score_cursor.zip(r.score_cursor_created_at);
                 (r.posts, r.cursor, next_score)
+            }
+            Selection::Author(author) => {
+                // One author's posts — chronological on the `created_at`
+                // keyset cursor; the author read takes no search.
+                let r = feed
+                    .feed_author_posts(author, cursor, Some(PAGE_LIMIT))
+                    .await
+                    .map_err(|e| e.to_string())?;
+                (r.posts, r.cursor, None)
             }
         };
 
@@ -4656,19 +4730,32 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
                                 // the quote renders "Removed under legal obligation
                                 // ({reference})" in place of the withheld content, never a
                                 // blank/broken embed.
+                                // An admin-blocked post (moderation.md § Admin block
+                                // of a reported item) is withheld the same way from
+                                // everyone but its author, whose read keeps the body:
+                                // an empty body projects the notice card, a body
+                                // decodes as usual and carries the reason beside it.
+                                let block_reason =
+                                    reply.admin_block.as_ref().map(|m| m.reason.token());
                                 if let Some(marker) = reply.legal_takedown {
                                     quote::project_taken_down(&quoted_post_id, marker.reference)
+                                } else if let Some(reason) =
+                                    block_reason.filter(|_| reply.body.is_empty())
+                                {
+                                    quote::project_blocked(&quoted_post_id, reason)
                                 } else {
                                     // Bound to the requested id: a nest serving
                                     // another signed post under this id is `Failed`.
                                     let (post, verification, origin) =
                                         decode_fetched_post(&quoted_post_id, reply.body.as_ref())?;
-                                    quote::project_decoded(
+                                    let mut view = quote::project_decoded(
                                         &quoted_post_id,
                                         &post,
                                         verification,
                                         origin,
-                                    )
+                                    );
+                                    view.admin_block_reason = block_reason.map(str::to_string);
+                                    view
                                 }
                             }
                         }
@@ -4748,7 +4835,39 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
     /// real `Verified`/`Failed` and the full body — not the nest's 500-char FTS
     /// preview — and resolves the media hash from the body it already holds
     /// rather than paying [`resolve_media`](Self::resolve_media)'s second fetch.
-    pub async fn resolve_post(&self, post_id: String) -> PostResolution {
+    pub async fn resolve_post(&self, post_id: String) -> PostResolution
+    where
+        R::Error: fauna_protocol::RpcErrorClass,
+    {
+        self.resolve_post_inner(post_id, None).await
+    }
+
+    /// [`resolve_post`](Self::resolve_post) for a link that names the post's
+    /// **home nest** (`feed.md` § The read model → *Opening a post the timeline
+    /// never loaded* → *A post homed on another nest*). The same door with one
+    /// more arm: this nest is asked first, and only its
+    /// `fauna.posts.not_found` sends the read on to `nest_url` through
+    /// `fauna.posts.get_remote` — this nest relays the home's envelope
+    /// unstored. Everything the slot guarantees holds on the relayed arm too
+    /// (the body bound to the id, the takedown tombstone, the unsealed-post
+    /// re-fold), and the summary carries
+    /// [`home_nest_url`](PostSummary::home_nest_url) so the apps' byte legs
+    /// fetch from the home. An empty `nest_url` is the plain resolve.
+    pub async fn resolve_post_from(&self, post_id: String, nest_url: String) -> PostResolution
+    where
+        R::Error: fauna_protocol::RpcErrorClass,
+    {
+        let home = Some(nest_url.trim().to_string()).filter(|u| !u.is_empty());
+        self.resolve_post_inner(post_id, home).await
+    }
+
+    /// The one body behind both resolves, so the relayed door cannot drift from
+    /// the same-nest one. `home` is `Some` only from
+    /// [`resolve_post_from`](Self::resolve_post_from).
+    async fn resolve_post_inner(&self, post_id: String, home: Option<String>) -> PostResolution
+    where
+        R::Error: fauna_protocol::RpcErrorClass,
+    {
         // Already covered by the timeline (the ordinary card-click case), or
         // already parked in the slot: nothing to fetch either way.
         {
@@ -4768,12 +4887,23 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
         }
 
         let posts = PostsClient::new(self.nest.clone());
-        let Ok(reply) = posts.posts_get(post_id.clone()).await else {
-            // Missing, quarantined, or unreachable — `fauna.posts.not_found` is
-            // the nest's answer for the first two. Leave the slot alone: the
-            // caller's surface degrades exactly as it always has for an
-            // unresolvable id, and the outcome tells it so.
-            return PostResolution::Unavailable;
+        // Missing, quarantined, or unreachable — `fauna.posts.not_found` is the
+        // nest's answer for the first two, and the one answer that sends a
+        // homed link on to its home (a transport fault never does: this nest
+        // being unreachable says nothing about where the post lives). Any
+        // other miss leaves the slot alone: the caller's surface degrades
+        // exactly as it always has for an unresolvable id, and the outcome
+        // tells it so.
+        let (reply, relayed_from) = match posts.posts_get(post_id.clone()).await {
+            Ok(reply) => (reply, None),
+            Err(e) if is_post_not_found(&e) && home.is_some() => {
+                let home = home.expect("checked above");
+                match posts.posts_get_remote(post_id.clone(), home.clone()).await {
+                    Ok(reply) => (reply, Some(home)),
+                    Err(_) => return PostResolution::Unavailable,
+                }
+            }
+            Err(_) => return PostResolution::Unavailable,
         };
         // A legally-taken-down post has its body **withheld** (empty) with the
         // reference on the reply (`moderation.md` § Categories & enforcement item
@@ -4799,6 +4929,22 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
                 reference: marker.reference,
             };
         }
+        // An admin-blocked post (`moderation.md` § Admin block of a reported
+        // item): every viewer but the author gets an empty body and the marker,
+        // so the slot takes the notice summary (`PostSummary::blocked`) and the
+        // app paints the shared notice in the body area — the takedown arm's
+        // posture, answered as `Fetched` because the slot holds a summary the
+        // app renders like any other. The author's read keeps the body and the
+        // marker: it decodes below and carries the reason beside the body.
+        let block_reason = reply.admin_block.as_ref().map(|m| m.reason.token());
+        if let Some(reason) = block_reason.filter(|_| reply.body.is_empty()) {
+            {
+                let mut s = self.state.write().unwrap();
+                s.deep_linked_post = Some(PostSummary::blocked(&post_id, reason));
+            }
+            self.notify();
+            return PostResolution::Fetched;
+        }
         // Bound to the requested id: a body that verifies but is some
         // other post renders here as `Failed`, never as this one verified.
         let Some((post, verification, origin)) = decode_fetched_post(&post_id, reply.body.as_ref())
@@ -4806,9 +4952,27 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             return PostResolution::Unavailable;
         };
         let mut summary = map_fetched_post(&post_id, &post, verification, origin);
+        summary.admin_block_reason = block_reason.map(str::to_string);
         // The one thing the raw body cannot say: the bridged author's face,
         // which only the nest's `bridge_authors` projection holds.
         summary.author_display = reply.author_display.map(Into::into);
+        summary.home_nest_url = relayed_from;
+        // The home's identity as the relaying nest dial-proved it — the root
+        // the foreign byte plane graduates its pin against.
+        summary.home_nest_actor_id = reply.home_nest_actor_id;
+        // The envelope just decoded IS the gated record `gated_blob_hash`
+        // would fetch: cache it here, because a relayed post is not on this
+        // nest and that fetch would miss — the unseal and the room's verdict
+        // read then never run.
+        if let Some(gated) = post.gated.clone() {
+            self.resolved_gated.write().unwrap().insert(
+                post_id.clone(),
+                ResolvedGated {
+                    author_hex: hex::encode(post.author.0),
+                    gated,
+                },
+            );
+        }
         {
             let mut s = self.state.write().unwrap();
             // A gated post this reader already unsealed must not revert to its
@@ -5173,6 +5337,121 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
         };
         if changed {
             self.notify();
+        }
+    }
+
+    /// Name a post's remote author from their own signed profile
+    /// (`feed.md` § The read model → *The remote author's byline*): for a
+    /// rendered post homed on another nest (`home_nest_url` set) that carries
+    /// no face yet, read the author's profile through this nest's relay
+    /// ([`ProfileClient::profile_get_remote`], the Profile page's own remote
+    /// read), verify it with the one signed decode, bind the signer to the
+    /// post's `author`, and write the `display_name` onto
+    /// [`PostSummary::author_display`] of every rendered post by that
+    /// `(author, home)`, with one notification.
+    ///
+    /// **One relay per `(author, home)` per window** — the `resolved_faces`
+    /// memo: an in-flight slot makes the other cards of that author return at
+    /// once, and a resolved slot is written back without a relay onto the
+    /// posts a later reload brings.
+    ///
+    /// **Every outcome writes** (the `resolve_post_tips` convention): an
+    /// author who did not opt in (`fauna.profile.not_found`), an unreachable
+    /// or refusing home, `rate_limited`, bytes that do not verify, or a profile
+    /// signed by another actor all resolve to
+    /// `Some(AuthorDisplayView::default())` — the label falls through to the id,
+    /// the guard closes, nothing retries within the window, and nothing reaches
+    /// `error-message`.
+    ///
+    /// [`ProfileClient::profile_get_remote`]: fauna_client_profile::ProfileClient::profile_get_remote
+    pub async fn resolve_author_face(&self, post_id: String) {
+        let key = {
+            let s = self.state.read().unwrap();
+            match s.rendered_posts().find(|p| p.post_id == post_id) {
+                Some(PostSummary {
+                    author,
+                    home_nest_url: Some(home),
+                    author_display: None,
+                    ..
+                }) => (author.clone(), home.clone()),
+                // Homed here, already faced, or not rendered.
+                _ => return,
+            }
+        };
+        let memo_hit = {
+            let mut faces = self.resolved_faces.write().unwrap();
+            match faces.entry(key.clone()) {
+                std::collections::hash_map::Entry::Occupied(slot) => match slot.get() {
+                    FaceSlot::Resolved(view) => Some(view.clone()),
+                    FaceSlot::InFlight => return,
+                },
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(FaceSlot::InFlight);
+                    None
+                }
+            }
+        };
+        let view = match memo_hit {
+            Some(view) => view,
+            None => {
+                let view = self.fetch_author_face(&key.0, &key.1).await;
+                self.resolved_faces
+                    .write()
+                    .unwrap()
+                    .insert(key.clone(), FaceSlot::Resolved(view.clone()));
+                view
+            }
+        };
+        let changed = {
+            let mut s = self.state.write().unwrap();
+            let mut changed = false;
+            for p in rendered_posts_mut(&mut s) {
+                if p.author_display.is_none()
+                    && p.author == key.0
+                    && p.home_nest_url.as_deref() == Some(key.1.as_str())
+                {
+                    p.author_display = Some(view.clone());
+                    changed = true;
+                }
+            }
+            changed
+        };
+        if changed {
+            self.notify();
+        }
+    }
+
+    /// The relay and the verify behind [`resolve_author_face`](Self::resolve_author_face):
+    /// the author's face, or the empty view for every no-face outcome.
+    async fn fetch_author_face(&self, author: &str, home: &str) -> AuthorDisplayView {
+        let profiles = fauna_client_profile::ProfileClient::new(self.nest.clone());
+        let reply = match profiles.profile_get_remote(author, home).await {
+            Ok(reply) => reply,
+            Err(e) => {
+                tracing::debug!(%author, %home, error = %e, "remote author face: no profile");
+                return AuthorDisplayView::default();
+            }
+        };
+        match fauna_core::encoding::decode_profile(&reply.body) {
+            // The signer must be the post's author: a home cannot pair a post
+            // with another actor's name.
+            Ok((profile, _)) if hex::encode(profile.actor_id.0).eq_ignore_ascii_case(author) => {
+                AuthorDisplayView {
+                    // The `Profile` carries no handle; the avatar is the
+                    // avatar lane's.
+                    handle: None,
+                    display_name: profile.display_name,
+                    avatar_url: None,
+                }
+            }
+            Ok(_) => {
+                tracing::debug!(%author, %home, "remote author face: profile signed by another actor");
+                AuthorDisplayView::default()
+            }
+            Err(e) => {
+                tracing::debug!(%author, %home, error = %e, "remote author face: profile does not verify");
+                AuthorDisplayView::default()
+            }
         }
     }
 
@@ -6086,7 +6365,8 @@ fn map_post(p: FeedPostItem) -> PostSummary {
     PostSummary {
         post_id: p.post_id,
         author: p.author,
-        // A bridged author's face, carried straight from the wire item
+        // The author's face — a bridged author's or a local native author's,
+        // as the nest projected it — carried straight from the wire item
         // (`bridges.md` § Unified feed ingestion → *Bridged authors*).
         author_display: p.author_display.map(Into::into),
         body: p.body,
@@ -6156,12 +6436,22 @@ fn map_post(p: FeedPostItem) -> PostSummary {
         // so no list item can carry a reference; only the single-post deep-link
         // door (`resolve_post`) ever sees the marker.
         legal_takedown_ref: None,
+        // The same for an admin block: the feed query excludes a blocked post.
+        admin_block_reason: None,
         // Resolved lazily by `resolve_post_tips` — the feed-index projection
         // carries no tip totals, which is *why* the resolver can't use a data
         // trigger and writes `Some` on every outcome instead.
         tips: None,
         // Set only by the buy and by a later resolve its guard declines.
         unlock_purchase_pending: false,
+        // A post this nest indexed from its home — a federated follow's
+        // delivered envelope (`federated-follow.md` § Decision 3): the byte
+        // legs fetch the sealed body and media from there.
+        home_nest_url: p.home_nest_url,
+        // …and the home's identity the delivery verified, so the byte plane
+        // graduates its pin against the home before the first byte
+        // (`transport-trust.md` § The post arm).
+        home_nest_actor_id: p.home_nest_actor_id,
     }
 }
 
@@ -6206,9 +6496,9 @@ fn map_fetched_post(
     PostSummary {
         post_id: post_id.to_string(),
         author: hex::encode(post.author.0),
-        // The raw post carries no bridged-author face; `resolve_post` fills it
-        // from `PostGetReply.author_display` (`bridges.md` § Unified feed
-        // ingestion → *Bridged authors*).
+        // The raw post carries no author face; `resolve_post` fills it from
+        // `PostGetReply.author_display` — a bridged or a local native author's
+        // (`bridges.md` § Unified feed ingestion → *Bridged authors*).
         author_display: None,
         body,
         document,
@@ -6264,7 +6554,12 @@ fn map_fetched_post(
         // from the reply's marker before it ever reaches this projection, via
         // `PostSummary::taken_down`.
         legal_takedown_ref: None,
+        // Set by `resolve_post` after this projection when the reply carries
+        // the admin-block marker beside the author's own body.
+        admin_block_reason: None,
         unlock_purchase_pending: false,
+        home_nest_url: None,
+        home_nest_actor_id: None,
     }
 }
 
@@ -6310,6 +6605,10 @@ pub(crate) fn build_post_document(
             // …and the not-found state for a quoted post that is gone
             // (`ui/feed.md` § Post deletion). `false` for every live quote.
             not_found: q.not_found,
+            // …and the admin block's reason, so the card paints the shared
+            // notice in place of a withheld body or beside the author's own
+            // (moderation.md § Admin block of a reported item).
+            admin_block_reason: q.admin_block_reason.clone(),
         });
     }
     // The resolved media as trusted, content-addressed blocks, in body order — an
@@ -6828,7 +7127,7 @@ mod tests {
         /// feed.posts / feed.local.posts in order.
         pages: VecDeque<(Vec<FeedPostItem>, Option<i64>)>,
         /// Reload-race gate: while armed, the FIRST `fauna.feed.local.posts`
-        /// request PARKS (returns `Pending`, consuming the arm) until
+        /// (or `fauna.feed.author.posts`) request PARKS (returns `Pending`, consuming the arm) until
         /// `open_gate` — letting a test drive a NEWER reload to completion
         /// while an older one is mid-fetch, then release the stale fetch and
         /// assert its result is dropped. Manual-poll friendly (no waker).
@@ -6861,6 +7160,11 @@ mod tests {
         /// answers `not_found` — which is how a test builds a corpus where some
         /// marked posts are fetchable and others are not.
         posts_get_by_id: std::collections::HashMap<String, Vec<u8>>,
+        /// Signed profile bytes `fauna.profile.get_remote` answers, keyed by
+        /// the requested `actor_id`; an id the test did not seed answers
+        /// `fauna.profile.not_found` — the home's one answer for an author who
+        /// did not opt in.
+        remote_profiles: std::collections::HashMap<String, Vec<u8>>,
         /// The reply answered to `fauna.posts.room_labels` and to its relayed
         /// twin `fauna.posts.room_labels_remote` alike — `None` is the empty
         /// answer a nest gives a caller off every floor.
@@ -6878,9 +7182,23 @@ mod tests {
         /// body is withheld (empty) and `legal_takedown` carries this reference
         /// (the taken-down-post wire shape — moderation.md § Categories item 1).
         posts_get_legal_takedown: Option<String>,
+        /// When set, `fauna.posts.get` answers an **admin-block** reply carrying
+        /// this reason token (moderation.md § Admin block of a reported item):
+        /// with `false` the body is withheld (any viewer but the author), with
+        /// `true` the seeded body is kept beside the marker (the author's read).
+        posts_get_admin_block: Option<(String, bool)>,
         /// When set, `fauna.posts.get` carries this bridged-author face on its
         /// reply (`PostGetReply.author_display`).
         posts_get_author_display: Option<fauna_protocol::feed::AuthorDisplay>,
+        /// Bytes answered to `fauna.posts.get_remote` — the post's home nest,
+        /// relayed by this one.
+        posts_get_remote_body: Vec<u8>,
+        /// The home identity the relay stamps on its `fauna.posts.get_remote`
+        /// reply (`PostGetReply.home_nest_actor_id`).
+        posts_get_remote_home_id: Option<String>,
+        /// When set, `fauna.posts.get_remote` answers the home's legal-takedown
+        /// marker over an empty body.
+        posts_get_remote_legal_takedown: Option<String>,
         /// Subscriptions answered to `fauna.bridges.feeds.list`.
         bridge_subs: Vec<fauna_protocol::bridges_ui::FeedSubscription>,
         /// Bridge-list answered to `fauna.bridges.list` (the build/runtime-gated
@@ -7307,7 +7625,7 @@ mod tests {
         {
             // Reload-race gate: park OUTSIDE the mutex so a later (newer)
             // request can be answered while this one is held.
-            if kind == "fauna.feed.local.posts" {
+            if kind == "fauna.feed.local.posts" || kind == "fauna.feed.author.posts" {
                 let armed = {
                     let mut g = self.inner.lock().unwrap();
                     std::mem::take(&mut g.gate_armed)
@@ -7346,6 +7664,14 @@ mod tests {
                     "fauna.feed.local.posts" => {
                         let (posts, cursor) = g.pages.pop_front().unwrap_or_default();
                         fauna_protocol::encode_canonical(&FeedLocalPostsReply {
+                            posts,
+                            cursor,
+                            extra: Default::default(),
+                        })
+                    }
+                    "fauna.feed.author.posts" => {
+                        let (posts, cursor) = g.pages.pop_front().unwrap_or_default();
+                        fauna_protocol::encode_canonical(&FeedAuthorPostsReply {
                             posts,
                             cursor,
                             extra: Default::default(),
@@ -7445,11 +7771,37 @@ mod tests {
                             }
                             None => (g.posts_get_body.clone(), None),
                         };
+                        let (body, admin_block) = match &g.posts_get_admin_block {
+                            Some((reason, keep_body)) => (
+                                if *keep_body { body } else { Vec::new() },
+                                fauna_protocol::posts::AdminBlockMarker::from_reason(Some(reason)),
+                            ),
+                            None => (body, None),
+                        };
                         fauna_protocol::encode_canonical(&fauna_protocol::posts::PostGetReply {
                             body: serde_bytes::ByteBuf::from(body),
                             legal_takedown,
+                            admin_block,
                             author_display: g.posts_get_author_display.clone(),
-                            extra: Default::default(),
+                            ..Default::default()
+                        })
+                    }
+                    "fauna.posts.get_remote" => {
+                        let (body, legal_takedown) = match &g.posts_get_remote_legal_takedown {
+                            Some(reference) => (
+                                Vec::new(),
+                                Some(fauna_protocol::posts::LegalTakedownMarker {
+                                    reference: reference.clone(),
+                                    extra: Default::default(),
+                                }),
+                            ),
+                            None => (g.posts_get_remote_body.clone(), None),
+                        };
+                        fauna_protocol::encode_canonical(&fauna_protocol::posts::PostGetReply {
+                            body: serde_bytes::ByteBuf::from(body),
+                            legal_takedown,
+                            home_nest_actor_id: g.posts_get_remote_home_id.clone(),
+                            ..Default::default()
                         })
                     }
                     "fauna.bridges.feeds.list" => fauna_protocol::encode_canonical(
@@ -7662,6 +8014,24 @@ mod tests {
                             },
                         )
                     }
+                    "fauna.profile.get_remote" => {
+                        let req: fauna_protocol::profile::ProfileGetRemoteRequest =
+                            fauna_protocol::decode_strict(&bytes).unwrap();
+                        match g.remote_profiles.get(&req.actor_id) {
+                            Some(body) => fauna_protocol::encode_canonical(
+                                &fauna_protocol::profile::ProfileGetReply {
+                                    body: serde_bytes::ByteBuf::from(body.clone()),
+                                    ..Default::default()
+                                },
+                            ),
+                            None => {
+                                return Err(MockErr::Rejected(fauna_protocol::RpcError::new(
+                                    fauna_protocol::RpcError::CODE_PROFILE_NOT_FOUND,
+                                    "error.profile.not_found",
+                                )));
+                            }
+                        }
+                    }
                     #[cfg(feature = "payments")]
                     "fauna.tips.list" => fauna_protocol::encode_canonical(
                         &g.tips_reply.clone().unwrap_or_default(),
@@ -7688,6 +8058,7 @@ mod tests {
                             subhandles: false,
                             registration: None,
                             moderation: fauna_protocol::discovery::ModerationInfo {
+                                content_policy: None,
                                 extra: Default::default(),
                             },
                             ..Default::default()
@@ -8379,6 +8750,169 @@ mod tests {
                 .map(|p| p.post_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["zz"]
+        );
+    }
+
+    // ── The author window (`feed.md` § State & data shape → *The author
+    // window*) ─────────────────────────────────────────────────────
+
+    fn post_ids(m: &FeedManager<Arc<MockNest>>) -> Vec<String> {
+        m.snapshot()
+            .posts
+            .iter()
+            .map(|p| p.post_id.clone())
+            .collect()
+    }
+
+    /// The window pages through `fauna.feed.author.posts` on the ordinary
+    /// reload / load-more path — the author on every request, the cursor the
+    /// nest handed back on the second — and leaves the timeline it was opened
+    /// from untouched: no local read, no posts, no selection change.
+    #[test]
+    fn an_author_window_pages_through_the_author_read_and_leaves_the_timeline_alone() {
+        let nest = MockNest::arc();
+        let m = mgr(nest.clone());
+        let author = "ab".repeat(32);
+        let w = m.author_window(author.clone());
+        assert_eq!(
+            w.snapshot().author_selected.as_deref(),
+            Some(author.as_str())
+        );
+        assert_eq!(
+            m.snapshot().author_selected,
+            None,
+            "the timeline is no window"
+        );
+
+        nest.push_page(vec![post("aa", 3), post("bb", 2)], Some(2));
+        nest.push_page(vec![post("bb", 2), post("cc", 1)], None);
+        block_on(w.refresh_current_feed());
+        assert_eq!(post_ids(&w), vec!["aa", "bb"]);
+        assert!(w.snapshot().has_more);
+        block_on(w.load_more());
+        assert_eq!(post_ids(&w), vec!["aa", "bb", "cc"], "deduped, nest order");
+        assert!(!w.snapshot().has_more);
+
+        let reads: Vec<FeedAuthorPostsRequest> = nest
+            .calls()
+            .iter()
+            .filter(|(k, _)| k == "fauna.feed.author.posts")
+            .map(|(_, b)| fauna_protocol::decode_strict(b).unwrap())
+            .collect();
+        assert_eq!(reads.len(), 2, "one read per page");
+        assert!(reads.iter().all(|r| r.author == author));
+        assert_eq!(reads[0].cursor, None);
+        assert_eq!(
+            reads[1].cursor,
+            Some(2),
+            "the second page resumes at the cursor"
+        );
+        assert!(
+            !nest.kinds().iter().any(|k| k == "fauna.feed.local.posts"
+                || k == "fauna.feed.trending.posts"
+                || k == "fauna.feed.posts"),
+            "the window reads the author only, and never composes"
+        );
+        assert!(m.snapshot().posts.is_empty(), "the timeline is untouched");
+    }
+
+    /// The refresh rule holds on a window as on the timeline: refreshing the
+    /// author on screen keeps the posts while the fetch is in flight, and a
+    /// switch away from the author (a selection on the window) clears them up
+    /// front.
+    #[test]
+    fn an_author_window_refresh_keeps_and_a_switch_clears() {
+        let nest = MockNest::arc();
+        let m = mgr(nest.clone());
+        let w = m.author_window("ab".repeat(32));
+        nest.push_page(vec![post("aa", 1), post("bb", 2)], None);
+        block_on(w.refresh_current_feed());
+        assert_eq!(post_ids(&w), vec!["aa", "bb"]);
+
+        nest.gate_next_local_page();
+        let mut refresh = Box::pin(w.refresh_current_feed());
+        assert!(poll_once(&mut refresh).is_pending(), "parks at the gate");
+        assert_eq!(
+            post_ids(&w),
+            vec!["aa", "bb"],
+            "a refresh of the author on screen keeps its posts in flight"
+        );
+        nest.push_page(vec![post("bb", 2), post("probe", 3)], None);
+        nest.open_gate();
+        assert!(poll_once(&mut refresh).is_ready());
+        assert_eq!(post_ids(&w), vec!["bb", "probe"], "the landed page wins");
+
+        // A switch on the window leaves the author: the list clears up front.
+        {
+            let mut g = nest.inner.lock().unwrap();
+            g.gate_open = false;
+            g.gate_armed = true;
+        }
+        let mut switch = Box::pin(w.select_feed(None));
+        assert!(poll_once(&mut switch).is_pending(), "parks at the gate");
+        assert!(
+            w.snapshot().posts.is_empty(),
+            "a switch clears before its fetch"
+        );
+        assert_eq!(
+            w.snapshot().author_selected,
+            None,
+            "the selection moved off the author"
+        );
+    }
+
+    /// The window carries the timeline's installed seams: a room post of a room
+    /// the reader sits in names the room on a window row exactly as on the
+    /// timeline — the room-post key seam was cloned in, not left empty.
+    #[test]
+    fn an_author_windows_room_post_derives_its_room_label_from_the_cloned_seam() {
+        let room = [0xC7u8; 32];
+        let nest = MockNest::arc();
+        let m = mgr(nest.clone());
+        m.set_room_post_keys(Arc::new(OneRoomKey {
+            room,
+            seal: fauna_core::room_post::RoomPostSeal::EndToEnd { epoch: 1 },
+            base: [0u8; 32],
+        }));
+        let w = m.author_window("22".repeat(32));
+        let mut room_post = post(&"aa".repeat(32), 2);
+        room_post.gated_tier = Some(fauna_core::subscription::ROOM_POST_TIER.into());
+        room_post.gated_room = Some(hex::encode(room));
+        nest.push_page(vec![room_post, post(&"bb".repeat(32), 1)], None);
+        block_on(w.refresh_own_rooms());
+        block_on(w.refresh_current_feed());
+        let snap = w.snapshot();
+        assert_eq!(snap.posts.len(), 2);
+        assert_eq!(snap.posts[0].room_label.as_deref(), Some("the room"));
+        assert_eq!(
+            snap.posts[1].room_label, None,
+            "a public post names no room"
+        );
+    }
+
+    /// An author window has no feed page whose `refresh_feeds` would load the
+    /// rooms its labels derive from, so its own read does: the Posts tab's
+    /// open (`refresh_current_feed`) alone names the room — no app has to know
+    /// to ask for `refresh_own_rooms` first.
+    #[test]
+    fn an_author_windows_read_loads_the_rooms_its_labels_derive_from() {
+        let room = [0xC8u8; 32];
+        let nest = MockNest::arc();
+        let m = mgr(nest.clone());
+        m.set_room_post_keys(Arc::new(OneRoomKey {
+            room,
+            seal: fauna_core::room_post::RoomPostSeal::EndToEnd { epoch: 1 },
+            base: [0u8; 32],
+        }));
+        let w = m.author_window("22".repeat(32));
+        let mut room_post = post(&"aa".repeat(32), 1);
+        room_post.gated_tier = Some(fauna_core::subscription::ROOM_POST_TIER.into());
+        room_post.gated_room = Some(hex::encode(room));
+        nest.push_page(vec![room_post], None);
+        block_on(w.refresh_current_feed());
+        assert_eq!(
+            w.snapshot().posts[0].room_label.as_deref(),
+            Some("the room")
         );
     }
 
@@ -9594,6 +10128,243 @@ mod tests {
             gated.key_access
         );
         assert_eq!(created.references.len(), 1);
+    }
+
+    /// A room-post key seam that keys several rooms at once — each at its own
+    /// epoch and base — and lists them in the order given, so a test can put a
+    /// sibling room *first*.
+    struct ManyRoomKeys {
+        rooms: Vec<([u8; 32], u64, [u8; 32])>,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl fauna_core::room_post::RoomPostKeys for ManyRoomKeys {
+        async fn room_post_seal_key(
+            &self,
+            room: [u8; 32],
+        ) -> Result<
+            (
+                fauna_core::room_post::RoomPostSeal,
+                zeroize::Zeroizing<[u8; 32]>,
+            ),
+            String,
+        > {
+            self.rooms
+                .iter()
+                .find(|(r, _, _)| *r == room)
+                .map(|(_, epoch, base)| {
+                    (
+                        fauna_core::room_post::RoomPostSeal::EndToEnd { epoch: *epoch },
+                        zeroize::Zeroizing::new(*base),
+                    )
+                })
+                .ok_or_else(|| "not keyed into that room".to_string())
+        }
+
+        async fn room_post_base_key(
+            &self,
+            room: [u8; 32],
+            seal: fauna_core::room_post::RoomPostSeal,
+        ) -> Result<zeroize::Zeroizing<[u8; 32]>, String> {
+            self.rooms
+                .iter()
+                .find(|(r, epoch, _)| {
+                    *r == room
+                        && seal == fauna_core::room_post::RoomPostSeal::EndToEnd { epoch: *epoch }
+                })
+                .map(|(_, _, base)| zeroize::Zeroizing::new(*base))
+                .ok_or_else(|| "not keyed into that room's key".to_string())
+        }
+
+        async fn room_post_rooms(&self) -> Vec<fauna_core::room_post::RoomPostRoom> {
+            self.rooms
+                .iter()
+                .map(|(room, _, _)| fauna_core::room_post::RoomPostRoom {
+                    room: *room,
+                    label: "a room".into(),
+                })
+                .collect()
+        }
+    }
+
+    /// The staged post's sealed envelope, decoded — what a pin on the arm and
+    /// the seal id reads before anything is uploaded.
+    fn staged_gated(m: &FeedManager<Arc<MockNest>>) -> fauna_core::subscription::types::GatedInfo {
+        let bytes = m
+            .pending_gated
+            .read()
+            .unwrap()
+            .as_ref()
+            .expect("a post is staged")
+            .post_bytes
+            .clone();
+        decode_post(&bytes)
+            .expect("decodes + verifies")
+            .0
+            .gated
+            .expect("the staged post is sealed")
+    }
+
+    /// **A seated member's reply seals to the TARGET's own room, not to a
+    /// sibling room they also sit in.** The seam keys two rooms at distinct
+    /// epochs and lists the sibling FIRST, so a verb that took the first own
+    /// room, or any room but the target's, lands under the wrong arm.
+    #[test]
+    fn a_sealed_reply_seals_to_the_targets_own_room_not_a_sibling() {
+        use fauna_core::subscription::types::KeyAccess;
+        const ROOM_A: [u8; 32] = [0xA1u8; 32];
+        const ROOM_B: [u8; 32] = [0xB2u8; 32];
+        let target = "c2".repeat(32);
+        let mut item = post(&target, 2);
+        item.gated_tier = Some("room".into());
+        item.gated_room = Some(hex::encode(ROOM_A));
+        let nest = MockNest::arc();
+        nest.push_page(vec![item], None);
+        let m = mgr(nest);
+        m.set_room_post_keys(Arc::new(ManyRoomKeys {
+            rooms: vec![(ROOM_B, 7, [0xBBu8; 32]), (ROOM_A, 4, [0xAAu8; 32])],
+        }));
+        block_on(m.select_feed(None));
+        block_on(m.refresh_own_rooms());
+        assert_eq!(
+            reply_audience(&m, &target),
+            Some(ReplyAudience::SealedToRoom)
+        );
+
+        block_on(m.prepare_sealed_reply(target, "said in room A".into()))
+            .expect("prepare ok")
+            .expect("a seated member has a body to upload");
+        let gated = staged_gated(&m);
+        assert!(
+            matches!(gated.key_access, KeyAccess::Room { ref group_id, epoch: 4, .. } if group_id.0 == ROOM_A),
+            "sealed to the target's own room at its own epoch: {:?}",
+            gated.key_access
+        );
+    }
+
+    /// **A tier owner's reply seals to the TARGET's tier, not a wider or a
+    /// first-listed one.** Three own tiers each hold their own custody period
+    /// key; the target's is rank 2 and sits LAST, between a rank-9 and a
+    /// rank-1. The blob must open under the target tier's key and no other.
+    #[test]
+    fn a_sealed_reply_seals_to_the_targets_own_tier_not_a_wider_one() {
+        use fauna_core::subscription::crypto::{decrypt_content, derive_post_key};
+        const WIDE_KEY: [u8; 32] = [0x09u8; 32];
+        const NARROW_KEY: [u8; 32] = [0x01u8; 32];
+        let target = "c1".repeat(32);
+        let nest = MockNest::arc();
+        nest.seed_tier("platinum", 9);
+        nest.seed_tier("silver", 1);
+        nest.seed_tier(TIER, 2);
+        nest.seed_custody("platinum", WIDE_KEY);
+        nest.seed_custody("silver", NARROW_KEY);
+        nest.seed_custody(TIER, PERIOD_KEY);
+        nest.seed_key_blob(1, vec![0x11u8; 32], vec![0xAA]);
+        let mut item = post(&target, 3);
+        item.author = hex::encode(ActorKeypair::from_secret(TEST_SECRET).actor_id().0);
+        item.gated_tier = Some(TIER.into());
+        nest.push_page(vec![item], None);
+        let m = mgr(nest);
+        block_on(m.select_feed(None));
+        block_on(m.refresh_own_tiers());
+
+        let blob = block_on(m.prepare_sealed_reply(target, "for gold only".into()))
+            .expect("prepare ok")
+            .expect("the owner has a body to upload");
+        let gated = staged_gated(&m);
+        assert_eq!(gated.tier, TIER);
+        assert_eq!(gated.tier_rank, 2);
+        let key = derive_post_key(&PERIOD_KEY, &gated.seal_id);
+        decrypt_content(&key, &blob).expect("the blob opens under the target tier's period key");
+        for other in [WIDE_KEY, NARROW_KEY] {
+            let wrong = derive_post_key(&other, &gated.seal_id);
+            assert!(
+                decrypt_content(&wrong, &blob).is_err(),
+                "no other own tier's key may open it"
+            );
+        }
+    }
+
+    /// **Every staged post mints a fresh seal id** — two sealed replies, and
+    /// two text-only composer submits on each of the tier, room and sell arms.
+    /// A constant or reused id would key every post under one per-post key.
+    #[test]
+    fn every_sealed_post_stages_a_fresh_seal_id() {
+        // Sealed replies (tier arm): two prepares, one target.
+        let target = "c1".repeat(32);
+        let nest = MockNest::arc();
+        nest.seed_tier(TIER, 2);
+        nest.seed_custody(TIER, PERIOD_KEY);
+        nest.seed_key_blob(1, vec![0x11u8; 32], vec![0xAA]);
+        let mut item = post(&target, 3);
+        item.author = hex::encode(ActorKeypair::from_secret(TEST_SECRET).actor_id().0);
+        item.gated_tier = Some(TIER.into());
+        nest.push_page(vec![item], None);
+        let m = mgr(nest);
+        block_on(m.select_feed(None));
+        block_on(m.refresh_own_tiers());
+        let mut reply_ids = Vec::new();
+        for _ in 0..2 {
+            block_on(m.prepare_sealed_reply(target.clone(), "again".into()))
+                .expect("prepare ok")
+                .expect("a body");
+            reply_ids.push(staged_gated(&m).seal_id);
+        }
+        assert_ne!(reply_ids[0], reply_ids[1], "sealed reply, tier arm");
+
+        // Sealed replies (room arm).
+        let (m, target) = seated_member(MockNest::arc());
+        let mut reply_ids = Vec::new();
+        for _ in 0..2 {
+            block_on(m.prepare_sealed_reply(target.clone(), "again".into()))
+                .expect("prepare ok")
+                .expect("a body");
+            reply_ids.push(staged_gated(&m).seal_id);
+        }
+        assert_ne!(reply_ids[0], reply_ids[1], "sealed reply, room arm");
+
+        // Composer, tier arm.
+        let nest = MockNest::arc();
+        nest.seed_tier(TIER, 2);
+        nest.seed_custody(TIER, PERIOD_KEY);
+        nest.seed_key_blob(1, vec![0x11u8; 32], vec![0xAA]);
+        let m = mgr(nest);
+        block_on(m.refresh_own_tiers());
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            m.update_compose("a premium body".into(), String::new(), None);
+            m.update_compose_gate(Some(TIER.into()), "a teaser".into());
+            block_on(m.prepare_gated_blob())
+                .expect("tier build")
+                .expect("a blob");
+            ids.push(staged_gated(&m).seal_id);
+        }
+        assert_ne!(ids[0], ids[1], "composer, tier arm");
+
+        // Composer, room arm.
+        let (m, _) = seated_member(MockNest::arc());
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            m.update_compose("a room body".into(), String::new(), None);
+            m.update_compose_room(Some(hex::encode(SEALED_ROOM)), "a teaser".into());
+            block_on(m.prepare_gated_blob())
+                .expect("room build")
+                .expect("a blob");
+            ids.push(staged_gated(&m).seal_id);
+        }
+        assert_ne!(ids[0], ids[1], "composer, room arm");
+
+        // Composer, sell arm.
+        let m = mgr(MockNest::arc());
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            m.update_compose("the body you are selling".into(), String::new(), None);
+            m.update_compose_gate(None, "buy this to read it".into());
+            block_on(m.prepare_sell_post(Some("5 EUR".into()), false, None)).expect("sell build");
+            ids.push(staged_gated(&m).seal_id);
+        }
+        assert_ne!(ids[0], ids[1], "composer, sell arm");
     }
 
     /// **Everyone else has nothing to upload — and is still refused.** A
@@ -11104,6 +11875,44 @@ mod tests {
         );
     }
 
+    /// An admin-blocked post (`moderation.md` § Admin block of a reported item)
+    /// through the deep-link door: for any viewer but the author the nest
+    /// withholds the body, so the slot takes the notice summary — the reason,
+    /// nothing of the post; for the author, whose read keeps the body, the
+    /// decoded post carries the reason beside it (decision 4).
+    #[test]
+    fn resolve_post_carries_an_admin_block_in_place_of_or_beside_the_body() {
+        let nest = MockNest::arc();
+        nest.push_page(vec![post("aa", 1)], None);
+        let kp = ActorKeypair::from_secret([9u8; 32]);
+        nest.inner.lock().unwrap().posts_get_body =
+            build_post(&kp, "the blocked words", &[], None).unwrap();
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+
+        nest.inner.lock().unwrap().posts_get_admin_block = Some(("harassment".into(), false));
+        assert_eq!(
+            block_on(m.resolve_post("yy".into())),
+            PostResolution::Fetched
+        );
+        let snap = m.snapshot();
+        let found = snap.find_post("yy").expect("the notice renders in place");
+        assert_eq!(found.admin_block_reason.as_deref(), Some("harassment"));
+        assert_eq!(found.body, "");
+        assert_eq!(found.author, "");
+        assert_eq!(found.legal_takedown_ref, None);
+
+        nest.inner.lock().unwrap().posts_get_admin_block = Some(("spam".into(), true));
+        assert_eq!(
+            block_on(m.resolve_post("xx".into())),
+            PostResolution::Fetched
+        );
+        let snap = m.snapshot();
+        let own = snap.find_post("xx").expect("the author's post resolves");
+        assert_eq!(own.body, "the blocked words", "the author keeps their view");
+        assert_eq!(own.admin_block_reason.as_deref(), Some("spam"));
+    }
+
     /// A post the nest cannot serve (not found / quarantine-gated) degrades to
     /// the surface's empty state rather than erroring the page.
     #[test]
@@ -11118,6 +11927,194 @@ mod tests {
             PostResolution::Unavailable
         );
         assert_eq!(m.snapshot().deep_linked_post, None);
+    }
+
+    /// Seed the local `fauna.posts.get` to answer `fauna.posts.not_found` for
+    /// every id but one the tests never ask — this nest does not hold the post.
+    fn local_store_misses(nest: &MockNest) {
+        nest.inner
+            .lock()
+            .unwrap()
+            .posts_get_by_id
+            .insert("unrelated".into(), vec![0x00]);
+    }
+
+    /// The deep-link door for a post homed on another nest
+    /// (`feed.md` § *A post homed on another nest*): this nest's `not_found`
+    /// sends the read to the post's home through `posts.get_remote`, and the
+    /// slot holds the post with its home recorded for the byte legs.
+    #[test]
+    fn resolve_post_from_relays_a_miss_to_the_posts_home() {
+        let nest = MockNest::arc();
+        nest.push_page(vec![post("aa", 1)], None);
+        let kp = ActorKeypair::from_secret([9u8; 32]);
+        let bytes = build_post(&kp, "homed elsewhere", &[], None).unwrap();
+        let zz = wire_post_id(&bytes);
+        local_store_misses(&nest);
+        nest.inner.lock().unwrap().posts_get_remote_body = bytes;
+        let home_id = "ab".repeat(32);
+        nest.inner.lock().unwrap().posts_get_remote_home_id = Some(home_id.clone());
+
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+        assert_eq!(
+            block_on(m.resolve_post_from(zz.clone(), "https://home.example".into())),
+            PostResolution::Fetched
+        );
+
+        // Local first, then the relay — in that order, naming the home.
+        let kinds = nest.kinds();
+        let local = kinds.iter().position(|k| k == "fauna.posts.get").unwrap();
+        let remote = kinds
+            .iter()
+            .position(|k| k == "fauna.posts.get_remote")
+            .expect("the miss relays to the home");
+        assert!(local < remote);
+        let req: fauna_protocol::posts::PostGetRemoteRequest = nest.req("fauna.posts.get_remote");
+        assert_eq!(req.post_id, zz);
+        assert_eq!(req.nest_url, "https://home.example");
+
+        let snap = m.snapshot();
+        let found = snap.find_post(&zz).expect("the relayed post renders");
+        assert_eq!(found.body, "homed elsewhere");
+        assert_eq!(found.verification, VerificationStatus::Verified);
+        assert_eq!(found.home_nest_url.as_deref(), Some("https://home.example"));
+        // The identity the relaying nest stamped rides with the home, so the
+        // byte plane can graduate a pin for it.
+        assert_eq!(
+            found.blob_home(),
+            Some(crate::BlobHome {
+                url: "https://home.example",
+                nest_actor_id: Some(&home_id),
+            })
+        );
+    }
+
+    /// A gated post reached only through the relay unseals without a second
+    /// read: this nest does not hold it, so `gated_blob_hash`'s own
+    /// `fauna.posts.get` would miss — the envelope the relay decoded is the
+    /// gated record the unlock needs.
+    #[test]
+    fn a_relayed_gated_post_unseals_without_reading_this_nest_again() {
+        let kp = ActorKeypair::from_secret(TEST_SECRET);
+        let build = fauna_client_core::post::build_gated_post(
+            &kp,
+            "public teaser",
+            "the-full-premium-body",
+            TIER,
+            2,
+            [0x11u8; 32],
+            &PERIOD_KEY,
+        )
+        .unwrap();
+        let zz = wire_post_id(&build.post_bytes);
+
+        let nest = MockNest::arc();
+        nest.push_page(vec![post("aa", 1)], None);
+        nest.seed_custody(TIER, PERIOD_KEY);
+        local_store_misses(&nest);
+        nest.inner.lock().unwrap().posts_get_remote_body = build.post_bytes.clone();
+
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+        assert_eq!(
+            block_on(m.resolve_post_from(zz.clone(), "https://home.example".into())),
+            PostResolution::Fetched
+        );
+        let gets_before = nest
+            .kinds()
+            .iter()
+            .filter(|k| *k == "fauna.posts.get")
+            .count();
+        let hash = block_on(m.gated_blob_hash(zz.clone())).expect("the relayed record resolves");
+        assert_eq!(
+            hash,
+            hex::encode(blake3::hash(&build.encrypted_blob).as_bytes())
+        );
+        assert_eq!(
+            nest.kinds()
+                .iter()
+                .filter(|k| *k == "fauna.posts.get")
+                .count(),
+            gets_before,
+            "no second read of a nest that does not hold the post"
+        );
+        block_on(m.unlock_gated_post(zz.clone(), build.encrypted_blob.clone()))
+            .expect("the relayed post unseals");
+        let snap = m.snapshot();
+        let found = snap.find_post(&zz).expect("still in the slot");
+        assert!(found.gated_unlocked);
+        assert_eq!(found.body, "the-full-premium-body");
+    }
+
+    /// A post this nest holds is served locally, whatever home the link named
+    /// — no relay, and no home recorded.
+    #[test]
+    fn resolve_post_from_does_not_relay_a_post_this_nest_holds() {
+        let nest = MockNest::arc();
+        nest.push_page(vec![post("aa", 1)], None);
+        let kp = ActorKeypair::from_secret([9u8; 32]);
+        let bytes = build_post(&kp, "held here", &[], None).unwrap();
+        let zz = wire_post_id(&bytes);
+        nest.inner.lock().unwrap().posts_get_body = bytes;
+
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+        assert_eq!(
+            block_on(m.resolve_post_from(zz.clone(), "https://home.example".into())),
+            PostResolution::Fetched
+        );
+        assert!(!nest.kinds().iter().any(|k| k == "fauna.posts.get_remote"));
+        let snap = m.snapshot();
+        let found = snap.find_post(&zz).expect("served locally");
+        assert_eq!(found.home_nest_url, None);
+    }
+
+    /// The home's legal-takedown marker rides the relay to the same tombstone
+    /// the same-nest door parks.
+    #[test]
+    fn resolve_post_from_forwards_a_takedown_tombstone() {
+        let nest = MockNest::arc();
+        nest.push_page(vec![post("aa", 1)], None);
+        local_store_misses(&nest);
+        nest.inner.lock().unwrap().posts_get_remote_legal_takedown =
+            Some("EU-DSA-2024/12345".into());
+
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+        assert_eq!(
+            block_on(m.resolve_post_from("yy".into(), "https://home.example".into())),
+            PostResolution::TakenDown {
+                reference: "EU-DSA-2024/12345".into()
+            }
+        );
+        let snap = m.snapshot();
+        let found = snap
+            .find_post("yy")
+            .expect("the tombstone renders in place");
+        assert_eq!(
+            found.legal_takedown_ref.as_deref(),
+            Some("EU-DSA-2024/12345")
+        );
+        assert_eq!(found.body, "");
+    }
+
+    /// The no-home resolve never relays: a link that names no home has none to
+    /// ask, so this nest's `not_found` is the answer.
+    #[test]
+    fn resolve_post_never_relays() {
+        let nest = MockNest::arc();
+        nest.push_page(vec![post("aa", 1)], None);
+        local_store_misses(&nest);
+        nest.inner.lock().unwrap().posts_get_remote_body = vec![0x01];
+
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+        assert_eq!(
+            block_on(m.resolve_post("zz".into())),
+            PostResolution::Unavailable
+        );
+        assert!(!nest.kinds().iter().any(|k| k == "fauna.posts.get_remote"));
     }
 
     /// Deleting the post you are viewing releases the slot too — `s.posts
@@ -11436,6 +12433,61 @@ mod tests {
             }
             other => panic!("expected a trailing QuotedPost block, got {other:?}"),
         }
+    }
+
+    /// The quote fallback over an admin-blocked post (`moderation.md` § Admin
+    /// block of a reported item): a withheld body projects the notice card and
+    /// the folded block carries the reason; the author's read decodes the body
+    /// and carries the reason beside it.
+    #[test]
+    fn resolve_quoted_post_fallback_carries_an_admin_block() {
+        use fauna_core::render::RenderBlock;
+        let nest = MockNest::arc();
+        let mut quoting = post("aa", 2);
+        quoting.quoted_post_id = Some("zz".into());
+        nest.push_page(vec![quoting], None);
+        nest.inner.lock().unwrap().posts_get_admin_block = Some(("hate".into(), false));
+
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+        let view = block_on(m.resolve_quoted_post("zz".into())).expect("the notice resolves");
+        assert_eq!(view.admin_block_reason.as_deref(), Some("hate"));
+        assert!(view.body.is_empty());
+        assert!(!view.not_found);
+        let aa = m
+            .snapshot()
+            .posts
+            .into_iter()
+            .find(|p| p.post_id == "aa")
+            .unwrap();
+        match aa.document.blocks.last() {
+            Some(RenderBlock::QuotedPost {
+                admin_block_reason,
+                body,
+                ..
+            }) => {
+                assert_eq!(admin_block_reason.as_deref(), Some("hate"));
+                assert!(body.is_empty());
+            }
+            other => panic!("expected a trailing QuotedPost block, got {other:?}"),
+        }
+
+        // The author's read: the body decodes, the reason rides beside it.
+        let nest = MockNest::arc();
+        let mut quoting = post("aa", 2);
+        quoting.quoted_post_id = Some("zz".into());
+        nest.push_page(vec![quoting], None);
+        let kp = ActorKeypair::from_secret([9u8; 32]);
+        {
+            let mut g = nest.inner.lock().unwrap();
+            g.posts_get_body = build_post(&kp, "my own words", &[], None).unwrap();
+            g.posts_get_admin_block = Some(("hate".into(), true));
+        }
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+        let view = block_on(m.resolve_quoted_post("zz".into())).expect("the author's quote");
+        assert_eq!(view.body, "my own words");
+        assert_eq!(view.admin_block_reason.as_deref(), Some("hate"));
     }
 
     /// A quote this device resolved from its loaded page, whose target is then
@@ -14066,6 +15118,256 @@ mod tests {
         assert_eq!(m.snapshot().posts[0].unlock_offer, None);
     }
 
+    // ── The remote author's byline (`feed.md` § The read model → *The remote
+    //    author's byline*) ──
+
+    const HOME: &str = "https://home.example";
+
+    /// A post by `author` homed on `home` — a delivered follow post or a relay.
+    fn remote_post(id: &str, author: &str, home: Option<&str>) -> FeedPostItem {
+        FeedPostItem {
+            author: author.into(),
+            home_nest_url: home.map(str::to_string),
+            ..post(id, 1)
+        }
+    }
+
+    /// `kp`'s signed profile bytes, naming them `name`.
+    fn signed_profile(kp: &ActorKeypair, name: &str) -> Vec<u8> {
+        let profile = fauna_core::data::Profile {
+            actor_id: kp.actor_id(),
+            display_name: Some(name.into()),
+            bio: None,
+            avatar: None,
+            banner: None,
+            links: vec![],
+            nests: vec![],
+            admin_nests: vec![],
+            load_hint: None,
+            inbox_mode: fauna_core::data::InboxMode::Open,
+            recovery_head: None,
+            audience: fauna_core::data::ProfileAudience::Everyone,
+            updated_at: Timestamp(0),
+        };
+        sign_and_pack(kp, &profile).unwrap()
+    }
+
+    fn face_relays(nest: &MockNest) -> usize {
+        nest.kinds()
+            .iter()
+            .filter(|k| *k == "fauna.profile.get_remote")
+            .count()
+    }
+
+    fn face_of(m: &FeedManager<Arc<MockNest>>, id: &str) -> Option<AuthorDisplayView> {
+        m.snapshot().find_post(id).unwrap().author_display.clone()
+    }
+
+    /// The memo's whole point: N cards by one author cost one relay, and the
+    /// answer lands on all of them; a second author costs their own.
+    #[test]
+    fn three_cards_by_one_remote_author_cost_one_relay() {
+        let alice = ActorKeypair::from_secret([11u8; 32]);
+        let bob = ActorKeypair::from_secret([12u8; 32]);
+        let (a, b) = (
+            hex::encode(alice.actor_id().0),
+            hex::encode(bob.actor_id().0),
+        );
+        let nest = MockNest::arc();
+        nest.push_page(
+            vec![
+                remote_post("p1", &a, Some(HOME)),
+                remote_post("p2", &a, Some(HOME)),
+                remote_post("p3", &a, Some(HOME)),
+                remote_post("p4", &b, Some(HOME)),
+            ],
+            None,
+        );
+        {
+            let mut g = nest.inner.lock().unwrap();
+            g.remote_profiles
+                .insert(a.clone(), signed_profile(&alice, "Alice"));
+            g.remote_profiles
+                .insert(b.clone(), signed_profile(&bob, "Bob"));
+        }
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+
+        for id in ["p1", "p2", "p3", "p4"] {
+            block_on(m.resolve_author_face(id.into()));
+        }
+        assert_eq!(face_relays(&nest), 2, "one relay per (author, home)");
+        let alice_face = AuthorDisplayView {
+            handle: None,
+            display_name: Some("Alice".into()),
+            avatar_url: None,
+        };
+        for id in ["p1", "p2", "p3"] {
+            assert_eq!(face_of(&m, id), Some(alice_face.clone()));
+        }
+        assert_eq!(
+            face_of(&m, "p4").unwrap().display_name.as_deref(),
+            Some("Bob")
+        );
+    }
+
+    /// A reload rebuilds every `PostSummary` with no face; the memo writes the
+    /// held answer back without a second relay.
+    #[test]
+    fn a_reload_reapplies_the_held_face_without_a_relay() {
+        let alice = ActorKeypair::from_secret([11u8; 32]);
+        let a = hex::encode(alice.actor_id().0);
+        let nest = MockNest::arc();
+        nest.push_page(vec![remote_post("p1", &a, Some(HOME))], None);
+        nest.push_page(vec![remote_post("p1", &a, Some(HOME))], None);
+        nest.inner
+            .lock()
+            .unwrap()
+            .remote_profiles
+            .insert(a.clone(), signed_profile(&alice, "Alice"));
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+        block_on(m.resolve_author_face("p1".into()));
+        block_on(m.select_feed(None));
+        assert_eq!(face_of(&m, "p1"), None, "the reload dropped the face");
+        block_on(m.resolve_author_face("p1".into()));
+        assert_eq!(face_relays(&nest), 1);
+        assert_eq!(
+            face_of(&m, "p1").unwrap().display_name.as_deref(),
+            Some("Alice")
+        );
+    }
+
+    /// An author who did not opt in: the home's `not_found` is a VALUE — the
+    /// guard closes, the label falls through to the id, nothing retries.
+    #[test]
+    fn a_remote_author_without_a_shown_profile_resolves_to_the_empty_face() {
+        let a = "33".repeat(32);
+        let nest = MockNest::arc();
+        nest.push_page(vec![remote_post("p1", &a, Some(HOME))], None);
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+
+        block_on(m.resolve_author_face("p1".into()));
+        block_on(m.resolve_author_face("p1".into()));
+        assert_eq!(face_relays(&nest), 1, "resolved, never re-asked");
+        let face = face_of(&m, "p1").expect("every outcome writes");
+        assert_eq!(face, AuthorDisplayView::default());
+        assert_eq!(
+            fauna_core::format::peer_display_label(
+                None,
+                face.display_name.as_deref(),
+                face.handle.as_deref(),
+                &a,
+            )
+            .primary,
+            fauna_core::format::peer_display_label(None, None, None, &a).primary,
+            "the card reads the id, as for no face at all"
+        );
+        assert!(
+            m.snapshot().error.is_none(),
+            "nothing reaches error-message"
+        );
+    }
+
+    /// A home cannot pair a post with another actor's name: a profile that
+    /// verifies but is signed by someone else is no face.
+    #[test]
+    fn a_profile_signed_by_another_actor_is_no_face() {
+        let alice = ActorKeypair::from_secret([11u8; 32]);
+        let mallory = ActorKeypair::from_secret([13u8; 32]);
+        let a = hex::encode(alice.actor_id().0);
+        let nest = MockNest::arc();
+        nest.push_page(vec![remote_post("p1", &a, Some(HOME))], None);
+        nest.inner
+            .lock()
+            .unwrap()
+            .remote_profiles
+            .insert(a.clone(), signed_profile(&mallory, "Not Alice"));
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+        block_on(m.resolve_author_face("p1".into()));
+        assert_eq!(face_of(&m, "p1"), Some(AuthorDisplayView::default()));
+    }
+
+    /// Bytes that do not verify are no face either.
+    #[test]
+    fn unverifiable_profile_bytes_are_no_face() {
+        let a = "33".repeat(32);
+        let nest = MockNest::arc();
+        nest.push_page(vec![remote_post("p1", &a, Some(HOME))], None);
+        nest.inner
+            .lock()
+            .unwrap()
+            .remote_profiles
+            .insert(a.clone(), b"not a profile".to_vec());
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+        block_on(m.resolve_author_face("p1".into()));
+        assert_eq!(face_of(&m, "p1"), Some(AuthorDisplayView::default()));
+    }
+
+    /// A post homed here never relays, and a bridged face is never replaced.
+    #[test]
+    fn a_post_homed_here_or_already_faced_never_relays() {
+        let a = "33".repeat(32);
+        let bridged = AuthorDisplayView {
+            handle: Some("bridged.example.com".into()),
+            display_name: Some("Bridged".into()),
+            avatar_url: None,
+        };
+        let nest = MockNest::arc();
+        nest.push_page(
+            vec![
+                remote_post("here", &a, None),
+                FeedPostItem {
+                    author_display: Some(fauna_protocol::feed::AuthorDisplay {
+                        handle: bridged.handle.clone(),
+                        display_name: bridged.display_name.clone(),
+                        avatar_url: None,
+                        extra: Default::default(),
+                    }),
+                    ..remote_post("bridged", &a, Some(HOME))
+                },
+            ],
+            None,
+        );
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+        block_on(m.resolve_author_face("here".into()));
+        block_on(m.resolve_author_face("bridged".into()));
+        assert_eq!(face_relays(&nest), 0);
+        assert_eq!(face_of(&m, "here"), None);
+        assert_eq!(face_of(&m, "bridged"), Some(bridged));
+    }
+
+    /// The deep-link slot is a rendered post like any other: it takes the face.
+    #[test]
+    fn the_deep_linked_post_takes_the_face() {
+        let alice = ActorKeypair::from_secret([11u8; 32]);
+        let a = hex::encode(alice.actor_id().0);
+        let nest = MockNest::arc();
+        nest.push_page(vec![post("aa", 1)], None);
+        nest.inner
+            .lock()
+            .unwrap()
+            .remote_profiles
+            .insert(a.clone(), signed_profile(&alice, "Alice"));
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+        let mut linked = m.snapshot().posts[0].clone();
+        linked.post_id = "zz".into();
+        linked.author = a.clone();
+        linked.home_nest_url = Some(HOME.into());
+        m.state.write().unwrap().deep_linked_post = Some(linked);
+
+        block_on(m.resolve_author_face("zz".into()));
+        assert_eq!(
+            face_of(&m, "zz").unwrap().display_name.as_deref(),
+            Some("Alice")
+        );
+    }
+
     /// The happy path: the post's totals and its attribution window land on
     /// `PostSummary.tips`, which is what `post-tip-total` / `post-tip-count` /
     /// `post-tip-item` render.
@@ -15024,6 +16326,37 @@ mod tests {
                 .all(|p| p.room_label.is_none()),
             "a lost seat drops the card back to the reserved tier"
         );
+    }
+
+    /// A delivered post's feed item names its home and the identity the
+    /// delivery verified (`federated-follow.md` § Decision 3): `map_post` folds
+    /// both onto the summary, so `blob_home` hands the byte plane the root it
+    /// graduates its pin against (`transport-trust.md` § The post arm).
+    #[test]
+    fn a_delivered_items_home_identity_rides_onto_the_summary() {
+        let home_id = "b0".repeat(32);
+        let delivered = map_post(FeedPostItem {
+            post_id: "ab".repeat(32),
+            author: "01".repeat(32),
+            source: "fauna".into(),
+            home_nest_url: Some("https://home.example".into()),
+            home_nest_actor_id: Some(home_id.clone()),
+            ..Default::default()
+        });
+        assert_eq!(
+            delivered.blob_home(),
+            Some(crate::BlobHome {
+                url: "https://home.example",
+                nest_actor_id: Some(&home_id),
+            })
+        );
+        let own = map_post(FeedPostItem {
+            post_id: "cd".repeat(32),
+            author: "01".repeat(32),
+            source: "fauna".into(),
+            ..Default::default()
+        });
+        assert_eq!(own.home_nest_actor_id, None);
     }
 
     /// A repost renders "as the target's own gated card, teaser and badge"
@@ -16696,6 +18029,7 @@ mod tests {
                         {"url": "https://a.example/", "state": "failed"},
                         {"url": "https://b.example/", "state": "resolving"},
                     ],
+                    "author_display": null,
                 },
                 {
                     "post_id": "p2",
@@ -16716,6 +18050,7 @@ mod tests {
                     "viewer_repost_id": null,
                     "quoted_post_id": null,
                     "link_previews": [],
+                    "author_display": null,
                 },
             ])
         );

@@ -61,13 +61,13 @@ Stamped 2026-10-01 at e5a7e5d758.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| linux | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
+| linux | ⚠ partial | 0.1.4-dev+5bf6e2c5.dirty standalone |
 | windows | ⚠ partial | 0.1.2-dev+98b03c39 standalone |
 | macos | ⚠ partial | 0.1.2-dev+ac32864b standalone |
 | ios | ⚠ partial | 0.1.2-dev+ac32864b standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| tui | ⚠ partial | 0.1.4-dev+a3bd9d85 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -79,9 +79,9 @@ Stamped 2026-10-01 at e5a7e5d758.
 | 3 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_signal_sharing_toggle_and_pane_render` | web (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 3 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_signal_sharing_persisted_optin_honoured_by_producer_after_relaunch` | — |
 | 4 | nest | `tests/e2e-unified/tests/api/test_signal_sharing.py::test_signal_sharing_k_gate_transparency_flip_public_gate_and_opt_out` | nest (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_scrolling_past_a_post_teaches_less_like_this_and_lingering_later_takes_it_back` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_scrolling_past_a_post_teaches_less_like_this_and_lingering_later_takes_it_back` | web (linux): failed, linux (linux): passed, tui (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_flicking_fast_past_a_post_teaches_nothing` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_scrolling_past_a_post_teaches_less_like_this_and_lingering_later_takes_it_back` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 7 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_scrolling_past_a_post_teaches_less_like_this_and_lingering_later_takes_it_back` | web (linux): failed, linux (linux): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_a_switched_off_topic_learns_nothing_and_switching_off_keeps_what_it_learned` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_a_switched_off_topic_learns_nothing_and_switching_off_keeps_what_it_learned` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 10 | nest | `tests/e2e-unified/tests/api/test_personalization_sealed_at_rest.py::test_the_engagement_rollup_rests_on_the_nest_only_sealed` | nest (linux): passed |

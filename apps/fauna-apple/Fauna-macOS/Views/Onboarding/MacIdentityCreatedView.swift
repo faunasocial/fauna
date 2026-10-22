@@ -45,6 +45,13 @@ struct MacIdentityCreatedView: View {
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 400)
 
+            // A confirm whose keychain write failed lands back here with the
+            // shared machine's `identity_commit_failed` message.
+            if let error = vm.errorMessage {
+                ErrorBanner(message: error)
+                    .frame(maxWidth: 400)
+            }
+
             HStack {
                 Button(L.common.back) { vm.machine.back() }
                     .accessibilityIdentifier(Ids.identityCreatedBackButton)

@@ -74,6 +74,7 @@ public struct MutedWordsView: View {
             vm.configure(api: client.api)
             await vm.load()
         }
+        .onStoreChange { await vm.resync() }
     }
 
     private func submitAdd() {

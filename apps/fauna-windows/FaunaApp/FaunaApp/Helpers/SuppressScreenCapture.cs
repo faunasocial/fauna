@@ -21,7 +21,7 @@ namespace FaunaApp.Helpers;
 /// screenshot a recovery kit precisely because that copy is what saves them. Suppressing
 /// there trades a shoulder-surfing risk for an account-loss risk — the irreversible one.
 /// The in-scope surfaces are the <b>minted, revocable</b> three, and only those:
-/// <c>mail-settings-credential-item-secret</c>, <c>atproto-app-credential-reveal</c>,
+/// <c>connected-apps-item-secret</c>, <c>atproto-app-credential-reveal</c>,
 /// <c>nostr-bunker-connect-string</c>. That list is pinned from outside this app by tier_1
 /// <c>tests/e2e-unified/tests/test_screen_capture_posture.py</c>, in both directions.</para>
 /// </summary>

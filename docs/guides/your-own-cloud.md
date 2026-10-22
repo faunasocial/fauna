@@ -1,20 +1,13 @@
-# Your own cloud — replacing Dropbox, iCloud and Google Drive with Fauna
+# Your own cloud — files, photos and backups on a server you control
 
-> **Status — this guide describes Fauna as it is taking shape.** Most of what
-> you read here is built and tested today; some pieces are still landing. The
-> body reads as the finished product so you can judge the destination, and each
-> guide ends with a **"Where this stands"** table that says plainly what is
-> available now, what is landing, and what is planned. Nothing here is
-> speculation beyond Fauna's ratified design documents.
+> **Status — this guide describes Fauna as it is taking shape.** Most of what you read here is built and tested today; some pieces are still being built or planned. Each companion guide ends with a **"Where this stands"** table that says plainly where each piece stands.
 
 ---
 
-> **What this is.** The case for moving your files, photos, and backups off
-> commercial cloud storage and onto a server you own, running Fauna. It links to
-> four companion guides that each cover one job in depth:
+> **What this is.** The case for moving your files, photos, and backups off commercial cloud storage and onto a server you control, running Fauna. It links to five companion guides that each cover one job in depth:
 >
 > 1. **[Your files on every device](cloud-sync.md)** — sync, network drives, offline.
-> 2. **[Backup — your own, and with friends](cloud-backup.md)** — snapshots, restore, and letting a friend hold your (unreadable) backup.
+> 2. **[Backup — your own, and with friends](cloud-backup.md)** — snapshots, restore, and letting a friend hold your backup without being able to read it, apart from a folder you have made public.
 > 3. **[Photos and media](cloud-photos.md)** — automatic camera-roll backup from iPhone and Android, and browsing your media anywhere.
 > 4. **[Sharing files and running a family nest](cloud-sharing-family.md)** — sharing with other people, and putting your household on one server.
 > 5. **[File sync FAQ](file-sync-faq.md)** — working together in shared folders: simultaneous edits, conflicts and merging, Office and VM disks, sync timing.
@@ -30,7 +23,6 @@ A typical household pays for several of these at once (ballpark prices, mid-2026
 
 | Service | What it does | Typical price |
 |---|---|---|
-| iCloud+ 2 TB | Photo backup, device sync, family sharing | ≈ $11 / month |
 | Google One 2 TB | Drive, Photos, Gmail storage | ≈ $10 / month |
 | Dropbox Plus 2 TB | File sync and sharing | ≈ $12 / month |
 | Microsoft 365 Personal (1 TB) | OneDrive + Office | ≈ $10 / month |
@@ -44,23 +36,18 @@ flag, with quotas designed to push you to the next tier.
 ## What Fauna replaces it with
 
 ```
-  your devices                          your nest (a server YOU own)
+  your devices                      your nest (a server YOU control)
  ┌──────────────────────┐              ┌────────────────────────────┐
  │ laptop, phone, NAS…  │              │  a small rented VPS, or a  │
  │                      │◄──encrypted──►  box at home — your files, │
- │ hold your ONE key;   │     sync     │  photos, backups, mail,    │
- │ files are encrypted  │              │  calendar. Stores what YOU │
- │ before they leave    │              │  can't read? Impossible —  │
- └──────────────────────┘              │  it stores ciphertext.     │
+ │ hold your key; files │     sync     │  photos, backups, mail,    │
+ │ are encrypted before │              │  calendar, stored          │
+ │ they leave by default│              │  encrypted on your nest    │
+ └──────────────────────┘              │  by default.               │
                                        └────────────────────────────┘
 ```
 
-One Fauna server (a **nest**) does the jobs you're paying separate
-subscriptions for: file sync across devices, automatic photo backup from your
-phones, versioned backups, file sharing, media browsing — plus email, calendar,
-contacts, messaging, and social feeds, which no storage subscription gives you
-at all. The same apps (Windows, macOS, Linux, iPhone, Android, and web) drive
-all of it.
+One Fauna server (a **nest**) does the jobs you're paying separate subscriptions for: file sync across devices, automatic photo backup from your phones, versioned backups, file sharing, media browsing — plus email, calendar, contacts, messaging, and social feeds, which no storage subscription gives you at all. The same Fauna apps — on your computer, on your phone, in a browser or in a terminal — drive all of it.
 
 ### What it costs instead
 
@@ -76,9 +63,7 @@ Ballpark, mid-2026:
   - **the sweet spot: keep the bulk at home.** A nest on a mini-PC or NAS with
     cheap multi-terabyte disks, paired with a small VPS as its public front
     door. Disk you own outright costs ~€20 *once* per terabyte, not per month.
-    See [Set up a nest at home](nest-home-setup.md); a companion
-    home-relay guide (mail flowing through the public box) publishes when its
-    fully in-app flow lands.
+    See [Set up a nest at home](nest-home-setup.md), which serves your files on your own network, and [Link a home nest to an internet nest](nest-relay-setup.md), which has the small server receive your email and keep it until the nest at home collects it.
 
 So the steady state is roughly **€70–130 a year** for the VPS-only shape —
 replacing subscriptions that cost twice that or more — and closer to just the
@@ -90,28 +75,10 @@ domain fee if your storage lives at home. You are trading a little setup work
 This is the part no mainstream cloud offers, and it's worth understanding
 because it is *the* reason Fauna works the way it does:
 
-- **Your identity is one key**, created on your device when you first sign up.
-  It never leaves your devices. There is no password, so there is no password
-  database to breach and no "reset my password" support desk that can be
-  social-engineered. You copy the key to each new device yourself (shown as a
-  QR code / recovery phrase at sign-in).
-- **Files are encrypted on your device before they are uploaded.** The nest
-  stores content-addressed encrypted chunks. Identical data is stored once
-  (deduplication), only changed pieces are re-uploaded, and the server can
-  verify integrity — all without ever being able to read the contents.
-- **You choose how much the box gets to do with your data — any time, not
-  just at setup.** Every nest holds ciphertext by default; there's no
-  claim-time trust question to answer, right down to a rented VPS. When you
-  want a box to do more — serve mail to any mail app on your home LAN, index
-  your content for search, and so on — you mint the specific, revocable grant
-  for it from Settings → Nests. Nothing is granted until you ask for it, and
-  you can take it back the same way.
-- **The flip side, stated honestly: your key is your account.** If you lose
-  the key from *all* your devices and copies, no one — not you, not the nest,
-  not the Fauna project — can recover your encrypted data. Keep the key on at
-  least two devices and store the recovery phrase somewhere safe. The
-  [backup guide](cloud-backup.md) § "The key that matters more than the backup"
-  covers this.
+- **Your identity is one key**, created on your device when you first sign up — a key on your devices, not an account with anyone. There is no account password, so no server stores a password that would let someone sign in as you, and there is no "reset my password" support desk that can be talked into handing over your account. You move the key to each new device yourself: paste it, or scan it as a QR code from a device you are already signed in on.
+- **The Fauna apps encrypt your files on your device before uploading them**, except in a folder you make public; a file you save into a folder over WebDAV is encrypted by your nest as it arrives. The nest stores content-addressed encrypted chunks. Identical data within a folder is stored once (deduplication), only changed pieces are re-uploaded, and the server can verify integrity — all without being able to read the contents, unless you choose otherwise: a folder you make public, serve over WebDAV or put behind a paywall is readable by the box that serves it.
+- **You choose how much the box gets to do with your data — any time, not just at setup.** Every nest — right down to a rented VPS — stores your content encrypted, apart from what you publish to everyone, which is public by design. At the end of claiming or joining a nest you may be offered **Trust this box?**; it's optional, and **Not now** changes nothing. When you want a box to do more — read your mail again to re-run its spam and virus checks when they are updated, for example (mail from outside your nest is checked once as it arrives either way) — you give it permission for that one job from Settings → Nests (**Add trust…**) — or by subscribing to a community labeler that reads your mail, which gets its own trust for that one labeler. Nothing is granted until you ask for it, and you can take it back the same way. Linking an account on another network gives your nest that account's sign-in until you unlink it. Connecting a standard mail, calendar or contacts app lets your nest open what that app reads while it is signed in. Mail and messages your nest passes to and from email and other networks arrive readable and are stored encrypted as they land, and a group may choose to be a community room, which its home nest can read. When your app shows a preview of a link that stands on a line of its own, in a post or a message, it asks your nest to fetch that link, so your nest learns the link's address. And someone who can open one of your messages, or a post only some people can open, can attach its text to a report, which the admins it goes to can then read. And your nest sees what any server that delivers your messages must: who you're connected to — your contacts, whom you follow, the groups you're in — and when and how much you send.
+- **The flip side, stated honestly: whoever holds your key can act as you, and losing it needs a way back.** Make a **recovery kit** — a second key, kept only by you and only offline, that gets your account back if you lose your key or someone steals it — and keep the key itself on at least two devices. If you lose the key from *all* your devices and copies and have no recovery kit, no one — not you, not the nest, not the Fauna project — can recover your encrypted data. The [backup guide](cloud-backup.md) § "The key that matters more than the backup" covers this.
 
 ## Quotas — your disk is the limit
 
@@ -130,19 +97,19 @@ cap.
 
 ## How it compares
 
-| | **Fauna (your nest)** | iCloud+ | Google One | Dropbox | OneDrive | Nextcloud (self-hosted) |
-|---|---|---|---|---|---|---|
-| Who can read your files | **Only you** (E2EE by default) | Apple, unless you enable ADP | Google | Dropbox | Microsoft | Your server can (E2EE add-on is partial) |
-| Runs on hardware you own | **Yes** (VPS or home box) | No | No | No | No | Yes |
-| Multi-device file sync | **Yes** — desktop apps + network-drive access | Mac/iOS-centric | Yes | Yes | Yes | Yes |
-| Automatic phone photo backup | **Yes** (iPhone and Android) | iPhone | Android + iPhone | Yes | Yes | Yes (app) |
-| Versioned backups you control | **Yes** — snapshot history with retention you set | Time Machine is separate | Limited | 30–180 days | 30 days | Apps/add-ons |
-| Backup to a friend's server, unreadable by them | **Yes** | No | No | No | No | No |
-| Share to another person | **Yes** — to their Fauna identity; revocation actually re-encrypts | Yes | Yes | Yes | Yes | Yes |
-| "Anyone with the link" public links | **No — deliberately.** Bearer links are how private files leak. Public content uses real web hosting instead | Yes | Yes | Yes | Yes | Yes |
-| Also included: mail, calendar, contacts, messaging, social | **Yes** | No (mail separate) | Gmail separate | No | No | Via many add-on apps |
-| Monthly fee scales with storage | **No** — your disk | Yes | Yes | Yes | Yes | No |
-| Someone else runs it for you | No — you do (guided) | Yes | Yes | Yes | Yes | No |
+| | **Fauna (your nest)** | Google One | Dropbox | OneDrive | Nextcloud (self-hosted) |
+|---|---|---|---|---|---|
+| Who can read your files | **Only you** and the people you share with (end-to-end encrypted by default) | Google | Dropbox | Microsoft | Your server can (E2EE add-on is partial) |
+| Runs on a server you control | **Yes** (a rented VPS or a box at home) | No | No | No | Yes |
+| Multi-device file sync | **Yes** — desktop apps, your phone's Files app, and network-drive access | Yes | Yes | Yes | Yes |
+| Automatic phone photo backup | **Yes** (iPhone and Android) | Android + iPhone | Yes | Yes | Yes (app) |
+| Versioned backups you control | **Yes** — snapshot history with retention you set | Limited | 30–180 days | 30 days | Apps/add-ons |
+| Backup to a friend's server, unreadable by them | **Yes**, apart from a folder you have made public | No | No | No | No |
+| Share to another person | **Yes** — to their Fauna identity; removing them rotates the folder's key, so nothing added afterwards reaches them | Yes | Yes | Yes | Yes |
+| "Anyone with the link" links | **Yes** — links that expire when you choose and that you can revoke; a private file's link carries its own key | Yes | Yes | Yes | Yes |
+| Also included: mail, calendar, contacts, messaging, social | **Yes** | Gmail separate | No | No | Via many add-on apps |
+| Monthly fee scales with storage | **No** — your disk | Yes | Yes | Yes | No |
+| Someone else runs it for you | No — you do (guided) | Yes | Yes | Yes | No |
 
 That last row is the honest trade: Fauna's setup guides make it approachable,
 but you are the admin of your own service in the way a Dropbox customer is
@@ -152,12 +119,4 @@ to, without the subscription or the surveillance.
 
 ## Where this stands
 
-Fauna is in closed alpha (since June 2026). The per-feature status tables live
-at the end of each companion guide — [sync](cloud-sync.md#where-this-stands-today),
-[backup](cloud-backup.md#where-this-stands-today),
-[photos](cloud-photos.md#where-this-stands-today),
-[sharing & family](cloud-sharing-family.md#where-this-stands-today). The short
-version: sync, photo backup, snapshots, friend-hosted backup storage, sharing,
-and the per-file version history browser are built and tested; the most
-visible pieces still landing are one-click disaster-restore from a backup
-destination and read-write shared folders.
+Fauna is in closed alpha. The per-feature status tables live at the end of each companion guide — [sync](cloud-sync.md#where-this-stands-today), [backup](cloud-backup.md#where-this-stands-today), [photos](cloud-photos.md#where-this-stands-today), [sharing & family](cloud-sharing-family.md#where-this-stands-today), [the file sync FAQ](file-sync-faq.md#where-this-stands-today). The short version: sync, photo backup, snapshots, backup copies on a nest you back up to — a friend's, say — or on one of your own devices, one-click restore from such a copy after losing your nest (from a nest's copy, once the lost nest is rebuilt with its own identity — **Recover a lost box** in the app does this, or gives a server you set up by hand the line to rebuild it), sharing — with other people, read-only or read-write, and by link — and the per-file version history browser are built and tested; the companion guides' tables name what is not available yet.

@@ -106,6 +106,10 @@ pub struct AuthorState {
     /// (`subscription-claim-tier-select`).
     #[cfg(feature = "payments")]
     pub claim_tier: String,
+    /// §5 — the code whose `subscription-claim-void-button` has been pressed
+    /// once: its second press voids (`bridges.rs`'s armed-uninstall shape).
+    #[cfg(feature = "payments")]
+    pub claim_void_armed: Option<String>,
     /// §1 create/edit form, when open.
     pub form: Option<TierForm>,
     /// §4 add/edit form, when open.
@@ -374,6 +378,20 @@ pub fn webhook_url(st: &ProfileState) -> String {
     fauna_client_payments::webhook_url(st.nest_url(), st.self_actor_id_hex(), kind)
 }
 
+/// The §4 form's live return-URL preview — the post-checkout redirect the
+/// author pastes into their provider's settings, so the buyer lands back on the
+/// nest's paywall return door. The shape is owned by `fauna_payments::return_url`
+/// (the nest registers its route from the same constants), so this never
+/// restates it. `site_origin` is the creator's **web-site** origin — the door
+/// finds the site owner from the request's `Host` — never `nest_url`, which is
+/// what the webhook display above uses; `None` while the creator has no public
+/// web address.
+#[cfg(feature = "payments")]
+pub fn return_url(st: &ProfileState, site_origin: Option<&str>) -> Option<String> {
+    let kind = provider_form(st).map(|f| f.kind.as_str()).unwrap_or("");
+    site_origin.map(|origin| fauna_client_payments::return_url(origin, kind))
+}
+
 /// The evidence-based §4 status badge (`provider_status_label` — no ping, the
 /// nest's verify/reject stamps decide).
 #[cfg(feature = "payments")]
@@ -393,11 +411,25 @@ fn claim_status(c: &ClaimItem) -> String {
     ))
 }
 
+/// The armed §5 void button's text: the consequence the second press has.
+/// A redeemed code's void also ends its redeemer's entitlement to the tier
+/// (`fauna.payments.claims.void`), so that is what the author is told.
+#[cfg(feature = "payments")]
+fn void_claim_confirm(c: &ClaimItem) -> String {
+    match &c.redeemed_by {
+        Some(redeemer) => s::void_claim_confirm_redeemed(&redeemer.to_hex(), &c.tier),
+        None => s::VOID_CLAIM_CONFIRM_UNREDEEMED.to_string(),
+    }
+}
+
 // ── Elements ─────────────────────────────────────────────────────────────────
 
 /// Paint §§1–5 in ui.yaml's declared order. Called by the page shell for the
 /// SELF Tiers tab only.
-pub fn elements(st: &ProfileState) -> Vec<Element> {
+pub fn elements(
+    st: &ProfileState,
+    #[cfg_attr(not(feature = "payments"), allow(unused_variables))] site_origin: Option<&str>,
+) -> Vec<Element> {
     let a = &st.author;
     let mut out = Vec::new();
     let tier_names = a.tier_names();
@@ -713,6 +745,24 @@ pub fn elements(st: &ProfileState) -> Vec<Element> {
                 true,
                 Gesture::Profile(Action::CopyWebhookUrl),
             ));
+            // The sibling display for the paywall return door; with no public
+            // web address the label says so and the copy button is inert.
+            let return_url = return_url(st, site_origin);
+            out.push(
+                Element::label(
+                    ids::SUBSCRIPTION_PROVIDER_FORM_RETURN_URL,
+                    return_url
+                        .clone()
+                        .unwrap_or_else(|| s::RETURN_URL_UNAVAILABLE.to_string()),
+                )
+                .labelled(s::RETURN_URL_LABEL),
+            );
+            out.push(Element::gesture_button(
+                ids::SUBSCRIPTION_PROVIDER_FORM_RETURN_URL_COPY_BUTTON,
+                fauna_i18n::strings::common::COPY,
+                return_url.is_some(),
+                Gesture::Profile(Action::CopyReturnUrl),
+            ));
             out.push(Element::gesture_button(
                 ids::SUBSCRIPTION_PROVIDER_FORM_SAVE,
                 s::SAVE,
@@ -762,6 +812,34 @@ pub fn elements(st: &ProfileState) -> Vec<Element> {
                 Element::label(ids::SUBSCRIPTION_CLAIM_STATUS, claim_status(c))
                     .within(ids::SUBSCRIPTION_CLAIM_ROW, i),
             );
+            // Conditional like the request row's paid badge — read through the
+            // row scope only. A voided code has nothing left to void.
+            if c.voided_at.is_some() {
+                continue;
+            }
+            let armed = a.claim_void_armed.as_deref() == Some(c.code.as_str());
+            out.push(
+                Element::gesture_button(
+                    ids::SUBSCRIPTION_CLAIM_VOID_BUTTON,
+                    if armed {
+                        void_claim_confirm(c)
+                    } else {
+                        s::VOID_CLAIM.to_string()
+                    },
+                    true,
+                    Gesture::Profile(Action::VoidClaim(c.code.clone())),
+                )
+                .within(ids::SUBSCRIPTION_CLAIM_ROW, i),
+            );
+            if armed {
+                out.push(
+                    Element::chrome_button(
+                        s::VOID_CLAIM_CANCEL,
+                        Gesture::Profile(Action::CancelVoidClaim),
+                    )
+                    .within(ids::SUBSCRIPTION_CLAIM_ROW, i),
+                );
+            }
         }
     }
 

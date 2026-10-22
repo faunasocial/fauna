@@ -166,7 +166,7 @@ def auto_dkim_nest(docker_image, stub_mx):
     name = f"fauna-dkauto-{http_port}"
     start_container_with_ports(
         name,
-        {3000: http_port, **mail_ports},
+        {443: http_port, **mail_ports},
         env={
             "FAUNA_CLAIM_CODE": CLAIM_CODE,
             "FAUNA_PORT": "3000",

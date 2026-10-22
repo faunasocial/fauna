@@ -23,6 +23,14 @@ from .session_bus import PrivateSessionBus
 from .x_display import sweep_stale_x_locks
 
 
+XVFB_SERVER_ARGS = "-screen 0 1920x1440x24"
+"""The throwaway display's geometry. ``xvfb-run``'s own default is 1280x1024,
+shorter than the app's default window (1090x1210 under Xvfb, where no monitor
+list exists for the app to clamp to): a popover anchored below y=1024 — the
+⋯ menu of the third tall card in a feed — cannot be placed on that screen and
+never maps, so a click on it "succeeds" and no menu ever shows."""
+
+
 def _headless_render_cmd_env(
     cmd: list[str], env: dict[str, str],
 ) -> tuple[list[str], dict[str, str]]:
@@ -44,7 +52,7 @@ def _headless_render_cmd_env(
     (also the fallback when xvfb-run isn't installed).
     """
     if not env.get("FAUNA_E2E_REAL_DISPLAY") and shutil.which("xvfb-run"):
-        cmd = ["xvfb-run", "-a", *cmd]
+        cmd = ["xvfb-run", "-a", "-s", XVFB_SERVER_ARGS, *cmd]
         env["GDK_BACKEND"] = "x11"
         env.pop("WAYLAND_DISPLAY", None)
         env.setdefault("GSK_RENDERER", "cairo")
@@ -590,6 +598,17 @@ class LinuxBridgeDriver(HttpBridgeDriver):
             return Path(os.path.join(tmp, "app.err")).read_text(errors="replace")
         except OSError:
             return ""
+
+    def on_device_log_text(self) -> str:
+        """The app's own on-device rolling log file(s) — `fauna.log.<date>` under
+        `<config>/fauna/logs/`, written by `install_logging()`'s `fauna_log::init`
+        — or "". Not `app_stderr_text()`: that is the captured `app.err` stream,
+        which proves nothing about the file (`observability.md` § 2. Persistence
+        & privacy). Not named `app_log_text` either: `helpers/app_log_section.py`
+        prefers that attribute, and the file lacks the non-tracing stderr a
+        failure report wants."""
+        cfg = getattr(self, "_xdg_config", None)
+        return rolling_log_text(os.path.join(cfg, "fauna")) if cfg else ""
 
     def inherited_agent_log_text(self) -> str:
         """The child sync agent's own rolling log (`<config>/fauna/sync/logs`):

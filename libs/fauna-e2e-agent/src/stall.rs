@@ -566,7 +566,7 @@ mod imp {
     }
 
     /// `(state, cpu-time)` for a thread, from `/proc/self/task/<tid>/stat`.
-    fn thread_state(tid: i32) -> Option<(char, Duration)> {
+    pub(super) fn thread_state(tid: i32) -> Option<(char, Duration)> {
         let stat = read_proc(tid, "stat")?;
         // The comm field is parenthesized and may contain spaces, so every
         // parse starts after the LAST ')'.
@@ -838,6 +838,22 @@ mod tests {
             let _ = rx.recv();
         }
 
+        /// The tid arrives from inside the fixture's `send`, before it reaches
+        /// `recv`, so a capture taken at once can sample the thread still
+        /// finishing the send (seen on a loaded box). Wait until the kernel has
+        /// it asleep.
+        fn wait_until_asleep(tid: i32) {
+            use std::time::{Duration, Instant};
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while super::super::imp::thread_state(tid).is_none_or(|(state, _)| state != 'S') {
+                assert!(
+                    Instant::now() < deadline,
+                    "thread {tid} never went to sleep"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+
         /// Pull `CPU +X.XXs over the Y.YYs sample` back out of a report.
         fn reported_cpu_and_window(report: &str) -> (f64, f64) {
             let line = report
@@ -874,6 +890,7 @@ mod tests {
             let handle =
                 std::thread::spawn(move || e2e_stall_fixture_parks_here(&release_rx, &entered_tx));
             let tid = entered_rx.recv().expect("fixture thread reports its tid");
+            wait_until_asleep(tid);
 
             let report = capture(tid);
             assert!(
@@ -924,6 +941,7 @@ mod tests {
             let handle =
                 std::thread::spawn(move || e2e_stall_fixture_parks_here(&release_rx, &entered_tx));
             let tid = entered_rx.recv().expect("fixture thread reports its tid");
+            wait_until_asleep(tid);
 
             let frames = sample_stack(&serialize_captures(), tid)
                 .expect("the parked thread answers the capture");

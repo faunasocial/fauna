@@ -13,10 +13,11 @@
 //   --allow-env, --allow-sys    unscoped — why each cannot be narrowed is recorded in
 //                               the goal doc (the environment itself is scrubbed)
 //   --allow-write=.             the tree, minus every root entry present at launch
-//                               except OUTPUT_DIRS
+//                               except OUTPUT_DIRS, and minus every node_modules
+//                               entry but SvelteKit's generated `$app`
 //   --allow-net=<--net>         omitted when --net is absent: no network
 //   --allow-run=<esbuild>       the exact esbuild binaries, found below
-//   --allow-ffi=<rollup addons> the exact files, found below
+//   --allow-ffi=<node addons>   the exact files, found below
 //   --preload=<deno-sandbox-preload.mjs>  directory listings come back sorted, so
 //                               the output does not follow the checkout's order
 //
@@ -41,11 +42,10 @@
 const NATIVE: { dirPrefix: string; kind: "run" | "ffi"; match: (name: string) => boolean }[] = [
   // esbuild's JS API drives its Go binary as a subprocess.
   { dirPrefix: "@esbuild+", kind: "run", match: (n) => n === "esbuild" || n === "esbuild.exe" },
-  // rollup 4 parses through a Node-API addon, which Deno loads as FFI.
-  { dirPrefix: "@rollup+rollup-", kind: "ffi", match: (n) => n.endsWith(".node") },
-  // astro 7's toolchain: rolldown bundles (vite 8), the astro compiler parses
-  // `.astro` files, satteri renders markdown, lightningcss transforms CSS — each a
-  // Node-API addon in its per-platform package.
+  // vite 8 (SvelteKit 3's and astro 7's): rolldown bundles and lightningcss
+  // transforms CSS; astro 7 adds its compiler, which parses `.astro` files, and
+  // satteri, which renders markdown — each a Node-API addon in its per-platform
+  // package, which Deno loads as FFI.
   { dirPrefix: "@rolldown+binding-", kind: "ffi", match: (n) => n.endsWith(".node") },
   { dirPrefix: "@astrojs+compiler-binding-", kind: "ffi", match: (n) => n.endsWith(".node") },
   { dirPrefix: "@bruits+satteri-", kind: "ffi", match: (n) => n.endsWith(".node") },
@@ -85,6 +85,18 @@ const OUTPUT_DIRS = ["build", "dist", ".svelte-kit", ".cache", ".astro"];
 // symlinks and `..` included. Tools' caches therefore live under the tree's `.cache/`,
 // never node_modules/.vite or .astro. This launcher sits outside every tree.
 const NEVER_WRITE = ["deno.json", "deno.lock", "package.json", "node_modules"];
+
+// The one node_modules entry a build writes (owner-ruled 2026-10-19): SvelteKit 3
+// generates `$app` there — the base tsconfig a tsconfig extends by package path, and
+// its types — and has no option that moves it (measured: `outDir` does not). So when
+// node_modules exists at launch, the deny is per entry, every entry but `$app`; under
+// bubblewrap node_modules stays read-only with `$app` alone bound writable over it,
+// and before the spawn and after every run the audit (auditNodeModules) fails the build
+// on a new node_modules entry, or on anything at `$app`'s top that SvelteKit does not
+// generate, by name or by kind
+// (a `package.json` or `index.js` there is the shape that would hijack `$app`).
+const GENERATED_IN_NODE_MODULES = "$app";
+const GENERATED_APP_ENTRIES = ["tsconfig.json", "tsconfig", "types"];
 
 // The environment the child keeps. Everything else — tokens, the SSH agent socket,
 // cloud credentials — is cleared.
@@ -365,9 +377,58 @@ if (shaEnv) {
 const { run, ffi } = await nativeGrants(tree);
 const extraReads = read.map((r) => resolvePath(tree, r));
 
-const deny = new Set(NEVER_WRITE);
+// node_modules as a real directory: denied per entry. Absent, or anything else (a
+// symlink, a file): denied whole, as every other NEVER_WRITE name.
+const nodeModules = join(tree, "node_modules");
+const appDir = join(nodeModules, GENERATED_IN_NODE_MODULES);
+let nodeModulesAtLaunch: Set<string> | null = null;
+try {
+  if (Deno.lstatSync(nodeModules).isDirectory) {
+    nodeModulesAtLaunch = new Set([...Deno.readDirSync(nodeModules)].map((e) => e.name));
+  }
+} catch { /* absent */ }
+const lstatOrNull = (p: string): Deno.FileInfo | null => {
+  try {
+    return Deno.lstatSync(p);
+  } catch {
+    return null;
+  }
+};
+if (nodeModulesAtLaunch?.has(GENERATED_IN_NODE_MODULES) && !lstatOrNull(appDir)?.isDirectory) {
+  fail(`node_modules/${GENERATED_IN_NODE_MODULES} is not a plain directory — remove it (\`deno install\` never makes one)`);
+}
+
+// Root entries denied whole: under bubblewrap each is also bound read-only.
+const denyRoot = new Set(NEVER_WRITE);
 for (const e of Deno.readDirSync(tree)) {
-  if (!OUTPUT_DIRS.includes(e.name)) deny.add(e.name);
+  if (!OUTPUT_DIRS.includes(e.name)) denyRoot.add(e.name);
+}
+const deny = new Set([...denyRoot].filter((n) => n !== "node_modules" || nodeModulesAtLaunch === null));
+for (const n of nodeModulesAtLaunch ?? []) {
+  if (n !== GENERATED_IN_NODE_MODULES) deny.add(`node_modules/${n}`);
+}
+
+// What a run left in node_modules that no build may leave: a new entry beside `$app`,
+// anything at `$app`'s top that SvelteKit does not generate, a link anywhere in `$app`.
+function auditNodeModules(): string[] {
+  if (nodeModulesAtLaunch === null) return [];
+  const found: string[] = [];
+  for (const e of Deno.readDirSync(nodeModules)) {
+    if (!nodeModulesAtLaunch.has(e.name) && e.name !== GENERATED_IN_NODE_MODULES) found.push(`node_modules/${e.name}`);
+  }
+  const app = lstatOrNull(appDir);
+  if (!app) return found;
+  if (!app.isDirectory) return [...found, `node_modules/${GENERATED_IN_NODE_MODULES}`];
+  const walk = (dir: string, rel: string, top: boolean) => {
+    for (const e of Deno.readDirSync(dir)) {
+      const r = `${rel}/${e.name}`;
+      const wrongKind = e.name.endsWith(".json") ? !e.isFile : !e.isDirectory;
+      if ((top && (!GENERATED_APP_ENTRIES.includes(e.name) || wrongKind)) || e.isSymlink) found.push(r);
+      else if (e.isDirectory) walk(join(dir, e.name), r, false);
+    }
+  };
+  walk(appDir, `node_modules/${GENERATED_IN_NODE_MODULES}`, true);
+  return found;
 }
 
 // The child runs under bubblewrap; without it native code reaches the whole
@@ -433,7 +494,8 @@ function bwrapArgs(deno: string, seccompFd: number): string[] {
   a.push("--ro-bind", deno, deno);
   if (env.DENO_DIR) a.push("--ro-bind-try", env.DENO_DIR, env.DENO_DIR);
   a.push("--bind", tree, tree);
-  for (const n of deny) a.push("--ro-bind-try", join(tree, n), join(tree, n));
+  for (const n of denyRoot) a.push("--ro-bind-try", join(tree, n), join(tree, n));
+  if (nodeModulesAtLaunch) a.push("--bind", appDir, appDir);
   for (const p of readList) {
     if (p !== tree && !p.startsWith(`${tree}/`) && !p.startsWith("/proc/")) a.push("--ro-bind-try", p, p);
   }
@@ -445,6 +507,36 @@ if (bwrap) {
   // The host's temp directory is outside the sandbox; the private /tmp stands in.
   for (const k of ["TMPDIR", "TEMP", "TMP"]) if (env[k]) env[k] = "/tmp";
 }
+// `$app`'s writable bind needs its source to exist before bubblewrap starts (it
+// resolves every bind source up front), and this launcher holds no write grant: a
+// bubblewrap of its own, which only binds the tree and makes the directory, creates it.
+if (bwrap && nodeModulesAtLaunch && !nodeModulesAtLaunch.has(GENERATED_IN_NODE_MODULES)) {
+  const sys = SYSTEM_RO.flatMap((p) => ["--ro-bind-try", p, p]);
+  const links = USR_LINKS.flatMap((l) => {
+    try {
+      return ["--symlink", Deno.readLinkSync(l), l];
+    } catch {
+      return ["--ro-bind-try", l, l];
+    }
+  });
+  const made = await new Deno.Command(bwrap, {
+    args: ["--unshare-all", "--die-with-parent", "--tmpfs", "/", ...sys, ...links, "--bind", tree, tree, "--dir", appDir, "--", "/usr/bin/true"],
+    clearEnv: true,
+    stdout: "null",
+  }).output();
+  if (!made.success || !lstatOrNull(appDir)?.isDirectory) fail(`could not create node_modules/${GENERATED_IN_NODE_MODULES}`);
+}
+
+// A plant a run left behind whose post-run audit never ran (a launcher killed by
+// SIGKILL, the harness reaper, a VM reset) would be read by this run: refuse it before
+// the spawn. At launch the node_modules set is by definition current, so only `$app`'s
+// shape can be wrong.
+const plantedBefore = auditNodeModules();
+if (plantedBefore.length) {
+  for (const p of plantedBefore) console.error(`deno-sandbox: ${p} was already there before this run, which no build writes`);
+  fail("node_modules holds what no build may leave, planted before this run (build-system.md § The Deno build sandbox, the write row) — remove it, then `deno install`");
+}
+
 // Inside the sandbox PATH names nothing, so Deno is named by its own path there.
 const seccomp = bwrap ? seccompFilterFd() : null;
 const child = new Deno.Command(bwrap ?? "deno", {
@@ -461,4 +553,9 @@ seccomp?.close();
 // so a dev/preview server's own shutdown finishes and its exit code is reported.
 Deno.addSignalListener("SIGINT", () => {});
 const status = await child.status;
+const planted = auditNodeModules();
+if (planted.length) {
+  for (const p of planted) console.error(`deno-sandbox: the build left ${p}, which no build writes`);
+  fail("node_modules gained what no build may leave (build-system.md § The Deno build sandbox, the write row) — remove it, then `deno install`");
+}
 Deno.exit(status.code);

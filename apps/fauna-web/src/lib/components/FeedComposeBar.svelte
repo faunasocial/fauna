@@ -1,9 +1,9 @@
 <script lang="ts">
   import MarkdownToolbar from './MarkdownToolbar.svelte';
-  import { t } from '$lib/i18n/strings';
-  import { byteSize } from '$lib/value-format';
-  import { resolveGateSelection } from '$lib/compose-gate';
-  import { IDS } from '$lib/generated/uiIds';
+  import { t } from '#lib/i18n/strings';
+  import { byteSize } from '#lib/value-format';
+  import { resolveGateSelection } from '#lib/compose-gate';
+  import { IDS } from '#lib/generated/uiIds';
   // The sell composer whole — its three controls and the select's "Sell this
   // post…" answer — is inside the `payments` plane (dynamic-features.md
   // § Platform-family surface excision → *The price-and-route class*). The
@@ -11,7 +11,7 @@
   // `__FAUNA_PAYMENTS__` below, matching ProviderSection/ClaimSection's own
   // isolation; the answer is an option value, not an id, so the condition on
   // its render (and on the arm that enters sell mode) alone carries it.
-  import SellControls from '$lib/components/payments/SellControls.svelte';
+  import SellControls from '#lib/components/payments/SellControls.svelte';
 
   interface Props {
     composeBody: string;

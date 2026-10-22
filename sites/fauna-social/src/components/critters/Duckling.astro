@@ -1,0 +1,25 @@
+---
+interface Props { size?: number; delay?: string; }
+const { size = 110, delay = '0s' } = Astro.props;
+---
+<svg viewBox="0 0 120 140" width={size} height={Math.round((size * 140) / 120)}
+  class="critter" style={`--wave-delay:${delay}`} aria-hidden="true">
+  <ellipse cx="58" cy="133" rx="25" ry="5" class="critter-shadow" />
+  <!-- waving wing -->
+  <g class="wave" style="transform-origin: 80px 96px;">
+    <ellipse cx="86" cy="85" rx="8" ry="16" transform="rotate(-30 86 85)" fill="#e2b646" />
+  </g>
+  <!-- body -->
+  <ellipse cx="58" cy="100" rx="26" ry="28" fill="#f4c95d" />
+  <ellipse cx="58" cy="107" rx="16" ry="18" fill="#fbe6a8" />
+  <ellipse cx="34" cy="98" rx="8" ry="17" transform="rotate(12 34 98)" fill="#e2b646" />
+  <ellipse cx="48" cy="131" rx="8" ry="4.5" fill="#e8863a" />
+  <ellipse cx="70" cy="131" rx="8" ry="4.5" fill="#e8863a" />
+  <!-- head, with the one curl of down every duckling gets -->
+  <path d="M53 34 Q56 17 65 29 Q59 27 53 34 Z" fill="#f4c95d" />
+  <circle cx="58" cy="54" r="22" fill="#f4c95d" />
+  <circle cx="49" cy="50" r="3.2" fill="#2b2a24" />
+  <circle cx="67" cy="50" r="3.2" fill="#2b2a24" />
+  <ellipse cx="58" cy="64" rx="11" ry="6.5" fill="#e8863a" />
+  <path d="M48 64 Q58 67 68 64" stroke="#c96f2c" stroke-width="1.6" fill="none" stroke-linecap="round" />
+</svg>

@@ -6,7 +6,9 @@ using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Data;
 using Microsoft.UI.Xaml.Navigation;
+using FaunaApp.Conversations;
 using FaunaApp.Core.Calendar;
+using uniffi.fauna_conversations;
 using uniffi.fauna_ffi;
 using FaunaApp.Core.Logs;
 using FaunaApp.Core.Models;
@@ -255,6 +257,37 @@ public sealed partial class EventsPage : Page
             new AppDataSnapshot.EventSnapshot(e.Id, e.Summary,
                 e.Start.ToString("o"), e.End.ToString("o"), e.RsvpStatus)));
         StartPoll();
+
+        // Refused scheduling changes (events.md § Refused scheduling changes): read
+        // on every load, then kept current by the shared store-change notice — a
+        // refusal is the app's own runtime's background write to the store, and the
+        // witness stays on this open page and never re-enters (the calendar poll
+        // above bails on a refused CANCEL, which changes no calendar).
+        await _viewModel.LoadRefusedChangesAsync(Manager);
+        RenderRefusedChanges();
+        _viewModel.StoreResynced -= RenderRefusedChanges;
+        _viewModel.StoreResynced += RenderRefusedChanges;
+        _viewModel.WatchStore(() => Manager);
+    }
+
+    private ConversationsManager Manager =>
+        _clients?.ConvSession?.Manager() ?? ConversationsManagerHost.Instance;
+
+    /// <summary>Paint the refused-change list: absent entirely (Collapsed) when
+    /// empty, so the everyday page is unchanged.</summary>
+    private void RenderRefusedChanges()
+    {
+        if (_viewModel is null) return;
+        RefusedChangeItems.ItemsSource = _viewModel.RefusedChanges.ToList();
+        RefusedChangeListPanel.Visibility = _viewModel.RefusedChanges.Count > 0
+            ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private async void RefusedChangeDismiss_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel is null || sender is not Button { Tag: string key }) return;
+        await _viewModel.DismissRefusedChangeAsync(key, Manager);
+        RenderRefusedChanges();
     }
 
     /// <summary>
@@ -322,6 +355,13 @@ public sealed partial class EventsPage : Page
         // EventDetailPage and resume via Page_Loaded on Back; never leak it
         // across pages). Stop on the UI thread (here = UI thread).
         _pollTimer?.Stop();
+        // Only the open page re-reads on the store-change notice (the app-lifetime
+        // rpc seam must never hold a left page's VM); Page_Loaded re-arms it.
+        if (_viewModel is not null)
+        {
+            _viewModel.CleanupStoreChange();
+            _viewModel.StoreResynced -= RenderRefusedChanges;
+        }
         // Same reasoning for the deferred day-cell drill-in: a tick that lands
         // after we have navigated away would switch the view mode under a page
         // the user has left (this page is cached, so they would come back to it).

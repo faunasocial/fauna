@@ -35,6 +35,7 @@ use std::sync::Arc;
 use fauna_client_mail_settings::MailSettingsMachine;
 #[cfg(test)]
 use fauna_conversations::SortOrder;
+use fauna_conversations::room::RoomSearchStatus;
 use fauna_conversations::{
     ConversationsManager, ConversationsSnapshot, MessageId, Rail, RecipientPickerState,
     ResolveState, SendState, SnapshotObserver, ThreadId, TypedAddress, next_sort_order,
@@ -42,7 +43,7 @@ use fauna_conversations::{
 use fauna_core::identity::ActorId;
 use fauna_core::obligation::RenderVerdict;
 use fauna_core::render::{RenderBlock, RenderDocument};
-use fauna_i18n::strings::{common, conversations, family, markdown};
+use fauna_i18n::strings::{common, conversations, markdown};
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -249,6 +250,17 @@ pub enum Action {
     /// invitations are visible to whoever may withdraw them*).
     WithdrawRoomInvite { invitee_actor_hex: String },
 
+    // --- the room's search strip (`room-search.md` § The surface) ---
+    /// `room-search-button` — open the strip on the open thread
+    /// (`manager.open_room_search`), or close it when it is open
+    /// (`close_room_search`, which drops the query and the rows). Local.
+    /// Painted only under `capabilities.can_search_room`.
+    ToggleRoomSearch,
+    /// Enter in `room-search-field`, or `room-search-submit-button` — search
+    /// the room's words for the typed query (`manager.room_search`). Async →
+    /// [`Op::RoomSearch`]; a blank query is the manager's to drop.
+    SubmitRoomSearch,
+
     // --- the standing community-room invitations, atop the list ---
     /// `room-invitation-accept-button[i]` — accept the invitation `id` names
     /// (`manager.accept_room_invitation`): the account is seated on the
@@ -421,6 +433,12 @@ impl Action {
             // nest — the invitation's envelope is consumed there, so no nest
             // means nothing to withdraw.
             Action::WithdrawRoomInvite { .. } => Some("fauna.conversations.room.revoke_invite"),
+            // The room's own search. The manager picks the relay
+            // (`room.search_remote`, OnlineOnly) for a room homed elsewhere
+            // from a home map no paint can see, so this names the same-nest
+            // `Read` — the safe direction: the control stays live and a
+            // relay that cannot run lands on `error-message`.
+            Action::SubmitRoomSearch => Some("fauna.conversations.room.search"),
             // The catalog page's own inspect gesture, from the room editor.
             Action::InspectRoomLabeler { .. } => Some("fauna.labelers.inspect"),
 
@@ -493,6 +511,7 @@ impl Action {
             | Action::OpenAddParticipant
             | Action::OpenRename
             | Action::OpenRoomSettings
+            | Action::ToggleRoomSearch
             // The opener; its commit gesture (ConfirmRoomLeave) carries the call.
             | Action::StartRoomLeave
             | Action::SetRoomJoinRule(_)
@@ -586,6 +605,10 @@ pub struct ConversationsState {
     /// `ActionsStep::ConfirmDelete` shape, kept beside the draft because the
     /// departure is not one of the draft's staged edits.
     pub room_leave_confirm: bool,
+    /// The `room-search-field` buffer — the typed, not-yet-submitted query.
+    /// Local like [`Self::rename_draft`]: the manager takes the query only on
+    /// submit (`room_search`) and holds what it last asked, not what is typed.
+    pub room_search_draft: String,
     /// The `dm-reply-recipient-add` To-line input buffer (the typed-but-uncommitted
     /// new reply recipient). Local like [`Self::rename_draft`] — the manager holds
     /// only committed `compose.reply_recipients`; Enter parses + commits this via
@@ -637,6 +660,14 @@ pub struct ConversationsState {
     /// `SearchState` because its lifetime is the conversations session's: it is
     /// built at login and dropped with this state, which ends its flush driver.
     pub index_launcher: Option<Arc<fauna_client_conversations::NestMailIndexLauncher>>,
+    /// The conversations oracle's door this login keeps
+    /// (`conversations-oracle.md` § The custodian and the door), started where
+    /// the engine opened. Dropped with this state at sign-out, which gives the
+    /// door up for the account's next app. Held for its drop alone, so never
+    /// read.
+    #[cfg(unix)]
+    #[allow(dead_code)]
+    pub oracle_door: Option<fauna_client_account_runtime::conversations_door::ConversationsDoor>,
     /// The per-bubble ⋯ actions overlay (`Some` while open) — a LOCAL overlay
     /// like [`Self::rename_draft`]: the manager holds no menu state (the GUI
     /// apps' flyout is a transient popover too). Esc cancels overlay-first.
@@ -768,6 +799,7 @@ pub fn init(tx: &UnboundedSender<UiMessage>) -> ConversationsState {
         rename_draft: None,
         room_settings: None,
         room_leave_confirm: false,
+        room_search_draft: String::new(),
         reply_recipient_draft: String::new(),
         attach_path_draft: String::new(),
         real_session: None,
@@ -776,6 +808,8 @@ pub fn init(tx: &UnboundedSender<UiMessage>) -> ConversationsState {
         succession_witness: None,
         peer_anchor_harvest: Default::default(),
         index_launcher: None,
+        #[cfg(unix)]
+        oracle_door: None,
         actions_overlay: None,
         remote_images: crate::image_cache::ImageCache::new(),
         revealed_muted: std::collections::HashSet::new(),
@@ -827,6 +861,11 @@ pub enum ConversationsField {
     /// replacement for an OS file picker (`apps/tui.md` § Declared platform
     /// absences 4).
     AttachPath,
+    /// `room-search-field` — the room search's typed query. A **local**
+    /// buffer ([`crate::conversations::ConversationsState::room_search_draft`]);
+    /// Enter submits it ([`Action::SubmitRoomSearch`]), so typing costs no
+    /// round-trip (`room-search.md` § The surface: submit-driven, no debounce).
+    RoomSearch,
 }
 
 /// Read one of the page's editable fields.
@@ -862,6 +901,7 @@ pub fn field(state: &ConversationsState, field: &ConversationsField) -> String {
             .map(|o| o.emoji_draft.clone())
             .unwrap_or_default(),
         ConversationsField::AttachPath => state.attach_path_draft.clone(),
+        ConversationsField::RoomSearch => state.room_search_draft.clone(),
     }
 }
 
@@ -958,6 +998,12 @@ pub fn set_field(
             state.attach_path_draft = value;
             None
         }
+        ConversationsField::RoomSearch => {
+            // A local buffer too — Enter (`Action::SubmitRoomSearch`) hands it
+            // to the manager.
+            state.room_search_draft = value;
+            None
+        }
         ConversationsField::ReactionEmoji => {
             // The ⋯ menu's free-entry emoji prompt — a local buffer on the open
             // overlay; Enter commits it via `toggle_reaction`.
@@ -1013,10 +1059,26 @@ pub fn detail_overlay_open(state: &ConversationsState) -> bool {
     state.rename_draft.is_some()
         || state.room_settings.is_some()
         || state.actions_overlay.is_some()
+        || open_room_search_thread(state).is_some()
         || state
             .manager
             .as_ref()
             .is_some_and(|m| m.snapshot().add_participant.is_some())
+}
+
+/// The open thread, when the room's search strip is open on it — Esc closes
+/// the strip before it leaves the thread (`room-search.md` § The surface).
+fn open_room_search_thread(state: &ConversationsState) -> Option<ThreadId> {
+    let Mode::Detail(thread_id) = &state.mode else {
+        return None;
+    };
+    state
+        .manager
+        .as_ref()?
+        .thread_detail(thread_id.clone())?
+        .room?
+        .search
+        .map(|_| thread_id.clone())
 }
 
 /// Cancel whichever detail overlay is open (the Esc affordance). Add-participant
@@ -1029,9 +1091,15 @@ pub fn cancel_detail_overlay(state: &mut ConversationsState) {
     {
         manager.cancel_add_participant();
     }
+    if let Some(thread_id) = open_room_search_thread(state)
+        && let Some(manager) = state.manager.as_ref()
+    {
+        manager.close_room_search(thread_id);
+    }
     state.rename_draft = None;
     state.room_settings = None;
     state.room_leave_confirm = false;
+    state.room_search_draft.clear();
     state.actions_overlay = None;
 }
 
@@ -1076,8 +1144,54 @@ fn show_detail(state: &mut ConversationsState, thread_id: ThreadId) {
     state.rename_draft = None;
     state.room_settings = None;
     state.room_leave_confirm = false;
+    state.room_search_draft.clear();
     state.reply_recipient_draft.clear();
     state.actions_overlay = None;
+}
+
+/// `room-search-result-item[i]` activation — open the hit through its typed
+/// target (`room-search.md` § The surface → *Opening a hit*). A message hit
+/// is the Search page's `Mail` door: select the message in its thread (the
+/// manager closes the strip) and land the focus ring on it. A post hit is the
+/// Search page's `Post` door onto the feed's `post_detail`, relayed to the
+/// room's home when the row names one — so a gated room post still unseals
+/// there, its body read from that home.
+pub fn open_room_search_hit(
+    app: &mut App,
+    nav: fauna_conversations::room::RoomSearchNav,
+) -> Option<crate::app::PageOp> {
+    use crate::app::PageOp;
+    use crate::pages::Page;
+    use fauna_conversations::room::RoomSearchNav;
+
+    match nav {
+        RoomSearchNav::Message {
+            thread_id,
+            message_id,
+        } => {
+            let op = apply_local(
+                app,
+                Action::SelectThreadAndMessage {
+                    thread_id: thread_id.0,
+                    message_id: message_id.0,
+                },
+            )
+            .map(PageOp::Conversations);
+            crate::search::focus_selected_message(app);
+            op
+        }
+        RoomSearchNav::Post {
+            post_id,
+            home_nest_url,
+        } => {
+            app.page = Page::Feed;
+            let action = match home_nest_url {
+                Some(home) => crate::feed::Action::OpenPostDetailFrom { post_id, home },
+                None => crate::feed::Action::OpenPostDetail(post_id),
+            };
+            crate::feed::apply_local(app, action).map(PageOp::Feed)
+        }
+    }
 }
 
 pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
@@ -1090,7 +1204,8 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             // A thread addressed to one of the account's own mailing lists shows
             // the list-send warning on its compose (`mail-mass-mailing.md`
             // § Composing a list message); the manager answers None for the rest.
-            Some(Op::RefreshListSend {
+            // Its received mail reads each message's scan verdict.
+            Some(Op::RefreshOpenedThread {
                 manager,
                 thread_id: Some(thread_id),
             })
@@ -1104,14 +1219,21 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 thread_id.clone(),
                 fauna_conversations::message::MessageId(message_id),
             );
-            show_detail(&mut app.conversations, thread_id);
+            show_detail(&mut app.conversations, thread_id.clone());
             // Land the focus ring on the selected message. In tui the viewport
             // follows the focus ring (`crate::ui::scroll_offset`), so the focus
             // IS the scroll — the same reason `events::open_time_axis_at_
             // working_start` exists. Deferred to the caller (`crate::search`)
             // because the ring indexes the page's *painted* elements, which do
             // not exist until this mode switch has been rendered.
-            None
+            //
+            // The thread opens all the same, so it reads what any opening
+            // reads — a mail search hit is exactly where a received message's
+            // scan verdict is wanted.
+            Some(Op::RefreshOpenedThread {
+                manager,
+                thread_id: Some(thread_id),
+            })
         }
         Action::StartNewConversation => {
             manager.start_new_conversation();
@@ -1425,6 +1547,29 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 invitee_actor_hex,
             })
         }
+        Action::ToggleRoomSearch => {
+            let Mode::Detail(thread_id) = &app.conversations.mode else {
+                return None;
+            };
+            let thread_id = thread_id.clone();
+            if open_room_search_thread(&app.conversations).is_some() {
+                manager.close_room_search(thread_id);
+                app.conversations.room_search_draft.clear();
+            } else {
+                manager.open_room_search(thread_id);
+            }
+            None
+        }
+        Action::SubmitRoomSearch => {
+            let Mode::Detail(thread_id) = &app.conversations.mode else {
+                return None;
+            };
+            Some(Op::RoomSearch {
+                manager,
+                thread_id: thread_id.clone(),
+                query: app.conversations.room_search_draft.clone(),
+            })
+        }
         Action::SaveRoomSettings => {
             let Mode::Detail(thread_id) = &app.conversations.mode else {
                 return None;
@@ -1670,10 +1815,15 @@ pub enum Op {
         manager: Arc<ConversationsManager>,
         index: u32,
     },
-    /// Re-derive a compose's list-send view (`refresh_list_send`) — the opened
-    /// thread's, or the new-thread compose's for `None`. The snapshot notify
-    /// repaints; nothing to surface.
-    RefreshListSend {
+    /// What a thread opening (or the new-thread compose, for `None`) reads:
+    /// the compose's list-send view (`refresh_list_send`) and, for an opened
+    /// thread, each received mail message's scan verdict
+    /// (`refresh_message_scan_results`) and the account's alias rows its
+    /// "Delivered to" tag resolves against (`refresh_delivered_aliases`), and
+    /// the account's queue rows each own withheld message's badge matches
+    /// (`refresh_withheld_messages`). The snapshot notify repaints;
+    /// nothing to surface.
+    RefreshOpenedThread {
         manager: Arc<ConversationsManager>,
         thread_id: Option<ThreadId>,
     },
@@ -1737,6 +1887,14 @@ pub enum Op {
         manager: Arc<ConversationsManager>,
         thread_id: ThreadId,
         invitee_actor_hex: String,
+    },
+    /// `room-search-field` Enter / `room-search-submit-button` — search the
+    /// room (`room_search`). The rows, the empty state and a refusal all land
+    /// on the snapshot, so nothing comes back.
+    RoomSearch {
+        manager: Arc<ConversationsManager>,
+        thread_id: ThreadId,
+        query: String,
     },
     /// `room-invitation-accept-button[i]` — accept the standing invitation
     /// (`accept_room_invitation`), which selects the room's thread on success.
@@ -1865,8 +2023,13 @@ impl Op {
                 manager.refresh_list_send(None).await;
                 Outcome::Done
             }
-            Op::RefreshListSend { manager, thread_id } => {
-                manager.refresh_list_send(thread_id).await;
+            Op::RefreshOpenedThread { manager, thread_id } => {
+                manager.refresh_list_send(thread_id.clone()).await;
+                if let Some(thread_id) = thread_id {
+                    manager.refresh_delivered_aliases(thread_id.clone()).await;
+                    manager.refresh_withheld_messages(thread_id.clone()).await;
+                    manager.refresh_message_scan_results(thread_id).await;
+                }
                 Outcome::Done
             }
             // The overlay closes and the roster updates via the manager's own
@@ -1971,6 +2134,14 @@ impl Op {
                 manager
                     .withdraw_room_invite(thread_id, invitee_actor_hex)
                     .await;
+                Outcome::Done
+            }
+            Op::RoomSearch {
+                manager,
+                thread_id,
+                query,
+            } => {
+                manager.room_search(thread_id, query).await;
                 Outcome::Done
             }
             Op::AcceptRoomInvitation { manager, id } => {
@@ -2374,7 +2545,7 @@ fn compose_body(state: &ConversationsState) -> String {
 /// `crate::session::registry(app).active()` read, which can name a
 /// *different* account on a bound (secondary) launch
 /// (`account-scoping.md` § Concurrent instances → "every session-path
-/// identity read resolves through the registry for that account", :818-822).
+/// identity read resolves through the registry for that account").
 fn backup_audit_key(app: &App, snapshot: &ConversationsSnapshot) -> Option<(String, i64)> {
     let newest = snapshot.threads.iter().map(|t| t.last_activity_ms).max()?;
     let actor_id_hex = app.session.as_ref()?.actor_id.clone();
@@ -2393,7 +2564,9 @@ fn backup_audit_key(app: &App, snapshot: &ConversationsSnapshot) -> Option<(Stri
 /// diverge from what was forwarded. The return is `observe_thread_activity`'s
 /// own echo of its parameters, which cannot by itself prove *what* was
 /// forwarded; `backup_audit_observation_returns_the_sinks_own_pair_not_a_separate_local`
-/// witnesses that through `backup_audit::last_forwarded_actor` .
+/// witnesses that through `backup_audit::forwarded_actors`, cleared just before
+/// this call, so the pin sees every actor this call forwarded — exactly the
+/// session actor, once .
 /// `backup_audit_observation_keys_by_the_session_account_not_active` pins
 /// the return against `backup_audit_key`'s independent resolution; the render loop
 /// itself (`elements`, below) still discards the return: `OBSERVED`
@@ -2415,6 +2588,8 @@ pub fn elements(app: &App) -> Vec<Element> {
         Element::label(ids::PAGE_HEADING, conversations::list::TITLE),
         Element::label(ids::CONVERSATIONS_VIEW, ""),
     ];
+    // The nest changed its rules: the one-line notice, as on the feed.
+    out.extend(crate::nest_rules::changed_notice_elements(app));
     let Some(snapshot) = app.conversations.snapshot() else {
         return out;
     };
@@ -3128,7 +3303,9 @@ pub(crate) fn region_blocked_count(app: &App) -> usize {
     detail
         .messages
         .iter()
-        .filter(|msg| !msg.deleted && msg.legal_takedown_ref.is_none())
+        .filter(|msg| {
+            !msg.deleted && msg.legal_takedown_ref.is_none() && !msg.admin_block_in_place()
+        })
         .filter(|msg| {
             let composed =
                 crate::region::verdict_for(app, &msg.message_id.0, &msg.labels, None, || {
@@ -3136,6 +3313,36 @@ pub(crate) fn region_blocked_count(app: &App) -> usize {
                 });
             crate::region::region_verdict(&composed)
                 .is_some_and(|p| p.verb == fauna_client_region::RegionVerb::Block)
+        })
+        .count()
+}
+
+/// How many bubbles of the open thread the composed engine NEST-blocks — the
+/// [`region_blocked_count`] twin, behind `crate::nest_rules::block_render_json`.
+pub(crate) fn nest_blocked_count(app: &App) -> usize {
+    let Mode::Detail(thread_id) = &app.conversations.mode else {
+        return 0;
+    };
+    let Some(detail) = app
+        .conversations
+        .manager
+        .as_ref()
+        .and_then(|m| m.thread_detail(thread_id.clone()))
+    else {
+        return 0;
+    };
+    detail
+        .messages
+        .iter()
+        .filter(|msg| {
+            !msg.deleted && msg.legal_takedown_ref.is_none() && !msg.admin_block_in_place()
+        })
+        .filter(|msg| {
+            let composed =
+                crate::region::verdict_for(app, &msg.message_id.0, &msg.labels, None, || {
+                    crate::region::message_input(&msg.document.to_plaintext())
+                });
+            crate::nest_rules::nest_verdict(&composed).is_some_and(|p| p.is_block())
         })
         .count()
 }
@@ -3264,6 +3471,17 @@ fn detail_elements(app: &App, thread_id: &ThreadId) -> Vec<Element> {
             true,
             Gesture::Conversations(Action::OpenRoomSettings),
         ));
+        // The room's search door, beside the editor's — painted iff the
+        // shared capability says this room's words are searchable for this
+        // seat (`room-search.md` § The surface); never a class branch here.
+        if detail.capabilities.can_search_room {
+            out.push(Element::gesture_button(
+                ids::ROOM_SEARCH_BUTTON,
+                conversations::unified::ROOM_SEARCH,
+                true,
+                Gesture::Conversations(Action::ToggleRoomSearch),
+            ));
+        }
     }
     // The "+ add participant" affordance is painted whenever the rail's
     // membership is mutable and GREYED when the viewer's role in a governed
@@ -3331,9 +3549,21 @@ fn detail_elements(app: &App, thread_id: &ThreadId) -> Vec<Element> {
         }
     }
 
+    // The room's search strip, between the header and the stream; while a
+    // submitted query stands its results take the stream's place.
+    let search = detail.room.as_ref().and_then(|room| room.search.as_ref());
+    if let Some(search) = search {
+        out.extend(room_search_elements(app, search));
+    }
+    let stream: &[_] = if search.is_none_or(|s| s.status == RoomSearchStatus::Idle) {
+        &detail.messages
+    } else {
+        &[]
+    };
+
     // One bubble per message, in thread order (flat indexed ids — the driver reads
     // `dm-message-text[i]` etc. by index, like feed's post-card children).
-    for msg in &detail.messages {
+    for msg in stream {
         // The selected message — `SearchNav::Mail`'s second half (`ui/search.md`
         // § State & data shape). The manager resolved it against this thread's
         // fetched window, so this is a pure paint: `Some` here always names a
@@ -3391,13 +3621,27 @@ fn detail_elements(app: &App, thread_id: &ThreadId) -> Vec<Element> {
         // obligation, so the bubble collapses exactly like `deleted` — the
         // shared localized tombstone plus the timestamp, never a blank or
         // failed-decrypt bubble. Ordered AFTER `deleted` (linux's order) so a
-        // tombstoned-then-deleted message stays a plain deletion. No dedicated
-        // test id: it is presentation, like the quoted-post tombstone, and a new
-        // e2e id would need ui.yaml approval first (§ UI Consistency A).
+        // tombstoned-then-deleted message stays a plain deletion. ui.yaml
+        // `dm-message-legal-takedown`, the twin of `dm-message-deleted`.
         if let Some(reference) = &msg.legal_takedown_ref {
-            out.push(Element::chrome(
+            out.push(Element::label(
+                ids::DM_MESSAGE_LEGAL_TAKEDOWN,
                 fauna_i18n::strings::moderation::legal_takedown::tombstone(reference),
             ));
+            out.push(message_timestamp_element(msg.timestamp_ms, selected));
+            continue;
+        }
+        // Admin-block notice (`moderation.md` § Admin block of a reported
+        // item): the relay withheld the envelope after the admin blocked the
+        // record, so the bubble collapses to the shared notice exactly as the
+        // tombstone above does. The author's own blocked message keeps its
+        // body (decision 4) and paints the notice beside it, below.
+        if msg.admin_block_in_place()
+            && let Some(reason) = &msg.admin_block_reason
+        {
+            out.push(Element::chrome(crate::moderation::admin_block_notice(
+                reason,
+            )));
             out.push(message_timestamp_element(msg.timestamp_ms, selected));
             continue;
         }
@@ -3456,6 +3700,23 @@ fn detail_elements(app: &App, thread_id: &ThreadId) -> Vec<Element> {
             out.push(message_timestamp_element(msg.timestamp_ms, selected));
             continue;
         }
+        // A NEST verdict, the same way: the nest's own placeholder naming the
+        // nest the thread is read through and the admin's reason
+        // (`nest-rules.md` § Don't do these: no silent application).
+        if let Some(withheld) = crate::nest_rules::nest_verdict(&composed)
+            && (withheld.is_block()
+                || !app.conversations.revealed_content.contains(&msg.message_id))
+        {
+            out.extend(crate::nest_rules::placeholder(
+                &withheld,
+                Gesture::Conversations(Action::RevealContent {
+                    msg_id: msg.message_id.clone(),
+                }),
+                None,
+            ));
+            out.push(message_timestamp_element(msg.timestamp_ms, selected));
+            continue;
+        }
         // The viewer's own report: the same placeholder slot, the reporter's
         // own words ("You reported this"), `source="reported"` beside it.
         if composed.reported() {
@@ -3464,15 +3725,22 @@ fn detail_elements(app: &App, thread_id: &ThreadId) -> Vec<Element> {
                     ids::CONTENT_POLICY_BLOCKED_NOTICE,
                     fauna_i18n::strings::moderation::report::HIDDEN_PLACEHOLDER,
                 )
+                .attr("state", "blocked")
                 .attr("source", "reported"),
             );
             out.push(message_timestamp_element(msg.timestamp_ms, selected));
             continue;
         }
+        // The guardian's reason, when a rule of the guardian's document drove
+        // the verdict, rides beside the frame on both arms
+        // (`crate::content_policy::placeholder`).
         if content_verdict == RenderVerdict::Block {
-            out.push(Element::label(
-                ids::CONTENT_POLICY_BLOCKED_NOTICE,
-                family::CONTENT_BLOCKED_NOTICE,
+            out.extend(crate::content_policy::placeholder(
+                &composed,
+                Gesture::Conversations(Action::RevealContent {
+                    msg_id: msg.message_id.clone(),
+                }),
+                None,
             ));
             out.push(message_timestamp_element(msg.timestamp_ms, selected));
             continue;
@@ -3497,11 +3765,11 @@ fn detail_elements(app: &App, thread_id: &ThreadId) -> Vec<Element> {
         {
             out.push(Element::label(
                 ids::DM_MESSAGE_MUTED,
-                conversations::detail::MUTED_WORD,
+                fauna_i18n::strings::muted_words::COLLAPSED,
             ));
             out.push(Element::gesture_button(
                 ids::DM_MESSAGE_MUTED_REVEAL_BUTTON,
-                conversations::detail::MUTED_REVEAL,
+                fauna_i18n::strings::muted_words::REVEAL,
                 true,
                 Gesture::Conversations(Action::RevealMuted {
                     msg_id: msg.message_id.clone(),
@@ -3514,18 +3782,18 @@ fn detail_elements(app: &App, thread_id: &ThreadId) -> Vec<Element> {
         // same shape as the muted collapse above but its own reveal set. `Block`
         // already returned, so only `Collapse` reaches here; the floor itself
         // persists (the guardian relaxing it is what stops future collapse).
-        // Untagged, like linux's and web's twins — ui.yaml scopes no id to this
-        // arm, so the reveal is a `chrome_button`: reachable by the focus ring,
-        // invisible to the registry.
+        // The block arm's notice in `state="collapsed"` beside
+        // `content-policy-collapsed-reveal-button` (ids user-approved
+        // 2026-10-16), the feed's twin.
         if content_verdict == RenderVerdict::Collapse
             && !app.conversations.revealed_content.contains(&msg.message_id)
         {
-            out.push(Element::chrome(family::CONTENT_COLLAPSED_NOTICE));
-            out.push(Element::chrome_button(
-                family::CONTENT_REVEAL_BUTTON,
+            out.extend(crate::content_policy::placeholder(
+                &composed,
                 Gesture::Conversations(Action::RevealContent {
                     msg_id: msg.message_id.clone(),
                 }),
+                None,
             ));
             out.push(message_timestamp_element(msg.timestamp_ms, selected));
             continue;
@@ -3598,6 +3866,37 @@ fn detail_elements(app: &App, thread_id: &ThreadId) -> Vec<Element> {
             body = body.observes(record);
         }
         out.push(body);
+        let withheld = msg.withheld.as_ref();
+        if let Some(reason) = &msg.admin_block_reason
+            && !withheld.is_some_and(|w| w.carries_block_notice())
+        {
+            // Beside the author's own blocked body: no dedicated id (none
+            // approved), so the notice rides as chrome right after the body —
+            // the post detail's shape. A withheld badge carrying the same
+            // notice paints instead, so the bubble says it once.
+            out.push(Element::chrome(crate::moderation::admin_block_notice(
+                reason,
+            )));
+        }
+        // The author's own message the nest withholds, matched to their queue
+        // row (`MessageSnapshot::withheld`, the shared projection;
+        // `moderation.md` § Legal takedown → *App render*): the shared lines
+        // side by side, and one tap opens that row's appeal.
+        if let Some(withheld) = withheld {
+            let text: Vec<String> = withheld
+                .lines
+                .iter()
+                .map(|line| line.resolve_nested(fauna_i18n::strings::lookup))
+                .collect();
+            out.push(Element::gesture_button(
+                ids::DM_MESSAGE_WITHHELD_BADGE,
+                text.join(" · "),
+                true,
+                Gesture::AppealWithheld {
+                    content_id: withheld.content_id.clone(),
+                },
+            ));
+        }
         // A body `![](https://…)` — the walker leaves `RenderBlock::RemoteImage`
         // inert like every other embed, so the page registers each one as
         // `doc-remote-image`: the blocked placeholder, and the real half-block
@@ -3629,6 +3928,52 @@ fn detail_elements(app: &App, thread_id: &ThreadId) -> Vec<Element> {
                 Gesture::Conversations(Action::RevealRemoteImages {
                     msg_id: msg.message_id.clone(),
                 }),
+            ));
+        }
+        // An own message its bridge never took (`MessageSnapshot::undelivered`,
+        // the shared answer; `apps/bridges.md` § Phase G → *When the bridge
+        // stops serving*): said in words under the body, which stays in view so
+        // the user can send it again (`ui/conversations.md` § Element IDs →
+        // `dm-message-undelivered`).
+        if msg.undelivered {
+            out.push(Element::label(
+                ids::DM_MESSAGE_UNDELIVERED,
+                conversations::unified::DM_MESSAGE_UNDELIVERED,
+            ));
+        }
+        // An own sent mail the fresh-IP warm-up is holding back
+        // (`MessageSnapshot::warmup_hold`; `mail-deliverability.md`
+        // § Enforcement at submission time): when it goes out and how many
+        // are ahead of it, in the shared wording, which falls silent once the
+        // release has come.
+        if let Some(line) = msg.warmup_hold.as_ref().and_then(|hold| {
+            fauna_conversations::message::warmup_deferred_text(hold, now_ms().div_euclid(1_000))
+        }) {
+            out.push(Element::label(ids::DM_MESSAGE_WARMUP_DEFERRED, line));
+        }
+        // The alias a received mail message arrived on, and its label
+        // (`MessageSnapshot::delivered_to`, the shared wording resolved when
+        // the thread opened; `mail-aliases.md` § Label).
+        if let Some(line) = &msg.delivered_to {
+            out.push(Element::label(
+                ids::DM_MESSAGE_DELIVERED_TO_ALIAS,
+                line.clone(),
+            ));
+        }
+        // A received mail message's own perimeter scan verdict — ClamAV,
+        // rspamd, the action taken — as the shared lines
+        // (`MessageSnapshot::scan_result_lines`, read when the thread opened;
+        // `mail-content-scanning.md` § User sees their own message's row).
+        // One row, the lines side by side: a terminal bubble reads across.
+        if !msg.scan_result_lines.is_empty() {
+            let lines: Vec<String> = msg
+                .scan_result_lines
+                .iter()
+                .map(crate::wizard::localized)
+                .collect();
+            out.push(Element::label(
+                ids::DM_MESSAGE_SCAN_RESULT,
+                lines.join(" · "),
             ));
         }
         out.push(message_timestamp_element(msg.timestamp_ms, selected));
@@ -3703,6 +4048,64 @@ fn detail_elements(app: &App, thread_id: &ThreadId) -> Vec<Element> {
         thread_id,
         detail.rail,
     ));
+    out
+}
+
+/// The room's search strip (`room-search.md` § The surface): the field and
+/// its submit, then — once the home nest answered — one row per hit in the
+/// served order, or the empty state. In flight and failed paint no result
+/// region at all: a driver waits on a row, the empty state or
+/// `error-message`, never on a "searching" element. Every word on a row is
+/// the shared snapshot's; the `kind` attribute is for drivers only.
+fn room_search_elements(
+    app: &App,
+    search: &fauna_conversations::room::RoomSearchSnapshot,
+) -> Vec<Element> {
+    let mut out = vec![
+        Element::input_commit(
+            ids::ROOM_SEARCH_FIELD,
+            app.conversations.room_search_draft.clone(),
+            Field::Conversations(ConversationsField::RoomSearch),
+            Gesture::Conversations(Action::SubmitRoomSearch),
+        )
+        .labelled(conversations::unified::ROOM_SEARCH_PLACEHOLDER),
+        Element::gesture_button(
+            ids::ROOM_SEARCH_SUBMIT_BUTTON,
+            common::SEARCH,
+            true,
+            Gesture::Conversations(Action::SubmitRoomSearch),
+        ),
+    ];
+    if search.status != RoomSearchStatus::Done {
+        return out;
+    }
+    if search.results.is_empty() {
+        out.push(Element::label(
+            ids::ROOM_SEARCH_NO_RESULTS,
+            conversations::unified::ROOM_SEARCH_NO_RESULTS,
+        ));
+    }
+    for row in &search.results {
+        let words = [
+            row.sender_display.clone(),
+            row.sent_at_ms.map(message_timestamp_text),
+            Some(row.text.clone()).filter(|t| !t.is_empty()),
+        ];
+        let text = words
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" \u{b7} ");
+        out.push(
+            Element::gesture_button(
+                ids::ROOM_SEARCH_RESULT_ITEM,
+                text,
+                true,
+                Gesture::OpenRoomSearchHit(row.navigation.clone()),
+            )
+            .attr("kind", row.kind.attr_token()),
+        );
+    }
     out
 }
 
@@ -3884,13 +4287,17 @@ fn reply_compose_bar(
     // The body + send. `dm-text-field` is already `Mode::Detail`-routed
     // (`set_field` → `set_compose_body(thread_id, …)`), and `dm-send-button` runs
     // the per-thread `manager.send` (a distinct gesture from the composer's).
+    // Both render READ-ONLY (present, disabled) where the room takes no send —
+    // a bridged room no bridge serves (`can_send`, shared Rust's room gate) —
+    // and `thread-room-notice` above says why.
     out.push(
         Element::input(
             ids::DM_TEXT_FIELD,
             compose.body_draft.clone(),
             Field::Conversations(ConversationsField::ComposeBody),
         )
-        .labelled(conversations::compose::WRITE_MESSAGE),
+        .labelled(conversations::compose::WRITE_MESSAGE)
+        .enabled(caps.can_send),
     );
     // The reply bar carries the same attach control + chip row as the new-thread
     // composer (ui.yaml declares the ids on both); `Mode::Detail` routes the commit
@@ -3931,7 +4338,7 @@ fn reply_compose_bar(
     out.push(Element::gesture_button(
         ids::DM_SEND_BUTTON,
         common::SEND,
-        !sending,
+        !sending && caps.can_send,
         Gesture::Conversations(Action::SendThread { rail }),
     ));
     out
@@ -4684,7 +5091,7 @@ mod tests {
     /// SESSION's own account, never a fresh `registry(app).active()` read —
     /// on a bound (secondary) launch the two can genuinely diverge, and the
     /// rendered threads are always the session's own (`account-scoping.md`
-    /// § Concurrent instances, :818-822).
+    /// § Concurrent instances).
     ///
     /// Pins `backup_audit_key`'s pure resolution — the sibling test
     /// `backup_audit_observation_keys_by_the_session_account_not_active` pins
@@ -4738,7 +5145,7 @@ mod tests {
     /// (`test_backup_audit_observation.py::…_tui`) already reads this
     /// function's on-disk effect back, it just runs against one signed-in
     /// account, so `active()` and the session account can never diverge
-    /// there (`account-scoping.md` § Concurrent instances, :818-822).
+    /// there (`account-scoping.md` § Concurrent instances).
     ///
     /// **Residual limit :** this test alone
     /// only proves the return matches `backup_audit_key`'s resolution — it
@@ -4779,9 +5186,10 @@ mod tests {
     }
 
     /// Closes 's residual limit on the sibling test
-    /// above: pins that `backup_audit_observation`'s return IS
-    /// `observe_thread_activity`'s own return for the same call, not merely
-    /// a value that happens to match `backup_audit_key`'s resolution. The
+    /// above: pins that `backup_audit_observation` returns a pair equal to
+    /// `observe_thread_activity`'s for the same inputs (equal, not the same
+    /// value — a separately-held equal pair passes), and that during the call
+    /// the sink was handed exactly the session actor, once, and no other. The
     /// expected actor is derived independently, straight from
     /// `backup_audit_key` — never re-derived from `backup_audit_observation`'s
     /// own return, which would make this tautological. Needs the same
@@ -4815,22 +5223,26 @@ mod tests {
 
         let direct = crate::backup_audit::observe_thread_activity(&expected_actor, expected_ms)
             .expect("the lock is never poisoned in this test");
+        // `direct` seeded the record with the expected actor; scope it to the
+        // call under test so that seed cannot answer for it.
+        crate::backup_audit::clear_forwarded_actors();
         let via_render_path =
             backup_audit_observation(&app, &snapshot).expect("a thread is present");
 
         assert_eq!(
             via_render_path, direct,
-            "backup_audit_observation must return observe_thread_activity's \
-             own return for the same call, not a separately-held local"
+            "backup_audit_observation must return a pair equal to \
+             observe_thread_activity's for the same inputs"
         );
         // The echo above is the sink's own parameters, so it cannot tell a
         // forwarded `active()` local from the right binding. What the sink was
-        // actually handed can.
+        // actually handed during this call can: every forward, not the last.
         assert_eq!(
-            crate::backup_audit::last_forwarded_actor().as_deref(),
-            Some(expected_actor.as_str()),
-            "backup_audit_observation must forward the session account's actor \
-             to observe_thread_activity, not a freshly-resolved active() one"
+            crate::backup_audit::forwarded_actors(),
+            vec![expected_actor.clone()],
+            "backup_audit_observation must forward exactly the session account's \
+             actor to observe_thread_activity, once — no active() one, no extra, \
+             no missing forward"
         );
     }
 
@@ -5950,9 +6362,14 @@ mod tests {
         );
         assert_eq!(count_id(&app, "dm-message-timestamp"), 1);
         assert!(
-            elements(&app).iter().any(|e| e.text
-                == fauna_i18n::strings::moderation::legal_takedown::tombstone("DMCA-2026-0001")),
-            "the shared localized tombstone paints in place of the body",
+            elements(&app)
+                .iter()
+                .any(|e| e.id == "dm-message-legal-takedown"
+                    && e.text
+                        == fauna_i18n::strings::moderation::legal_takedown::tombstone(
+                            "DMCA-2026-0001"
+                        )),
+            "the shared localized tombstone paints in place of the body, as `dm-message-legal-takedown`",
         );
     }
 
@@ -6009,9 +6426,23 @@ mod tests {
             }));
         assert_eq!(count_id(&app, "content-policy-blocked-notice"), 1);
         assert_eq!(
+            attr(&one(&app, ids::CONTENT_POLICY_BLOCKED_NOTICE), "state"),
+            Some("blocked")
+        );
+        assert_eq!(
+            count_id(&app, "content-policy-collapsed-reveal-button"),
+            0,
+            "a block has no reveal"
+        );
+        assert_eq!(
             count_id(&app, "dm-message-text"),
             0,
             "the blocked body never paints"
+        );
+        assert_eq!(
+            count_id(&app, "content-policy-blocked-reason"),
+            0,
+            "a floor invents no reason"
         );
         assert_eq!(count_id(&app, "dm-message-timestamp"), 1);
         for el in elements(&app) {
@@ -6022,6 +6453,46 @@ mod tests {
                 el.text
             );
         }
+    }
+
+    /// A guardian document rule's `block` paints the guardian's reason
+    /// verbatim in `content-policy-blocked-reason` beside the frame
+    /// (`nest-rules.md` § The shared rule editor → *The reason is the
+    /// member's to read*) — the feed card's twin; the floor above paints none.
+    #[tokio::test]
+    async fn a_guardian_rule_block_paints_its_reason_on_the_bubble() {
+        use fauna_core::content_policy::{
+            ContentPolicyDocument, ContentRule, ContentVerdict, REASON_DEFAULT_KEY,
+        };
+        let app = flagged_detail_app("buy zzcheappills now");
+        let mut document = ContentPolicyDocument::empty();
+        document.rules.push(ContentRule {
+            factor: "spam".into(),
+            min_permille: 500,
+            verdict: ContentVerdict::Block,
+            reason_code: "rule-1".into(),
+            reason: [(
+                REASON_DEFAULT_KEY.to_string(),
+                "Not for this account".to_string(),
+            )]
+            .into(),
+            extra: Default::default(),
+        });
+        app.content_policy
+            .set_ward_content_policy(Some(fauna_core::obligation::ContentPolicy {
+                document: Some(document),
+                ..Default::default()
+            }));
+        assert_eq!(
+            one(&app, ids::CONTENT_POLICY_BLOCKED_NOTICE).text,
+            fauna_i18n::strings::family::CONTENT_BLOCKED_NOTICE,
+            "the notice's own text stays the frame"
+        );
+        assert_eq!(
+            one(&app, ids::CONTENT_POLICY_BLOCKED_REASON).text,
+            "Not for this account"
+        );
+        assert_eq!(count_id(&app, "dm-message-text"), 0);
     }
 
     /// **Block beats mute**, the conversations twin of the feed's ordering test:
@@ -6050,10 +6521,10 @@ mod tests {
         assert_eq!(count_id(&app, "dm-message-muted-reveal-button"), 0);
     }
 
-    /// A `collapse` floor is revealable, session-locally, and the reveal is a
-    /// keyboard-reachable untagged control (ui.yaml scopes no id to this arm —
-    /// linux and web made the same call, but a TUI has no mouse, so an
-    /// unfocusable one would be a dead affordance).
+    /// A `collapse` floor is revealable, session-locally, through a
+    /// keyboard-reachable `content-policy-collapsed-reveal-button` (a TUI has no
+    /// mouse, so an unfocusable one would be a dead affordance), beside the
+    /// notice in `state="collapsed"`.
     #[tokio::test]
     async fn a_collapse_floor_reveals_in_place_without_relaxing_the_policy() {
         let mut app = flagged_detail_app("buy zzcheappills now");
@@ -6078,9 +6549,11 @@ mod tests {
             reveal.focusable(),
             "the reveal must be reachable by keyboard"
         );
-        assert!(
-            reveal.id.is_empty(),
-            "and it must not mint a app-specific id"
+        assert_eq!(reveal.id, ids::CONTENT_POLICY_COLLAPSED_REVEAL_BUTTON);
+        assert_eq!(
+            attr(&one(&app, ids::CONTENT_POLICY_BLOCKED_NOTICE), "state"),
+            Some("collapsed"),
+            "the collapse arm's notice says which verb it is"
         );
 
         apply_local(
@@ -6184,6 +6657,7 @@ mod tests {
                     ..Default::default()
                 },
                 legal_takedown_ref: None,
+                admin_block_reason: None,
                 // This fixture is about crypto badges, not the plane.
                 plane_ref: None,
             })
@@ -6205,6 +6679,214 @@ mod tests {
                 "{badge} must paint when its flag is set"
             );
         }
+    }
+
+    /// The withheld badge on the author's OWN copy (`moderation.md` § Legal
+    /// takedown → *App render*, the fourth surface), in both shapes the
+    /// author's devices hold: a copy synced before the block (the body alone
+    /// — the badge is the only notice), and the author-exempt fetch after it
+    /// (the body plus the block notice — the badge carries the notice, so the
+    /// bubble says it ONCE). Either way the body stays and the tap opens the
+    /// queue row's appeal.
+    #[tokio::test]
+    async fn the_authors_withheld_copy_paints_one_badge_opening_its_appeal() {
+        use fauna_conversations::Rail;
+        use fauna_conversations::backend::RailInboundMessage;
+        use fauna_conversations::backends::mock::MockRailBackend;
+        use fauna_conversations::message::{
+            BodyFormat, MessageBadges, PlaneRef, WithheldGround, WithheldRecord,
+        };
+
+        let mut app = detail_app(&[json!({
+            "rail": "FaunaMls", "sender": "carol@self-nest.test",
+            "body": "plain", "message_id": "m-1",
+        })]);
+        let manager = app.conversations.manager.clone().unwrap();
+        let backend = MockRailBackend::new(Rail::FaunaMls);
+        *backend.withheld_records.lock().unwrap() = ["aa", "bb"]
+            .into_iter()
+            .map(|digest| WithheldRecord {
+                content_id: digest.to_string(),
+                ground: WithheldGround::Blocked,
+                issuer_nest: None,
+                timestamp: 1,
+            })
+            .collect();
+        manager.register_backend(std::sync::Arc::new(backend));
+        for (id, digest, reason) in [
+            ("m-synced-before", "aa", None),
+            ("m-fetched-after", "bb", Some("harassment")),
+        ] {
+            manager
+                .inject_own_for_test(RailInboundMessage {
+                    rail: Rail::FaunaMls,
+                    sender: TypedAddress::Fauna {
+                        handle: "carol@self-nest.test".to_string(),
+                        actor_id: fauna_core::identity::ActorId([7u8; 32]),
+                    },
+                    recipients: vec![TypedAddress::Fauna {
+                        handle: "me@self-nest.test".to_string(),
+                        actor_id: fauna_core::identity::ActorId([8u8; 32]),
+                    }],
+                    subject: None,
+                    body: format!("words of {id}"),
+                    body_format: BodyFormat::Markdown,
+                    timestamp_ms: now_ms(),
+                    message_id: MessageId(id.to_string()),
+                    in_reply_to: None,
+                    attachments: Vec::new(),
+                    badges: MessageBadges::default(),
+                    legal_takedown_ref: None,
+                    admin_block_reason: reason.map(str::to_string),
+                    plane_ref: Some(PlaneRef {
+                        scope: "content:conv:00".to_string(),
+                        record_digest: digest.to_string(),
+                    }),
+                })
+                .expect("own inject routes");
+        }
+        let tid = app
+            .conversations
+            .snapshot()
+            .unwrap()
+            .threads
+            .iter()
+            .find(|t| {
+                manager.thread_detail(t.thread_id.clone()).is_some_and(|d| {
+                    d.messages
+                        .iter()
+                        .any(|m| m.message_id.0 == "m-fetched-after")
+                })
+            })
+            .expect("the own messages landed")
+            .thread_id
+            .clone();
+        manager.refresh_withheld_messages(tid.clone()).await;
+        apply_local(&mut app, Action::SelectThread(tid.0.clone()));
+
+        let painted = elements(&app);
+        let badges: Vec<&Element> = painted
+            .iter()
+            .filter(|e| e.id == ids::DM_MESSAGE_WITHHELD_BADGE)
+            .collect();
+        assert_eq!(badges.len(), 2, "one badge per withheld own message");
+        let notice = crate::moderation::admin_block_notice("harassment");
+        assert!(
+            !painted.iter().any(|e| e.text == notice),
+            "no separate block notice beside the badge that already says it"
+        );
+        assert_eq!(
+            painted.iter().filter(|e| e.text.contains(&notice)).count(),
+            1,
+            "the fetched-after copy's badge carries the notice, once"
+        );
+        let appeal = fauna_i18n::strings::moderation::APPEAL;
+        let blocked = fauna_core::obligation::obligation_action_label(10)
+            .resolve(fauna_i18n::strings::lookup);
+        assert!(
+            badges
+                .iter()
+                .any(|b| b.text == format!("{blocked} · {appeal}")),
+            "the synced-before copy's badge names the ground and the appeal: {:?}",
+            badges.iter().map(|b| &b.text).collect::<Vec<_>>()
+        );
+        for id in ["m-synced-before", "m-fetched-after"] {
+            assert!(
+                painted
+                    .iter()
+                    .any(|e| e.id == ids::DM_MESSAGE_TEXT
+                        && e.text.contains(&format!("words of {id}"))),
+                "the body of {id} stays in view"
+            );
+        }
+        assert!(
+            badges.iter().any(|b| matches!(
+                &b.role,
+                crate::element::Role::Button(Gesture::AppealWithheld { content_id })
+                    if content_id == "aa"
+            )),
+            "the tap opens the matched queue row's appeal"
+        );
+    }
+
+    /// The admin block's two bubble shapes (`moderation.md` § Admin block of a
+    /// reported item): a withheld record (empty body) collapses to the shared
+    /// notice in place of the bubble; the author's own blocked message — whose
+    /// body the nest serves its attested author, decision 4 — keeps the body
+    /// and paints the notice right after it.
+    #[test]
+    fn an_admin_blocked_message_paints_the_notice_in_place_or_beside_the_authors_body() {
+        use fauna_conversations::Rail;
+        use fauna_conversations::backend::RailInboundMessage;
+        use fauna_conversations::message::{BodyFormat, MessageBadges};
+
+        let mut app = detail_app(&[json!({
+            "rail": "FaunaMls", "sender": "carol@self-nest.test",
+            "body": "plain", "message_id": "m-1",
+        })]);
+        let manager = app.conversations.manager.clone().unwrap();
+        for (id, body) in [("m-2", ""), ("m-3", "my own blocked words")] {
+            manager
+                .inject_inbound_for_test(RailInboundMessage {
+                    rail: Rail::FaunaMls,
+                    sender: TypedAddress::Fauna {
+                        handle: "carol@self-nest.test".to_string(),
+                        actor_id: fauna_core::identity::ActorId([7u8; 32]),
+                    },
+                    recipients: vec![TypedAddress::Fauna {
+                        handle: "me@self-nest.test".to_string(),
+                        actor_id: fauna_core::identity::ActorId([8u8; 32]),
+                    }],
+                    subject: None,
+                    body: body.to_string(),
+                    body_format: BodyFormat::Markdown,
+                    timestamp_ms: now_ms(),
+                    message_id: MessageId(id.to_string()),
+                    in_reply_to: None,
+                    attachments: Vec::new(),
+                    badges: MessageBadges::default(),
+                    legal_takedown_ref: None,
+                    admin_block_reason: Some("harassment".to_string()),
+                    plane_ref: None,
+                })
+                .expect("blocked inject routes");
+        }
+        let threads = app.conversations.snapshot().unwrap().threads;
+        let tid = threads
+            .iter()
+            .find(|t| {
+                manager
+                    .thread_detail(t.thread_id.clone())
+                    .is_some_and(|d| d.messages.iter().any(|m| m.message_id.0 == "m-3"))
+            })
+            .expect("the blocked messages landed")
+            .thread_id
+            .clone();
+        apply_local(&mut app, Action::SelectThread(tid.0.clone()));
+
+        let notice = crate::moderation::admin_block_notice("harassment");
+        let painted = elements(&app);
+        let notices: Vec<usize> = painted
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.text == notice)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(notices.len(), 2, "one notice per blocked message");
+        let own_body = painted
+            .iter()
+            .position(|e| e.id == ids::DM_MESSAGE_TEXT && e.text.contains("my own blocked words"))
+            .expect("the author's blocked body stays on screen");
+        assert!(
+            notices.contains(&(own_body + 1)),
+            "the notice paints right after the author's body"
+        );
+        assert!(
+            !painted
+                .iter()
+                .any(|e| e.id == ids::DM_MESSAGE_TEXT && e.text.is_empty()),
+            "the withheld record paints no empty bubble"
+        );
     }
 
     /// The per-bubble ⋯ overflow gates on the shared capability matrix exactly
@@ -7430,6 +8112,8 @@ mod tests {
             // own far address, as a real bridge does.
             self_address: Some(fauna_conversations::manager::TEST_SEAM_SELF_ADDRESS.into()),
             guardian_state,
+            disconnected: false,
+            undelivered_rows: Vec::new(),
         };
 
         let mut app = authed_app();
@@ -7532,6 +8216,368 @@ mod tests {
                 && e.text == conversations::unified::recipient_picker_bridges("Example")),
             "the picker lists the registered bridge"
         );
+    }
+
+    /// A bridged room no live bridge serves paints what its snapshot says and
+    /// nothing tui decided (`apps/bridges.md` § Phase G → *When the bridge
+    /// stops serving*): the header's notice in its `bridge-disconnected`
+    /// state, and `dm-message-undelivered` under the user's own message the
+    /// bridge never took — with that message's body still on screen — while
+    /// the peer's message carries no such line; and the reply bar the notice
+    /// explains is read-only, readable but never writable.
+    #[test]
+    fn a_disconnected_bridged_room_says_so_and_marks_the_undelivered_own_message() {
+        use fauna_conversations::backend::{
+            BridgedOutbound, BridgedResolved, BridgedSent, BridgedSink,
+        };
+        use fauna_conversations::backends::bridged::{
+            BridgedBackend, BridgedRoomRecord, bridged_message_id,
+        };
+        use fauna_conversations::manager::TEST_SEAM_SELF_ADDRESS;
+
+        struct NoWire;
+        #[async_trait::async_trait]
+        impl BridgedSink for NoWire {
+            async fn resolve(&self, _raw: String) -> Result<Option<BridgedResolved>, String> {
+                Ok(None)
+            }
+            async fn send(&self, _outbound: BridgedOutbound) -> Result<BridgedSent, String> {
+                Err("no wire in this test".into())
+            }
+        }
+
+        let peer = "@peer:instance.test";
+        let mut app = authed_app();
+        let manager = ConversationsManager::new();
+        manager.install_mock_backends_for_test();
+        let bridged = BridgedBackend::new(Arc::new(NoWire));
+        bridged.set_rooms(vec![BridgedRoomRecord {
+            bridge_id: "example".into(),
+            identity: None,
+            participants: vec![peer.into()],
+            self_address: Some(TEST_SEAM_SELF_ADDRESS.into()),
+            guardian_state: None,
+            disconnected: true,
+            undelivered_rows: vec![2],
+        }]);
+        manager.register_backend(Arc::new(bridged));
+        let state = ConversationsState {
+            manager: Some(manager),
+            ..Default::default()
+        };
+        for (sender, to, row, body) in [
+            (peer, TEST_SEAM_SELF_ADDRESS, 1, "hello"),
+            (TEST_SEAM_SELF_ADDRESS, peer, 2, "never left"),
+        ] {
+            assert!(inject_inbound(
+                &state,
+                &json!({
+                    "rail": "Bridged",
+                    "bridge_id": "example",
+                    "sender": sender,
+                    "recipients": [to],
+                    "body": body,
+                    "message_id": bridged_message_id(row).0
+                })
+            ));
+        }
+        app.conversations = state;
+        app.page = Page::Conversations;
+        let thread = app.conversations.snapshot().unwrap().threads[0]
+            .thread_id
+            .clone();
+        apply_local(&mut app, Action::SelectThread(thread.0));
+
+        let notice = one(&app, ids::THREAD_ROOM_NOTICE);
+        assert_eq!(attr(&notice, "state"), Some("bridge-disconnected"));
+        assert_eq!(
+            notice.text,
+            conversations::unified::ROOM_NOTICE_BRIDGE_DISCONNECTED
+        );
+        let painted = elements(&app);
+        let undelivered: Vec<&Element> = painted
+            .iter()
+            .filter(|e| e.id == ids::DM_MESSAGE_UNDELIVERED)
+            .collect();
+        assert_eq!(undelivered.len(), 1, "only the own, stamped message");
+        assert_eq!(
+            undelivered[0].text,
+            conversations::unified::DM_MESSAGE_UNDELIVERED
+        );
+        // It sits after the body of the message it speaks of, which stays.
+        let pos = |pred: &dyn Fn(&Element) -> bool| painted.iter().position(pred);
+        let own_body = pos(&|e| e.id == ids::DM_MESSAGE_TEXT && e.text.contains("never left"))
+            .expect("the undelivered message's body stays in view");
+        let line = pos(&|e| e.id == ids::DM_MESSAGE_UNDELIVERED).unwrap();
+        assert!(own_body < line, "under the body");
+        // Readable, never writable: the bar stays in view, disabled.
+        assert!(!one(&app, ids::DM_TEXT_FIELD).enabled, "no body to type");
+        assert!(!one(&app, ids::DM_SEND_BUTTON).enabled, "no send to press");
+    }
+
+    /// Opening a mail thread reads each received message's scan verdict, and
+    /// the bubble paints exactly the shared lines in one `dm-message-scan-result`
+    /// row (`mail-content-scanning.md` § User sees their own message's row) —
+    /// under the received message only, never under the account's own copy.
+    #[tokio::test]
+    async fn an_opened_mail_thread_paints_the_received_messages_scan_verdict() {
+        use fauna_conversations::backend::{InboundMailRecord, MailFeed, OutboundMailSink};
+        use fauna_conversations::backends::smtp::{SmtpBackend, ingest_inbound_record};
+        use fauna_core::localized::LocalizedText;
+        use fauna_core::mail_scan::{ClamavVerdict, RspamdScore, ScanActionTaken};
+
+        fn lines() -> Vec<LocalizedText> {
+            fauna_core::mail_scan::scan_result_lines(
+                &ClamavVerdict::Clean,
+                Some(&RspamdScore {
+                    raw_milli: 1200,
+                    flagged_rules: vec!["BAYES_HAM".into()],
+                    ..Default::default()
+                }),
+                ScanActionTaken::Delivered,
+            )
+        }
+        struct ScanSink;
+        #[async_trait::async_trait]
+        impl OutboundMailSink for ScanSink {
+            async fn submit(&self, _to: Vec<String>, _raw: Vec<u8>) -> Result<(), String> {
+                Ok(())
+            }
+            async fn message_scan_result(
+                &self,
+                nest_message_id: Vec<u8>,
+            ) -> Result<Option<Vec<LocalizedText>>, String> {
+                Ok((nest_message_id == b"in-1").then(lines))
+            }
+        }
+        fn record(mailbox: MailFeed, id: &str, from: &str, to: &str) -> InboundMailRecord {
+            InboundMailRecord {
+                uid: 1,
+                mailbox,
+                message_id: id.as_bytes().to_vec(),
+                internal_date_ms: 1,
+                rfc5322: format!(
+                    "From: {from}\r\nTo: {to}\r\nSubject: scanned\r\nMessage-ID: <{id}@host.test>\r\n\r\n{id}\r\n"
+                )
+                .into_bytes(),
+                suppress_from_view: false,
+                has_seen_flag: true,
+                warmup_hold: None,
+            }
+        }
+
+        let mut app = authed_app();
+        let manager = ConversationsManager::new();
+        manager.register_backend(Arc::new(SmtpBackend::new(
+            Arc::new(ScanSink),
+            "me@host.test",
+        )));
+        for rec in [
+            record(MailFeed::Inbox, "in-1", "alice@far.test", "me@host.test"),
+            record(MailFeed::Sent, "sent-1", "me@host.test", "alice@far.test"),
+        ] {
+            ingest_inbound_record(&manager, &rec).unwrap();
+        }
+        app.conversations = ConversationsState {
+            manager: Some(manager),
+            ..Default::default()
+        };
+        app.page = Page::Conversations;
+        let thread = app.conversations.snapshot().unwrap().threads[0]
+            .thread_id
+            .clone();
+        assert!(
+            !elements(&app)
+                .iter()
+                .any(|e| e.id == ids::DM_MESSAGE_SCAN_RESULT)
+        );
+        let op = apply_local(&mut app, Action::SelectThread(thread.0)).expect("an open reads");
+        op.run().await;
+
+        let painted = elements(&app);
+        let rows: Vec<&Element> = painted
+            .iter()
+            .filter(|e| e.id == ids::DM_MESSAGE_SCAN_RESULT)
+            .collect();
+        assert_eq!(rows.len(), 1, "the received message only");
+        assert_eq!(
+            rows[0].text,
+            "ClamAV: clean · Rspamd score: 1.2 (BAYES_HAM) · Action: delivered to Inbox"
+        );
+        let pos = |pred: &dyn Fn(&Element) -> bool| painted.iter().position(pred);
+        let received = pos(&|e| e.id == ids::DM_MESSAGE_TEXT && e.text.contains("in-1")).unwrap();
+        let own = pos(&|e| e.id == ids::DM_MESSAGE_TEXT && e.text.contains("sent-1")).unwrap();
+        let row = pos(&|e| e.id == ids::DM_MESSAGE_SCAN_RESULT).unwrap();
+        assert!(
+            received < row && row < own,
+            "under the received message's body"
+        );
+    }
+
+    /// Opening a mail thread reads the account's alias rows, and the received
+    /// message delivered on one paints `dm-message-delivered-to-alias` in the
+    /// shared wording (`mail-aliases.md` § Label) — under that message only,
+    /// never under the account's own copy.
+    #[tokio::test]
+    async fn an_opened_mail_thread_tags_the_received_message_with_its_alias() {
+        use fauna_conversations::backend::{InboundMailRecord, MailFeed, OutboundMailSink};
+        use fauna_conversations::backends::smtp::{SmtpBackend, ingest_inbound_record};
+
+        struct AliasSink;
+        #[async_trait::async_trait]
+        impl OutboundMailSink for AliasSink {
+            async fn submit(&self, _to: Vec<String>, _raw: Vec<u8>) -> Result<(), String> {
+                Ok(())
+            }
+            async fn account_alias_labels(
+                &self,
+            ) -> Result<Vec<fauna_conversations::backend::AliasLabelRow>, String> {
+                Ok(vec![fauna_conversations::backend::AliasLabelRow {
+                    kind: "exact".into(),
+                    local_domain: "host.test".into(),
+                    pattern: "shop".into(),
+                    label: "Online shops".into(),
+                }])
+            }
+        }
+        fn record(mailbox: MailFeed, id: &str, from: &str, to: &str) -> InboundMailRecord {
+            InboundMailRecord {
+                uid: 1,
+                mailbox,
+                message_id: id.as_bytes().to_vec(),
+                internal_date_ms: 1,
+                rfc5322: format!(
+                    "X-Fauna-Delivered-To: shop@host.test\r\nFrom: {from}\r\nTo: {to}\r\nSubject: tagged\r\nMessage-ID: <{id}@host.test>\r\n\r\n{id}\r\n"
+                )
+                .into_bytes(),
+                suppress_from_view: false,
+                has_seen_flag: true,
+                warmup_hold: None,
+            }
+        }
+
+        let mut app = authed_app();
+        let manager = ConversationsManager::new();
+        manager.register_backend(Arc::new(SmtpBackend::new(
+            Arc::new(AliasSink),
+            "me@host.test",
+        )));
+        for rec in [
+            record(MailFeed::Inbox, "in-1", "alice@far.test", "me@host.test"),
+            record(MailFeed::Sent, "sent-1", "me@host.test", "alice@far.test"),
+        ] {
+            ingest_inbound_record(&manager, &rec).unwrap();
+        }
+        app.conversations = ConversationsState {
+            manager: Some(manager),
+            ..Default::default()
+        };
+        app.page = Page::Conversations;
+        let thread = app.conversations.snapshot().unwrap().threads[0]
+            .thread_id
+            .clone();
+        assert!(
+            !elements(&app)
+                .iter()
+                .any(|e| e.id == ids::DM_MESSAGE_DELIVERED_TO_ALIAS),
+            "nothing until the alias rows are read"
+        );
+        let op = apply_local(&mut app, Action::SelectThread(thread.0)).expect("an open reads");
+        op.run().await;
+
+        let painted = elements(&app);
+        let tags: Vec<&Element> = painted
+            .iter()
+            .filter(|e| e.id == ids::DM_MESSAGE_DELIVERED_TO_ALIAS)
+            .collect();
+        assert_eq!(tags.len(), 1, "the received message only");
+        assert_eq!(tags[0].text, "Delivered to: shop@host.test [Online shops]");
+        let pos = |pred: &dyn Fn(&Element) -> bool| painted.iter().position(pred);
+        let received = pos(&|e| e.id == ids::DM_MESSAGE_TEXT && e.text.contains("in-1")).unwrap();
+        let own = pos(&|e| e.id == ids::DM_MESSAGE_TEXT && e.text.contains("sent-1")).unwrap();
+        let tag = pos(&|e| e.id == ids::DM_MESSAGE_DELIVERED_TO_ALIAS).unwrap();
+        assert!(
+            received < tag && tag < own,
+            "under the received message's body"
+        );
+    }
+
+    /// A sent mail the fresh-IP warm-up holds paints `dm-message-warmup-deferred`
+    /// under its body in the shared wording, from nothing but the `Sent` read's
+    /// hold (`mail-deliverability.md` § Enforcement at submission time); a hold
+    /// whose release has come paints nothing.
+    #[test]
+    fn a_sent_mail_the_warm_up_holds_says_when_it_will_be_delivered() {
+        use fauna_conversations::backend::{
+            InboundMailRecord, MailFeed, MailWarmupHold, OutboundMailSink,
+        };
+        use fauna_conversations::backends::smtp::{SmtpBackend, ingest_inbound_record};
+
+        struct NoWire;
+        #[async_trait::async_trait]
+        impl OutboundMailSink for NoWire {
+            async fn submit(&self, _to: Vec<String>, _raw: Vec<u8>) -> Result<(), String> {
+                Err("no wire in this test".into())
+            }
+        }
+
+        let now = now_ms().div_euclid(1_000);
+        let held = MailWarmupHold {
+            release_at_secs: now + 3_600,
+            messages_ahead: 2,
+        };
+        let released = MailWarmupHold {
+            release_at_secs: now - 60,
+            messages_ahead: 0,
+        };
+        let manager = ConversationsManager::new();
+        manager.register_backend(Arc::new(SmtpBackend::new(Arc::new(NoWire), "me@host.test")));
+        for (uid, hold, body) in [(1, held, "held back"), (2, released, "already out")] {
+            let raw = format!(
+                "From: me@host.test\r\nTo: bob@external.test\r\nSubject: Warm-up\r\n\
+                 Message-ID: <w{uid}@host.test>\r\n\r\n{body}\r\n"
+            );
+            ingest_inbound_record(
+                &manager,
+                &InboundMailRecord {
+                    uid,
+                    message_id: format!("seg-{uid}").into_bytes(),
+                    internal_date_ms: 1_700_000_000_000 + i64::from(uid),
+                    rfc5322: raw.into_bytes(),
+                    mailbox: MailFeed::Sent,
+                    suppress_from_view: false,
+                    has_seen_flag: false,
+                    warmup_hold: Some(hold),
+                },
+            )
+            .expect("ingest the Sent copy");
+        }
+        let mut app = authed_app();
+        app.conversations = ConversationsState {
+            manager: Some(manager),
+            ..Default::default()
+        };
+        app.page = Page::Conversations;
+        let thread = app.conversations.snapshot().unwrap().threads[0]
+            .thread_id
+            .clone();
+        apply_local(&mut app, Action::SelectThread(thread.0));
+
+        let painted = elements(&app);
+        let lines: Vec<&Element> = painted
+            .iter()
+            .filter(|e| e.id == ids::DM_MESSAGE_WARMUP_DEFERRED)
+            .collect();
+        assert_eq!(lines.len(), 1, "only the message still held");
+        assert_eq!(
+            Some(lines[0].text.clone()),
+            fauna_conversations::message::warmup_deferred_text(&held, now)
+        );
+        let pos = |pred: &dyn Fn(&Element) -> bool| painted.iter().position(pred);
+        let body = pos(&|e| e.id == ids::DM_MESSAGE_TEXT && e.text.contains("held back"))
+            .expect("the held message's body is on screen");
+        let line = pos(&|e| e.id == ids::DM_MESSAGE_WARMUP_DEFERRED).unwrap();
+        assert!(body < line, "under the body of the message it speaks of");
     }
 
     /// Keep dispatches the shared succession-ledger write for **that person** — the
@@ -8757,7 +9803,9 @@ mod tests {
                 labelers: None,
                 awaiting_key,
                 moderation_unverified,
+                bridge_disconnected: false,
                 pending_invites: None,
+                search: None,
             },
         );
         app.conversations
@@ -8766,6 +9814,169 @@ mod tests {
             .unwrap()
             .register_backend(mock.clone());
         (app, thread_id, mock)
+    }
+
+    /// The room the manager projects onto `thread_id` now — a fixture's room
+    /// to edit and set back.
+    fn projected_room(app: &App, thread_id: &ThreadId) -> fauna_conversations::RoomSnapshot {
+        app.conversations
+            .manager
+            .as_ref()
+            .unwrap()
+            .thread_detail(thread_id.clone())
+            .and_then(|d| d.room)
+            .expect("the fixture projects a room")
+    }
+
+    /// A community room's search strip, end to end through the real paint
+    /// (`room-search.md` § The surface): the door paints only on a community
+    /// room; opening it paints the field and submit over the stream; a
+    /// submitted query's rows replace the stream in the served order, a post
+    /// row carrying the words the post-read seam resolved; a post hit on a
+    /// room homed elsewhere opens the feed's detail through the relay door;
+    /// Esc closes the strip and the stream returns.
+    #[tokio::test]
+    async fn the_room_search_strip_opens_searches_and_opens_a_post_hit_through_the_home() {
+        use fauna_conversations::backend::{
+            RoomSearchAnswer, RoomSearchHitRef, RoomSearchPostEnvelope,
+        };
+        use fauna_conversations::{RoomClass, room::RoomSearchNav};
+        let (mut app, thread_id, mock) = governed_group_app(&["bob"]);
+        let painted = ids(&app);
+        assert!(
+            !painted.contains(ids::ROOM_SEARCH_BUTTON),
+            "an end-to-end room's words rest only on its members' devices"
+        );
+
+        let mut room = projected_room(&app, &thread_id);
+        room.class = RoomClass::Community;
+        mock.set_room(thread_id.clone(), room);
+        let manager = app.conversations.manager.clone().unwrap();
+        manager
+            .send_text(thread_id.clone(), "a message in the stream".into())
+            .await
+            .expect("the mock rail takes the send");
+        manager.select_thread(thread_id.clone());
+        let painted = ids(&app);
+        assert!(painted.contains(ids::DM_MESSAGE_TEXT), "the stream paints");
+        assert!(painted.contains(ids::ROOM_SEARCH_BUTTON));
+        assert!(
+            !painted.contains(ids::ROOM_SEARCH_FIELD),
+            "closed until asked"
+        );
+
+        assert!(apply_local(&mut app, Action::ToggleRoomSearch).is_none());
+        let painted = ids(&app);
+        for id in [ids::ROOM_SEARCH_FIELD, ids::ROOM_SEARCH_SUBMIT_BUTTON] {
+            assert!(painted.contains(id), "{id} paints in the open strip");
+        }
+        assert!(
+            painted.contains(ids::DM_MESSAGE_TEXT),
+            "nothing submitted: the stream stays"
+        );
+
+        let post_id = "ab".repeat(32);
+        mock.set_room_search_answer(
+            thread_id.clone(),
+            RoomSearchAnswer {
+                channel_hex: "cd".repeat(16),
+                hits: vec![RoomSearchHitRef::Post {
+                    post_id_hex: post_id.clone(),
+                }],
+                home_nest_url: Some("https://home.example".into()),
+            },
+        );
+        mock.set_room_search_post(
+            post_id.clone(),
+            RoomSearchPostEnvelope {
+                author_actor_hex: "ef".repeat(32),
+                author_display: Some("Founder".into()),
+                created_at_ms: 1_700_000_000_000,
+                teaser: "the teaser marker".into(),
+            },
+        );
+        set_field(
+            &mut app.conversations,
+            ConversationsField::RoomSearch,
+            "marker".into(),
+        );
+        let Some(Op::RoomSearch { query, .. }) = apply_local(&mut app, Action::SubmitRoomSearch)
+        else {
+            panic!("submit is the search op");
+        };
+        assert_eq!(query, "marker");
+        apply_local(&mut app, Action::SubmitRoomSearch)
+            .unwrap()
+            .run()
+            .await;
+
+        let rows: Vec<Element> = elements(&app)
+            .into_iter()
+            .filter(|e| e.id == ids::ROOM_SEARCH_RESULT_ITEM)
+            .collect();
+        assert_eq!(rows.len(), 1, "one row per hit");
+        assert!(rows[0].attrs.contains(&("kind".into(), "post".into())));
+        assert!(
+            rows[0].text.contains("the teaser marker"),
+            "{}",
+            rows[0].text
+        );
+        assert!(
+            !ids(&app).contains(ids::DM_MESSAGE_TEXT),
+            "the results take the stream's place"
+        );
+        assert!(!ids(&app).contains(ids::ROOM_SEARCH_NO_RESULTS));
+        let Some(Gesture::OpenRoomSearchHit(nav)) = rows[0].gesture() else {
+            panic!("the row opens its typed target");
+        };
+        assert_eq!(
+            nav,
+            RoomSearchNav::Post {
+                post_id: post_id.clone(),
+                home_nest_url: Some("https://home.example".into()),
+            }
+        );
+
+        assert!(
+            detail_overlay_open(&app.conversations),
+            "Esc closes the strip first"
+        );
+        cancel_detail_overlay(&mut app.conversations);
+        let painted = ids(&app);
+        assert!(!painted.contains(ids::ROOM_SEARCH_FIELD));
+        assert!(painted.contains(ids::DM_MESSAGE_TEXT), "the stream returns");
+    }
+
+    /// Zero hits is the empty state, never a blank region.
+    #[tokio::test]
+    async fn a_room_search_with_no_hits_paints_the_empty_state() {
+        use fauna_conversations::RoomClass;
+        use fauna_conversations::backend::RoomSearchAnswer;
+        let (mut app, thread_id, mock) = governed_group_app(&["bob"]);
+        let mut room = projected_room(&app, &thread_id);
+        room.class = RoomClass::Community;
+        mock.set_room(thread_id.clone(), room);
+        mock.set_room_search_answer(
+            thread_id.clone(),
+            RoomSearchAnswer {
+                channel_hex: "cd".repeat(16),
+                hits: Vec::new(),
+                home_nest_url: None,
+            },
+        );
+        apply_local(&mut app, Action::ToggleRoomSearch);
+        set_field(
+            &mut app.conversations,
+            ConversationsField::RoomSearch,
+            "nothing".into(),
+        );
+        apply_local(&mut app, Action::SubmitRoomSearch)
+            .unwrap()
+            .run()
+            .await;
+        let painted = ids(&app);
+        assert!(painted.contains(ids::ROOM_SEARCH_NO_RESULTS));
+        assert!(!painted.contains(ids::ROOM_SEARCH_RESULT_ITEM));
     }
 
     /// `thread-room-notice` is absent while neither room fact holds, states
@@ -8990,7 +10201,9 @@ mod tests {
             labelers: None,
             awaiting_key: false,
             moderation_unverified: false,
+            bridge_disconnected: false,
             pending_invites: pending,
+            search: None,
         };
         let carol = "11".repeat(32);
         let pending_row =
@@ -9164,7 +10377,9 @@ mod tests {
                 labelers: None,
                 awaiting_key: false,
                 moderation_unverified: false,
+                bridge_disconnected: false,
                 pending_invites: None,
+                search: None,
             },
         );
 
@@ -9385,7 +10600,9 @@ mod tests {
                 labelers: Some(vec![wasm.clone()]),
                 awaiting_key: false,
                 moderation_unverified: false,
+                bridge_disconnected: false,
                 pending_invites: None,
+                search: None,
             },
         );
         apply_local(&mut app, Action::OpenRoomSettings);
@@ -9525,7 +10742,9 @@ mod tests {
                 labelers: Some(vec![]),
                 awaiting_key: false,
                 moderation_unverified: false,
+                bridge_disconnected: false,
                 pending_invites: None,
+                search: None,
             },
         );
         apply_local(&mut app, Action::OpenRoomSettings);

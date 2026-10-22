@@ -1,12 +1,13 @@
 use adw::prelude::*;
 use fauna_client::Value;
-use fauna_client_bridges::bridges_ui::{BridgeFollow, BridgeLinkMode, BridgeSetting};
-use fauna_client_bridges::follow_display;
-use fauna_protocol::bridge_search_policy::SETTING_TYPE_NUMBER;
+use fauna_client_bridges::bridges_ui::{
+    BridgeFollow, BridgeIdentity, BridgeLinkMode, BridgeSetting,
+};
+use fauna_client_bridges::{SettingControl, follow_display, setting_control};
 use fauna_ui_ids as ids;
 use gtk::glib;
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 use crate::client::FaunaClient;
@@ -19,8 +20,8 @@ use crate::i18n::strings::{bridges as bridges_strings, common};
 // inputs, both supervised-only by construction (so no "is supervised" test is
 // written — rule (h)): the durable `status.feed_requests` and this session's
 // TYPED refusals, both held in `crate::ward_asks`. Rows are keyed on the ask
-// data itself, never on the add-follow dialog's buffers (rule (d)) — the dialog
-// is closed, its entries gone, by the time a refusal comes back.
+// data itself, never on the add-follow row's buffers (rule (d)) — the row clears
+// its entries on send, so they are gone by the time a refusal comes back.
 
 /// One open card's ask container (weak) and its repaint hook.
 type SourceAskPane = (glib::WeakRef<gtk::Box>, Rc<dyn Fn()>);
@@ -77,7 +78,7 @@ pub fn repaint_source_asks() {
 /// refusal is the ward's to read verbatim.
 fn ask_for_source(client: &Rc<FaunaClient>, bridge_id: &str, operation: &str, target: &str) {
     let tx = client.tx();
-    // Display-only: the add-follow petname is gone by now (the dialog closed),
+    // Display-only: the add-follow petname is gone by now (the row cleared on send),
     // so the bridge id is the one label still available — nothing is invented.
     client.request_feed_source(bridge_id, operation, target, bridge_id, move |result| {
         match result {
@@ -174,14 +175,27 @@ fn cbor_text_entry(key: &str, value: impl Into<String>) -> (String, Value) {
     (key.to_string(), Value::String(value.into()))
 }
 
-/// Handles a caller needs back from a built detail pane — today just the
-/// `follows_list` widget, so a caller can repaint it when a
-/// `fauna.bridges.list_follows` reply lands later (the pane used to
-/// render nothing to hand back, so the follows section always showed its
-/// empty placeholder no matter what the nest returned). Mirrors
-/// `list::BridgeListHandles`'s shape (one field today, room to grow).
+/// Handles a caller needs back from a built detail pane — the `follows_list`
+/// widget, so a caller can repaint it when a `fauna.bridges.list_follows` reply
+/// lands later (the pane used to render nothing to hand back, so the
+/// follows section always showed its empty placeholder no matter what the nest
+/// returned), and the follow-requests section, repainted the same way.
+/// Mirrors `list::BridgeListHandles`'s shape.
+#[derive(Clone)]
 pub struct BridgeDetailHandles {
     pub follows_list: gtk::ListBox,
+    pub follow_requests: FollowRequestsHandles,
+}
+
+/// The *Follow requests* section of a bridge card (`bridges.md` § Follow
+/// requests). Built hidden: only a bridge that declares
+/// `supports_follow_requests` is ever asked for its requests, and the section
+/// appears with the first reply — empty, it keeps its heading at a zero count.
+#[derive(Clone)]
+pub struct FollowRequestsHandles {
+    pub section: gtk::Box,
+    pub heading: gtk::Label,
+    pub list: gtk::ListBox,
 }
 
 /// Build the bridge detail pane for a given bridge.
@@ -191,12 +205,14 @@ pub struct BridgeDetailHandles {
 /// - Identity info (when linked)
 /// - Settings (when linked, as editable rows)
 /// - Follows list with add/remove (when linked + supports_follows)
+#[allow(clippy::too_many_arguments)]
 pub fn build_bridge_detail(
     bridge_id: &str,
     bridge_name: &str,
     link_modes: Vec<BridgeLinkMode>,
     linked: bool,
     error: Option<String>,
+    identity: Option<BridgeIdentity>,
     settings: Vec<BridgeSetting>,
     client: Rc<FaunaClient>,
 ) -> (gtk::Box, BridgeDetailHandles) {
@@ -206,8 +222,9 @@ pub fn build_bridge_detail(
     header.set_title_widget(Some(&gtk::Label::new(Some(bridge_name))));
     outer.append(&header);
 
-    let (scroll_content, handles) =
-        build_bridge_detail_content(bridge_id, link_modes, linked, error, settings, client);
+    let (scroll_content, handles) = build_bridge_detail_content(
+        bridge_id, link_modes, linked, error, identity, settings, client,
+    );
 
     let scrolled = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
@@ -233,6 +250,7 @@ pub fn build_bridge_detail_content(
     link_modes: Vec<BridgeLinkMode>,
     linked: bool,
     error: Option<String>,
+    identity: Option<BridgeIdentity>,
     settings: Vec<BridgeSetting>,
     client: Rc<FaunaClient>,
 ) -> (gtk::Box, BridgeDetailHandles) {
@@ -252,6 +270,19 @@ pub fn build_bridge_detail_content(
     let identity_row = adw::ActionRow::new();
     identity_row.set_title(common::IDENTITY);
     identity_row.set_subtitle(common::NOT_LINKED);
+    // A linked card shows the identity the nest reports for the account
+    // (`BridgeStatus.identity`): `bridge-identity` reads `<label>: <display>`,
+    // the shared line every app paints (`bridges.md` § User actions). An
+    // unlinked card has none, so the placeholder row carries no id.
+    if let (true, Some(identity)) = (linked, identity.as_ref()) {
+        identity_row.set_title(&identity.label);
+        identity_row.set_subtitle(&identity.display);
+        crate::testid::set_test_id(&identity_row, ids::BRIDGE_IDENTITY);
+        crate::testid::set_test_text(
+            &identity_row,
+            &format!("{}: {}", identity.label, identity.display),
+        );
+    }
     link_group.add(&identity_row);
 
     let mode_row = adw::ActionRow::new();
@@ -344,7 +375,11 @@ pub fn build_bridge_detail_content(
     // -----------------------------------------------------------------------
     // Settings section
     // -----------------------------------------------------------------------
-    let settings_group = build_settings_group(bridge_id, &settings, &client);
+    let settings_group = build_settings_group(&settings, {
+        let bridge_id = bridge_id.to_string();
+        let client = Rc::clone(&client);
+        Rc::new(move |key, value| commit_setting(&client, &bridge_id, key, value))
+    });
     scroll_content.append(&settings_group);
 
     // -----------------------------------------------------------------------
@@ -358,20 +393,7 @@ pub fn build_bridge_detail_content(
     follows_title.set_hexpand(true);
     follows_title.set_halign(gtk::Align::Start);
 
-    let add_follow_btn = gtk::Button::builder()
-        .icon_name("list-add-symbolic")
-        .tooltip_text(bridges_strings::ADD_FOLLOW)
-        .build();
-    // `ids::BRIDGE_ADD_FOLLOW_BUTTON` belongs on the dialog's real "Add"
-    // submit button (below, in `build_add_follow_dialog`) — matching every
-    // sibling app, where this id sits directly on the button that calls
-    // add-follow (web's `BridgeCard.svelte` handleAddFollow, android's
-    // `AddFollowRow` IconButton, apple's `BridgeCardContent.swift` — none of
-    // them tag this "+" opener). This icon button only opens the dialog, so
-    // it stays untagged.
-
     follows_header.append(&follows_title);
-    follows_header.append(&add_follow_btn);
     scroll_content.append(&follows_header);
 
     let follows_list = gtk::ListBox::new();
@@ -386,26 +408,33 @@ pub fn build_bridge_detail_content(
 
     scroll_content.append(&follows_list);
 
+    // The add row — inline on the card like every sibling app (web's
+    // `BridgeCard.svelte`, tui's `follows_elements`): the id and the optional
+    // petname, then the button that sends both.
+    scroll_content.append(&build_add_follow_row(bridge_id, Rc::clone(&client)));
+
+    // -----------------------------------------------------------------------
+    // Follow requests section (hidden until a `supports_follow_requests` bridge
+    // answers — `populate_follow_requests`)
+    // -----------------------------------------------------------------------
+    let requests_section = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    requests_section.set_visible(false);
+    let requests_heading = gtk::Label::new(None);
+    requests_heading.add_css_class("heading");
+    requests_heading.set_halign(gtk::Align::Start);
+    requests_heading.set_margin_top(8);
+    crate::testid::set_test_id(&requests_heading, ids::BRIDGE_FOLLOW_REQUESTS_LIST);
+    let requests_list = gtk::ListBox::new();
+    requests_list.set_selection_mode(gtk::SelectionMode::None);
+    requests_list.add_css_class("boxed-list");
+    requests_section.append(&requests_heading);
+    requests_section.append(&requests_list);
+    scroll_content.append(&requests_section);
+
     // (The bridge-feed-subscription elements — bridge-feed-subscriptions /
     // bridge-feed-item / bridge-subscribe-feed-button — were retired here per
     // the Feed-only decision: subscription is the Feed page's `bridge-form-*`
     // surface, not the bridge detail. See bridges.md § Layout & flow.)
-
-    // Wire "Add follow" button.
-    {
-        let bid = bridge_id.to_string();
-        let c = Rc::clone(&client);
-        let fl = follows_list.clone();
-        add_follow_btn.connect_clicked(move |btn| {
-            let dialog = build_add_follow_dialog(&bid, Rc::clone(&c), fl.clone());
-            if let Some(root) = btn.root()
-                && let Some(win) = root.downcast_ref::<gtk::Window>()
-            {
-                dialog.set_transient_for(Some(win));
-            }
-            dialog.present();
-        });
-    }
 
     // Note: Protocol-specific timeline/DM/feed sections are intentionally absent.
     // The nest abstracts bridge content into unified feeds and conversations.
@@ -413,7 +442,17 @@ pub fn build_bridge_detail_content(
     let bid_lower = bridge_id.to_lowercase();
     let _ = &bid_lower;
 
-    (scroll_content, BridgeDetailHandles { follows_list })
+    (
+        scroll_content,
+        BridgeDetailHandles {
+            follows_list,
+            follow_requests: FollowRequestsHandles {
+                section: requests_section,
+                heading: requests_heading,
+                list: requests_list,
+            },
+        },
+    )
 }
 
 /// Render a bridge's `settings[]` as editable rows, one `adw::PreferencesGroup`
@@ -424,10 +463,15 @@ pub fn build_bridge_detail_content(
 /// `fauna.bridges.set_settings` the moment it changes — fire-and-forget,
 /// mirroring `settings/nostr_tab.rs`'s `save_settings` idiom (the widget's own
 /// state already reflects the user's intent; a transient error just logs).
-fn build_settings_group(
-    bridge_id: &str,
+///
+/// `commit` writes one changed `(key, value)`: a bridge's card sends it over
+/// `fauna.bridges.set_settings`, a hosted plugin's settings card over
+/// `fauna.plugins.set_settings` (`views::bridges::plugins`) — the one
+/// renderer for both, as tui's `setting_elements` is.
+#[allow(clippy::type_complexity)]
+pub(super) fn build_settings_group(
     settings: &[BridgeSetting],
-    client: &Rc<FaunaClient>,
+    commit: Rc<dyn Fn(&str, Value)>,
 ) -> adw::PreferencesGroup {
     let settings_group = adw::PreferencesGroup::new();
     settings_group.set_title(common::SETTINGS);
@@ -443,55 +487,52 @@ fn build_settings_group(
     }
 
     for setting in settings {
-        match setting.setting_type.as_str() {
-            // Hedges the same three spellings tui's `setting_elements` does —
-            // providers do not agree on one string (activitypub emits
-            // "boolean", the shared default emits "bool").
-            "bool" | "boolean" | "toggle" => {
+        match setting_control(&setting.setting_type) {
+            SettingControl::Toggle => {
                 let row = adw::SwitchRow::builder()
                     .title(setting.label.as_str())
                     .build();
+                crate::testid::set_test_id(&row, &setting_id(&setting.key));
                 row.set_active(matches!(setting.value, Value::Bool(true)));
-                let bid = bridge_id.to_string();
                 let key = setting.key.clone();
-                let c = Rc::clone(client);
+                let commit = Rc::clone(&commit);
                 row.connect_active_notify(move |sw| {
-                    commit_setting(&c, &bid, &key, Value::Bool(sw.is_active()));
+                    commit(&key, Value::Bool(sw.is_active()));
                 });
                 settings_group.add(&row);
             }
-            "select" => {
+            SettingControl::Select => {
                 let options = setting.options.clone().unwrap_or_default();
                 let labels: Vec<&str> = options.iter().map(|o| o.label.as_str()).collect();
                 let combo = adw::ComboRow::builder()
                     .title(setting.label.as_str())
                     .model(&gtk::StringList::new(&labels))
                     .build();
+                crate::testid::set_test_id(&combo, &setting_id(&setting.key));
                 if let Some(idx) = options.iter().position(|o| o.value == setting.value) {
                     combo.set_selected(idx as u32);
                 }
-                let bid = bridge_id.to_string();
                 let key = setting.key.clone();
-                let c = Rc::clone(client);
+                let commit = Rc::clone(&commit);
                 combo.connect_selected_notify(move |cb| {
                     if let Some(opt) = options.get(cb.selected() as usize) {
-                        commit_setting(&c, &bid, &key, opt.value.clone());
+                        commit(&key, opt.value.clone());
                     }
                 });
                 settings_group.add(&combo);
             }
-            SETTING_TYPE_NUMBER => {
+            SettingControl::Number => {
                 let row = adw::ActionRow::builder()
                     .title(setting.label.as_str())
                     .build();
                 let entry = gtk::Entry::builder().width_chars(10).build();
+                crate::testid::set_test_id(&entry, &setting_id(&setting.key));
                 if let Value::Integer(n) = setting.value {
                     entry.set_text(&n.to_string());
                 }
                 row.add_suffix(&entry);
-                let bid = bridge_id.to_string();
                 let key = setting.key.clone();
-                let c = Rc::clone(client);
+                let commit = Rc::clone(&commit);
                 // Commit-on-Enter, never per-keystroke — the
                 // `folder-member-cap-input` idiom (`views/devices_folders/
                 // folders.rs`), this page's own analogue of a debounced
@@ -502,29 +543,29 @@ fn build_settings_group(
                 // since none of them repaint from a live snapshot today.
                 entry.connect_activate(move |e| {
                     if let Some(n) = fauna_core::format::parse_count_i64(&e.text()) {
-                        commit_setting(&c, &bid, &key, Value::Integer(n as i128));
+                        commit(&key, Value::Integer(n as i128));
                     }
                 });
                 settings_group.add(&row);
             }
-            "text" => {
+            SettingControl::Text => {
                 let row = adw::ActionRow::builder()
                     .title(setting.label.as_str())
                     .build();
                 let entry = gtk::Entry::new();
+                crate::testid::set_test_id(&entry, &setting_id(&setting.key));
                 if let Value::String(s) = &setting.value {
                     entry.set_text(s);
                 }
                 row.add_suffix(&entry);
-                let bid = bridge_id.to_string();
                 let key = setting.key.clone();
-                let c = Rc::clone(client);
+                let commit = Rc::clone(&commit);
                 entry.connect_activate(move |e| {
-                    commit_setting(&c, &bid, &key, Value::String(e.text().to_string()));
+                    commit(&key, Value::String(e.text().to_string()));
                 });
                 settings_group.add(&row);
             }
-            _ => {
+            SettingControl::Unknown => {
                 // Forward-compat fallback: a setting_type this build predates
                 // (a newer nest) — a read-only row, never a dropped setting.
                 // Mirrors tui's `Element::chrome` fallback / web's read-only
@@ -533,12 +574,24 @@ fn build_settings_group(
                     .title(setting.label.as_str())
                     .subtitle(setting_display(&setting.value).as_str())
                     .build();
+                crate::testid::set_test_id(&row, &setting_id(&setting.key));
+                crate::testid::set_test_text(
+                    &row,
+                    &format!("{}: {}", setting.label, setting_display(&setting.value)),
+                );
                 settings_group.add(&row);
             }
         }
     }
 
     settings_group
+}
+
+/// A setting row's id, `bridge-setting[<key>]` — keyed by the setting's own
+/// key (the `settings-nav-row[<key>]` idiom), so a test addresses a setting by
+/// what it is, never by its position in the provider's list.
+fn setting_id(key: &str) -> String {
+    format!("{}[{key}]", ids::BRIDGE_SETTING)
 }
 
 /// Plain-text rendering of a setting's scalar value, for the forward-compat
@@ -600,6 +653,105 @@ pub fn populate_follows_list(
     }
 }
 
+thread_local! {
+    /// The last follow-request list each bridge answered with. Opening a
+    /// bridge's detail REBUILDS the pane (row activation), whose section starts
+    /// hidden; painting this cache at once keeps the list on screen across the
+    /// rebuild while the re-read is in flight, instead of blanking it.
+    static FOLLOW_REQUESTS_CACHE: RefCell<HashMap<String, Vec<fauna_client_bridges::FollowRequestRow>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Remember `rows` as `bridge_id`'s latest follow-request list.
+pub fn cache_follow_requests(bridge_id: &str, rows: &[fauna_client_bridges::FollowRequestRow]) {
+    FOLLOW_REQUESTS_CACHE.with(|c| {
+        c.borrow_mut().insert(bridge_id.to_string(), rows.to_vec());
+    });
+}
+
+/// Paint `bridge_id`'s cached follow requests into a freshly built pane, if the
+/// bridge has answered before this session (otherwise the section stays hidden
+/// until its first reply).
+pub fn paint_cached_follow_requests(
+    handles: &FollowRequestsHandles,
+    bridge_id: &str,
+    on_resolve: impl Fn(&str, bool) + Clone + 'static,
+) {
+    if let Some(rows) = FOLLOW_REQUESTS_CACHE.with(|c| c.borrow().get(bridge_id).cloned()) {
+        populate_follow_requests(handles, &rows, on_resolve);
+    }
+}
+
+/// Paint a bridge's waiting follow requests (`BridgeDetailHandles::
+/// follow_requests`), replacing the rows: the section shows, its heading
+/// carries the count (kept at zero), and each row is the shared
+/// `FollowRequestRow::display` line with **Approve** and **Refuse**.
+/// `on_resolve` is called with the request's own `id` and `approve`; the caller
+/// supplies the resolve-then-re-read wiring (no confirm, non-optimistic).
+pub fn populate_follow_requests(
+    handles: &FollowRequestsHandles,
+    rows: &[fauna_client_bridges::FollowRequestRow],
+    on_resolve: impl Fn(&str, bool) + Clone + 'static,
+) {
+    handles.section.set_visible(true);
+    handles
+        .heading
+        .set_label(&bridges_strings::follow_requests(&rows.len().to_string()));
+    crate::views::layout::clear_list_box_rows(&handles.list);
+    for request in rows {
+        handles
+            .list
+            .append(&build_follow_request_row(request, on_resolve.clone()));
+    }
+}
+
+fn build_follow_request_row(
+    request: &fauna_client_bridges::FollowRequestRow,
+    on_resolve: impl Fn(&str, bool) + Clone + 'static,
+) -> gtk::ListBoxRow {
+    let label = gtk::Label::new(Some(&request.display()));
+    label.set_halign(gtk::Align::Start);
+    label.set_hexpand(true);
+
+    let approve_btn = gtk::Button::with_label(bridges_strings::APPROVE_FOLLOW_REQUEST);
+    approve_btn.add_css_class("suggested-action");
+    crate::testid::set_test_id(&approve_btn, ids::BRIDGE_FOLLOW_REQUEST_APPROVE);
+    crate::offline_gate::declare_wire_kind(&approve_btn, "fauna.bridges.resolve_follow_request");
+    let refuse_btn = gtk::Button::with_label(bridges_strings::REFUSE_FOLLOW_REQUEST);
+    refuse_btn.add_css_class("destructive-action");
+    crate::testid::set_test_id(&refuse_btn, ids::BRIDGE_FOLLOW_REQUEST_REFUSE);
+    crate::offline_gate::declare_wire_kind(&refuse_btn, "fauna.bridges.resolve_follow_request");
+
+    let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    hbox.set_margin_top(8);
+    hbox.set_margin_bottom(8);
+    hbox.set_margin_start(12);
+    hbox.set_margin_end(12);
+    // The item id sits on the display label itself, so a row's read-back text is
+    // the shared display line (the follow row's marker is empty; this one is
+    // what the witness test reads the address and name from).
+    crate::testid::set_test_id(&label, ids::BRIDGE_FOLLOW_REQUEST_ITEM);
+    hbox.append(&label);
+    hbox.append(&approve_btn);
+    hbox.append(&refuse_btn);
+
+    let row = gtk::ListBoxRow::new();
+    row.set_child(Some(&hbox));
+    row.set_widget_name(&request.id);
+
+    {
+        let id = request.id.clone();
+        let on_resolve = on_resolve.clone();
+        approve_btn.connect_clicked(move |_| on_resolve(&id, true));
+    }
+    {
+        let id = request.id.clone();
+        refuse_btn.connect_clicked(move |_| on_resolve(&id, false));
+    }
+
+    row
+}
+
 fn build_follow_row(
     follow_id: &str,
     display: &str,
@@ -622,11 +774,9 @@ fn build_follow_row(
     hbox.set_margin_bottom(8);
     hbox.set_margin_start(12);
     hbox.set_margin_end(12);
-    let follow_marker = gtk::Label::new(None);
-    follow_marker.set_height_request(1);
-    follow_marker.set_overflow(gtk::Overflow::Hidden);
-    crate::testid::set_test_id(&follow_marker, ids::BRIDGE_FOLLOW_ITEM);
-    hbox.append(&follow_marker);
+    // The item id sits on the display label itself, so a row's read-back text
+    // is the shared display line (the nickname, else the id).
+    crate::testid::set_test_id(&label, ids::BRIDGE_FOLLOW_ITEM);
     hbox.append(&label);
     hbox.append(&remove_btn);
 
@@ -804,72 +954,46 @@ fn render_mode_fields(
     }
 }
 
-/// Build a dialog to add a follow to a bridge.
-fn build_add_follow_dialog(
-    bridge_id: &str,
-    client: Rc<FaunaClient>,
-    follows_list: gtk::ListBox,
-) -> adw::Window {
-    let dialog = adw::Window::builder()
-        .title(bridges_strings::ADD_FOLLOW)
-        .modal(true)
-        .default_width(360)
-        .build();
-
-    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    vbox.set_margin_top(16);
-    vbox.set_margin_bottom(16);
-    vbox.set_margin_start(16);
-    vbox.set_margin_end(16);
-
-    let id_label = gtk::Label::new(Some(bridges_strings::ID_TO_FOLLOW));
-    id_label.set_halign(gtk::Align::Start);
+/// The follow add row: `bridge-follow-id-input`, `bridge-follow-petname-input`
+/// and `bridge-add-follow-button`. The button sends `fauna.bridges.add_follow`
+/// with the typed id (and the nickname when typed), then clears both fields; an
+/// empty id sends nothing.
+fn build_add_follow_row(bridge_id: &str, client: Rc<FaunaClient>) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    row.set_margin_top(8);
 
     let id_entry = gtk::Entry::new();
+    id_entry.set_hexpand(true);
     id_entry.set_placeholder_text(Some(bridges_strings::ID_TO_FOLLOW_PLACEHOLDER));
-
-    let petname_label = gtk::Label::new(Some(bridges_strings::PETNAME_OPTIONAL));
-    petname_label.set_halign(gtk::Align::Start);
+    crate::testid::set_test_id(&id_entry, ids::BRIDGE_FOLLOW_ID_INPUT);
 
     let petname_entry = gtk::Entry::new();
     petname_entry.set_placeholder_text(Some(bridges_strings::FRIENDLY_NAME_PLACEHOLDER));
+    crate::testid::set_test_id(&petname_entry, ids::BRIDGE_FOLLOW_PETNAME_INPUT);
 
-    let add_btn = gtk::Button::with_label(common::ADD);
+    let add_btn = gtk::Button::with_label(bridges_strings::ADD_FOLLOW);
     add_btn.add_css_class("suggested-action");
     crate::testid::set_test_id(&add_btn, ids::BRIDGE_ADD_FOLLOW_BUTTON);
     crate::offline_gate::declare_wire_kind(&add_btn, "fauna.bridges.add_follow");
 
-    vbox.append(&id_label);
-    vbox.append(&id_entry);
-    vbox.append(&petname_label);
-    vbox.append(&petname_entry);
-    vbox.append(&add_btn);
+    row.append(&id_entry);
+    row.append(&petname_entry);
+    row.append(&add_btn);
 
-    dialog.set_content(Some(&vbox));
+    let bid = bridge_id.to_string();
+    add_btn.connect_clicked(move |_| {
+        let id = id_entry.text().to_string();
+        if id.is_empty() {
+            return;
+        }
+        let petname_text = petname_entry.text().to_string();
+        let petname = (!petname_text.is_empty()).then_some(petname_text.as_str());
+        client.add_bridge_follow(&bid, &id, petname);
+        id_entry.set_text("");
+        petname_entry.set_text("");
+    });
 
-    {
-        let bid = bridge_id.to_string();
-        let d = dialog.clone();
-        let ie = id_entry.clone();
-        let pe = petname_entry.clone();
-        let _fl = follows_list;
-        add_btn.connect_clicked(move |_| {
-            let id = ie.text().to_string();
-            if id.is_empty() {
-                return;
-            }
-            let petname_text = pe.text().to_string();
-            let petname = if petname_text.is_empty() {
-                None
-            } else {
-                Some(petname_text.as_str())
-            };
-            client.add_bridge_follow(&bid, &id, petname);
-            d.close();
-        });
-    }
-
-    dialog
+    row
 }
 
 #[cfg(test)]
@@ -975,18 +1099,15 @@ mod tests {
         }
     }
 
-    /// The second hbox child inside a follow row's content is the display
-    /// `Label` (`follow_marker`, then `label`, then `remove_btn` — the order
-    /// `build_follow_row` appends them in).
+    /// The first hbox child inside a follow row's content is the display
+    /// `Label` (`label`, then `remove_btn` — the order `build_follow_row`
+    /// appends them in).
     fn row_display_label(row: &gtk::Widget) -> String {
         let hbox = row.first_child().expect("row has content");
-        let marker = hbox.first_child().expect("hbox has the marker");
-        let label = marker
-            .next_sibling()
-            .expect("hbox has the label after the marker");
+        let label = hbox.first_child().expect("hbox has the display label");
         label
             .downcast::<gtk::Label>()
-            .expect("second hbox child is the display Label")
+            .expect("first hbox child is the display Label")
             .text()
             .to_string()
     }
@@ -1072,6 +1193,86 @@ mod tests {
             assert_eq!(
                 *removed.borrow(),
                 vec!["alice".to_string(), "bob".to_string()]
+            );
+        });
+    }
+
+    fn request(id: &str, name: Option<&str>) -> fauna_client_bridges::FollowRequestRow {
+        fauna_client_bridges::FollowRequestRow {
+            id: id.to_string(),
+            address: format!("@{id}@remote.example"),
+            name: name.map(str::to_string),
+        }
+    }
+
+    fn requests_handles() -> FollowRequestsHandles {
+        FollowRequestsHandles {
+            section: gtk::Box::new(gtk::Orientation::Vertical, 0),
+            heading: gtk::Label::new(None),
+            list: gtk::ListBox::new(),
+        }
+    }
+
+    /// The section is hidden until a reply paints it; an empty reply shows the
+    /// heading at a zero count with no rows (`bridges.md` § Follow requests), and
+    /// a populated one paints a counted heading, one row per request carrying the
+    /// shared display line, and Approve / Refuse wired to THAT row's own id.
+    #[test]
+    fn populate_follow_requests_paints_a_counted_heading_and_wires_both_buttons() {
+        crate::testid::run_on_gtk_thread(|| {
+            let h = requests_handles();
+            h.section.set_visible(false);
+
+            populate_follow_requests(&h, &[], |_, _| {});
+            assert!(h.section.is_visible());
+            assert_eq!(h.heading.label(), "Follow requests (0)");
+            assert!(h.list.first_child().is_none());
+
+            let answered: Rc<RefCell<Vec<(String, bool)>>> = Rc::new(RefCell::new(Vec::new()));
+            let a = Rc::clone(&answered);
+            populate_follow_requests(
+                &h,
+                &[request("bob", Some("Bob")), request("cy", None)],
+                move |id, approve| a.borrow_mut().push((id.to_string(), approve)),
+            );
+            assert_eq!(h.heading.label(), "Follow requests (2)");
+
+            let mut lines = Vec::new();
+            let mut child = h.list.first_child();
+            while let Some(row) = child {
+                lines.push(
+                    find_by_test_id(&row, ids::BRIDGE_FOLLOW_REQUEST_ITEM)
+                        .and_then(|w| w.downcast::<gtk::Label>().ok())
+                        .expect("each request row exposes its item label")
+                        .text()
+                        .to_string(),
+                );
+                for (test_id, _) in [
+                    (ids::BRIDGE_FOLLOW_REQUEST_APPROVE, true),
+                    (ids::BRIDGE_FOLLOW_REQUEST_REFUSE, false),
+                ] {
+                    find_by_test_id(&row, test_id)
+                        .and_then(|w| w.downcast::<gtk::Button>().ok())
+                        .expect("each request row exposes its button")
+                        .emit_clicked();
+                }
+                child = row.next_sibling();
+            }
+            assert_eq!(
+                lines,
+                vec![
+                    "Bob (@bob@remote.example)".to_string(),
+                    "@cy@remote.example".to_string()
+                ]
+            );
+            assert_eq!(
+                *answered.borrow(),
+                vec![
+                    ("bob".to_string(), true),
+                    ("bob".to_string(), false),
+                    ("cy".to_string(), true),
+                    ("cy".to_string(), false),
+                ]
             );
         });
     }
@@ -1175,6 +1376,7 @@ mod tests {
             crate::ward_asks::note_feed_refusal("activitypub", "follow", "npub1abc");
             crate::ward_asks::set_from_status(
                 true,
+                None,
                 Vec::new(),
                 vec![feed_ask("follow", "npub1abc", false)],
             );
@@ -1197,6 +1399,7 @@ mod tests {
             crate::ward_asks::clear_for_identity_change();
             crate::ward_asks::set_from_status(
                 true,
+                None,
                 Vec::new(),
                 vec![feed_ask("follow", "npub1abc", true)],
             );

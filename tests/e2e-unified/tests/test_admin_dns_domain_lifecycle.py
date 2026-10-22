@@ -21,6 +21,7 @@ import pytest
 
 from helpers.budgets import RPC_ROUNDTRIP_S, UI_SETTLE_S
 from helpers.waiting import wait_until
+from i18n.strings import S
 
 pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.web, pytest.mark.linux]
 
@@ -206,6 +207,106 @@ def test_the_primary_row_is_the_one_that_offers_the_rename(lifecycle_admin_app, 
         "the non-primary row offers itself as the rename's target"
     )
     assert app.driver.count("admin-dns-domain-promote-button", scope=_row(app, primary)) == 0
+
+
+def _skip_unless_lifted(app, surface: str) -> None:
+    """The remove-confirm dialog and the tagged first-domain warning are built on
+    tui, web, linux and android; macos, ios and windows are parity debt until
+    their trickle-down lift."""
+    from helpers.app_surface import app_name, skip_unbuilt
+
+    if app_name(app.driver) not in {"tui", "web", "linux", "android"}:
+        skip_unbuilt(
+            app.driver,
+            surface=surface,
+            detail="built on tui, web, linux and android (mail-multidomain.md § Removing a "
+            "local domain, § Wizard steps step 7)",
+            tracked="",
+        )
+
+
+@pytest.mark.feature("admin-dns-and-certificates")
+def test_the_first_domain_add_warns_it_becomes_the_permanent_primary(
+    lifecycle_admin_app, lifecycle_nest
+):
+    """On a domainless nest the add form warns that the domain becomes the
+    primary, which can never be removed and only a rename undoes; once a primary
+    exists the form warns of nothing (``mail-multidomain.md`` § Wizard steps,
+    step 7)."""
+    app = lifecycle_admin_app
+    _skip_unless_lifted(app, "admin-dns-add-domain-primary-warning")
+    app.admin.navigate_dns()
+    app.driver.wait_for("admin-dns-add-domain-button", timeout=UI_SETTLE_S)
+    assert _nest_domains(lifecycle_nest) == [], "a fresh dedicated nest must host no domain yet"
+
+    app.driver.click("admin-dns-add-domain-button")
+    app.driver.wait_for("admin-dns-add-domain-input", timeout=UI_SETTLE_S)
+    warning = wait_until(
+        lambda: app.driver.get_text("admin-dns-add-domain-primary-warning")
+        if app.driver.count("admin-dns-add-domain-primary-warning")
+        else None,
+        UI_SETTLE_S,
+        diagnose=lambda: _diagnose(app, "a domainless nest's add form carries no first-domain warning"),
+    )
+    assert warning == S.admin.dns.add_domain_primary_warning, (
+        f"the warning must say the domain becomes the permanent primary; read {warning!r}"
+    )
+    app.driver.click("admin-dns-add-domain-cancel-button")
+
+    first = f"first-{secrets.token_hex(4)}.test"
+    _add_domain_through_the_page(app, lifecycle_nest, first)
+    app.driver.click("admin-dns-add-domain-button")
+    app.driver.wait_for("admin-dns-add-domain-input", timeout=UI_SETTLE_S)
+    assert app.driver.count("admin-dns-add-domain-primary-warning") == 0, (
+        "with a primary in place a second add is ordinary and must not warn"
+    )
+
+
+@pytest.mark.feature("admin-dns-and-certificates")
+def test_removing_a_domain_asks_to_confirm_first(lifecycle_admin_app, lifecycle_nest):
+    """The row's remove control opens a confirm dialog naming the domain and
+    stating the ratified retention text (what stops working, the 30-day restore,
+    what is lost after) and removes nothing; cancel closes it with the domain
+    kept, and only the dialog's confirm removes it (``mail-multidomain.md``
+    § Removing a local domain, § Confirm dialog text)."""
+    app = lifecycle_admin_app
+    _skip_unless_lifted(app, "admin-dns-domain-remove-confirm-modal")
+    _primary, other = _two_domains(app, lifecycle_nest)
+
+    app.admin.press_domain_remove(other)
+    assert app.admin.remove_confirm_open(), _diagnose(
+        app, f"pressing remove on {other!r} opened no confirm dialog"
+    )
+    title = app.driver.get_text("admin-dns-domain-remove-confirm-modal") or ""
+    assert S.admin.dns.remove_confirm_title(domain=other) in title, (
+        f"the dialog must name the domain it removes; read {title!r}"
+    )
+    assert S.admin.dns.remove_confirm_body(domain=other) in title, (
+        f"the dialog must carry the ratified retention text for {other!r}; read {title!r}"
+    )
+    assert other in [d["domain_name"] for d in _nest_domains(lifecycle_nest)], (
+        "opening the dialog must remove nothing"
+    )
+
+    app.admin.cancel_domain_remove()
+    assert not app.admin.remove_confirm_open(), "cancel must close the dialog"
+    assert other in app.admin.dns_domain_names(), "cancel must keep the domain listed"
+    assert other in [d["domain_name"] for d in _nest_domains(lifecycle_nest)], (
+        "cancel must leave the nest's domain in place"
+    )
+
+    app.admin.press_domain_remove(other)
+    assert app.admin.remove_confirm_open(), "the dialog must reopen on a second press"
+    app.admin.confirm_domain_remove()
+    wait_until(
+        lambda: other in app.admin.dns_removed_domain_names() or None,
+        RPC_ROUNDTRIP_S,
+        diagnose=lambda: _diagnose(app, f"confirming never moved {other!r} to recently removed"),
+    )
+    assert other not in [d["domain_name"] for d in _nest_domains(lifecycle_nest)], (
+        "the confirm must soft-delete the domain at the nest"
+    )
+    assert not app.admin.remove_confirm_open(), "the confirm must close the dialog"
 
 
 def _start_rename_from_the_sheet(app, target: str, grace_days: str) -> None:

@@ -69,7 +69,7 @@ func TestResolveBuildsRecordOpener(t *testing.T) {
 	}
 	m := testAuthMiddleware(caller)
 
-	sess, err := m.resolve(context.Background(), fixtureLocalPart, fixtureDomain, "default", string(fixturePlainPassword))
+	sess, err := m.resolve(context.Background(), fixtureLocalPart, fixtureDomain, "default", string(fixturePlainPassword), "203.0.113.7")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestResolveNoSnapshotLeavesNilOpener(t *testing.T) {
 	}
 	m := testAuthMiddleware(caller)
 
-	sess, err := m.resolve(context.Background(), fixtureLocalPart, fixtureDomain, "default", string(fixturePlainPassword))
+	sess, err := m.resolve(context.Background(), fixtureLocalPart, fixtureDomain, "default", string(fixturePlainPassword), "203.0.113.7")
 	if err != nil {
 		t.Fatalf("resolve without a snapshot must still AUTH: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestResolveUnparseableSnapshotFailsAuth(t *testing.T) {
 	}
 	m := testAuthMiddleware(caller)
 
-	sess, err := m.resolve(context.Background(), fixtureLocalPart, fixtureDomain, "default", string(fixturePlainPassword))
+	sess, err := m.resolve(context.Background(), fixtureLocalPart, fixtureDomain, "default", string(fixturePlainPassword), "203.0.113.7")
 	if err == nil {
 		t.Fatal("resolve with an unparseable snapshot must fail AUTH, got nil error")
 	}

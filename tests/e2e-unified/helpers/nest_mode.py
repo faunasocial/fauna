@@ -214,24 +214,63 @@ BOX_DECLARATIONS = (BOX_SHARED, BOX_DISPOSABLE)
 #: The hosts a run may declare disposable — the staging boxes, and nothing
 #: else (`testing.md` § The shared-box rule, user ruling 2026-10-04:
 #: the dev nest from every dev machine, the test nest from CI; a production
-#: or acceptance nest is never a test target. `dev.example.com` is the dev nest until
-#: its re-creation as `dev.fauna.build`; the `fauna.build` pair joined
-#: 2026-10-13 when the one image workflow began verifying on them). Pinned in `test_nest_mode_axis.py` against the
-#: image workflows' `VERIFY_HOST`, so the box the pipeline verifies on is
-#: always one the gate can declare.
-DISPOSABLE_BOX_HOSTS = frozenset({
-    "dev.example.com", "dev.fauna.build", "test.fauna.build",
-})
+#: or acceptance nest is never a test target). Pinned in `test_nest_mode_axis.py`
+#: against the image workflows' `VERIFY_HOST`, so the box the pipeline verifies
+#: on is always one the gate can declare.
+DISPOSABLE_BOX_HOSTS = frozenset({"dev.fauna.build", "test.fauna.build"})
+
+
+#: The acceptance nest — humans only, never an automated test's target, shared
+#: or disposable (`org-nests.md` § The three nests; `testing.md` § The
+#: shared-box rule → *The acceptance nest is refused*). Disjoint from
+#: `DISPOSABLE_BOX_HOSTS`, pinned in `test_nest_mode_axis.py`.
+ACCEPTANCE_NEST_HOSTS = frozenset({"fauna.build"})
+
+
+def _host(url: str) -> str:
+    return (urlsplit(url.strip()).hostname or "").lower().rstrip(".")
+
+
+def refuse_acceptance_nest(mode: NestMode, environ=None) -> None:
+    """Refuse the RUN when any box it could reach is the acceptance nest.
+
+    Two doors, both read: the live run's own box (`live_url`, which covers the
+    `:URL` argument and the env fallback), and `FAUNA_LIVE_NEST_URL` on ANY
+    mode — a standalone run with `FAUNA_E2E_LIVE=1` reads the export directly
+    in its `live_box` modules, so a check on the live mode alone would leave
+    that door open. A refusal, not a deselect: there is no test that may run
+    against this box, so a mostly-green run beside it would only hide the
+    misdirected invocation.
+    """
+    env = os.environ if environ is None else environ
+    urls = [env.get("FAUNA_LIVE_NEST_URL") or ""]
+    if mode.is_live:
+        urls.append(mode.argument or "")
+    for url in urls:
+        if url and _host(url) in ACCEPTANCE_NEST_HOSTS:
+            raise _acceptance_refusal(url)
+
+
+def _acceptance_refusal(url: str) -> NestModeError:
+    return NestModeError(
+        f"refusing {url.strip()}: the acceptance nest is for humans only and is "
+        "never an automated test's target (org-nests.md § The three nests; "
+        "testing.md § The shared-box rule) — point the run at a staging box "
+        f"({', '.join(sorted(DISPOSABLE_BOX_HOSTS))})"
+    )
 
 
 def live_url(mode: NestMode) -> str:
     """The box a live run hits: `--nest live:URL` > `FAUNA_LIVE_NEST_URL` > the
     project's own live box — the one precedence the provider, the `live_box`
     flock and the box declaration all read, so none can disagree about which
-    box is under test."""
+    box is under test. Never the acceptance nest (`refuse_acceptance_nest`)."""
     from helpers import multiseat_config as cfg
 
-    return (mode.argument or cfg.nest_url()).rstrip("/")
+    url = (mode.argument or cfg.nest_url()).rstrip("/")
+    if _host(url) in ACCEPTANCE_NEST_HOSTS:
+        raise _acceptance_refusal(url)
+    return url
 
 
 def declare_box(mode: NestMode, raw: str | None) -> NestMode:

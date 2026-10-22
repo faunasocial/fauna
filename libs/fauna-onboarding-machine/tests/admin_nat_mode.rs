@@ -30,6 +30,7 @@ async fn hydrate_preselects_current_mode_from_setup_status() {
     fake.set_probe_setup_status_response(Ok(SetupStatus {
         claimed: true,
         node_mode: Some(NodeMode::Private),
+        ..Default::default()
     }));
 
     m.hydrate().await;
@@ -48,6 +49,7 @@ async fn hydrate_unknown_node_mode_defaults_public() {
     fake.set_probe_setup_status_response(Ok(SetupStatus {
         claimed: true,
         node_mode: None,
+        ..Default::default()
     }));
 
     m.hydrate().await;
@@ -105,6 +107,7 @@ async fn submit_success_sends_signed_body_and_keeps_save_enabled() {
     fake.set_probe_setup_status_response(Ok(SetupStatus {
         claimed: true,
         node_mode: Some(NodeMode::Public),
+        ..Default::default()
     }));
     fake.set_submit_nat_mode_response(Ok(()));
 

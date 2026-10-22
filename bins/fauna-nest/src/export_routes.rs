@@ -322,6 +322,9 @@ struct ContactExport {
     status: String,
     accepted_at: Option<i64>,
     created_at: i64,
+    /// The edge's verified peer home nest (`contacts.peer_nest_id`, hex);
+    /// `None` for a local peer or an edge formed otherwise.
+    peer_nest_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -509,6 +512,7 @@ async fn gather_export_data(
             status: c.status,
             accepted_at: c.accepted_at,
             created_at: c.created_at,
+            peer_nest_id: c.peer_nest_id.map(hex::encode),
         })
         .collect();
 
@@ -738,6 +742,7 @@ async fn gather_export_data(
                     &channel,
                     cursor,
                     PAGE,
+                    Some(actor_id),
                 )
                 .await?;
                 // Loop until an EMPTY page, not a short one: a mirror row
@@ -748,11 +753,16 @@ async fn gather_export_data(
                     break;
                 };
                 cursor = *last_seq;
-                for (seq, body, legal_ref) in page {
-                    // Withheld: the records row carries the takedown
-                    // reference, so the absence is declared; the sealed bytes
-                    // were never read (the gate returns an empty body).
-                    if legal_ref.is_some() {
+                for (seq, body, withhold) in page {
+                    // Withheld on either ground: the records row carries the
+                    // takedown reference or the blocking report id, so the
+                    // absence is declared; the sealed bytes were never read
+                    // (the gate returns an empty body). The exporter's own
+                    // blocked record is the one exemption — the gate served
+                    // its body, as an author-scoped path is untouched by a
+                    // block (`moderation.md` § Admin block of a reported item,
+                    // decision 4).
+                    if withhold.is_withheld() && body.is_empty() {
                         continue;
                     }
                     conv_bodies.push(ConvBodyExport {

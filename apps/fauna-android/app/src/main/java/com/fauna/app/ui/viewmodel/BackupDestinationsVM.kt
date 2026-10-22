@@ -108,6 +108,14 @@ class BackupDestinationsVM @Inject constructor(
     val reseedResult: StateFlow<FfiReseedResult?> = _reseedResult.asStateFlow()
 
     /**
+     * The nest destination the last restore pulled back from, or `null` for
+     * the custodian ceremony — the view names it in the pull-back's own
+     * re-enrollment failure (`backups.backup_reseed_pull_back_reenroll_failed`).
+     */
+    private val _reseedPulledFrom = MutableStateFlow<FfiBackupDestinationView?>(null)
+    val reseedPulledFrom: StateFlow<FfiBackupDestinationView?> = _reseedPulledFrom.asStateFlow()
+
+    /**
      * The `destination_id` whose `backup-audit-recover-confirm-modal` is open,
      * or `null` (`ui/backups.md` § Audit-alert surface, the fifth reason).
      */
@@ -249,8 +257,19 @@ class BackupDestinationsVM @Inject constructor(
     ): List<String?> = runCatching {
         com.fauna.ffi.backupReseedRows(
             destinations, secureStorage.resolveDeviceId().orEmpty(), orphanedStoreBytes != null,
+            // android hosts the nest-held pull-back: [reseed] runs it in-process.
+            true,
         )
     }.getOrDefault(emptyList())
+
+    /**
+     * Whether the restore armed on [destinationId]'s row pulls back from a
+     * surviving nest (the shared `backupReseedRunsPullBack`, never the row's
+     * kind re-read here) — the confirm then names that nest.
+     */
+    fun reseedRunsPullBack(destinations: List<FfiBackupDestinationView>, destinationId: String): Boolean =
+        runCatching { com.fauna.ffi.backupReseedRunsPullBack(destinations, destinationId) }
+            .getOrDefault(false)
 
     /**
      * The confirmed restore (`backups.md` § Restore after losing the nest).
@@ -264,16 +283,29 @@ class BackupDestinationsVM @Inject constructor(
      * Re-lists only when nothing is left to say: the re-enrolled row appears and
      * the orphaned verdict is re-measured against it. A stop or a re-enrollment
      * failure keeps its message.
+     *
+     * [source] is the pressed row: `null` for the orphaned store's, a
+     * `destination_id` for a destination row's. A surviving nest's row runs
+     * the nest-held pull-back through the shared host; every other runs the
+     * custodian ceremony.
      */
-    fun reseed() {
+    fun reseed(source: String? = null) {
         if (_reseedRunning.value) return
         val deviceId = secureStorage.resolveDeviceId()
+        val pullFrom = source
+            ?.takeIf { reseedRunsPullBack(_destinations.value, it) }
+            ?.let { id -> _destinations.value.firstOrNull { it.destinationId == id } }
         viewModelScope.launch {
             _reseedRunning.value = true
             _reseedResult.value = null
+            _reseedPulledFrom.value = pullFrom
             val result = try {
                 if (deviceId.isNullOrBlank()) throw ApiException("no device id")
-                api.reseedCustodianStore(deviceId, dataDir())
+                if (pullFrom != null) {
+                    api.pullBackFromDestination(deviceId, pullFrom.destinationId)
+                } else {
+                    api.reseedCustodianStore(deviceId, dataDir())
+                }
             } catch (e: Exception) {
                 reseedStopped(e.message ?: "error")
             } finally {

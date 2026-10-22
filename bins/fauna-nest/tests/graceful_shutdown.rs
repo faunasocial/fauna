@@ -261,12 +261,11 @@ async fn graceful_shutdown_stops_accepting_before_the_drain_completes() {
         1,
         "the directly-registered connection must be counted before shutdown starts"
     );
-    let db = fauna_nest::db::CacheDb::open_in_memory().unwrap();
+    let mut state =
+        fauna_nest::routes::AppState::for_test(Arc::new(CacheDb::open_in_memory().unwrap()));
+    state.ws = Arc::clone(&ws_state);
 
-    let shutdown = tokio::spawn({
-        let ws_state = Arc::clone(&ws_state);
-        async move { fauna_nest::graceful_shutdown(handle, &ws_state, &db).await }
-    });
+    let shutdown = tokio::spawn(async move { fauna_nest::graceful_shutdown(handle, &state).await });
 
     // Causal barrier per convention 14, not a settle-sleep: poll
     // `is_shutting_down()` until `graceful_shutdown` flips it, which can
@@ -306,4 +305,45 @@ async fn graceful_shutdown_stops_accepting_before_the_drain_completes() {
     // GRACEFUL_SHUTDOWN_TIMEOUT.
     ws_state.remove(&conn.actor_id, conn.conn_id);
     shutdown.await.unwrap();
+}
+
+/// Step 4 — **no segment is left open across an orderly exit**. An open
+/// segment's `.meta` sidecar exists only in memory until it is finalized, so a
+/// nest that exits with one open leaves the next process a manifest-live
+/// `.dat` it cannot open: every listing of that scope then fails
+/// (`fauna.backup.status` → "list nest-local segments", the Nests page's
+/// backup rows gone after a plain restart). Drives
+/// the exact production function and reopens the store as the next process
+/// would, over the same directory.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graceful_shutdown_finalizes_every_open_segment() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db = Arc::new(CacheDb::open_in_memory().unwrap());
+    let mut state = fauna_nest::routes::AppState::for_test(db);
+    state.post_segments = Arc::new(fauna_segment_store::SegmentManager::new(
+        tmp.path().to_path_buf(),
+        "post",
+    ));
+    let author = [0x51u8; 32];
+    let record = b"a post appended just before the restart";
+    state
+        .post_segments
+        .append_record(
+            &author,
+            fauna_cbor::Cid::of_dag_cbor(&record[..]),
+            record,
+            b"",
+        )
+        .await
+        .expect("append");
+
+    let handle = tokio::spawn(async {});
+    fauna_nest::graceful_shutdown(handle, &state).await;
+
+    let next_process = fauna_segment_store::SegmentManager::new(tmp.path().to_path_buf(), "post");
+    let meta = next_process
+        .describe_segment_for_backup(&author, 1)
+        .await
+        .expect("the next process must open the segment this one had open at shutdown");
+    assert_eq!(meta.record_count, 1);
 }

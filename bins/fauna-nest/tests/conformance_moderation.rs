@@ -296,12 +296,16 @@ async fn appeal_is_bounded_and_author_scoped_on_posts() {
     assert_eq!(appeal_rows(&state).await, 2);
 }
 
-/// The conversation arm stays unscoped (`moderation.md` § Errors & edge
-/// cases): a sealed record persists no sender, so each caller holding its id
-/// appeals it — each once per decision.
+/// A conversation record no attestation names stays unscoped (`moderation.md`
+/// § Errors & edge cases, the appeal bullet): its takedown writes no queue row,
+/// so each caller holding its id appeals it — each once per decision. (An
+/// attested record's appeal is its author's alone —
+/// `conformance_conversations_channel.rs`.)
 #[tokio::test]
-async fn a_conversation_appeal_is_any_callers_once_each() {
+async fn an_unattested_conversation_appeal_is_any_callers_once_each() {
     let (router, state) = router_with_db_only().await;
+    let admin = [0x9eu8; 32];
+    state.db.add_admin_actor(&admin).await.unwrap();
     let record_id = [0x9au8; 32];
     let content_id = hex::encode(record_id);
     let record_cid = fauna_cbor::Cid::from_digest_dag_cbor(record_id);
@@ -310,14 +314,35 @@ async fn a_conversation_appeal_is_any_callers_once_each() {
         .segment_records_insert_conv(&[0x9bu8; 32], 0, &record_cid, "b", 1_000, 1, &[], None)
         .await
         .unwrap();
-    assert_eq!(
-        state
-            .db
-            .set_conv_legal_takedown(&record_cid, Some("EU-DSA-2024/99997"))
-            .await
-            .unwrap(),
-        1
-    );
+    let reply: ModerationLegalTakedownReply = decode(
+        &dispatch(
+            &router,
+            state.clone(),
+            admin,
+            "fauna.moderation.legal_takedown",
+            pack(&ModerationLegalTakedownRequest {
+                content_id: content_id.clone(),
+                content_type: "conversation".into(),
+                legal_reference: "EU-DSA-2024/99997".into(),
+                restore: false,
+                extra: Default::default(),
+            }),
+        )
+        .await
+        .expect("admin conversation takedown ok"),
+    )
+    .unwrap();
+    assert_eq!(reply.status, "taken_down");
+    let conn = state.db.conn().await;
+    let rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM obligation_action_records WHERE content_id = ?1",
+            rusqlite::params![content_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    drop(conn);
+    assert_eq!(rows, 0, "no attestation, no queue row");
 
     for (member, want) in [
         ([0x9cu8; 32], "appeal_recorded"),

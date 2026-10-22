@@ -50,28 +50,13 @@ public struct ImageLightbox: View {
         .automationValue(Ids.imageLightbox, text: { "" })
     }
 
-    /// The image itself. A public post's blob is fetched and decoded by
-    /// `AsyncImage`; a sealed one arrives already opened, since only the shared
-    /// manager can turn its bytes into pixels (`ui/media.md` § Encryption at rest).
+    /// The image itself, always arriving already fetched through the post-blob
+    /// plane and opened by the shared manager (`ui/media.md` § Encryption at rest).
     @ViewBuilder private var content: some View {
         switch source {
-        case .url(let url):
-            AsyncImage(url: url) { phase in
-                switch phase {
-                case .empty:
-                    ProgressView()
-                        .tint(.white)
-                case .success(let image):
-                    zoomable(image)
-                case .failure:
-                    undecodable
-                @unknown default:
-                    EmptyView()
-                }
-            }
         case .decoded(let image):
             zoomable(Image(platformImage: image))
-        case .sealedPending, .proxiedPending:
+        case .pending, .proxiedPending:
             ProgressView()
                 .tint(.white)
         case .unavailable:

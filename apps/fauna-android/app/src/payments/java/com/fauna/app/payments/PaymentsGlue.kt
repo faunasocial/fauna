@@ -1,6 +1,10 @@
 package com.fauna.app.payments
 
 import com.fauna.app.core.ApiClient
+import com.fauna.app.core.WebPublishStore
+import javax.inject.Inject
+import javax.inject.Singleton
+import kotlinx.coroutines.flow.StateFlow
 import com.fauna.app.core.HexUtil
 
 /**
@@ -59,6 +63,28 @@ fun ApiClient.paymentsWebhookUrl(kind: String): String {
     return com.fauna.ffi.paymentsWebhookUrl(nodeUrl, actorIdHex, kind)
 }
 
+/** §4 — the post-checkout redirect to register at [kind]'s provider, built on the creator's
+ *  **web-site origin** [siteOrigin] (never the nest URL [paymentsWebhookUrl] uses): the paywall
+ *  return door resolves the site owner from the request `Host`. Pure local compute over the
+ *  shared `fauna-payments` constants the nest registers the route from. */
+fun paymentsReturnUrl(siteOrigin: String, kind: String): String =
+    com.fauna.ffi.paymentsReturnUrl(siteOrigin, kind)
+
+/** The creator's web-site origin for the §4 return-URL display — the shared
+ *  `WebPublishStore` resolution (active custom domain > enabled subdomain) the
+ *  `web-settings` page shows, so the two surfaces never disagree. Every build type that takes
+ *  this twin also takes `src/noKids`, where the store lives. */
+@Singleton
+class PaymentsSiteOrigin @Inject constructor(private val store: WebPublishStore) {
+    /** `null` until the origin is hydrated, or when the creator has no public web address. */
+    val origin: StateFlow<String?> get() = store.origin
+
+    /** Hydrate the origin once (a no-op once resolved or in flight). */
+    fun ensure() {
+        store.ensureOrigin()
+    }
+}
+
 /** Redeem a post-payment claim code — binds the entitlement to this actor;
  *  the queued grant lands through Pillar 1's queue like a queued subscribe. */
 suspend fun ApiClient.paymentsClaimsRedeem(code: String) {
@@ -69,6 +95,13 @@ suspend fun ApiClient.paymentsClaimsRedeem(code: String) {
  *  always `"manual"` on the wire, for a no-API provider already paid out-of-band). */
 suspend fun ApiClient.paymentsClaimsMint(tier: String) {
     paymentsClient().claimsMint(tier, null)
+}
+
+/** §5 void — the author withdraws one of their own claim codes (a redeemed code's void
+ *  also ends its redeemer's entitlement). Idempotent; a code that is gone or was never
+ *  theirs answers `fauna.payments.claim_not_found`. */
+suspend fun ApiClient.paymentsClaimsVoid(code: String) {
+    paymentsClient().claimsVoid(code)
 }
 
 /** §5 — the author's own claim codes, newest first; the audit surface for BOTH

@@ -84,6 +84,23 @@ fn transport_policy_put_handler() -> RpcHandler {
 
 // ── Registration entry point ────────────────────────────────────────
 
+/// This module's admin-plane kinds for an admin-consented principal —
+/// the nest page's transport policy — each its actor handler behind
+/// [`crate::principal_handlers::admin_twin`] (`authorization-server.md`
+/// § Scope grammar → *The admin arms* names the set).
+pub(crate) fn principal_admin_handlers()
+-> Vec<(&'static str, crate::principal_handlers::PrincipalHandler)> {
+    use crate::principal_handlers::admin_twin;
+    let kinds: [(&'static str, crate::rpc_router::RpcHandler); 2] = [
+        ("fauna.transport.get_policy", transport_policy_get_handler()),
+        ("fauna.transport.put_policy", transport_policy_put_handler()),
+    ];
+    kinds
+        .into_iter()
+        .map(|(kind, actor)| (kind, admin_twin(kind, actor)))
+        .collect()
+}
+
 pub fn register_transport_policy_handlers(b: &mut RpcRouterBuilder) {
     b.add(
         KIND_GET_TRANSPORT_POLICY,

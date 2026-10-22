@@ -7,19 +7,19 @@
   // the Linked-account panel (the shared `BridgeCard`, embedded verbatim —
   // zero new element IDs, ui/atproto.md § Element IDs), the hosted-identity
   // panel, and the full-PDS login-plane surface (app credentials +
-  // connected-app sessions + the external-apps kill-switch), gated on
+  // connected-app sessions; the external-apps switch lives on Connected apps), gated on
   // level = `hosted_full`. Mirrors `apps/fauna-linux/src/settings/atproto.rs`
   // (the reference implementation) and `apps/fauna-tui/src/settings/
   // bluesky.rs` (the closest architectural analog — a direct render over the
   // shared `AtprotoSettingsMachine`, re-snapshotting after every gesture).
   //
-  // F1 collects no label/dm_allowed input at mint time — no such ui.yaml IDs
-  // were approved, only `atproto-app-credential-mint` (a single button). This
-  // page auto-labels ("App credential N") and defaults `dm_allowed` to
-  // `false` (least privilege, matching the doc's default-closed posture).
-  import { identity } from '$lib/store';
-  import { sharedRpcPort } from '$lib/rpc';
-  import { ensureWasm, atprotoDepthLevelOptions, type DepthLevelOption } from '$lib/wasm';
+  // Mint collects no label input: the page auto-labels ("App credential N").
+  // Direct-message access is the page-local `atproto-app-credential-dm-access`
+  // toggle beside the mint button, off by default (least privilege) and read
+  // at the moment the button is pressed.
+  import { identity } from '#lib/store';
+  import { sharedRpcPort } from '#lib/rpc';
+  import { ensureWasm, atprotoDepthLevelOptions, type DepthLevelOption } from '#lib/wasm';
   import {
     getAtprotoSettingsMachine,
     ensureAtprotoSettingsWasm,
@@ -27,13 +27,13 @@
     delegationCapabilityLabels,
     delegationStatusLabel,
     identityStatusLabel,
-  } from '$lib/wasm-atproto-settings';
-  import { resolveLocalized } from '$lib/i18n/localized';
-  import { isSafeNavUrl } from '$lib/safe-url';
+  } from '#lib/wasm-atproto-settings';
+  import { resolveLocalized } from '#lib/i18n/localized';
+  import { isSafeNavUrl } from '#lib/safe-url';
   import { onMount, onDestroy } from 'svelte';
-  import { registerActorScopedReset, sameActorSince } from '$lib/actorScope';
-  import { t } from '$lib/i18n/strings';
-  import type { AtprotoSettingsSnapshot } from '$lib/atproto-settings-machine';
+  import { createActorScopedPoll, sameActorSince } from '#lib/actorScope';
+  import { t } from '#lib/i18n/strings';
+  import type { AtprotoSettingsSnapshot } from '#lib/atproto-settings-machine';
   import type { AtprotoSettingsMachine } from '../../../static/fauna_wasm_atproto_settings.js';
   import BridgeCard from './BridgeCard.svelte';
   import {
@@ -46,8 +46,8 @@
     removeBridgeFollow,
     type BridgeInfo,
     type BridgeFollow,
-  } from '$lib/bridges';
-  import { IDS } from '$lib/generated/uiIds';
+  } from '#lib/bridges';
+  import { IDS } from '#lib/generated/uiIds';
 
   let { error = $bindable('') } = $props();
 
@@ -69,20 +69,17 @@
   let machine: AtprotoSettingsMachine | null = null;
   let snap = $state<AtprotoSettingsSnapshot | null>(null);
   let ready = $state(false);
-  let timer: ReturnType<typeof setInterval> | null = null;
   // The 15 s poll writes this actor's snapshot, so the canonical drop retires it
   // (`account-scoping.md` § The scoping taxonomy: background loops die with the
   // state they write); it must not outlive an in-place identity change.
-  function stopTimer(): void {
-    if (timer) clearInterval(timer);
-    timer = null;
-  }
-  const unregisterActorReset = registerActorScopedReset(stopTimer);
+  const poll = createActorScopedPoll(15000);
   // Secrets revealed (by mint or explicit reveal) this session, keyed by
   // credential_id. Never persisted, never part of the snapshot (D3) — the
   // reveal button's OWN text becomes the secret once revealed (no separate
   // secret-display id in F1's approved ui.yaml surface).
   let revealedSecrets = $state<Record<string, string>>({});
+  // Staged `atproto-app-credential-dm-access` value, read by the next mint.
+  let mintDmAccess = $state(false);
 
   // ── Linked-account panel: the shared "bluesky" BridgeCard ───────────────
   // A synthetic, unlinked placeholder — mirrors tui's `embed_bridge_card`
@@ -99,6 +96,7 @@
     mode: null,
     settings: [],
     supports_follows: false,
+    supports_follow_requests: false,
     link_modes: null,
     error: null,
   };
@@ -237,7 +235,7 @@
       // Test builds only (convention 15) — a production `vite build` folds the
       // constant to false and strips the import.
       if (__FAUNA_E2E_AUTOMATION__) {
-        const { setAtprotoDelegationRehydrateHook } = await import('$lib/atproto-delegation-e2e');
+        const { setAtprotoDelegationRehydrateHook } = await import('#lib/atproto-delegation-e2e');
         setAtprotoDelegationRehydrateHook(async () => {
           await machine?.refresh();
           applySnapshot();
@@ -251,9 +249,7 @@
       // it itself.
       // A drop that landed during the awaits above already ran; starting the poll
       // now would resurrect the outgoing actor's loop.
-      if (sameActor()) {
-        timer = setInterval(async () => { await machine?.refresh(); applySnapshot(); }, 15000);
-      }
+      poll.start(sameActor, async () => { await machine?.refresh(); applySnapshot(); });
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : String(e);
       ready = true;
@@ -261,13 +257,12 @@
   });
 
   onDestroy(() => {
-    stopTimer();
-    unregisterActorReset();
+    poll.dispose();
     // Drop the rehydrate hook with the page, so the command fails loudly ("the
     // AT Protocol settings page is not mounted") instead of poking a torn-down
     // closure whose `machine` reference is stale.
     if (__FAUNA_E2E_AUTOMATION__) {
-      void import('$lib/atproto-delegation-e2e').then((m) =>
+      void import('#lib/atproto-delegation-e2e').then((m) =>
         m.setAtprotoDelegationRehydrateHook(null),
       );
     }
@@ -402,7 +397,7 @@
       count: String((snap?.credentials.length ?? 0) + 1),
     });
     try {
-      const secret = await machine.mint(label, false);
+      const secret = await machine.mint(label, mintDmAccess);
       applySnapshot();
       const newRow = (snap?.credentials ?? []).find((c) => !before.has(c.credential_id));
       if (newRow) revealedSecrets = { ...revealedSecrets, [newRow.credential_id]: secret };
@@ -423,12 +418,6 @@
 
   async function revokeCredential(credentialId: string): Promise<void> {
     await machine?.revoke(credentialId);
-    applySnapshot();
-  }
-
-  async function toggleExternalApps(): Promise<void> {
-    if (!machine) return;
-    await machine.setExternalAppsEnabled(!(snap?.external_apps_enabled ?? true));
     applySnapshot();
   }
 
@@ -693,20 +682,21 @@
       <!-- The consent cards and the connected-app rows moved to Settings →
            Connected apps (connected-apps.md — a lift, never a duplication). -->
 
-      <button
-        class="btn toggle"
-        class:on={snap?.external_apps_enabled}
-        data-testid={IDS.ATPROTO_EXTERNAL_APPS_ENABLE}
-        data-state={snap?.external_apps_enabled ? 'on' : 'off'}
-        onclick={toggleExternalApps}
-      >{t.atproto_settings.external_apps_toggle}</button>
-      <p class="muted small">{t.atproto_settings.external_apps_hint}</p>
-
       <div class="creds">
         <h3>{t.atproto_settings.app_credentials_heading}</h3>
         <button class="btn btn-primary" data-testid={IDS.ATPROTO_APP_CREDENTIAL_MINT} onclick={mintCredential}>
           {t.atproto_settings.mint_button}
         </button>
+        <label class="toggle">
+          <input
+            type="checkbox"
+            data-testid={IDS.ATPROTO_APP_CREDENTIAL_DM_ACCESS}
+            data-checked={mintDmAccess ? 'true' : 'false'}
+            checked={mintDmAccess}
+            onchange={(e) => (mintDmAccess = e.currentTarget.checked)}
+          />
+          {t.atproto_settings.mint_dm_access_label}
+        </label>
         {#if (snap?.credentials ?? []).length === 0}
           <p class="muted small">{t.atproto_settings.app_credentials_empty}</p>
         {:else}
@@ -720,6 +710,9 @@
                   ? t.atproto_settings.credential_never_used
                   : t.atproto_settings.credential_last_used_prefix({ date: new Date(c.last_used_at_millis).toLocaleString() })}
               </span>
+              {#if c.dm_allowed}
+                <span class="muted small">{t.atproto_settings.credential_dm_access}</span>
+              {/if}
               {#if c.revealable || c.credential_id in revealedSecrets}
                 <button
                   class="btn small"

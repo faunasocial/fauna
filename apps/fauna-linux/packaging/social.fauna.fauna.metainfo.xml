@@ -13,8 +13,9 @@
 -->
 <component type="desktop-application">
   <id>social.fauna.fauna</id>
+  <!-- public-text: linux-metainfo -->
   <name>Fauna</name>
-  <summary>Private messaging, groups, and file sync for your personal nest</summary>
+  <summary>Feed, messages, mail, calendar and files</summary>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>Apache-2.0 OR MIT</project_license>
   <developer id="social.fauna">
@@ -22,22 +23,24 @@
   </developer>
   <description>
     <p>
-      Fauna is a native Linux desktop app for the Fauna social platform.
-      Connect to your personal nest server for private messaging, group chats,
-      contacts, calendar events, feeds, file sync, and encrypted backups.
+      Fauna is the Linux desktop app of Fauna, free software for your feed,
+      messages, mail, calendar and files on a server you control. Connect to
+      your own nest for private messaging, group chats, contacts, calendar
+      events, feeds, file sync, and encrypted backups.
     </p>
     <p>Features:</p>
     <ul>
-      <li>End-to-end encrypted messaging and group chat</li>
+      <li>End-to-end encrypted messages, and chat in groups</li>
       <li>Contact management with knock-based introductions</li>
       <li>Calendar with cross-nest event invitations and RSVP</li>
       <li>Custom feeds with filter rules and bridge integrations</li>
-      <li>File synchronization with chunked upload/download</li>
+      <li>File sync between your devices, with only changed pieces travelling</li>
       <li>Versioned backup snapshots</li>
       <li>System tray with background sync when window is closed</li>
       <li>Full nest setup wizard — provision your own server from the app</li>
     </ul>
   </description>
+  <!-- public-text-end: linux-metainfo -->
   <url type="homepage">https://fauna.social</url>
   <launchable type="desktop-id">social.fauna.fauna.desktop</launchable>
   <!-- The binary the desktop entry's Exec= runs. Both predecessors of this

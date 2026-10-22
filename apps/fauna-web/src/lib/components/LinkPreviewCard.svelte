@@ -12,8 +12,8 @@
    *  domain always show, the image appears after the post's reveal button is tapped. The
    *  domain is the shared `urlHost` (wasm twin of `fauna_core::format::url_host`) — the
    *  same source of truth linux/tui/android/apple/windows already consume. */
-  import { urlHost } from '$lib/wasm';
-  import { IDS } from '$lib/generated/uiIds';
+  import { urlHost } from '#lib/wasm';
+  import { IDS } from '#lib/generated/uiIds';
 
   interface Props {
     url: string;

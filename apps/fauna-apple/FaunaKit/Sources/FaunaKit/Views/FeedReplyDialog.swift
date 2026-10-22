@@ -17,6 +17,8 @@ public struct FeedReplyDialog: View {
     let vm: FeedVM
     @Environment(\.dismiss) private var dismiss
     @State private var replyText = ""
+    /// Born unchecked at every open and never remembered (`@State` dies with the sheet).
+    @State private var publicConfirmed = false
 
     public init(post: PostSummary, vm: FeedVM) {
         self.post = post
@@ -27,10 +29,28 @@ public struct FeedReplyDialog: View {
 
     private func submit() {
         Task {
-            await vm.replyToPost(postId: post.postId, body: replyText)
+            // The box exists (hence can be ticked) only under *public by
+            // confirmation*; the send path lives in `FeedVM.replyToPost`.
+            await vm.replyToPost(postId: post.postId, body: replyText,
+                                 publicConfirmed: needsPublicConfirm && publicConfirmed)
             dismiss()
         }
     }
+
+    /// `feed-reply-audience` — the manager's own per-post answer
+    /// (`PostSummary.replyAudience`), stated and never decided here. A public
+    /// target has no answer and paints neither this line nor the checkbox
+    /// (restricted-posts.md § Encryption at rest → *Ruling 5's build*, (d) + (e)).
+    private var audienceText: String? {
+        switch post.replyAudience {
+        case .sealedToRoom: return L.feed.post.replyAudienceRoom(room: post.roomLabel ?? "")
+        case .sealedToTier: return L.feed.post.replyAudienceTier(tier: post.gatedTier ?? "")
+        case .publicByConfirmation: return L.feed.post.replyAudiencePublic
+        case nil: return nil
+        }
+    }
+
+    private var needsPublicConfirm: Bool { post.replyAudience == .publicByConfirmation }
 
     public var body: some View {
         VStack(spacing: 16) {
@@ -46,11 +66,28 @@ public struct FeedReplyDialog: View {
                 .background(.background.secondary)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
 
+            if let audienceText {
+                Text(audienceText)
+                    .font(.caption)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier(Ids.feedReplyAudience)
+                    .automationValue(Ids.feedReplyAudience, text: { audienceText })
+            }
+
             TextEditor(text: $replyText)
                 .frame(height: 100)
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(.separator))
                 .accessibilityIdentifier(Ids.feedReplyTextField)
                 .automationField(Ids.feedReplyTextField, text: $replyText)
+
+            if needsPublicConfirm {
+                Toggle(L.feed.post.replyPublicConfirm, isOn: $publicConfirmed)
+                    .accessibilityIdentifier(Ids.feedReplyPublicConfirm)
+                    .automationActivate(
+                        Ids.feedReplyPublicConfirm,
+                        value: { publicConfirmed ? "on" : "off" }
+                    ) { publicConfirmed.toggle() }
+            }
 
             HStack {
                 Button(L.common.cancel) { dismiss() }
@@ -63,7 +100,7 @@ public struct FeedReplyDialog: View {
         }
         .padding(24)
         #if os(macOS)
-        .frame(width: 450, height: 350)
+        .frame(width: 450, height: 430)
         #endif
         .accessibilityIdentifier(Ids.feedReplyDialog)
         .automationValue(Ids.feedReplyDialog, text: { "" })

@@ -241,6 +241,41 @@ def aftermath_log_lines(app, limit: int = 12) -> str:
 # through its own walk's carry (`config-dissolution.md`, *What replaces the
 # bridge's two carriages*), so a read that stays empty is explained here or
 # nowhere.
+_TAKE_OVER_LOG_MARKERS = (
+    "succession take-over",
+    "succession cut",
+    "adoption marker",
+    "head re-judge",
+    "a history row",
+)
+
+
+def take_over_log_lines(app, limit: int = 16) -> str:
+    """The succession cut's and take-over's log lines for this launch — the
+    cut (`set_lifecycle`'s re-mint report), the engine's head re-judge and its
+    take-over pass (`fauna_sync_engine::engine`, `succession-cut.md` ruling
+    (11)(d)), and the reader's history drops. What an inherited item absent
+    from a bound set's listing needs beside it: cut-without-take-over and
+    take-over-that-carried-nothing read the same on the page.
+
+    Same capability dispatch as :func:`row_judge_log_lines`; the agent's
+    engine logs into the same stream on tui and linux.
+    """
+    reader = _log_reader(app)
+    if reader is None:
+        return "<no app-log reader on this driver>"
+    try:
+        text = reader()
+    except Exception as exc:  # never mask the real failure with a reader fault
+        return f"<unreadable: {type(exc).__name__}: {exc}>"
+    lines = [_ANSI_RE.sub("", ln).strip() for ln in text.splitlines()]
+    truncation = [ln for ln in lines if _TRUNCATED_MARKER in ln]
+    hits = [ln for ln in lines if any(m in ln for m in _TAKE_OVER_LOG_MARKERS)]
+    if not hits:
+        hits = ["<no cut or take-over line in this launch's log>"]
+    return "\n      ".join(truncation + hits[-limit:])
+
+
 _ACCOUNT_PLANE_LOG_MARKERS = (
     "account runtime",
     "account pump",

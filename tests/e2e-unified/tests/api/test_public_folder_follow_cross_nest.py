@@ -59,7 +59,7 @@ Byte plane, deliberately unauthenticated
 (``lib.rs``'s ``public_bytes`` router) — possession of the content hash *is* the
 capability. The follower therefore fetches with no ``Authorization`` header at
 all, and a 401/403 here would be a real regression of the ratified design
-(``federation.md`` § The public folder read plane: *"manifests/chunks GET by hash
+(``federation-shared-folders.md`` § The public folder read plane: *"manifests/chunks GET by hash
 on the open bulk plane (plaintext for a public folder)"*).
 
 Rows are seeded through the production ingest rail (``fauna.sync.changes.record``,

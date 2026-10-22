@@ -22,6 +22,10 @@ pub struct ContactRow {
     /// for a federated peer).
     /// Pairs with `peer_handle` for the shared roster-filter predicate.
     pub peer_domain: Option<String>,
+    /// The peer's home nest URL when the nest knows it (`ContactItem.home_nest_url`)
+    /// — carried by the row's tap into the Profile's actor-home slot
+    /// (`contacts.md` § State & data shape).
+    pub peer_home_nest_url: Option<String>,
     pub status: String,
     pub updated_at: Option<String>,
 }

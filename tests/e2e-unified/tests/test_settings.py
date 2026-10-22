@@ -2,7 +2,7 @@ import uuid
 import pytest
 
 from common.launch_harness import reached_authenticated_app
-from helpers.app_surface import declared_absence, skip_unbuilt
+from helpers.app_surface import app_name, declared_absence, skip_unbuilt
 from helpers.budgets import RPC_ROUNDTRIP_S
 from helpers.rpc_hold import (
     arm_rpc_hold,
@@ -760,17 +760,182 @@ def test_email_filter_forward_keeps_its_copy_mode_through_an_edit(
     settings.delete_filter(_wait_filter_listed(settings, name))
 
 
+#: The apps whose filter form collects every v1 condition and action, the
+#: rule's order and its `continue` flag (tui leads; the six follow from their
+#: per-app lifts).
+_FULL_FILTER_FORM_APPS = {"tui", "linux", "web", "android"}
+
+
+def _require_full_filter_form(driver, surface: str) -> None:
+    if app_name(driver) not in _FULL_FILTER_FORM_APPS:
+        skip_unbuilt(
+            driver,
+            surface=surface,
+            detail="this app's filter form collects only the Allow/Discard/Reject/Forward inputs",
+            tracked="docs/goal/behavior/email-filters.md § Email filter rules (Implementation status today)",
+        )
+
+
+@pytest.mark.feature("mail-filter-rules")
+def test_email_filter_files_labels_and_replies_from_the_form(
+    logged_in_app, nest_instance, test_user
+):
+    """The rule editor makes a rule that files matching mail into a folder, one
+    that adds a label and one that replies for you, each stored exactly as
+    typed, listed with its badge, and reopened with every input it was saved
+    with (`mail-filter-rules` outcome 4; the forward half is
+    `test_email_filter_forward_keeps_its_copy_mode_through_an_edit`)."""
+    _require_full_filter_form(logged_in_app.driver, "filter-file-into-mailbox")
+    settings = logged_in_app.settings
+    settings.navigate()
+    cases = [
+        (
+            "FileInto",
+            {"filter-file-into-mailbox": "Reading"},
+            {"FileInto": {"mailbox": "Reading"}},
+            S.status.email_filters.action_file_into,
+        ),
+        (
+            "AddLabel",
+            {"filter-add-label": "Newsletters"},
+            {"AddLabel": {"label": "Newsletters"}},
+            S.status.email_filters.action_add_label,
+        ),
+        (
+            "AutoReply",
+            {
+                "filter-auto-reply-subject": "Away",
+                "filter-auto-reply-body": "Back on Monday",
+                "filter-auto-reply-interval-hours": "24",
+            },
+            {"AutoReply": {"subject": "Away", "body": "Back on Monday", "interval_hours": 24}},
+            S.status.email_filters.action_auto_reply,
+        ),
+    ]
+    for action, inputs, stored_action, badge in cases:
+        name = _unique(action)
+        settings.create_email_filter(
+            name=name, rule_type="SenderDomain", rule_value="news.example.com",
+            action=action, inputs=inputs,
+        )
+        index = _wait_filter_listed(settings, name)
+        assert settings.filter_action(index) == badge
+        stored = _stored_filter(nest_instance, test_user, name)
+        assert stored["action"] == stored_action, (
+            f"the form must store {stored_action!r}; stored {stored['action']!r}"
+        )
+
+        assert settings.filter_edit_visible(index), (
+            f"a {action} rule the form itself produced must offer an edit affordance"
+        )
+        settings.open_filter_edit(index)
+        for element_id, value in inputs.items():
+            assert settings.filter_input(element_id) == value, (
+                f"{element_id} must reopen with what was saved"
+            )
+        settings.save_open_filter()
+        after = _stored_filter(nest_instance, test_user, name)
+        assert after["action"] == stored_action, (
+            f"saving the untouched edit form changed the action to {after['action']!r}"
+        )
+        settings.delete_filter(_wait_filter_listed(settings, name))
+
+
+@pytest.mark.feature("mail-filter-rules")
+def test_email_filter_matches_a_header_value_or_the_spam_score(
+    logged_in_app, nest_instance, test_user
+):
+    """A rule matches on what a header says (the header's name and the text it
+    must contain) or on the spam score, typed in points — each stored as the
+    typed condition and reopened with the same inputs (`mail-filter-rules`
+    outcome 5; the sender, subject, body and header-present conditions are
+    the form's single-value kinds `test_email_filter_edit` drives)."""
+    _require_full_filter_form(logged_in_app.driver, "filter-rule-spam-score")
+    settings = logged_in_app.settings
+    settings.navigate()
+    cases = [
+        (
+            "HeaderContains",
+            "List-Id",
+            {"filter-rule-header-value": "announce"},
+            {"HeaderContains": {"name": "List-Id", "value": "announce"}},
+        ),
+        (
+            "SpamScoreAtLeast",
+            "",
+            {"filter-rule-spam-score": "7.5"},
+            {"SpamScoreAtLeast": {"milli": 7500}},
+        ),
+    ]
+    for rule_type, rule_value, inputs, stored_rule in cases:
+        name = _unique(rule_type)
+        settings.create_email_filter(
+            name=name, rule_type=rule_type, rule_value=rule_value,
+            action="Discard", inputs=inputs,
+        )
+        index = _wait_filter_listed(settings, name)
+        stored = _stored_filter(nest_instance, test_user, name)
+        assert stored["rules"] == [stored_rule], (
+            f"the form must store {stored_rule!r}; stored {stored['rules']!r}"
+        )
+        settings.open_filter_edit(index)
+        for element_id, value in inputs.items():
+            assert settings.filter_input(element_id) == value, (
+                f"{element_id} must reopen with what was saved"
+            )
+        settings.save_open_filter()
+        assert _stored_filter(nest_instance, test_user, name)["rules"] == [stored_rule]
+        settings.delete_filter(_wait_filter_listed(settings, name))
+
+
+@pytest.mark.feature("mail-filter-rules")
+def test_email_filter_order_and_continue_are_set_from_the_form(
+    logged_in_app, nest_instance, test_user
+):
+    """A rule's place in the order and its "keep checking later rules" mark
+    are set from the form, stored on the rule, reopened as saved, and cleared
+    again by an edit (`mail-filter-rules` outcome 6; the nest applying them is
+    outcome 14)."""
+    _require_full_filter_form(logged_in_app.driver, "filter-continue-toggle")
+    settings = logged_in_app.settings
+    settings.navigate()
+    name = _unique("Ordered")
+    settings.create_email_filter(
+        name=name, rule_type="SenderDomain", rule_value="lists.example.com",
+        action="AddLabel",
+        inputs={"filter-add-label": "Lists", "filter-priority-input": "5"},
+        continue_matching=True,
+    )
+    index = _wait_filter_listed(settings, name)
+    stored = _stored_filter(nest_instance, test_user, name)
+    assert (stored["priority"], stored["continue_on_match"]) == (5, True), (
+        f"the form must store order 5 and continue; stored {stored!r}"
+    )
+
+    settings.open_filter_edit(index)
+    assert settings.filter_input("filter-priority-input") == "5"
+    assert settings.filter_continue(), "the edit form must reopen with continue checked"
+    settings.driver.clear_and_type("filter-priority-input", "-2")
+    settings.set_filter_continue(False)
+    settings.save_open_filter()
+    after = _stored_filter(nest_instance, test_user, name)
+    assert (after["priority"], after["continue_on_match"]) == (-2, False), (
+        f"the edit must store order -2, first-match-wins; stored {after!r}"
+    )
+    settings.delete_filter(_wait_filter_listed(settings, name))
+
+
 @pytest.mark.feature("mail-filter-rules")
 def test_email_filter_the_form_cannot_show_is_listed_but_never_opens(
     logged_in_app, nest_instance, test_user
 ):
-    """A rule the form cannot fully show — an auto-reply, which only the API
-    writes today — is listed with its badge but offers no edit affordance, so
-    it never opens in a form that would lose part of it (`mail-filter-rules`
-    outcome 7)."""
+    """A rule the form cannot fully show — two conditions, where every form
+    holds one, which only the API writes — is listed with its badge but offers
+    no edit affordance, so it never opens in a form that would lose part of it
+    (`mail-filter-rules` outcome 7)."""
     from clients.ws_rpc_admin_client import WsRpcAdminClient
 
-    name = _unique("Away notice")
+    name = _unique("Two senders")
     with WsRpcAdminClient(
         nest_instance["url"],
         actor_id=test_user["actor_id_bytes"],
@@ -778,8 +943,11 @@ def test_email_filter_the_form_cannot_show_is_listed_but_never_opens(
     ) as account:
         account.call("fauna.email.filters.create", {
             "name": name,
-            "rules": [{"SenderDomain": {"domain": "example.org"}}],
-            "combination": "all",
+            "rules": [
+                {"SenderDomain": {"domain": "example.org"}},
+                {"SenderDomain": {"domain": "example.net"}},
+            ],
+            "combination": "any",
             "action": {"AutoReply": {
                 "subject": "Away", "body": "Back on Monday", "interval_hours": 24,
             }},
@@ -791,7 +959,7 @@ def test_email_filter_the_form_cannot_show_is_listed_but_never_opens(
     index = _wait_filter_listed(settings, name)
     assert settings.filter_action(index) == S.status.email_filters.action_auto_reply
     assert not settings.filter_edit_visible(index), (
-        "an auto-reply rule must not open in a form that cannot hold its subject/body"
+        "a two-condition rule must not open in a form that holds one condition"
     )
 
     settings.delete_filter(index)

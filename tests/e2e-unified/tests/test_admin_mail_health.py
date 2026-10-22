@@ -47,6 +47,9 @@ pytestmark = [
     pytest.mark.web,
     pytest.mark.linux,
     pytest.mark.windows,
+    pytest.mark.android,
+    pytest.mark.macos,
+    pytest.mark.ios,
 ]
 
 #: The categorical line's English labels (`admin.mail_page.health_state_*`),
@@ -121,6 +124,24 @@ def _wait(predicate, budget_s: float = budgets.RPC_ROUNDTRIP_S) -> bool:
         return bool(wait_until(predicate, budget_s))
     except AssertionError:
         return bool(predicate())
+
+
+#: The apps that paint the sender-dashboard note (outcome 34). tui leads;
+#: web and linux followed; android is painted but not yet run on its emulator;
+#: macos, ios and windows follow on their own machines.
+SENDER_DASHBOARD_NOTE_BUILT = {"tui", "web", "linux"}
+
+SENDER_DASHBOARDS_NOTE = (
+    "Gmail Postmaster Tools and Outlook SNDS are externally managed dashboards "
+    "on the receiver's website. Sign up at postmaster.google.com and "
+    "sendersms.outlook.com if you want their per-receiver-side view; Fauna "
+    "doesn't integrate with these APIs (none exist)."
+)
+
+SENDER_DASHBOARD_URLS = [
+    "https://postmaster.google.com/",
+    "https://sendersupport.olc.protection.outlook.com/snds/",
+]
 
 
 def _open_readout(admin_app):
@@ -252,6 +273,27 @@ def test_delist_link_absent_while_not_listed(admin_app, nest_instance):
     assert not admin_app.admin.mail_health_delist_present(), (
         "admin-mail-health-delist-link rendered with no listing"
     )
+
+
+@pytest.mark.feature("admin-mail-health")
+def test_the_sender_dashboard_note_points_to_gmail_and_outlook(admin_app):
+    """Outcome 34: under the readout, plain help text names the two receivers'
+    own sender dashboards, with one link per receiver (Gmail, then Outlook)
+    leading to its hard-coded sign-up page. Static: no nest state decides it."""
+    if app_name(admin_app.driver) not in SENDER_DASHBOARD_NOTE_BUILT:
+        skip_unbuilt(
+            admin_app.driver,
+            surface="admin-mail-health-sender-dashboards-note",
+            detail="tui leads; the other apps follow in their trickle-down",
+            tracked="the per-app trickle-down of the sender-dashboard note",
+        )
+    _open_readout(admin_app)
+    assert _wait(lambda: admin_app.admin.mail_health_sender_dashboards_note() != ""), (
+        "admin-mail-health-sender-dashboards-note never rendered. "
+        f"error: {admin_app.error_text()!r}"
+    )
+    assert admin_app.admin.mail_health_sender_dashboards_note() == SENDER_DASHBOARDS_NOTE
+    assert admin_app.admin.mail_health_sender_dashboard_targets() == SENDER_DASHBOARD_URLS
 
 
 @pytest.mark.feature("admin-mail-health")

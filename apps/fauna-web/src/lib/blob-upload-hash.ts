@@ -1,7 +1,7 @@
 // The client-computed media hash rule's web half (`docs/goal/architecture/security.md`
 // § Signed-envelope shape): a blob-upload reply names the hash every caller then
 // signs over, so the SPA compares it with the hash it computed itself from the
-// bytes it sent. Kept free of `$lib/wasm` so a deno test can drive it; the hasher
+// bytes it sent. Kept free of `#lib/wasm` so a deno test can drive it; the hasher
 // is the wasm `blobContentHashHex` export (shared Rust `blake3`), injected.
 
 /** Return the lowercase blake3 hex of `bytes` when the nest's `echoed` hash

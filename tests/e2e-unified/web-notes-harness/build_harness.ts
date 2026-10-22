@@ -1,4 +1,4 @@
-// Bundles `harness-entry.ts` (+ the real $lib Notes-editor graph + the real wasm
+// Bundles `harness-entry.ts` (+ the real #lib Notes-editor graph + the real wasm
 // glue) into a single ESM file the harness page loads, and stages the wasm binary
 // next to it. Run with deno: `deno run -A build_harness.ts` (the `just
 // notes-browser-harness` recipe wraps this). Uses the app's already-installed
@@ -6,8 +6,8 @@
 //
 // Two import rewrites make the SvelteKit-resolved source bundle outside Kit:
 //   $app/paths → app-paths-stub.ts (just `base = ''`)
-//   $lib/*     → apps/fauna-web/src/lib/*
-// The dynamic `import('../../static/fauna_wasm.js')` inside $lib/wasm is bundled
+//   #lib/*     → apps/fauna-web/src/lib/*
+// The dynamic `import('../../static/fauna_wasm.js')` inside #lib/wasm is bundled
 // inline (no code-splitting), so the page loads exactly one JS file; the wasm
 // *binary* is fetched at runtime from the served root, so we copy it there.
 
@@ -33,7 +33,7 @@ await esbuild.build({
   nodePaths: [join(webRoot, 'node_modules')],
   alias: {
     '$app/paths': join(here, 'app-paths-stub.ts'),
-    $lib: srcLib,
+    '#lib': srcLib,
   },
   logLevel: 'info',
 });

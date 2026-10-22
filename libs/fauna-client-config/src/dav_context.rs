@@ -151,6 +151,12 @@ mod tests {
             ) -> Result<bool, crate::StoreError> {
                 unreachable!()
             }
+            async fn clear_rotation(
+                &self,
+                _: fauna_core::secret::SecretArray32,
+            ) -> Result<bool, crate::StoreError> {
+                unreachable!()
+            }
             async fn put_credential(
                 &self,
                 _: fauna_core::data::MailCredential,
@@ -161,6 +167,13 @@ mod tests {
                 &self,
                 _: String,
                 _: fauna_core::data::MsekFingerprint,
+            ) -> Result<bool, crate::StoreError> {
+                unreachable!()
+            }
+            async fn mark_token_minted(
+                &self,
+                _: String,
+                _: u64,
             ) -> Result<bool, crate::StoreError> {
                 unreachable!()
             }

@@ -54,6 +54,7 @@ fun ProfileEditFormSection(
     val avatarUploading by vm.avatarUploading.collectAsState()
     val bannerUploading by vm.bannerUploading.collectAsState()
     val errorMessage by vm.errorMessage.collectAsState()
+    val audienceEveryone by vm.audienceEveryone.collectAsState()
     val appMessages = LocalAppMessages.current
     val context = LocalContext.current
 
@@ -116,6 +117,8 @@ fun ProfileEditFormSection(
                 saving = saving,
                 avatarUploading = avatarUploading,
                 bannerUploading = bannerUploading,
+                audienceEveryone = audienceEveryone,
+                onToggleAudience = vm::toggleAudience,
                 onSave = { displayName, bio, links -> vm.save(displayName, bio, links, onSaved) },
                 onCancel = onCancel,
                 onPickAvatar = { avatarPicker.launch("image/*") },
@@ -135,6 +138,8 @@ fun ProfileEditFormContent(
     saving: Boolean,
     avatarUploading: Boolean = false,
     bannerUploading: Boolean = false,
+    audienceEveryone: Boolean = false,
+    onToggleAudience: () -> Unit = {},
     onSave: (String, String, List<FfiProfileLink>) -> Unit,
     onCancel: () -> Unit,
     onPickAvatar: () -> Unit = {},
@@ -243,6 +248,21 @@ fun ProfileEditFormContent(
                 enabled = !saving,
                 modifier = Modifier.testTag(Ids.PROFILE_EDIT_BANNER_REMOVE_BUTTON),
             ) { Text(stringResource(R.string.profile_edit_remove_banner)) }
+        }
+
+        // ── Audience (profile.md § Where logic lives → The remote read) ────────
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(stringResource(R.string.profile_edit_audience_toggle), modifier = Modifier.weight(1f))
+            Switch(
+                checked = audienceEveryone,
+                onCheckedChange = { onToggleAudience() },
+                enabled = !saving,
+                modifier = Modifier.testTag(Ids.PROFILE_EDIT_AUDIENCE_TOGGLE),
+            )
         }
 
         // ── Save / cancel ──────────────────────────────────────────────────────

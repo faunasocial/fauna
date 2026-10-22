@@ -506,6 +506,33 @@ pub fn parse_reserved_backup_set_name(name: &str) -> Option<(&'static str, [u8; 
     (reserved_backup_set_name(kind, &scope)?.as_str() == name).then_some((kind, scope))
 }
 
+/// The landing name a delivered copy of the owner's own `kind` corpus rests
+/// under on a nest the owner's account lives on — `__landing/<kind>`, or
+/// `__landing/conv/<channel_hex>` — or `None` for a kind
+/// [`reserved_backup_set_name`] does not know.
+///
+/// A third reserved name, never the rail's: the re-seed delivery, the
+/// nest-held pull-back and the lived-in recovery each bring the corpus back to
+/// a nest that mints (or will mint) its own `__<kind>` rail, and a custody copy
+/// under the rail's name meets that rail (`reserved-folders.md` § __mail Sync →
+/// *The landing set*). Mechanically the set is a custody copy in full; only
+/// its name differs, so the rail mint, `is_pure_backup_destination` and every
+/// reader of [`parse_reserved_backup_set_name`] pass it by by shape. Defined
+/// for every [`BACKUP_SET_KINDS`] entry, whether or not a verb serves it yet.
+pub fn landing_set_name(kind: &str, scope_id: &[u8; 32]) -> Option<String> {
+    let reserved = reserved_backup_set_name(kind, scope_id)?;
+    Some(format!("__landing/{}", reserved.strip_prefix("__")?))
+}
+
+/// Read a landing name back into the `(kind, scope)` it was derived from, or
+/// `None` if [`landing_set_name`] could not have produced it —
+/// parse-then-re-derive, exactly as [`parse_reserved_backup_set_name`].
+pub fn parse_landing_set_name(name: &str) -> Option<(&'static str, [u8; 32])> {
+    let rest = name.strip_prefix("__landing/")?;
+    let (kind, scope) = parse_reserved_backup_set_name(&format!("__{rest}"))?;
+    (landing_set_name(kind, &scope)?.as_str() == name).then_some((kind, scope))
+}
+
 /// The destination-side path of the `manifest.<kind>` mirror — the same contract
 /// as [`segment_rel_path`], for the one non-segment path in a backup set.
 pub fn manifest_rel_path(scope_hex: &str, kind: &str) -> String {
@@ -603,6 +630,44 @@ mod tests {
                 .parse_mirror_path(&scope, &SegmentFamily::Content.mirror_path(&scope, "mail")),
             None
         );
+    }
+
+    /// Every kind the derivation knows round-trips through the landing pair,
+    /// and the landing and reserved axes never answer for each other's names:
+    /// a delivered set must never read as the rail or as a custody copy of
+    /// it, and the reverse.
+    #[test]
+    fn the_landing_name_round_trips_and_stays_off_the_reserved_axis() {
+        let channel = [0x5au8; 32];
+        for kind in BACKUP_SET_KINDS {
+            let scope = if *kind == "conv" { channel } else { [0u8; 32] };
+            let landing = landing_set_name(kind, &scope).expect("every kind lands");
+            assert_eq!(parse_landing_set_name(&landing), Some((*kind, scope)));
+            assert_eq!(parse_reserved_backup_set_name(&landing), None, "{landing}");
+
+            let reserved = reserved_backup_set_name(kind, &scope).unwrap();
+            assert_eq!(parse_landing_set_name(&reserved), None, "{reserved}");
+        }
+        assert_eq!(
+            landing_set_name("mail", &channel).as_deref(),
+            Some("__landing/mail")
+        );
+        assert_eq!(
+            landing_set_name("conv", &channel),
+            Some(format!("__landing/conv/{}", hex::encode(channel)))
+        );
+        assert_eq!(landing_set_name("bogus", &channel), None);
+        for name in [
+            "__landing/",
+            "__landing/bogus",
+            "__landing/conv",
+            "__landing/conv/tooshort",
+            "__landing/mail/extra",
+            "__landing/__mail",
+            "landing/mail",
+        ] {
+            assert_eq!(parse_landing_set_name(name), None, "{name}");
+        }
     }
 
     #[test]

@@ -16,7 +16,7 @@ your handle carries a real domain, turns mail on for you without another questio
 
 ## Coverage contract
 
-Stamped 2026-09-23 at 207d96534d.
+Stamped 2026-10-21 at 77c610862e.
 
 1. [app] A nest nobody has claimed yet sends you to the claim-code step, and a wrong code says so in place — `docs/goal/behavior/onboarding.md` § 3a. Claim code
    - `tests/e2e-unified/tests/test_claim_code_unclaimed_nest.py::test_unclaimed_nest_routes_to_claim_code`
@@ -30,7 +30,7 @@ Stamped 2026-09-23 at 207d96534d.
    - `tests/e2e-unified/tests/test_nat_mode_choice.py::test_nat_mode_choosing_public_seed`
    - `tests/e2e-unified/tests/test_nat_mode_choice.py::test_nat_mode_selecting_private_updates_selection`
    - `tests/e2e-unified/tests/test_nat_mode_choice.py::test_nat_mode_private_ward_preselection`
-3. [app] The claim ends with a one-tap offer to trust this nest with sealed copies of your data, and either answer takes you into the app — `docs/goal/behavior/onboarding.md` § 3b-ter. One-tap "trust this box" default grant
+3. [app] The claim ends with a one-tap offer to trust this nest to read your mail and calendar, and with them your address book, for itself, and either answer takes you into the app — `docs/goal/behavior/onboarding.md` § 3b-ter. One-tap "trust this box" default grant
    - `tests/e2e-unified/tests/test_trust_prompt.py::test_the_claim_offers_the_one_tap_trust_before_the_app`
    - `tests/e2e-unified/tests/test_trust_prompt.py::test_declining_the_offer_leaves_everything_as_today`
    - `tests/e2e-unified/tests/test_trust_prompt.py::test_accepting_the_offer_also_reaches_the_app`
@@ -84,7 +84,7 @@ Stamped 2026-09-23 at 207d96534d.
 | 1 | app | `tests/e2e-unified/tests/test_claim_code_unclaimed_nest.py::test_claim_code_invalid_renders_status_not_error_message` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/test_claim_code_unclaimed_nest.py::test_claim_code_uri_paste_reaches_the_machine_intact` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/test_silent_challenge_unclaimed_nest.py::test_launch_flow_navigate_to_claim_code_renders_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_onboarding_localhost.py::test_test_at_localhost_reaches_admin_claim` | web (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_onboarding_localhost.py::test_test_at_localhost_reaches_admin_claim` | web (linux): failed |
 | 1 | app | `tests/e2e-unified/tests/test_web_claim_pin_wasm_witness.py::test_wasm_claim_pin_same_root_preserves_rotation_seq` | web (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/test_web_claim_pin_wasm_witness.py::test_wasm_claim_pin_differing_root_overwrites` | web (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_nat_mode_choice.py::test_nat_mode_choosing_public_seed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
@@ -103,12 +103,12 @@ Stamped 2026-09-23 at 207d96534d.
 | 5 | nest | `tests/e2e-unified/tests/platform/docker/test_nest.py::test_docker_nest_claim_admin` | nest (linux): passed |
 | 6 | nest | `tests/e2e-unified/tests/platform/docker/test_docker_api_claim.py::test_docker_api_provisioning` | nest (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_onboarding_logged_in_terminal_empty_store.py::test_logged_in_terminal_survives_an_empty_secret_slot` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_web_claim_enters_without_teardown.py::test_an_imported_identity_claims_a_fresh_box_and_enters_without_a_teardown` | — |
+| 7 | app | `tests/e2e-unified/tests/test_web_claim_enters_without_teardown.py::test_an_imported_identity_claims_a_fresh_box_and_enters_without_a_teardown` | web (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_claim_code_unclaimed_nest.py::test_claim_code_uri_paste_reaches_the_machine_intact` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_web_claim_pin_wasm_witness.py::test_wasm_claim_pin_same_root_preserves_rotation_seq` | web (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_web_claim_pin_wasm_witness.py::test_wasm_claim_pin_differing_root_overwrites` | web (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_claim_link_nest_pin.py::test_a_claim_link_naming_another_nest_is_refused` | web (linux): skipped, linux (linux): passed, windows (windows): skipped, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_claim_link_nest_pin.py::test_a_claim_link_naming_this_nest_claims_it_and_pins_that_identity` | web (linux): skipped, linux (linux): passed, windows (windows): skipped, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_claim_link_nest_pin.py::test_a_claim_link_naming_another_nest_is_refused` | web (linux): skipped, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_claim_link_nest_pin.py::test_a_claim_link_naming_this_nest_claims_it_and_pins_that_identity` | web (linux): skipped, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 10 | app | `tests/e2e-unified/tests/test_mail_enable_at_admin_claim.py::test_admin_claim_with_real_domain_handle_auto_enables_mail` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_mail_enable_at_admin_claim.py::test_marking_the_box_private_at_claim_leaves_all_four_serving_off` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 12 | nest | `tests/e2e-unified/tests/api/test_admin_auth.py::test_claim_admin` | nest (linux): passed, nest (windows): passed |

@@ -186,11 +186,16 @@ fn read_member_never_holds_more_than_the_declared_size_even_when_it_lies() {
     let err = result
         .unwrap()
         .expect_err("a member that inflates past its declared size refuses");
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("inflates past its declared"),
-        "wrong refusal reason: {msg}"
-    );
+    // Whichever layer refuses first — our own probe past the declared size
+    // ("inflates past its declared …"), or zip's decoder, which since zip 9
+    // checks the declared uncompressed size itself — it must be a member
+    // refusal on the SAME member, and the bound below must hold either way.
+    match err {
+        fauna_archive::error::ArchiveError::Member { member, .. } => {
+            assert_eq!(member, "category.json");
+        }
+        other => panic!("expected ArchiveError::Member, got {other:?}"),
+    }
     assert!(
         peak <= DECLARED_SIZE + TOLERANCE,
         "read_member peaked at {peak} B reading a member that declares {DECLARED_SIZE} B and \

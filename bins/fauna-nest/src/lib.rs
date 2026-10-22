@@ -25,6 +25,8 @@ pub mod account_handlers;
 pub mod account_lock_test_hook;
 pub mod acme;
 pub mod acme_http01;
+#[cfg(feature = "test-hooks")]
+pub mod acme_issuance_error_test_hook;
 #[cfg(feature = "activitypub")]
 pub mod activitypub;
 pub mod admin;
@@ -43,6 +45,9 @@ pub mod atproto_oracle;
 pub mod auth;
 pub mod auth_core;
 pub mod auth_handlers;
+/// The shared half of the oracle's two authoring-key classes (TP11,
+/// `post.author` and `profile.author`).
+pub mod authoring_oracle;
 pub mod backup;
 pub mod backup_handlers;
 pub mod blob_routes;
@@ -101,6 +106,7 @@ pub mod claim_handlers;
 pub mod config;
 pub mod contacts_handlers;
 pub mod content_index_handlers;
+pub mod content_policy_handlers;
 pub mod conversations_handlers;
 pub mod cursor_seal;
 pub mod custody_admission;
@@ -130,7 +136,6 @@ pub mod domain_expiry;
 pub mod domain_expiry_handlers;
 #[cfg(feature = "test-hooks")]
 pub mod domain_expiry_test_hook;
-pub mod domain_hash;
 pub mod drafts_handlers;
 pub mod email_handlers;
 pub mod factory_reset;
@@ -168,6 +173,8 @@ pub mod folder_authz;
 pub mod folder_deposit;
 pub mod folder_handlers;
 pub mod folder_public;
+pub mod follow_delivery;
+pub mod follow_federation;
 // folder_routes / user_folder_routes / lease_routes deleted in the
 // WS-RPC-everywhere rip-out — user + admin folders, members, schedule,
 // devices, sync conflicts and upload leases are now solely the
@@ -218,6 +225,7 @@ pub mod membership_lapse;
 pub mod membership_lapse_test_hook;
 pub mod mls_replica_handlers;
 pub mod mode_commit;
+pub mod moderation_federation;
 pub mod moderation_handlers;
 pub mod moderation_withhold;
 pub mod mta_sts_advance;
@@ -295,6 +303,7 @@ pub mod outbound_dmarc;
 pub mod outbound_dmarc_test_hook;
 #[cfg(feature = "test-hooks")]
 pub mod outbound_drain_test_hook;
+pub mod outbound_mta_sts;
 pub mod outbound_retry;
 pub mod outbound_tlsrpt;
 #[cfg(feature = "test-hooks")]
@@ -346,6 +355,8 @@ pub mod pre_identity_allowlist;
 pub mod principal_handlers;
 pub mod principal_session;
 pub mod principals_handlers;
+/// The oracle's profile custodian (TP11, the `profile.author` class).
+pub mod profile_author_oracle;
 pub mod profile_handlers;
 // `fauna.protocol.echo` — a transport round-trip probe for tests, served only
 // by a `test-hooks` build (gated 2026-10-01: a shipped nest answers it
@@ -377,6 +388,7 @@ pub mod rpc_errors;
 pub mod rpc_router;
 pub mod s3_blob_store;
 pub mod search_handlers;
+pub mod served_name;
 #[cfg(feature = "test-hooks")]
 pub mod version_prune_test_hook;
 #[cfg(feature = "test-hooks")]
@@ -438,6 +450,7 @@ pub mod ttl_gc;
 #[cfg(unix)]
 pub mod unix_signal;
 pub mod update_channel;
+pub mod updater_report;
 pub mod video;
 pub mod video_routes;
 pub mod web_app_origin;
@@ -453,17 +466,19 @@ use std::sync::Arc;
 use anyhow::Result;
 use routes::AppState;
 
+// public-text: nest-info-page
 async fn info_page() -> axum::response::Html<&'static str> {
     axum::response::Html(
         r#"<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Fauna Nest</title></head>
+<html><head><meta charset="utf-8"><title>Fauna nest</title></head>
 <body style="font-family:system-ui;max-width:600px;margin:80px auto;text-align:center">
-<h1>Fauna Nest API</h1>
+<h1>Fauna nest</h1>
 <p>This server hosts a Fauna nest.</p>
-<p>Open the web app: <a href="/app">local</a> · <a href="https://app.fauna.social">app.fauna.social</a></p>
+<p><a href="/app">Open the web app</a></p>
 </body></html>"#,
     )
 }
+// public-text-end: nest-info-page
 
 /// The public router's fallback: a hosted plugin's declared ingress prefix on
 /// the nest's own host first (`plugin_ingress`), then web content / the info
@@ -664,6 +679,7 @@ fn is_unsubscribe_token_shape(t: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
 }
 
+// public-text: nest-list-pages
 /// A complete, self-contained HTML page for the external recipient (no Fauna
 /// app, no assets, no `ui.yaml` id — `mail-mass-mailing.md` § The HTTPS
 /// endpoint), shared by the unsubscribe and `List-Help` pages. `inner` is trusted markup the caller assembles from already-safe
@@ -747,6 +763,7 @@ async fn list_help_get(
     )
         .into_response()
 }
+// public-text-end: nest-list-pages
 
 /// `POST /list/unsubscribe?t=<token>` — RFC 8058 §3.3 One-Click. The POST body
 /// MUST carry `List-Unsubscribe=One-Click` (reject `400` otherwise). The token
@@ -941,14 +958,10 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
         // (`content-index.md` § Ingest triggers, v1 — one segment is one blob,
         // there is no chunk-manifest form on that rail), whose segments
         // routinely exceed 2 MB for a real mailbox.
-        .route(
-            "/api/v1/blob/{id}",
-            get(blob_routes::download_blob)
-                .put(blob_routes::put_blob_by_cid)
-                .layer(axum::extract::DefaultBodyLimit::max(
-                    blob_routes::BLOB_BODY_LIMIT,
-                )),
-        )
+        //
+        // The route itself is mounted on the open-CORS `public_bytes` router
+        // below, not here (`transport-trust.md` § The post arm → *The browser's
+        // leg*); axum refuses the same path on both sides of a merge.
         // Video segment routes. The upload deliberately carries no body-limit
         // layer: one segment per request, bounded by axum's 2 MB `Bytes`
         // default like every route not raised above or below. Each segment
@@ -990,18 +1003,8 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
                 .delete(chunk_routes::decline_relay_chunk)
                 .layer(axum::extract::DefaultBodyLimit::max(CHUNK_BLOB_BODY_LIMIT)),
         )
-        // Segment byte-source (Plan 5 — sibling of /api/v1/chunks). The
-        // `/meta` sibling serves the pair's sidecar, which an adopting
-        // replica needs and a backup pass does not (segment_route's module
-        // docs argue the split).
-        .route(
-            "/api/v1/segments/{kind}/{actor_hex}/{segment_id}",
-            get(crate::segments::segment_route::get_segment),
-        )
-        .route(
-            "/api/v1/segments/{kind}/{actor_hex}/{segment_id}/meta",
-            get(crate::segments::segment_route::get_segment_meta),
-        )
+        // The segment byte-source (sibling of /api/v1/chunks) is mounted on
+        // `public_bytes` below — its open, credential-less CORS.
         // Manifest routes. Manifests are small (a list of 32-byte hashes) but
         // share the chunk body limit for uniformity with the chunk route.
         .route(
@@ -1318,6 +1321,8 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
     #[cfg(feature = "test-hooks")]
     let router = router.merge(cert_nudge_test_hook::routes());
     #[cfg(feature = "test-hooks")]
+    let router = router.merge(acme_issuance_error_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
     let router = router.merge(mail_portability_test_hook::routes());
     #[cfg(feature = "test-hooks")]
     let router = router.merge(post_fanout_test_hook::routes());
@@ -1391,6 +1396,9 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
             "/internal/worker/ws",
             get(nest_link::proxy::worker_ws_handler),
         )
+        // Loopback-only, fail-closed inside the handler (the shared
+        // `internal_ws_allowlist_gate`; `worker.md` § Router Status Endpoint):
+        // mounted on the public listener, inert to any non-loopback caller.
         .route(
             "/internal/router-status",
             get(router_status::get_router_status),
@@ -1401,7 +1409,15 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
         // fetches its `relay.<apex>` TLS cert as an HPKE-sealed blob it opens with
         // its own X25519 — so it never reads `/data/acme` (`security.md` § UID
         // isolation; `behavior/p2p.md` § Architecture).
-        .route("/internal/relay/ws", get(sidecar_channel::relay_ws_handler));
+        .route("/internal/relay/ws", get(sidecar_channel::relay_ws_handler))
+        // The sni-router's leg of the same channel class: the same loopback
+        // gate and token handshake (bound to `SidecarScope::Router`, no key in
+        // its hello), serving only the sidecar log plane
+        // (`apps/observability.md` § The sidecar log plane).
+        .route(
+            "/internal/router/ws",
+            get(sidecar_channel::router_ws_handler),
+        );
     // /admin/api/worker/status migrated to the `fauna.admin.worker.status`
     // WS-RPC kind (admin_ws_handlers) — HTTP twin deleted in the
     // WS-RPC-everywhere rip-out.
@@ -1464,8 +1480,8 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
         web_app_origin::live_probe(state.clone()),
     );
 
-    // S6 (`federation.md` § Cross-nest shared folders + channel append —
-    // analysis 2026-07-18): the two content-addressed byte **GET** routes get a
+    // S6 (`federation-shared-folders.md` § Cross-nest shared folders + channel append —
+    // analysis 2026-07-18): the content-addressed byte **GET** routes get a
     // route-scoped `Access-Control-Allow-Origin: *`, GET/HEAD-only, **no
     // credentials** — a cross-nest member's web app runs on a *foreign*
     // nest's app origin, unknowable to this nest's credentialed allowlist, and
@@ -1479,6 +1495,25 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
     // its caller; the browser preflights it, and a script-held bearer is no
     // ambient authority, so the layer stays credential-less.
     let public_bytes = axum::Router::new()
+        // A post's own bytes by content address (`transport-trust.md` § The
+        // post arm → *The browser's leg*): a reader's web app on another nest's
+        // origin reads a post homed here direct, the same class as the chunk
+        // reads below — open by possession (`download_blob` takes no bearer),
+        // content-addressed. The own-nest reads lose nothing: none carries a
+        // cookie (the SPA's bearer is the script-held `Authorization` header
+        // the layer admits), and `?thumb=1` / `Range` are the handler's. The
+        // PUT rides along: its caller is nest-side (`put_blob_by_cid`, a
+        // no-serve writer), CORS binds browsers only, and no browser PUTs by
+        // CID. The body limit is the one the PUT needs — see the note where
+        // the main router's chunk routes raise theirs.
+        .route(
+            "/api/v1/blob/{id}",
+            get(blob_routes::download_blob)
+                .put(blob_routes::put_blob_by_cid)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    blob_routes::BLOB_BODY_LIMIT,
+                )),
+        )
         .route("/api/v1/chunks/{hash}", get(chunk_routes::download_chunk))
         .route(
             "/api/v1/manifests/{hash}",
@@ -1497,11 +1532,33 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
             "/share/{token}/chunk/{index}",
             get(share_routes::handle_share_chunk),
         )
+        // The segment byte-source (Plan 5 — sibling of /api/v1/chunks). The
+        // `/meta` sibling serves the pair's sidecar, which an adopting
+        // replica needs and a backup pass does not (segment_route's module
+        // docs argue the split). Bearer-gated in the handler
+        // (owner-or-custodian-or-fleet, `segment_route`), and on this router
+        // for the chunk routes' reason: the owner's web app restoring from a
+        // CUSTODIAN nest runs on an origin foreign to it (its own nest's
+        // `/app`, or the central origin), unknowable to the credentialed
+        // allowlist, and a script-held bearer is no ambient authority
+        // (`message-segment-store.md` § Implementation status today, the
+        // HTTP-residue bullet).
+        .route(
+            "/api/v1/segments/{kind}/{actor_hex}/{segment_id}",
+            get(crate::segments::segment_route::get_segment),
+        )
+        .route(
+            "/api/v1/segments/{kind}/{actor_hex}/{segment_id}/meta",
+            get(crate::segments::segment_route::get_segment_meta),
+        )
         .layer(
             tower_http::cors::CorsLayer::new()
                 .allow_origin(tower_http::cors::Any)
                 .allow_methods([axum::http::Method::GET, axum::http::Method::HEAD])
-                .allow_headers([axum::http::header::AUTHORIZATION]),
+                .allow_headers([axum::http::header::AUTHORIZATION])
+                // The blob's C2PA pre-filter header (`c2pa.ts`, the plane's
+                // `head_has_c2pa`), readable cross-origin.
+                .expose_headers([axum::http::HeaderName::from_static("x-c2pa")]),
         );
 
     // The OAuth issuer's plane — the two discovery documents, the JWKS and every
@@ -1558,7 +1615,7 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
 /// transport hygiene (`X-Content-Type-Options: nosniff`, `Referrer-Policy:
 /// no-referrer`). The *resource* CSP (`script-src 'self' 'wasm-unsafe-eval'`,
 /// `style-src`, `connect-src`, …) is emitted as a hashed `<meta>` by SvelteKit's
-/// `kit.csp` (`apps/fauna-web/svelte.config.js`) — it alone knows its inline
+/// `csp` option (`apps/fauna-web/vite.config.ts`) — it alone knows its inline
 /// bootstrap hash — so it is deliberately NOT duplicated here.
 ///
 /// Scoped to `/app` on purpose: the apex/subdomain web-content fallback
@@ -1922,6 +1979,7 @@ pub(crate) fn build_rpc_router() -> rpc_router::RpcRouter {
     // The region tier's one admin surface: which region claims this deployment
     // (`region-blocking.md` § Region determination — declared, never detected).
     region_tier::register_region_handlers(&mut b);
+    content_policy_handlers::register_content_policy_handlers(&mut b);
     // The admin's web-app origin choice: what this nest's `/app` answers.
     web_app_origin::register_web_app_origin_handlers(&mut b);
     // Which builds this box's updater follows (`nest/update-channel.md`).
@@ -1949,6 +2007,9 @@ pub(crate) fn build_rpc_router() -> rpc_router::RpcRouter {
     // The oracle's posting door (`fauna.posts.author.{create,delete}`, TP11)
     // — principal-only; the actor-side half only carries the wire contract.
     post_author_oracle::register_post_author_handlers(&mut b);
+    // The oracle's profile door (`fauna.profile.author.set`, TP11) — the same
+    // split.
+    profile_author_oracle::register_profile_author_handlers(&mut b);
     // The oracle's ATProto door (`fauna.atproto.oracle.service_auth`, TP11)
     // — principal-only, the same split. Ungated: the PDS bridge it hands off
     // to is the first-party `atproto.pds` role, not a nest feature.
@@ -2154,6 +2215,12 @@ pub async fn start_server(
     // this populates the live `AppState.node_mode` every runtime reader uses.
     let resolved_node_mode = nat_mode_core::resolve_node_mode(&db, &nest_config).await;
     tracing::info!("nat mode: {}", resolved_node_mode.as_str());
+    let resolved_content_scanners =
+        crate::mail_enable::read_content_scanners_from_db_path(&nest_config.nest.db_path);
+    tracing::info!(
+        "content scanners: {}",
+        resolved_content_scanners.as_wire_str()
+    );
 
     // Resolve the client-set `[nest]`-policy toggles: the `nest_subhandles` /
     // `nest_max_storage_bytes` / `nest_cors_origins` DB row wins, else the
@@ -2264,25 +2331,24 @@ pub async fn start_server(
     #[cfg(feature = "activitypub")]
     bridge_registry.register(Box::new(activitypub::bridge_provider::ActivityPubProvider));
 
-    // Spawn update check loop (check-only, no auto-apply for bare-metal nests).
-    let update_rx = if nest_config.update.check {
-        let update_config = fauna_update::UpdateConfig {
-            github_repo: fauna_core::version::RELEASE_REPO,
-            current_version: env!("CARGO_PKG_VERSION"),
-            artifact_prefix: "fauna-nest",
-            check_interval: std::time::Duration::from_secs(86400),
-            auto_apply: false,
-            install_dir: std::path::PathBuf::from("/usr/local/bin"),
-            github_token: nest_config.update.github_token.clone(),
-        };
-        // The generation token IS the update loop's shutdown signal: an old
-        // generation's checker dies at teardown instead of surviving as a
-        // duplicate (its cadence is 24 h, so tracker coverage is not needed).
-        fauna_update::spawn_update_loop(update_config, serve_generation.clone())
-    } else {
-        let (_tx, rx) = tokio::sync::watch::channel(None);
-        rx
+    // The daily release check (check-only, never an apply): always on, with no
+    // knob — bucket 1 of `principles.md` § One configuration surface (ruled
+    // 2026-10-19; the `[update] check` file switch is gone). Its answer is what
+    // `fauna.nest.info` tells every app at sign-in (`installers/README.md`
+    // § Knowing a newer version is out → *The nest's newest-release field*), so
+    // a switch here would silently blind every app's security-fix notice.
+    let update_config = fauna_update::UpdateConfig {
+        github_repo: fauna_core::version::RELEASE_REPO,
+        current_version: env!("CARGO_PKG_VERSION"),
+        artifact_prefix: "fauna-nest",
+        check_interval: std::time::Duration::from_secs(86400),
+        auto_apply: false,
+        install_dir: std::path::PathBuf::from("/usr/local/bin"),
     };
+    // The generation token IS the update loop's shutdown signal: an old
+    // generation's checker dies at teardown instead of surviving as a
+    // duplicate (its cadence is 24 h, so tracker coverage is not needed).
+    let update_rx = fauna_update::spawn_update_loop(update_config, serve_generation.clone());
 
     let payload_store = backup_service.as_ref().map(|svc| {
         Arc::new(crate::payload_store::PayloadStore::new(
@@ -2329,27 +2395,27 @@ pub async fn start_server(
         .parent()
         .unwrap_or(std::path::Path::new("."))
         .to_path_buf();
-    let mail_segments = Arc::new(fauna_segment_store::SegmentManager::new(
+    let mail_segments = Arc::new(crate::segments::content_segment_manager(
         mail_data_dir.clone(),
         "mail",
     ));
-    let conv_segments = Arc::new(fauna_segment_store::SegmentManager::new(
+    let conv_segments = Arc::new(crate::segments::content_segment_manager(
         mail_data_dir.clone(),
         "conv",
     ));
     // Track C posts: per-author post segment store under `{data-dir}/__post/`.
-    let post_segments = Arc::new(fauna_segment_store::SegmentManager::new(
+    let post_segments = Arc::new(crate::segments::content_segment_manager(
         mail_data_dir.clone(),
         "post",
     ));
     // S6.4: per-actor calendar CONTENT segment store under `{data-dir}/__calendar/`.
     // Sibling of `post_segments`; distinct from the `cal_placement` journal below.
-    let cal_segments = Arc::new(fauna_segment_store::SegmentManager::new(
+    let cal_segments = Arc::new(crate::segments::content_segment_manager(
         mail_data_dir.clone(),
         "calendar",
     ));
     // S6.5: per-actor card CONTENT segment store under `{data-dir}/__card/`.
-    let card_segments = Arc::new(fauna_segment_store::SegmentManager::new(
+    let card_segments = Arc::new(crate::segments::content_segment_manager(
         mail_data_dir.clone(),
         "card",
     ));
@@ -2406,6 +2472,7 @@ pub async fn start_server(
 
     // T2.1a: MTA-STS policy fetcher for `fauna.bridges.fetch_mta_sts_policy`.
     // nest does the `_mta-sts.<domain>` TXT + `.well-known/mta-sts.txt` GET
+    // (the GET through the SSRF guard: `outbound_mta_sts::GuardedMtaStsPolicyHttp`)
     // and wraps a real `LiveMtaStsFetcher` in `CachingMtaStsFetcher` so each
     // domain's policy is fetched once per `max_age` window. A
     // `LiveMtaStsFetcher::new()` failure is non-fatal — fall through to
@@ -2414,7 +2481,9 @@ pub async fn start_server(
     // shared fetcher). Always present (no `test-hooks` gate); the test
     // override is consulted ahead of it inside the handler.
     let mta_sts_fetcher: Arc<dyn fauna_mail::outbound::mta_sts::MtaStsFetcher> =
-        match fauna_mail::outbound::mta_sts::LiveMtaStsFetcher::new() {
+        match fauna_mail::outbound::mta_sts::LiveMtaStsFetcher::new(Arc::new(
+            crate::outbound_mta_sts::GuardedMtaStsPolicyHttp,
+        )) {
             Ok(fetcher) => {
                 let clock: fauna_mail::outbound::mta_sts::ClockFn =
                     Arc::new(fauna_core::data::Timestamp::now_secs_or_zero);
@@ -2575,6 +2644,7 @@ pub async fn start_server(
             .timeout(std::time::Duration::from_secs(5))
             .build()
             .expect("failed to build HTTP client"),
+        peer_fetch_loopback: None,
         tls_enabled: tls_config.is_some(),
         cors_origins: Arc::new(arc_swap::ArcSwap::from_pointee(resolved_cors_origins)),
         web_app_origin: Arc::new(arc_swap::ArcSwap::from_pointee(resolved_web_app_origin)),
@@ -2646,10 +2716,8 @@ pub async fn start_server(
             delivery_nudge: ap_delivery_nudge.clone(),
             // No `domain` snapshot — AP resolves it per request from the
             // claim-refreshed `identity_domain` cache (`ActivityPubState` docs).
-            inbox_limiter: Some(Arc::new({
-                let quota = governor::Quota::per_second(std::num::NonZeroU32::new(30).unwrap());
-                governor::RateLimiter::dashmap(quota)
-            })),
+            inbox_limiter: Some(activitypub::inbox_routes::new_inbox_limiter()),
+            actor_fetch_limiter: Some(activitypub::inbox_routes::new_actor_fetch_limiter()),
         },
         web_content_service,
         host_resolver,
@@ -2678,6 +2746,12 @@ pub async fn start_server(
             fauna_conn_limit::DEFAULT_MAX_CONNS_PER_IP,
         ),
         federation_rate_limit: Arc::new(crate::bridge_rate_limit::Limiter::new()),
+        keypackage_fetch_target_limit: Arc::new(crate::bridge_rate_limit::Limiter::with_config(
+            crate::bridge_rate_limit::KEYPACKAGE_FETCH_TARGET_LIMITER_CONFIG,
+        )),
+        federation_target_budget: Arc::new(crate::bridge_rate_limit::Limiter::with_config(
+            crate::bridge_rate_limit::FEDERATION_TARGET_LIMITER_CONFIG,
+        )),
         handler_semaphore: Arc::new(tokio::sync::Semaphore::new(
             crate::dispatch_core::MAX_INFLIGHT_HANDLERS,
         )),
@@ -2710,6 +2784,10 @@ pub async fn start_server(
         )),
         invite_request_rate_limit_shed: Arc::new(fauna_conn_limit::ShedCounter::new()),
         node_mode: Arc::new(tokio::sync::RwLock::new(resolved_node_mode)),
+        content_scanners: resolved_content_scanners,
+        dav_direct_listener: crate::mail_enable::read_dav_direct_listener_from_db_path(
+            &nest_config.nest.db_path,
+        ),
         enforce_tier_quotas: Arc::new(tokio::sync::RwLock::new(enforce_tier_quotas)),
         subhandles: Arc::new(tokio::sync::RwLock::new(resolved_subhandles)),
         registration_mode: Arc::new(tokio::sync::RwLock::new(resolved_registration_mode)),
@@ -2793,6 +2871,7 @@ pub async fn start_server(
         rpc_hold: Arc::new(crate::rpc_hold_test_hook::RpcHoldRegistry::default()),
         #[cfg(feature = "test-hooks")]
         region_status_registry_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        test_scratch: None,
     });
 
     // Boot-seed the live HostResolver from persisted state (`seed_host_resolver`).
@@ -2939,13 +3018,7 @@ pub async fn start_server(
                 }
             };
         let tlsrpt_poster: std::sync::Arc<dyn fauna_mail::outbound::tlsrpt::TlsrptHttpPoster> =
-            match fauna_mail::outbound::tlsrpt::ReqwestTlsrptPoster::new() {
-                Ok(p) => std::sync::Arc::new(p),
-                Err(e) => {
-                    tracing::warn!("failed to build TLSRPT https poster: {e}; https reports off");
-                    std::sync::Arc::new(fauna_mail::outbound::tlsrpt::NullTlsrptHttpPoster)
-                }
-            };
+            std::sync::Arc::new(crate::outbound_tlsrpt::GuardedTlsrptPoster);
         crate::outbound_tlsrpt::spawn_tlsrpt_daily_dispatch(
             state.clone(),
             tlsrpt_fetcher,
@@ -3132,6 +3205,11 @@ pub async fn start_server(
         // § Kind 1 — Exact.
         crate::mail_enable::ensure_admin_recipient_aliases(&state).await;
     }
+    // A handle and another account's exact alias (or a forwarder / list) on
+    // one local part can only predate the exclusion the alias and handle
+    // doors enforce; report each such pair to the admin once, reassign nothing
+    // (`mail-aliases.md` § Cross-user uniqueness).
+    crate::mail_enable::report_handle_alias_collisions(&state).await;
 
     // Boot drain of owed web renders — the reconcile half of a revoke's
     // durability (`web-content-hosting.md` § Routing, render, serving → *A
@@ -3323,6 +3401,20 @@ pub async fn start_server(
     // peer that was down when a report was filed still receives it.
     abuse_report_federation::spawn_abuse_report_forwarder(state.clone());
 
+    // The updater's report (`nest/update-channel.md` § What the updater
+    // reports): the file the updater writes into this container, read every
+    // ten seconds into the sidecar log plane as `updater:<event>` entries; and
+    // the nest's own `update overdue` line beside it, which covers a dead or
+    // absent updater. A box with no updater reads an absent file; a pinned
+    // box's watch reads one value and returns. The watch runs only where an
+    // updater can enact a channel — a nest run from the image
+    // (`update_channel::enactable`): a packaged or installer nest follows no
+    // channel and asks the registry nothing.
+    updater_report::spawn_updater_report_reader(state.clone());
+    if update_channel::enactable(&state) {
+        update_channel::spawn_update_overdue_watch(state.clone());
+    }
+
     let app = build_router(state);
     let ip_limiter = rate_limit::new_ip_limiter(100);
     // GC the per-IP governor DashMap every 5 min so it can't grow unboundedly as
@@ -3333,6 +3425,22 @@ pub async fn start_server(
         std::time::Duration::from_secs(300),
     ));
     let app = app.layer(rate_limit::RateLimitLayer::new(ip_limiter));
+
+    // The ActivityPub inbox's two per-source maps need the same GC: keyed on
+    // the real client IP, they grow by one entry per source ever seen.
+    #[cfg(feature = "activitypub")]
+    for limiter in [
+        state_ret.activitypub.inbox_limiter.clone(),
+        state_ret.activitypub.actor_fetch_limiter.clone(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        state_ret.scope_handle(rate_limit::spawn_retain_sweeper(
+            limiter,
+            std::time::Duration::from_secs(300),
+        ));
+    }
 
     // The authorization server's per-(route, source) limiter needs the same
     // treatment, and for a sharper reason: its buckets used to be reclaimed from inside `allow`, so under a
@@ -3509,16 +3617,14 @@ pub async fn start_server(
 
 /// Graceful shutdown (`transport.md` § Graceful shutdown): abort the
 /// accept-loop `handle` `start_server` returned and await it, broadcast WS
-/// 1001 and wait out the drain, then flush. `handle.abort()` — never
+/// 1001 and wait out the drain, finalize every open segment
+/// ([`routes::AppState::finalize_open_segments`]), then flush. `handle.abort()` — never
 /// `drop(handle)`, which only detaches the task rather than stopping it — is
 /// what actually stops the accept loop. Lifted out of `main.rs::cmd_serve` so an integration test in `bins/fauna-nest/tests/` — which
 /// links this lib, never the `main.rs` bin — can drive the exact production
 /// sequence and mutation-test the one line that matters.
-pub async fn graceful_shutdown(
-    handle: tokio::task::JoinHandle<()>,
-    ws_state: &ws::WsState,
-    db: &db::CacheDb,
-) {
+pub async fn graceful_shutdown(handle: tokio::task::JoinHandle<()>, state: &routes::AppState) {
+    let ws_state = &state.ws;
     handle.abort();
     let _ = handle.await;
     tracing::info!("graceful shutdown: broadcasting WS 1001 and draining in-flight requests");
@@ -3534,8 +3640,11 @@ pub async fn graceful_shutdown(
             ws::GRACEFUL_SHUTDOWN_TIMEOUT.as_secs()
         );
     }
+    // After the drain, so no handler is mid-append; before the flush, so the
+    // last word on disk is a finalized pair.
+    state.finalize_open_segments().await;
     tracing::info!("Flushing database...");
-    if let Err(e) = db.flush().await {
+    if let Err(e) = state.db.flush().await {
         tracing::error!("Error flushing database: {e}");
     }
     tracing::info!("Shutdown complete");
@@ -3811,20 +3920,20 @@ async fn serve_admitted(
             // TLS, post loopback-dial fix) is rejected (`ok=false`) and mail
             // never serves. The wrapper only inserts an extension, so the
             // request (incl. hyper's `OnUpgrade`) is otherwise untouched and WS
-            // upgrades still work.
-            let hyper_svc = hyper_util::service::TowerToHyperService::new(WithConnectInfo {
-                inner: svc,
-                addr: source_addr,
-            });
+            // upgrades still work. Over TLS the same wrapper carries the
+            // **served name** — the SNI the accepted `ServerConnection` holds,
+            // read once the handshake is done — so a channel-binding producer
+            // can sign the SPKI of the cert this very connection was served
+            // (`served_name.rs`; `transport-trust.md` Axis 1).
             match acceptor {
                 Some(acceptor) => {
                     // Bound the TLS handshake so a peer that opens a connection
                     // and then stalls mid-handshake can't pin a task (slow-loris
-                    // / handshake flood — security review § D1). 15 s is
-                    // generous; a real handshake completes in well under a
-                    // second.
+                    // / handshake flood — security review § D1). The shared
+                    // 15 s is generous; a real handshake completes in well
+                    // under a second.
                     let tls_stream = match tokio::time::timeout(
-                        std::time::Duration::from_secs(15),
+                        fauna_conn_limit::TLS_HANDSHAKE_TIMEOUT,
                         acceptor.accept(stream),
                     )
                     .await
@@ -3839,9 +3948,31 @@ async fn serve_admitted(
                             return;
                         }
                     };
+                    // The nest's own TLS state, never a wire field: `None` for
+                    // a no-SNI (IP) dial, where every producer keeps the no-SNI
+                    // read.
+                    let served_name = tls_stream
+                        .get_ref()
+                        .1
+                        .server_name()
+                        .map(std::sync::Arc::<str>::from);
+                    let hyper_svc =
+                        hyper_util::service::TowerToHyperService::new(WithConnectInfo {
+                            inner: svc,
+                            addr: source_addr,
+                            served_name,
+                        });
                     serve_http_connection(tls_stream, hyper_svc, addr).await;
                 }
-                None => serve_http_connection(stream, hyper_svc, addr).await,
+                None => {
+                    let hyper_svc =
+                        hyper_util::service::TowerToHyperService::new(WithConnectInfo {
+                            inner: svc,
+                            addr: source_addr,
+                            served_name: None,
+                        });
+                    serve_http_connection(stream, hyper_svc, addr).await
+                }
             }
         });
     }
@@ -3864,7 +3995,7 @@ async fn serve_http_connection<IO>(
     // request head — a slow-header (Slowloris) guard so a trickle of
     // header bytes can't hold a connection (and its semaphore permit)
     // open indefinitely (security review § D1). WS-RPC upgrades send
-    // their head promptly, so 20 s never bites a real client.
+    // their head promptly, so the shared 20 s never bites a real client.
     // `header_read_timeout` REQUIRES a registered hyper `Timer`; the
     // auto builder sets none by default, and hyper *panics*
     // ("timeout set, but no timer set") on the first request without
@@ -3872,7 +4003,7 @@ async fn serve_http_connection<IO>(
     builder
         .http1()
         .timer(hyper_util::rt::TokioTimer::new())
-        .header_read_timeout(std::time::Duration::from_secs(20));
+        .header_read_timeout(fauna_conn_limit::HEADER_READ_TIMEOUT);
     // `serve_connection_with_upgrades`, NOT `serve_connection`: the
     // WS-RPC transport (every client↔nest path) rides an HTTP/1.1
     // `Upgrade: websocket`. Plain `serve_connection` writes the 101 but
@@ -4108,7 +4239,8 @@ fn load_router_auth_secret() -> Option<Vec<u8>> {
     }
 }
 
-/// Tower middleware that inserts `ConnectInfo(addr)` into each request's
+/// Tower middleware that inserts `ConnectInfo(addr)` — and, over TLS, the
+/// accepted server name as [`served_name::ServedName`] — into each request's
 /// extensions. `serve_tls` builds its per-connection service by hand (unlike
 /// the plain path's `into_make_service_with_connect_info`), so without this the
 /// peer address is absent over TLS and the loopback gate for the bridge's
@@ -4118,6 +4250,9 @@ fn load_router_auth_secret() -> Option<Vec<u8>> {
 struct WithConnectInfo<S> {
     inner: S,
     addr: std::net::SocketAddr,
+    /// The SNI the TLS handshake selected the served cert for; `None` on the
+    /// plain listener and on a no-SNI dial (`served_name.rs`).
+    served_name: Option<std::sync::Arc<str>>,
 }
 
 impl<S, B> tower_service::Service<axum::http::Request<B>> for WithConnectInfo<S>
@@ -4138,6 +4273,8 @@ where
     fn call(&mut self, mut req: axum::http::Request<B>) -> Self::Future {
         req.extensions_mut()
             .insert(axum::extract::ConnectInfo(self.addr));
+        req.extensions_mut()
+            .insert(served_name::ServedName(self.served_name.clone()));
         self.inner.call(req)
     }
 }

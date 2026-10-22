@@ -2,7 +2,7 @@
 
 > **Status — this guide describes Fauna as it is taking shape.** Most of it is
 > built and tested; the [table at the end](#where-this-stands-today) says
-> exactly what is available now, what is landing, and what is planned.
+exactly what is available now.
 >
 > Part of the [Your own cloud](your-own-cloud.md) series. For the basics of
 > folders see [file sync](cloud-sync.md); for sharing and roles see
@@ -24,14 +24,7 @@ Explorer/Finder.
 
 ## Does sharing work when the other person's account lives on a different nest?
 
-Yes. You share to their handle exactly as you would with someone on your own
-nest; because their account lives elsewhere, the share always arrives as an
-invitation they confirm before anything happens (a safety choice — nobody can
-silently attach a set to your machine). After they accept, their files come
-to them through their own nest, end-to-end encrypted; neither nest can read
-the content. Give them **Writer** access and they can bind the set to a
-location of their own and edit; see the status table for where write access
-across nests stands today.
+Yes. You share to their handle exactly as you would with someone on your own nest; because their account lives elsewhere, the share always arrives as an invitation they confirm before anything happens (a safety choice — nobody can silently attach a folder to your machine). After they accept, their files come to them through their own nest, end-to-end encrypted; neither nest can read the content unless the folder's owner chooses otherwise: a folder made public, served over WebDAV or put behind a paywall is readable by the box that serves it. Give them **Writer** access and they can bind the folder to a location of their own and edit.
 
 ## My collaborator saved a file four times before I opened it. Do I get all four saves?
 
@@ -155,9 +148,7 @@ Two practical cautions for VM disks specifically:
 
 No. Hidden dotfiles (like `.DS_Store`) never sync — they're excluded outright.
 Application temp litter (Office's `~$…` lock files, `*.tmp` save leftovers,
-`Thumbs.db`, `desktop.ini`) is filtered too, out of the box. You can add your
-own per-folder exclusion rules on top with a `.faunaignore` file
-(gitignore-style patterns).
+`Thumbs.db`, `desktop.ini`) is filtered too, out of the box. You can add your own per-folder exclusions on top: under **Selective Sync** in Settings → Folders, or with a `.faunaignore` file inside the folder (gitignore-style patterns).
 
 ## My external drive was unplugged. Did that just wipe the folder from my nest?
 
@@ -197,10 +188,9 @@ There is no button, because there is nothing to confirm: fix the permissions or
 reconnect the drive, and the next sync picks those files up again — the note
 disappears on its own.
 
-## What if my access is downgraded while I have the set bound to a location?
+## What if my access is downgraded while I have the folder bound to a location?
 
-Loudly and safely. Write access is enforced by the nest that owns the set the
-moment the owner changes it — your next upload simply won't be accepted. Your
+Loudly and safely. Write access is enforced by the nest that owns the folder the moment the owner changes it — your next upload simply won't be accepted. Your
 app then clearly marks that location as no longer syncing; nothing on your disk
 is deleted or changed, and any local edits stay right where they are, visible.
 A location is never left *silently* stale.
@@ -209,14 +199,14 @@ A location is never left *silently* stale.
 
 | Piece | Status |
 |---|---|
-| Explorer / Finder cloud folders (open/edit/save without the app) | **Available** (Windows on-demand files; macOS File Provider) |
-| Sharing to someone on your nest, Reader/Writer roles, per-writer caps | **Rolling out** — live on Linux, macOS, and the terminal app; Windows landing (Android and web don't bind folder locations, so writer binding doesn't apply there) |
+| Explorer / Finder cloud folders (open/edit/save without the app) | **Available** (File Explorer on Windows; Finder on Mac) |
+| Sharing to someone on your nest, Reader/Writer roles, per-writer caps | **Available** — a writer's folder syncs both ways (the web app keeps no local folder to sync) |
 | Sharing to someone on **another nest** — browsing + downloading | **Available** (accept the invitation once, then it behaves like any other directory) |
-| Write access for someone on another nest (their location binding) | **Landing** — the server side is built and proven; the app-side binding is in progress |
+| Write access for someone on another nest (their location binding) | **Available** — accept the invitation, then bind the folder like one of your own |
 | Versions, restore, "who made this version" | **Available** |
 | Automatic conflict handling (text merge / latest-wins + history) | **Available** |
 | Instant appearance of the other side's saves (push notification) | **Available when you're both on the same nest** — typically well under a couple of seconds; across two different nests it still arrives on the periodic catch-up (every few minutes, the same on every folder) |
 | Built-in filtering of app temp files (`~$…`, `*.tmp`, `Thumbs.db`, `desktop.ini`) | **Available** — dotfiles are also never synced; `.faunaignore` adds your own rules on top |
-| Holding an all-at-once folder emptying instead of propagating it | **Available** — the protection itself works everywhere; the "Deletions held / Apply held deletions" row is live on the terminal app, desktop Linux, macOS, and Windows (Android and web don't bind folder locations, so the row doesn't apply there) |
-| Telling you when part of a folder can't be read (instead of treating it as deleted) | **Available** — the protection works everywhere; the note on the folder's row is live on the terminal app, with desktop Linux, macOS, and Windows following |
+| Holding an all-at-once folder emptying instead of propagating it | **Available** — the protection itself works everywhere, and the folder's row offers **Apply held deletions** wherever a folder is bound to a location |
+| Telling you when part of a folder can't be read (instead of treating it as deleted) | **Available** — the protection works everywhere, and the folder's row tells you how many items it couldn't read |
 | Office live co-authoring | **Not possible** on any third-party cloud (Microsoft-private protocol) |

@@ -26,6 +26,9 @@ use crate::progress::{
     SubstepKey, run_step, set_cancelled, set_run_succeeded,
 };
 use crate::registrar::{ContactInfo, Registrar};
+use crate::update_channel::UpdateChannel;
+use crate::update_channel::availability::{self, ChannelBuild};
+use crate::update_channel::registry::Registry;
 use crate::vps::{VpsInstance, VpsProvider};
 
 /// Final outcome of a successful run. Same shape as
@@ -221,6 +224,10 @@ pub async fn provision_with_snapshot<V, D, S, F, Fut>(
     // the poll reaches the box before public DNS propagates (see
     // `run_all_steps`). The strict cloud-provider client is `client`.
     probe_for_ip: F,
+    // The registry the Server step asks, before anything is bought, whether
+    // the box's image tag has a build at all (`run_server_step`); `None` skips
+    // that pre-flight (a test harness with no registry to ask).
+    registry: Option<&Registry>,
     vps: &V,
     dns: &D,
     domain: &str,
@@ -250,6 +257,7 @@ where
     let result = run_all_steps(
         client,
         probe_for_ip,
+        registry,
         vps,
         dns,
         None::<&NoRegistrar>, // no registration in standard flow
@@ -285,6 +293,11 @@ pub async fn provision_with_registration_snapshot<V, D, R, S, F, Fut>(
     // the poll reaches the box before public DNS propagates (see
     // `run_all_steps`); the strict cloud-provider client is `client`.
     probe_for_ip: F,
+    // The registry asked whether the box's image tag has a build at all —
+    // by the Domain step before `register`, and again by the Server step
+    // (`refuse_tag_with_no_build`); `None` skips that pre-flight (a test
+    // harness with no registry to ask).
+    registry: Option<&Registry>,
     vps: &V,
     dns: &D,
     registrar: &R,
@@ -318,6 +331,7 @@ where
     let result = run_all_steps(
         client,
         probe_for_ip,
+        registry,
         vps,
         dns,
         Some(registrar),
@@ -352,6 +366,10 @@ where
 #[allow(clippy::too_many_arguments)] // server-config + progress-callback plumbing; a params struct just relocates the fields
 pub async fn provision_nest_no_dns<V>(
     client: &Client,
+    // The registry the Server step asks, before anything is bought, whether
+    // the box's image tag has a build at all (`run_server_step`); `None` skips
+    // that pre-flight (a test harness with no registry to ask).
+    registry: Option<&Registry>,
     vps: &V,
     domain: &str,
     server_name: &str,
@@ -387,6 +405,7 @@ where
     // Step 2: Server create.
     let (instance, origin) = run_server_step(
         client,
+        registry,
         vps,
         domain,
         server_name,
@@ -492,6 +511,7 @@ async fn run_all_steps<V, D, R, S, F, Fut>(
     // binding makes reaching-by-IP MITM-safe (security.md § Transport trust).
     // The strict `client` above stays for the cloud-provider API calls.
     probe_for_ip: F,
+    registry: Option<&Registry>,
     vps: &V,
     dns: &D,
     registrar: Option<&R>,
@@ -539,8 +559,9 @@ where
     F: Fn(&str) -> Client,
     Fut: std::future::Future<Output = ()>,
 {
-    // Step 1: Domain — register (if applicable) and verify the zone exists.
-    let zone_id = run_step(
+    // Step 1: Domain — register (if applicable) and verify the zone exists. A
+    // terminal failure stops the run here: nothing after it may be bought.
+    run_step(
         state,
         &notify,
         cancel,
@@ -562,6 +583,9 @@ where
             }
 
             if let Some(reg) = registrar {
+                // The registration is the run's first purchase, so the no-build
+                // refusal comes before it, not only at the Server step.
+                refuse_tag_with_no_build(registry, &cloud_init_params.image_tag).await?;
                 reg.register(client, domain, 1, agreed_price_cents, contact)
                     .await?;
                 // Re-discover the zone after registration completes.
@@ -596,18 +620,9 @@ where
         },
         sleep_fn,
     )
-    .await
-    .map(|_| ())
-    .map(|()| {
-        let snap = state.lock().unwrap();
-        snap.result
-            .as_ref()
-            .map(|_| String::new())
-            .unwrap_or_default()
-    });
+    .await?;
     // The closure above stashed the zone id + name; pull them out of the
     // dedicated sidecar (a sidecar keeps them off the uniffi-exposed snapshot).
-    drop(zone_id);
     let (stashed_zone_id, zone_name) = take_stashed_zone(state);
     let zone_id = stashed_zone_id.unwrap_or_else(|| initial_zone_id.to_string());
 
@@ -617,6 +632,7 @@ where
     // on-read post-boot (see `build_records`).
     let (instance, origin) = run_server_step(
         client,
+        registry,
         vps,
         domain,
         server_name,
@@ -758,6 +774,7 @@ pub enum ServerOrigin {
 #[allow(clippy::too_many_arguments)]
 async fn run_server_step<V, S, Fut>(
     client: &Client,
+    registry: Option<&Registry>,
     vps: &V,
     domain: &str,
     server_name: &str,
@@ -798,6 +815,10 @@ where
                     *captured.lock().unwrap() = Some((inst, ServerOrigin::Found));
                     return Ok(StepOutcome::Skipped(SkipReason::ServerAlreadyExists));
                 }
+                // Asked again here, not only before a registration: the Server
+                // step is the one create chokepoint, reached by runs that buy
+                // no domain and by a Retry whose Domain step skips.
+                refuse_tag_with_no_build(registry, &cloud_init_params.image_tag).await?;
                 let user_data = build_cloud_init(cloud_init_params);
                 let inst = vps
                     .create_server(
@@ -819,6 +840,48 @@ where
     captured.lock().unwrap().take().ok_or_else(|| {
         ProvisionError::Other("server step finished without producing an instance".into())
     })
+}
+
+/// Nothing is bought for a tag with no build: the box's first boot would pull
+/// nothing (`onboarding-provisioning.md` § 5 → *What exists decides the
+/// default*). Only a `404` refuses — an unknown outcome proceeds, the box
+/// retrying its own pull; no registry (a test harness) skips the question.
+/// Asked before every purchase: the Domain step's registration and the Server
+/// step's `create_server`.
+async fn refuse_tag_with_no_build(
+    registry: Option<&Registry>,
+    tag: &str,
+) -> Result<(), ProvisionError> {
+    if let Some(registry) = registry
+        && availability::resolve(registry, tag, availability::WIZARD_PLAN_ARCH).await
+            == ChannelBuild::NoBuild
+    {
+        return Err(ProvisionError::Other(no_build_message(tag)));
+    }
+    Ok(())
+}
+
+/// The refusal of a tag the registry has no build for — English, as every
+/// `last_error` is today.
+fn no_build_message(tag: &str) -> String {
+    let image = format!(
+        "{}/{}:{tag}",
+        crate::update_channel::NEST_IMAGE_REGISTRY,
+        crate::update_channel::NEST_IMAGE_REPOSITORY
+    );
+    match UpdateChannel::from_image_tag(tag) {
+        Some(channel) => {
+            let name = match channel {
+                UpdateChannel::Stable => "Stable",
+                UpdateChannel::Test => "Test",
+                UpdateChannel::Dev => "Dev",
+            };
+            format!(
+                "no build is published on the {name} channel yet ({image}) — go back and choose another channel"
+            )
+        }
+        None => format!("no build is published as {image}"),
+    }
 }
 
 /// Union the caller's labels with [`crate::vps::MANAGED_BY_LABEL`] — the

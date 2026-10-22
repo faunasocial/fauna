@@ -122,6 +122,8 @@ async fn subscribe(
     tier: &str,
 ) -> SubscribeReply {
     let req = SubscribeRequest {
+        home_nest_url: None,
+        intent: None,
         author_id: ActorId(author),
         tier: tier.into(),
         mlkem_encaps_key: None,

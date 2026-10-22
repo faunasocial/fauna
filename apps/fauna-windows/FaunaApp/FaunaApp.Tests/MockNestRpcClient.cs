@@ -409,6 +409,42 @@ internal sealed class MockNestRpcClient : INestRpcClient
         return Task.FromResult(NextFeatureRows);
     }
 
+    /// <summary>What <see cref="FeaturesAuthoredRowsAsync"/> /
+    /// <see cref="FeaturesWardAuthoredRowsAsync"/> answer.</summary>
+    public IReadOnlyList<FfiAuthoredRow> NextAuthoredRows { get; set; } = Array.Empty<FfiAuthoredRow>();
+
+    /// <summary>What the two open-editor calls hand back (null → they throw, like a
+    /// nest that does not carry the member).</summary>
+    public IFfiPolicyEditor? NextEditor { get; set; }
+
+    public Task<IReadOnlyList<FfiAuthoredRow>> FeaturesAuthoredRowsAsync(string tier)
+    {
+        _calls.Add($"FeaturesAuthoredRows:{tier}");
+        Throw();
+        return Task.FromResult(NextAuthoredRows);
+    }
+
+    public Task<IReadOnlyList<FfiAuthoredRow>> FeaturesWardAuthoredRowsAsync(byte[] ward)
+    {
+        _calls.Add("FeaturesWardAuthoredRows");
+        Throw();
+        return Task.FromResult(NextAuthoredRows);
+    }
+
+    public Task<IFfiPolicyEditor> FeaturesOpenEditorAsync(string tier, string feature)
+    {
+        _calls.Add($"FeaturesOpenEditor:{tier}:{feature}");
+        Throw();
+        return Task.FromResult(NextEditor ?? throw new InvalidOperationException("no editor staged"));
+    }
+
+    public Task<IFfiPolicyEditor> FeaturesOpenEditorForWardAsync(byte[] ward, string feature)
+    {
+        _calls.Add($"FeaturesOpenEditorForWard:{feature}");
+        Throw();
+        return Task.FromResult(NextEditor ?? throw new InvalidOperationException("no editor staged"));
+    }
+
     /// The `status.node` fixture — defaults to a nest that answers.
     public FfiNodeLeg NextStatusNode { get; set; } = new FfiNodeLeg("nest.example.com", "1.2.3");
 
@@ -1474,6 +1510,21 @@ internal sealed class MockNestRpcClient : INestRpcClient
         return Task.FromResult(restore ? "restored" : "taken_down");
     }
 
+    /// Last <c>fauna.moderation.appeal</c> args, for asserting the queue dispatches
+    /// the content id captured when the form was opened.
+    public (string ContentId, string Reason)? LastAppeal { get; private set; }
+    /// Make the next <c>fauna.moderation.appeal</c> throw (the refused-appeal arm).
+    public Exception? AppealError { get; set; }
+
+    public Task<string> ModerationAppealAsync(string contentId, string reason)
+    {
+        _calls.Add("ModerationAppeal");
+        LastAppeal = (contentId, reason);
+        Throw();
+        if (AppealError is not null) throw AppealError;
+        return Task.FromResult("appeal_recorded");
+    }
+
     /// The <c>fauna.bridges.get_spam_threshold_override</c> fixture.
     public uint? NextSpamThresholdOverride { get; set; }
     /// Last <c>fauna.bridges.set_spam_threshold_override</c> arg, for asserting the round-trip.
@@ -2383,6 +2434,29 @@ internal sealed class MockNestRpcClient : INestRpcClient
         return Task.FromResult(NextMemberReviewRemoveResult);
     }
 
+    /// The rows every `RefusedChangesOpenAsync` returns (the open refused
+    /// scheduling changes the Events page paints).
+    public IReadOnlyList<FfiRefusedChange> NextRefusedChanges { get; set; }
+        = new List<FfiRefusedChange>();
+    public string? LastRefusedChangeDismiss { get; private set; }
+
+    public Task<IReadOnlyList<FfiRefusedChange>> RefusedChangesOpenAsync(ConversationsManager manager)
+    {
+        _calls.Add("RefusedChangesOpen");
+        Throw();
+        return Task.FromResult(NextRefusedChanges);
+    }
+
+    /// A dismissal closes the row in the fake store, as the real one does.
+    public Task<bool> RefusedChangeDismissAsync(string key)
+    {
+        _calls.Add("RefusedChangeDismiss");
+        LastRefusedChangeDismiss = key;
+        Throw();
+        NextRefusedChanges = NextRefusedChanges.Where(r => r.key != key).ToList();
+        return Task.FromResult(true);
+    }
+
     /// The audit rows the next `BackupAuditRunPassAsync` returns (tests set this to
     /// model the audit pass's per-destination `alert_reason`).
     public IReadOnlyList<FfiDestinationAuditRow> NextAuditRows { get; set; }
@@ -2962,7 +3036,8 @@ internal sealed class MockNestRpcClient : INestRpcClient
         new FfiMineSubscription(authorId, tier, status, handle, since,
             authorDisplay ?? (handle is { Length: > 0 } h
                 ? h
-                : Convert.ToHexString(authorId).ToLowerInvariant()));
+                : Convert.ToHexString(authorId).ToLowerInvariant()),
+            null);
 
     /// A <c>FfiTierItem</c> fixture (§1 "My tiers" own-read row).
     public static FfiTierItem MakeTier(
@@ -2983,7 +3058,7 @@ internal sealed class MockNestRpcClient : INestRpcClient
     public static FfiPendingRequest MakePendingRequest(
         long requestId, byte[] subscriberId, string tierName, string kind = "subscribe", ulong createdAt = 0,
         bool paymentEntitled = false) =>
-        new FfiPendingRequest(requestId, subscriberId, tierName, kind, createdAt, null, paymentEntitled);
+        new FfiPendingRequest(requestId, subscriberId, tierName, kind, createdAt, null, paymentEntitled, null);
 
     /// A <c>FfiSubscriberEntry</c> fixture (§3 roster).
     public static FfiSubscriberEntry MakeSubscriber(byte[] subscriberId, ulong joinedAt = 0) =>
@@ -3470,11 +3545,12 @@ internal sealed class MockNestRpcClient : INestRpcClient
     /// <c>serving_port</c> (default 443), <c>fronted_by_router</c> (default false =
     /// a direct-listener desktop / bare-IP box where serving_port is a genuine
     /// admin choice; <c>true</c> = a router-fronted Docker/cloud nest).
-    /// The trailing host-OS-maintenance fields (<c>os_security_updates_pending</c>,
+    /// The trailing host-OS-maintenance fields (<c>os_host_status_present</c>,
+    /// <c>os_security_updates_pending</c>,
     /// <c>os_reboot_pending</c>, and the informational-only <c>os_reboot_deferred_since</c>
     /// / <c>os_last_patched_at</c> — not rendered in v1) default to the nest serde
-    /// "nothing pending" state (0 / false / None), i.e. a nest with no host channel
-    /// (dev / desktop) → "OS up to date", no false alarm
+    /// state (false / 0 / false / None), i.e. a nest with no host channel
+    /// (a hand-built box, dev, desktop) → "OS status not reported by this host"
     /// (installers/vps.md § Host OS Maintenance § 4).
     // NAMED args deliberately: this record grows from the shared side, and two
     // fields (registrationMode, maxFreeUsers) were once inserted MID-list, which
@@ -3482,7 +3558,8 @@ internal sealed class MockNestRpcClient : INestRpcClient
     // class of misalignment a compile error instead of a wrong fixture value.
     public static FfiSetupStatus MakeSetupStatus(
         ushort servingPort = 443, bool frontedByRouter = false,
-        uint osSecurityUpdatesPending = 0, bool osRebootPending = false) =>
+        bool osHostStatusPresent = false, uint osSecurityUpdatesPending = 0,
+        bool osRebootPending = false) =>
         new FfiSetupStatus(
             domain: "nest.test", dnsConfigured: false, tlsActive: false, emailEnabled: false,
             adminExists: true, claimed: true, version: "0.0.0",
@@ -3490,6 +3567,7 @@ internal sealed class MockNestRpcClient : INestRpcClient
             registrationMode: null, maxFreeUsers: null, subhandles: false,
             ageVerificationRequired: false, maxStorageBytes: null,
             corsOrigins: Array.Empty<string>(), servingPort: servingPort, frontedByRouter: frontedByRouter,
+            osHostStatusPresent: osHostStatusPresent,
             osSecurityUpdatesPending: osSecurityUpdatesPending, osRebootPending: osRebootPending,
             osRebootDeferredSince: null, osLastPatchedAt: null,
             webAppOrigin: "bundled", webAppOriginTarget: null, webAppOriginDomainless: false);

@@ -4,11 +4,11 @@
 // (`libs/fauna-wasm/src/contact_overlays.rs`). Every name, label line, filter
 // match and refusal is the face's; this module only picks which face a tab
 // reads and turns a Save's answer into what the page shows; the "names may
-// have moved" revision is `$lib/conversations`'s `contactsRevision`, set at
+// have moved" revision is `#lib/conversations`'s `contactsRevision`, set at
 // every conversations re-read.
 //
 // A tab that hosts no runtime (it lost the MLS-writing role to another tab of
-// the account — `$lib/conversations`'s `engineRoleDenied`) builds no manager,
+// the account — `#lib/conversations`'s `engineRoleDenied`) builds no manager,
 // so it reads the runtime-less face: every name is the public label, and its
 // Save is refused on `error-message`, never silently
 // (`account-client-lifecycle.md` § The client-side lifecycle → *Bounds,
@@ -65,6 +65,9 @@ export interface OverlayFace {
     actorId: string,
   ): boolean;
   subscriptionAuthorLabel(handle: string | null | undefined, authorId: Uint8Array): string;
+  /** The completion under the label add field: vocabulary labels `typed`
+   *  starts, minus the `staged` ones (`label_suggestions` in shared Rust). */
+  labelSuggestions(typed: string, staged: string[]): string[];
   editor(actorId: string): OverlayEditorFace;
 }
 

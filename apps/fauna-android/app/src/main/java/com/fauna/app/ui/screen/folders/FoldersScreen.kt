@@ -2118,7 +2118,11 @@ private fun PaywallTierSelect(
                 Text(
                     stringResource(
                         if (hasTiers) R.string.devices_paywall_tier_hint else R.string.devices_paywall_tier_needs_tier
-                    )
+                    ),
+                    // `folder-paywall-hint` is present exactly while the select is
+                    // disabled for want of a tier; the has-tiers line is the select's
+                    // ordinary caption and carries no id.
+                    modifier = if (hasTiers) Modifier else Modifier.testTag(Ids.FOLDER_PAYWALL_HINT),
                 )
             },
             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },

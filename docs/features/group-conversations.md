@@ -52,17 +52,19 @@ Stamped 2026-09-19 at fdd225839d.
    - `tests/e2e-unified/tests/test_conversation_room_labelers.py::test_a_community_rooms_owner_names_a_labeler_and_a_members_message_is_labelled`
 17. [app] Someone on another nest can be invited into a community room by their full handle and joins it through their own nest: the invitation reaches them there, accepting seats them, the founder's app lets them in by itself, and messages cross both ways — `docs/goal/behavior/conversation-rooms.md` § Join rules and invites
    - `tests/e2e-unified/tests/test_conversation_room_community_cross_nest.py::test_a_member_of_another_nest_joins_a_community_room_through_the_relay`
+18. [app] A community room's members can search the room from the room itself — also from an account on another nest — and a post the search finds opens in the feed, even one their own nest does not hold — `docs/goal/behavior/room-search.md` § The surface
+   - `tests/e2e-unified/tests/test_conversation_room_community_cross_nest.py::test_a_member_of_another_nest_searches_the_room_and_opens_a_room_post_through_the_relay`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+b3bd74b7 standalone |
-| linux | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
+| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
 | windows | ⚠ partial | 0.1.2-dev+b9593858 standalone |
-| macos | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| ios | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| macos | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| ios | ⚠ partial | 0.1.5-dev+61b844ca standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.2-dev+7663afa6 standalone |
 
@@ -82,9 +84,10 @@ Stamped 2026-09-19 at fdd225839d.
 | 10 | app | `tests/e2e-unified/tests/test_conversation_room_roles.py::test_a_room_is_born_governed_and_its_roles_govern_removal` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_conversation_room_roles.py::test_a_room_is_born_governed_and_its_roles_govern_removal` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_conversation_room_join_rule.py::test_the_join_rule_decides_whether_a_plain_member_may_invite` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_conversation_room_delete_any.py::test_an_admin_and_the_owner_delete_a_members_message_for_everyone` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_conversation_room_delete_any.py::test_an_admin_and_the_owner_delete_a_members_message_for_everyone` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 14 | app | `tests/e2e-unified/tests/test_thread_membership_real.py::test_in_place_add_of_an_unreachable_person_is_refused` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 15 | app | `tests/e2e-unified/tests/test_conversation_room_community.py::test_a_community_room_is_founded_joined_searched_and_its_read_withdrawn` | linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 16 | app | `tests/e2e-unified/tests/test_conversation_room_labelers.py::test_a_community_rooms_owner_names_a_labeler_and_a_members_message_is_labelled` | linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 17 | app | `tests/e2e-unified/tests/test_conversation_room_community_cross_nest.py::test_a_member_of_another_nest_joins_a_community_room_through_the_relay` | tui (linux): passed |
+| 15 | app | `tests/e2e-unified/tests/test_conversation_room_community.py::test_a_community_room_is_founded_joined_searched_and_its_read_withdrawn` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 16 | app | `tests/e2e-unified/tests/test_conversation_room_labelers.py::test_a_community_rooms_owner_names_a_labeler_and_a_members_message_is_labelled` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 17 | app | `tests/e2e-unified/tests/test_conversation_room_community_cross_nest.py::test_a_member_of_another_nest_joins_a_community_room_through_the_relay` | web (linux): passed, tui (linux): passed |
+| 18 | app | `tests/e2e-unified/tests/test_conversation_room_community_cross_nest.py::test_a_member_of_another_nest_searches_the_room_and_opens_a_room_post_through_the_relay` | web (linux): skipped, linux (linux): passed, macos (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

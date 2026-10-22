@@ -15,18 +15,20 @@
   // actual RPC calls + error surfacing stay with the host page (its `error`
   // binding shape differs — MessageBanner vs. a bindable prop), passed in as
   // callback props.
-  import { hasNip07, nip07LinkFields } from '$lib/nostr';
-  import { identity } from '$lib/store';
-  import { bridgeLinkBlock, bridgeModeApplies, parseCountI64, shortId } from '$lib/wasm';
+  import { hasNip07, nip07LinkFields } from '#lib/nostr';
+  import { identity } from '#lib/store';
+  import { bridgeLinkBlock, bridgeModeApplies, followDisplay, shortId } from '#lib/wasm';
+  import BridgeSettingRows from '#lib/components/BridgeSettingRows.svelte';
   import { onMount } from 'svelte';
-  import { t } from '$lib/i18n/strings';
-  import type { BridgeInfo, BridgeFollow, BridgeLinkMode } from '$lib/bridges';
-  import type { FeedTriple, SourceAskRows } from '$lib/ward-asks';
-  import { IDS } from '$lib/generated/uiIds';
+  import { t } from '#lib/i18n/strings';
+  import type { BridgeInfo, BridgeFollow, BridgeFollowRequestRow, BridgeLinkMode } from '#lib/bridges';
+  import type { FeedTriple, SourceAskRows } from '#lib/ward-asks';
+  import { IDS } from '#lib/generated/uiIds';
 
   let {
     bridge,
     follows = [],
+    followRequests = [],
     sourceAsks,
     onRequestSource,
     onLink,
@@ -34,11 +36,13 @@
     onSettingChange,
     onAddFollow,
     onRemoveFollow,
+    onResolveFollowRequest,
   }: {
     bridge: BridgeInfo;
     follows?: BridgeFollow[];
+    followRequests?: BridgeFollowRequestRow[];
     /** The supervised ward's feed-source ask rows for THIS card
-     *  (`$lib/ward-asks` `sourceAskRows`) — `bridge-source-request-state` per
+     *  (`#lib/ward-asks` `sourceAskRows`) — `bridge-source-request-state` per
      *  durable ask, `bridge-source-request-button` per refused triple with no
      *  durable row yet (family-safety.md § Feed-source approvals). Absent on a
      *  host page that has no ask surface (the Bluesky Linked panel). */
@@ -50,6 +54,8 @@
     onSettingChange: (key: string, value: any) => void | Promise<void>;
     onAddFollow: (id: string, petname?: string) => void | Promise<void>;
     onRemoveFollow: (id: string) => void | Promise<void>;
+    /** Absent on an embed whose provider never declares follow requests (Bluesky). */
+    onResolveFollowRequest?: (id: string, approve: boolean) => void | Promise<void>;
   } = $props();
 
   let hasNip07Extension = $state(false);
@@ -103,6 +109,13 @@
     await onLink(mode.mode, fields);
   }
 
+  // The shared display rule: the nickname if set, else the id — an id (an
+  // ActivityPub actor URL, a DID) is shortened only when it is what shows.
+  function followLabel(follow: BridgeFollow): string {
+    const shown = followDisplay(follow.id, follow.petname);
+    return shown === follow.id ? shortId(follow.id) : shown;
+  }
+
   async function handleAddFollow(): Promise<void> {
     if (!followId) return;
     await onAddFollow(followId, followPetname || undefined);
@@ -118,48 +131,11 @@
   {:else if bridge.linked}
     <!-- Identity display -->
     {#if bridge.identity}
-      <p><strong>{bridge.identity.label}:</strong> <span class="mono">{bridge.identity.display}</span></p>
+      <p data-testid={IDS.BRIDGE_IDENTITY}>{bridge.identity.label}: <span class="mono">{bridge.identity.display}</span></p>
     {/if}
 
-    <!-- Settings -->
-    {#each bridge.settings as setting}
-      {#if setting.type === 'bool'}
-        <label class="toggle">
-          <input type="checkbox" checked={setting.value} onchange={() => onSettingChange(setting.key, !setting.value)} />
-          {setting.label}
-        </label>
-      {:else if setting.type === 'text'}
-        <label>{setting.label}:
-          <input type="text" value={setting.value} onblur={(e) => onSettingChange(setting.key, e.currentTarget.value)} class="input" />
-        </label>
-      {:else if setting.type === 'select' && setting.options}
-        <label>{setting.label}:
-          <select onchange={(e) => onSettingChange(setting.key, Number(e.currentTarget.value))}>
-            {#each setting.options as opt}
-              <option value={opt.value} selected={opt.value === setting.value}>{opt.label}</option>
-            {/each}
-          </select>
-        </label>
-      {:else if setting.type === 'number'}
-        <label>{setting.label}:
-          <input
-            type="text"
-            value={setting.value}
-            onblur={(e) => {
-              const parsed = parseCountI64(e.currentTarget.value);
-              if (parsed !== undefined) onSettingChange(setting.key, parsed);
-            }}
-            class="input"
-          />
-        </label>
-      {:else}
-        <!-- Unrecognized setting_type: additive-evolution fallback (a newer
-             nest may serve a type this build predates) — a read-only label,
-             never a silently dropped row. Mirrors tui's `setting_elements`
-             fallback arm. -->
-        <p class="muted">{setting.label}: {setting.value}</p>
-      {/if}
-    {/each}
+    <!-- Settings (the rows a plugin's settings card paints too) -->
+    <BridgeSettingRows settings={bridge.settings} {onSettingChange} />
 
     <!-- Unlink -->
     <button data-testid={IDS.BRIDGE_ACTION_BUTTON} class="btn danger" onclick={() => onUnlink()}>{t.bridges.unlink({ name: bridge.name })}</button>
@@ -168,19 +144,19 @@
     {#if bridge.supports_follows}
       <h4>{t.bridges.follows}</h4>
       <div class="follow-form">
-        <input type="text" bind:value={followId} placeholder={t.bridges.id_to_follow} class="input" />
-        <input type="text" bind:value={followPetname} placeholder={t.bridges.petname_optional} class="input small" />
+        <input data-testid={IDS.BRIDGE_FOLLOW_ID_INPUT} type="text" bind:value={followId} placeholder={t.bridges.id_to_follow} class="input" />
+        <input data-testid={IDS.BRIDGE_FOLLOW_PETNAME_INPUT} type="text" bind:value={followPetname} placeholder={t.bridges.petname_optional} class="input small" />
         <button data-testid={IDS.BRIDGE_ADD_FOLLOW_BUTTON} onclick={handleAddFollow} class="btn">{t.bridges.add_follow}</button>
       </div>
       <div data-testid={IDS.BRIDGE_FOLLOWS_LIST}>
         {#if follows.length > 0}
           <ul class="follows-list">
             {#each follows as follow}
-              <li data-testid={IDS.BRIDGE_FOLLOW_ITEM}>
-                <span class="mono">{shortId(follow.id)}</span>
-                {#if follow.petname}
-                  <span class="petname">({follow.petname})</span>
-                {/if}
+              <li>
+                <!-- The item id sits on the display text itself, so a row's
+                     read-back is the shared display line, not the row's joined
+                     children (the remove button's label included). -->
+                <span class="mono" data-testid={IDS.BRIDGE_FOLLOW_ITEM}>{followLabel(follow)}</span>
                 <button data-testid={IDS.BRIDGE_FOLLOW_REMOVE} onclick={() => onRemoveFollow(follow.id)} class="btn small danger">{t.bridges.remove_follow}</button>
               </li>
             {/each}
@@ -193,6 +169,24 @@
            not the bridge card (bridges.md § Layout & flow, Feed-only decision
            ratified 2026-06-28). The former bridge-feed-* shim elements were
            retired with the ui.yaml registry removal. -->
+    {/if}
+
+    <!-- Follow requests (bridges.md § Follow requests): the heading keeps its
+         count at zero; rows paint the shared `display` line and forward two
+         clicks. -->
+    {#if bridge.supports_follow_requests}
+      <h4 data-testid={IDS.BRIDGE_FOLLOW_REQUESTS_LIST}>{t.bridges.follow_requests({ count: String(followRequests.length) })}</h4>
+      {#if followRequests.length > 0}
+        <ul class="follows-list">
+          {#each followRequests as request}
+            <li data-testid={IDS.BRIDGE_FOLLOW_REQUEST_ITEM}>
+              <span class="mono">{request.display}</span>
+              <button data-testid={IDS.BRIDGE_FOLLOW_REQUEST_APPROVE} onclick={() => onResolveFollowRequest?.(request.id, true)} class="btn small">{t.bridges.approve_follow_request}</button>
+              <button data-testid={IDS.BRIDGE_FOLLOW_REQUEST_REFUSE} onclick={() => onResolveFollowRequest?.(request.id, false)} class="btn small danger">{t.bridges.refuse_follow_request}</button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
     {/if}
   {:else}
     <!-- Unlinked: show link modes. The Link button always renders when
@@ -309,12 +303,6 @@
   .btn.primary { background: #4a6cf7; }
   .btn.danger { background: #c0392b; }
   .btn.small { padding: 0.2rem 0.5rem; font-size: 0.85em; }
-  .toggle {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    margin: 0.4rem 0;
-  }
   .follow-form {
     display: flex;
     gap: 0.5rem;
@@ -332,6 +320,5 @@
     padding: 0.3rem 0;
     border-bottom: 1px solid var(--border, #222);
   }
-  .petname { color: var(--muted, #888); }
   .muted { color: var(--muted, #888); }
 </style>

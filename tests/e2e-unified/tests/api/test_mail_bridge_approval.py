@@ -191,11 +191,13 @@ def test_approve_unknown_pubkey_not_found(nest_instance):
     )
 
 
-def test_set_mail_enabled_toggle(nest_instance):
+def test_set_mail_enabled_toggle(dedicated_no_mail_nest):
     """The deployment-wide mail-enable toggle dispatches + is admin-gated. The
     flag-file / supervisor-socket effects are unit-tested in the nest
-    ``mail_enable`` module; here we prove the kind routes and replies ok."""
-    admin = _admin_client(nest_instance)
+    ``mail_enable`` module; here we prove the kind routes and replies ok. On a
+    dedicated nest: ending on ``enabled: False`` on the session nest switched
+    mail off under every later mail-bridge test in a full-suite run."""
+    admin = _admin_client(dedicated_no_mail_nest)
     with admin:
         assert admin.call("fauna.bridges.set_mail_enabled", {"enabled": True}).get("ok") is True
         assert admin.call("fauna.bridges.set_mail_enabled", {"enabled": False}).get("ok") is True
@@ -241,7 +243,7 @@ def _enroll(url, pubkey: bytes, role: str) -> str:
 
 
 @pytest.mark.feature("admin-bridges")
-def test_request_enrollment_auto_approves_when_mail_enabled(nest_instance):
+def test_request_enrollment_auto_approves_when_mail_enabled(dedicated_no_mail_nest):
     """The box's own bridge self-enrolls over the anonymous (loopback) WS and is
     **auto-approved** once an admin has enabled mail — no manual
     ``approve_pending_bridge`` click (``mail-bridge-lifecycle.md`` § Onboarding
@@ -249,9 +251,11 @@ def test_request_enrollment_auto_approves_when_mail_enabled(nest_instance):
     the ``mail_enabled`` DB toggle end-to-end over the socket — coverage the
     in-process handler unit tests (which call the handler directly) cannot give.
     The admin's Admin-class enable is the only thing that opens the window; the
-    enrollment itself is the unauthenticated loopback path."""
-    admin = _admin_client(nest_instance)
-    url = nest_instance["url"]
+    enrollment itself is the unauthenticated loopback path. On a dedicated
+    nest, for both ends: step 1 needs mail never enabled, and the session nest
+    has mail on once any mail-bridge fixture ran."""
+    admin = _admin_client(dedicated_no_mail_nest)
+    url = dedicated_no_mail_nest["url"]
 
     # 1. Mail off (fresh nest, toggle unset) → a self-enroll lands pending.
     pk_off = secrets.token_bytes(32)
@@ -284,6 +288,6 @@ def test_request_enrollment_auto_approves_when_mail_enabled(nest_instance):
             "a pre-enable pending bridge self-heals to approved on re-poll"
         )
     finally:
-        # Restore the session-scoped nest's default (mail off).
+        # The dedicated nest is this test's alone; leave it as it found it.
         with admin:
             admin.call("fauna.bridges.set_mail_enabled", {"enabled": False})

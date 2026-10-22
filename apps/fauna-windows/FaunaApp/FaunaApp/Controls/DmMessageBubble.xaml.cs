@@ -24,8 +24,11 @@ namespace FaunaApp.Controls;
 public record DmMessageView(
     string Id,
     string From,
-    bool SignatureValid,
+    // MessageSnapshot.badges, flag for flag: one badge per true flag
+    // (Bind's crypto-badge block).
     bool Encrypted,
+    bool Signed,
+    bool Verified,
     string Timestamp,
     bool IsOwn,
     // MessageSnapshot.canDelete: whether THIS viewer may delete this message — the
@@ -419,19 +422,12 @@ public sealed partial class DmMessageBubble : UserControl
         BodyView.Visibility = Visibility.Visible;
         ActionsRow.Visibility = Visibility.Visible;
 
-        // Signature badges
-        if (msg.Encrypted)
-            EncryptedBadge.Visibility = Visibility.Visible;
-        if (msg.SignatureValid)
-        {
-            VerifiedBadge.Visibility = Visibility.Visible;
-            SignatureText.Text = Strings.Get("common/verified");
-        }
-        else
-        {
-            SignedBadge.Visibility = Visibility.Visible;
-            SignatureText.Text = msg.SignatureValid.ToString();
-        }
+        // Crypto badges: one per TRUE shared MessageBadges flag, and nothing for a false
+        // one — never a badge standing for the negation (linux message_bubble.rs paints
+        // the same three the same way). Set both ways: bubbles are reused across re-binds.
+        EncryptedBadge.Visibility = msg.Encrypted ? Visibility.Visible : Visibility.Collapsed;
+        SignedBadge.Visibility = msg.Signed ? Visibility.Visible : Visibility.Collapsed;
+        VerifiedBadge.Visibility = msg.Verified ? Visibility.Visible : Visibility.Collapsed;
 
         // Set the document first: both the attachment walk (RenderAttachments) and the body
         // walk (RenderBody) source from it (render-model.md § D1/§ D2).

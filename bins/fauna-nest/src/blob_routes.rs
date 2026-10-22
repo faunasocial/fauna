@@ -429,7 +429,10 @@ fn blob_id_digest(id: &str) -> Option<([u8; 32], bool)> {
     }
 }
 
-/// `Some(451)` when a legal takedown withholds this blob from the serve door.
+/// `Some(451)` when a legal takedown withholds this blob from the serve door,
+/// `Some(403)` when the admin's block of a reported item does
+/// (`moderation.md` § Admin block of a reported item, decision 3 — 451 stays
+/// the legal takedown's alone; a blob both reach answers 451).
 ///
 /// The takedown withholds the naming record's body at the read primitive every
 /// per-record serve path flows through; its attachments live outside that body
@@ -460,14 +463,20 @@ pub(crate) async fn legal_takedown_gate(
     db: &crate::db::CacheDb,
     digest: &[u8; 32],
 ) -> Option<axum::response::Response> {
-    if !is_legally_withheld(db, digest).await {
-        return None;
-    }
+    let ground = withhold_ground(db, digest).await?;
     tracing::info!(
         blob = hex::encode(digest),
-        "blob get withheld — legal takedown"
+        ground = ground.token(),
+        "blob get withheld"
     );
-    Some(StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS.into_response())
+    Some(match ground {
+        crate::db::blob_withhold::WithholdGround::Legal => {
+            StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS.into_response()
+        }
+        crate::db::blob_withhold::WithholdGround::AdminBlock => {
+            StatusCode::FORBIDDEN.into_response()
+        }
+    })
 }
 
 /// The withhold predicate itself, for the readers that are **not routes**.
@@ -478,15 +487,25 @@ pub(crate) async fn legal_takedown_gate(
 /// including its deliberate fail-OPEN on a storage error, for the reason the
 /// gate's own doc gives — lives here once and both read it.
 pub(crate) async fn is_legally_withheld(db: &crate::db::CacheDb, digest: &[u8; 32]) -> bool {
-    match db.blob_is_legally_withheld(digest).await {
+    withhold_ground(db, digest).await.is_some()
+}
+
+/// The ground withholding `digest` on either withhold (legal takedown or the
+/// admin's block of a reported item), with the fail-OPEN posture both
+/// [`legal_takedown_gate`] and [`is_legally_withheld`] share.
+async fn withhold_ground(
+    db: &crate::db::CacheDb,
+    digest: &[u8; 32],
+) -> Option<crate::db::blob_withhold::WithholdGround> {
+    match db.blob_withhold_ground(digest).await {
         Ok(v) => v,
         Err(e) => {
             tracing::error!(
                 blob = hex::encode(digest),
                 error = %e,
-                "legal-takedown withhold lookup failed — serving the blob"
+                "blob withhold lookup failed — serving the blob"
             );
-            false
+            None
         }
     }
 }
@@ -866,6 +885,36 @@ mod tests {
             legal_takedown_gate(&db, &withheld.digest()).await.is_none(),
             "a restored record's attachment must serve again"
         );
+    }
+
+    /// The second ground answers 403, never 451 (`moderation.md` § Admin block
+    /// of a reported item, decision 3), and the non-route predicate withholds
+    /// it all the same.
+    #[tokio::test]
+    async fn the_door_answers_403_for_a_blocked_blob() {
+        use crate::db::blob_withhold::WithholdGround;
+        let db = crate::db::CacheDb::open_in_memory().unwrap();
+        let blocked = fauna_core::data::ContentHash::of_raw(b"a blocked post's photo");
+        db.replace_blob_withhold(&[(blocked.digest(), WithholdGround::AdminBlock)])
+            .await
+            .unwrap();
+        let resp = legal_takedown_gate(&db, &blocked.digest())
+            .await
+            .expect("a blocked blob must not reach the store read");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert!(is_legally_withheld(&db, &blocked.digest()).await);
+        // A later legal takedown of the same bytes raises the ground.
+        db.add_blob_withhold(&[(blocked.digest(), WithholdGround::Legal)])
+            .await
+            .unwrap();
+        let resp = legal_takedown_gate(&db, &blocked.digest()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
+        // ... and an ADD never lowers it back.
+        db.add_blob_withhold(&[(blocked.digest(), WithholdGround::AdminBlock)])
+            .await
+            .unwrap();
+        let resp = legal_takedown_gate(&db, &blocked.digest()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
     }
 
     // ── Byte ranges on the hex branch (render-model.md § D6c → Inline playback,

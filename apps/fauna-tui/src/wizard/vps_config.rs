@@ -4,7 +4,8 @@
 //! `vps-provider-link`, `vps-provider-open-browser-button`,
 //! `vps-provider-help-text`, `vps-credentials-form`, `vps-verify-button`,
 //! `vps-location-picker` (indexed), `vps-config-mail-mode-toggle`,
-//! `vps-config-update-channel-row` (keyed by channel id),
+//! `vps-config-ssh-door-toggle`, `vps-config-ssh-door-warning` (only while the
+//! door is on), `vps-config-update-channel-row` (keyed by channel id),
 //! `vps-server-type-radio` (indexed), `vps-config-back-button`,
 //! `vps-config-continue-button`.
 //!
@@ -174,6 +175,22 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
         Action::SetProvisionMailMode(!enable_mail),
     ));
 
+    // The SSH door, beside the mail mode and default off; its warning shows
+    // only while it is on, directly under it (`onboarding-provisioning.md` § 5).
+    let ssh_door = m.provision_ssh_door_enabled();
+    out.push(Element::checkbox(
+        ids::VPS_CONFIG_SSH_DOOR_TOGGLE,
+        t::SSH_DOOR_LABEL,
+        ssh_door,
+        Action::SetProvisionSshDoor(!ssh_door),
+    ));
+    if ssh_door {
+        out.push(Element::label(
+            ids::VPS_CONFIG_SSH_DOOR_WARNING,
+            t::SSH_DOOR_WARNING,
+        ));
+    }
+
     // `vps-config-update-channel-row` is the *container*; each channel is
     // `vps-config-update-channel-row[<channel id>]` — keyed, like the provider
     // rows. One-of-N → `Radio`. The rows declare their own `group`: this page
@@ -189,10 +206,12 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
     ));
     let channel = m.provision_update_channel();
     for c in UpdateChannel::ALL {
-        // The shared getters pick the keys (the compat-line wording for Test /
+        // The shared getters pick the keys (the no-build wording for a channel
+        // the registry has nothing on, else the compat-line wording for Test /
         // Dev while the product major is 0); the app only looks them up.
         let label = fauna_i18n::strings::lookup(c.label_key()).unwrap_or_default();
-        let desc = fauna_i18n::strings::lookup(c.description_key()).unwrap_or_default();
+        let desc = fauna_i18n::strings::lookup(&m.update_channel_description_key_for_row(c))
+            .unwrap_or_default();
         let is_selected = c == channel;
         out.push(
             Element::radio_gesture(
@@ -324,6 +343,34 @@ mod tests {
         assert_eq!(reason(&els).as_deref(), Some(t::STATUS_VERIFY_CREDENTIALS));
     }
 
+    /// The SSH door toggle paints off for every box, and its warning paints
+    /// only while it is on (`onboarding-provisioning.md` § 5).
+    #[test]
+    fn the_ssh_door_is_off_by_default_and_warns_while_on() {
+        let app = crate::app::tests::test_app();
+        app.wizard
+            .machine
+            .set_step_for_test(OnboardingStep::VpsConfig);
+        let find = |els: &[Element], id: &str| els.iter().find(|e| e.id == id).cloned();
+        let checked =
+            |e: Element| matches!(e.role, crate::element::Role::Checkbox { checked: true, .. });
+
+        let els = elements(&app.wizard);
+        let toggle = find(&els, "vps-config-ssh-door-toggle").expect("the toggle paints");
+        assert!(!checked(toggle), "default off");
+        assert!(find(&els, "vps-config-ssh-door-warning").is_none());
+
+        app.wizard.machine.set_provision_ssh_door(true);
+        let els = elements(&app.wizard);
+        assert!(checked(find(&els, "vps-config-ssh-door-toggle").unwrap()));
+        assert_eq!(
+            find(&els, "vps-config-ssh-door-warning")
+                .expect("the warning paints while on")
+                .text,
+            t::SSH_DOOR_WARNING
+        );
+    }
+
     /// The update-channel rows: all three always paint, exactly one is
     /// selected (`stable` before any choice), and a row's gesture selects it —
     /// which is what reaches `CloudInitParams::image_tag`.
@@ -394,6 +441,47 @@ mod tests {
             .collect();
         assert_eq!(on, ["vps-config-update-channel-row[dev]"]);
         assert_eq!(m.provision_update_channel().image_tag(), "dev");
+    }
+
+    /// What exists decides the default (`onboarding-provisioning.md` § 5): with
+    /// the registry reporting no Stable build and a Dev head at this app's
+    /// version, an unchosen page selects Dev and Stable's row says it has no
+    /// build — the shared getters decide, the rows only render them.
+    #[test]
+    fn a_channel_with_no_build_says_so_and_the_default_moves_off_it() {
+        let app = crate::app::tests::test_app();
+        let m = &app.wizard.machine;
+        m.set_step_for_test(OnboardingStep::VpsConfig);
+        let app_version = fauna_provisioning::update_channel::availability::product_version();
+        m.call_machine_method(
+            "set_channel_availability_for_test".into(),
+            serde_json::json!([
+                {"channel": "stable", "build": {"build": "no_build"}},
+                {"channel": "test", "build": {"build": "unknown"}},
+                {"channel": "dev", "build": {"build": "available", "version": app_version.to_string()}},
+            ])
+            .to_string(),
+        );
+        let els = elements(&app.wizard);
+        let row = |c: &str| {
+            els.iter()
+                .find(|e| e.id == format!("vps-config-update-channel-row[{c}]"))
+                .cloned()
+                .expect("row painted")
+        };
+        let on = |c: &str| row(c).attrs.iter().any(|(k, v)| k == "state" && v == "on");
+        // Test is unknown, so it is the first channel that may be usable.
+        assert!(on("test") && !on("stable") && !on("dev"));
+        assert!(
+            row("stable")
+                .text
+                .contains(t::UPDATE_CHANNEL_STABLE_DESC_NO_BUILD)
+        );
+        assert!(
+            !row("dev")
+                .text
+                .contains(t::UPDATE_CHANNEL_DEV_DESC_NO_BUILD)
+        );
     }
 
     /// A live Continue paints NO explanation — `None`, not a blank line.

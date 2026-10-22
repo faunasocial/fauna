@@ -538,6 +538,7 @@ async fn the_custody_ceremony_runs_end_to_end_over_the_real_nest() {
             attachments: vec![],
             badges: MessageBadges::default(),
             legal_takedown_ref: None,
+            admin_block_reason: None,
             plane_ref: None,
         })
         .expect("setup ingest");

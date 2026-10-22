@@ -77,6 +77,7 @@ from helpers.oauth_client import OAuthClient
 from helpers.waiting import wait_until
 from tests.api.test_bridged_conversation_kinds import _approve, _ok
 from helpers.principal_session import alice_client, PrincipalSession, upgrade
+from i18n.strings import S
 
 # `real_conversations`: windows (like macOS/iOS/android) registers the real receive
 # loop only behind the launch-time FAUNA_E2E_REAL_CONVERSATIONS gate this marker
@@ -140,7 +141,7 @@ def consent_nest_env(metadata_server):
 def _bridged_built(driver) -> bool:
     """Whether this app registers the bridged rail and paints it — the apps
     the lift (``conversations.md`` § Implementation status today) has reached."""
-    return driver.is_tui() or driver.is_web() or driver.is_linux() or driver.is_windows()
+    return driver.is_tui() or driver.is_web() or driver.is_linux() or driver.is_windows() or driver.is_macos() or driver.is_ios()
 
 
 @pytest.fixture
@@ -262,6 +263,8 @@ def _await_text(app, body):
 @pytest.mark.web
 @pytest.mark.linux
 @pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
 def test_a_bridged_room_renders_and_a_reply_reaches_only_the_bridge(
     bridged_app, consent_nest, metadata_server
 ):
@@ -353,6 +356,143 @@ def test_a_bridged_room_renders_and_a_reply_reaches_only_the_bridge(
     )
 
 
+# ── The bridge stops serving ─────────────────────────────────────────────
+
+
+@pytest.mark.feature("conversations")
+@pytest.mark.tui
+@pytest.mark.web
+@pytest.mark.linux
+def test_a_revoked_bridges_room_says_so_and_its_undelivered_reply_too(
+    bridged_app, consent_nest, metadata_server
+):
+    """``docs/goal/architecture/apps/bridges.md`` § Bridge-kind catalogue →
+    Phase G → *When the bridge stops serving* (consequences 2 and 3), painted
+    as ``docs/goal/ui/conversations.md`` § Element IDs rules it.
+
+    Production data flow, one sentence: the user replies in a bridged room →
+    the app queues it sealed to the bridge (``conversation.send``) and the
+    bridge has not drained it → the user revokes the bridge on Connected apps
+    (``fauna.principals.revoke``) → the nest deletes the undrained item and
+    stamps the Sent row ``undelivered`` in the same transaction, the room now
+    ``disconnected`` on ``rooms.list``, and nudges ``conversation_changed`` →
+    the app's receive loop re-reads the rooms, and its glue re-reads the
+    disconnected room (the row was read before the stamp, so the cursor-paged
+    inbox would never serve it again) → the header's ``thread-room-notice``
+    states ``bridge-disconnected`` and ``dm-message-undelivered`` sits under
+    the user's own bubble, whose text stays on screen → the room's gate
+    withholds the send (``ThreadCapabilities.can_send``), so ``dm-text-field``
+    and ``dm-send-button`` stay in view, disabled: readable, never writable."""
+    app = bridged_app
+    nest = consent_nest
+    conv = app.conversations
+    tail = os.urandom(3).hex()
+    far_room = f"!revoked-{tail}:example.org"
+    peer = f"@carol-{tail}:example.org"
+    reply = f"this one never left {tail}"
+
+    session, _holder_secret, key = _consented_bridge(nest, metadata_server)
+    _deposit(
+        session,
+        key,
+        far_room_id=far_room,
+        far_message_id=f"$revoked-{tail}",
+        sender=peer,
+        body=INBOUND_BODY,
+    )
+
+    conv.navigate()
+
+    def _thread():
+        return next((t for t in conv.list_threads() if peer in (t.label or "")), None)
+
+    thread = wait_until(
+        _thread,
+        RECEIVE_CYCLE_S,
+        diagnose=lambda: f"no thread for {peer}; threads={_threads(conv)!r}",
+    )
+    conv.open_thread_by_id(thread.thread_id)
+    _await_text(app, INBOUND_BODY)
+    assert app.driver.count("thread-room-notice") == 0, "a served room carries no notice"
+
+    # ── The reply is queued, and the bridge never drains it. ──
+    conv.send_in_open_thread(reply)
+    wait_until(
+        lambda: _ok(session, "fauna.bridges.conversation.outbox.fetch", {})["items"],
+        RECEIVE_CYCLE_S,
+        diagnose=lambda: f"the reply never queued; error: {_page_error(app)!r}",
+    )
+    _await_text(app, reply)
+    session.ws.close()
+
+    # ── The user revokes the bridge from the app. ──
+    ca = app.connected_apps
+    assert ca.visit(), f"Connected apps did not load; error: {ca.current_error_text()!r}"
+    row = ca.wait_for_item_containing(metadata_server.client_id())
+    assert row is not None, "the consented bridge must be on the roster"
+    ca.revoke_item(row)
+    assert ca.wait_for_no_item_containing(metadata_server.client_id()), (
+        f"the revoked bridge must leave the roster; error: {ca.current_error_text()!r}"
+    )
+
+    # The nest's own answer first (convention 5): a missing mark below is then
+    # the app's, not the nest's.
+    room = next(r for r in _rooms(nest) if r["far_room_id"] == far_room)
+    assert room.get("disconnected") is True, room
+    with alice_client(nest) as ws:
+        rows = ws.call(
+            "fauna.bridges.conversation.inbox.fetch", {"room_id": bytes(room["room_id"])}
+        )["messages"]
+    assert [m.get("undelivered", False) for m in rows if m["outbound"]] == [True], rows
+
+    # ── The room says so, and so does the reply that never left. ──
+    conv.navigate()
+    conv.open_thread_by_id(thread.thread_id)
+
+    def _painted():
+        try:
+            state = app.driver.get_attr("thread-room-notice", "state")
+        except Exception:
+            return None
+        if state != "bridge-disconnected" or app.driver.count("dm-message-undelivered") == 0:
+            return None
+        return state
+
+    wait_until(
+        _painted,
+        RECEIVE_CYCLE_S,
+        diagnose=lambda: (
+            f"notice={app.driver.get_texts('thread-room-notice')!r}, "
+            f"undelivered={app.driver.count('dm-message-undelivered')}, "
+            f"error: {_page_error(app)!r}"
+        ),
+    )
+    assert app.driver.get_text("thread-room-notice") == (
+        S.conversations.unified.room_notice_bridge_disconnected
+    )
+    assert app.driver.get_texts("dm-message-undelivered") == [
+        S.conversations.unified.dm_message_undelivered
+    ], "only the user's own, undrained reply is marked"
+    texts = app.driver.get_texts("dm-message-text")
+    assert any(reply in (t or "") for t in texts), (
+        f"the undelivered reply's text stays on screen, to send again: {texts!r}"
+    )
+    assert any(INBOUND_BODY in (t or "") for t in texts), texts
+
+    # ── Readable, never writable: the reply bar is withheld. ──
+    if not app.driver.is_tui():
+        skip_unbuilt(
+            app.driver,
+            surface="a read-only dm-compose-bar on a disconnected bridged room",
+            detail="dm-text-field / dm-send-button do not yet gate on can_send",
+            tracked="docs/goal/behavior/bridged-adapter.md § Implementation status today",
+        )
+    for control in ("dm-text-field", "dm-send-button"):
+        assert app.driver.get_attr(control, "disabled") == "true", (
+            f"{control} must be withheld on a room no bridge serves"
+        )
+
+
 # ── The supervised ward ──────────────────────────────────────────────────
 
 
@@ -404,6 +544,8 @@ def held_ward(consent_nest):
 @pytest.mark.web
 @pytest.mark.linux
 @pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
 def test_a_cold_peers_bridged_room_is_marked_held_for_a_ward_and_stays_readable(
     request, app, consent_nest, consent_bridge, metadata_server, held_ward
 ):
@@ -492,6 +634,8 @@ LATER_BODY = "see you there on saturday"
 @pytest.mark.web
 @pytest.mark.linux
 @pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
 def test_a_guardian_lets_a_held_bridged_conversation_through_and_later_messages_arrive(
     request, app, consent_nest, consent_bridge, metadata_server, held_ward
 ):
@@ -633,6 +777,8 @@ def _post_to_relay(nest, event: dict) -> None:
 @pytest.mark.web
 @pytest.mark.linux
 @pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
 def test_a_nostr_gift_wrap_arrives_as_a_nostr_bridged_room(bridged_app, consent_nest):
     app = bridged_app
     nest = consent_nest

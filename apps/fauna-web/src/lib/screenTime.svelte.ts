@@ -19,11 +19,11 @@ import {
   screenLockMessage,
   type ScreenTimePolicyValue,
   type UsageHeartbeatHandle,
-} from '$lib/wasm';
-import { familyUsageReport } from '$lib/rpc';
-import { registerActorScopedReset } from '$lib/actorScope';
-import { utcOffsetMinutes } from '$lib/utcOffset';
-import type { LocalizedText } from '$lib/i18n/localized';
+} from '#lib/wasm';
+import { familyUsageReport } from '#lib/rpc';
+import { registerActorScopedReset } from '#lib/actorScope';
+import { utcOffsetMinutes } from '#lib/utcOffset';
+import type { LocalizedText } from '#lib/i18n/localized';
 
 // The supervised viewer's OWN screen-time policy (`fauna.family.status`).
 // `null` for an unsupervised account — nothing to enforce.
@@ -61,7 +61,7 @@ function usage(): UsageHeartbeatHandle {
 }
 
 // Test-only clock skew in seconds (testing.md § convention 14's fake clock),
-// driven by the `screen_time_heartbeat` command in `$lib/screen-time-e2e` — the
+// driven by the `screen_time_heartbeat` command in `#lib/screen-time-e2e` — the
 // browser twin of linux's `advance_test_clock`. Screen time is the one pillar
 // whose behavior really is a function of elapsed time, and a test that SLEPT for
 // a heartbeat would be defunct under § point 14, not merely slow. It stays 0 in

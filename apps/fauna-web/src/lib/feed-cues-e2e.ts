@@ -6,17 +6,17 @@
 // live tracker and lands each step with a sample of its own.
 //
 // This module exists ONLY in builds made for testing (testing.md § convention
-// 15): its one importer, `$lib/e2e-automation`, sits behind `+layout.svelte`'s
+// 15): its one importer, `#lib/e2e-automation`, sits behind `+layout.svelte`'s
 // `if (__FAUNA_E2E_AUTOMATION__)`, so a production `vite build` folds it away.
 //
 // Every reply is the shared shape: `{ok: true}` for a step, the `CueProbe`
 // object for the probe, `{error}` for a refusal — a refused advance is loud,
 // never a silent no-op (convention 11).
 
-import { feedManagerIfReady } from '$lib/feed';
-import { activeCueCapture, cueTrackerFor } from '$lib/feed-cues';
-import { registerE2eCommands } from '$lib/e2e-commands';
-import type { CueTrackerHandle } from '$lib/wasm';
+import { feedManagerIfReady } from '#lib/feed';
+import { activeCueCapture, cueTrackerFor } from '#lib/feed-cues';
+import { registerE2eCommands } from '#lib/e2e-commands';
+import type { CueTrackerHandle } from '#lib/wasm';
 
 /** `WasmCueTracker`'s `test-helpers` faces (`libs/fauna-wasm/src/feed.rs`). */
 interface CueTrackerTestSeams {
@@ -58,7 +58,7 @@ const FEED_CUE_COMMANDS = [
   'feed_cue_scroll_by',
 ] as const;
 
-/** Register the cue-clock commands. Called once from `$lib/e2e-automation`. */
+/** Register the cue-clock commands. Called once from `#lib/e2e-automation`. */
 export function registerFeedCueCommands(): void {
   registerE2eCommands(FEED_CUE_COMMANDS, async (action, p) => {
     try {

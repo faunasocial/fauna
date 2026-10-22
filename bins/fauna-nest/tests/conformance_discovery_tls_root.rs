@@ -31,7 +31,7 @@ use std::sync::Arc;
 use fauna_nest::acme::spki_sha256_of_cert_der;
 use fauna_nest::db::CacheDb;
 use fauna_nest::federation_pool::{
-    FederationChannelPool, PairingTargetTrust, PeerHostClass, PoolError,
+    ClassifiedPeerHost, FederationChannelPool, PairingTargetTrust, PeerHostClass, PoolError,
 };
 use fauna_nest::routes::AppState;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -184,6 +184,29 @@ async fn a_pinned_configured_target_answering_as_its_pin_is_admitted() {
         .resolve_peer_nest_id_in_class(&url, PeerHostClass::NonGlobal)
         .await
         .expect("the pinned public nest is the configured target");
+    assert_eq!(id, nest_id);
+}
+
+/// The discovery dial connects to the address the class was judged from, not
+/// to a second resolution of the name (). The URL's host is an
+/// `.invalid` name that never resolves, so the dial can only succeed by
+/// honouring `dial_addr`; a dial that re-resolves fails with a resolve error.
+#[tokio::test]
+async fn the_dial_connects_to_the_classified_address_not_a_second_lookup() {
+    let (peer_url, nest_id) = start_floor_peer().await;
+    let port = peer_url.rsplit(':').next().unwrap();
+    let url = format!("https://pull-target.invalid:{port}");
+    let pool = pool_with_target(&url, true, Some(nest_id));
+    let id = pool
+        .resolve_peer_nest_id_in_host(
+            &url,
+            ClassifiedPeerHost {
+                class: PeerHostClass::NonGlobal,
+                dial_addr: Some(format!("127.0.0.1:{port}").parse().unwrap()),
+            },
+        )
+        .await
+        .expect("the dial must go to the classified address, not re-resolve the name");
     assert_eq!(id, nest_id);
 }
 

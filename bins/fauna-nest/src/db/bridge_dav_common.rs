@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use blake3::Hasher;
 use tokio::sync::Mutex;
 
-use crate::domain_hash::{HashField, write_fields};
+use fauna_core::domain_hash::{HashField, write_fields};
 
 /// `id = blake3(domain_tag || actor || timestamp_le_i64 || encrypted_body)`.
 /// Domain-tagged so distinct call paths can never share an id, even on

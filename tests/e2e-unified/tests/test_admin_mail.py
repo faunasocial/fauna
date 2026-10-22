@@ -114,9 +114,9 @@ def _wait(predicate, timeout: float = 15.0, interval: float = 0.3) -> bool:
 
 
 #: The five policy groups `get_mail_config` projects, each with the kind that
-#: writes it. With the alias policy (its own read twin) and the auto-enable
-#: toggle (read via `fauna.setup.status`), this is every deployment-wide knob a
-#: test in this file saves.
+#: writes it. With the alias and DMARC policies (each its own read twin) and the
+#: auto-enable toggle (read via `fauna.setup.status`), this is every
+#: deployment-wide knob a test in this file saves.
 _PROJECTED_POLICY_GROUPS = {
     "spam": "fauna.bridges.put_spam_policy",
     "auth": "fauna.bridges.put_auth_policy",
@@ -131,6 +131,7 @@ def _policy_snapshot(client):
     return {
         **{group: config[group] for group in _PROJECTED_POLICY_GROUPS},
         "alias": client.call("fauna.bridges.get_alias_policy", {}),
+        "dmarc": client.call("fauna.bridges.get_dmarc_policy", {}),
         "auto_enable": client.call("fauna.setup.status", {})[
             "auto_enable_mail_for_new_users"
         ],
@@ -166,6 +167,8 @@ def _leave_the_session_nest_as_found(nest_instance):
                 client.call(kind, before[group])
         if now["alias"] != before["alias"]:
             client.call("fauna.bridges.put_alias_policy", before["alias"])
+        if now["dmarc"] != before["dmarc"]:
+            client.call("fauna.bridges.put_dmarc_policy", before["dmarc"])
         if now["auto_enable"] != before["auto_enable"]:
             client.call(
                 "fauna.bridges.set_auto_enable_mail_for_new_users",
@@ -400,9 +403,79 @@ def test_publish_spam_baseline_withheld(admin_app):
     )
 
 
+#: Apps whose publish button asks first (the same-button two-press,
+#: `MailPolicyConfirm::PublishSpamBaseline`): tui is the lead app; windows and apple
+#: follow in their batched trickle-down.
+_PUBLISH_CONFIRM_BUILT_APPS = {"tui", "linux", "web", "android"}
+
+
+@pytest.mark.android
+@pytest.mark.web
+@pytest.mark.feature("admin-mail-policy")
+def test_publishing_the_baseline_asks_first_and_says_whose_training_it_reflects(
+    admin_app, nest_instance
+):
+    """The first press of Publish deployment baseline only relabels the button
+    to its confirm — the baseline reflects the training of the members who
+    opted in (`mail-spam.md` § Cold start, step 1) — and runs nothing: the
+    nest's served-baseline state is untouched. The second press publishes:
+    the nest answers (on this nest the contributor floor withholds it), the
+    result text says so, and the button comes back to rest. The nest's
+    `get_spam_baseline_state` is the ground truth that the first press sent
+    nothing."""
+    if app_name(admin_app.driver) not in _PUBLISH_CONFIRM_BUILT_APPS:
+        skip_unbuilt(
+            admin_app.driver,
+            surface="admin-mail-publish-spam-baseline-button confirm",
+            detail="the baseline-publish confirm is built on tui first",
+            tracked="the six-app trickle-down of the admin-mail baseline-publish confirm",
+        )
+    from i18n.strings import S
+
+    page = S.admin.mail_page
+    with _admin_client(nest_instance) as client:
+        served_before = client.call("fauna.bridges.get_spam_baseline_state", {})
+    admin_app.admin.navigate_mail()
+    assert _wait(
+        lambda: admin_app.admin.publish_spam_baseline_text() == page.publish_spam_baseline_button
+    ), (
+        f"publish button at rest reads {admin_app.admin.publish_spam_baseline_text()!r}; "
+        f"error: {admin_app.error_text()!r}"
+    )
+    admin_app.admin.press_publish_spam_baseline()
+    assert _wait(
+        lambda: admin_app.admin.publish_spam_baseline_text() == page.publish_spam_baseline_confirm
+    ), (
+        "the first press did not arm the confirm: "
+        f"{admin_app.admin.publish_spam_baseline_text()!r}; error: {admin_app.error_text()!r}"
+    )
+    assert "opted in" in page.publish_spam_baseline_confirm
+    assert admin_app.admin.publish_spam_baseline_result() == "", (
+        "the first press published without a confirm: "
+        f"{admin_app.admin.publish_spam_baseline_result()!r}"
+    )
+    with _admin_client(nest_instance) as client:
+        served = client.call("fauna.bridges.get_spam_baseline_state", {})
+    assert served == served_before, (
+        f"the first press moved the nest's baseline state: {served_before!r} → {served!r}"
+    )
+
+    admin_app.admin.press_publish_spam_baseline()
+    assert _wait(
+        lambda: "too few contributors"
+        in admin_app.admin.publish_spam_baseline_result().lower()
+    ), (
+        f"the confirm did not publish: {admin_app.admin.publish_spam_baseline_result()!r}; "
+        f"error: {admin_app.error_text()!r}"
+    )
+    assert _wait(
+        lambda: admin_app.admin.publish_spam_baseline_text() == page.publish_spam_baseline_button
+    ), f"the confirm never came back to rest: {admin_app.admin.publish_spam_baseline_text()!r}"
+
+
 #: Apps that render the standing-publish toggle and the baseline state text
 #: (tui is the lead app; the other six follow in their batched trickle-down).
-_STANDING_BUILT_APPS = {"tui", "web", "linux", "android", "windows"}
+_STANDING_BUILT_APPS = {"tui", "web", "linux", "android", "windows", "macos", "ios"}
 
 
 def _opted_in_contributors(nest_instance, seal_helper_binary, tag, n=3):
@@ -776,6 +849,240 @@ def test_alias_policy_save_round_trips(admin_app, nest_instance):
     assert not admin_app.error_text().strip(), (
         f"unexpected error after a valid save: {admin_app.error_text()!r}"
     )
+
+
+#: Apps that render the DMARC-reports group (`dmarc-reporting.md`
+#: § Implementation status today) — tui leads; linux, web and android followed
+#: in the trickle-down, windows / macos / ios are still to come.
+_DMARC_BUILT_APPS = {"tui", "linux", "web", "android"}
+
+#: Apps that render the Microsoft-registration section (`mailbox-migration.md`
+#: § Microsoft sign-in, *An admin-supplied registration*) — the same lift and
+#: the same app set as the DMARC group.
+_MICROSOFT_BUILT_APPS = {"tui", "linux", "web", "android"}
+
+
+def _expected_dmarc_records(client) -> dict:
+    """Every domain's expected ``_dmarc`` record tags, read off
+    ``fauna.dns.list_records`` (the one assembler the DNS page and the
+    provisioner both consume), keyed by domain."""
+    reply = client.call("fauna.dns.list_records", {})
+    out = {}
+    for row in reply.get("domains", []):
+        domain = row.get("domain")
+        for r in row.get("records", []):
+            if r["record_type"] == "TXT" and r["name"].rstrip(".") == f"_dmarc.{domain}":
+                out[domain] = dict(
+                    part.strip().split("=", 1)
+                    for part in r["expected"].split(";")
+                    if "=" in part
+                )
+    return out
+
+
+@pytest.mark.android
+@pytest.mark.web
+@pytest.mark.feature("dmarc-reporting")
+def test_dmarc_policy_save_round_trips(admin_app, nest_instance):
+    """An admin opts into forensic DMARC reports from the page, reads the PII
+    warning at the switch, picks which failures to report and how long forensic
+    reports are kept, and saves (`dmarc-reporting.md` § Forensic-report receive
+    → *Default off*, § Retention). The group is not projected into
+    `FetchConfigReply`: it hydrates from `fauna.bridges.get_dmarc_policy` and
+    saves via `put_dmarc_policy`.
+
+    toggle on → `fo=d` → aggregate retention 120 → forensic retention 60 →
+    Save (all UI) → ground truth: `get_dmarc_policy` holds the four choices,
+    every domain's expected `_dmarc` record carries `ruf=` (the deployment's
+    report address, the same one as `rua=`) and `fo=d`, and the page
+    re-renders the persisted retention. Then a forensic retention past the
+    nest's 90-day ceiling is refused onto `error-message` and changes nothing.
+    The autouse fixture puts the catalog back, so later modules see the opt-in
+    off again."""
+    if app_name(admin_app.driver) not in _DMARC_BUILT_APPS:
+        skip_unbuilt(
+            admin_app.driver,
+            surface="admin-mail-dmarc-ruf-publish-toggle",
+            detail="the DMARC-reports group is not yet on this app",
+            tracked="",
+        )
+    before = _nest_now(nest_instance, lambda c: c.call("fauna.bridges.get_dmarc_policy", {}))
+    assert before["ruf_publish"] is False, (
+        f"the session nest already holds the forensic opt-in on: {before!r}"
+    )
+    target_fo = _distinct_target(before["fo_mode"], "d", "s")
+    target_retention = _distinct_target(before["forensic_retention_days"], 60, 45)
+    target_aggregate = _distinct_target(before["aggregate_retention_days"], 120, 180)
+
+    admin_app.admin.navigate_mail()
+    assert _wait(admin_app.admin.mail_policy_present), (
+        f"page did not render. error: {admin_app.error_text()!r}"
+    )
+    for element_id in (
+        "admin-mail-dmarc-ruf-publish-toggle",
+        "admin-mail-dmarc-ruf-warning",
+        "admin-mail-dmarc-fo-mode-select",
+        "admin-mail-dmarc-aggregate-retention-input",
+        "admin-mail-dmarc-forensic-retention-input",
+        "admin-mail-dmarc-save-button",
+    ):
+        assert _wait(lambda eid=element_id: admin_app.admin.mail_field_present(eid)), (
+            f"{element_id} missing — DMARC group not rendered. "
+            f"error: {admin_app.error_text()!r}"
+        )
+    warning = admin_app.admin.mail_field_text("admin-mail-dmarc-ruf-warning")
+    assert "recipient email addresses" in warning, (
+        f"the PII warning is not beside the opt-in: {warning!r}"
+    )
+
+    forensic = "admin-mail-dmarc-forensic-retention-input"
+    aggregate = "admin-mail-dmarc-aggregate-retention-input"
+    assert _wait(
+        lambda: admin_app.admin.mail_field_text(forensic).strip()
+        == str(before["forensic_retention_days"])
+    ), (
+        f"forensic retention did not hydrate to {before['forensic_retention_days']}; "
+        f"got {admin_app.admin.mail_field_text(forensic)!r}, error: {admin_app.error_text()!r}"
+    )
+    assert admin_app.admin.mail_field_text(aggregate).strip() == str(
+        before["aggregate_retention_days"]
+    ), f"aggregate retention did not hydrate: {admin_app.admin.mail_field_text(aggregate)!r}"
+
+    admin_app.admin.toggle_mail_dmarc_ruf_publish()
+    admin_app.admin.select_mail_dmarc_fo_mode(target_fo)
+    admin_app.admin.set_mail_field(aggregate, str(target_aggregate))
+    admin_app.admin.set_mail_field(forensic, str(target_retention))
+    admin_app.admin.save_mail_dmarc()
+
+    with _admin_client(nest_instance) as client:
+        assert _wait(
+            lambda: client.call("fauna.bridges.get_dmarc_policy", {})["ruf_publish"] is True
+        ), f"put_dmarc_policy did not persist the opt-in. error: {admin_app.error_text()!r}"
+        policy = client.call("fauna.bridges.get_dmarc_policy", {})
+        assert policy["fo_mode"] == target_fo, policy
+        assert policy["forensic_retention_days"] == target_retention, policy
+        assert policy["aggregate_retention_days"] == target_aggregate, policy
+        # The tags without a control rode through the full PUT unchanged.
+        for key in ("policy_mode", "pct", "rua_destination", "ri_seconds"):
+            assert policy[key] == before[key], (key, policy, before)
+
+        records = _expected_dmarc_records(client)
+        assert records, "fauna.dns.list_records lists no domain with a _dmarc record"
+        for domain, tags in records.items():
+            assert tags.get("ruf", "").startswith("mailto:dmarc-report@"), (domain, tags)
+            assert tags.get("ruf") == tags.get("rua"), (domain, tags)
+            assert tags.get("fo") == target_fo, (domain, tags)
+
+    assert _wait(
+        lambda: admin_app.admin.mail_field_text(forensic).strip() == str(target_retention)
+    ), (
+        f"the page did not re-render the persisted forensic retention ({target_retention}). "
+        f"error: {admin_app.error_text()!r}"
+    )
+    assert not admin_app.error_text().strip(), (
+        f"unexpected error after a valid save: {admin_app.error_text()!r}"
+    )
+
+    # Past the ceiling: the nest refuses, the page says so, nothing changes.
+    admin_app.admin.set_mail_field(forensic, "91")
+    admin_app.admin.save_mail_dmarc()
+    assert _wait(lambda: admin_app.error_text().strip() != ""), (
+        "a 91-day forensic retention was not refused onto error-message"
+    )
+    with _admin_client(nest_instance) as client:
+        held = client.call("fauna.bridges.get_dmarc_policy", {})["forensic_retention_days"]
+    assert held == target_retention, (
+        f"a refused save changed the stored forensic retention to {held}"
+    )
+
+
+# A registration of the admin's own, distinctive so it cannot be the project's.
+_MS_CLIENT_ID = "0b5c1a2e-3f4d-4e5a-8b6c-7d8e9f0a1b2c"
+_MS_TENANT = "contoso.example"
+
+
+def _stored_microsoft_registration(nest_instance):
+    """What the nest holds for the deployment's own Microsoft registration, off
+    `fauna.setup.status` (``None`` while the project's own is in force)."""
+    with _admin_client(nest_instance) as client:
+        return client.call("fauna.setup.status", {}).get("microsoft_registration")
+
+
+@pytest.mark.android
+@pytest.mark.web
+@pytest.mark.feature("mailbox-import")
+def test_microsoft_registration_save_round_trips(admin_app, nest_instance):
+    """An admin sets the deployment's own Microsoft app registration from
+    `admin-mail`, sees it read back normalised, is refused a malformed one onto
+    `error-message`, and clears it (`mailbox-migration.md` § Microsoft sign-in,
+    *An admin-supplied registration*).
+
+    client ID (upper-cased GUID) + tenant → Save (all UI) → ground truth:
+    `fauna.setup.status.microsoft_registration` holds the GUID lowercased and
+    the tenant, and the field reads the stored ID back. Then a non-GUID ID is
+    refused and changes nothing; both fields blank clears it, which is also how
+    this test leaves the nest. The sign-in that SENDS the stored ID is witnessed
+    by `test_mail_import_microsoft_registration.py` (tui) and
+    `test_mail_import.py::test_outlook_signs_in_with_microsoft_and_imports`
+    (tui, linux, android)."""
+    client_field = "admin-mail-microsoft-client-id-input"
+    if app_name(admin_app.driver) not in _MICROSOFT_BUILT_APPS:
+        skip_unbuilt(
+            admin_app.driver,
+            surface=client_field,
+            detail="the Microsoft-registration section is not yet on this app",
+            tracked="",
+        )
+    assert _stored_microsoft_registration(nest_instance) is None, (
+        "the session nest already holds an admin Microsoft registration"
+    )
+
+    admin_app.admin.navigate_mail()
+    assert _wait(admin_app.admin.mail_policy_present), (
+        f"page did not render. error: {admin_app.error_text()!r}"
+    )
+    for element_id in (
+        client_field,
+        "admin-mail-microsoft-tenant-input",
+        "admin-mail-microsoft-save-button",
+    ):
+        assert _wait(lambda eid=element_id: admin_app.admin.mail_field_present(eid)), (
+            f"{element_id} missing — Microsoft section not rendered. "
+            f"error: {admin_app.error_text()!r}"
+        )
+
+    try:
+        admin_app.admin.save_mail_microsoft_registration(_MS_CLIENT_ID.upper(), _MS_TENANT)
+        assert _wait(
+            lambda: _stored_microsoft_registration(nest_instance)
+            == {"client_id": _MS_CLIENT_ID, "tenant": _MS_TENANT}
+        ), (
+            f"set_microsoft_registration did not persist. stored: "
+            f"{_stored_microsoft_registration(nest_instance)!r}, "
+            f"error: {admin_app.error_text()!r}"
+        )
+        assert _wait(
+            lambda: admin_app.admin.mail_field_text(client_field).strip() == _MS_CLIENT_ID
+        ), (
+            "the page did not read the stored (lowercased) client ID back: "
+            f"{admin_app.admin.mail_field_text(client_field)!r}"
+        )
+
+        # A malformed ID is refused onto `error-message`; the stored pair stays.
+        admin_app.admin.save_mail_microsoft_registration("not-a-guid", _MS_TENANT)
+        assert _wait(lambda: admin_app.error_text().strip() != ""), (
+            "a non-GUID client ID was not refused onto error-message"
+        )
+        assert _stored_microsoft_registration(nest_instance) == {
+            "client_id": _MS_CLIENT_ID,
+            "tenant": _MS_TENANT,
+        }, "a refused save changed the stored registration"
+    finally:
+        # Leave the session nest on the project's own registration.
+        admin_app.admin.save_mail_microsoft_registration("", "")
+        assert _wait(lambda: _stored_microsoft_registration(nest_instance) is None), (
+            "clearing the registration did not take"
+        )
 
 
 @pytest.mark.android

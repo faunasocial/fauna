@@ -47,7 +47,7 @@ reaching surviving box B alone (§ (a) The multi-box floor):
   3. Launch a FRESH device (new config-home, no account store), import the
      SAME identity, connect to B under recovery intent → ``nest_recovery``,
      whose box list is the resolver: B's cold read, no local store.
-     **Assert ``recover-box-item-0`` AND ``recover-box-item-1`` render.**
+     **Assert ``recover-box-item`` rows 0 AND 1 render.**
 
   ⚠ **T2 depends on the bind leg** (``docs/goal/architecture/
   account-sync-plane.md`` § The bind leg): A's row reaches B only when a
@@ -158,6 +158,16 @@ from common.auth import claim_admin  # noqa: E402
 from common.nest import stop_nest  # noqa: E402
 from drivers import create_driver  # noqa: E402
 from helpers.waiting import await_account_runtime_assembled  # noqa: E402
+from helpers.indexed_rows import (  # noqa: E402
+    click_row,
+    diagnose_row,
+    row_absent,
+    row_present,
+    row_texts,
+    row_visible,
+    wait_for_row,
+)
+
 from helpers.box_recovery_launch import (  # noqa: E402
     LINKED_CUSTODY_NEEDLES,
     LOGGED_IN_MARKERS,
@@ -307,7 +317,7 @@ def test_two_nest_fan_out_fires_and_fresh_device_recovers_both_boxes(
     § The bind leg), ruled and not built: A's custody row reaches B only when
     the runtime bound to B in launch 2 completes B's replica with every fleet
     row the device holds. Until that leg lands this test is EXPECTED RED at the
-    `recover-box-item-1` assertion — deliberately neither xfail nor skip: the
+    `recover-box-item` row-1 assertion — deliberately neither xfail nor skip: the
     red is the guard, and the green is the bind leg's landing gate. (The test
     name predates the plane and still says "fan out"; the seed-map fan-out it
     named is retired — the name is kept only because the feature ledgers key
@@ -401,20 +411,20 @@ def test_two_nest_fan_out_fires_and_fresh_device_recovers_both_boxes(
                 f"on nest_recovery: {app2.driver.diagnose('recover-back-button')}"
             )
 
-            app2.driver.wait_for("recover-box-item-0", timeout=30)
-            assert app2.is_visible("recover-box-item-0"), (
+            wait_for_row(app2.driver, RECOVER_BOX_ITEM, 0, timeout=30)
+            assert row_visible(app2.driver, RECOVER_BOX_ITEM, 0), (
                 "the fresh device's box list (the pre-login resolver's cold read "
                 "of the reachable nest B) never rendered box 0 — not even B's own "
-                f"custody row: {app2.driver.diagnose('recover-box-item-0')}"
+                f"custody row: {diagnose_row(app2.driver, RECOVER_BOX_ITEM, 0)}"
             )
-            app2.driver.wait_for("recover-box-item-1", timeout=30)
-            assert app2.is_visible("recover-box-item-1"), (
+            wait_for_row(app2.driver, RECOVER_BOX_ITEM, 1, timeout=30)
+            assert row_visible(app2.driver, RECOVER_BOX_ITEM, 1), (
                 "only ONE box rendered: a device that never saw box A must still "
                 "list BOTH boxes by reaching box B alone (box-recovery.md § The "
                 "plane-era recovery floor, (a)). EXPECTED RED until the bind leg "
                 "lands (account-sync-plane.md § The bind leg) — nothing yet "
                 "completes B's replica with A's custody row: "
-                f"{app2.driver.diagnose('recover-box-item-1')}"
+                f"{diagnose_row(app2.driver, RECOVER_BOX_ITEM, 1)}"
             )
         finally:
             driver2.teardown()
@@ -524,9 +534,9 @@ def test_launch_recover_button_appears_on_a_reachable_custodied_nest(
 
                 app2.click("launch-recover-button")
                 app2.driver.wait_for("recover-back-button", timeout=30)
-                assert app2.is_visible("recover-box-item-0"), (
+                assert row_visible(app2.driver, RECOVER_BOX_ITEM, 0), (
                     "clicking launch-recover-button should seed nest_recovery with "
-                    f"the launch-time box list: {app2.driver.diagnose('recover-box-item-0')}"
+                    f"the launch-time box list: {diagnose_row(app2.driver, RECOVER_BOX_ITEM, 0)}"
                 )
             finally:
                 driver2.teardown()
@@ -655,17 +665,17 @@ def test_launch_recover_button_appears_when_the_saved_nest_is_dead(
 
             app2.click("launch-recover-button")
             app2.driver.wait_for("recover-back-button", timeout=30)
-            app2.driver.wait_for("recover-box-item-0", timeout=30)
-            assert app2.is_visible("recover-box-item-0"), (
+            wait_for_row(app2.driver, RECOVER_BOX_ITEM, 0, timeout=30)
+            assert row_visible(app2.driver, RECOVER_BOX_ITEM, 0), (
                 "nest_recovery should list the dead box from this device's own "
-                f"store: {app2.driver.diagnose('recover-box-item-0')}"
+                f"store: {diagnose_row(app2.driver, RECOVER_BOX_ITEM, 0)}"
             )
             # Exactly the one box this identity custodied — A. A second row
             # would mean the list came from somewhere other than this
             # device's own custody of A.
-            assert app2.is_absent("recover-box-item-1"), (
+            assert row_absent(app2.driver, RECOVER_BOX_ITEM, 1), (
                 "nest_recovery listed more than the one box this identity "
-                f"custodied: {app2.driver.diagnose('recover-box-item-1')}"
+                f"custodied: {diagnose_row(app2.driver, RECOVER_BOX_ITEM, 1)}"
             )
         finally:
             driver2.teardown()
@@ -695,11 +705,8 @@ def _recheck_into_nest_recovery(app, handle: str) -> None:
 
 
 def _recover_box_labels(app) -> list[str]:
-    """The label of every `recover-box-item-N` row now rendered, in order."""
-    labels = []
-    while app.is_visible(f"recover-box-item-{len(labels)}"):
-        labels.append(app.driver.get_text(f"recover-box-item-{len(labels)}") or "")
-    return labels
+    """The label of every `recover-box-item` row now rendered, in order."""
+    return [label or "" for label in row_texts(app.driver, RECOVER_BOX_ITEM)]
 
 
 class _LinkedSeat:
@@ -841,7 +848,7 @@ def _resolve_row_nest_id(app, row: int) -> str:
     return the nest id (hex) the command's seed derives to."""
     from nacl.signing import SigningKey
 
-    app.click(f"recover-box-item-{row}")
+    click_row(app.driver, RECOVER_BOX_ITEM, row)
     app.click("recover-method-selfhosted-button")
     app.driver.wait_for("recover-selfhosted-command", timeout=30)
 
@@ -982,7 +989,8 @@ def test_linking_a_box_custodies_it_and_a_fresh_device_recovers_both(
 # success wording (i18n `admin.nest_page.rotate_seed_done`, en.yaml) — the
 # same ids and string `test_nest_rotation_admin_journey.py` drives.
 _ROTATE_ARM = "admin-nest-seed-rotate-button"
-_ROTATE_ROSTER_ITEM_0 = "admin-nest-seed-rotate-roster-item-0"
+RECOVER_BOX_ITEM = "recover-box-item"  # indexed; read via helpers.indexed_rows
+_ROTATE_ROSTER_ITEM = "admin-nest-seed-rotate-roster-item"
 _ROTATE_CONFIRM = "admin-nest-seed-rotate-confirm-button"
 _ROTATE_STATUS = "admin-nest-seed-rotate-status"
 _ROTATE_WORKING = "Rotating the deployment identity…"
@@ -1024,7 +1032,7 @@ def _rotate_through_the_app(driver, port: int) -> tuple[str, str]:
     _poll_until(lambda: driver.count(_ROTATE_ARM) > 0, 30.0,
                 "admin-nest renders the rotate section")
     driver.click(_ROTATE_ARM)
-    _poll_until(lambda: driver.count(_ROTATE_ROSTER_ITEM_0) > 0, 30.0,
+    _poll_until(lambda: row_present(driver, _ROTATE_ROSTER_ITEM), 30.0,
                 "the rotation's roster listing resolves")
     # The drive merges the successor's custody row through the account store
     # before dispatch and refuses without one: wait for the store as state.
@@ -1126,7 +1134,7 @@ def test_a_rotated_away_identity_is_never_offered_for_recovery(
             app2.driver.wait_for("launch-recover-button", timeout=60)
             app2.click("launch-recover-button")
             app2.driver.wait_for("recover-back-button", timeout=30)
-            app2.driver.wait_for("recover-box-item-0", timeout=30)
+            wait_for_row(app2.driver, RECOVER_BOX_ITEM, 0, timeout=30)
             labels = _recover_box_labels(app2)
             assert len(labels) == 1, (
                 "nest_recovery must offer the successor alone — this device's "

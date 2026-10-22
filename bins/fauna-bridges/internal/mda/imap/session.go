@@ -369,6 +369,10 @@ func (s *Session) Login(username, password string) error {
 	// resolution, wrapped-blob fetch, AEAD unwrap, and audit event are
 	// byte-for-byte identical to AUTHENTICATE PLAIN.
 	if err := s.authenticatePLAIN(auth.BuildPlainPayload("", username, password)); err != nil {
+		if err == errAuthUnavailable {
+			// A busy credential-KDF gate: `NO [UNAVAILABLE]`, not a verdict.
+			return err
+		}
 		// authenticatePLAIN already fired the result=fail audit event
 		// and collapsed every failure into the opaque errAuthFailed.
 		// Map it to a tagged NO so the MUA sees `NO Authentication

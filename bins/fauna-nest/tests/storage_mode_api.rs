@@ -73,7 +73,6 @@ async fn harness_with_domain(domain: Option<String>) -> Harness {
         submission: None,
         acme: None,
         email: None,
-        update: Default::default(),
     });
 
     let nest_identity = Arc::new(fauna_nest::nest_identity::NestIdentity::from_seed(

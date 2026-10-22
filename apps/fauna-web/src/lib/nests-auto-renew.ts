@@ -6,8 +6,8 @@
 // nest whose PROVEN identity is blessed, each due grant by its own mint-time
 // length, and degrades silently to renewing less. This module only schedules.
 
-import { linkedNestsMachineWithTrust } from '$lib/rpc';
-import { autoRenewCheckSecs, ensureWasm } from '$lib/wasm';
+import { linkedNestsMachineWithTrust } from '#lib/rpc';
+import { autoRenewCheckSecs, ensureWasm } from '#lib/wasm';
 
 /** One pass: a fresh trust-enabled machine, `AutoRenew` dispatched. Best-effort
  *  by design — a failure means renewing less this hour, never an error surface

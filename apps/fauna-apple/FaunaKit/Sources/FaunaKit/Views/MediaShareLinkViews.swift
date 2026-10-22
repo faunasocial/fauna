@@ -95,6 +95,14 @@ private struct ShareLinkCreateModal: View {
                 .font(.caption)
                 .fixedSize(horizontal: false, vertical: true)
 
+            // A sealed file's link carries its key: the notice exists only
+            // then, off the shared snapshot's bit (absent on a public file).
+            if create.keyInFragment {
+                automationText(Ids.shareLinkKeyNotice, L.shareLink.keyNotice)
+                    .font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             if let revealed {
                 automationText(Ids.shareLinkUrl, revealed)
                     .font(.callout.monospaced())

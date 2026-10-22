@@ -285,6 +285,23 @@ def upload_count(app, filename: str) -> int:
     return sum(1 for line in text.splitlines() if "file uploaded" in line and logged in line)
 
 
+def engine_restart_count(app, set_name: str) -> int:
+    """How many times this seat's agent has restarted ``set_name``'s engine —
+    ``engine_driver.rs``'s ``"…; restarting engine"`` line, which names the set
+    REDACTED (:func:`log_folder_name`), so matching the plaintext name never
+    fires. **Counted, never merely matched:** binding the set already produces
+    one restart (unbound → keyed), so a barrier waits for the count to rise past
+    a baseline taken after the bind."""
+    logged = log_folder_name(set_name)
+    try:
+        text = app.driver.app_stderr_text()
+    except Exception:
+        return 0
+    return sum(
+        1 for line in text.splitlines() if "restarting engine" in line and logged in line
+    )
+
+
 def await_agent_upload(
     app, filename: str, *, seat: str, window: float = SYNC_WINDOW_SECS
 ) -> None:

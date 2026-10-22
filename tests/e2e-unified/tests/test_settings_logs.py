@@ -18,7 +18,7 @@ import uuid
 import pytest
 
 from helpers import budgets
-from helpers.app_surface import skip_unbuilt
+from helpers.app_surface import declared_absence, skip_unbuilt
 from helpers.waiting import wait_until
 from i18n.strings import S
 
@@ -478,4 +478,72 @@ def test_message_text_never_reaches_the_log(logged_in_app):
     assert sentinel not in printed, (
         "message text reached the app's printed log: "
         f"{[line for line in printed.splitlines() if sentinel in line][:3]!r}"
+    )
+
+
+@pytest.mark.feature("app-log")
+def test_a_relaunch_finds_the_previous_launchs_line_in_the_on_device_file(logged_in_app):
+    """observability.md § 2. Persistence & privacy: the log is also kept in a
+    daily-rolling `fauna.log.<date>` file under the app's data root, so what the
+    app did before a restart is still there afterwards.
+
+    Make the app log a recognisable line (the displayed settings error of
+    :func:`test_displayed_settings_error_is_captured`, logged at the producer),
+    pin the client-local store so the relaunch is the same install coming back
+    (convention 10 otherwise gives every launch a fresh XDG base, and the file
+    with it), relaunch, and read the line back out of the on-device file — the
+    driver's `on_device_log_text()`, never the captured `app.err` stream.
+
+    tui and linux, whose drivers can read the file from the host. The other
+    native apps lift it with their own file readers; web keeps no on-device
+    file (a declared absence on the feature page).
+    """
+    app = logged_in_app
+    if app.driver.is_web():
+        declared_absence(
+            app.driver,
+            capability="an on-device log file (a browser tab keeps no file on the device)",
+            doc="apps/observability.md § 2. Persistence & privacy",
+        )
+    reader = getattr(app.driver, "on_device_log_text", None)
+    if reader is None:
+        skip_unbuilt(
+            app.driver,
+            surface="the driver's on-device log file reader (`on_device_log_text`)",
+            detail="tui and linux read the file from the host today; the other "
+            "native drivers lift a reader beside their `app_log_text`",
+            tracked="docs/features/app-log.md outcome 6",
+        )
+
+    app.linked_nests.navigate()
+    assert app.linked_nests.is_page_visible()
+    app.linked_nests.link("http://127.0.0.1:1")
+    err = app.linked_nests.page_error_text(timeout=15.0)
+    assert err, f"linking an unreachable nest should display an error banner, got {err!r}"
+    needle = err.strip().splitlines()[0][:60]
+
+    # The file writer is non-blocking: wait for the line to reach the disk
+    # before the relaunch, so a miss afterwards is the file's, not the flush's.
+    wait_until(
+        lambda: needle in reader(),
+        budgets.UI_SETTLE_S,
+        diagnose=lambda: (
+            f"the displayed error {needle!r} never reached the on-device log file; "
+            f"file tail: {reader()[-2000:]!r}"
+        ),
+    )
+
+    assert app.driver.preserve_state_across_relaunch(), (
+        "this journey needs the driver to pin its client-local store across the relaunch"
+    )
+    app.driver.hard_reload()
+    app.logs.navigate()
+    assert app.logs.is_page_visible(), (
+        f"the relaunched app's Logs page is not reachable. error: {app.error_text()!r}"
+    )
+
+    text = reader()
+    assert needle in text, (
+        f"after the relaunch the on-device log file no longer holds the previous "
+        f"launch's line {needle!r}; file tail: {text[-2000:]!r}"
     )

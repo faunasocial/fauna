@@ -192,7 +192,13 @@ class TrainedTopicsVM @Inject constructor(
     /** Commit the name-input: a rename when a row retargeted it, else a create. */
     fun submitTopic() {
         val name = _topicName.value.trim()
-        if (name.isEmpty() || _busy.value) return
+        if (_busy.value) return
+        if (name.isEmpty()) {
+            // Refused here, before the round trip, with the shared sentence —
+            // never a silent no-op (linux `submit`, tui).
+            _errorMessage.value = appContext.getString(R.string.personalization_trained_factor_blank_name)
+            return
+        }
         val id = renamingId
         _busy.value = true
         viewModelScope.launch {

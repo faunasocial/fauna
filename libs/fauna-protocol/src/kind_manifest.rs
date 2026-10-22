@@ -532,8 +532,8 @@ pub const RESERVED_BRIDGE_IDS: &[&str] = &["nostr", "bluesky", "activitypub", "e
 
 /// The members of `bridge.capabilities` a manifest MUST declare: the
 /// `ThreadCapabilities` record's always-present fields
-/// (`libs/fauna-conversations/src/capabilities.rs`) minus `encryption`, which
-/// the room's class derives. `fauna-conversations` never depends on this
+/// (`libs/fauna-conversations/src/capabilities.rs`) minus `encryption` and
+/// `can_search_room`, which the room's class derives. `fauna-conversations` never depends on this
 /// crate, so the names are listed here and pinned against the record by the
 /// nest's `bridge_capability_members_are_thread_capabilities_minus_encryption`.
 pub const BRIDGE_CAPABILITY_REQUIRED: &[&str] = &[

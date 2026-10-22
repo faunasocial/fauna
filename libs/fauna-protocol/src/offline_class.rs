@@ -301,6 +301,7 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     m.insert("fauna.bridges.set_mail_switches", OnlineOnly);
     m.insert("fauna.bridges.set_mail_enabled", OnlineOnly);
     m.insert("fauna.bridges.set_mail_serving_enabled", OnlineOnly);
+    m.insert("fauna.bridges.set_microsoft_registration", OnlineOnly);
     m.insert("fauna.bridges.set_role_address", OnlineOnly);
     m.insert("fauna.bridges.set_spam_threshold_override", OnlineOnly);
     m.insert("fauna.bridges.set_webdav_enabled", OnlineOnly);
@@ -508,6 +509,9 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     // optimism.
     m.insert("fauna.principals.list", Read);
     m.insert("fauna.principals.ops", Read);
+    // A device custodian's record submission retries from the custodian's
+    // own store, never the generic queue.
+    m.insert("fauna.principals.ops.record", OnlineOnly);
     m.insert("fauna.principals.revoke", OnlineOnly);
     // The events doors' poll (`transport.md` § Push events → *Third-party
     // event doors*): a pure read, issued by a principal, never by an app.
@@ -611,6 +615,7 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     m.insert("fauna.bridges.cancel_import_session", OnlineOnly);
     m.insert("fauna.bridges.finalize_import_session", OnlineOnly);
     m.insert("fauna.bridges.fail_import_session", OnlineOnly);
+    m.insert("fauna.bridges.discard_import_session", OnlineOnly);
     m.insert("fauna.bridges.list_own_mailboxes", Read);
     m.insert("fauna.bridges.start_export_session", OnlineOnly);
     m.insert("fauna.bridges.list_export_sessions", Read);
@@ -859,6 +864,11 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     m.insert("fauna.posts.author.create", OnlineOnly);
     m.insert("fauna.posts.author.delete", OnlineOnly);
 
+    // ── register_profile_author_kinds ───────────────────────────────
+    // The oracle's profile door — a principal's call; the custodian signs
+    // with a key only the nest holds, so nothing queues offline.
+    m.insert("fauna.profile.author.set", OnlineOnly);
+
     // ── register_atproto_oracle_kinds ──────────────────────────────
     // The oracle's ATProto door — a principal asks for a service token it is
     // about to present; the answer is the point of the call.
@@ -1032,6 +1042,10 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     // fresh call would get, only later. Nothing about it is judged against
     // live nest state the way the keying acts are.
     m.insert("fauna.conversations.room.search", Read);
+    // Its relayed twin, for a room homed on another nest — a relay, so it
+    // needs the live nest↔nest leg; this nest holds no corpus for a room it
+    // does not home (the `room.list_roster_remote` grading).
+    m.insert("fauna.conversations.room.search_remote", OnlineOnly);
 
     // ── register_delegation_kinds ───────────────────────────────────
     // Delegation liveness — a heartbeat has no meaning to replay after the fact.
@@ -1076,6 +1090,11 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     m.insert("fauna.moderation.abuse_report.withdraw", OfflineQueued);
     m.insert("fauna.moderation.abuse_report.queue", Read);
     m.insert("fauna.moderation.abuse_report.resolve", OnlineOnly);
+    // The admin's block of a reported item: a lever on another user's content
+    // that resolves a report and rings its reporter — online-only, like
+    // `legal_takedown` and `abuse_report.resolve`. `.list` is a read.
+    m.insert("fauna.moderation.admin_block", OnlineOnly);
+    m.insert("fauna.moderation.admin_block.list", Read);
 
     // ── register_family_kinds ───────────────────────────────────────
     // Family/guardian plane. Custody transfer and graduation are irreversible
@@ -1210,7 +1229,7 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     m.insert("fauna.folders.public.fetch", Read);
     m.insert("fauna.folders.members.list", Read);
     m.insert("fauna.folders.members.list_actors", Read);
-    // The cross-nest relay twin (`federation.md` § Cross-nest…, *The cross-nest
+    // The cross-nest relay twin (`federation-shared-folders.md` § Cross-nest…, *The cross-nest
     // writer roster read*) — a pure read like the door it relays to.
     m.insert("fauna.folders.members.list_actors_remote", Read);
     m.insert("fauna.folders.members.set_access", OfflineSafe);
@@ -1378,6 +1397,7 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     m.insert("fauna.admin.tiers.list", Read);
     m.insert("fauna.admin.tiers.create", OnlineOnly);
     m.insert("fauna.admin.tiers.update", OnlineOnly);
+    m.insert("fauna.admin.tiers.delete", OnlineOnly);
     m.insert("fauna.admin.membership_tiers.list", Read);
     m.insert("fauna.admin.membership_tiers.set", OnlineOnly);
     m.insert("fauna.admin.membership_tiers.clear", OnlineOnly);
@@ -1419,6 +1439,12 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     // withdrew.
     m.insert("fauna.admin.region.get", Read);
     m.insert("fauna.admin.region.set", OnlineOnly);
+    // The nest's published rules: an ordinary admin read, and a `set` that is
+    // `OnlineOnly` like the region's — a document replayed out of an offline
+    // queue would re-publish rules the admin has since changed, and announce
+    // them to every member.
+    m.insert("fauna.admin.content_policy.get", Read);
+    m.insert("fauna.admin.content_policy.set", OnlineOnly);
     // The web-app origin choice: an ordinary admin read, and a `set` that is
     // `OnlineOnly` like the region's — a choice replayed out of an offline queue
     // would re-assert what `/app` answers after the admin had moved it back.
@@ -1499,6 +1525,9 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     // local answer to fall back on: this nest indexes no post of a room it
     // does not home, so its own reception-pass map resolves nothing.
     m.insert("fauna.posts.room_labels_remote", OnlineOnly);
+    // The deep-link relay of `get` to a post's home nest — a relay, so it
+    // needs the live nest↔nest leg; this nest holds no copy to fall back on.
+    m.insert("fauna.posts.get_remote", OnlineOnly);
     m.insert("fauna.posts.create", OfflineSafe);
     m.insert("fauna.posts.delete", OfflineSafe);
     m.insert("fauna.posts.interact", OfflineQueued);
@@ -1508,6 +1537,9 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     // under an `INSERT OR REPLACE` — offline-safe on the registry's own note.
     m.insert("fauna.profile.get", Read);
     m.insert("fauna.profile.set", OfflineSafe);
+    // The relay of `get` to an actor's home nest — a relay, so it needs the
+    // live nest↔nest leg; this nest stores no remote profile to fall back on.
+    m.insert("fauna.profile.get_remote", OnlineOnly);
 
     // ── register_notifications_kinds ────────────────────────────────
     // `mark_read` is an idempotent upsert that converges on replay — the
@@ -1560,6 +1592,7 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
         m.insert("fauna.feed.get", Read);
         m.insert("fauna.feed.posts", Read);
         m.insert("fauna.feed.local.posts", Read);
+        m.insert("fauna.feed.author.posts", Read);
         m.insert("fauna.feed.trending.posts", Read);
         m.insert("fauna.feed.contributors.list", Read);
         m.insert("fauna.feed.create", OfflineQueued);

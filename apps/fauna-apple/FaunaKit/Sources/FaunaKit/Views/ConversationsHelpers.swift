@@ -29,6 +29,14 @@ public enum ConversationsUI {
         sourceGlyphEmoji(glyph: glyph)
     }
 
+    /// The `protocol-icon` text: the declared glyph, with the bridge's declared
+    /// label after it on a bridged room (`"$glyph $label"`, android's shape).
+    public static func protocolIconText(_ glyph: SourceGlyph, bridge: BridgeIdentitySnapshot?) -> String {
+        let emoji = glyphEmoji(glyph)
+        guard let bridge else { return emoji }
+        return "\(emoji) \(bridge.label)"
+    }
+
     /// User-typeable / canonical string for a typed address — the single
     /// `user@host`-style identifier the spec calls for (no split handle/node).
     /// Delegates to the shared-Rust `fauna_conversations::TypedAddress::display()`
@@ -85,8 +93,17 @@ public struct ConversationRowModel: Identifiable, Equatable {
     public let unreadCount: UInt32
     public let participantCount: UInt32
     public let lastActivityMs: Int64
+    /// The bridge carrying a bridged thread — `nil` on every other rail. Its
+    /// declared label rides beside the glyph and its id is `protocol-icon`'s
+    /// `bridge` attribute (`bridged-adapter.md` § The `Bridged` adapter).
+    public let bridge: BridgeIdentitySnapshot?
+    /// The family gate's marker (`held | blocked`) — `nil` off a supervised
+    /// account's held/blocked bridged room.
+    public let guardianState: GuardianState?
 
     public init(_ t: ThreadSummary) {
+        self.bridge = t.bridge
+        self.guardianState = t.guardianState
         self.id = t.threadId
         // Display label off the shared `thread_label_display` — a blank label
         // becomes the localized `(no subject)`, a real label rides verbatim. This

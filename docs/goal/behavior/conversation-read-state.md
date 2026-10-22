@@ -61,7 +61,7 @@ The nest already holds a per-message read flag for every mail the account has: I
 
 ## A rail that ingests later
 
-`Rail::Bridged` exists as a name (the Bluesky, ActivityPub and Nostr rails were deleted 2026-10-02 and 2026-10-03 in favour of it, [`../ui/conversations.md`](../ui/conversations.md) § Where logic lives → *The `Bridged` adapter*); no app ingests on it into the manager today. A bridged room's read state is the native carrier, keyed by room id, as that section rules. The rule for the day one does: if the upstream owns a read state of its own (as a mailbox does), that state is the marker and the app reads and writes it — the mail pattern; if it does not, and the rail has a per-thread total order every device sees identically, it takes a keyspace prefix in `fauna.state.read-marker` — the native pattern. A rail with neither gets a design pass, not a third carrier improvised in an app.
+`Rail::Bridged` exists as a name (the Bluesky, ActivityPub and Nostr rails were deleted 2026-10-02 and 2026-10-03 in favour of it, [`bridged-adapter.md`](bridged-adapter.md) § Where logic lives → *The `Bridged` adapter*); no app ingests on it into the manager today. A bridged room's read state is the native carrier, keyed by room id, as that section rules. The rule for the day one does: if the upstream owns a read state of its own (as a mailbox does), that state is the marker and the app reads and writes it — the mail pattern; if it does not, and the rail has a per-thread total order every device sees identically, it takes a keyspace prefix in `fauna.state.read-marker` — the native pattern. A rail with neither gets a design pass, not a third carrier improvised in an app.
 
 ## How the carriers meet the in-memory set
 

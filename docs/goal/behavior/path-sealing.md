@@ -114,7 +114,7 @@ changes-list / files / media / snapshot-browse / snapshot-diff / conflict planes
 conflict planes with them); `SyncEngine::record_change` seals **every** recorded path through one
 funnel (`seal_recorded_path` — M2 content-key generation for a bound set, the owner's
 `convergent_chunk_root()` otherwise, convergent nonce salted by `path_hash`, and FS-BIND-5
-fail-closed inherited from `content_seal_root`), joined by the `fauna-sync` daemon's data-plane
+fail-closed inherited from `content_seal_root`), joined by the (since removed) `fauna-sync` daemon's data-plane
 notify and the Media upload gesture, which seals where it already holds the `BackupKey`. A tier_3
 conformance test drives a real client seal through `fauna.sync.changes.record` into
 `sync_changes.path_sealed` and back out of `fauna.sync.changes.list` byte-for-byte, opening under
@@ -130,7 +130,7 @@ an app can look healthy on uploads while every delete and restore fails. Without
 flip the nest **refuses** it outright (`fauna.sync.path_seal_required`). Injecting: **tui**
 (`apps/fauna-tui/src/media/mod.rs`), **linux** (`apps/fauna-linux/src/views/media/mod.rs`),
 **android** (`ui/viewmodel/MediaVM.kt::ensureMachine`, landed 2026-08-02), **web**
-(the `setOwnerBackupKey` wasm export + injection inside `$lib/wasm-media::createMediaMachine`,
+(the `setOwnerBackupKey` wasm export + injection inside `#lib/wasm-media::createMediaMachine`,
 landed 2026-08-02), **apple** (`MediaMachineVM.configure()`, landed 2026-08-02 — detailed below),
 and **windows** (`MediaPage.xaml.cs::Page_Loaded`, landed 2026-08-03 — detailed below), closing
 the cross-app injection track. The client half is pinned by
@@ -300,7 +300,7 @@ paths — called from `DevicesSection.svelte`/`FoldersSection.svelte` right befo
 `file_count` and refuses rather than restoring a subset. `file_count` is a trustworthy witness
 because the nest stamps it as `files.len()` at capture and serves the rows unpaginated, so any
 shortfall was introduced client-side by the omission. Every restore entry point routes through it
-(`fauna-sync cmd_restore`, the FFI full restore, the FFI per-file download) — **a future seam that
+(the engine's `restore_snapshot_into_dir`, the FFI full restore, the FFI per-file download; the `fauna-sync` daemon's `cmd_restore`, the original third, left with the daemon 2026-10-02) — **a future seam that
 forgets its custody gets a loud error naming the missing wiring, instead of an empty directory and
 exit 0.** This is the shape to prefer whenever a degrade is correct for one audience and data loss
 for another: keep the degrade on the shared read, and put the strictness on the call site that knows
@@ -324,8 +324,8 @@ loudly. Mutation-graded three ways: reverting the call site to the pre-fix keyle
 neutering the sink's own comparison fails the negative arm. **It needs no Mac** —
 `FfiSyncEngineHost` is plain async Rust, so the mechanism is a merge-gate-able barrier on every dev
 machine; what is genuinely mac-only above it is `MacRestoreView`'s three lines of SwiftUI glue and an
-`NSOpenPanel` folder choice. `fauna-sync cmd_restore` has had no end-to-end pin of its own since
-2026-10-01 (its e2e left ahead of the daemon); this file's multi-chunk arm took over the reassembly witness.
+`NSOpenPanel` folder choice. The `fauna-sync` daemon's `cmd_restore` had no end-to-end pin of its own from
+2026-10-01 and the daemon itself left 2026-10-02; this file's multi-chunk arm took over the reassembly witness.
 
 **`fauna.media.list` also gained the additive negotiated v2 cursor** — keyset ordering that outlives
 the plaintext scrub, requested by `cursor_version` and echoed in the reply; the plaintext
@@ -366,9 +366,9 @@ found by the post-flip verification sweep, where every `conformance_file_provide
 enumeration came back empty ("not tracked") because the flip landed with the display renders
 converted but this functional twin still plaintext-keyed, structurally breaking device-to-device
 catch-up convergence. The `fauna-sync` daemon's own catch-up (`apply_caught_up_changes`, a
-separate `changes.list` consumer — found independently by the two-seat local test) reconstitutes
+separate `changes.list` consumer — found independently by the two-seat local test) reconstituted
 the same way via `SyncWsClient::open_recorded_path`, the read mirror of its owner-root seal
-sites. A wrong-key hydration host now enumerates nothing (the Omit degrade), where during expand
+sites (the daemon and that consumer were removed 2026-10-02). A wrong-key hydration host now enumerates nothing (the Omit degrade), where during expand
 it could still list from plaintext.
 
 **Apply-path degrade ruling (2026-08-02).** The listing degrade — *omit, re-enter on
@@ -389,7 +389,7 @@ their anchor; `SyncDb::migrate` rewinds the `seq` anchor to 0 exactly once (meta
 re-listing the set — apply is convergent, so the cost is one catch-up pass and no data can be
 destroyed by it.
 
-**The transient arm is NARROWED to "no root here yet" (2026-09-20).** The ruling above classes *every* seal that does not open as transient, and that overshoots in the one direction the ruling itself warns about. "Cannot open **yet**" is the key material lagging its changes — genuinely transient, genuinely worth freezing the batch for. But a `path_sealed` blob that is not a decodable envelope, a `path_hash` that is not 32 hex bytes, and plaintext that is not UTF-8 are each decidable **locally, from the row's own bytes**, and no key that ever arrives changes the answer. Holding the anchor below one of those held it there **forever** — and because the nest cannot check a seal (it rests none of this plaintext), ONE member's malformed record froze **every other member's** catch-up on a shared set. So the apply path is three-classed, not two: a seal no root here opens **yet** keeps the transient stop-with-the-anchor-unmoved arm; a seal that can never open **anywhere** joins the permanent arm — recorded as a `catchup_failed` conflict row and skipped, with the anchor advancing past it, exactly as [`file-sync.md`](file-sync.md) § *A failed change must not strand the device* already rules for a permanently un-appliable change (and reported to the nest under the row's own label pair, rendering name-less — [`conflicts.md`](conflicts.md) § Skipped catch-up changes reach the review list); and a record with neither plaintext nor seal keeps its own permanent skip, unchanged. Only a locally-decidable criterion may enter the permanent arm: "a generation this holder will never hold" is **not** one — it is indistinguishable from "not synced yet" at a failed open — so it stays transient.
+**The transient arm is NARROWED to "no root here yet" (2026-09-20).** The ruling above classes *every* seal that does not open as transient, and that overshoots in the one direction the ruling itself warns about. "Cannot open **yet**" is the key material lagging its changes — genuinely transient, genuinely worth freezing the batch for. But a `path_sealed` blob that is not a decodable envelope, a `path_hash` that is not 32 hex bytes, and plaintext that is not UTF-8 are each decidable **locally, from the row's own bytes**, and no key that ever arrives changes the answer. Holding the anchor below one of those held it there **forever** — and because the nest cannot check a seal (it rests none of this plaintext), ONE member's malformed record froze **every other member's** catch-up on a shared set. So the apply path is three-classed, not two: a seal no root here opens **yet** keeps the transient stop-with-the-anchor-unmoved arm; a seal that can never open **anywhere** joins the permanent arm — recorded as a `catchup_failed` conflict row and skipped, with the anchor advancing past it, exactly as [`file-sync.md`](file-sync.md) § *A failed change must not strand the device* already rules for a permanently un-appliable change (and reported to the nest under the row's own label pair, rendering name-less — [`conflicts.md`](conflicts.md) § Skipped catch-up changes reach the review list); and a record with neither plaintext nor seal keeps its own permanent skip, unchanged. Only a locally-decidable criterion may enter the permanent arm: "a generation this holder will never hold" is **not** one — it is indistinguishable from "not synced yet" at a failed open — so it stays transient. How long that transient hold may last, and how a row passed after it is re-read once a key arrives, is [`file-sync.md`](file-sync.md) § *A failed change must not strand the device*'s KEY-PENDING class (2026-10-16).
 
 **An opened path is bound to its own row (2026-09-20).** The AEAD binds the **salt** — the wire's `path_hash` — and says nothing about what plaintext the sealer put inside it, so a seal that opens proves only *"someone holding this set's label key sealed something under this hash"*. A writer holding that key could therefore seal path P under path Q's hash: every device would write P while the nest's per-path heads, conflicts and history all recorded Q. The apply path therefore requires `path_hash(opened) == path_hash` before a row's `path` is filled at all, and a mismatch is **refused** — permanent, recorded, never applied. **The render path binds too (2026-09-27).** The earlier exemption — *a read surface displays a label, it does not act on one* — was false for one surface: the WebDAV MDA lists through the same renderer and then **acts** on the rendered name (GET serves the first row matching it, DELETE and bulk delete tombstone it, COPY/MOVE resolve their source by it), so an unbound P would have it serve Q's bytes or tombstone the owner's real P. The binding therefore lives in the one render funnel, `fauna_core::label_custody::render_path`, sharing `path_bound_to_salt` with `open_change_path`: a seal that opens to a plaintext not hashing to the row's `path_hash` is treated exactly as a seal that did not open — the row falls to its resting plaintext (which the nest hashed itself on ingest, so it is bound by construction) or takes the ordinary `Omit` degrade. It is not a refusal: a render has no anchor to account for. **Surface audit** — every production caller of `render_path`: the WebDAV MDA listing (`webdav_render_paths`) *acts*; snapshot browse/diff (`fauna-client-snapshots`), the conflict list (`fauna-devices-machine`), the media list (`fauna-media-machine`) and the file-corpus enumeration (`fauna-client-conversations`) show the rendered name to a user, and any action a user then takes from one (restore a snapshot entry, choose a conflict's winner) starts from a name the same funnel produced — so every one of them, acting or not, now receives only bound names, and no surface keeps a private exemption to re-audit when a new action is added.
 
@@ -666,7 +666,7 @@ both through the funnel below. `fauna.files.versions.{get,undelete}` address a v
 `path_hash` alone and never named a set.
 
 **The log + error-string scrub is BUILT (S7, 2026-07-31).** Every nest-side and daemon-side
-(`bins/fauna-nest`, `bins/fauna-sync`) log line and error string that interpolated a user-chosen
+(`bins/fauna-nest`, and the legacy `bins/fauna-sync` daemon until its removal 2026-10-02) log line and error string that interpolated a user-chosen
 path, folder name, or import-source descriptor now carries only a short hash-prefix redaction
 (`fauna_core::log_redact::{log_path,log_folder_name,log_hash_prefix}`) — a reserved (`__`) set
 name stays literal (a routing constant, not user data), every other name/path hashes. Three
@@ -683,7 +683,7 @@ conformance test drives a real `web_files` rejection (a website set's `fauna.syn
 (`bins/fauna-nest/tests/conformance_log_redaction.rs`). **`libs/fauna-sync-engine` — the daemon's own engine
 crate, shared by both `bins/fauna-nest` and the sync agent — sat outside S7's original
 inventory** (its own T6 slice scrubbed only `bins/fauna-nest/src` and the daemon's `src`) until
-finding brought its `tracing` field/format-string call sites into line the same way. The
+finding brought its `tracing` field/format-string call sites into line the same way. The post-pass sites (the two "left unsigned" warnings, the re-record and pre-bind re-seal start passes, the deposit-adoption pass and the apple host's settle warning) are redacted too, under one convention: every `always_resident.rs` helper takes the plaintext folder name and redacts inside, so no caller pre-hashes. The crate's regression pin scans every log-macro body and every error-constructor body (`anyhow!`, `bail!`, `ensure!`, `context`, `with_context`) for an unwrapped name/path-shaped value, whatever its spelling, with a named `file:shape` allowlist for the cleared classes (held addresses, internal storage roots). The sync agent's every `tracing` path field (`bridge.rs`, `pipe_server.rs`, `cfapi_host.rs`, `fuse_host.rs`, `engine_driver.rs` — user-chosen bound-root paths and mount points alike) is scrubbed the same way, pinned by a source scan over every `src/*.rs` of the agent (`bins/fauna-sync-agent/src/log_redaction_test.rs`, `no_agent_log_macro_carries_a_bare_user_path`) whose named allowlist clears only the agent's own internal roots (IPC socket, custodian store, TLS trust directory); the agent's set-name `folder` log fields (the bound set's user-chosen name) go through `log_folder_name` the same way, pinned by the same scan, and a field carrying only the set's opaque ref (`FolderRef` wire form, the engine key) is logged as `folder_ref`, never as a name. The agent's error strings are held the same way: every message an error constructor builds (an `anyhow!`/`bail!`/`ensure!` body, and a `format!` under `Err`, `map_err`, `ok_or_else`, `ok_or`, `context` or `with_context` — the IPC handlers' `Err(String)` replies, which the agent itself logs in places and the host apps log on a failed request) wraps a set name in `log_folder_name` and a bound-root or folder-relative path in `log_path`, pinned by `no_agent_error_string_carries_a_bare_name_or_path` in the same file, whose named allowlist clears only the agent's own config file and named pipe; both crates' pins share one scanner (`fauna_core::log_redact_scan`, behind `test-helpers`). One carve-out: the restore's per-set refusal `detail` (`FolderRehome::Unsigned.reason`, which names the folder's display name) is owner-facing report text. It travels only over the device-local agent IPC to the owner's own app, the report lines built from it carry the refusal code and remedy only, and nothing logs it. The
 custodian/account stores' remaining `.display()` sites (internal storage roots keyed by `actor_id_hex` or a fixed
 subdirectory name, never a user-chosen name) and their `{path}` error strings (a set-qualified held
 address: reserved name plus hashes) are **confirmed out of scope**: no nest-side production code
@@ -787,13 +787,13 @@ The resolver became transport-generic over `RpcRequester` in the cross-nest fore
 
 **What web wired is the whole sweep, not two calls** (`fauna_client_folders::seal_backfill`): D1,
 then the roster, then D3 per **owned** set (`role == "member"` skipped), every step
-independently best-effort. That sequencing had been hand-written once per client — `bins/fauna-sync`,
+independently best-effort. That sequencing had been hand-written once per client — the legacy `bins/fauna-sync` daemon (since removed),
 windows' `SealBackfillSweep.cs`, apple's `FaunaClient.runSealBackfill`, android's
 `MailEnableGlueVM.runSealBackfill` — so rather than adding a fifth copy in TypeScript it moved into
 shared Rust, where `run_sweep(transport, keypair)` builds both clients over the one
 `resolver_backed_custody` constructor. Web calls it at the same post-auth gate as the critical-alert
-sweep (`runSealBackfillSweep`, `+layout.svelte`); `bins/fauna-sync` was converted onto it in the same
-change, which is what proves the sweep against both transports. **A UniFFI face landed 2026-08-13**
+sweep (`runSealBackfillSweep`, `+layout.svelte`); the daemon (removed 2026-10-02) was converted onto it in the same
+change, which proved the sweep against both transports. **A UniFFI face landed 2026-08-13**
 (`FfiFoldersClient::run_seal_backfill_sweep`, wired through the same `resolver_backed_custody`/
 `run_sweep` constructor, degrading to keyless `sweep_with` where the crate's `folders-author`
 feature is off) — **android adopted it the same day**, `MailEnableGlueVM.runSealBackfill` now calling
@@ -823,9 +823,9 @@ label) — and plus `import_sessions.source_descriptor`, whose plaintext lock in
 `bins/fauna-nest/tests/conformance_at_rest_byte_scan.rs`: the never-rests scan through the next
 boot's scrub + `VACUUM` (the pre-flip-image reconcile boot retired with the flip at the
 2026-09-24 genesis of the nest schema), and the self-backup rotation proof; and
-`bins/fauna-sync/tests/at_rest_cache_artifacts.rs` pins the daemon's cache-dir artifact state
+a test in the legacy daemon pinned its cache-dir artifact state
 after the real apply flow — every resting entry flat and hash-shaped (at artifact
-level).
+level) — until the daemon's removal, 2026-10-02.
 **The one surface the scrub cannot reach is RULED (2026-08-01): the
 self-backup window is ratified and bounded, not invalidated.** The nest's hourly unencrypted
 hot-copies of `nest.db` (`backup-restore.md` § 11 owns the mechanism and its retention) keep
@@ -883,10 +883,11 @@ byte-scans the resting DB. Only the two machine-authored synthetic labels
 device row renders with an **empty** label, identified by `device_id` alone — flip-completeness,
 exactly as this section's lead-in says, and the reason the ratified direction below is about giving
 that row an identity rather than plugging a leak. Two narrower facts worth keeping: `folder_members`
-cannot hold a foreign device through any *user* door (both writers verify the device's owner —
-`add_folder_member_for_user`, `set_folder_place_flags`), so only the Admin door
-`fauna.admin.folders.add_member` can seat one, which makes the cross-actor case reachable in
-practice only on `fauna.folders.devices` (via a shared set's multi-writer `sync_changes` rows); and
+cannot hold a device its folder's owner has not registered through any door (both seat doors,
+`fauna.folders.places.set` and the Admin `fauna.admin.folders.add_member`, write through
+`set_folder_place_flags`, which verifies the owner's registration — `devices.md` § Removing a
+Device, step 4), which makes the cross-actor case reachable in practice only on
+`fauna.folders.devices` (via a shared set's multi-writer `sync_changes` rows); and
 neither reply carries a sealed sibling, because the seal is under the *registering* owner's root and
 a foreign reader could not open one. The ratified direction for those two is *"cross-actor member
 listings render actor identity, not the device label"* — which needs an actor-identity carrier
@@ -1070,7 +1071,7 @@ tightening set got its column in S1. The **UserConfig `backup` section** that th
 once called the real retention exposure was ruled a **dark rail** in the same pass and deliberately
 not sealed; `../architecture/encryption-at-rest.md` § Carve-outs carries the corrected statement and
 `backup-restore.md` § 8 the consequence for auto-pruning.
-**Superseded for the share half (2026-10-01):** the passage below, written 2026-07-31, predates the share-link build — `share_tokens.filename` is no longer a dark rail with no producer or a declared (vacuous) gap: the seal writer was built 2026-09-28 and the seal made required 2026-10-01, the plaintext column left at schema 103, and the sealed name is the only form (owner: [`share-links.md`](share-links.md) § The filename rests sealed). Read every "share" clause below as history; the `import_sessions.source_descriptor` half stands as written.
+**Superseded for the share half (2026-10-01):** the passage below, written 2026-07-31, predates the share-link build — `share_tokens.filename` is no longer a dark rail with no producer or a declared (vacuous) gap: the seal writer was built 2026-09-28 and the seal made required 2026-10-01, the plaintext column left at schema 103, and the sealed name is the only form (owner: [`share-links.md`](share-links.md) § The filename rests sealed). Read every "share" clause below as history; the `import_sessions.source_descriptor` half stands as written save its "vacuously": that producer has since landed (`fauna.bridges.start_import_session`, sealing through `label_custody::seal_import_source` — owner [`mailbox-migration.md`](mailbox-migration.md) § Progress lives nest-side), and a keyless client's row rests sealless, the named keyless-writer gap the passage below foresaw.
 The remaining two aux fields — `share_tokens.filename` and `import_sessions.source_descriptor` —
 are **DISPOSITIONED BLOCKED-DARK (2026-07-31): deliberately not built, and the S6 sealing-writer
 slice set is complete without them.** Their sealed columns exist from S1; both *surfaces* are dark

@@ -674,6 +674,7 @@ fn hold(verified: VerifiedArtifact, last_checked_at: Option<u64>, relay_stale: b
                 authority_name: authority,
                 status,
                 rules: Vec::new(),
+                inert_rules: Vec::new(),
             };
             (state, rule_set, Vec::new())
         }
@@ -689,10 +690,11 @@ fn hold(verified: VerifiedArtifact, last_checked_at: Option<u64>, relay_stale: b
 }
 
 fn prepare_scorers(document: &ContentPolicyDocument, region: &RegionCode) -> Vec<PreparedScorer> {
-    scorers_in_use(document, region)
+    let publisher = fauna_core::content_policy::Publisher::Region(region.clone());
+    scorers_in_use(document, &publisher)
         .into_iter()
         .filter_map(|scorer| {
-            PreparedScorer::prepare(region, scorer)
+            PreparedScorer::prepare(&publisher, scorer)
                 .map_err(|e| tracing::warn!("region: a bundled scorer does not prepare: {e:#}"))
                 .ok()
         })

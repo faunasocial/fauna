@@ -25,6 +25,7 @@ import time
 import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
+from helpers.app_surface import app_name, skip_unbuilt
 from helpers.copy_button import read_clipboard_or_copied
 from helpers.mail_aliases import default_alias_domain
 from helpers.mail_client_ui import plain_message, route_inbound_mail_to_app
@@ -383,3 +384,92 @@ def test_row_shows_hit_count_and_last_hit_after_real_inbound(
             row = _row(api, "exact", local)
             if row is not None:
                 api.call("fauna.bridges.delete_account_alias", {"alias_id": row["alias_id"]})
+
+
+#: The apps whose rows open the per-address history (tui leads; the six follow
+#: from their per-app lifts).
+_AUDIT_BUILT_APPS = {"tui", "linux", "web", "android"}
+
+
+@pytest.mark.feature("mail-aliases")
+def test_an_address_shows_where_its_mail_came_from(
+    logged_in_app, mail_bridge_mta, nest_instance, test_user
+):
+    """Outcome 15: an address's history lists each message that arrived on it —
+    the address it came to, the sending domain and when — and an address
+    nothing has arrived on says so. One real inbound delivery writes the hit
+    (only the nest's recipient resolver ever does); the nest's own
+    `list_account_alias_hits` is the ground truth the page must match."""
+    app = logged_in_app
+    if app_name(app.driver) not in _AUDIT_BUILT_APPS:
+        skip_unbuilt(
+            app.driver,
+            surface="mail-aliases-audit-item",
+            detail="the row's show-audit disclosure is still inert on this app",
+            tracked="docs/goal/behavior/mail-aliases.md § Still deferred (the Show audit disclosure)",
+        )
+    local = "audit" + secrets.token_hex(3)
+    quiet = "quiet" + secrets.token_hex(3)
+    addr = route_inbound_mail_to_app(app, mail_bridge_mta, nest_instance, test_user, local)
+    domain = addr.split("@", 1)[1]
+    with _user_client(nest_instance, test_user) as api:
+        try:
+            api.call(
+                "fauna.bridges.create_account_alias",
+                {"kind": "exact", "local_domain": domain, "pattern": quiet, "controls": {"label": ""}},
+            )
+            nonce = f"aliasaudit{secrets.token_hex(4)}"
+            deadline = time.monotonic() + 40.0
+            with _connect_smtp_starttls(mail_bridge_mta.mx_port, mail_bridge_mta.domain, deadline) as conn:
+                conn.cmd("MAIL FROM:<sender@external.test>", "250", deadline)
+                conn.cmd(f"RCPT TO:<{addr}>", "250", deadline)
+                conn.cmd("DATA", "354", deadline)
+                conn.send_raw(plain_message("sender@external.test", addr, nonce))
+                conn.cmd(".", "250", deadline)
+                conn.cmd("QUIT", "221", deadline)
+            row = None
+
+            def hit_logged():
+                nonlocal row
+                row = _row(api, "exact", local)
+                return (row or {}).get("hit_count") == 1
+
+            assert _wait(hit_logged), f"the nest should log one hit on {addr!r}: {row!r}"
+            hits = api.call(
+                "fauna.bridges.list_account_alias_hits",
+                {"alias_id": row["alias_id"], "limit": 100},
+            )["hits"]
+            assert [h["matched_address"] for h in hits] == [addr], hits
+
+            aliases = app.mail_aliases
+            aliases.navigate()
+            assert aliases.is_page_visible()
+            assert aliases.wait_for_pattern(addr), aliases.patterns()
+            assert aliases.wait_for_pattern(f"{quiet}@{domain}"), aliases.patterns()
+            index = aliases.index_of_pattern(addr)
+            assert aliases.audit_closed(index), "the history starts closed"
+
+            aliases.toggle_audit(index)
+            assert _wait(lambda: aliases.audit_count(index) == 1), (
+                f"the history should list the one message; "
+                f"count={aliases.audit_count(index)}; error: {aliases.page_error_text(timeout=1.0)!r}"
+            )
+            assert aliases.audit_text("matched-address", index) == addr
+            assert aliases.audit_text("sender-domain", index) == hits[0]["sender_domain"]
+            assert aliases.audit_text("received-at", index), "the hit must say when it arrived"
+
+            aliases.toggle_audit(index)
+            assert _wait(lambda: aliases.audit_closed(index)), "a second press closes it"
+
+            quiet_index = aliases.index_of_pattern(f"{quiet}@{domain}")
+            aliases.toggle_audit(quiet_index)
+            assert _wait(lambda: aliases.audit_empty_shown(quiet_index)), (
+                "an address nothing has arrived on must say so; "
+                f"error: {aliases.page_error_text(timeout=1.0)!r}"
+            )
+            assert aliases.audit_count(quiet_index) == 0
+        finally:
+            for pattern in (local, quiet):
+                stale = _row(api, "exact", pattern)
+                if stale is not None:
+                    api.call("fauna.bridges.delete_account_alias", {"alias_id": stale["alias_id"]})

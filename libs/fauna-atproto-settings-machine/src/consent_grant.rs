@@ -75,9 +75,10 @@ pub struct ConsentGrantSeams {
     /// card's folder name — `None` refuses a folder read (`Unwired`).
     pub folders: Option<Arc<dyn ConsentFolderSeam>>,
     /// The account's D10 authoring-delegation doors, for a
-    /// `fauna:identity:op:post.author` scope — approving the class provisions
-    /// the delegation when the account has none ([`ensure_post_delegation`]).
-    /// `None` refuses that class (`Unwired`).
+    /// `fauna:identity:op:post.author` or `profile.author` scope — approving
+    /// either class provisions the delegation when the account has none
+    /// ([`ensure_authoring_delegation`]). `None` refuses those classes
+    /// (`Unwired`).
     pub authoring: Option<Arc<dyn crate::nest_api::AtprotoSettingsNestApi>>,
 }
 
@@ -222,7 +223,8 @@ impl ConsentGrantSeams {
     }
 
     /// These seams with the account's D10 delegation doors wired — what lets
-    /// an approve of the `post.author` class provision the delegation.
+    /// an approve of the `post.author` or `profile.author` class provision
+    /// the delegation.
     #[must_use]
     pub fn with_authoring(mut self, api: Arc<dyn crate::nest_api::AtprotoSettingsNestApi>) -> Self {
         self.authoring = Some(api);
@@ -301,8 +303,9 @@ pub enum ProvisionDelegationError {
 /// the nest refuses a cert naming any key but the one it minted. The cert
 /// grants the enumerated authoring set for `DELEGATION_WINDOW_SECS` from
 /// `now` (time-bounded by construction). The one ceremony both the AT
-/// Protocol page's authorize gesture and the consent of the `post.author`
-/// class run; re-running it renews a lapsed delegation in place.
+/// Protocol page's authorize gesture and the consent of the `post.author` and
+/// `profile.author` classes run; re-running it renews a lapsed delegation in
+/// place.
 pub async fn provision_delegation(
     api: &dyn crate::nest_api::AtprotoSettingsNestApi,
     identity: &ActorKeypair,
@@ -331,16 +334,20 @@ pub async fn provision_delegation(
         .map_err(ProvisionDelegationError::Nest)
 }
 
-/// Make sure the account holds a live delegation carrying `Capability::Post`
-/// before a `post.author` grant is minted (`authorization-server.md` § Scope
-/// grammar → *The planes ruled 2026-10-02*: approving the class provisions
-/// the delegation when the account has none). The stored cert is verified
-/// under the account's OWN identity key — a cert it did not sign is no
-/// delegation — and a missing, foreign, Post-less or lapsed one is replaced
-/// by [`provision_delegation`]. Returns whether it provisioned.
-pub async fn ensure_post_delegation(
+/// Make sure the account holds a live delegation carrying every capability
+/// in `required` before a grant of an authoring-key class is minted
+/// (`authorization-server.md` § Scope grammar → *The planes ruled
+/// 2026-10-02* and *The profile arm*: approving `post.author` or
+/// `profile.author` provisions the delegation when the account has none —
+/// [`authoring_capabilities`] names what each class needs). The stored cert
+/// is verified under the account's OWN identity key — a cert it did not sign
+/// is no delegation — and a missing, foreign, lapsed one, or one lacking a
+/// required capability, is replaced by [`provision_delegation`], whose cert
+/// carries both. Returns whether it provisioned.
+pub async fn ensure_authoring_delegation(
     api: &dyn crate::nest_api::AtprotoSettingsNestApi,
     identity: &ActorKeypair,
+    required: &[fauna_core::data::Capability],
     now: fauna_core::data::Timestamp,
 ) -> Result<bool, ProvisionDelegationError> {
     use fauna_client_bridges::atproto_delegation::{
@@ -352,9 +359,7 @@ pub async fn ensure_post_delegation(
         .map_err(ProvisionDelegationError::Nest)?;
     let live = state.cert.as_deref().is_some_and(|cert| {
         parse_delegation_cert(cert, &identity.actor_id()).is_ok_and(|summary| {
-            summary
-                .capabilities
-                .contains(&fauna_core::data::Capability::Post)
+            required.iter().all(|c| summary.capabilities.contains(c))
                 && delegation_liveness(summary.expires_at, now) != DelegationLiveness::Expired
         })
     });
@@ -365,12 +370,25 @@ pub async fn ensure_post_delegation(
     Ok(true)
 }
 
-/// Whether `row` names the `post.author` oracle class.
-fn names_post_author(row: &NestConsentRow) -> bool {
-    row.scopes.iter().any(|s| {
-        fauna_bridge_atproto::fauna_scope::identity_op_qualifier(s)
-            == Some(fauna_core::identity_op::IdentityOpClass::PostAuthor)
-    })
+/// The capabilities the authoring delegation must carry for the oracle
+/// classes `row` names — `Post` for `post.author`, `UpdateProfile` for
+/// `profile.author` (each class's custodian checks the same one per
+/// request); empty when it names neither.
+fn authoring_capabilities(row: &NestConsentRow) -> Vec<fauna_core::data::Capability> {
+    use fauna_core::data::Capability;
+    use fauna_core::identity_op::IdentityOpClass;
+    let mut required = Vec::new();
+    for s in &row.scopes {
+        let cap = match fauna_bridge_atproto::fauna_scope::identity_op_qualifier(s) {
+            Some(IdentityOpClass::PostAuthor) => Capability::Post,
+            Some(IdentityOpClass::ProfileAuthor) => Capability::UpdateProfile,
+            _ => continue,
+        };
+        if !required.contains(&cap) {
+            required.push(cap);
+        }
+    }
+    required
 }
 
 /// Whether answering `row` with an approve mints a consent-time grant — it
@@ -380,9 +398,16 @@ fn names_post_author(row: &NestConsentRow) -> bool {
 /// are the ceiling each user may later grant the plugin, and installing
 /// grants nothing over anyone's data — each user's own bind card mints
 /// theirs (`third-party.md` § The runner contract → *The install-approval
-/// leg*).
+/// leg*). A bind card carries the install section too, flagged `bind`, and
+/// mints like every consent.
 pub fn names_twin(row: &NestConsentRow) -> bool {
-    row.install.is_none() && row.scopes.iter().any(|s| names_twin_scope(s))
+    !is_install_card(row) && row.scopes.iter().any(|s| names_twin_scope(s))
+}
+
+/// An admin's install card: an install section that does not ride a user's
+/// bind card.
+fn is_install_card(row: &NestConsentRow) -> bool {
+    row.install.as_ref().is_some_and(|i| !i.bind)
 }
 
 /// The owner's own name for every folder `rows`' `folder:read` scopes name,
@@ -455,7 +480,7 @@ pub enum ConsentGrantError {
     /// The shared entry point refused (manifest, kinds, keys, store, sign).
     #[error(transparent)]
     Refused(#[from] ExtConsentError),
-    /// The `post.author` class's delegation could not be provisioned.
+    /// An authoring-key class's delegation could not be provisioned.
     #[error(transparent)]
     Delegation(#[from] ProvisionDelegationError),
 }
@@ -514,7 +539,7 @@ where
     // the nest as handed.
     let folder = folder.filter(|_| approved);
     let approved_row;
-    let row = if approved && row.install.is_none() {
+    let row = if approved && !is_install_card(row) {
         approved_row = NestConsentRow {
             scopes: approved_scopes(&row.scopes, folder)
                 .map_err(|e| AnswerError::Grant(e.into()))?,
@@ -539,18 +564,20 @@ where
                 }
             }
         }
-        // The posting class's custodian signs with the account's delegated
-        // authoring sub-key: provision it first, so the grant is never minted
-        // over a class nothing can perform (mint before resolve still holds —
-        // this precedes both).
-        if names_post_author(row) {
+        // The posting and profile classes' custodian signs with the account's
+        // delegated authoring sub-key: provision it first, so the grant is
+        // never minted over a class nothing can perform (mint before resolve
+        // still holds — this precedes both).
+        let required = authoring_capabilities(row);
+        if !required.is_empty() {
             let api = seams
                 .authoring
                 .as_ref()
                 .ok_or(AnswerError::Grant(ConsentGrantError::Unwired))?;
-            ensure_post_delegation(
+            ensure_authoring_delegation(
                 api.as_ref(),
                 &seams.owner_keypair,
+                &required,
                 fauna_core::data::Timestamp::now(),
             )
             .await
@@ -1037,6 +1064,62 @@ mod tests {
         assert!(calls.log().is_empty());
     }
 
+    /// Approving `profile.author` on an account whose delegation carries
+    /// `Post` alone re-provisions it — the profile custodian checks
+    /// `UpdateProfile` — and the new cert carries both; a second consent
+    /// finds it live and provisions nothing.
+    #[tokio::test]
+    async fn approving_profile_author_provisions_an_update_profile_delegation() {
+        use crate::nest_api::{AuthoringDelegationState, FakeAtprotoSettingsNestApi, FakeCall};
+        use fauna_core::data::Capability;
+        use fauna_core::identity_op::IdentityOpClass;
+        let api = Arc::new(FakeAtprotoSettingsNestApi::new());
+        let seams = seams(None).with_authoring(api.clone());
+        let post_only = fauna_client_bridges::atproto_delegation::build_authoring_delegation_cert(
+            &seams.owner_keypair,
+            [0xA5; 32],
+            &[Capability::Post],
+            fauna_core::data::Timestamp::now(),
+            None,
+        )
+        .unwrap();
+        api.set_delegation(AuthoringDelegationState {
+            k_pub: Some([0xA5; 32]),
+            cert: Some(post_only),
+            last_used_at: None,
+        });
+        let calls = Calls::default();
+        let row = consent(&["fauna:identity:op:profile.author"]);
+
+        assert!(approve(Some(&seams), &row, &calls).await.unwrap());
+
+        let provisions = |api: &FakeAtprotoSettingsNestApi| {
+            api.calls()
+                .into_iter()
+                .filter(|c| matches!(c, FakeCall::ProvisionAuthoringDelegation { .. }))
+                .count()
+        };
+        assert_eq!(provisions(&api), 1, "a Post-only delegation is replaced");
+        let summary = fauna_client_bridges::atproto_delegation::parse_delegation_cert(
+            &api.delegation().cert.expect("provisioned"),
+            &seams.owner_keypair.actor_id(),
+        )
+        .expect("signed by the owner");
+        assert!(summary.capabilities.contains(&Capability::UpdateProfile));
+        assert!(summary.capabilities.contains(&Capability::Post));
+        assert_eq!(calls.log(), ["deposit", "resolve"]);
+        assert_eq!(
+            calls.blobs()[0].scope,
+            [fauna_client_capabilities::identity_op_scope(
+                IdentityOpClass::ProfileAuthor
+            )]
+        );
+
+        let again = Calls::default();
+        assert!(approve(Some(&seams), &row, &again).await.unwrap());
+        assert_eq!(provisions(&api), 1);
+    }
+
     /// An oracle class with no custodian prerequisite mints its keyless
     /// grant and provisions nothing.
     #[tokio::test]
@@ -1063,6 +1146,33 @@ mod tests {
         assert!(!names_twin(&row));
         assert!(approve(None, &row, &calls).await.unwrap());
         assert_eq!(calls.log(), ["resolve"]);
+    }
+
+    /// A user's bind card carries the install section too (rebuilt from the
+    /// installed rows), but it is a consent like any other: its approve mints
+    /// the account's grant to the plugin's holder key before it resolves
+    /// (`third-party.md` § The principal model → *Hosted principals*, the
+    /// bind leg). The section's `bind` flag is what tells the two cards apart.
+    #[tokio::test]
+    async fn approving_a_bind_card_mints_its_grant_before_resolving() {
+        let records = consent(&["atproto", "fauna:records:rw:ext.plugins.example.*"]);
+        let mut bind = records.clone();
+        bind.install = Some(crate::NestConsentInstall {
+            execution_form: "wasm".into(),
+            bind: true,
+            ..Default::default()
+        });
+        assert!(
+            names_twin(&bind),
+            "a bind card's records scope plans a grant"
+        );
+
+        let seams = seams(None);
+        let calls = Calls::default();
+        let mut row = consent(&["fauna:identity:op:nostr.sign_event"]);
+        row.install = bind.install.clone();
+        assert!(approve(Some(&seams), &row, &calls).await.unwrap());
+        assert_eq!(calls.log(), ["deposit", "resolve"]);
     }
 
     /// Two folders are two grants, each deposited in order before the

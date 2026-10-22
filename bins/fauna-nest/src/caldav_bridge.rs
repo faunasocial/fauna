@@ -12,6 +12,7 @@
 use std::sync::Arc;
 
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 
 use crate::routes::AppState;
@@ -46,6 +47,12 @@ use crate::well_known_dav::{DavProtocol, well_known_dav_gate};
 /// enablement; the same effective value `FetchConfigReply.caldav_enabled`
 /// feeds the MDA), so a mail-enabled box answers without an explicit CalDAV
 /// toggle — the apex must not `503` while the MDA serves.
-pub async fn wellknown_caldav(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    well_known_dav_gate(&state, DavProtocol::CalDav).await
+///
+/// On a direct-listener box the `301` names the request's own host at the
+/// admin-set DAV port instead of `mail.<primary>` (`well_known_dav`).
+pub async fn wellknown_caldav(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    well_known_dav_gate(&state, DavProtocol::CalDav, &headers).await
 }

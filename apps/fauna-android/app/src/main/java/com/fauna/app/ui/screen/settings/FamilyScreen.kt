@@ -18,6 +18,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.fauna.app.R
 import com.fauna.app.core.HexUtil
+import com.fauna.app.core.RegionPlaneHost
 import com.fauna.app.core.UndenyDecide
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.components.DisabledControlReasonText
@@ -29,7 +30,6 @@ import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.viewmodel.FamilyVM
 import com.fauna.app.ui.viewmodel.FeatureAuthoringState
 import com.fauna.app.ui.viewmodel.FeatureEditorActions
-import com.fauna.ffi.FfiContentPolicy
 import com.fauna.ffi.FfiFamilyApprovalEntry
 import com.fauna.ffi.FfiFamilyContentNotice
 import com.fauna.ffi.FfiFamilyIncomingTransfer
@@ -39,8 +39,6 @@ import com.fauna.ffi.FfiFamilyWardInfo
 import com.fauna.ffi.FfiReachPolicy
 import com.fauna.ffi.FfiScreenTimePolicy
 import com.fauna.ffi.ageBandLine
-import com.fauna.ffi.contentFloorLabel
-import com.fauna.ffi.contentFloorOptions
 import com.fauna.ffi.contentNoticeLine
 import com.fauna.ffi.feedSourcesLabel
 import com.fauna.ffi.feedSourcesOptions
@@ -108,6 +106,9 @@ fun FamilyScreen(
         onCancelTransfer = vm::cancelTransfer,
         onAcceptIncomingTransfer = vm::acceptIncomingTransfer,
         onDeclineIncomingTransfer = vm::declineIncomingTransfer,
+        // The shared rule editor's guardian mounting (nest-rules.md § The shared
+        // rule editor (b)); a save re-reads the page.
+        rulesSection = { ward -> FamilyRulesSection(ward, onSaved = vm::refresh) },
     )
 }
 
@@ -132,6 +133,10 @@ fun FamilyContent(
     onDeclineIncomingTransfer: (ByteArray) -> Unit,
     featureAuthoring: FeatureAuthoringState = FeatureAuthoringState(),
     featureEditor: FeatureEditorActions = FeatureEditorActions.None,
+    // `family-policy-rules-section` for the selected ward, where the four floor
+    // selects stood — a slot, so a host test renders the page without the
+    // editor's Hilt host.
+    rulesSection: @Composable (FfiFamilyWardInfo) -> Unit = {},
 ) {
     Scaffold(
         topBar = {
@@ -223,6 +228,7 @@ fun FamilyContent(
                         onSaveError = onSaveError,
                         featureAuthoring = featureAuthoring,
                         featureEditor = featureEditor,
+                        rulesSection = rulesSection,
                         onMarkDevice = onMarkDevice,
                         onAllowBlockedPeer = onAllowBlockedPeer,
                         onDecideApproval = onDecideApproval,
@@ -288,6 +294,7 @@ private fun GuardianSection(
     onSaveError: (String) -> Unit,
     featureAuthoring: FeatureAuthoringState,
     featureEditor: FeatureEditorActions,
+    rulesSection: @Composable (FfiFamilyWardInfo) -> Unit,
     onMarkDevice: (ByteArray, String, Boolean) -> Unit,
     onAllowBlockedPeer: (UndenyDecide) -> Unit,
     onDecideApproval: (FfiFamilyApprovalEntry, Boolean) -> Unit,
@@ -312,7 +319,7 @@ private fun GuardianSection(
         // that ward into the shared editor."
         val selectedWard = wards.find { selectedWardActorId?.contentEquals(it.actorId) == true }
         if (selectedWard != null) {
-            PolicyEditor(ward = selectedWard, onSavePolicy = onSavePolicy, onSaveError = onSaveError)
+            PolicyEditor(ward = selectedWard, onSavePolicy = onSavePolicy, onSaveError = onSaveError, rulesSection = rulesSection)
             // Directly after the policy save button, before the device marks
             // (family-safety.md § App surface → *Feature limits*).
             FeatureLimitsGuardianSection(authoring = featureAuthoring, editor = featureEditor)
@@ -453,6 +460,7 @@ private fun PolicyEditor(
     ward: FfiFamilyWardInfo,
     onSavePolicy: (ByteArray, FfiReachPolicy) -> Unit,
     onSaveError: (String) -> Unit,
+    rulesSection: @Composable (FfiFamilyWardInfo) -> Unit,
 ) {
     val wardKey = HexUtil.bytesToHex(ward.actorId)
     var contactApproval by remember(wardKey) { mutableStateOf(ward.policy.contactApproval) }
@@ -470,15 +478,9 @@ private fun PolicyEditor(
     // rendered value and silently rewrite the ward's stored knob.
     var unknownPeerDmWire by remember(wardKey) { mutableStateOf(normalizeUnknownPeerDmWireForRender(ward.policy.unknownPeerDm)) }
     var unknownPeerDmTouched by remember(wardKey) { mutableStateOf(false) }
-    // v1.x content pillar (family-safety.md § Content policy) — the four
-    // per-category floors + the Notify toggle. An unset policy (`null`) seeds
-    // every floor to `inherit` (the ward's own preferences decide); a stored
-    // value android cannot parse normalizes fail-closed to `block` at load, the
-    // same load-bearing rule as the reach knobs above.
-    var contentNsfwWire by remember(wardKey) { mutableStateOf(normalizeContentFloorWire(ward.policy.contentPolicy?.nsfw ?: "inherit")) }
-    var contentSpamWire by remember(wardKey) { mutableStateOf(normalizeContentFloorWire(ward.policy.contentPolicy?.spam ?: "inherit")) }
-    var contentPhishingWire by remember(wardKey) { mutableStateOf(normalizeContentFloorWire(ward.policy.contentPolicy?.phishing ?: "inherit")) }
-    var contentCommercialWire by remember(wardKey) { mutableStateOf(normalizeContentFloorWire(ward.policy.contentPolicy?.commercial ?: "inherit")) }
+    // v1.x content pillar (family-safety.md § Content policy): the rules are the
+    // shared rule editor's (`rulesSection`, saved by its own button); this form
+    // keeps only the Notify toggle.
     var contentNotify by remember(wardKey) { mutableStateOf(ward.policy.contentNotify ?: false) }
     // Screen time (family-safety.md § Screen time, Slice E) — the usage
     // window's two `HH:MM` bounds and the daily budget in whole minutes.
@@ -547,43 +549,11 @@ private fun PolicyEditor(
             labelFor = { localized(unknownPeerDmLabel(it)) ?: it },
             onSelectWire = { unknownPeerDmWire = it; unknownPeerDmTouched = true },
         )
-        // ── Content policy (v1.x pillar 2, family-safety.md § Content policy) ──
-        // A per-category floor: inherit | collapse | block, over the same shared
-        // `contentFloorOptions`/`contentFloorLabel` catalog the linux/web legs use
-        // (priority #1/#2). Each select round-trips the wire value; the Notify
-        // toggle carries category+count only, never content (§ Guardian Notify).
-        PolicySelectDropdown(
-            testId = "family-policy-content-nsfw-select",
-            labelRes = R.string.family_policy_content_nsfw_label,
-            options = remember { contentFloorOptions().map { it.value } },
-            selectedWire = contentNsfwWire,
-            labelFor = { localized(contentFloorLabel(it)) ?: it },
-            onSelectWire = { contentNsfwWire = it },
-        )
-        PolicySelectDropdown(
-            testId = "family-policy-content-spam-select",
-            labelRes = R.string.family_policy_content_spam_label,
-            options = remember { contentFloorOptions().map { it.value } },
-            selectedWire = contentSpamWire,
-            labelFor = { localized(contentFloorLabel(it)) ?: it },
-            onSelectWire = { contentSpamWire = it },
-        )
-        PolicySelectDropdown(
-            testId = "family-policy-content-phishing-select",
-            labelRes = R.string.family_policy_content_phishing_label,
-            options = remember { contentFloorOptions().map { it.value } },
-            selectedWire = contentPhishingWire,
-            labelFor = { localized(contentFloorLabel(it)) ?: it },
-            onSelectWire = { contentPhishingWire = it },
-        )
-        PolicySelectDropdown(
-            testId = "family-policy-content-commercial-select",
-            labelRes = R.string.family_policy_content_commercial_label,
-            options = remember { contentFloorOptions().map { it.value } },
-            selectedWire = contentCommercialWire,
-            labelFor = { localized(contentFloorLabel(it)) ?: it },
-            onSelectWire = { contentCommercialWire = it },
-        )
+        // ── Content rules (nest-rules.md § The shared rule editor (b);
+        // family-safety.md § App surface → *Content rules*) — the shared rule
+        // editor stands where the four per-category floor selects stood, with its
+        // own save; the Notify toggle below stays this form's.
+        rulesSection(ward)
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(stringResource(R.string.family_policy_content_notify_label), modifier = Modifier.weight(1f))
             Switch(
@@ -624,6 +594,8 @@ private fun PolicyEditor(
             stringResource(R.string.family_policy_screen_caveat),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+            // `family-policy-screen-hint`, user-approved 2026-10-16.
+            modifier = Modifier.testTag(Ids.FAMILY_POLICY_SCREEN_HINT),
         )
         // A policy the nest enforces is written online
         // (`account-offline-mutation.md` § The offline-mutation contract).
@@ -656,17 +628,11 @@ private fun PolicyEditor(
                         unknownSenderMail = unknownSenderWire,
                         federationContact = federationContact,
                         feedSources = feedSourcesWire,
-                        // v1.x content pillar (Slice C) — the editor now builds the
-                        // four floors + Notify, so it sends them present (replace
-                        // semantics, mirroring the linux/web reference which likewise
-                        // dropped the prior "leave unchanged" null). An all-`inherit`
-                        // policy is a valid no-op floor.
-                        contentPolicy = FfiContentPolicy(
-                            nsfw = contentNsfwWire,
-                            spam = contentSpamWire,
-                            phishing = contentPhishingWire,
-                            commercial = contentCommercialWire,
-                        ),
+                        // The content pillar is the rule editor's own save
+                        // (`FfiFamilyClient.saveContentRules`), so this form sends it
+                        // ABSENT — "leave unchanged" — and never overwrites the
+                        // guardian's document with floors (tui's and web's twin).
+                        contentPolicy = null,
                         // v1.x screen-time pillar (Slice E) — the editor now
                         // builds it too, so it sends it present (replace
                         // semantics, same as content above). An all-empty
@@ -853,13 +819,6 @@ private fun normalizeUnknownPeerDmWireForRender(wire: String?): String {
     return unknownPeerDmOptions().firstOrNull { it.label.key == resolvedKey }?.value ?: (wire ?: "allow")
 }
 
-/** See [normalizeUnknownSenderWire]; a content floor fails closed to `block`
- *  (never the permissive `inherit`) via the shared [contentFloorLabel] resolver. */
-private fun normalizeContentFloorWire(wire: String): String {
-    val resolvedKey = contentFloorLabel(wire).key
-    return contentFloorOptions().firstOrNull { it.label.key == resolvedKey }?.value ?: wire
-}
-
 /** The four knobs as "{label}: {value}" lines, over the shared
  *  `fauna_core::format::reach_policy_summary` (family-safety.md § Where logic
  *  lives, replacing the former hand-rolled boolean/label join) — the
@@ -878,7 +837,16 @@ private fun formatPolicySummary(policy: FfiReachPolicy, usageTodayMinutes: UInt?
     // composable-safe by the Compose compiler even though the function is
     // `inline` — resolve each line via `.map` (a non-nullable, always-inlined
     // transform) first, then join the plain strings.
-    val lines = reachPolicySummary(policy).map { line -> "${localized(line.label)}: ${localized(line.value)}" }.toMutableList()
+    // A line a rule of the guardian's document makes carries that rule's reason,
+    // appended verbatim as "{label}: {value} — {reason}" (nest-rules.md § The shared
+    // rule editor → *The reason is the member's to read*): `reason_text`'s pick
+    // over the record (`{ lang → text }`, the `default` entry always present — the
+    // pick is not a UniFFI method). Every other line is unchanged.
+    val lines = reachPolicySummary(policy).map { line ->
+        val text = "${localized(line.label)}: ${localized(line.value)}"
+        val reason = line.reason?.let { it[RegionPlaneHost.UI_LANG] ?: it["default"] }
+        if (reason.isNullOrEmpty()) text else "$text — $reason"
+    }.toMutableList()
     if (usageTodayMinutes != null) {
         val line = usageTodayLine(usageTodayMinutes, policy.screenTime?.dailyMinutes)
         lines.add("${localized(line.label)}: ${localized(line.value)}")

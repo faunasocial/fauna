@@ -113,7 +113,12 @@ class ConversationDetailContentTest {
         // to isOwn, the common case; a peer's message sets it explicitly.
         canDelete: Boolean = isOwn,
         labels: List<ContentLabelEntry> = emptyList(),
+        // The alias a received mail message arrived on, already worded by the shared
+        // refresh (mail-aliases.md § Label); `null` = not a mail alias delivery.
+        deliveredTo: String? = null,
+        legalTakedownRef: String? = null,
     ) = MessageSnapshot(
+        deliveredTo = deliveredTo,
         messageId = id,
         sender = TypedAddress.Email("$sender@example.com"),
         senderDisplay = sender,
@@ -127,7 +132,7 @@ class ConversationDetailContentTest {
         deleted = deleted,
         isOwn = isOwn,
         canDelete = canDelete,
-        legalTakedownRef = null,
+        legalTakedownRef = legalTakedownRef,
         // Post-decrypt content-policy labels (moderation.md § Per-row badge
         // data path) — drives `content-label-badge` via the shared
         // primaryContentLabel pick (contentLabelBadgeRendersHighestConfidenceLabel
@@ -377,6 +382,23 @@ class ConversationDetailContentTest {
         )
     }
 
+    @Test
+    fun deliveredToAliasPaintsTheSnapshotLineOnlyWhenPresent() {
+        // `dm-message-delivered-to-alias` carries MessageSnapshot.deliveredTo verbatim
+        // (mail-aliases.md § Label) and is absent on a message with no alias delivery.
+        render(
+            detail(
+                messages = listOf(
+                    msg("m1", deliveredTo = "Delivered to: shop@example.com [shopping]"),
+                    msg("m2"),
+                ),
+            ),
+        )
+        val tagged = composeTestRule.onAllNodesWithTag("dm-message-delivered-to-alias")
+        assertEquals(1, tagged.fetchSemanticsNodes().size)
+        tagged[0].assertTextEquals("Delivered to: shop@example.com [shopping]")
+    }
+
     // ── Content-policy render enforcement (Slice C, family-safety.md § Content ──
     // policy). The verdict is a real shared-Rust call, so these run under
     // android-host-test (host JNA). The cross-app tier_3 proof
@@ -395,8 +417,32 @@ class ConversationDetailContentTest {
                 contentPolicy = FfiContentPolicy("block", "inherit", "inherit", "inherit"),
             ),
         )
-        composeTestRule.onNodeWithTag("content-policy-blocked-notice").assertExists()
+        composeTestRule.onNodeWithTag("content-policy-blocked-notice")
+            .assertExists()
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "blocked"))
+        composeTestRule.onNodeWithTag("content-policy-collapsed-reveal-button").assertDoesNotExist()
         composeTestRule.onNodeWithTag("dm-message-text").assertDoesNotExist()
+    }
+
+    @Test
+    fun guardianCollapseFloorFoldsBubbleBehindARevealableNotice() {
+        // A guardian `collapse` floor over a commercial-labeled message folds the
+        // bubble behind `content-policy-blocked-notice` in state `collapsed`, and
+        // `content-policy-collapsed-reveal-button` shows the body in place.
+        val labeled = msg("m1", body = "folded", labels = listOf(ContentLabelEntry("commercial", 900u)))
+        render(
+            detail(messages = listOf(labeled)),
+            contentPolicyInputs = ContentPolicyInputs(
+                contentPolicy = FfiContentPolicy("inherit", "inherit", "inherit", "collapse"),
+            ),
+        )
+        composeTestRule.onNodeWithTag("content-policy-blocked-notice")
+            .assertExists()
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "collapsed"))
+        composeTestRule.onNodeWithTag("dm-message-text").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("content-policy-collapsed-reveal-button").performClick()
+        composeTestRule.onNodeWithTag("dm-message-text").assertExists()
+        composeTestRule.onNodeWithTag("content-policy-blocked-notice").assertDoesNotExist()
     }
 
     @Test
@@ -1577,6 +1623,23 @@ class ConversationDetailContentTest {
             ),
         )
         composeTestRule.onNodeWithTag("dm-message-deleted").assertExists()
+        composeTestRule.onAllNodesWithTag("dm-message-text").assertCountEquals(0)
+        composeTestRule.onAllNodesWithTag("dm-message-actions-button").assertCountEquals(0)
+    }
+
+    @Test
+    fun legallyTakenDownMessageShowsTombstoneAndStripsBody() {
+        // A withheld envelope collapses to the dm-message-legal-takedown tombstone
+        // naming the reference, the twin of dm-message-deleted (moderation.md
+        // § Legal takedown → App render).
+        render(
+            detail(
+                capabilities = caps(reactions = true, messageDelete = true),
+                messages = listOf(msg("m1", body = "", legalTakedownRef = "DMCA-2026-0001")),
+            ),
+        )
+        composeTestRule.onNodeWithTag("dm-message-legal-takedown").assertExists()
+        composeTestRule.onNodeWithTag("dm-message-legal-takedown").assertTextContains("DMCA-2026-0001", substring = true)
         composeTestRule.onAllNodesWithTag("dm-message-text").assertCountEquals(0)
         composeTestRule.onAllNodesWithTag("dm-message-actions-button").assertCountEquals(0)
     }

@@ -281,6 +281,9 @@ pub(super) fn recovery_elements(
     els.extend(backup_regrant_elements(aftermath.backup_regrant.as_ref()));
     els.extend(mls_reseal_elements(aftermath.mls_reseal.as_ref()));
     els.extend(grant_remint_elements(aftermath.grant_remint.as_ref()));
+    // Leg 8 runs right after leg 4 in the post-store-ready pass, so it reports
+    // right after it — above the corpus, drafts and mail lines.
+    els.extend(period_rotation_elements(aftermath.period_rotation.as_ref()));
     els.extend(corpus_reseal_elements(aftermath.corpus_reseal.as_ref()));
     // Leg 7 before leg 6 for the same reason the task runs them in that order:
     // the burn is the only leg that takes something away, so every restoring
@@ -536,6 +539,33 @@ fn grant_remint_elements(
     };
     vec![Element::label(
         ids::RECOVERY_KIT_GRANT_REMINT_STATUS,
+        line.resolve(fauna_i18n::strings::lookup),
+    )]
+}
+
+/// The aftermath's **subscriber-tier period-key rotation** leg — each tier's
+/// period key replaced with one the retired identity never held, or nothing
+/// when the leg owes the user no word (`succession-aftermath.md` § Re-key
+/// scope).
+///
+/// Same division of labour as [`backup_regrant_elements`]: the shared projection
+/// ([`fauna_client_subscriptions::orchestration::PeriodRotationProgress`]'s
+/// `status_line`) decides whether a line renders and which one; this resolves
+/// the key.
+///
+/// ⚠ The nest-too-old arm is not a delay and not an error: nothing was rotated,
+/// so the predecessor-era key is still live and every subscriber-only post
+/// published from now on is readable by whoever held the retired seed. That arm
+/// must render — a missing line reads as a clean aftermath over an open
+/// exposure.
+fn period_rotation_elements(
+    progress: Option<&fauna_client_subscriptions::orchestration::PeriodRotationProgress>,
+) -> Vec<Element> {
+    let Some(line) = progress.and_then(|p| p.status_line()) else {
+        return Vec::new();
+    };
+    vec![Element::label(
+        ids::RECOVERY_KIT_PERIOD_ROTATION_STATUS,
         line.resolve(fauna_i18n::strings::lookup),
     )]
 }

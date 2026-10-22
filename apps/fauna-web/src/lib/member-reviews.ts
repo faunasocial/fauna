@@ -8,14 +8,14 @@
 // which the user reaches later and which mounts fresh. Page-local state would
 // therefore be empty at exactly the moment a successor's FIRST session needs it
 // — the one session the whole surface exists for. Same reasoning, same shape as
-// `$lib/succession-aftermath`; a native app gets this for free from one
+// `#lib/succession-aftermath`; a native app gets this for free from one
 // process-wide `App`.
 //
 // **Cached, not re-read per paint (the ratified rule).** A member list paints on
 // every frame while the succession ledger changes only when a ceremony raises
 // items or the owner answers one, so this store is refreshed at exactly the two
 // points § Propagation names — **behind the aftermath's raise**
-// (`routes/+layout.svelte`, on the post-store-ready pass's `configStageSettled`)
+// (`lib/components/RootShell.svelte`, on the post-store-ready pass's `configStageSettled`)
 // and **after every adjudication** (a Keep press). Anything else re-reads the
 // ledger to answer a question that cannot have changed.
 //

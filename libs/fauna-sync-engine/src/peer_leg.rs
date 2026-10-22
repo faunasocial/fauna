@@ -855,6 +855,47 @@ where
     .map(Some)
 }
 
+/// The restore gesture's entry at a typed address
+/// ([`crate::custodian_nest_restore::restore_at_address`]), as the runtime's
+/// `RestoreFromCustodian` command runs it: the account and the revocation
+/// view are this leg's, the identity is the slot's enrollment witness — the
+/// one thing the fleet handshake cannot do without, so its absence is an
+/// `Err` naming it, never a silent no-op.
+pub(crate) async fn custodian_restore_gesture<B>(
+    state: &PeerLegState,
+    ctx: fauna_account_plane::account_driver::RestoreCtx<'_, B>,
+    url: &str,
+    content_scopes: &mut dyn FnMut() -> Vec<fauna_protocol::scope::ContentScope>,
+) -> Result<crate::custodian_nest_restore::CustodianRestoreOutcome>
+where
+    B: StoreBackend,
+{
+    let Some(witness) = ctx.slot.device_authorization() else {
+        anyhow::bail!(
+            "this device is not enrolled in its account yet — a custodian nest admits an \
+             enrolled device only"
+        );
+    };
+    let owner: [u8; 32] = fauna_core::hex32::decode(&state.actor_id_hex)
+        .map_err(|e| anyhow::anyhow!("custodian nest restore: actor id: {e}"))?;
+    crate::custodian_nest_restore::restore_at_address(
+        ctx.store,
+        url,
+        crate::custodian_nest_restore::FleetDialIdentity {
+            owner,
+            schedule: ctx.schedule,
+            trust: ctx.trust,
+            writer_key: ctx.writer_key,
+            authorization: &witness.wire,
+            generation_custody: Some(ctx.slot),
+            seed: ctx.seed,
+        },
+        &state.revoked,
+        content_scopes,
+    )
+    .await
+}
+
 /// Dial a target's transport candidates and open the peer channel on the
 /// resulting connection — shared by the sibling dial pass ([`dial_one`])
 /// and the custody dial pass (`custody_leg::dial_one_owner`), which

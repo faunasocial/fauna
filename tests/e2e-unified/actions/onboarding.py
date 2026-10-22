@@ -729,9 +729,13 @@ class OnboardingActions:
     def go_to_vps_config_with_verified(self,
                                        provider_id: str,
                                        creds: dict,
-                                       fake_cloud) -> None:
+                                       fake_cloud,
+                                       vps_base_url: str | None = None) -> None:
         """Drive to vps_config and verify the VPS provider against
         ``fake_cloud`` so server types render as radios.
+
+        ``vps_base_url`` points the one ``vps`` override at another leg of
+        the fake than its default Hetzner one (OVH: ``fake_cloud.ovh.base_url()``).
 
         Reaches vps_config via the DNS-deferred path
         (``dns-set-up-later-button``), selects the VPS provider, fills
@@ -739,26 +743,29 @@ class OnboardingActions:
         locations + server_types endpoints (redirected via
         ``provider_base_urls["vps"]``) and populates the server-type radios.
 
-        Web + linux (see ``go_to_vps_config_with_dns_provider``). Here the
-        VPS verify is driven by a real ``vps-verify-button`` UI click — linux's
-        button already drives the async ``verify_vps`` on a worker runtime via
-        ``run_on_tokio`` — so this helper needs only ``set_provider_base_urls``.
+        Web + linux + tui (see ``go_to_vps_config_with_dns_provider``). Here
+        the VPS verify is driven by a real ``vps-verify-button`` UI click —
+        linux's button drives the async ``verify_vps`` on a worker runtime via
+        ``run_on_tokio``, tui's on its own tokio loop — so this helper needs
+        only ``set_provider_base_urls`` (tui's comes from ``HttpBridgeDriver``).
         """
-        if not (self.driver.is_web() or self.driver.is_linux()):
+        if not (self.driver.is_web() or self.driver.is_linux() or self.driver.is_tui()):
             from helpers.app_surface import skip_unbuilt
 
             skip_unbuilt(
                 self.driver,
                 surface="set_provider_base_urls",
                 detail="fake-cloud provider redirection for the VPS verify; web + "
-                       "linux implement it, the other five apps do not",
+                       "linux + tui implement it, the other four apps do not",
                 tracked="the fake-cloud provisioning follow-up, Track 2",
             )
         # Override ONLY "vps". Overriding "nest" would make the anonymous
         # WsNestApi route the handle-check probe (in go_to_vps_config →
         # go_to_dns_config) at the non-WS fake nest → transient failure; this
         # helper never provisions, so it doesn't need the nest redirect.
-        self.driver.set_provider_base_urls({"vps": fake_cloud.url_map()["vps"]})
+        self.driver.set_provider_base_urls(
+            {"vps": vps_base_url or fake_cloud.url_map()["vps"]}
+        )
         self.go_to_vps_config()
         self.driver.click(f"vps-provider-row[{provider_id}]")
         self.driver.wait_for("vps-credentials-form", timeout=10)

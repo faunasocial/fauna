@@ -165,6 +165,7 @@ fn nest_info_reply(domain: &str) -> fauna_protocol::discovery::NestInfoReply {
         subhandles: false,
         registration: None,
         moderation: fauna_protocol::discovery::ModerationInfo {
+            content_policy: None,
             extra: Default::default(),
         },
         ..Default::default()

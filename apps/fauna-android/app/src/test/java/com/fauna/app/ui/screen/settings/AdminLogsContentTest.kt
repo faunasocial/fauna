@@ -1,6 +1,8 @@
 package com.fauna.app.ui.screen.settings
 
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import org.junit.Assert.assertEquals
@@ -77,6 +79,40 @@ class AdminLogsContentTest {
             2,
             composeTestRule.onAllNodesWithTag("log-entry").fetchSemanticsNodes().size,
         )
+    }
+
+    @Test
+    fun auditSectionRendersSeededRowsAndIntegrityStatus() {
+        composeTestRule.setContent {
+            AdminLogsContent(
+                rows = nestRows,
+                copyText = "",
+                filterIndex = 0,
+                onFilterChange = {},
+                onBack = {},
+                auditRows = listOf("2026-10-18 12:00  first", "2026-10-18 12:01  second"),
+                auditStatus = "chain verified",
+                auditMoreEnabled = true,
+            )
+        }
+        composeTestRule.onNodeWithTag("admin-audit-section").assertExists()
+        assertEquals(
+            2,
+            composeTestRule.onAllNodesWithTag("admin-audit-entry").fetchSemanticsNodes().size,
+        )
+        composeTestRule.onNodeWithTag("admin-audit-integrity-status").assertExists()
+        composeTestRule.onNodeWithTag("admin-audit-more-button").assertIsEnabled()
+    }
+
+    @Test
+    fun auditMoreButtonDisabledWithoutOlderPage() {
+        render()
+        composeTestRule.onNodeWithTag("admin-audit-section").assertExists()
+        assertEquals(
+            0,
+            composeTestRule.onAllNodesWithTag("admin-audit-entry").fetchSemanticsNodes().size,
+        )
+        composeTestRule.onNodeWithTag("admin-audit-more-button").assertIsNotEnabled()
     }
 
     @Test

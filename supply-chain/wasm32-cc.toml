@@ -13,7 +13,7 @@ release = "23.1.2"
 published = "2026-09-22"
 # The exact first line of the installed `clang --version`; recorded from the first
 # install, before any builder selects this pin.
-clang_version_line = ""
+clang_version_line = "clang version 23.1.2 (https://github.com/llvm/llvm-project 85ac560262434c9ccfc0c183ec22d4138ed647fb)"
 
 [arch.aarch64]
 url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.2/LLVM-23.1.2-Linux-ARM64.tar.xz"

@@ -2729,6 +2729,7 @@ fn consent_install_row(i: crate::NestConsentInstall) -> crate::ConsentInstallRow
         hosts: strip_all(i.hosts),
         ingress_paths: strip_all(i.ingress_paths),
         development: i.development,
+        bind: i.bind,
     }
 }
 

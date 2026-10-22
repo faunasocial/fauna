@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -187,6 +188,10 @@ class Page:
     #: owes the rest (§ The page, `absences`). `absences` above stays the page-level
     #: map, whose column renders `—`; a column here renders a real cell.
     outcome_absences: dict = field(default_factory=dict)
+    #: The ui.yaml `pages:` keys the feature's contract tests drive (front-matter
+    #: `ui-pages`, optional): what lets a ui.yaml edit name the pages it touches
+    #: (the touched-set selector, delayed-testing.md § What a session runs).
+    ui_pages: tuple = ()
 
     def absent_from(self, app: str, outcome: Outcome) -> bool:
         """Is `app` excused from this one outcome by a per-outcome absence?"""
@@ -591,7 +596,52 @@ def parse_page(path: Path) -> Page:
         goal=front["goal"], guide=front["guide"], absences=absences,
         what="\n".join(sections["What a user gets"][1]).strip(),
         stamp_date=stamp_date, stamp_commit=stamp_commit, outcomes=outcomes,
-        outcome_absences=_check_outcome_absences(scoped, absences, outcomes, path))
+        outcome_absences=_check_outcome_absences(scoped, absences, outcomes, path),
+        ui_pages=_parse_ui_pages(front.get("ui-pages"), path))
+
+
+def _parse_ui_pages(raw, path: Path) -> tuple:
+    """Front-matter `ui-pages: feed, settings` -> `("feed", "settings")` (§ The page)."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, str):
+        raise CatalogError(f"{path.name}: `ui-pages` is a comma-separated list of "
+                           "ui.yaml page keys, not a map")
+    keys = [k.strip() for k in raw.split(",")]
+    if not all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", k) for k in keys):
+        raise CatalogError(f"{path.name}: `ui-pages` holds a malformed key: {raw!r}")
+    return tuple(keys)
+
+
+def ui_page_ranges(text: str) -> dict:
+    """`{page key: (first line, last line)}` of ui.yaml's `pages:` section, 1-based.
+
+    The same indentation scan `scripts/ui-show.py` addresses `pages.<key>` by: a
+    two-space key under the top-level `pages:`. A page's last line is the line before
+    the next key, trailing blank and comment lines excluded.
+    """
+    ranges: dict = {}
+    in_pages, key, last = False, None, 0
+    for number, line in enumerate(text.splitlines(), start=1):
+        top = re.match(r"^([A-Za-z_][A-Za-z0-9_]*):", line)
+        if top or (key and re.match(r"^  [A-Za-z_][A-Za-z0-9_.-]*:", line)):
+            if key:
+                ranges[key] = (ranges[key][0], last)
+                key = None
+            if top:
+                in_pages = top.group(1) == "pages"
+                continue
+        if not in_pages:
+            continue
+        child = re.match(r"^  ([A-Za-z_][A-Za-z0-9_.-]*):", line)
+        if child:
+            key, last = child.group(1), number
+            ranges[key] = (number, number)
+        elif key and line.strip() and not line.lstrip().startswith("#"):
+            last = number
+    if key:
+        ranges[key] = (ranges[key][0], last)
+    return ranges
 
 
 #: A per-outcome `absences` key: `web (outcome 4)`, `ios (outcomes 4, 5)`.
@@ -725,6 +775,57 @@ def load_releases(features: Path = FEATURES) -> list:
     except json.JSONDecodeError as exc:
         raise CatalogError(f"ledger/releases.json: {exc}") from exc
     return data.get("releases") or []
+
+
+#: The trees a test's staleness is counted over (delayed-testing.md § The last-green
+#: directory, *Staleness is read in commits*): the suite, the shared code, the nest,
+#: the strings and the harness — plus its own app's tree (`app_tree`).
+SHARED_TEST_TREES = ("tests/e2e-unified/", "libs/", "bins/fauna-nest/", "i18n/", "scripts/",
+                     "justfile")
+#: The apps whose tree is not `apps/fauna-<app>/`: macos and ios share one project.
+_APP_DIRS = {"macos": "apps/fauna-apple/", "ios": "apps/fauna-apple/"}
+
+
+def app_tree(app: str | None) -> str | None:
+    """`apps/<its dir>/` for an app column, `None` for the nest or no app."""
+    if not app or app == NEST:
+        return None
+    return _APP_DIRS.get(app, f"apps/fauna-{app}/")
+
+
+def load_last_green(platform: str, features: Path = FEATURES) -> dict:
+    """The published last-green snapshot's records for one platform,
+    `{node id with its parametrization: record}` — `{}` when that platform has never
+    published (delayed-testing.md § The last-green directory, *The published
+    snapshot*). The record's shape is `tests/e2e-unified/helpers/last_green.py`'s."""
+    path = features / "last-green" / f"{platform}.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise CatalogError(f"last-green/{path.name}: {exc}") from exc
+    return data.get("tests") or {}
+
+
+def behind_commits(record: dict, app: str | None, repo: Path = REPO,
+                   ref: str = "origin/main") -> int | None:
+    """How far `record`'s last green is behind: the `ref` commits since its `base`
+    that touch the test's trees. `None` when it has no green, no base, or git cannot
+    count (the base unknown to this checkout); the day age is the caller's to show."""
+    base = ((record or {}).get("last_green") or {}).get("base")
+    if not base:
+        return None
+    trees = list(SHARED_TEST_TREES) + ([app_tree(app)] if app_tree(app) else [])
+    try:
+        counted = subprocess.run(
+            ["git", "-C", str(repo), "rev-list", "--count", f"{base}..{ref}", "--", *trees],
+            capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if counted.returncode != 0:
+        return None
+    return int(counted.stdout.strip() or 0)
 
 
 def newest_verified(releases: list) -> dict | None:

@@ -28,9 +28,9 @@
 //! nest. What is shared is every leaf that could
 //! otherwise drift into a data-loss bug: [`diff_segments`],
 //! [`hash_segments_canonical`], [`LiveManifestMirror`], the `segment_backup_state`
-//! rows, and above all the seal + chunk pipeline inside [`SyncEngine::upload_bytes`]
-//! (a second implementation of the seal would produce backups the owner's client
-//! could not open). The pass *sequence* below mirrors the retired client arm's
+//! rows, and above all the seal + chunk pipeline inside [`SyncEngine::upload_staged`]
+//! and [`SyncEngine::upload_bytes`] (a second implementation of the seal would
+//! produce backups the owner's client could not open). The pass *sequence* below mirrors the retired client arm's
 //! step-for-step, minus the destination provisioning it needed and this arm does not —
 //! the destination's `fauna.federation.backup.changes.record` handler creates the
 //! owner's reserved custody-copy set lazily behind its grant gate.
@@ -512,7 +512,8 @@ pub struct NestBackupCoordinator {
     covered_folders: Vec<(String, i64)>,
     source: Arc<NestLocalSegmentSource>,
     /// Inert scratch the destination engines are constructed against — they only
-    /// ever `upload_bytes`, never watch a tree.
+    /// ever upload (`upload_staged`, `upload_bytes`), never watch a tree. Its
+    /// `staging/` holds a pass's sealed segment halves while they upload.
     scratch_dir: PathBuf,
     /// The custody relay's backpressure contract ([`Backpressure`]).
     backpressure: Backpressure,
@@ -627,7 +628,7 @@ impl NestBackupCoordinator {
     ///   nest's `device_id` as attribution only (it registers no device there),
     ///   so naming itself is both truthful and greppable in the custody rows.
     /// * the engine's control-plane `NestClient` is the nest's own identity. It
-    ///   is unreachable on this path — `upload_bytes` never touches it (only the
+    ///   is unreachable on this path — no upload touches it (only the
     ///   conflict path does, which segment backup has no notion of) — and a
     ///   fabricated keypair there would read as if the nest impersonated someone.
     ///
@@ -636,7 +637,7 @@ impl NestBackupCoordinator {
     ///
     /// The **folder-mirror pass drives this directly** rather than through the
     /// engine: a covered folder's bytes are already at-rest ciphertext and are
-    /// copied as-is, so the engine's `upload_bytes` seal pipeline must never
+    /// copied as-is, so the engine's seal pipeline must never
     /// touch them (`backup-destinations.md` § Ordinary-folder coverage — no
     /// re-seal, no `NestBackupKey`).
     fn destination_sync_client(&self, dest: &BackupDestinationRow) -> SyncClient {
@@ -682,7 +683,7 @@ impl NestBackupCoordinator {
         SyncEngine::new(
             self.scratch_dir.clone(),
             // The engine's own DB backs `upload_file`'s resume queue, which
-            // `upload_bytes` deliberately skips — the coordinator re-drives a
+            // the segment uploads deliberately skip — the coordinator re-drives a
             // failed pass instead. Nothing here needs to outlive the pass.
             SyncDb::open_in_memory().expect("in-memory sync db"),
             self.destination_sync_client(dest),
@@ -706,7 +707,7 @@ impl NestBackupCoordinator {
                 ActorKeypair::from_secret(self.state.nest_identity.signing_key.to_bytes()),
             ),
             // Backup: this engine only ever pushes the nest's own segments to a
-            // backup destination (`upload_bytes`), so it never pulls and never
+            // backup destination (`upload_staged`), so it never pulls and never
             // reaches the delete arm. Naming the mode it actually serves keeps
             // the value honest if a pull path is ever added here.
             fauna_sync_engine::config::SyncMode::Backup,
@@ -920,22 +921,52 @@ impl NestBackupCoordinator {
         let diff = diff_segments(src_refs, &local);
         let mut report = RunReport::default();
 
+        // Each pair is sealed off its files into a directory here, one chunk at
+        // a time, and uploaded off the staged bodies — a segment has no size
+        // ceiling, so neither half is ever whole in this process
+        // (`message-segment-store.md` § Segment size). A crash leaves its
+        // directory for the next pass's sweep.
+        let staging = self.scratch_dir.join("staging");
+        if !diff.to_upload.is_empty() {
+            std::fs::create_dir_all(&staging)
+                .with_context(|| format!("create backup staging {}", staging.display()))?;
+            fauna_sync_engine::segment_backup::sweep_stale_staging(&staging).await;
+        }
+
         for src_ref in &diff.to_upload {
-            let pair = self
+            let files = self
                 .source
-                .segment_pair(tag, &scope_hex, src_ref.segment_id)
+                .open_pair(tag, &scope_hex, src_ref.segment_id)
                 .await?;
-            // The pair was read under the scope lock, but the listing this
+            let dat = engine
+                .seal_staged(files.dat, &staging)
+                .await
+                .with_context(|| format!("seal segment kind={kind} seg={}", src_ref.segment_id))?;
+            let meta = engine
+                .seal_staged(files.meta, &staging)
+                .await
+                .with_context(|| {
+                    format!(
+                        "seal segment sidecar kind={kind} seg={}",
+                        src_ref.segment_id
+                    )
+                })?;
+            // The pair was opened under the scope lock, but the listing this
             // pass diffed against may predate it (a rotation in between):
-            // custody must name exactly the bytes the mirror will describe.
-            pair.verify_against(src_ref)?;
-            let dat_size = pair.dat.len() as i64;
-            let meta_size = pair.meta.len();
+            // custody must name exactly the bytes the mirror will describe. The
+            // hashes were taken as each half was sealed.
+            fauna_sync_engine::segment_backup::verify_pair_hashes(
+                &dat.plain_blake3_hex(),
+                &meta.plain_blake3_hex(),
+                src_ref,
+            )?;
+            let dat_size = dat.plain_len() as i64;
+            let meta_size = meta.plain_len();
             let rel_path = family.dat_path(&scope_hex, src_ref.segment_id);
             let meta_rel_path = family.meta_path(&scope_hex, src_ref.segment_id);
 
             let manifest_hash = engine
-                .upload_bytes(pair.dat, &rel_path, &folder)
+                .upload_staged(&dat, &rel_path, &folder)
                 .await
                 .with_context(|| {
                     format!(
@@ -960,7 +991,7 @@ impl NestBackupCoordinator {
             // tear between the two re-pushes the pair (dedup makes that free)
             // rather than marking a half-corpus done.
             let meta_manifest_hash = engine
-                .upload_bytes(pair.meta, &meta_rel_path, &folder)
+                .upload_staged(&meta, &meta_rel_path, &folder)
                 .await
                 .with_context(|| {
                     format!(
@@ -986,7 +1017,7 @@ impl NestBackupCoordinator {
                 src_ref.segment_id,
                 src_ref.record_count as u64,
                 src_ref.size_bytes,
-                Some(meta_size as u64),
+                Some(meta_size),
             )?;
             report.uploaded_segments.push(src_ref.segment_id);
         }

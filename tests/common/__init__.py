@@ -7,7 +7,7 @@ files and test modules via `from common import ...`.
 from common.nest import (
     CLAIM_CODE,
     build_node,
-    build_sync_service_win,
+    build_sync_agent,
     build_app,
     build_macos_app,
     nest_id_from_data_dir,
@@ -77,7 +77,7 @@ __all__ = [
     # nest.py
     "CLAIM_CODE",
     "build_node",
-    "build_sync_service_win",
+    "build_sync_agent",
     "build_app",
     "build_macos_app",
     "nest_id_from_data_dir",

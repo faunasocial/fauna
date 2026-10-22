@@ -1,18 +1,18 @@
 <script lang="ts">
-  import { connectionStatus, identity } from '$lib/store';
-  import { connectionStateLabel, ensureWasm } from '$lib/wasm';
-  import { resolveLocalized } from '$lib/i18n/localized';
+  import { connectionStatus, identity } from '#lib/store';
+  import { connectionStateLabel, ensureWasm } from '#lib/wasm';
+  import { resolveLocalized } from '#lib/i18n/localized';
   import { goto } from '$app/navigation';
-  import { page } from '$app/stores';
+  import { page } from '$app/state';
   import { onMount } from 'svelte';
-  import { t } from '$lib/i18n/strings';
-  import { IDS } from '$lib/generated/uiIds';
-  import AppShellFrame from '$lib/components/AppShellFrame.svelte';
+  import { t } from '#lib/i18n/strings';
+  import { IDS } from '#lib/generated/uiIds';
+  import AppShellFrame from '#lib/components/AppShellFrame.svelte';
 
   // The admin shell is a vertical **sidebar-swap** (admin.md § Navigation
   // model, ratified 2026-06-01, vertical-rail form 2026-06-03): while in the
   // admin shell this layout renders its OWN shell whose vertical rail takes
-  // over the app's sidebar slot — the root layout (routes/+layout.svelte)
+  // over the app's sidebar slot — the root layout (lib/components/RootShell.svelte)
   // yields the full viewport for any `/app/admin` route (same bare-canvas
   // bypass it uses for onboarding), so the normal nav (conversations / feed /
   // …) is replaced in place rather than sitting beside a horizontal admin
@@ -79,6 +79,7 @@
     { href: '/app/admin/dns', key: 'admin-dns', label: t.admin.dns.title },
     { href: '/app/admin/custody-hosting', key: 'admin-custody-hosting', label: t.admin.custody_hosting.title },
     { href: '/app/admin/mail', key: 'admin-mail', label: t.admin.mail_page.title },
+    { href: '/app/admin/mail-reports', key: 'admin-mail-reports', label: t.admin.mail_reports_page.title },
     { href: '/app/admin/calendar', key: 'admin-calendar', label: t.admin.calendar_page.title },
     { href: '/app/admin/contacts', key: 'admin-contacts', label: t.admin.contacts_page.title },
     { href: '/app/admin/files', key: 'admin-files', label: t.admin.files_page.title },
@@ -89,7 +90,8 @@
 
   function isActive(path: string, href: string): boolean {
     if (href === '/app/admin') return path === '/app/admin' || path === '/app/admin/';
-    return path.startsWith(href);
+    // `/app/admin/mail` must not light up on `/app/admin/mail-reports`.
+    return path === href || path.startsWith(href + '/');
   }
 </script>
 
@@ -121,7 +123,7 @@
         <a
           href={link.href}
           class="tab"
-          class:active={isActive($page.url.pathname, link.href)}
+          class:active={isActive(page.url.pathname, link.href)}
           data-testid={`${IDS.ADMIN_NAV_ROW}[${link.key}]`}
         >{link.label}</a>
       {/each}
@@ -159,7 +161,7 @@
     padding: 0.5rem 1rem 1rem;
     color: var(--accent);
   }
-  /* Mirrors routes/+layout.svelte's indicator, like the rest of this shell. */
+  /* Mirrors lib/components/RootShell.svelte's indicator, like the rest of this shell. */
   .connection-status {
     font-size: 0.75rem;
     padding: 0 1rem 0.75rem;

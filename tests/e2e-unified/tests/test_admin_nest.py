@@ -29,6 +29,8 @@ import time
 
 import pytest
 
+from helpers.indexed_rows import row_count, row_texts
+
 pytestmark = [pytest.mark.tier2, pytest.mark.tier_3]
 
 
@@ -243,10 +245,12 @@ def test_region_section_warns_when_the_authority_has_gone_quiet(admin_app, nest_
 
         post_nest_hook(nest_instance, "region/authority-silent", {"region": "NO"})
 
-        # The section is re-read on the nav edge, so re-enter the page until the
-        # nest's verdict is painted.
+        # The section is re-read on the nav edge, so leave the page and come
+        # back — the admin's gesture; a nav to the page already shown is no
+        # entry on web or linux — until the nest's verdict is painted.
         deadline = time.monotonic() + 30.0
         while time.monotonic() < deadline and not admin_app.admin.region_staleness_text().strip():
+            admin_app.admin.navigate_dashboard()
             admin_app.admin.navigate_nest()
         warning = admin_app.admin.region_staleness_text().strip()
         assert warning, (
@@ -327,7 +331,7 @@ def stoppable_admin_app(request, app, stoppable_nest):
 _ROTATE_ARM = "admin-nest-seed-rotate-button"
 _ROTATE_CONFIRM = "admin-nest-seed-rotate-confirm-button"
 _ROTATE_REASON = "admin-nest-seed-rotate-roster-reason"
-_ROTATE_ROW_0 = "admin-nest-seed-rotate-roster-item-0"
+_ROTATE_ROSTER = "admin-nest-seed-rotate-roster-item"
 
 
 @pytest.mark.feature("admin-nest")
@@ -371,7 +375,7 @@ def test_the_rotation_confirm_stays_disabled_while_the_roster_is_unresolved(
         "the confirm must be disabled while the inheritors are unknown. "
         f"reason: {app.driver.get_text(_ROTATE_REASON)!r}"
     )
-    assert app.driver.count(_ROTATE_ROW_0) == 0, (
+    assert row_count(app.driver, _ROTATE_ROSTER) == 0, (
         "an unresolved roster must list nobody, not an empty set that reads "
-        f"'nobody inherits': {app.driver.get_text(_ROTATE_ROW_0)!r}"
+        f"'nobody inherits': {row_texts(app.driver, _ROTATE_ROSTER)!r}"
     )

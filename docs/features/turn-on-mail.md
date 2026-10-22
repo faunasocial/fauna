@@ -59,7 +59,7 @@ Stamped 2026-09-23 at 039e9619ca.
 14. [app] If turning mail on is interrupted, turning it on again finishes the job — `docs/goal/behavior/mail-credentials.md` § Partial-state-during-minting (first-enable)
    - `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_client_mid_mail_enable_box_recovers`
 15. [app] While mail is only partly on, the page says so instead of pretending it is off — `docs/goal/behavior/mail-credentials.md` § Partial-state-during-minting (first-enable)
-   - (none)
+   - `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_client_mid_first_enable_shows_partial_and_resume_finishes`
 16. [app] A brief connection drop while turning mail on does not undo it; the app retries and finishes — `docs/goal/behavior/mail-credentials.md` § Partial-state-during-minting (first-enable)
    - `tests/e2e-unified/tests/test_mail_settings_controls.py::test_a_brief_drop_while_turning_mail_on_is_retried_and_finishes`
 17. [app] Turning email off while your calendar or contacts are on keeps those apps signed in with the same password — `docs/goal/ui/mail-settings.md` § User actions
@@ -73,15 +73,17 @@ Stamped 2026-09-23 at 039e9619ca.
 21. [app] Your mail setup and app passwords appear on each of your devices without setting mail up again — `docs/goal/behavior/mail-credentials.md` § Goal
    - `tests/e2e-unified/tests/test_mail_settings_controls.py::test_mail_setup_and_passwords_follow_you_to_a_second_device`
 22. [app] You can separately stop receiving or stop sending mail for your account; both are on by default — `docs/goal/behavior/mail-policy-config.md` § Tier 3 — per-account (user)
-   - (none)
-23. [app] The page shows how much of your mailbox you have used, and you are told in the app when it is full — `docs/goal/behavior/imap-server.md` § Composition with submission quota
-   - (none)
+   - `tests/e2e-unified/tests/test_mail_account_settings.py::test_receiving_and_sending_are_switched_off_and_on_separately`
+23. [app] The page shows how much of your mailbox you have used and how many recipients you have sent to today of your daily allowance (`mail-settings-submission-quota`), and you are told in the app when it is full — `docs/goal/behavior/imap-server.md` § Composition with submission quota
+   - `tests/e2e-unified/tests/test_mail_settings_over_quota.py::test_a_full_mailbox_shows_the_notice_and_the_used_size`
 24. [app] If the nest cannot be reached or refuses a change, the page says why and you can try again — `docs/goal/ui/mail-settings.md` § Errors & edge cases
    - `tests/e2e-unified/tests/test_mail_settings_controls.py::test_a_refused_change_says_why_and_can_be_tried_again`
 25. [app] A mail app keeps sending month after month without you re-entering anything — `docs/goal/behavior/mail-credentials.md` § Architectural rules
-   - (none)
+   - `tests/e2e-unified/tests/test_mail_submission_token_refresh.py::test_a_mail_app_keeps_sending_after_the_first_token_would_have_expired`
 26. [app] After you rotate your mail keys, the calendars and events you made before still open — `docs/goal/behavior/mail-credentials.md` § Rotation and recovery
    - `tests/e2e-unified/tests/test_mail_credentials.py::test_calendar_written_before_a_key_rotation_still_opens`
+27. [app] On a nest set up without the virus scanner and spam filter mail needs, both Mail pages say mail can't be turned on there and no switch turns it on — `docs/goal/ui/mail-settings.md` § Layout & flow
+   - `tests/e2e-unified/tests/test_mail_unavailable_without_scanners_ui.py::test_both_mail_pages_render_a_box_that_cannot_enable_mail`
 
 ## Status
 
@@ -113,7 +115,7 @@ Stamped 2026-09-23 at 039e9619ca.
 | 3 | app | `tests/e2e-unified/tests/test_mail_stale_sibling_after_key_rotation.py::test_a_stale_sibling_reconnecting_after_a_rotation_keeps_imap_working` | tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_mail_disable.py::test_disable_mail_revokes_all_credentials_via_confirm_dialog` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_mail_auto_enable_first_setup.py::test_non_admin_first_setup_auto_mints_and_imap_logs_in` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 6 | app | `tests/e2e-unified/tests/platform/docker/test_mail_client_ui_enable_docker.py::test_linux_ui_enable_mail_boots_docker_bridge` | — |
+| 6 | app | `tests/e2e-unified/tests/platform/docker/test_mail_client_ui_enable_docker.py::test_linux_ui_enable_mail_boots_docker_bridge` | linux (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_mail_serving_toggle.py::test_serve_here_toggle_defaults_on_and_writes_through_to_nest` | web (linux): passed, linux (linux): failed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_mail_settings_caldav_only.py::test_caldav_only_mail_settings_render_gate` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_mail_settings_controls.py::test_status_line_reads_off_then_up_to_date_and_syncing_while_a_change_runs` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
@@ -122,17 +124,18 @@ Stamped 2026-09-23 at 039e9619ca.
 | 11 | app | `tests/e2e-unified/tests/test_mail_settings_controls.py::test_an_interrupted_rotation_is_shown_and_one_tap_finishes_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_mail_settings_controls.py::test_a_password_marked_compromised_at_rotation_stops_working` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 13 | app | `tests/e2e-unified/tests/test_mail_settings_controls.py::test_revoking_one_password_leaves_the_others_working` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 14 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_client_mid_mail_enable_box_recovers` | linux (linux): passed, tui (linux): passed |
-| 15 | app | (none) | — |
+| 14 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_client_mid_mail_enable_box_recovers` | web (linux): failed, linux (linux): passed, tui (linux): passed |
+| 15 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_client_mid_first_enable_shows_partial_and_resume_finishes` | web (linux): passed, tui (linux): passed |
 | 16 | app | `tests/e2e-unified/tests/test_mail_settings_controls.py::test_a_brief_drop_while_turning_mail_on_is_retried_and_finishes` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 17 | app | `tests/e2e-unified/tests/test_mail_settings_controls.py::test_turning_email_off_keeps_the_calendar_signed_in` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 18 | app | `tests/e2e-unified/tests/test_mail_settings_controls.py::test_turning_your_own_mail_off_leaves_another_users_mail_working` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 19 | app | `tests/e2e-unified/tests/test_mail_settings_controls.py::test_serving_off_closes_mail_apps_but_the_app_still_shows_mail` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 20 | app | `tests/e2e-unified/tests/test_mail_settings_controls.py::test_new_password_is_generated_by_default_and_a_typed_one_is_warned` | web (linux): passed, linux (linux): failed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 21 | app | `tests/e2e-unified/tests/test_mail_settings_controls.py::test_mail_setup_and_passwords_follow_you_to_a_second_device` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 22 | app | (none) | — |
-| 23 | app | (none) | — |
+| 22 | app | `tests/e2e-unified/tests/test_mail_account_settings.py::test_receiving_and_sending_are_switched_off_and_on_separately` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 23 | app | `tests/e2e-unified/tests/test_mail_settings_over_quota.py::test_a_full_mailbox_shows_the_notice_and_the_used_size` | web (linux): passed, tui (linux): passed |
 | 24 | app | `tests/e2e-unified/tests/test_mail_settings_controls.py::test_a_refused_change_says_why_and_can_be_tried_again` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 25 | app | (none) | — |
+| 25 | app | `tests/e2e-unified/tests/test_mail_submission_token_refresh.py::test_a_mail_app_keeps_sending_after_the_first_token_would_have_expired` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 26 | app | `tests/e2e-unified/tests/test_mail_credentials.py::test_calendar_written_before_a_key_rotation_still_opens` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 27 | app | `tests/e2e-unified/tests/test_mail_unavailable_without_scanners_ui.py::test_both_mail_pages_render_a_box_that_cannot_enable_mail` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 <!-- features-render:end -->

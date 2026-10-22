@@ -35,11 +35,11 @@ Stamped 2026-09-19 at 23b3189e2b.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.2-dev+3677c3d4 standalone |
-| linux | ✅ full | 0.1.4-dev+52904896 standalone |
+| web | ✅ full | 0.1.5-dev+110d1248 standalone |
+| linux | ✅ full | 0.1.4-dev+d1096e50.dirty standalone |
 | windows | ✅ full | 0.1.2-dev+83a219a8 standalone |
-| macos | ✅ full | 0.1.4-dev+52904896 standalone |
-| ios | ✅ full | 0.1.4-dev+52904896 standalone |
+| macos | ✅ full | 0.1.5-dev+61b844ca standalone |
+| ios | ✅ full | 0.1.5-dev+61b844ca standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.2-dev+bcc8d0de standalone |
 

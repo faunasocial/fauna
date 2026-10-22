@@ -53,28 +53,28 @@ Stamped 2026-10-13 at 899b58ab1b.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| linux | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| windows | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| macos | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| ios | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| android | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| tui | ✅ full | 0.1.4-dev+52904896 standalone |
+| web | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| linux | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| windows | ⚠ partial | 0.1.4-dev+1b9205d6 standalone |
+| macos | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| ios | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| android | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| tui | ✅ full | 0.1.4-dev+899b58ab.dirty standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_encryption_settings_page.py::test_each_sign_in_tops_up_the_supply_so_a_peer_can_start_while_you_are_away` | tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_encryption_settings_page.py::test_the_page_shows_the_nests_count_and_calls_it_low_below_five` | tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_encryption_settings_page.py::test_the_page_shows_the_nests_count_and_calls_it_low_below_five` | tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_encryption_settings_page.py::test_opening_the_page_never_tops_up_and_refresh_does` | tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_encryption_settings_page.py::test_opening_the_page_never_tops_up_and_refresh_does` | tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_encryption_settings_page.py::test_each_sign_in_tops_up_the_supply_so_a_peer_can_start_while_you_are_away` | windows (windows): passed, tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_encryption_settings_page.py::test_the_page_shows_the_nests_count_and_calls_it_low_below_five` | windows (windows): skipped, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_encryption_settings_page.py::test_the_page_shows_the_nests_count_and_calls_it_low_below_five` | windows (windows): skipped, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_encryption_settings_page.py::test_opening_the_page_never_tops_up_and_refresh_does` | windows (windows): skipped, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_encryption_settings_page.py::test_opening_the_page_never_tops_up_and_refresh_does` | windows (windows): skipped, tui (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/api/test_mls_channels.py::test_key_package_lifecycle` | nest (linux): passed |
 | 6 | nest | `tests/e2e-unified/tests/api/test_starter_key_supply.py::test_once_the_one_use_keys_run_out_the_last_resort_key_keeps_you_reachable` | nest (linux): passed |
 | 7 | nest | `tests/e2e-unified/tests/api/test_starter_key_supply.py::test_a_starter_key_expires_after_thirty_days` | nest (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_encryption_settings_page.py::test_the_page_shows_the_nests_count_and_calls_it_low_below_five` | tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_encryption_settings_page.py::test_opening_the_page_never_tops_up_and_refresh_does` | tui (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_encryption_settings_page.py::test_a_new_identity_is_reachable_as_soon_as_it_is_set_up` | tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_encryption_settings_page.py::test_signing_in_on_another_device_publishes_fresh_keys_from_it` | tui (linux): passed |
+| 8 | app | `tests/e2e-unified/tests/test_encryption_settings_page.py::test_the_page_shows_the_nests_count_and_calls_it_low_below_five` | windows (windows): skipped, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_encryption_settings_page.py::test_opening_the_page_never_tops_up_and_refresh_does` | windows (windows): skipped, tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_encryption_settings_page.py::test_a_new_identity_is_reachable_as_soon_as_it_is_set_up` | windows (windows): skipped, tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_encryption_settings_page.py::test_signing_in_on_another_device_publishes_fresh_keys_from_it` | windows (windows): passed, tui (linux): passed |
 | 12 | nest | `tests/e2e-unified/tests/api/test_starter_key_supply.py::test_a_lookup_learns_only_whether_you_can_be_reached` | nest (linux): passed |
 | 12 | nest | `tests/e2e-unified/tests/api/test_starter_key_supply.py::test_a_signed_in_neighbour_learns_only_whether_you_can_be_reached` | nest (linux): passed |
 | 13 | nest | `tests/e2e-unified/tests/api/test_starter_key_supply.py::test_nobody_takes_starter_keys_anonymously_and_another_nest_cannot_drain_them` | nest (linux): passed |

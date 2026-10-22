@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/logplane"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mailfauna"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/metrics"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/scan"
@@ -83,6 +84,10 @@ type scanBreaker struct {
 	mu          sync.Mutex
 	consecutive int
 	openUntil   time.Time
+	// tripped is true from the closed→open edge until the success that closes the
+	// breaker; it survives the half-open window, which is how record() tells a
+	// failed trial (still open) from a fresh trip.
+	tripped bool
 	// clock is injectable for tests; nil ⇒ time.Now.
 	clock func() time.Time
 }
@@ -112,21 +117,42 @@ func (b *scanBreaker) allow() bool {
 	return true
 }
 
-func (b *scanBreaker) record(ok bool) {
+// breakerTransition is what a record() call changed about the breaker's
+// externally visible state. Only a real closed→open or open→closed edge is a
+// transition: a failed half-open trial re-arms an already-open breaker, and a
+// success on a breaker that never opened is not a recovery.
+type breakerTransition int
+
+const (
+	breakerUnchanged breakerTransition = iota
+	breakerOpened
+	breakerClosed
+)
+
+func (b *scanBreaker) record(ok bool) breakerTransition {
 	if b == nil {
-		return
+		return breakerUnchanged
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if ok {
 		b.consecutive = 0
 		b.openUntil = time.Time{}
-		return
+		if b.tripped {
+			b.tripped = false
+			return breakerClosed
+		}
+		return breakerUnchanged
 	}
 	b.consecutive++
 	if b.consecutive >= scanBreakerThreshold {
 		b.openUntil = b.now().Add(scanBreakerCooldown)
+		if !b.tripped {
+			b.tripped = true
+			return breakerOpened
+		}
 	}
+	return breakerUnchanged
 }
 
 // scanGate holds the MTA-process-wide runtime state for the content-scan gate:
@@ -139,6 +165,9 @@ type scanGate struct {
 	inflight chan struct{} // cap maxInFlightScans; nil ⇒ uncapped
 	clamd    *scanBreaker
 	rspamd   *scanBreaker
+	// onTransition receives each breaker edge (opened=true for closed→open); nil ⇒
+	// the admin-logs plane. Injectable so a test can count emissions.
+	onTransition func(scanner logplane.ScannerName, opened bool)
 }
 
 func newScanGate() *scanGate {
@@ -179,9 +208,28 @@ func (g *scanGate) clamdAllow() bool {
 	return g.clamd.allow()
 }
 
+// noteTransition reports a breaker edge on the admin-logs plane (transition-only,
+// never per tempfail — the plane's catalogue is the scanner-availability story
+// for third-party scanners that are never plane sources themselves).
+func (g *scanGate) noteTransition(scanner logplane.ScannerName, t breakerTransition) {
+	if t == breakerUnchanged {
+		return
+	}
+	opened := t == breakerOpened
+	if g.onTransition != nil {
+		g.onTransition(scanner, opened)
+		return
+	}
+	if opened {
+		logplane.ScannerUnavailable(scanner)
+	} else {
+		logplane.ScannerRecovered(scanner)
+	}
+}
+
 func (g *scanGate) clamdRecord(ok bool) {
 	if g != nil {
-		g.clamd.record(ok)
+		g.noteTransition(logplane.ScannerClamd, g.clamd.record(ok))
 	}
 }
 
@@ -194,7 +242,7 @@ func (g *scanGate) rspamdAllow() bool {
 
 func (g *scanGate) rspamdRecord(ok bool) {
 	if g != nil {
-		g.rspamd.record(ok)
+		g.noteTransition(logplane.ScannerRspamd, g.rspamd.record(ok))
 	}
 }
 

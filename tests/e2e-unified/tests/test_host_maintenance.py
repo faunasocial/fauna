@@ -2,7 +2,8 @@
 § Host OS Maintenance § 4) — the client UI half.
 
 The admin/nest page renders a passive host-OS status line (`nest-os-maintenance-status`)
-from the `os_*` fields on `fauna.setup.status` — "OS up to date" by default, or a
+from the `os_*` fields on `fauna.setup.status` — "OS status not reported by this
+host" when the nest reads no host-status file (the default), "OS up to date", or a
 pending-updates count badge (`nest-os-updates-count`) / a "restart now" button
 (`nest-os-restart-now-button`) when the host reports pending work. The button
 dispatches `fauna.admin.request_host_restart`, which writes a `restart-requested`
@@ -71,10 +72,11 @@ def _wait(predicate, timeout: float = 15.0, interval: float = 0.3) -> bool:
 
 
 @pytest.mark.feature("admin-nest")
-def test_os_maintenance_status_up_to_date(admin_app, nest_instance):
-    """With no host maintenance channel (the default), the admin-nest page shows
-    the always-present status line reading 'OS up to date', and neither the count
-    badge nor the restart-now button render (nothing is pending)."""
+def test_os_maintenance_status_not_reported_without_host_data(admin_app, nest_instance):
+    """With no host maintenance channel (the default — a hand-built box), the
+    admin-nest page shows the always-present status line reading 'OS status not
+    reported by this host' — never 'OS up to date', which the nest cannot vouch
+    for — and neither the count badge nor the restart-now button render."""
     shutil.rmtree(_maintenance_dir(nest_instance), ignore_errors=True)
     shutil.rmtree(_host_state_dir(nest_instance), ignore_errors=True)
     admin_app.admin.navigate_nest()
@@ -84,9 +86,9 @@ def test_os_maintenance_status_up_to_date(admin_app, nest_instance):
     )
     assert _wait(
         lambda: admin_app.admin.os_maintenance_status_text().strip()
-        == S.admin.nest_page.os_up_to_date
+        == S.admin.nest_page.os_no_host_data
     ), (
-        "status line should read 'OS up to date' with no host channel. got: "
+        "status line should read the not-reported string with no host channel. got: "
         f"{admin_app.admin.os_maintenance_status_text()!r}"
     )
     assert not admin_app.admin.os_updates_count_present(), (
@@ -95,6 +97,34 @@ def test_os_maintenance_status_up_to_date(admin_app, nest_instance):
     assert not admin_app.admin.os_restart_now_present(), (
         "the restart-now button must be absent when no reboot is pending"
     )
+
+
+@pytest.mark.feature("admin-nest")
+def test_os_maintenance_status_up_to_date(admin_app, nest_instance):
+    """With a host-status reporting nothing pending, the status line reads 'OS up
+    to date' and neither the count badge nor the restart-now button render."""
+    host_state = _write_host_status(
+        nest_instance,
+        "security_updates_pending=0\nreboot_pending=false\n",
+    )
+    try:
+        admin_app.admin.navigate_nest()
+        assert _wait(
+            lambda: admin_app.admin.os_maintenance_status_text().strip()
+            == S.admin.nest_page.os_up_to_date
+        ), (
+            "status line should read 'OS up to date' when the host reports nothing "
+            f"pending. got: {admin_app.admin.os_maintenance_status_text()!r} "
+            f"error: {admin_app.error_text()!r}"
+        )
+        assert not admin_app.admin.os_updates_count_present(), (
+            "the count badge must be absent when no updates are pending"
+        )
+        assert not admin_app.admin.os_restart_now_present(), (
+            "the restart-now button must be absent when no reboot is pending"
+        )
+    finally:
+        shutil.rmtree(host_state, ignore_errors=True)
 
 
 @pytest.mark.feature("admin-nest")

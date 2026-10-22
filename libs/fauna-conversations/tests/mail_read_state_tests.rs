@@ -56,6 +56,7 @@ fn record(mailbox: MailFeed, uid: u32, from: &str, subject: &str, seen: bool) ->
         rfc5322: raw.into_bytes(),
         suppress_from_view: false,
         has_seen_flag: seen,
+        warmup_hold: None,
     }
 }
 

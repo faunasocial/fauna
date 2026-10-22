@@ -4,6 +4,7 @@ Provides image build, container lifecycle, health checks, and port
 allocation for all Docker-based e2e tests.
 """
 
+import base64
 import contextlib
 import datetime
 import email.message
@@ -24,13 +25,19 @@ import uuid
 from pathlib import Path
 
 from drivers.browser import launch_kwargs as browser_launch_kwargs
+from helpers import nest_test_image
 from helpers.mail_aliases import add_exact_alias_as
 from helpers.recipient_seal_key import provision_recipient_seal_key
 
 
-IMAGE_TAG = "fauna-nest-test:local"
 BUILD_TIMEOUT = 1800
+#: How long a build waits for its `build` slot before giving up — a saturated box
+#: queues builds for a while, and the wait is not the build's own time.
+SLOT_WAIT_TIMEOUT = 3600
 HEALTH_TIMEOUT = 60
+#: The fleet's build-slot script, relative to the repository root; a checkout
+#: without it builds unslotted.
+SLOT_SCRIPT = ("scripts", "build-slot.py")
 
 
 def get_repo_root() -> Path:
@@ -95,35 +102,49 @@ def find_free_ports(count: int) -> list[int]:
             s.close()
 
 
-#: How far the tag may lag HEAD before the run says so. Not a refusal threshold:
-#: an older image still proves plenty, and rebuilding is barred on a dev VM
-#: (below), so the honest move is to make the drift visible and let the reader
-#: judge. Chosen as "older than a working week" — long enough that an ordinary
-#: pull-and-retag keeps every run quiet, short enough that a *wire* change is
-#: unlikely to have slipped underneath it unnoticed.
+def image_tag() -> str:
+    """The image every helper here boots: the image ``FAUNA_NEST_TEST_IMAGE``
+    names when the run names one, else this tree's own keyed tag
+    (``helpers/nest_test_image.py``)."""
+    return nest_test_image.image_tag(get_repo_root())
+
+
+def __getattr__(name):
+    # `IMAGE_TAG` resolves on first use, never at import: the modules importing
+    # it get this tree's keyed tag, and a tier_1 test importing this package for
+    # something else runs no git.
+    if name == "IMAGE_TAG":
+        return image_tag()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+#: How far a NAMED image may lag HEAD before the run says so. Not a refusal
+#: threshold: an older image still proves plenty, so the honest move is to make
+#: the drift visible and let the reader judge. Chosen as "older than a working
+#: week" — long enough that an ordinary pull keeps every run quiet, short enough
+#: that a *wire* change is unlikely to have slipped underneath it unnoticed. A
+#: keyed tag needs no such warning: its key IS this tree's inputs.
 STALE_IMAGE_DAYS = 7
 
 _age_reported = False
 
 
-def report_image_age(created_iso: str) -> str | None:
-    """Say how far `IMAGE_TAG` lags HEAD, once per run, when it lags at all.
+def report_image_age(created_iso: str, image: str | None = None) -> str | None:
+    """Say how far a named image lags HEAD, once per run, when it lags at all.
 
-    **The failure this exists to name.** `docker_build` reuses whatever image
-    carries the tag, and its own contract says it "cannot know whether a local
-    image predates the commit under test". On 2026-08-29 that abdication cost a
-    session: the tag on the primary dev VM had been built 2026-08-14, three days
-    before the actor key went tagged-only (and its transition machinery was
-    deleted), so every authenticated call to it answers
+    **The failure this exists to name.** On 2026-08-29 the one fixed tag this
+    package then booted had been built 2026-08-14 on the primary dev VM, three
+    days before the actor key went tagged-only (and its transition machinery was
+    deleted), so every authenticated call to it answered
     `fauna.auth.signature_failed`. A docker-mode sweep recorded 11 of those as an
     unexplained tail. The controlled differential is stark — the `tests/api/`
     slice is 107 passed against the pulled release image and **108 errors, every
     one `signature_failed`**, against the stale tag, same tests and same commit.
 
-    A wire-affecting commit between the image and HEAD makes EVERY test in this
-    package fail in a way that reads like a product defect, so a run that cannot
-    rule that out must at least say so out loud. Returns the message it printed,
-    or `None` when the image is current enough to keep quiet.
+    The keyed tag closed that hole for the tree's own build; an image the run
+    names with ``FAUNA_NEST_TEST_IMAGE`` is still whatever was pulled, so a run
+    against an old one must at least say so out loud. Returns the message it
+    printed, or `None` when the image is current enough to keep quiet.
     """
     global _age_reported
     if _age_reported or not created_iso:
@@ -133,19 +154,23 @@ def report_image_age(created_iso: str) -> str | None:
         built = datetime.datetime.fromisoformat(stamp)
     except ValueError:
         return None
+    if built.tzinfo is not None:
+        built = built.astimezone().replace(tzinfo=None)
     days = (datetime.datetime.now() - built).days
     if days < STALE_IMAGE_DAYS:
         return None
     _age_reported = True
+    image = image or image_tag()
     message = (
-        f"\n⚠ {IMAGE_TAG} was built {days} days ago ({built.date()}), and this "
-        f"package's tests run against IT, not against anything the run names.\n"
+        f"\n⚠ {image} was built {days} days ago ({built.date()}), and this "
+        f"package's tests run against IT, not against this tree.\n"
         f"  A wire-affecting commit since then makes every authenticated call "
         f"fail in a way that reads like a product defect — measured "
         f"2026-08-29: a 15-day-old tag turned a 107-passed slice into 108 "
         f"`fauna.auth.signature_failed` errors.\n"
-        f"  Refresh it with:  docker pull ghcr.io/faunasocial/nest:dev && "
-        f"docker tag ghcr.io/faunasocial/nest:dev {IMAGE_TAG}\n"
+        f"  Refresh it with:  docker pull ghcr.io/faunasocial/nest:dev  (and "
+        f"name it in {nest_test_image.OVERRIDE_ENV}), or unset "
+        f"{nest_test_image.OVERRIDE_ENV} to test this tree's own build.\n"
         f"  (`:dev` is every image build's push; `:latest` moves only on a "
         f"production promote and can itself be weeks behind.)\n"
     )
@@ -153,84 +178,149 @@ def report_image_age(created_iso: str) -> str | None:
     return message
 
 
-def docker_build(repo_root: Path) -> str:
-    """Build the Docker image and return the tag.
+_override_announced = False
 
-    **This helper does not build the nest image, by design** — the same rule the
-    nest-mode axis's ``_DockerProvider`` already states, now applied to the tier_4
-    suite that used to contradict it. Building ``ghcr.io/faunasocial/nest`` belongs
-    to GitHub-hosted runners via ``build-nest-image.yml`` (``image-pipeline.md``
-    § Image tags & channels): the three dev VMs share one physical host, so a build
-    here starves every sibling session — the standing user stop of 2026-06-13.
 
-    That contradiction had teeth. ``tests/platform/docker/`` modules carry
-    ``@pytest.mark.feature``, so a ``--feature`` selected docker-mode sweep pulls
-    them in like any other test — and on 2026-08-28 one silently started
-    ``docker buildx build`` on the primary dev VM (twice; it respawned when the
-    first was killed) while sibling sessions queued for build slots on that box.
-
-    An absent image is therefore a loud refusal naming both remedies, never a
-    20-minute surprise build. ``FAUNA_ALLOW_NEST_IMAGE_BUILD=1`` is the explicit
-    opt-in for the machine whose job that is.
-
-    ``FAUNA_REUSE_IMAGE=1`` was the old opt-in for this behaviour; reuse is now
-    the default, so the variable is accepted and ignored.
-
-    **The tag's currency is still the caller's to own, but no longer silently
-    so.** This helper cannot know whether the image implements the commit under
-    test — a run wanting a *known* artifact should pass ``--nest docker:<ref>``
-    against a pulled published image instead. What it can know, and now says, is
-    how OLD the tag is: that abdication cost a session on 2026-08-29, when a
-    15-day-old tag predating the tagged-only actor key turned every
-    authenticated call into ``fauna.auth.signature_failed`` and a docker-mode
-    sweep filed 11 of them as an unexplained tail. See ``report_image_age``.
-    """
+def _image_created(image: str) -> str | None:
+    """The image's creation stamp, or `None` when it is not present here."""
     created = subprocess.run(
-        ["docker", "image", "inspect", "--format", "{{.Created}}", IMAGE_TAG],
+        ["docker", "image", "inspect", "--format", "{{.Created}}", image],
         capture_output=True, text=True, timeout=30,
     )
-    if created.returncode == 0:
-        report_image_age(created.stdout.strip())
-        return IMAGE_TAG
+    return created.stdout.strip() if created.returncode == 0 else None
+
+
+def docker_build(repo_root: Path) -> str:
+    """Return the tag of the image this tree's tier_4 docker tests boot, building
+    it first when it is absent and the run opted in.
+
+    **The tag is keyed on the image's source inputs** (``helpers/
+    nest_test_image.py``): same inputs, same tag, across every checkout on the
+    machine, so a test reuses an image only when it was built from exactly what
+    this tree would send the build. A run that means to test another image — a
+    pulled ``ghcr.io/faunasocial/nest:dev`` — names it in
+    ``FAUNA_NEST_TEST_IMAGE``; that image is never built, and the run says once
+    that it is not this tree's.
+
+    **It builds only on an explicit opt-in.** An image only for tests is built
+    locally, never dispatched (owner ruling 2026-10-19, ``image-pipeline.md``
+    § Image tags & channels): the self-hosted CI runner shares the dev VMs' host, so a local build
+    costs the host what a dispatch does, and a dispatch would add ``:sha-<sha>``
+    to the public package. But a build is still a heavy act no sweep may start
+    by surprise: ``tests/platform/docker/`` modules carry
+    ``@pytest.mark.feature``, so a ``--feature`` selected docker-mode sweep pulls
+    them in like any other test, and on 2026-08-28 one silently started
+    ``docker buildx build`` on the primary dev VM (twice; it respawned when the
+    first was killed) while sibling sessions queued for build slots on that box.
+    An absent image is therefore a loud refusal naming both remedies;
+    ``FAUNA_ALLOW_NEST_IMAGE_BUILD=1`` is the explicit opt-in.
+
+    **One build per key.** The build runs under a machine-wide lock on the tag —
+    a second caller waits, then finds the tag and reuses it — and inside a
+    ``build`` slot (``scripts/build-slot.py``), like any other heavy build. After
+    a build, keyed tags past the GC window are untagged
+    (``nest_test_image.collect_old_tags``).
+    """
+    global _override_announced
+    named = nest_test_image.override_image()
+    if named:
+        created = _image_created(named)
+        if created is None:
+            raise RuntimeError(
+                f"{nest_test_image.OVERRIDE_ENV} names {named!r}, which is not "
+                f"present on this machine; `docker pull {named}` first. A named "
+                f"image is never built here."
+            )
+        if not _override_announced:
+            _override_announced = True
+            print(f"\n⚠ the tier_4 docker tests boot {named!r}, named by "
+                  f"{nest_test_image.OVERRIDE_ENV} — not this tree's own build.\n",
+                  file=sys.stderr)
+        report_image_age(created, named)
+        return named
+
+    tag = nest_test_image.local_image_tag(repo_root)
+    if tag == nest_test_image.UNKEYED_TAG:
+        raise RuntimeError(
+            f"cannot key the nest test image on {repo_root}'s sources (git "
+            f"failed there), so no tag can say which tree it was built from."
+        )
+    if _image_created(tag) is not None:
+        return tag
 
     if os.environ.get("FAUNA_ALLOW_NEST_IMAGE_BUILD") != "1":
         raise RuntimeError(
-            f"the tier_4 docker suite needs the image {IMAGE_TAG!r}, which is "
-            f"not present on this machine. This helper deliberately does NOT "
-            f"build it: building the nest image on a dev VM is forbidden — the "
-            f"dev VMs share one physical host and the build starves them "
-            f"(image-pipeline.md § Image tags & channels; the 2026-06-13 user "
-            f"stop). Either\n"
-            f"  • docker pull ghcr.io/faunasocial/nest:latest, then retag it "
-            f"{IMAGE_TAG!r}, or\n"
-            f"  • dispatch a real build: gh workflow run build-nest-image.yml "
-            f"--ref main, then pull the resulting tag.\n"
-            f"The machine whose job IS building the image sets "
-            f"FAUNA_ALLOW_NEST_IMAGE_BUILD=1."
+            f"the tier_4 docker suite needs {tag!r} — the nest image built from "
+            f"this tree's sources, keyed on them — which is not present on this "
+            f"machine, and this helper builds only on an explicit opt-in (a "
+            f"build is a heavy act no sweep starts by surprise). Either\n"
+            f"  • export FAUNA_ALLOW_NEST_IMAGE_BUILD=1 and re-run: an image "
+            f"only for tests is built locally, inside a build slot — never a "
+            f"build-nest-image.yml dispatch, which adds :sha-<sha> to the public "
+            f"package (image-pipeline.md § Image tags & channels, owner ruling "
+            f"2026-10-19) — and a later test with the same sources reuses it, or\n"
+            f"  • docker pull ghcr.io/faunasocial/nest:dev and export "
+            f"{nest_test_image.OVERRIDE_ENV}=ghcr.io/faunasocial/nest:dev, when "
+            f"an already-published build is what you test."
         )
 
-    head_sha = subprocess.run(
-        ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
-        capture_output=True, text=True, timeout=30,
-    ).stdout.strip()
-    result = subprocess.run(
-        [
+    with nest_test_image.build_lock(tag):
+        # A sibling holding the lock may have built it while this caller waited.
+        if _image_created(tag) is not None:
+            return tag
+        head_sha = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=30,
+        ).stdout.strip()
+        slot = repo_root.joinpath(*SLOT_SCRIPT)
+        cmd = ([sys.executable, str(slot), "--pool", "build",
+                "--timeout", str(SLOT_WAIT_TIMEOUT), "--"]
+               if slot.exists() else []) + [
             "docker", "buildx", "build",
-            "-t", IMAGE_TAG,
+            "-t", tag,
             # Same value the release-candidate gate reads off `.Config.Env`
             # (feature_ledger.py::release_candidate_refusal_for_image) and the
-            # new `org.opencontainers.image.revision` label reads from — a
-            # build through this helper should be self-identifying too,
-            # not just the pipeline's (testing.md class (7)).
+            # `org.opencontainers.image.revision` label reads from — a build
+            # through this helper is self-identifying too (testing.md class (7)).
+            # The tag is shared across checkouts, so this is the HEAD of the
+            # FIRST builder: a commit whose tree has exactly these inputs, not
+            # necessarily the caller's (nest_test_image's module docstring).
             "--build-arg", f"FAUNA_BUILD_COMMIT={head_sha or 'dev'}",
             "--load", str(repo_root),
-        ],
-        capture_output=True, text=True,
-        timeout=BUILD_TIMEOUT,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"docker build failed:\n{result.stderr[-2000:]}")
-    return IMAGE_TAG
+        ]
+        # Output is not captured: build-slot.py's queue lines say why a build
+        # waits, and pytest shows the stream on a failure.
+        result = subprocess.run(cmd, timeout=SLOT_WAIT_TIMEOUT + BUILD_TIMEOUT)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"docker build of {tag} failed (exit {result.returncode}); its "
+                f"output is in this test's captured stderr")
+    nest_test_image.collect_old_tags(tag)
+    return tag
+
+
+def cloud_init_write_files(user_data: str) -> dict[str, str]:
+    """``{path: content}`` for every ``write_files`` entry of the rendered
+    cloud-init user-data. `build_cloud_init` emits each as ``  - path: P`` /
+    ``    content: |`` / the body indented six spaces / ``    permissions:``,
+    so the block scalar is read back by that indent."""
+    files: dict[str, str] = {}
+    lines = user_data.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith("  - path: ") and i + 1 < len(lines) \
+                and lines[i + 1] == "    content: |":
+            path = line[len("  - path: "):].strip()
+            body = []
+            i += 2
+            while i < len(lines) and (lines[i].startswith("      ") or lines[i] == ""):
+                body.append(lines[i][6:])
+                i += 1
+            files[path] = "\n".join(body).rstrip("\n") + "\n"
+            continue
+        i += 1
+    return files
 
 
 def remove_container(name: str):
@@ -245,18 +335,19 @@ def start_container(name: str, port: int, env: dict | None = None) -> str:
     """Start a fauna-nest container. Returns container ID."""
     remove_container(name)
     # FAUNA_PORT=3000: the production nest internal port (the entrypoint /
-    # Dockerfile HEALTHCHECK / SNI-router default). Set explicitly — and the
-    # host-port mapping below targets 3000 — so the in-container listener
-    # matches the real deploy and the tier_4 image tests mirror production.
+    # Dockerfile HEALTHCHECK / SNI-router default), set explicitly so the
+    # in-container listener matches the real deploy. It binds container
+    # loopback, so the host-port mapping below targets the SNI router's :443 —
+    # the production path to the nest.
     cmd = [
         "docker", "run", "-d", *fence_cpuset_args(),
         "--name", name,
-        "-p", f"127.0.0.1:{port}:3000",
+        "-p", f"127.0.0.1:{port}:443",
         "-e", "FAUNA_PORT=3000",
     ]
     for k, v in (env or {}).items():
         cmd.extend(["-e", f"{k}={v}"])
-    cmd.append(IMAGE_TAG)
+    cmd.append(image_tag())
     result = subprocess.run(
         cmd, capture_output=True, text=True, timeout=30,
     )
@@ -288,6 +379,7 @@ def wait_for_health(port: int, container_name: str,
                 resp = urllib.request.urlopen(url, timeout=5, context=ctx)
                 if resp.status == 200:
                     _note_booted_artifact(container_name, resp)
+                    _wait_for_router_channel(container_name, deadline)
                     return
             except Exception:
                 pass
@@ -310,6 +402,31 @@ def wait_for_health(port: int, container_name: str,
         f"── nest boot/migration lines (full log) ──\n" + "\n".join(nest_lines[-50:]) +
         f"\n── raw tail ──\n{out[-1200:]}"
     )
+
+
+ROUTER_CHANNEL_UP = "router channel to nest established"
+
+
+def _wait_for_router_channel(container_name: str, deadline: float) -> None:
+    """Wait until the SNI router's sidecar channel to the nest is up.
+
+    Every fixture reaches the nest through the router's :443. On a fresh
+    container the router can start before the nest has minted its token, is
+    refused, and exits for s6 to restart it (``docker/s6/fauna-sni-router/run``,
+    the credential rule): health answered through :443 in that window is
+    followed by a dropped connection, so a first WS-RPC call lands on a router
+    that is about to restart. The channel-up line is the router's own word that
+    the restart is behind it. An image whose router never logs it (an older
+    build) falls through at the caller's deadline rather than failing here.
+    """
+    while time.monotonic() < deadline:
+        logs = subprocess.run(
+            ["docker", "logs", container_name],
+            capture_output=True, text=True, timeout=30,
+        )
+        if ROUTER_CHANNEL_UP in logs.stdout + logs.stderr:
+            return
+        time.sleep(1.0)  # sleep-ok: the poll interval of a deadline-bounded wait on the router's own log line
 
 
 def _note_booted_artifact(container_name: str, resp) -> None:
@@ -541,7 +658,7 @@ def start_container_with_ports(
     dns: str | None = None,
     mounts: list[tuple[str, str]] | None = None,
     data_volume: str | None = None,
-    image: str = IMAGE_TAG,
+    image: str | None = None,
     labels: dict | None = None,
     publish_host: str = "127.0.0.1",
     udp_port_map: dict[int, int] | None = None,
@@ -549,9 +666,9 @@ def start_container_with_ports(
 ) -> str:
     """Start a fauna-nest container mapping container_port→host_port.
 
-    ``image`` overrides the locally-built ``IMAGE_TAG`` — the live private-relay
-    test runs the production ``ghcr.io/faunasocial/nest:latest`` pull directly,
-    without retagging over a sibling session's locally-built test image.
+    ``image`` overrides this tree's keyed tag (``image_tag()``) — the live
+    private-relay test runs the production ``ghcr.io/faunasocial/nest:latest``
+    pull directly.
 
     ``port_map`` keys are in-container ports (the nest listener, 25/465/587 SMTP,
     993 IMAPS, …), values the ``127.0.0.1`` host ports to bind them to.
@@ -561,11 +678,14 @@ def start_container_with_ports(
     **Nest port.** Production binds the nest at ``3000`` (``FAUNA_PORT``, the
     entrypoint/HEALTHCHECK/router default) — kept off ``8443`` so ``8443`` means
     *CalDAV only* (a bare-IP box serves user-facing CalDAV at ``<ip>:8443``).
-    The docker tests here publish ``{3000: …}`` + ``FAUNA_PORT=3000`` for the
-    nest so the tier_4 suite mirrors the real deploy port. The internal nest
-    port is pure IPC (callers reach the nest via the host port, and every
-    in-container consumer — the SNI router, the bridge run-scripts, the
-    entrypoint — dials ``${FAUNA_PORT:-3000}``), but it matters concretely when
+    The image binds it on container LOOPBACK, so no publish reaches it: the
+    docker tests here publish ``{443: …}`` — the SNI router, the production
+    path, whose no-SNI default route is the nest — and pass ``FAUNA_PORT=3000``
+    so the tier_4 suite mirrors the real deploy port
+    (``deployment-threat-model.md`` § Concern 1a, the container-hardening
+    paragraph). The internal nest port is pure IPC (every in-container consumer
+    — the SNI router, the bridge run-scripts, the entrypoint — dials
+    ``127.0.0.1:${FAUNA_PORT:-3000}``), but it matters concretely when
     ``FAUNA_LAN_BIND_IP`` is set: then the MDA binds CalDAV directly on the LAN
     interface at the admin port (default ``8443``), so the nest **must** be on
     ``3000`` (or CalDAV on a non-8443 port) or the two ``EADDRINUSE``-collide
@@ -647,7 +767,7 @@ def start_container_with_ports(
         cmd.extend(["--add-host", f"{host}:{value}"])
     for k, v in (env or {}).items():
         cmd.extend(["-e", f"{k}={v}"])
-    cmd.append(image)
+    cmd.append(image or image_tag())
     result = subprocess.run(
         cmd, capture_output=True, text=True, timeout=30,
     )
@@ -663,10 +783,39 @@ def remove_data_dir(path: str) -> None:
     container over the same bind mount, then the emptied directory goes."""
     subprocess.run(
         ["docker", "run", "--rm", "--user", "0", "--entrypoint", "find",
-         "-v", f"{path}:/d", IMAGE_TAG, "/d", "-mindepth", "1", "-delete"],
+         "-v", f"{path}:/d", image_tag(), "/d", "-mindepth", "1", "-delete"],
         capture_output=True, timeout=60,
     )
     subprocess.run(["rm", "-rf", path], capture_output=True, timeout=30)
+
+
+def read_data_file(path: str, rel: str) -> bytes:
+    """Read ``rel`` from a host directory a container used as ``data_volume``.
+    The image's services own what they write there (uid ``fauna``), which the
+    harness's uid matches on the dev VMs but not on a runner, so the read runs
+    in a throwaway root container over the same bind mount — the
+    :func:`remove_data_dir` move."""
+    r = subprocess.run(
+        ["docker", "run", "--rm", "--user", "0", "--entrypoint", "cat",
+         "-v", f"{path}:/d", image_tag(), f"/d/{rel}"],
+        capture_output=True, timeout=60,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"read /data/{rel} failed: {r.stderr.decode(errors='replace')}")
+    return r.stdout
+
+
+def write_data_file(path: str, rel: str, data: bytes) -> None:
+    """Overwrite an EXISTING file ``rel`` under a ``data_volume`` host
+    directory, as :func:`read_data_file` reads it. ``tee`` truncates in place,
+    so the file keeps the owner and mode the nest gave it."""
+    r = subprocess.run(
+        ["docker", "run", "--rm", "-i", "--user", "0", "--entrypoint", "tee",
+         "-v", f"{path}:/d", image_tag(), f"/d/{rel}"],
+        input=data, capture_output=True, timeout=60,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"write /data/{rel} failed: {r.stderr.decode(errors='replace')}")
 
 
 def wait_for_smtp_banner(host: str, port: int, timeout: float = 30.0):
@@ -1285,7 +1434,6 @@ def provision_mail_recipient(nest, run_seal_helper, *, domain: str, local_part: 
     claimed admin, so mail sealed to it (the forwarder NDR's ``forwarder_actor``
     IS the creating admin) becomes readable over IMAP (`provision_admin_mailbox`).
     """
-    import base64
     import secrets
 
     from clients.ws_rpc_admin_client import WsRpcAdminClient
@@ -1503,6 +1651,71 @@ def start_fake_scanner_sidecars(
     # docker embedded DNS — see container_ip() for the SERVFAIL flake it avoids.
     return {"clamd_addr": f"{container_ip(clamd_name)}:{clamd_port}",
             "rspamd_url": f"http://{container_ip(rspamd_name)}:{rspamd_port}"}
+
+
+def nest_served_leaf(container_name: str, sni: str, nest_port: int = 3000):
+    """The leaf the NEST itself presents for ``sni`` (verify off), read from
+    inside the container's network namespace.
+
+    The nest binds container loopback and the harness reaches it through the
+    SNI router's :443, which sends ``mail.*`` / ``relay.*`` / ``pds.*`` to
+    their bridges — so a host-side handshake under one of those names never
+    meets the nest's resolver. A throwaway container sharing the nest
+    container's network namespace (``--network container:<name>``) dials the
+    nest's own loopback listener with that SNI instead. It runs the scanner
+    sidecars' stdlib python image; the nest image has no python."""
+    from cryptography import x509
+
+    ensure_image(SCANNER_SIDECAR_IMAGE)
+    snippet = (
+        "import socket, ssl, base64; "
+        "c = ssl.create_default_context(); c.check_hostname = False; "
+        "c.verify_mode = ssl.CERT_NONE; "
+        f"s = c.wrap_socket(socket.create_connection(('127.0.0.1', {nest_port}), timeout=10), "
+        f"server_hostname={sni!r}); "
+        "print(base64.b64encode(s.getpeercert(binary_form=True)).decode())"
+    )
+    r = subprocess.run(
+        ["docker", "run", "--rm", "--network", f"container:{container_name}",
+         SCANNER_SIDECAR_IMAGE, "python", "-c", snippet],
+        capture_output=True, text=True, timeout=60,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"in-namespace handshake with the nest (SNI {sni!r}) failed: {r.stderr[-600:]}")
+    return x509.load_der_x509_certificate(base64.b64decode(r.stdout.strip()))
+
+
+@contextlib.contextmanager
+def scanner_wired_network(prefix: str):
+    """A user-defined network carrying the fake clamd + rspamd sidecars, for a
+    nest container that enables mail without exercising the scan gate itself.
+
+    A public box whose artifact wired no content scanners refuses
+    ``fauna.bridges.set_mail_enabled(true)`` with
+    ``fauna.bridges.mail_unavailable_here`` (``mail-bridge-lifecycle.md``
+    § Default-off on first claim → *A box with no content scanners cannot
+    enable mail*); the entrypoint declares ``content_scanners = "wired"`` only
+    when both ``FAUNA_CLAMD_ADDR`` and ``FAUNA_RSPAMD_URL`` are set. So a
+    mail-enabling container is started the way a real deploy is — with the
+    scanners beside it. Yields ``(network, env)``: pass ``network=network`` and
+    merge ``env`` into the container env. Sidecars and network are removed on
+    exit; the nest container is the caller's to remove first."""
+    suffix = find_free_port()
+    network = f"{prefix}-net-{suffix}"
+    clamd_name = f"{prefix}-clamd-{suffix}"
+    rspamd_name = f"{prefix}-rspamd-{suffix}"
+    fakes_dir = str(get_repo_root() / "tests" / "e2e-unified" / "fakes")
+    create_network(network)
+    try:
+        scan = start_fake_scanner_sidecars(
+            network, fakes_dir, clamd_name=clamd_name, rspamd_name=rspamd_name)
+        yield network, {"FAUNA_CLAMD_ADDR": scan["clamd_addr"],
+                        "FAUNA_RSPAMD_URL": scan["rspamd_url"]}
+    finally:
+        remove_container(clamd_name)
+        remove_container(rspamd_name)
+        remove_network(network)
 
 
 def start_fake_dns_sidecar(
@@ -2035,7 +2248,6 @@ def _provision_submission_token(nest, run_seal_helper, *, actor_id: bytes,
     connection authenticated as that actor, not the admin. Mirrors the
     ``mail_bridge_mta`` fixture's submission-token block (conftest.py § Submission
     identity)."""
-    import base64
 
     from clients.ws_rpc_admin_client import WsRpcAdminClient
 
@@ -2195,7 +2407,6 @@ def submit_message_tls(host: str, port: int, server_name: str, *,
     SASL PLAIN AUTH (the wrapped submission token, AEAD-unsealed + inner-Ed25519-
     verified bridge-side), then MAIL/RCPT/DATA. CERT_NONE — the listener serves the
     admin-synthesized self-signed cert. Raises on any non-2xx step."""
-    import base64
     import smtplib
 
     auth_plain = base64.b64encode(
@@ -2312,7 +2523,6 @@ def provision_relay_user(public_nest, private_nest, run_seal_helper, *,
     ``owner_admins_public`` says ``home_owner`` also claimed the public box (one
     person claiming both boxes from one app), so it is already that box's admin
     and is not registered there a second time."""
-    import base64
     import secrets
 
     from clients.ws_rpc_admin_client import WsRpcAdminClient

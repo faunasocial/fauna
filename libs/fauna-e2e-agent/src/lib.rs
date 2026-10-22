@@ -288,7 +288,7 @@ pub const BARRIER_ACK_PROBE_KEY: &str = "barrier_ack_probe";
 /// `Tab`/`Shift-Tab` presses through the web bridge's bare `/keyboard/press`
 /// route, which Chromium receives as a *trusted* key event via CDP. The in-page
 /// registry (`window.__fauna_callCommand`) keeps `focus_move` as a named refusal
-/// pointing at this driver door (`$lib/focus-walk-e2e.ts`) rather than the generic
+/// pointing at this driver door (`#lib/focus-walk-e2e.ts`) rather than the generic
 /// "unknown command" — see `e2e-systematic-ui-walks.md` § Implementation status
 /// today → the web-leg entry.
 pub const FOCUS_MOVE: &str = "focus_move";
@@ -459,7 +459,7 @@ fn describe(v: Option<&Value>) -> String {
 /// late read passed against a do-nothing barrier; here a late read is strictly
 /// stronger than an early one. The property is *not* free on every app: a web
 /// teardown is a document navigation that destroys the JS heap, so web persists
-/// the counter across it (`$lib/generation-e2e`, `sessionStorage`). An in-memory
+/// the counter across it (`#lib/generation-e2e`, `sessionStorage`). An in-memory
 /// web counter would reset to 0 across exactly the relaunch it exists to detect,
 /// turning the assert vacuous in the one direction that matters.
 pub const SESSION_GENERATION_KEY: &str = "session_generation";
@@ -609,7 +609,7 @@ pub const AUTO_RENEW_WAKE: &str = "auto_renew_wake";
 /// Per-app depth differs, and the difference is worth knowing when reading a
 /// failure: **tui and linux await the `fauna.family.notify_report` round trip**,
 /// so the ack is a true barrier; **web** fires the flush and returns without
-/// awaiting the RPC (`$lib/family-notify-e2e` → `notifyBuffer.checkNow()`), so
+/// awaiting the RPC (`#lib/family-notify-e2e` → `notifyBuffer.checkNow()`), so
 /// there the guardian-side poll is what closes the loop. Both satisfy the
 /// contract — "the flush pass has been run" — but only the first is a barrier.
 pub const FAMILY_NOTIFY_CHECK_NOW: &str = "family_notify_check_now";

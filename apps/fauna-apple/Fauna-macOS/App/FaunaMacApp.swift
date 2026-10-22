@@ -275,6 +275,10 @@ public struct FaunaMacApp: App {
                 // hosts hand it to `BridgeManagerVM` (family-safety.md §§
                 // Child-initiated contact requests / Feed-source approvals).
                 .environment(appState.familyStatus)
+                // The shared FaunaKit `SubscriptionTiersTab` reads
+                // `@Environment(WebPublishStore.self)` for the creator's web-site
+                // origin (the §4 provider form's return-URL display).
+                .environment(appState.webPublish)
                 .environment(appDelegate.menuBarController)
                 // Inject the FaunaClient every `@Environment(FaunaClient.self)`
                 // view (admin shell, mail-settings, …) reads.
@@ -1047,6 +1051,29 @@ public struct FaunaMacApp: App {
     /// their OBSERVABLE effect is entirely through `appState` mutations (also
     /// stable), matching `resetToFactory()`'s existing precedent for this same
     /// test-command path.
+    /// Push notifications (settings.md § Push notifications; common.md § Push
+    /// Notifications → Transports), run by every sign-in path — the launch and
+    /// the e2e agent's session patch alike, so the patch exercises the same
+    /// announce a user's launch makes. The macOS twin of iOS's
+    /// `FaunaApp.startPushSession`: build the shared `PushManager`, hand it to
+    /// the AppDelegate so a device token has somewhere to land, and run its
+    /// session start — announce which device this connection serves, and
+    /// re-ask APNs for a token only when this install already opted in: the OS
+    /// prompt itself belongs to the toggle, never to launch, and the OS
+    /// permission alone is NOT the opt-in (`PushManager.shouldRegisterAtLaunch`
+    /// carries the reasoning). `PushManager` no-ops its OS half on a host that
+    /// cannot serve a notification centre (the bare-binary debug build), so
+    /// this is safe on every launch path.
+    @MainActor
+    private func startPushSession(_ faunaClient: FaunaClient, deviceId: String) {
+        let pushManager = PushManager(api: faunaClient.api, deviceId: deviceId)
+        appState.pushManager = pushManager
+        appDelegate.pushManager = pushManager
+        Task { @MainActor in
+            await pushManager.onSessionStart()
+        }
+    }
+
     @MainActor
     private func performPostAuthSilentSignIn() async {
         await FaunaKit.performPostAuthSilentSignIn(
@@ -1238,23 +1265,7 @@ public struct FaunaMacApp: App {
         // release is out. `applySessionPatch` makes the same call.
         appState.updates.lookOnceAtSignIn()
 
-        // Push notifications (settings.md § Push notifications; common.md
-        // § Push Notifications → Transports). The macOS twin of iOS's
-        // `FaunaApp.swift` block: build the shared `PushManager`, hand it to the
-        // AppDelegate so a device token has somewhere to land, and run its
-        // session start — announce which device this connection serves, and
-        // re-ask APNs for a token only when this install already opted in: the
-        // OS prompt itself belongs to the toggle, never to launch, and the OS
-        // permission alone is NOT the opt-in (`PushManager.shouldRegisterAtLaunch`
-        // carries the reasoning). `PushManager` no-ops its OS half on a host
-        // that cannot serve a notification centre (the bare-binary debug
-        // build), so this is safe on every launch path.
-        let pushManager = PushManager(api: faunaClient.api, deviceId: deviceId)
-        appState.pushManager = pushManager
-        appDelegate.pushManager = pushManager
-        Task { @MainActor in
-            await pushManager.onSessionStart()
-        }
+        startPushSession(faunaClient, deviceId: deviceId)
 
         // Post-auth identity re-check (security.md § Post-auth surfacing): one-shot,
         // best-effort, non-blocking — see `performPostAuthSilentSignIn` below.
@@ -1761,6 +1772,8 @@ public struct FaunaMacApp: App {
                 // repost post — the harness's id-keyed reads need both to confirm
                 // the toggle actually created/removed a post, not just moved a count.
                 "reposted_post_id": p.repostedPostId ?? "",
+                // A quote post's quoted original, beside it (tui/linux/web's key).
+                "quoted_post_id": p.quotedPostId ?? "",
                 "viewer_repost_id": p.viewerRepostId ?? "",
                 // Every link preview with its state, in body order (render-model.md
                 // § D4) — lets a test tell a FAILED preview from one still
@@ -1926,6 +1939,10 @@ public struct FaunaMacApp: App {
                 if !conversationsVM.manager.acceptCurrentRecipientChip() {
                     testAgentFailure(
                         "conversations_accept_recipient: \(acceptRecipientNoChipReason)")
+                } else {
+                    // The same follow-up the user's Enter runs
+                    // (`NewThreadComposeForm`'s `onAcceptCurrent`).
+                    await conversationsVM.refreshListSend(nil)
                 }
             case "conversations_real_resolve_send_new":
                 if let reason = await ConversationsSendTestCommand.resolveSendNew(command, vm: conversationsVM) {
@@ -2341,8 +2358,10 @@ public struct FaunaMacApp: App {
                 self.client = faunaClient
                 appState.liveClient = faunaClient
                 // This patch is a sign-in too: the same once-per-sign-in
-                // newer-version look `completeAuthenticatedLaunch` makes.
+                // newer-version look `completeAuthenticatedLaunch` makes, and
+                // the same push session start (the presence announce).
                 appState.updates.lookOnceAtSignIn()
+                startPushSession(faunaClient, deviceId: deviceId)
                 let isE2E = FaunaE2E.isActive
                 if isE2E {
                     // Authenticate only — no WebSocket/sync/backup (too heavy for
@@ -3170,6 +3189,7 @@ public struct FaunaMacApp: App {
         appState.session.pendingWebdavEnable = false
         appState.session.pendingTrustPromptGranted = false
         appState.session.pendingRecoveryKitHex = nil
+        appState.session.pendingDnsCredential = nil
 
         client = nil
         appState.liveClient = nil
@@ -3195,7 +3215,8 @@ public struct FaunaMacApp: App {
             dismissWizard: { appState.isAddingAccount = false },
             switchAccount: { actorId, confirmed in
                 try? await self.switchAccount(to: actorId, confirmed: confirmed)
-            }
+            },
+            reportRefused: AccountSwitcherVM.postAddRefused
         )
     }
 

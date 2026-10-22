@@ -1,8 +1,8 @@
 // CodeMirror 6 wiring for the Notes WYSIWYG editor mode (delta #3/#4/#5). This is the
-// browser-only half of the Notes editor: it turns the pure plan from `$lib/notes-editor` into
+// browser-only half of the Notes editor: it turns the pure plan from `#lib/notes-editor` into
 // CodeMirror decorations + chrome widgets + atomic ranges, and routes structural gestures through
 // the shared `apply_structural_gesture` engine. The pure offset/marker logic (the real risk) lives
-// in `$lib/notes-editor` and is unit-tested without a browser; this file is the thin CM glue.
+// in `#lib/notes-editor` and is unit-tested without a browser; this file is the thin CM glue.
 //
 // Installed as a single extension bundle by `MarkdownEditor.svelte` when its `notes` prop is set —
 // the conversations compose path (`notes` unset) is untouched (priority #4: one editor, two modes).

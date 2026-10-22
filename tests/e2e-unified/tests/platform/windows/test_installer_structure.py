@@ -331,6 +331,18 @@ class TestFileTable:
             "never bundled into the agent's"
         )
 
+    def test_cli_exe_present(self, msi_db):
+        """The cli app's device shell rides the TerminalApp feature as the
+        archive's third member (installers/tui.md § Decisions, decision 4) —
+        its own component in INSTALLFOLDER, so the one PATH entry covers it."""
+        files = self._files(msi_db)
+        assert "fauna-cli.exe" in files
+        assert files["fauna-cli.exe"] == "FaunaCliExe"
+        assert files["fauna-cli.exe"] != files["fauna-tui.exe"], (
+            "fauna-cli.exe must be its own component (TerminalApp.wxs), never "
+            "folded into fauna-tui.exe's"
+        )
+
     def test_nest_exe_present(self, msi_db):
         assert "fauna-nest-svc.exe" in self._files(msi_db)
 

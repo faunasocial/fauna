@@ -182,6 +182,74 @@ pub struct ListPrincipalOpsReply {
     pub extra: BTreeMap<String, Value>,
 }
 
+/// How many operations one `fauna.principals.ops.record` request may carry —
+/// a hard constant: a custodian's backlog drains in batches of this size.
+pub const PRINCIPAL_OPS_RECORD_BATCH: usize = 64;
+
+/// The longest `detail` a recorded operation may carry, in bytes. A device
+/// custodian's detail is a room id; the bound keeps the record a record.
+pub const PRINCIPAL_OP_DETAIL_MAX: usize = 256;
+
+/// One operation a **device** custodian performed for a principal, as it
+/// submits it (`conversations-oracle.md` § The per-operation record): the
+/// custodian is a first-party app on the user's device, so its record reaches
+/// the account's other apps through the nest.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RecordedPrincipalOp {
+    /// 16 bytes the custodian mints per operation. A retry after a lost reply
+    /// resubmits the same id and the nest keeps one row.
+    #[serde(with = "serde_bytes")]
+    pub op_id: Vec<u8>,
+    /// Unix seconds at which the custodian performed the operation.
+    pub at: i64,
+    /// The `identity.op` class — one a device custodian performs.
+    pub class: String,
+    /// The room's id: a plaintext-floor fact, never a body, a sender or a
+    /// query string. At most [`PRINCIPAL_OP_DETAIL_MAX`] bytes.
+    pub detail: String,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// `fauna.principals.ops.record` — a device custodian's submission of the
+/// operations it performed for one of the account's own principals (USER
+/// class, self-scoped). `fauna.principals.ops` merges the rows into that
+/// principal's record as a second custodian's.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RecordPrincipalOpsRequest {
+    #[serde(with = "serde_bytes")]
+    pub principal_id: Vec<u8>,
+    /// At most [`PRINCIPAL_OPS_RECORD_BATCH`].
+    pub ops: Vec<RecordedPrincipalOp>,
+    /// The custodian's ceiling position for the principal as the batch leaves
+    /// the device — the window lives there, so the roster's count in window
+    /// is read off the newest one a batch carried. Absent: no window to tell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<RecordedWindow>,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// A device custodian's ceiling window for one principal, as its `RateWindow`
+/// holds it (`conversations-oracle.md` § The ceiling and the page).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RecordedWindow {
+    /// Unix seconds at which the window opened.
+    pub window_start: u64,
+    /// Operations admitted in it — at most `OPS_PER_WINDOW`.
+    pub count: u32,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RecordPrincipalOpsReply {
+    /// Rows newly kept — a resubmitted `op_id` counts nothing.
+    pub recorded: u32,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
 /// `fauna.principals.revoke` — the one verb (USER class, self-scoped).
 ///
 /// Deletes the roster row and, in the same act, ends every OAuth grant family
@@ -259,6 +327,26 @@ mod tests {
         let back: ListPrincipalOpsReply =
             decode_strict(&encode_canonical(&reply).unwrap()).unwrap();
         assert_eq!(back, reply);
+    }
+
+    #[test]
+    fn a_record_batchs_window_round_trips_and_an_absent_one_stays_absent() {
+        let request = RecordPrincipalOpsRequest {
+            principal_id: vec![1; 16],
+            window: Some(RecordedWindow {
+                window_start: 1_700_000_000,
+                count: 4,
+                extra: Default::default(),
+            }),
+            ..Default::default()
+        };
+        let back: RecordPrincipalOpsRequest =
+            decode_strict(&encode_canonical(&request).unwrap()).unwrap();
+        assert_eq!(back, request);
+        let bare: RecordPrincipalOpsRequest =
+            decode_strict(&encode_canonical(&RecordPrincipalOpsRequest::default()).unwrap())
+                .unwrap();
+        assert_eq!(bare.window, None);
     }
 
     #[test]

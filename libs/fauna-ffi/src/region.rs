@@ -115,6 +115,18 @@ pub struct FfiRegionPlaceholder {
     pub reason: String,
 }
 
+/// A nest placeholder, ready to paint in place of the item — the app's frame
+/// (`nest_rules.blocked_notice` / `nest_rules.collapsed_notice`) naming
+/// `domain`, and the admin's `reason` verbatim beside it; a `collapse` adds the
+/// reveal (`nest-rules.md` § The nest source in the engine).
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiNestPlaceholder {
+    /// `block` | `collapse` — also the convention-17 `verdict` attribute.
+    pub verb: String,
+    pub domain: String,
+    pub reason: String,
+}
+
 /// One item's render decision with the region composed in.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct FfiRegionRender {
@@ -125,12 +137,45 @@ pub struct FfiRegionRender {
     /// region placeholder, ahead of the family arm (same verb, better
     /// attributed). `None` → the app's existing arms.
     pub placeholder: Option<FfiRegionPlaceholder>,
+    /// `Some` exactly when a nest rule drove a `block` or `collapse`
+    /// (`render_with_nest` only): paint the nest placeholder. Never set beside
+    /// `placeholder` — one source wins the verdict.
+    pub nest_placeholder: Option<FfiNestPlaceholder>,
+    /// `Some` exactly when the guardian's policy drove a `block` or `collapse`:
+    /// paint the family-policy placeholder, with the guardian's reason verbatim
+    /// beside it when a rule of the guardian's document drove it
+    /// (`nest-rules.md` § The shared rule editor → *The reason is the member's
+    /// to read*). Never set beside the other two.
+    #[uniffi(default = None)]
+    pub guardian_placeholder: Option<FfiGuardianPlaceholder>,
+}
+
+/// What a guardian-sourced verdict paints: the family-policy frame, and the
+/// guardian rule's `reason` verbatim beside it — `None` when a floor drove it,
+/// which paints the frame alone.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiGuardianPlaceholder {
+    /// `block` | `collapse` — also the convention-17 `verdict` attribute.
+    pub verb: String,
+    pub reason: Option<String>,
 }
 
 struct Inner {
     plane: RegionPlane,
     last_refresh: Option<u64>,
+    /// The ward's guardian document, its keyword and labeler rules joined in
+    /// the one composed call (`nest-rules.md` § The shared rule editor (b)) —
+    /// the wasm plane's twin.
+    #[cfg(feature = "nest-rules")]
+    guardian: fauna_client_policy::GuardianRules,
 }
+
+/// The nest an item was read through, with the book holding its rules
+/// (`render_with_nest`); `None` composes no nest source.
+#[cfg(feature = "nest-rules")]
+pub(crate) type ReadThrough<'a> = Option<(&'a crate::nest_rules::FfiNestRulesBook, &'a str)>;
+#[cfg(not(feature = "nest-rules"))]
+pub(crate) type ReadThrough<'a> = Option<&'a std::convert::Infallible>;
 
 /// The device's region plane — one per app install, opened at launch **ahead
 /// of** the first fetch (§ Fail posture) and kept across sign-out and identity
@@ -165,6 +210,8 @@ impl FfiRegionPlane {
             inner: Mutex::new(Inner {
                 plane,
                 last_refresh: None,
+                #[cfg(feature = "nest-rules")]
+                guardian: Default::default(),
             }),
             record,
         })
@@ -195,6 +242,115 @@ impl FfiRegionPlane {
     fn persist(&self, bytes: &[u8]) {
         if let Err(e) = fauna_client_region::store::write_record(&self.record, bytes) {
             tracing::warn!("region: cannot persist the device record: {e}");
+        }
+    }
+
+    /// `render` and `render_with_nest`'s one body: the chain's scorer factors,
+    /// then the nest's (when `nest` names one), then the guardian document's,
+    /// joined over the same input, and every source folded once.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn compose(
+        &self,
+        nest: ReadThrough<'_>,
+        labels: Vec<ContentLabelEntry>,
+        content_policy: Option<FfiContentPolicy>,
+        own_spam_permille: Option<u16>,
+        own_phishing_permille: Option<u16>,
+        content_id_hex: Option<String>,
+        author_hex: Option<String>,
+        text: String,
+        hashtags: Vec<String>,
+        has_media: bool,
+        lang: String,
+    ) -> FfiRegionRender {
+        let policy = crate::family::render_guardian_policy(content_policy);
+        #[cfg_attr(not(feature = "nest-rules"), allow(unused_mut))]
+        let mut inner = self.lock();
+        // The guardian document in force: the same value on each render keeps
+        // what is compiled; a different one, or none, drops it.
+        #[cfg(feature = "nest-rules")]
+        inner.guardian.set_policy(policy.as_ref());
+        let inner = &*inner;
+        let id = content_id_hex
+            .as_deref()
+            .and_then(|h| fauna_core::hex32::decode(h).ok());
+        let input = || {
+            let author = author_hex
+                .as_deref()
+                .and_then(|h| fauna_core::hex32::decode(h).ok())
+                .map(fauna_core::identity::ActorId)
+                .unwrap_or(fauna_core::identity::ActorId([0; 32]));
+            fauna_client_region::scorer_input(author, &text, &hashtags, has_media)
+        };
+        let joined = inner.plane.join_labels(id.as_ref(), &labels, input);
+        #[cfg(feature = "nest-rules")]
+        let (joined, nest_sets) = {
+            let (joined, nest_sets) = match nest {
+                Some((book, nest_id)) => book.join_for_render(nest_id, id.as_ref(), &joined, input),
+                None => (joined.into_owned(), Vec::new()),
+            };
+            let joined = inner
+                .guardian
+                .join_labels(id.as_ref(), &joined, input)
+                .into_owned();
+            (joined, nest_sets)
+        };
+        #[cfg(not(feature = "nest-rules"))]
+        let (joined, nest_sets) = {
+            let _ = nest;
+            (joined.into_owned(), Vec::new())
+        };
+        let own = own_spam_permille
+            .zip(own_phishing_permille)
+            .map(|(s, p)| ViewerThresholds {
+                spam_permille: s,
+                phishing_permille: p,
+            });
+        let composed = render_verdict_composed(
+            &joined,
+            policy.as_ref(),
+            own,
+            &inner.plane.rule_sets(),
+            &nest_sets,
+        );
+        let nest_placeholder = composed.nest().and_then(|source| {
+            let verb = match composed.verdict {
+                fauna_core::obligation::RenderVerdict::Block => "block",
+                fauna_core::obligation::RenderVerdict::Collapse => "collapse",
+                _ => return None,
+            };
+            Some(FfiNestPlaceholder {
+                verb: verb.to_string(),
+                domain: source.domain.clone(),
+                reason: fauna_core::content_policy::reason_text(&source.reason, &lang).to_string(),
+            })
+        });
+        let guardian_placeholder = composed.guardian().and_then(|source| {
+            let verb = match composed.verdict {
+                fauna_core::obligation::RenderVerdict::Block => "block",
+                fauna_core::obligation::RenderVerdict::Collapse => "collapse",
+                _ => return None,
+            };
+            Some(FfiGuardianPlaceholder {
+                verb: verb.to_string(),
+                reason: source
+                    .rule
+                    .as_ref()
+                    .map(|r| fauna_core::content_policy::reason_text(&r.reason, &lang).to_string()),
+            })
+        });
+        FfiRegionRender {
+            verdict: composed.verdict.as_str().to_string(),
+            placeholder: fauna_client_region::placeholder_for(&composed, &lang).map(|p| {
+                FfiRegionPlaceholder {
+                    verb: p.verb.as_str().to_string(),
+                    region: p.region.as_str().to_string(),
+                    authority_name: p.authority_name,
+                    reason: p.reason,
+                }
+            }),
+            nest_placeholder,
+            guardian_placeholder,
         }
     }
 }
@@ -242,6 +398,8 @@ impl FfiRegionPlane {
             inner: Mutex::new(Inner {
                 plane,
                 last_refresh: None,
+                #[cfg(feature = "nest-rules")]
+                guardian: Default::default(),
             }),
             record,
         })
@@ -335,38 +493,19 @@ impl FfiRegionPlane {
         has_media: bool,
         lang: String,
     ) -> FfiRegionRender {
-        let inner = self.lock();
-        let id = content_id_hex
-            .as_deref()
-            .and_then(|h| fauna_core::hex32::decode(h).ok());
-        let joined = inner.plane.join_labels(id.as_ref(), &labels, || {
-            let author = author_hex
-                .as_deref()
-                .and_then(|h| fauna_core::hex32::decode(h).ok())
-                .map(fauna_core::identity::ActorId)
-                .unwrap_or(fauna_core::identity::ActorId([0; 32]));
-            fauna_client_region::scorer_input(author, &text, &hashtags, has_media)
-        });
-        let policy = crate::family::render_guardian_policy(content_policy);
-        let own = own_spam_permille
-            .zip(own_phishing_permille)
-            .map(|(s, p)| ViewerThresholds {
-                spam_permille: s,
-                phishing_permille: p,
-            });
-        let composed =
-            render_verdict_composed(&joined, policy.as_ref(), own, &inner.plane.rule_sets());
-        FfiRegionRender {
-            verdict: composed.verdict.as_str().to_string(),
-            placeholder: fauna_client_region::placeholder_for(&composed, &lang).map(|p| {
-                FfiRegionPlaceholder {
-                    verb: p.verb.as_str().to_string(),
-                    region: p.region.as_str().to_string(),
-                    authority_name: p.authority_name,
-                    reason: p.reason,
-                }
-            }),
-        }
+        self.compose(
+            None,
+            labels,
+            content_policy,
+            own_spam_permille,
+            own_phishing_permille,
+            content_id_hex,
+            author_hex,
+            text,
+            hashtags,
+            has_media,
+            lang,
+        )
     }
 
     /// What the settings region surface paints.
@@ -511,6 +650,8 @@ mod tests {
                     p
                 },
                 last_refresh: None,
+                #[cfg(feature = "nest-rules")]
+                guardian: Default::default(),
             }),
             record: record.clone(),
         };
@@ -569,6 +710,7 @@ mod tests {
                 spam: "inherit".into(),
                 phishing: "inherit".into(),
                 commercial: "inherit".into(),
+                document: None,
             }),
             None,
             None,

@@ -287,6 +287,26 @@ struct SettingsView: View {
                         }
                     }
 
+                    Divider()
+
+                    // About: the build version (`faunaFfiBuildVersion()`, the shared
+                    // face — `product-version.md`) and the terms link, the same two
+                    // ids macOS' General page and android's Settings-root About
+                    // section carry. An eager VStack like the rows above (rule 6).
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(L.settings.about)
+                            .font(.headline)
+                        HStack {
+                            Text(L.settings.generalPage.version)
+                            Spacer()
+                            automationText(Ids.settingsAppVersion, faunaFfiBuildVersion())
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                        TermsLinkButton(id: Ids.settingsTermsLink)
+                    }
+                    .padding(.vertical, 10)
+
                     // The gated admin entry (admin.md § Navigation model step 1):
                     // shown only when the shared `am-i-admin` gate passes
                     // (`appState.isAdmin`) so non-admins do not see it (admin.md:19),
@@ -626,7 +646,7 @@ struct StatusDetailView: View {
                 // `.contain` mirrors the quota-section container-clobber rule.
                 if let featureRows = vm.featureRows {
                     GroupBox(L.features.sectionTitle) {
-                        FeatureLimitsSection(rows: featureRows)
+                        FeatureLimitsSection(rows: featureRows, host: vm.selfAuthoring)
                             .padding(8)
                     }
                     .accessibilityIdentifier(Ids.featureLimitsSection)

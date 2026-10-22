@@ -211,6 +211,15 @@ fn acme_directory_url(directory_url: Option<&str>) -> &str {
     directory_url.unwrap_or_else(|| LetsEncrypt::Production.url())
 }
 
+/// Which hosts the port-80 fallback may redirect to — the caller's answer to
+/// "does this server serve HTTPS for `host`?". Called with the request's
+/// lowercased, port-stripped `Host` (an IPv6 literal keeps its brackets). The
+/// router's own `domain` is always allowed; anything the predicate refuses gets
+/// a `404`, never a redirect, so port 80 cannot be used to bounce a visitor to
+/// a host the server does not serve (`deployment-threat-model.md` § Concern 1a,
+/// finding M2).
+pub type RedirectHosts = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 /// Build an axum router that serves ACME challenges and redirects everything
 /// else to HTTPS.
 ///
@@ -218,16 +227,30 @@ fn acme_directory_url(directory_url: Option<&str>) -> &str {
 /// - `GET /.well-known/acme-challenge/{token}` — returns the key authorization
 /// - `*` — 308 redirect to `https://{host}{path}`, where `{host}` is the
 ///   request's own `Host` (port-stripped — HTTPS lives on 443), so a custom
-///   web domain / subdomain bounces to ITS https origin and a domainless boot
-///   (empty `domain`) still redirects. `domain` is only the fallback for a
-///   `Host`-less request; with neither, a hostless `https://` Location would
-///   be malformed, so answer 400 (`domains-and-tls-bootstrap.md`
-///   § Implementation status — port-80 redirect host).
-pub fn http01_router(state: Arc<ChallengeState>, domain: String) -> Router {
+///   web domain / subdomain bounces to ITS https origin — but only when
+///   `{host}` is `domain` or a host `redirect_hosts` accepts; any other `Host`
+///   is answered `404`. `domain` is also the fallback for a `Host`-less
+///   request; with neither, a hostless `https://` Location would be malformed,
+///   so answer 400 (`domains-and-tls-bootstrap.md` § Implementation status —
+///   port-80 redirect host).
+///
+/// No route reads a body, so a request that announces one (a non-zero
+/// `Content-Length`, or any `Transfer-Encoding`) is refused `413` before it
+/// reaches a handler.
+///
+/// The router carries no connection or rate bounds of its own: whoever serves
+/// it supplies them (the nest serves it through its one admitted accept loop).
+pub fn http01_router(
+    state: Arc<ChallengeState>,
+    domain: String,
+    redirect_hosts: RedirectHosts,
+) -> Router {
+    let domain = domain.to_ascii_lowercase();
     Router::new()
         .route("/.well-known/acme-challenge/{token}", get(handle_challenge))
         .fallback(move |req: axum::extract::Request| {
             let fallback_host = domain.clone();
+            let redirect_hosts = Arc::clone(&redirect_hosts);
             async move {
                 use axum::response::IntoResponse as _;
                 let path = req.uri().path();
@@ -244,15 +267,40 @@ pub fn http01_router(state: Arc<ChallengeState>, domain: String) -> Router {
                     .and_then(|h| h.to_str().ok())
                     .map(host_without_port)
                     .filter(|h| !h.is_empty())
-                    .map(str::to_string)
-                    .unwrap_or(fallback_host);
+                    .map(str::to_ascii_lowercase)
+                    .unwrap_or_else(|| fallback_host.clone());
                 if host.is_empty() {
                     return (axum::http::StatusCode::BAD_REQUEST, "missing Host").into_response();
+                }
+                if host != fallback_host && !redirect_hosts(&host) {
+                    return (axum::http::StatusCode::NOT_FOUND, "not found").into_response();
                 }
                 Redirect::permanent(&format!("https://{host}{path}{query}")).into_response()
             }
         })
+        .layer(axum::middleware::from_fn(refuse_request_bodies))
         .with_state(state)
+}
+
+/// Refuse any request that announces a body — nothing on port 80 reads one,
+/// so the listener's body limit is zero.
+async fn refuse_request_bodies(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let headers = req.headers();
+    let chunked = headers.contains_key(axum::http::header::TRANSFER_ENCODING);
+    let sized = headers
+        .get(axum::http::header::CONTENT_LENGTH)
+        .is_some_and(|v| v.to_str().ok().and_then(|v| v.trim().parse::<u64>().ok()) != Some(0));
+    if chunked || sized {
+        return (
+            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+            "no body accepted",
+        )
+            .into_response();
+    }
+    next.run(req).await
 }
 
 /// Strip a `:port` suffix from a `Host` header value, keeping a bracketed
@@ -273,24 +321,26 @@ async fn handle_challenge(
     }
 }
 
-/// Start the HTTP listener for ACME challenges on the given port.
+/// Start a bare HTTP listener for ACME challenges on the given port — **test
+/// harness only** (`test-helpers`): it is a plain `axum::serve`, with no
+/// connection cap, header-read timeout or request governor, and its fallback
+/// redirects nowhere but `domain`. A production server serves
+/// [`http01_router`] through its own bounded accept loop (the nest:
+/// `fauna_nest::acme_http01::start_http01_listener`).
 ///
 /// Returns a `JoinHandle` for the listener task.
+#[cfg(feature = "test-helpers")]
 pub async fn start_http01_listener(
     state: Arc<ChallengeState>,
     domain: String,
     port: u16,
 ) -> Result<tokio::task::JoinHandle<()>> {
-    let app = http01_router(state, domain);
+    let app = http01_router(state, domain, Arc::new(|_| false));
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
         .await
         .context(format!("bind HTTP-01 listener on port {port}"))?;
     tracing::info!("HTTP-01 challenge listener started on port {port}");
-    // spawn-ok(process-lifetime): started once by `main.rs` *before* the
-    // serve-and-restart loop, and deliberately outlives every generation — it
-    // holds only `ChallengeState` (itself process-lifetime), no `AppState` and
-    // no deployment key, and re-binding :8080 per generation would fail. The
-    // caller drops the handle knowingly.
+    // spawn-ok(test): the harness-only listener; the caller holds the handle.
     let handle = tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
             tracing::error!("HTTP-01 listener error: {e}");
@@ -1407,7 +1457,7 @@ mod tests {
         let state = Arc::new(ChallengeState::new());
         state.set("test-token".into(), "test-key-auth".into()).await;
 
-        let mut app = http01_router(state, "example.com".into());
+        let mut app = http01_router(state, "example.com".into(), no_other_hosts());
 
         let req = Request::builder()
             .uri("/.well-known/acme-challenge/test-token")
@@ -1428,7 +1478,7 @@ mod tests {
         use tower_service::Service;
 
         let state = Arc::new(ChallengeState::new());
-        let mut app = http01_router(state, "example.com".into());
+        let mut app = http01_router(state, "example.com".into(), no_other_hosts());
 
         let req = Request::builder()
             .uri("/.well-known/acme-challenge/missing")
@@ -1446,7 +1496,7 @@ mod tests {
         use tower_service::Service;
 
         let state = Arc::new(ChallengeState::new());
-        let mut app = http01_router(state, "example.com".into());
+        let mut app = http01_router(state, "example.com".into(), no_other_hosts());
 
         let req = Request::builder()
             .uri("/some/page?q=1")
@@ -1466,7 +1516,11 @@ mod tests {
         use tower_service::Service;
 
         let state = Arc::new(ChallengeState::new());
-        let mut app = http01_router(state, "example.com".into());
+        let mut app = http01_router(
+            state,
+            "example.com".into(),
+            Arc::new(|h| h == "custom.test"),
+        );
 
         // The redirect targets the host the client actually asked for (with
         // any port stripped — HTTPS lives on 443), not the configured apex: a
@@ -1494,7 +1548,7 @@ mod tests {
         // Domainless boot: empty fallback domain. A Host-less request then has
         // no redirect target at all — a hostless `https://` Location would be
         // malformed, so answer 400 instead.
-        let mut app = http01_router(state, String::new());
+        let mut app = http01_router(state, String::new(), no_other_hosts());
 
         let req = Request::builder()
             .uri("/some/page")
@@ -1503,6 +1557,83 @@ mod tests {
 
         let resp = app.call(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// A predicate that accepts no host beyond the router's own `domain`.
+    fn no_other_hosts() -> RedirectHosts {
+        Arc::new(|_| false)
+    }
+
+    async fn call_with_host(app: &mut Router, host: &str) -> Response {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower_service::Service;
+
+        let req = Request::builder()
+            .uri("/some/page")
+            .header("host", host)
+            .body(Body::empty())
+            .unwrap();
+        app.call(req).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn http01_router_never_redirects_to_a_host_it_does_not_serve() {
+        use axum::http::StatusCode;
+
+        let state = Arc::new(ChallengeState::new());
+        let mut app = http01_router(
+            state,
+            "example.com".into(),
+            Arc::new(|h| h == "mail.example.com"),
+        );
+
+        // A foreign Host is the open redirect finding M2 names: answered 404,
+        // with no Location at all.
+        let resp = call_with_host(&mut app, "evil.test").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert!(resp.headers().get("location").is_none());
+
+        // The router's own domain and a host the predicate accepts still
+        // redirect, whatever the Host header's case.
+        for (host, want) in [
+            ("Example.COM", "https://example.com/some/page"),
+            ("mail.example.com:80", "https://mail.example.com/some/page"),
+        ] {
+            let resp = call_with_host(&mut app, host).await;
+            assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT, "{host}");
+            assert_eq!(resp.headers().get("location").unwrap(), want, "{host}");
+        }
+    }
+
+    #[tokio::test]
+    async fn http01_router_refuses_a_request_body() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower_service::Service;
+
+        let state = Arc::new(ChallengeState::new());
+        state.set("tok".into(), "auth".into()).await;
+        let mut app = http01_router(state, "example.com".into(), no_other_hosts());
+
+        for (name, value) in [("content-length", "5"), ("transfer-encoding", "chunked")] {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/.well-known/acme-challenge/tok")
+                .header(name, value)
+                .body(Body::from("hello"))
+                .unwrap();
+            let resp = app.call(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE, "{name}");
+        }
+
+        // An explicit zero length is no body: the challenge still answers.
+        let req = Request::builder()
+            .uri("/.well-known/acme-challenge/tok")
+            .header("content-length", "0")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(app.call(req).await.unwrap().status(), StatusCode::OK);
     }
 
     #[test]

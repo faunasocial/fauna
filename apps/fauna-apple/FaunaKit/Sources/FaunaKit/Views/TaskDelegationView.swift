@@ -79,6 +79,7 @@ public struct TaskDelegationView: View {
                 api: client.api, deviceId: client.deviceId,
                 capability: TaskDelegationVM.forThisBuild)
         }
+        .onStoreChange { await vm.resync() }
     }
 
     // MARK: - One `task-delegation-kind-item` row

@@ -15,6 +15,13 @@
 //! the nest ring — `ui.yaml:995`), and the landmark is `admin-logs-heading`
 //! rather than a shared `page-heading`.
 //!
+//! Below the log lines sits the **admin audit log** section
+//! (`admin-audit-section`; `admin.md` § The admin audit log on `admin-logs`):
+//! the nest's hash-chained record of admin actions, newest first, with the one
+//! line that says whether the chain checks out. Its rows, its integrity line
+//! and its more cursor are all `fauna_client_admin::AuditLog::view`'s; this
+//! page adds only the local time ahead of each row.
+//!
 //! The shell (`super`) owns the client, op and fold; this file is paint only.
 
 use fauna_i18n::strings::{admin as t, logs};
@@ -88,16 +95,49 @@ pub(super) fn logs_elements(state: &AdminState) -> Vec<Element> {
         }
     }
 
+    els.extend(audit_elements(state));
+    els
+}
+
+/// The audit section: heading, one row per entry, the integrity line, and
+/// the more button — disabled once the whole record is shown (a control at
+/// its bound is disabled, `admin.md` § 2's pagination rule).
+fn audit_elements(state: &AdminState) -> Vec<Element> {
+    let view = state.audit.view();
+    let mut els = vec![Element::label(
+        ids::ADMIN_AUDIT_SECTION,
+        t::logs_page::AUDIT_TITLE,
+    )];
+    for row in &view.rows {
+        els.push(Element::label(
+            ids::ADMIN_AUDIT_ENTRY,
+            format!(
+                "{}  {}",
+                fauna_core::format::format_unix_local_ms(row.ts_ms),
+                row.text.resolve(fauna_i18n::strings::lookup)
+            ),
+        ));
+    }
+    els.push(Element::label(
+        ids::ADMIN_AUDIT_INTEGRITY_STATUS,
+        view.integrity_text.resolve(fauna_i18n::strings::lookup),
+    ));
+    els.push(Element::gesture_button(
+        ids::ADMIN_AUDIT_MORE_BUTTON,
+        t::logs_page::AUDIT_MORE,
+        view.more_before_id.is_some(),
+        Gesture::Admin(Action::AuditMore),
+    ));
     els
 }
 
 /// This page's read failure — read by `App::screen_error_text`, not painted
 /// here (`crate::admin::page_error` carries the why).
 pub(super) fn page_error(state: &AdminState) -> Option<String> {
-    state
-        .logs_error
-        .as_deref()
-        .filter(|e| !e.is_empty())
+    [&state.logs_error, &state.audit_error]
+        .into_iter()
+        .filter_map(|e| e.as_deref())
+        .find(|e| !e.is_empty())
         .map(str::to_string)
 }
 
@@ -157,8 +197,141 @@ mod tests {
                 "log-entry",
                 "log-entry",
                 "log-entry",
+                "admin-audit-section",
+                "admin-audit-integrity-status",
+                "admin-audit-more-button",
             ],
             "a clean page paints no error-message and no log-clear-button"
+        );
+    }
+
+    /// A two-row audit chain written as the nest writes it (the shared
+    /// recomputation), `chain_length` saying how much of it exists.
+    fn audit_page(chain_length: i64) -> fauna_client_admin::AuditLogPage {
+        use fauna_client_admin::admin::{AdminAuditEntry, AdminAuditIntegrityReply};
+        use fauna_core::chain_version::{self, AuditPreimage, ChainVersion};
+        let admin = [9u8; 32];
+        let mut prev = chain_version::audit_genesis_prev_hash();
+        let mut entries = Vec::new();
+        for (id, action) in [(1, "tier.create"), (2, "user.update")] {
+            let ts = 1_700_000_000_000 + id;
+            let hash = chain_version::audit_entry_hash(
+                ChainVersion::CURRENT,
+                &AuditPreimage {
+                    id,
+                    ts,
+                    actor_id: Some(&admin),
+                    action,
+                    target: Some("bob"),
+                    detail: None,
+                    prev_hash: &prev,
+                },
+            );
+            entries.push(AdminAuditEntry {
+                id,
+                ts,
+                actor_id: Some(admin.to_vec().into()),
+                action: action.into(),
+                target: Some("bob".into()),
+                prev_hash: prev.clone(),
+                entry_hash: hash.clone(),
+                entry_hash_version: ChainVersion::CURRENT.as_i64(),
+                ..Default::default()
+            });
+            prev = hash;
+        }
+        entries.reverse();
+        fauna_client_admin::AuditLogPage {
+            before_id: None,
+            integrity: AdminAuditIntegrityReply {
+                head_id: 2,
+                head_hash: prev,
+                chain_length,
+                ..Default::default()
+            },
+            entries,
+            handles: vec![(admin.to_vec(), "alice".into())],
+        }
+    }
+
+    /// The audit section paints the shared fold: newest first, the admin by
+    /// handle, the chain line verified, and More disabled at the whole record.
+    #[test]
+    fn audit_section_paints_rows_newest_first_with_the_chain_line() {
+        let mut app = app_with(Vec::new());
+        app.admin.audit.absorb(audit_page(2));
+        let els = logs_elements(&app.admin);
+        let rows: Vec<&str> = els
+            .iter()
+            .filter(|e| e.id == "admin-audit-entry")
+            .map(|e| e.text.as_str())
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows[0].contains("alice — user.update on bob"),
+            "got {rows:?}"
+        );
+        assert!(rows[1].contains("tier.create"), "got {rows:?}");
+        let status = els
+            .iter()
+            .find(|e| e.id == "admin-audit-integrity-status")
+            .unwrap();
+        assert_eq!(
+            status.text,
+            "The record checks out through the 2 entries shown."
+        );
+        let more = els
+            .iter()
+            .find(|e| e.id == "admin-audit-more-button")
+            .unwrap();
+        assert!(!more.enabled, "the whole record is shown");
+    }
+
+    /// A longer record enables More, and the gesture reads the page older than
+    /// the oldest row shown.
+    #[test]
+    fn audit_more_pages_back_from_the_oldest_row() {
+        let mut app = app_with(Vec::new());
+        app.session = Some(crate::app::tests::test_session());
+        app.admin.audit.absorb(audit_page(5));
+        let more = logs_elements(&app.admin)
+            .into_iter()
+            .find(|e| e.id == "admin-audit-more-button")
+            .unwrap();
+        assert!(more.enabled);
+        assert_eq!(
+            app.admin.audit.view().more_before_id,
+            Some(1),
+            "the cursor `Action::AuditMore` reads"
+        );
+
+        // The older page folds in through the shell's outcome door, keeping
+        // the rows already shown.
+        let mut older = audit_page(5);
+        older.before_id = Some(1);
+        older.entries.clear();
+        crate::admin::apply_outcome(&mut app, crate::admin::Outcome::AuditLoaded(Ok(older)));
+        assert_eq!(app.admin.audit.view().rows.len(), 2);
+        assert_eq!(app.admin.audit_error, None);
+    }
+
+    /// A failed audit read reaches the page's one error line, and leaves the
+    /// rows already shown.
+    #[test]
+    fn audit_read_failure_reaches_the_page_error() {
+        let mut app = app_with(Vec::new());
+        app.admin.audit.absorb(audit_page(2));
+        app.admin.audit_error = Some("load audit log: timeout".into());
+        assert_eq!(
+            page_error(&app.admin).as_deref(),
+            Some("load audit log: timeout")
+        );
+        assert_eq!(
+            logs_elements(&app.admin)
+                .iter()
+                .filter(|e| e.id == "admin-audit-entry")
+                .count(),
+            2
         );
     }
 

@@ -27,9 +27,9 @@ Stamped 2026-09-19 at 25eff180d4.
 3. [app] A file you change inside an on-demand folder uploads like any other, and a file you put there joins the folder — `docs/goal/behavior/on-demand-files.md` § Sync direction
    - `tests/e2e-unified/tests/test_folder_on_demand_read_path_linux.py::test_on_demand_folder_is_read_and_written_through_its_mount`
 4. [app] Freeing a file's space keeps the file listed where it was and never deletes it from your nest or your other devices — `docs/goal/behavior/on-demand-files.md` § A placeholder is
-   - (none)
+   - `tests/e2e-unified/tests/test_folder_location_free_space.py::test_freeing_keeps_the_file_listed_and_never_deletes_it`
 5. [app] A change that has not reached your nest yet cannot have its space freed: your copy stays until it is safely recorded — `docs/goal/behavior/on-demand-files-apple.md` § Apple File Provider binding
-   - (none)
+   - `tests/e2e-unified/tests/test_folder_location_free_space.py::test_an_unrecorded_change_is_kept`
 6. [app] You can keep several folders on demand at once, and switching one on or off leaves the others working — `docs/goal/behavior/on-demand-files.md` § On-Demand Files (Placeholders)
    - (none)
 7. [nest] A file added from another device shows up in your on-demand folder by itself — `docs/goal/behavior/on-demand-files-apple.md` § Apple File Provider binding
@@ -66,8 +66,8 @@ Stamped 2026-09-19 at 25eff180d4.
 | 1 | app | `tests/e2e-unified/tests/test_folder_location_mode_toggle.py::test_folder_location_mode_toggle_flip_survives_re_entry` | linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (windows): passed |
 | 2 | nest | `tests/e2e-unified/tests/platform/macos/test_file_provider_read_path.py::test_file_provider_read_path` | — |
 | 3 | app | `tests/e2e-unified/tests/test_folder_on_demand_read_path_linux.py::test_on_demand_folder_is_read_and_written_through_its_mount` | linux (linux): passed |
-| 4 | app | (none) | — |
-| 5 | app | (none) | — |
+| 4 | app | `tests/e2e-unified/tests/test_folder_location_free_space.py::test_freeing_keeps_the_file_listed_and_never_deletes_it` | linux (linux): passed, tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_folder_location_free_space.py::test_an_unrecorded_change_is_kept` | linux (linux): passed, tui (linux): passed |
 | 6 | app | (none) | — |
 | 7 | nest | `tests/e2e-unified/tests/platform/macos/test_file_provider_read_path.py::test_file_provider_read_path` | — |
 | 8 | app | (none) | — |

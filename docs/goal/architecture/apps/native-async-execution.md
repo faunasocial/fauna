@@ -493,8 +493,7 @@ ones back to the kernel before the work and reads which are present after it.
   ⚠ **`refreshMailEpochSchedule` is therefore NOT a latent crash — it is a
   RESPONSIVENESS defect, and it still wants the same fix.** Its chain
   (`MailSettingsMachine::refresh_epoch_schedule`,
-  `libs/fauna-client-mail-settings/src/machine.rs:2087` → `provision_snapshot_for`
-  `:2108`) is the same one crash 2 died in and it does run on **every
+  `libs/fauna-client-mail-settings/src/machine.rs` → `provision_snapshot_for`) is the same one crash 2 died in and it does run on **every
   authenticated start** — but on the main thread, so the stack is ample and the
   cost lands on the UI instead. By the corollary below ("it runs on the main actor
   is NOT an acceptable remedy") that is still the wrong place for ML-KEM keygen,
@@ -510,9 +509,9 @@ ones back to the kernel before the work and reads which are present after it.
   wrong place for it on the other axis. The Rust-side spawn is the only fix that
   is correct about both stack and responsiveness.
   ⚠ **The FFI-reachable-surface crate list is corrected** to include
-  `fauna-client-pair` (`lib.rs:1436`, `uniffi::export(async_runtime = "tokio")` on
-  `impl LinkedNestsMachine` → `mint` `:1011` → `mint_grant` `:1033`) and
-  `fauna-client-mail-settings` (`machine.rs:2036`, `mint_grant` `:1132`) — both
+  `fauna-client-pair` (`lib.rs`, `impl LinkedNestsMachine`, since declared through
+  `#[fauna_uniffi_async::export]` → `mint` → `mint_grant`) and
+  `fauna-client-mail-settings` (`machine.rs`, `mint_grant`) — both
   reach the named leaves inline and appeared in **no** enumeration in this doc.
 
 - **Anon-WS connect path — DONE 2026-06-17, re-verified 2026-07-23 and
@@ -544,7 +543,7 @@ ones back to the kernel before the work and reads which are present after it.
   1. **Bearer-mint** (`fauna.auth.{challenge,verify}` since 2026-09-23; the
      handshake before — same connect): `FfiNestClient::connect`
      (`libs/fauna-ffi/src/nest_client.rs`) → `NestClient::connect`
-     (`libs/fauna-client/src/client.rs:163` `self.auth.authenticate()`) →
+     (`libs/fauna-client/src/client.rs`, `self.auth.authenticate()`) →
      `WsChallengeBearer::bearer`/`fetch_mint` → `fauna_anon_client::mint_bearer_over_silent_challenge`
      (`libs/fauna-anon-client/src/bearer.rs`) → `AnonymousNestClient::connect`
      → `connect_anonymous` — **already `Box::pin`'d** (every boxed connect
@@ -725,41 +724,38 @@ ones back to the kernel before the work and reads which are present after it.
   `submit_invite_request`, `recheck_invite_request`, `verify_invite_code`,
   `register`, `claim_admin`, `submit_nat_mode` (`submit_storage_mode` left with
   the storage-mode kind, 2026-09-24) — calls
-  `self.core(base_url)` (`ws_nest_api.rs:416`) →
+  `self.core(base_url)` →
   `fauna_anon_client::AnonymousNestClient::connect_resolving`
-  (`ws_nest_api.rs:316`) → `connect_with_registry_resolving`
-  (`libs/fauna-anon-client/src/client.rs:133`) → the same already-`Box::pin`'d
-  `crate::ws::connect_anonymous` leaf (`client.rs:138`) — so both new groups
+  → `connect_with_registry_resolving`
+  (`libs/fauna-anon-client/src/client.rs`) → the same already-`Box::pin`'d
+  `crate::ws::connect_anonymous` leaf — so both new groups
   are **safe with no additional fix**, same shared-leaf payoff as the other
-  seven. ⚠ **Line citations below re-verified and refreshed sweep
-  (2026-09-16)** — `machine.rs` and `ws_nest_api.rs` have each grown several
-  hundred lines from unrelated feature work since this enumeration was
-  written; every symbol and call chain still resolves exactly as described,
-  only the line numbers moved.
+  seven. ⚠ **Cite symbols, not lines** — `machine.rs` and `ws_nest_api.rs` (now under
+  `nest_api/`) keep growing from unrelated feature work; every symbol and
+  call chain below was re-checked against current code.
   - **Group six — `OnboardingMachine`'s own wizard-flow methods**
     (`libs/fauna-onboarding-machine/src/machine.rs`), all awaiting
     `self.nest_api` **inline**, no intervening `tokio::spawn`, same risk
-    profile as `LaunchMachine`'s group five: `probe_setup_status_at` (:1520 →
-    `probe_setup_status` :1524), `start_handle_check` (:3349 →
-    `silent_challenge` :3582, `probe_setup_status` :3647),
-    `wizard_submit_invite_request` (:3950 → `submit_invite_request` :4022),
-    `recheck_invite_status` (:4107 → `recheck_invite_request` :4137, and its
-    private `resolve_not_found_recheck` helper :4225 → `silent_challenge`
-    :4234), `verify_oob_invite_code` (:4276 → `verify_invite_code` :4281),
-    `redeem_invite` (:4314 → `register` :4408), `wizard_submit_claim_code`
-    (:4632 → `claim_admin` :4728; its post-claim storage-mode compat leg
-    retired 2026-09-24), `recheck_manual_dns` (:4830 → the shared
-    `claim_provisioned_box` helper :5325 → `probe_setup_status` :5334,
-    `claim_admin` :5468), and `submit_nat_mode_choice` (:5538 →
-    `submit_nat_mode` :5573). These are the
+    profile as `LaunchMachine`'s group five: `probe_setup_status_at` (→
+    `probe_setup_status`), `start_handle_check` (→ `silent_challenge`,
+    `probe_setup_status`), `wizard_submit_invite_request` (→
+    `submit_invite_request`), `recheck_invite_status` (→
+    `recheck_invite_request`, and its private `resolve_not_found_recheck`
+    helper → `silent_challenge`), `verify_oob_invite_code` (→
+    `verify_invite_code`), `redeem_invite` (→ `register`),
+    `wizard_submit_claim_code` (→ `claim_admin`; its post-claim storage-mode
+    compat leg retired 2026-09-24), `recheck_manual_dns` (→ the shared
+    `claim_provisioned_box` helper → `probe_setup_status`, `claim_admin`), and
+    `submit_nat_mode_choice` (→ `submit_nat_mode`). These are the
     production call sites behind the "mint / silent-challenge / registration /
     claim / invite / storage-mode" caller list the Anon-WS connect path bullet
-    already named above, never previously traced to file:line.
+    already named above. Cited by symbol, not line: the file grows with
+    unrelated feature work and every line number written here went stale.
   - **Group seven — `AdminNatModeMachine`** (a second, independent
     `uniffi::Object`, `libs/fauna-onboarding-machine/src/admin_nat_mode.rs`),
-    the post-onboarding Admin → Nest NAT-mode control: `hydrate` (:127 →
-    `probe_setup_status` :133) and `submit` (:162 → `submit_nat_mode` :177),
-    constructed with its own production `WsNestApi::new` at `:96`.
+    the post-onboarding Admin → Nest NAT-mode control: `hydrate` (→
+    `probe_setup_status`) and `submit` (→ `submit_nat_mode`), constructed with
+    its own production `WsNestApi::new`.
 
   Both groups predate this doc (`fauna-onboarding-machine` shipped before
   2026-06-17, same as `fauna-launch-machine`) and were missed for the same
@@ -772,12 +768,12 @@ ones back to the kernel before the work and reads which are present after it.
   **A separate, unaudited path was also found this sweep, outside this doc's
   `connect_anonymous` scope**: `fauna-ffi`'s `FfiMailImportClient` (native
   source-IMAP mail import, `libs/fauna-ffi/src/mail_import.rs`, added
-  2026-07-11) is `#[uniffi::export(async_runtime = "tokio")]`'d
-  (`mail_import.rs:176`), and its `connect` method (`mail_import.rs:212`)
+  2026-07-11) was `#[uniffi::export(async_runtime = "tokio")]`'d (now declared through
+  `#[fauna_uniffi_async::export]`), and its `connect` method
   awaits `self.connector.connect(...)` **inline** down into
   `libs/fauna-mail/src/imap_client/native.rs`'s `NativeImapConnector::connect`
-  (`native.rs:130`) and `NativeTlsTransport::handshake` (`native.rs:184`) — a
-  raw `TcpStream::connect` + `rustls` `TlsConnector::connect` (`native.rs:202`)
+  and `NativeTlsTransport::handshake` — a
+  raw `TcpStream::connect` + `rustls` `TlsConnector::connect`
   that is **not** `Box::pin`'d and has no future-size-assertion test anywhere
   in `libs/fauna-mail` or `libs/fauna-ffi`. This is a structurally different
   connect path from every group above (no `fauna_anon_client` involvement at
@@ -804,7 +800,7 @@ ones back to the kernel before the work and reads which are present after it.
 - **Mail-import IMAP connect path (`FfiMailImportClient`) — DONE 2026-08-17.**
   Resolves the flagged paragraph in the bullet above. Measured the actual
   future the FFI polls inline end to end — `FfiMailImportClient::connect`
-  (`mail_import.rs:212`) — rather than trusting the first hop alone:
+  (`mail_import.rs`) — rather than trusting the first hop alone:
   **17088 bytes**, well past this doc's ~10.9 KB unsafe baseline. Isolating
   `ImapSession::connect`'s own future (17040 B) showed the overwhelming
   majority was **not** the TLS handshake this doc's pattern usually targets:
@@ -820,7 +816,7 @@ ones back to the kernel before the work and reads which are present after it.
   (`ImapSession::connect`'s future: 680 B after).
   `FfiMailImportClient::connect`'s future: **1544 bytes** after, under the
   established 2048 B guard threshold. Belt-and-suspenders, found and fixed in
-  parallel: `NativeTlsTransport::handshake` (`native.rs:184`) is now also
+  parallel: `NativeTlsTransport::handshake` (`native.rs`) is now also
   `Box::pin`'d (1352 → 248 B on `NativeImapConnector::connect` in isolation) —
   a real hardening, though it was never the dominant contributor measured
   here (at most ~1.1 KB of the 17088). Size-assertion regression tests at
@@ -843,17 +839,16 @@ ones back to the kernel before the work and reads which are present after it.
   `finish_unconfirmed_succession`, etc.) is now **also** reachable from
   apple/windows/android through
   `libs/fauna-ffi/src/recovery.rs` (feature `recovery-ceremony`, default-on
-  via `store-safe`, `fauna-ffi/Cargo.toml:257`). Its
+  via `store-safe`, `fauna-ffi/Cargo.toml`). Its
   `succession_succeed_with_held_kit`
-  (`recovery.rs:495`, `#[uniffi::export(async_runtime = "tokio")]`) awaits,
+  (`recovery.rs`, since declared through `#[fauna_uniffi_async::export]`) awaits,
   **inline with no intervening `tokio::spawn`**, down through
   `fauna_client_recovery::ceremony::finish_unconfirmed_succession`
-  (`ceremony.rs:886`) → `fauna_anon_client::AnonymousNestClient::connect`
-  (`ceremony.rs:923`) — which itself resolves to the same already-`Box::pin`'d
+  (`ceremony.rs`) → `fauna_anon_client::AnonymousNestClient::connect`
+  (`ceremony.rs`) — which itself resolves to the same already-`Box::pin`'d
   `crate::ws::connect_anonymous` leaf (`AnonymousNestClient::connect` →
   `connect_with_registry_resolving` → `ws::connect_anonymous`,
-  `fauna-anon-client/src/client.rs:102-138`; re-verified this sweep, lines
-  drifted from file growth — cite the symbol) — so this new inline-await site is
+  `fauna-anon-client/src/client.rs`; cite the symbol, not a line) — so this new inline-await site is
   safe with **no additional fix**, the same shared-leaf payoff as every prior
   group. (`sweep_after_succession`/`sweep_as_successor`'s own
   `fauna_client::NestClient::connect` is the already-audited "Authenticated
@@ -863,7 +858,7 @@ ones back to the kernel before the work and reads which are present after it.
   `recovery_veto_pending_replacement`,
   `recovery_reseal_escrow_with_held_kit`) all build their
   `RecoveryClient` from the caller's already-established
-  `nest.nest_arc()` (`libs/fauna-ffi/src/nest_client.rs:348` — a plain
+  `nest.nest_arc()` (`libs/fauna-ffi/src/nest_client.rs` — a plain
   accessor, no fresh dial) — no new TLS/WS handshake, same
   "already-established dispatcher" class as most other `fauna-ffi` async
   exports. **The "FFI-reachable surface" crate list is corrected to also

@@ -161,8 +161,12 @@ fn settle(m: &OnboardingMachine, outcome: &RecoveryEntryOutcome, append: bool) {
         // The seed is back: commit it exactly as an import does, so a crash
         // before complete-login resumes at `handle_entry`.
         RecoveryEntryOutcome::Restored | RecoveryEntryOutcome::RestoredPredecessorsLost { .. } => {
-            if let Some(secret) = m.effective_secret() {
-                super::commit_confirmed_identity(&secret, append);
+            // A failed commit has put its own error on screen and the wizard
+            // back on this page: the outcome's line must not cover it.
+            if let Some(secret) = m.effective_secret()
+                && !super::commit_confirmed_identity(m, &secret, append)
+            {
+                return;
             }
         }
         _ => {}

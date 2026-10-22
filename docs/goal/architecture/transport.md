@@ -311,7 +311,7 @@ idempotency-check + spawn-and-cache mechanics with the federation channel via
 2. Idempotency lookup, two tiers: the per-connection LRU (`RpcConnection.idempotency_cache`, bounded 1000 entries, 5-min TTL; replies over 64 KiB are cached as a `too_large` marker, not re-playable bytes; hit → re-send the cached Reply frame verbatim), then — authenticated connections, LRU miss — the **durable** table (`db/rpc_idempotency.rs`, keyed `(actor, idempotency_key)`; hit → the Reply is **rebuilt** with the current correlation_id; see § Idempotency and reconnect-with-resume).
 3. Kind lookup in `RpcRouter`. Miss → `RpcError { code: "fauna.protocol.unknown_kind" }`.
 4. Effective deadline = `req.deadline_ms ?? meta.default_deadline`.
-5. **Acquire a global in-flight-handler permit** (`AppState.handler_semaphore`, `Semaphore::new(MAX_INFLIGHT_HANDLERS = 2048)`, `bins/fauna-nest/src/dispatch_core.rs:52`) **before** spawning the handler — `acquire_owned().await` blocks the caller's read loop as backpressure once the global cap is saturated (one socket pipelining an unbounded flood of requests can no longer spawn unbounded handler tasks), rather than failing the request; the permit moves into the handler task and releases on completion/abort/timeout. It bounds the **handler** only: the step-7 reply task is spawned after that release, deliberately, because this semaphore is global — the per-actor path shares it, so letting one peer's parked replies hold permits would starve every client's dispatch. What bounds the reply half is step 7's budget on the peer-symmetric planes, and step 1's per-connection slot on the per-actor plane, which a Reply holds from admission to its send. Shared by both the per-actor and federation dispatch paths (added from a 2026-06-23 nest firewall-exposure review).
+5. **Acquire a global in-flight-handler permit** (`AppState.handler_semaphore`, `Semaphore::new(MAX_INFLIGHT_HANDLERS = 2048)`, `bins/fauna-nest/src/dispatch_core.rs:54`, acquired at `:412`) **before** spawning the handler — `acquire_owned().await` blocks the caller's read loop as backpressure once the global cap is saturated (one socket pipelining an unbounded flood of requests can no longer spawn unbounded handler tasks), rather than failing the request; the permit moves into the handler task and releases on completion/abort/timeout. It bounds the **handler** only: the step-7 reply task is spawned after that release, deliberately, because this semaphore is global — the per-actor path shares it, so letting one peer's parked replies hold permits would starve every client's dispatch. What bounds the reply half is step 7's budget on the peer-symmetric planes, and step 1's per-connection slot on the per-actor plane, which a Reply holds from admission to its send. Shared by both the per-actor and federation dispatch paths (added from a 2026-06-23 nest firewall-exposure review).
 6. Spawn handler task; register `AbortHandle` in `pending_handlers` for Cancel-target lookup.
 7. Encode Reply, insert into idempotency cache (or `too_large` marker if > 64 KiB), send through the slot reserved at step 1, which cannot overflow. A Push takes only the capacity no admitted request holds, and its overflow triggers ResyncRequired (next section). A Reply with no reserved slot (none reaches one on the production path) falls back to a `try_send` onto `RpcConnection.ws_tx`: a full queue is fatal (close 1011), and a closed one (the writer is already gone) drops the Reply with its connection and is not an overflow.
 
@@ -324,7 +324,7 @@ The two bounds are independent and both are load-bearing. Until 2026-09-02 neith
 
 `RpcRouter` is built once at app startup in `bins/fauna-nest/src/lib.rs`'s
 `build_rpc_router()` via per-area `register_<area>_handlers(&mut
-RpcRouterBuilder)` calls — 77 areas as of 2026-09-09 (auth, discovery,
+RpcRouterBuilder)` calls — about 88 `register_*` calls as of 2026-10-14, some feature-gated (auth, discovery,
 account, claim, invite, bridges, conversations, feed, posts, sync,
 subscriptions, transport, backup, recovery, tip, region, nostr zap-signer,
 …); the list in `lib.rs` is the roster. (The federation table
@@ -389,7 +389,7 @@ disconnect.
 
 Explicit fourth frame type. Three cases:
 
-1. **Drop the future client-side** → the `RpcCall` handle's `Drop` impl (`libs/fauna-protocol/src/dispatcher.rs::RpcCall`, armed at construction in `request_raw`) sends `Cancel { correlation_id }` if still armed; server aborts handler via the registered `AbortHandle`; server replies with `RpcError { code: "fauna.protocol.cancelled" }` if the abort took effect before the handler completed. `RpcCall::await_reply()` disarms (`self.armed = false`) only *after* the internal `rx.await` resolves, so a drop while the future is genuinely suspended awaiting the reply (the client's own timeout, `tokio::time::timeout(remaining, call.await_reply())` in `libs/fauna-client/src/client.rs:360`; or any external drop of the request future) still finds `armed == true` and sends the Cancel (fixed 2026-07-22, `dispatcher.rs` — regression-pinned by `dispatcher::tests::drop_while_awaiting_reply_sends_cancel_frame`, which drives a real drop-while-suspended future and asserts the Cancel frame lands on the wire; previously the disarm ran as `await_reply`'s first synchronous statement, before the suspension point, so it always fired too early and no first-party call site's drop/timeout ever actually cancelled the server-side handler).
+1. **Drop the future client-side** → the `RpcCall` handle's `Drop` impl (`libs/fauna-protocol/src/dispatcher.rs::RpcCall`, armed at construction in `request_raw`) sends `Cancel { correlation_id }` if still armed; server aborts handler via the registered `AbortHandle`; server replies with `RpcError { code: "fauna.protocol.cancelled" }` if the abort took effect before the handler completed. `RpcCall::await_reply()` disarms (`self.armed = false`) only *after* the internal `rx.await` resolves, so a drop while the future is genuinely suspended awaiting the reply (the client's own timeout, the budget race `select(call.await_reply(), budget)` in `libs/fauna-protocol/src/dispatcher.rs::request_encoded` (`:605-606`); or any external drop of the request future) still finds `armed == true` and sends the Cancel (fixed 2026-07-22, `dispatcher.rs` — regression-pinned by `dispatcher::tests::drop_while_awaiting_reply_sends_cancel_frame`, which drives a real drop-while-suspended future and asserts the Cancel frame lands on the wire; previously the disarm ran as `await_reply`'s first synchronous statement, before the suspension point, so it always fired too early and no first-party call site's drop/timeout ever actually cancelled the server-side handler).
 2. **Cancel races a completed handler** → server silently discards the Cancel; the original Reply was already in flight or sent. No second Reply for a Cancel that has nothing to abort.
 3. **Cancel arrives after client's pending entry is gone** → no-op on both sides.
 
@@ -464,6 +464,10 @@ surface no push feeds. The two render-input flags exist because
 read fires — clause 1 for the supervision read (2026-09-13), the own-threshold
 bullet for the thresholds (2026-10-08) — and an app that derives its sweep from
 this seam has no way to fire the second one until the seam says so.
+
+**The self-description is push-fed — `nest_info`.** `fauna.nest.info_changed` (a hint-less, payload-free push the nest sends every connected member, never a bridge) stales the `fauna.nest.info` read and nothing else; the reconnect sweep and `ResyncRequired` stale it too, since a dropped push may have staled it. Today its one producer is an accepted write of the admin's published rules ([`../behavior/nest-rules.md`](../behavior/nest-rules.md) § Acceptance at joining, and a change of rules owns when it fires and what the device does with the newer sequence).
+
+**One surface no *single* kind stales — `devices`.** The Devices & Folders reads (the device, folder and conflict lists, and each open folder row's per-set rosters) are stale after a reconnect and after `ResyncRequired`, and never from one kind alone: `fauna.sync.changed` stales one set's row, which the app matches by the payload's set at its own call site (the per-payload fetch above), and a gap may have swallowed that push. The sweep is also what retires a row read's nest-down error once the nest answers ([`../ui/folders.md`](../ui/folders.md) § Errors & edge cases). *Status (2026-10-16):* linux serves it with a `DevicesMachine` refresh, whose list rebuild re-fires every open row's reads; `FfiStaleSurfaces` carries it, so windows and apple can serve it next; tui, web and android do not paint these reads' failures (tui logs them, web and android degrade each to an empty list), so they owe the error-retiring half nothing.
 
 > **Implementation status today (2026-08-22): tui and linux derive from the seam;
 > the other five apps still hand-derive their own.** This section previously
@@ -799,7 +803,7 @@ this seam has no way to fire the second one until the seam says so.
 > the rest are ignored. This landed the same commit that **deleted apple's dead second
 > socket** (`WebSocketClient` on `/api/v1/ws/{actor}?token=`, the query-auth form the
 > nest now 401s — it never opened and its JSON parse could never match the CBOR
-> `PushEvent`s, exactly like web's deleted `$lib/ws.ts`); knock/RSVP/MLS delivery never
+> `PushEvent`s, exactly like web's deleted `#lib/ws.ts`); knock/RSVP/MLS delivery never
 > depended on it (MLS rides the conversations rail's own `subscribe_kind`). Verified on
 > **macOS** by `test_push_live_refresh.py --client macos` and on **iOS** by the same
 > test `--client ios` (2026-07-17 — 1 passed in a solo iOS e2e window; the identical
@@ -1086,7 +1090,7 @@ from them when editing; 36 kinds as of 2026-10-01):
 | `fauna.bridges.push.export_error` | `bridge_routing::BridgeExportErrorPush` (`mail-export.md`) |
 | `fauna.bridges.push.export_complete` | `bridge_routing::BridgeExportCompletePush` (`mail-export.md`) |
 | `fauna.push.notification` | `PushNotificationPayload { title, body, url }` (a `ws-device` push row's delivery over the device's own connection — `apps/common.md` § Push Notifications → *Transports*) |
-| `fauna.sync.chunk.wanted` | `SyncChunkWantedPayload { request_id, folder, store_key }` (the relay's ask to the one connection that announced the folder; answered on the bulk rail — `file-sync.md` § Relay serving) |
+| `fauna.sync.chunk.wanted` | `SyncChunkWantedPayload { request_id, folder, store_key }` (the relay's ask to the one connection that announced the folder; answered on the bulk rail — `relay-serving.md` § Relay serving) |
 
 Application code on the nest side calls `state.ws.notify_push(actor,
 PushEvent::...)`; the WS layer encodes, allocates `seq`, and emits.
@@ -1198,7 +1202,11 @@ treats an unrecognized token as malformed rather than silently skipping it; a
 line naming a real token but otherwise malformed (too few fields, an
 unratifiable transition, a bare type tightened) fails only that token's OWN
 gate (exit 2) — the sibling gate skips a well-formed line for the other
-token, same as always, without reading its body. Who may write a line is owned
+token, same as always, without reading its body. Both rules bind HEAD's list:
+the merge base's list feeds only the base⊆head check and is read leniently — a
+line the grammar rejects there is skipped with a warning, never exit 2, so a
+malformed line that reached `main` never refuses the commit that removes it,
+while every well-formed base entry is still held to the check. Who may write a line is owned
 by [`version-compatibility.md`](version-compatibility.md) § Dimension 2, the
 fourth exception's *Who writes a ledger line* rule: a sweep-class remnant line
 is a session's own transcription in the removal's commit, any other break is a
@@ -1291,6 +1299,7 @@ libs/fauna-ws-substrate/              # substrate-neutral native WS transport; s
 │   ├── lib.rs                        # re-exports adapter + supervisor surfaces
 │   ├── adapter.rs                    # TungsteniteAdapter: tungstenite ↔ Bytes Stream/Sink; 30s/60s keepalive; ReconnectSignal close-code mapping; ensure_tls_provider
 │   ├── handshake.rs                  # shared bearer-connect pieces: actor_ws_url, `fauna.v1, bearer.<token>` header, MAX_RPC_WS_MESSAGE_SIZE-capped WebSocketConfig — lifted out of fauna-client + fauna-anon-client's duplicated connect steps
+│   ├── dial_budget.rs                # the process-wide dial budget: every native WS dial acquires from it first (`transport-connection.md` § Connection lifecycle)
 │   ├── tls_verify.rs                 # the capturing TLS cert verifier (channel-binding SPKI capture) shared by the bearer client and nest↔nest federation dialer; fauna-anon-client re-exports it
 │   ├── supervisor.rs                 # run_supervisor (backoff, dispatcher-slot, ConnectionState) + the SupervisedChannel seam (parameterised over the auth handshake)
 │   └── testing.rs                    # mpsc_pair + QueueChannel harness (feature `test-util`)
@@ -1307,6 +1316,13 @@ libs/fauna-client/                    # bearer client: connect step + public fa�
 │   ├── ws_device_handshake_bearer.rs # WsDeviceHandshakeBearer — device-key sibling minting over fauna.auth.device_handshake (store-principal processes)
 │   ├── ws_custody_handshake_bearer.rs # WsCustodyHandshakeBearer — custodian-key sibling minting over fauna.auth.custody_handshake (custody-grant pulls)
 │   ├── token_cache.rs                # TokenCache — the double-checked-lock refresh cache shared by the three WS bearer mints above
+│   ├── ws_custodied_fleet_bearer.rs  # WsCustodiedFleetBearer — owner-fleet-device sibling minting over fauna.auth.custodied_fleet_handshake (reading back what a custodian nest holds)
+│   ├── write_token_bearer.rs         # WriteTokenBearer — caching BearerSource a cross-nest writer presents on byte-plane POSTs to a set's/room's home nest
+│   ├── chunk_download.rs             # BlobFetcher impl over a nest's public manifest/chunk download routes (HTTP byte plane)
+│   ├── media_upload.rs               # blob-attachment upload for the feed composer (HTTP byte plane, client glue)
+│   ├── ranged_nest_reader.rs         # native-player leg: random-access byte source over a nest URL through the pinned client
+│   ├── remote_image.rs               # the revealed remote-image fetch (the one request to a host the nest does not control)
+│   ├── update_look.rs                # release-feed round trip and the once-per-sign-in look
 │   ├── error.rs                      # NestClientError (Rpc/RpcDisconnected/RpcTimeout/SubprotocolMismatch)
 │   └── types.rs                      # re-exports ConnectionState from fauna-ws-substrate
 └── tests/
@@ -1342,7 +1358,7 @@ Y itself ships two atomic slices:
 Beyond that, **per-feature specs each carry their own slice**:
 
 1. Identify the HTTP endpoints the feature owns.
-2. Define the WS-RPC request/reply types. **Current convention (evolved since the original recipe):** most features declare these as Rust structs in `libs/fauna-protocol/src/<feature>.rs` (covered by the `tools/check-additive-evolution` syn gate, above) rather than a per-feature CDDL file — as of 2026-09-09 there are ~99 `src/*.rs` wire modules but only 7 `schemas/*.cddl`, reserved for **push payloads** and at-rest types that carry byte-pinned conformance vectors. Add a `schemas/<feature>.cddl` only for a push payload (in `push_events.cddl`) or where a pinned vector is wanted.
+2. Define the WS-RPC request/reply types. **Current convention (evolved since the original recipe):** most features declare these as Rust structs in `libs/fauna-protocol/src/<feature>.rs` (covered by the `tools/check-additive-evolution` syn gate, above) rather than a per-feature CDDL file — as of 2026-10-14 there are ~112 `src/*.rs` wire modules but only 7 `schemas/*.cddl`, reserved for **push payloads** and at-rest types that carry byte-pinned conformance vectors. Add a `schemas/<feature>.cddl` only for a push payload (in `push_events.cddl`) or where a pinned vector is wanted.
 3. Implement nest-side handlers; register via `register_<feature>_handlers(&mut RpcRouterBuilder)`. **And add each kind's connection-class arm in `bins/fauna-nest/src/bridge_method_allowlist.rs`** — the central per-kind capability gate every live connection passes; an unlisted kind default-denies (`fauna.bridges.permission_denied`), a listed kind refused on caller class answers with its family's `fauna.<ns>.permission_denied` (contract owned by [`api-layers.md`](api-layers.md) § Caller-class authorization → *Refusal codes at the gate*), and handler-direct conformance tests bypass the gate, so a missing arm surfaces only on a real client call (the `fauna.payments.*` family hit exactly this, 2026-07-12).
 4. Implement client-side typed wrappers in a per-feature client crate (`libs/fauna-client-<feature>/`).
 5. Mark HTTP twins `#[deprecated(note = "use WS-RPC kind fauna.<area>.<verb>; HTTP removed in <milestone>")]`; log `tracing::warn!` on each hit.
@@ -1456,14 +1472,21 @@ follow-on specs. Spec Y has the full rationale for each.
   carrier; non-Fauna federation stays HTTP+JSON-LD per ActivityPub. Mechanism,
   kind inventory, and mixed-version rules: `federation.md` (owner). Design
   history: ratified 2026-05-30 + 2026-06-01 (tracked internally).
-- **Internal sidecar WS-RPC channel (BUILT 2026-06-08/09; its one rider is the
-  iroh relay — `behavior/p2p.md` § Architecture).** A fourth nest WS connection
+- **Internal sidecar WS-RPC channel (BUILT 2026-06-08/09; two riders — the
+  iroh relay, `behavior/p2p.md` § Architecture, and since 2026-10-14 the
+  sni-router, for the sidecar log plane alone).** A fourth nest WS connection
   class beside per-actor bearer / anonymous / federation: a channel to a
   co-located sidecar process, authenticated
   by a sidecar bearer token on a first-frame handshake (`fauna.sidecar.hello`,
-  not the nest-key hello) and keyed on the verified sidecar scope. The
-  **sidecar dials nest** (`GET /internal/relay/ws`, loopback-gated), attesting
-  its X25519 public key in the hello; it then originates
+  not the nest-key hello) and keyed on the verified sidecar scope. Each rider
+  has its own loopback-gated route and token scope, served by one lean loop
+  parameterised by the rider: `GET /internal/relay/ws` (scope `relay`) and
+  `GET /internal/router/ws` (scope `router`); a token is refused on any route
+  but its own. The router's hello carries no key and its channel serves only
+  `fauna.sidecar.log_events`. The relay's is richer: the
+  **sidecar dials nest** (`GET /internal/relay/ws`), attesting
+  its X25519 public key in the hello — a requirement of the relay's scope
+  alone; it then originates
   `fauna.relay.fetch_tls_cert` up the channel and nest answers with the
   `relay.<apex>` cert sealed to that key. The relay holds the channel for its
   whole life (re-dialing when it drops) and asks nest about every endpoint
@@ -1507,12 +1530,24 @@ follow-on specs. Spec Y has the full rationale for each.
     fails over an already-authenticated channel proves the token good and is retried,
     never exited on (the relay's cert fetch against a pre-claim box is exactly this).
     One implementation: `libs/fauna-sidecar-client` (`CredentialVerdict`,
-    `serve_while_reaching_nest`); the relay is its one user since the algorithm
-    sidecar was removed. The image starts the relay sidecar unconditionally, so it can
+    `serve_while_reaching_nest`); its users are the relay and the sni-router.
+    **For the router the end is costlier, and accepted (2026-10-14):** the router
+    is the container's public `:443`, so its exit drops every live splice it
+    carries (nest, CalDAV, relay, PDS) and unbinds `:443` for the restart's
+    moment — once per in-container nest restart. A nest restart (a crash, a
+    factory reset) already severs everything routed to nest, which is nearly all
+    of `:443`, and every client re-dials; the router's run-script says so beside
+    the token read. The image starts the relay sidecar unconditionally, so it can
     start before nest has minted this boot's tokens and read an empty or stale
     one: that is this same recovery — refused at its hello, ended, restarted by
-    s6 against the fresh file — and needs no boot-order rule. Proof: `bins/fauna-nest/tests/conformance_sidecar_channel.rs::a_refused_credential_hands_the_sidecar_back_to_its_supervisor`
-    (tier_3, latency-independent) over the shared crate's own tier_1 policy tests.
+    s6 against the fresh file — and needs no boot-order rule. Proof: the shared crate's
+    `a_served_channel_reconnects_but_a_refusal_ends_the_serve_loop` (the policy)
+    and the nest's `sidecar_channel.rs::a_refused_hello_reaches_the_dialer_as_unauthenticated`
+    (the refusal arriving as its real code); the tier_3
+    `conformance_sidecar_channel.rs` once cited here left with the algorithm
+    sidecar. Both binaries exit `78` through
+    `fauna_sidecar_client::EXIT_CREDENTIAL_REFUSED` (the relay's `main` maps
+    `CredentialRefused` to it since 2026-10-14; before, it exited `1`).
     Before this, both sidecars retried the forgotten token forever — observed
     2026-08-29 as `unknown sidecar token` for a full 60 s budget under load on a
     witness that passed in 7 s alone.
@@ -1985,8 +2020,8 @@ per-actor WS** (linux tracked internally; web via the wasm façade,
 2026-05-23; windows/macos/ios/android via the shared FFI; tui via the shared
 Rust client stack, parity 2026-07-19). The protocol crate
 is runtime-agnostic and compiles to `wasm32-unknown-unknown`; the nest runs
-bounded per-actor channels, the kind-routed `RpcRouter` (76 per-area handler
-registrations as of 2026-08-24), the idempotency cache, deadline + cancel handling, and typed
+bounded per-actor channels, the kind-routed `RpcRouter` (~88 per-area handler
+registrations as of 2026-10-14), the idempotency cache, deadline + cancel handling, and typed
 `PushEvent` frames with per-connection `seq`. All push events ride canonical
 CBOR end-to-end; the legacy `?token=` query parameter is gone.
 

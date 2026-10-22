@@ -1,7 +1,9 @@
 //! The Contacts Find User handle resolve — one `fauna.actor.by_handle` hop and
 //! the rule for which address the find result names, shared by every app's
-//! find-user surface (the UniFFI `resolve_handle` face for apple / windows /
-//! android, the wasm `actorByHandle` twin for web, and linux directly).
+//! find-user surface (the UniFFI `find_user` face for android and the wasm
+//! `findUser` twin for web, both through [`find_user_across_nests`]; the UniFFI
+//! `resolve_handle` face windows and apple still call; and linux and tui
+//! directly).
 //!
 //! **The dial names the peer** (`foreign-handle-resolution.md` § Peer-auth
 //! model). A find-user input typed with a `@domain` qualifier is dialed at that
@@ -82,7 +84,7 @@ pub struct CrossNestFound {
 
 /// The Find User lookup for a typed `localpart[@domain]`, discovering the peer
 /// nest itself when the typed domain is foreign — the one entry point every app
-/// calls (UniFFI `find_user`, wasm `findUser`, linux directly), so none of them
+/// calls (UniFFI `find_user`, wasm `findUser`, linux and tui directly), so none of them
 /// re-derives the decision or the URL (priority #2).
 ///
 /// - No typed domain → one hop on `home` ([`find_user_by_handle`]), `nest_url`
@@ -328,6 +330,30 @@ mod tests {
         assert_eq!(
             r.found.domain, "127.0.0.1:8443",
             "named by the typed address"
+        );
+    }
+
+    /// The cross-nest twin of the echo test above: the peer dialed for a foreign
+    /// typed domain answers with another identity, handle AND domain, and the
+    /// result still names the typed address — each half pinned on its own.
+    #[test]
+    fn a_cross_nest_peer_echoing_another_identity_is_named_by_the_dial() {
+        let home = Serving {
+            domain: Some("home.test"),
+        };
+        let r = block_on(find_user_across_nests(
+            &home,
+            "bob",
+            Some("attacker.test"),
+            |d| Some(format!("https://{d}")),
+            |_| async { Ok::<_, String>(peer("alice", "trusted.test")) },
+        ))
+        .unwrap();
+        assert_eq!(r.nest_url.as_deref(), Some("https://attacker.test"));
+        assert_eq!(r.found.handle, "bob", "the typed localpart, never the echo");
+        assert_eq!(
+            r.found.domain, "attacker.test",
+            "the typed domain, never the echo"
         );
     }
 

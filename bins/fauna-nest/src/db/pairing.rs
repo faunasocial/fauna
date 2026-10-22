@@ -249,6 +249,33 @@ impl CacheDb {
 
     // ── Outbox queue ────────────────────────────────────────────────
 
+    /// Queue a **follow-family** entry for the one nest `peer_nest_id` — a
+    /// `follow_state` push to a remote subscriber's home
+    /// (`federated-follow.md` § Decision 2). `author` is the local author the
+    /// entry is about, the row's person column as for a forward.
+    pub async fn outbox_enqueue_to_peer(
+        &self,
+        author: &[u8; 32],
+        payload: &[u8],
+        entry_type: &str,
+        peer_nest_id: &[u8; 32],
+    ) -> Result<()> {
+        let now = Timestamp::now().as_i64();
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "INSERT INTO outbox (payload, entry_type, created_at, author_id, peer_nest_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                payload,
+                entry_type,
+                now,
+                author.as_slice(),
+                peer_nest_id.as_slice()
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Queue `payload` for forward to the paired nest. `author` is the verified
     /// author of the post or tombstone inside — the producer has it in hand
     /// (this fn sees only bytes) — and is the row's one person column: what
@@ -355,6 +382,7 @@ impl CacheDb {
             "UPDATE outbox
                 SET next_retry = last_attempt_at + ?2
               WHERE author_id = ?1
+                AND peer_nest_id IS NULL
                 AND attempts > 0
                 AND next_retry > last_attempt_at + ?2",
             rusqlite::params![
@@ -388,7 +416,7 @@ impl CacheDb {
     pub async fn outbox_discard_for_author(&self, author: &[u8; 32]) -> Result<usize> {
         let conn = self.conn.lock().await;
         let discarded = conn.execute(
-            "DELETE FROM outbox WHERE author_id = ?1",
+            "DELETE FROM outbox WHERE author_id = ?1 AND peer_nest_id IS NULL",
             rusqlite::params![author.as_slice()],
         )?;
         Ok(discarded)
@@ -405,14 +433,14 @@ impl CacheDb {
         let conn = self.conn.lock().await;
         let (queued, stuck): (i64, i64) = conn.query_row(
             "SELECT COUNT(*), COALESCE(SUM(attempts >= ?2), 0)
-               FROM outbox WHERE author_id = ?1",
+               FROM outbox WHERE author_id = ?1 AND peer_nest_id IS NULL",
             rusqlite::params![author.as_slice(), Self::OUTBOX_MAX_ATTEMPTS],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         let last_error: Option<String> = conn
             .query_row(
                 "SELECT last_error FROM outbox
-                  WHERE author_id = ?1 AND last_error IS NOT NULL
+                  WHERE author_id = ?1 AND peer_nest_id IS NULL AND last_error IS NOT NULL
                   ORDER BY next_retry DESC, id DESC LIMIT 1",
                 rusqlite::params![author.as_slice()],
                 |row| row.get(0),
@@ -433,24 +461,40 @@ impl CacheDb {
     /// one author the order is oldest first, so a post still goes before its
     /// own deletion.
     pub async fn outbox_pending(&self, limit: i64) -> Result<Vec<OutboxEntry>> {
+        self.outbox_pending_where(limit, false).await
+    }
+
+    /// [`Self::outbox_pending`] narrowed to follow-family entries (those
+    /// naming a `peer_nest_id`) — what the worker drains on a nest that is not
+    /// private, where forwards wait (`federated-follow.md` § Decision 2).
+    pub async fn outbox_pending_follow(&self, limit: i64) -> Result<Vec<OutboxEntry>> {
+        self.outbox_pending_where(limit, true).await
+    }
+
+    async fn outbox_pending_where(
+        &self,
+        limit: i64,
+        follow_only: bool,
+    ) -> Result<Vec<OutboxEntry>> {
         let now = Timestamp::now().as_i64();
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
-            "SELECT id, payload, entry_type, attempts, author_id FROM (
-                SELECT id, payload, entry_type, attempts, author_id,
+            "SELECT id, payload, entry_type, attempts, author_id, peer_nest_id FROM (
+                SELECT id, payload, entry_type, attempts, author_id, peer_nest_id,
                        ROW_NUMBER() OVER (PARTITION BY author_id ORDER BY id) AS turn
                   FROM outbox
-                 WHERE next_retry <= ?1)
+                 WHERE next_retry <= ?1 AND (?3 = 0 OR peer_nest_id IS NOT NULL))
              ORDER BY turn ASC, id ASC LIMIT ?2",
         )?;
         let entries = stmt
-            .query_map(rusqlite::params![now, limit], |row| {
+            .query_map(rusqlite::params![now, limit, follow_only], |row| {
                 Ok(OutboxEntry {
                     id: row.get(0)?,
                     payload: row.get(1)?,
                     entry_type: row.get(2)?,
                     attempts: row.get(3)?,
                     author_id: row.get(4)?,
+                    peer_nest_id: row.get(5)?,
                 })
             })?
             .filter_map(|r| r.ok())

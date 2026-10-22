@@ -1,9 +1,9 @@
 import type { SharedRpcPort } from '../../static/fauna_wasm_backups.js';
-import { base } from '$app/paths';
+import { asset } from '$app/paths';
 import { sharedAccountPort } from './account-runtime';
 import type { BackupsMachine } from '../../static/fauna_wasm_backups.js';
-import type { LocalizedText } from '$lib/i18n/localized';
-import type { BackupOp, RowIntegrity, SnapshotState } from '$lib/backups-machine';
+import type { LocalizedText } from '#lib/i18n/localized';
+import type { BackupOp, RowIntegrity, SnapshotState } from '#lib/backups-machine';
 
 // Loader for the Backups-page WASM chunk (`libs/fauna-wasm-backups`: the
 // snapshot half's `BackupsMachine`). A separate wasm module from `fauna_wasm` —
@@ -31,7 +31,7 @@ export function ensureBackupsWasm(): Promise<void> {
   if (!wasmInit) {
     wasmInit = (async () => {
       const mod = await import('../../static/fauna_wasm_backups.js');
-      await mod.default(`${base}/fauna_wasm_backups_bg.wasm`);
+      await mod.default(asset('fauna_wasm_backups_bg.wasm'));
       wasmModule = mod;
     })().catch((e) => {
       wasmInit = null;
@@ -54,7 +54,7 @@ export interface BackupsMachineObserver {
 
 /**
  * Build the page-level `BackupsMachine` over the SPA singleton's socket —
- * `port` is `sharedRpcPort(secretHex)` from `$lib/rpc`. State starts empty —
+ * `port` is `sharedRpcPort(secretHex)` from `#lib/rpc`. State starts empty —
  * the caller drives `refresh()`.
  *
  * `ownerSecretHex` is the identity secret the machine derives its owner

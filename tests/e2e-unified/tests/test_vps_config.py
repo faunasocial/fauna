@@ -23,6 +23,7 @@ import pytest
 from helpers import budgets
 from helpers.app_surface import skip_unbuilt
 from helpers.waiting import wait_until
+from i18n.strings import S
 
 pytestmark = pytest.mark.tier_2
 
@@ -111,6 +112,46 @@ def test_vps_config_server_types_after_verify(app, fake_cloud):
     assert 1 <= radios <= 5, (
         f"vps-server-type-radio count {radios} outside 1..5 — curated "
         "list slice broke or stub returned wrong shape"
+    )
+
+
+def test_vps_server_types_follow_the_location(app, fake_cloud):
+    """A location change re-lists the ``vps-server-type-radio`` for the new
+    location (``registry.md`` § Server offers follow the location;
+    ``onboarding-provisioning.md`` § 5). The ``fake_cloud`` Hetzner leg prices
+    each type differently per location — ``cx23`` is 4.51 in Falkenstein and
+    5.17 in Helsinki — so the first radio's price is the listing's witness.
+
+    Drives the real ``verify_vps`` (the verified helper: web + linux + tui);
+    web omits the location picker, so it runs on linux + tui."""
+    if not (app.driver.is_linux() or app.driver.is_tui()):
+        skip_unbuilt(
+            app.driver,
+            surface="the vps-location-picker over a real verify",
+            detail="the verified helper runs on web + linux + tui and web omits "
+            "the picker; the other apps lack set_provider_base_urls",
+            tracked="installers/vps.md",
+        )
+    app.onboarding.go_to_vps_config_with_verified("hetzner",
+                                                  {"api-token": "MOCK"},
+                                                  fake_cloud)
+    radio = "vps-server-type-radio[0]"
+    first = app.driver.get_text(radio)
+    assert "4.51" in first, (
+        f"the default location (Falkenstein) should price cx23 at 4.51; "
+        f"radio read {first!r}; {app.driver.diagnose(radio)}"
+    )
+
+    app.driver.select("vps-location-picker", "Helsinki DC Park 1")
+
+    wait_until(
+        lambda: "5.17" in (app.driver.get_text(radio) or ""),
+        budgets.PROVIDER_VERIFY_S,
+        diagnose=lambda: (
+            f"after selecting Helsinki the radio still reads "
+            f"{app.driver.get_text(radio)!r}; error={app.error_text()!r}; "
+            f"{app.driver.diagnose(radio)}"
+        ),
     )
 
 
@@ -263,15 +304,11 @@ def test_vps_config_update_channel_rows_select_one_of_three(app):
     ``provision_update_channel_defaults_to_stable_then_follows_the_choice``
     (fauna-onboarding-machine).
     """
-    if app.driver.is_macos() or app.driver.is_ios():
-        skip_unbuilt(
-            app.driver,
-            surface="the vps-config-update-channel-row radios",
-            detail="tui, linux, web, android and windows render the rows; "
-            "macos+ios (shared Swift) are queued on their machines",
-            tracked="onboarding-provisioning.md",
-        )
     app.onboarding.go_to_vps_config()
+    # A fixed registry, not the live one: entering the page reads which
+    # channels have a build, and that reading moves the default (the next
+    # test). Unknown everywhere is the status quo — Stable.
+    seed_channel_availability(app, {"stable": UNKNOWN, "test": UNKNOWN, "dev": UNKNOWN})
     row = "vps-config-update-channel-row[{}]".format
     channels = ("stable", "test", "dev")
     app.driver.wait_for(row("stable"), timeout=10)
@@ -295,3 +332,70 @@ def test_vps_config_update_channel_rows_select_one_of_three(app):
     await_only("dev")
     app.driver.click(row("test"))
     await_only("test")
+
+
+UNKNOWN = {"build": "unknown"}
+NO_BUILD = {"build": "no_build"}
+
+
+def seed_channel_availability(app, builds: dict[str, dict]) -> None:
+    """Stand in for the registry read the page makes on entry
+    (``OnboardingMachine::probe_channel_availability``): rest a fixed reading
+    on the machine through its test-only setter, which a late live probe can
+    never overwrite."""
+    app.driver.call_machine_method(
+        "set_channel_availability_for_test",
+        json.dumps([{"channel": c, "build": b} for c, b in builds.items()]),
+    )
+
+
+def test_vps_config_default_channel_follows_what_the_registry_has(app):
+    """With no Stable build published, an unchosen page selects the first
+    channel that may have a usable one — here Test, whose state is unknown —
+    and an explicit choice still wins (``onboarding-provisioning.md`` § 5 →
+    *What exists decides the default*). The default is shared Rust
+    (``UpdateChannel::default_for``), so every app that renders the rows
+    follows it with no app code."""
+    app.onboarding.go_to_vps_config()
+    seed_channel_availability(app, {"stable": NO_BUILD, "test": UNKNOWN, "dev": UNKNOWN})
+    row = "vps-config-update-channel-row[{}]".format
+    channels = ("stable", "test", "dev")
+    app.driver.wait_for(row("stable"), timeout=10)
+
+    def states() -> dict[str, str | None]:
+        return {c: app.driver.get_attr(row(c), "state") for c in channels}
+
+    want = {"stable": "off", "test": "on", "dev": "off"}
+    wait_until(
+        lambda: states() == want,
+        budgets.UI_SETTLE_S,
+        diagnose=lambda: f"expected only the test row selected, rows read {states()}",
+    )
+    app.driver.click(row("stable"))
+    want = {"stable": "on", "test": "off", "dev": "off"}
+    wait_until(
+        lambda: states() == want,
+        budgets.UI_SETTLE_S,
+        diagnose=lambda: f"an explicit Stable choice must stick, rows read {states()}",
+    )
+
+
+def test_vps_config_channel_with_no_build_says_so(app):
+    """A channel the registry has no build for carries the no-build
+    description in its own row, no new element; the shared getter picks the
+    key (``update_channel_description_key_for_row``) and the app renders it."""
+    app.onboarding.go_to_vps_config()
+    seed_channel_availability(app, {"stable": NO_BUILD, "test": UNKNOWN, "dev": UNKNOWN})
+    row = "vps-config-update-channel-row[{}]".format
+    no_build = S.onboarding.vps_config.update_channel_stable_desc_no_build
+    wait_until(
+        lambda: no_build in (app.driver.get_text(row("stable")) or ""),
+        budgets.UI_SETTLE_S,
+        diagnose=lambda: (
+            f"the stable row should say it has no build, reads "
+            f"{app.driver.get_text(row('stable'))!r}; {app.driver.diagnose(row('stable'))}"
+        ),
+    )
+    assert no_build not in (app.driver.get_text(row("test")) or ""), (
+        "a channel whose state is unknown keeps its own description"
+    )

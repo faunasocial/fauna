@@ -280,21 +280,14 @@ pub trait AftermathSink {
     /// ([`crate::ledger_aftermath`]), never by this one.
     fn mail_burn(&mut self, progress: fauna_client_mail_settings::MailBurnProgress);
 
-    /// Leg 8 — the subscriber-tier period-key rotation.
-    ///
-    /// ⚠ **Defaulted, unlike its five siblings, and only because of build
-    /// order.** Every app should render this line — the arm that says a nest
-    /// is too old to rotate reports an exposure that is still open, and a
-    /// silent leg is exactly the "clean aftermath" the user must not be shown.
-    /// tui is the lead app for a new UI feature and takes it first; the default keeps the other six
-    /// compiling until their batched trickle-down overrides it, rather than
-    /// seeding six empty `match` arms that each have to be found again later.
+    /// Leg 8 — the subscriber-tier period-key rotation. Required like its
+    /// siblings: the arm that says a nest is too old to rotate reports an
+    /// exposure that is still open, and a silent leg is exactly the "clean
+    /// aftermath" the user must not be shown.
     fn period_rotation(
         &mut self,
         progress: fauna_client_subscriptions::orchestration::PeriodRotationProgress,
-    ) {
-        let _ = progress;
-    }
+    );
 
     /// Fired once, at the end of the post-store-ready pass
     /// ([`crate::ledger_aftermath::run_ledger_aftermath`]), once the silent
@@ -411,6 +404,12 @@ mod tests {
         }
         fn grant_remint(&mut self, progress: fauna_client_capabilities::GrantRemintProgress) {
             self.0.push(format!("remint:{}", label(&progress)));
+        }
+        fn period_rotation(
+            &mut self,
+            progress: fauna_client_subscriptions::orchestration::PeriodRotationProgress,
+        ) {
+            self.0.push(format!("rotation:{}", label(&progress)));
         }
         fn drafts_reseal(&mut self, progress: fauna_client_drafts::DraftsResealProgress) {
             self.0.push(format!("drafts:{}", label(&progress)));

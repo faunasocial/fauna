@@ -339,6 +339,12 @@ pub struct DomainDnsInput<'a> {
     pub dmarc_body: &'a str,
     pub mta_sts_policy_body: &'a str,
     pub dkim_selectors: &'a [DkimSelectorDns],
+    /// Whether the deployment's DAV listener binds the box's own interface
+    /// (no SNI router — the nest's `dav_direct_listener` is `Some(true)`).
+    /// There the `mail.<primary>:443` route the two DAV SRV rows name reaches
+    /// nothing, and no name is known to resolve to the listener, so both rows
+    /// are withheld (`caldav-server.md` § Network exposure — SRV autodiscovery).
+    pub dav_direct_listener: bool,
 }
 
 /// Assemble the full per-domain mail-record matrix for one local domain — the
@@ -346,7 +352,8 @@ pub struct DomainDnsInput<'a> {
 /// `docs/goal/behavior/dns-management.md` § Records covered. Emits, in a stable
 /// order: `MX`, `SPF`, one `DKIM` TXT per selector (in input order), `DMARC`,
 /// `MTA-STS` TXT, `TLSRPT`, `_caldavs._tcp` `SRV`, `_carddavs._tcp` `SRV`
-/// (CalDAV + CardDAV autodiscovery). The nest-host `A`/`AAAA` + advisory `PTR`
+/// (CalDAV + CardDAV autodiscovery; withheld on a direct DAV listener —
+/// [`DomainDnsInput::dav_direct_listener`]). The nest-host `A`/`AAAA` + advisory `PTR`
 /// are host config (not per-domain mail records) and are appended by the nest
 /// caller, not here.
 #[cfg(feature = "multidomain")]
@@ -368,11 +375,17 @@ pub fn build_domain_dns_records(input: &DomainDnsInput<'_>) -> Vec<DnsRecord> {
         input.mta_sts_policy_body,
     ));
     records.push(build_tlsrpt_txt_record(input.domain, input.primary_domain));
+    // A direct DAV listener serves no `mail.<primary>:443` route, and the
+    // deployment knows no name that resolves to it — members read the address
+    // off their own mail settings page instead.
+    if input.dav_direct_listener {
+        return records;
+    }
     // CalDAV + CardDAV autodiscovery (RFC 6764 § 4) — every local domain's DAV
     // surfaces are served at the single mail host `mail.<primary>`
     // (= `primary_mx_host`) via SNI, so both SRV targets match the MX target. The
     // `_carddavs` companion is a standing matrix row exactly like `_caldavs`
-    // (both unconditional — the per-deployment enable toggle gates the live
+    // (both independent of the enable toggle — it gates the live
     // service/well-known, not the offered record; manual mode, admin publishes).
     records.push(build_caldavs_srv_record(
         input.domain,
@@ -607,6 +620,7 @@ mod tests {
             dmarc_body: "v=DMARC1; p=reject; sp=reject; rua=mailto:dmarc-report@example.com",
             mta_sts_policy_body: &policy_body,
             dkim_selectors: &dkim,
+            dav_direct_listener: false,
         };
         let records = build_domain_dns_records(&input);
 
@@ -662,6 +676,7 @@ mod tests {
             dmarc_body: "v=DMARC1; p=reject; sp=reject; rua=mailto:dmarc-report@example.com",
             mta_sts_policy_body: &policy_body,
             dkim_selectors: &[],
+            dav_direct_listener: false,
         };
         let records = build_domain_dns_records(&input);
 
@@ -681,5 +696,29 @@ mod tests {
         assert_eq!(records[6].record_type, DnsRecordType::Srv);
         assert_eq!(records[6].name, "_carddavs._tcp.secondary.example");
         assert_eq!(records[6].body, "0 1 443 mail.example.com.");
+    }
+
+    /// A direct DAV listener withholds both DAV SRV rows and nothing else.
+    #[cfg(feature = "multidomain")]
+    #[test]
+    fn domain_matrix_on_a_direct_dav_listener_withholds_the_dav_srv_rows() {
+        let input = |direct| DomainDnsInput {
+            domain: "example.com",
+            primary_mx_host: "mail.example.com",
+            primary_domain: "example.com",
+            spf_body: "v=spf1 mx ~all",
+            dmarc_body: "v=DMARC1; p=reject",
+            mta_sts_policy_body: "version: STSv1",
+            dkim_selectors: &[],
+            dav_direct_listener: direct,
+        };
+        let routed = build_domain_dns_records(&input(false));
+        let direct = build_domain_dns_records(&input(true));
+        assert!(direct.iter().all(|r| r.record_type != DnsRecordType::Srv));
+        let routed_non_srv: Vec<_> = routed
+            .into_iter()
+            .filter(|r| r.record_type != DnsRecordType::Srv)
+            .collect();
+        assert_eq!(direct, routed_non_srv);
     }
 }

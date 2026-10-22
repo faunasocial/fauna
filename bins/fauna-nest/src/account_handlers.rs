@@ -156,15 +156,24 @@ fn register_handler() -> RpcHandler {
 /// `fauna_protocol::age::age_claim_signed_message`). Anonymous pre-identity
 /// kind — the registering actor has no account yet; the actor binding lives
 /// inside the platform-signed payload, not here. Throttled like every
-/// anonymous kind (`pre_identity_allowlist::is_throttled_anonymous_kind`).
-/// The reply lists the platforms this build can verify
-/// (`age_attest::attestation_platforms`), so the app attaches nothing the
-/// nest would ignore.
+/// anonymous kind (`pre_identity_allowlist::is_throttled_anonymous_kind`),
+/// and charged to the caller's source in a store bounded like every ceremony
+/// nonce store (`age_attest::AgeNonceStore`); a source at its cap is refused
+/// `fauna.protocol.rate_limited`. The reply lists the platforms this build can
+/// verify (`age_attest::attestation_platforms`), so the app attaches nothing
+/// the nest would ignore.
 fn age_nonce_handler() -> RpcHandler {
-    Box::new(|state, _actor, payload| {
+    Box::new(|state, caller, payload| {
         Box::pin(async move {
             let _req: fauna_protocol::age::AgeNonceRequest = decode(&payload).map_err(malformed)?;
-            let (nonce, expires_in_secs) = state.auth.age_nonce_store.issue().await;
+            let (nonce, expires_in_secs) = state
+                .auth
+                .age_nonce_store
+                .issue(crate::challenge_auth::IssueSource::of_current_caller(
+                    &caller,
+                ))
+                .await
+                .map_err(crate::challenge_auth::store_full)?;
             encode_reply(&fauna_protocol::age::AgeNonceReply {
                 nonce: hex::encode(nonce),
                 expires_in_secs,
@@ -473,7 +482,7 @@ fn am_i_admin_handler() -> RpcHandler {
 
 // ── fauna.profile.handle.change (≡ PUT /api/v1/profile/handle) ───────────────
 
-fn change_handle_handler() -> RpcHandler {
+pub(crate) fn change_handle_handler() -> RpcHandler {
     Box::new(|state, actor_id, payload| {
         Box::pin(async move {
             require_permission(&state, &actor_id, "fauna.profile.handle.change", "profile").await?;
@@ -504,16 +513,25 @@ fn change_handle_handler() -> RpcHandler {
                 _ => {}
             }
 
-            // Not already taken by another actor.
-            match state.db.resolve_handle(&req.handle).await {
-                Ok(Some(existing)) if existing != actor_id => {
-                    let mut e =
-                        RpcError::new("fauna.profile.handle_taken", "error.profile.handle_taken");
-                    e.details = Some(Box::new(Value::String("handle already taken".into())));
-                    return Err(e);
-                }
+            // Not already taken by another actor — as a handle, or as a mail
+            // address another account's alias, a forwarder or a list holds
+            // (one address, one owner: `mail-aliases.md` § Cross-user
+            // uniqueness). The executor's `set_handle` repeats the alias half
+            // under its own lock.
+            let taken = match state.db.resolve_handle(&req.handle).await {
+                Ok(Some(existing)) => existing != actor_id,
+                Ok(None) => false,
                 Err(e) => return Err(internal("profile", e)),
-                _ => {}
+            } || state
+                .db
+                .alias_holds_handle(&req.handle, &actor_id)
+                .await
+                .map_err(|e| internal("profile", e))?;
+            if taken {
+                let mut e =
+                    RpcError::new("fauna.profile.handle_taken", "error.profile.handle_taken");
+                e.details = Some(Box::new(Value::String("handle already taken".into())));
+                return Err(e);
             }
 
             // `target` = the requested handle: the list SUMMARY is what the

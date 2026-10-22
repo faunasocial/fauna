@@ -15,6 +15,17 @@ use fauna_core::load_cache::Finished;
 use crate::feed::host::LinuxFeedManager;
 use crate::nest_content_api::ApiError;
 
+/// The foreign home `post`'s own bytes are fetched from, with the identity its
+/// pin graduates against — `None` for this nest
+/// ([`PostSummary::blob_home`](fauna_feed::PostSummary::blob_home)). Handed
+/// unchanged to [`crate::client::FaunaClient::post_blob_hosts`]; no leg
+/// re-derives the host (`feed.md` § The read model → *A post homed on another
+/// nest*).
+pub fn post_home(post: &fauna_feed::PostSummary) -> Option<fauna_client::ForeignHome> {
+    post.blob_home()
+        .map(|home| fauna_client::ForeignHome::new(home.url, home.nest_actor_id))
+}
+
 /// The bytes to decode for a post image, given what its by-hash blob GET
 /// returned.
 ///

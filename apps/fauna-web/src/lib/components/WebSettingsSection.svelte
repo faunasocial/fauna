@@ -6,7 +6,7 @@
   // content at `https://<handle>.<domain>/` — with the live URL (or a disabled
   // reason) below it and a static content explainer. A dumb renderer of the
   // shared `WebClient` over the singleton WS-RPC client (the `webGet/SetSubdomainEnabled`
-  // calls in `$lib/rpc`, the WASM twin of the linux native `WebClient` +
+  // calls in `#lib/rpc`, the WASM twin of the linux native `WebClient` +
   // `fauna-ffi`'s `FfiWebClient`); the URL hint is the shared `webSubdomainView`
   // projection (`fauna_client_web::subdomain_view`), so the reserved-label rule +
   // the `<handle>.<domain>` URL never drift from the nest's routing (priority #2).
@@ -15,7 +15,7 @@
   // separate `admin-web` page. Reuses the settings page's single `error-message`
   // (no duplicate IDs) via the bindable `error`.
   // Behavior + IDs: docs/goal/behavior/web-content-hosting.md, ui.yaml § web-settings.
-  import { identity } from '$lib/store';
+  import { identity } from '#lib/store';
   import {
     webDomainGet,
     webGetSubdomainEnabled,
@@ -24,7 +24,7 @@
     webPublishUnset,
     webServingDomain,
     webSetSubdomainEnabled,
-  } from '$lib/rpc';
+  } from '#lib/rpc';
   import {
     ensureWasm,
     webDisabledReasonText,
@@ -33,20 +33,20 @@
     webTokenedUrl,
     type SiteLinkDisabledReason,
     type SubdomainView,
-  } from '$lib/wasm';
-  import { sameActorSince } from '$lib/actorScope';
+  } from '#lib/wasm';
+  import { sameActorSince } from '#lib/actorScope';
   import {
     bestEffortCopyToClipboard,
     patchWebPage,
     setWebPage,
     siteLink,
     type PublishedPost,
-  } from '$lib/web-publish';
+  } from '#lib/web-publish';
   import { onMount } from 'svelte';
   import { afterNavigate } from '$app/navigation';
-  import { t } from '$lib/i18n/strings';
-  import { resolveLocalized } from '$lib/i18n/localized';
-  import { IDS } from '$lib/generated/uiIds';
+  import { t } from '#lib/i18n/strings';
+  import { resolveLocalized } from '#lib/i18n/localized';
+  import { IDS } from '#lib/generated/uiIds';
 
   // The parent settings page owns the single error surface; web dispatch errors
   // flow into it.
@@ -69,7 +69,7 @@
 
   // ── Published-posts management section (web-content-hosting.md
   //    § Published-post management). `posts` + the origin resolution
-  //    (`$siteLink`, `$lib/web-publish`) are the SAME shared store the feed
+  //    (`$siteLink`, `#lib/web-publish`) are the SAME shared store the feed
   //    ⋯-menu reads, so the two surfaces can never disagree. `hydrated` is the
   //    "nobody has read yet" gate tui/linux use, so a pre-read frame never
   //    claims "no published posts" about a list nobody asked for. ──
@@ -103,7 +103,7 @@
   // same-route re-navigation. Mirrors linux's `set_visible_child_forced` fix
   // for the identical GTK-side gap (`views/nav_rail.rs`).
   async function hydrate(): Promise<void> {
-    // The identity seam (`$lib/actorScope`): captured before the first await,
+    // The identity seam (`#lib/actorScope`): captured before the first await,
     // handed to `setWebPage` so a read begun as A cannot repopulate the shared
     // store after an in-heap actor change.
     const stillThisActor = sameActorSince();

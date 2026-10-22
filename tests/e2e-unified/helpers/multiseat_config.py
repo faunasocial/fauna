@@ -65,7 +65,7 @@ def address() -> str:
     the `@domain` half is what the client's DoH discovery follows, and the
     localpart half is replaced by the nest's own answer at ``AlreadyOnNest``
     (`helpers/live_handle.py` documents the mechanism). It used to default to a
-    hardcoded ``test@example.com``: the example handle from the docstrings, shipped
+    hardcoded ``test@example.net``: the example handle from the docstrings, shipped
     as a real default — the out-of-band-knowledge defect in its most dangerous
     form, since a *guess* fails silently where a demand at least stops. The
     probe localpart makes it honest; the domain, which is the half that actually

@@ -22,10 +22,10 @@ public class OnboardingHelpersFfiTests
     public void QualifyReclaimHandle_PassesThroughEmptyAndAlreadyQualified()
     {
         // Empty stays empty; an already-qualified handle is untouched.
-        Assert.Equal("", FaunaOnboardingMachineMethods.QualifyReclaimHandle("", "example.com", "https://example.com"));
+        Assert.Equal("", FaunaOnboardingMachineMethods.QualifyReclaimHandle("", "example.net", "https://example.net"));
         Assert.Equal(
-            "alice@example.com",
-            FaunaOnboardingMachineMethods.QualifyReclaimHandle("alice@example.com", "other.example", "https://x"));
+            "alice@example.net",
+            FaunaOnboardingMachineMethods.QualifyReclaimHandle("alice@example.net", "other.example", "https://x"));
     }
 
     [Fact]
@@ -34,11 +34,11 @@ public class OnboardingHelpersFfiTests
         // A non-empty cached domain wins over the nest-URL host.
         Assert.Equal(
             "alice@custom.example",
-            FaunaOnboardingMachineMethods.QualifyReclaimHandle("alice", "custom.example", "https://example.com"));
+            FaunaOnboardingMachineMethods.QualifyReclaimHandle("alice", "custom.example", "https://example.net"));
         // An empty cached domain falls through to the nest-URL host.
         Assert.Equal(
-            "alice@example.com",
-            FaunaOnboardingMachineMethods.QualifyReclaimHandle("alice", "", "https://example.com"));
+            "alice@example.net",
+            FaunaOnboardingMachineMethods.QualifyReclaimHandle("alice", "", "https://example.net"));
     }
 
     [Fact]
@@ -49,11 +49,11 @@ public class OnboardingHelpersFfiTests
             "bob@localhost",
             FaunaOnboardingMachineMethods.QualifyReclaimHandle("bob", null, "http://localhost:3000"));
         Assert.Equal(
-            "bob@example.com",
-            FaunaOnboardingMachineMethods.QualifyReclaimHandle("bob", null, "example.com"));
+            "bob@example.net",
+            FaunaOnboardingMachineMethods.QualifyReclaimHandle("bob", null, "example.net"));
         Assert.Equal(
-            "bob@example.com",
-            FaunaOnboardingMachineMethods.QualifyReclaimHandle("bob", null, "https://user@example.com:8443/path"));
+            "bob@example.net",
+            FaunaOnboardingMachineMethods.QualifyReclaimHandle("bob", null, "https://user@example.net:8443/path"));
         // Hostless URL → can't qualify → return the bare localpart (the nest's
         // mail-domain safety net covers it).
         Assert.Equal("bob", FaunaOnboardingMachineMethods.QualifyReclaimHandle("bob", null, ""));

@@ -131,7 +131,7 @@ Stamped 2026-10-01 at 065ed2e2c2.
 46. [nest] A Bluesky post its author labelled arrives carrying that label as a content warning — `docs/goal/behavior/bridges.md` § Unified feed ingestion
    - `tests/e2e-unified/tests/test_bluesky_feed_ingest_nest.py::test_a_self_labelled_bluesky_post_arrives_carrying_its_label_as_a_content_warning`
 47. [app] When you make an app password you choose whether the app using it may read and send your Bluesky direct messages — `docs/goal/behavior/atproto-pds-full.md` § D3
-   - (none)
+   - `tests/e2e-unified/tests/test_atproto_settings.py::test_an_app_password_carries_dm_access_only_when_the_toggle_was_on`
 48. [nest] An app signed in with an app password reaches your Bluesky direct messages only when that password was made with direct-message access — `docs/goal/behavior/atproto-pds-full.md` § F3 detail — the D8 module, service proxying, preferences, DM switch
    - `tests/e2e-unified/tests/test_atproto_pds_proxy.py::test_atproto_app_password_reaches_dms_only_with_dm_access`
 49. [app] Opening the thread of a Bluesky post in your feed shows the conversation around it, replies from people you do not follow included, with the post you opened marked, and tells you when the post is gone from Bluesky — `docs/goal/behavior/bridges.md` § Bluesky-native thread view
@@ -147,7 +147,7 @@ Stamped 2026-10-01 at 065ed2e2c2.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | |
+| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
 | linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
 | windows | ⚠ partial | |
 | macos | ⚠ partial | |
@@ -170,7 +170,7 @@ Stamped 2026-10-01 at 065ed2e2c2.
 | 3 | app | `tests/e2e-unified/tests/test_atproto_settings.py::test_lapse_reads_as_reauthorize_here` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_atproto_settings.py::test_delete_presence_ceremony` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_atproto_custody_alarm.py::test_retire_identity_opt_in_rides_the_delete_ceremony` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_atproto_pds_consent.py::test_consent_ceremony_end_to_end` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_atproto_pds_consent.py::test_consent_ceremony_end_to_end` | web (linux): error, linux (linux): passed, tui (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_atproto_pds_consent.py::test_declining_fails_the_browser_cleanly` | web (linux): passed, linux (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_atproto_pds_consent.py::test_the_nests_own_authorization_server_issues_and_revokes_a_grant` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_atproto_custody_alarm.py::test_a_forged_seizure_alarms_but_is_never_signed` | web (linux): passed, linux (linux): passed, tui (linux): passed |
@@ -182,10 +182,10 @@ Stamped 2026-10-01 at 065ed2e2c2.
 | 8 | nest | `tests/e2e-unified/tests/test_atproto_pds_auth.py::test_atproto_pds_f1_auth_core_end_to_end` | nest (linux): passed |
 | 8 | nest | `tests/e2e-unified/tests/test_atproto_pds_proxy.py::test_atproto_pds_service_proxy_end_to_end` | nest (linux): passed |
 | 8 | nest | `tests/e2e-unified/tests/test_atproto_pds_consent.py::test_the_pds_sends_clients_to_the_nests_authorization_server` | nest (linux): passed |
-| 9 | nest | `tests/e2e-unified/tests/platform/docker/test_atproto_hosted_enable_docker.py::test_atproto_hosted_enable_boots_docker_bridge` | — |
-| 9 | nest | `tests/e2e-unified/tests/platform/docker/test_atproto_pds_sni_router.py::test_sni_router_routes_pds_to_the_atproto_bridge` | — |
-| 9 | nest | `tests/e2e-unified/tests/platform/docker/test_atproto_pds_sni_router.py::test_createsession_rate_limit_carries_real_client_ip` | — |
-| 10 | app | `tests/e2e-unified/tests/test_bluesky_notifications_bridged.py::test_a_bridged_bluesky_notification_reaches_the_unified_list` | linux (linux): passed |
+| 9 | nest | `tests/e2e-unified/tests/platform/docker/test_atproto_hosted_enable_docker.py::test_atproto_hosted_enable_boots_docker_bridge` | nest (linux): passed |
+| 9 | nest | `tests/e2e-unified/tests/platform/docker/test_atproto_pds_sni_router.py::test_sni_router_routes_pds_to_the_atproto_bridge` | nest (linux): passed |
+| 9 | nest | `tests/e2e-unified/tests/platform/docker/test_atproto_pds_sni_router.py::test_createsession_rate_limit_carries_real_client_ip` | nest (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_bluesky_notifications_bridged.py::test_a_bridged_bluesky_notification_reaches_the_unified_list` | web (linux): passed, linux (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_bluesky_feed_ingest.py::test_a_followed_bluesky_post_arrives_in_the_feed_and_a_reply_threads_under_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 12 | nest | `tests/e2e-unified/tests/test_atproto_firehose_post.py::test_public_post_reaches_the_firehose` | nest (linux): passed |
 | 13 | app | `tests/e2e-unified/tests/test_atproto_history_backfill.py::test_choosing_history_publishes_existing_public_posts` | tui (linux): passed |
@@ -223,7 +223,7 @@ Stamped 2026-10-01 at 065ed2e2c2.
 | 44 | nest | `tests/e2e-unified/tests/test_bluesky_feed_ingest_nest.py::test_a_bluesky_post_lands_in_the_feed_once_across_polls_and_linked_accounts` | nest (linux): passed |
 | 45 | nest | `tests/e2e-unified/tests/test_bluesky_feed_ingest_nest.py::test_a_bluesky_repost_arrives_as_the_original_post_under_its_author` | nest (linux): passed |
 | 46 | nest | `tests/e2e-unified/tests/test_bluesky_feed_ingest_nest.py::test_a_self_labelled_bluesky_post_arrives_carrying_its_label_as_a_content_warning` | nest (linux): passed |
-| 47 | app | (none) | — |
+| 47 | app | `tests/e2e-unified/tests/test_atproto_settings.py::test_an_app_password_carries_dm_access_only_when_the_toggle_was_on` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 48 | nest | `tests/e2e-unified/tests/test_atproto_pds_proxy.py::test_atproto_app_password_reaches_dms_only_with_dm_access` | nest (linux): passed |
 | 49 | app | `tests/e2e-unified/tests/test_bluesky_thread_view.py::test_a_bluesky_posts_thread_shows_the_conversation_with_the_opened_post_marked` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 49 | app | `tests/e2e-unified/tests/test_bluesky_thread_view.py::test_a_thread_whose_post_is_gone_at_its_origin_says_so` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |

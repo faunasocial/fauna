@@ -69,11 +69,18 @@ pub struct WsRpcMediaNest<R: RpcRequester> {
     /// custody (`MediaMachine::render_sealed_folder_names`).
     nest: R,
     /// This seat's own actor id — the trusted owner each of the caller's OWN
-    /// rows is verified against; a member row is verified against its
-    /// `owner_actor_id` (`encryption-at-rest.md` § Readable classes → *The
-    /// declassification is owner-ATTESTED*). `None` when the builder could not
-    /// read one: every own folder then seals.
+    /// rows is verified against (`encryption-at-rest.md` § Readable classes →
+    /// *The declassification is owner-ATTESTED*). `None` when the builder
+    /// could not read one: every own folder then seals.
     own: Option<fauna_core::identity::ActorId>,
+    /// The host's MLS state, the anchor a MEMBER row is verified against: the
+    /// channel's MLS-recorded owner, never the `owner_actor_id` the nest fills
+    /// on the row ([`DeclassificationAnchor`]). Handed in with the page's
+    /// join-filter ([`MediaNestApi::set_mls_query`]); unwired, every member
+    /// row seals.
+    ///
+    /// [`DeclassificationAnchor`]: fauna_protocol::member_rows::DeclassificationAnchor
+    channel_owners: std::sync::Mutex<Option<Arc<dyn fauna_protocol::member_rows::MlsQuery>>>,
     /// What this seat remembers about each folder's attestations, by folder
     /// id — the replay floor. **Process-lifetime only**: Media holds no
     /// device-local store, which is the replay residual the goal doc names for
@@ -114,6 +121,7 @@ where
             sync: SyncClient::new(nest.clone()),
             nest,
             own,
+            channel_owners: std::sync::Mutex::new(None),
             memories: std::sync::Mutex::new(std::collections::HashMap::new()),
             reader: fauna_client_sync::row_judge::ReaderSeat {
                 own: own.map(|a| a.0),
@@ -135,6 +143,13 @@ where
                 .clone(),
             ..self.reader.clone()
         }
+    }
+
+    fn do_set_mls_query(&self, query: Arc<dyn fauna_protocol::member_rows::MlsQuery>) {
+        *self
+            .channel_owners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(query);
     }
 
     fn do_set_reader_predecessors(&self, predecessors: Vec<[u8; 32]>) {
@@ -218,14 +233,29 @@ where
         // The verdict is asked HERE, at the one seam that holds a whole
         // `FolderSummary`, and carried on the row — the declassification rule
         // stays the one verifier's (`FolderSummary::judge_declassification`:
-        // the OWNER's attestation over this row, verified under the row's
-        // owner — this seat's own actor id for an own row, the row's
-        // `owner_actor_id` for a member row, nobody (sealed) for a member row
-        // naming none — above the seat's floor; WebDAV fail-safe included),
+        // the OWNER's attestation over this row, verified under the trusted
+        // owner `DeclassificationAnchor` resolves — this seat's own actor id
+        // for an own row, the channel's MLS-recorded owner for a member row,
+        // nobody (sealed) for a member row with no recorded owner or on a
+        // seam no MLS query was handed; never the row's nest-filled
+        // `owner_actor_id` — above the seat's floor; WebDAV fail-safe included),
         // and `MediaFolder` never re-derives it from an audience string it
         // would have to re-type. A folder this seat
         // remembered that the list no longer carries is burned like any
         // withdrawn verdict.
+        let channel_owners = self
+            .channel_owners
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let anchor = self
+            .own
+            .map(|own| fauna_protocol::member_rows::DeclassificationAnchor {
+                own,
+                channel_owners: channel_owners
+                    .as_deref()
+                    .map(|q| q as &dyn fauna_protocol::member_rows::FolderChannelOwners),
+            });
         let mut memories = self.memories.lock().unwrap_or_else(|p| p.into_inner());
         let listed: std::collections::HashSet<i64> = reply.folders.iter().map(|fs| fs.id).collect();
         memories.retain(|id, memory| {
@@ -240,13 +270,9 @@ where
             .into_iter()
             .map(|fs| {
                 let member = fs.role.as_deref() == Some("member");
-                let row_owner = if member {
-                    fs.owner_actor_id
-                        .as_deref()
-                        .and_then(|hex| fauna_core::identity::ActorId::from_hex(hex).ok())
-                } else {
-                    self.own
-                };
+                // No own id: own rows seal, and so do member rows — the
+                // seam was built without an identity, which is no anchor.
+                let row_owner = anchor.as_ref().and_then(|a| a.trusted_owner_for(&fs));
                 let memory = memories.get(&fs.id).copied().unwrap_or_default();
                 let (rests_unsealed, memory) =
                     fs.judge_declassification(&fs.name, row_owner.as_ref(), memory);
@@ -534,6 +560,7 @@ fauna_core::map_rpc_error! {
     fn map_err(e) -> MediaApiError {
         "not_found" => NotFound,
         "invalid_request" | "malformed" | "invalid_cursor" => BadRequest,
+        "path_seal_required" => SealRequired,
     }
 }
 
@@ -601,6 +628,10 @@ mod native {
 
         fn set_reader_predecessors(&self, predecessors: Vec<[u8; 32]>) {
             self.do_set_reader_predecessors(predecessors);
+        }
+
+        fn set_mls_query(&self, query: Arc<dyn fauna_protocol::member_rows::MlsQuery>) {
+            self.do_set_mls_query(query);
         }
 
         async fn undelete_version(
@@ -814,6 +845,10 @@ mod wasm {
 
         fn set_reader_predecessors(&self, predecessors: Vec<[u8; 32]>) {
             self.do_set_reader_predecessors(predecessors);
+        }
+
+        fn set_mls_query(&self, query: Arc<dyn fauna_protocol::member_rows::MlsQuery>) {
+            self.do_set_mls_query(query);
         }
 
         async fn undelete_version(
@@ -1180,41 +1215,101 @@ mod tests {
         assert_eq!(unsealed_ids(&seam).await, [3]);
     }
 
-    /// A shared set's row is judged under ITS owner (`media.md` § Encryption
-    /// at rest → *The filter and the upload target address the row*, (c)): the
-    /// attestation is the owner's, and the member projection names the owner
-    /// on the row. The same row attested by the seat itself — the trusted owner
-    /// an owner-scoped read assumed — does not arm it. The row's member facts
-    /// ride the transcription.
-    #[tokio::test]
-    async fn a_member_rows_declassification_is_judged_under_its_owner() {
-        let seat = fauna_core::identity::ActorKeypair::from_secret([3u8; 32]);
-        let member_row = |attest_by: &fauna_core::identity::ActorKeypair| {
-            fauna_protocol::folders::FolderSummary {
-                role: Some("member".into()),
-                access: Some("writer".into()),
-                owner_handle: Some("alice".into()),
-                owner_actor_id: Some(owner().actor_id().to_hex()),
-                mls_group_id: Some("aa".into()),
-                ..public_row(4, Some(attest_by), 1_000)
-            }
-        };
-        let seam_over = |row| {
-            WsRpcMediaNest::new(
-                FoldersRequester {
-                    folders: Arc::new(Mutex::new(vec![row])),
-                },
-                Some(seat.actor_id()),
-            )
-        };
+    /// The host's MLS state as the test sets it: every group joined, and the
+    /// recorded folder owner per channel — re-stampable, as the owner's
+    /// verified succession re-points the marker.
+    #[derive(Default)]
+    struct RecordedOwners(
+        Mutex<std::collections::HashMap<[u8; 32], fauna_core::identity::ActorId>>,
+    );
 
-        let by_owner = seam_over(member_row(&owner()));
-        assert_eq!(
-            unsealed_ids(&by_owner).await,
-            [4],
-            "the owner's attestation arms"
+    impl RecordedOwners {
+        fn stamp(&self, group_hex: &str, owner: fauna_core::identity::ActorId) {
+            let channel =
+                fauna_core::folder_keys::channel_id_for_group(&hex::decode(group_hex).unwrap());
+            self.0.lock().unwrap().insert(channel, owner);
+        }
+    }
+
+    impl fauna_protocol::member_rows::FolderChannelOwners for RecordedOwners {
+        fn folder_channel_owner(
+            &self,
+            channel_id: &[u8; 32],
+        ) -> Option<fauna_core::identity::ActorId> {
+            self.0.lock().unwrap().get(channel_id).copied()
+        }
+    }
+
+    impl fauna_protocol::member_rows::MlsQuery for RecordedOwners {
+        fn is_joined_shared_set(&self, _: &str) -> bool {
+            true
+        }
+    }
+
+    /// A member row of group `aa` the nest says `nest_named` owns, attested by
+    /// `attest_by` at `counter`.
+    fn member_row(
+        nest_named: &fauna_core::identity::ActorKeypair,
+        attest_by: &fauna_core::identity::ActorKeypair,
+        counter: u64,
+    ) -> fauna_protocol::folders::FolderSummary {
+        fauna_protocol::folders::FolderSummary {
+            role: Some("member".into()),
+            access: Some("writer".into()),
+            owner_handle: Some("alice".into()),
+            owner_actor_id: Some(nest_named.actor_id().to_hex()),
+            mls_group_id: Some("aa".into()),
+            ..public_row(4, Some(attest_by), counter)
+        }
+    }
+
+    fn member_seam(
+        folders: Arc<Mutex<Vec<fauna_protocol::folders::FolderSummary>>>,
+        owners: Option<Arc<RecordedOwners>>,
+    ) -> WsRpcMediaNest<FoldersRequester> {
+        let seat = fauna_core::identity::ActorKeypair::from_secret([3u8; 32]);
+        let seam = WsRpcMediaNest::new(FoldersRequester { folders }, Some(seat.actor_id()));
+        if let Some(owners) = owners {
+            seam.do_set_mls_query(owners);
+        }
+        seam
+    }
+
+    /// A shared set's row is judged under the channel's MLS-RECORDED owner,
+    /// never the `owner_actor_id` the nest fills on the row (`encryption-at-rest.md`
+    /// § Readable classes → *The declassification is owner-ATTESTED*; `media.md`
+    /// § Encryption at rest → *The filter and the upload target address the
+    /// row*, (c)). A nest naming a key it holds as the
+    /// owner, and attesting with it, arms nothing; the recorded owner's
+    /// attestation arms whatever the row names; a seam no MLS query was
+    /// handed, or a channel with no recorded owner, seals. The row's member
+    /// facts ride the transcription.
+    #[tokio::test]
+    async fn a_member_rows_declassification_is_judged_under_the_mls_recorded_owner() {
+        let nest_key = fauna_core::identity::ActorKeypair::from_secret([5u8; 32]);
+        let recorded = Arc::new(RecordedOwners::default());
+        recorded.stamp("aa", owner().actor_id());
+        let over = |row| Arc::new(Mutex::new(vec![row]));
+
+        let forged = member_seam(
+            over(member_row(&nest_key, &nest_key, 1_000)),
+            Some(recorded.clone()),
         );
-        let row = by_owner.do_list_folders().await.expect("list").remove(0);
+        assert!(
+            unsealed_ids(&forged).await.is_empty(),
+            "a nest-named owner's attestation arms nothing"
+        );
+
+        let genuine = member_seam(
+            over(member_row(&nest_key, &owner(), 1_000)),
+            Some(recorded.clone()),
+        );
+        assert_eq!(
+            unsealed_ids(&genuine).await,
+            [4],
+            "the recorded owner's attestation arms, whoever the row names"
+        );
+        let row = genuine.do_list_folders().await.expect("list").remove(0);
         assert!(row.member && row.writer);
         assert_eq!(row.owner_handle.as_deref(), Some("alice"));
         assert_eq!(row.mls_group_id.as_deref(), Some("aa"));
@@ -1223,17 +1318,88 @@ mod tests {
             "a shared set is never the seat's owner-only set"
         );
 
-        let by_seat = seam_over(member_row(&seat));
+        let seat = fauna_core::identity::ActorKeypair::from_secret([3u8; 32]);
+        let by_seat = member_seam(
+            over(member_row(&owner(), &seat, 1_000)),
+            Some(recorded.clone()),
+        );
         assert!(
             unsealed_ids(&by_seat).await.is_empty(),
             "the seat's own signature over someone else's set arms nothing"
         );
 
-        let mut unnamed = member_row(&owner());
-        unnamed.owner_actor_id = None;
+        let unwired = member_seam(over(member_row(&owner(), &owner(), 1_000)), None);
         assert!(
-            unsealed_ids(&seam_over(unnamed)).await.is_empty(),
-            "a member row naming no owner seals"
+            unsealed_ids(&unwired).await.is_empty(),
+            "a seam with no MLS query has no member anchor and seals"
+        );
+
+        let unstamped = member_seam(
+            over(member_row(&owner(), &owner(), 1_000)),
+            Some(Arc::new(RecordedOwners::default())),
+        );
+        assert!(
+            unsealed_ids(&unstamped).await.is_empty(),
+            "a channel with no recorded owner seals"
+        );
+    }
+
+    /// The succession burn at Media: once the marker is re-stamped to the
+    /// owner's verified successor, the retired key's attestation — even over a
+    /// higher counter — seals, and the successor's arms.
+    #[tokio::test]
+    async fn a_member_row_follows_the_recorded_owners_succession() {
+        let successor = fauna_core::identity::ActorKeypair::from_secret([8u8; 32]);
+        let recorded = Arc::new(RecordedOwners::default());
+        recorded.stamp("aa", owner().actor_id());
+        let folders = Arc::new(Mutex::new(vec![member_row(&owner(), &owner(), 1_000)]));
+        let seam = member_seam(folders.clone(), Some(recorded.clone()));
+        assert_eq!(unsealed_ids(&seam).await, [4], "the recorded owner arms");
+
+        recorded.stamp("aa", successor.actor_id());
+        *folders.lock().unwrap() = vec![member_row(&owner(), &owner(), 2_000)];
+        assert!(
+            unsealed_ids(&seam).await.is_empty(),
+            "the retired key's attestation seals once the marker names the successor"
+        );
+
+        *folders.lock().unwrap() = vec![member_row(&owner(), &successor, 3_000)];
+        assert_eq!(
+            unsealed_ids(&seam).await,
+            [4],
+            "the successor's attestation arms"
+        );
+    }
+
+    /// The forgery the member arm must refuse (`encryption-at-rest.md`
+    /// § Readable classes → *The declassification is owner-ATTESTED*: the
+    /// trusted owner of a member row is the MLS-recorded channel owner, "never
+    /// the `owner_actor_id` / `owner_handle` the nest fills on a member row"):
+    /// a nest that names ITS OWN key as a shared set's owner and signs the
+    /// attestation with it must not arm this seat — here on a seam no MLS
+    /// query was handed, which has no member anchor at all; the wired case is
+    /// `a_member_rows_declassification_is_judged_under_the_mls_recorded_owner`.
+    #[tokio::test]
+    async fn a_nest_naming_its_own_key_as_a_member_rows_owner_arms_nothing() {
+        let seat = fauna_core::identity::ActorKeypair::from_secret([3u8; 32]);
+        let nest_key = fauna_core::identity::ActorKeypair::from_secret([0x66; 32]);
+        let forged = fauna_protocol::folders::FolderSummary {
+            role: Some("member".into()),
+            access: Some("writer".into()),
+            owner_handle: Some("alice".into()),
+            owner_actor_id: Some(nest_key.actor_id().to_hex()),
+            mls_group_id: Some("aa".into()),
+            ..public_row(4, Some(&nest_key), 1_000)
+        };
+        let seam = WsRpcMediaNest::new(
+            FoldersRequester {
+                folders: Arc::new(Mutex::new(vec![forged])),
+            },
+            Some(seat.actor_id()),
+        );
+        assert!(
+            unsealed_ids(&seam).await.is_empty(),
+            "an owner the nest names and a signature it made arm nothing"
         );
     }
 
@@ -1457,6 +1623,36 @@ mod tests {
         );
         assert_eq!(listed[0].signed_as, Some(predecessor.actor_id().0));
         assert_eq!(listed[0].summary.content_key_version, None);
+    }
+
+    /// The nest's sealless-record refusal reaches the page TYPED: its
+    /// `details` is prose (`sync_handlers.rs`, "…must carry path_sealed…")
+    /// that never spells the code, so a page keying on `detail()` text would
+    /// never see it.
+    #[tokio::test]
+    async fn a_path_seal_required_refusal_maps_to_seal_required() {
+        let refused = seam(Some(rejection(
+            "fauna.sync.path_seal_required",
+            "this nest rests no plaintext paths (S9 flip): the record must carry \
+             path_sealed — a seal-less writer cannot sync this set",
+        )))
+        .0
+        .do_record_member(
+            "site",
+            Some(7),
+            "dev-1",
+            "index.html",
+            "ab".repeat(32),
+            11,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            matches!(refused, Err(MediaApiError::SealRequired { .. })),
+            "{refused:?}"
+        );
     }
 
     #[tokio::test]

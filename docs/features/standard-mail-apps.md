@@ -86,7 +86,7 @@ Stamped 2026-10-01 at 308c995169.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.3-dev+937bbf0c.dirty standalone |
+| web | ⚠ partial | 0.1.3-dev+937bbf0c.dirty standalone |
 | linux | ✅ full | 0.1.3-dev+937bbf0c.dirty standalone |
 | windows | ✅ full | 0.1.3-dev+937bbf0c.dirty standalone |
 | macos | ✅ full | 0.1.3-dev+937bbf0c.dirty standalone |
@@ -100,7 +100,7 @@ Stamped 2026-10-01 at 308c995169.
 | 1 | app | `tests/e2e-unified/tests/test_mail_enable_then_mua_round_trip.py::test_client_enabled_mail_submits_outbound_through_submission` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/test_mail_send_external_and_imap_auth.py::test_one_credential_sends_to_external_and_imap_authenticates` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_mail_multi_credential_auth.py::test_second_credential_authenticates_over_caldav_and_imap` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_mail_bare_username_auth.py::test_default_credential_username_form_matrix` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_mail_bare_username_auth.py::test_default_credential_username_form_matrix` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_login_and_select` | nest (linux): passed |
 | 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_wrong_password_rejected` | nest (linux): passed |
 | 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_append_fetch_roundtrip` | nest (linux): passed |

@@ -31,6 +31,7 @@ Stamped 2026-10-01 at e129e78aa0.
    - `tests/e2e-unified/tests/test_serving_port.py::test_serving_port_round_trips`
    - `tests/e2e-unified/tests/test_serving_port.py::test_serving_port_invalid_surfaces_error`
 4. [app] The Nest page says whether the server's operating system is up to date, how many security updates are waiting and that a restart is pending, and its restart-now button, offered only then, asks the server to restart — `docs/goal/architecture/installers/vps.md` § 4 — Admin visibility
+   - `tests/e2e-unified/tests/test_host_maintenance.py::test_os_maintenance_status_not_reported_without_host_data`
    - `tests/e2e-unified/tests/test_host_maintenance.py::test_os_maintenance_status_up_to_date`
    - `tests/e2e-unified/tests/test_host_maintenance.py::test_os_restart_pending_shows_button_and_triggers`
 5. [app] The declared region round-trips and a malformed code is refused on the page — `docs/goal/behavior/region-blocking.md` § Region determination
@@ -102,18 +103,31 @@ Stamped 2026-10-01 at e129e78aa0.
 33. [nest] The nest tells the admin the version its channel has reached, read from the registry, and answers without it when the registry has no build on that channel or cannot be reached — `docs/goal/architecture/nest/update-channel.md` § The channel as nest state
     - `tests/e2e-unified/tests/api/test_update_channel.py::test_the_channel_head_version_is_read_from_the_registry_and_absent_without_it`
 34. [nest] The server's updater keeps the nest on its channel and never on an older build: it leaves a current server alone, holds while the channel is behind, moves the nest onto a newer build with its data and settings and a clean disconnect for its apps, follows a channel the admin changes from the app, and finishes a move a crash cut short — `docs/goal/architecture/nest/update-channel.md` § The updater
+    - `tests/e2e-unified/tests/platform/docker/test_update_channel_updater.py::test_the_updater_hands_itself_off_to_the_build_it_moved_the_nest_to`
+    - `tests/e2e-unified/tests/platform/docker/test_update_channel_updater.py::test_a_hand_off_killed_between_create_and_start_settles_to_one_updater`
     - `tests/e2e-unified/tests/platform/docker/test_update_channel_updater.py::test_current_when_the_channel_head_is_the_running_build`
     - `tests/e2e-unified/tests/platform/docker/test_update_channel_updater.py::test_hold_when_the_channel_head_is_older_than_the_running_build`
     - `tests/e2e-unified/tests/platform/docker/test_update_channel_updater.py::test_apply_recreates_the_nest_on_the_newer_build_with_its_configuration`
     - `tests/e2e-unified/tests/platform/docker/test_update_channel_updater.py::test_a_channel_change_from_the_app_is_applied_on_the_next_poll`
     - `tests/e2e-unified/tests/platform/docker/test_update_channel_updater.py::test_a_recreate_cut_short_is_put_back_at_the_next_start`
+    - `tests/e2e-unified/tests/platform/docker/test_update_channel_updater.py::test_a_pull_of_a_head_whose_blob_is_gone_is_reported_and_moves_nothing`
+35. [app] The admin blocks a reported post from its queue row only after confirming a summary that names the post and the report's reason; everyone but its author then sees a notice in its place, the author keeps their own view and can appeal, and Unblock serves the same post again — `docs/goal/behavior/moderation.md` § Admin block of a reported item
+    - `tests/e2e-unified/tests/test_admin_block.py::test_the_admin_blocks_a_reported_post_and_unblocks_it_through_the_app`
+36. [app] The admin changes which builds the server installs from the app, and the status line says what the server follows and runs: following the chosen channel, waiting with both versions when that channel is behind the server's version, or following none on a server installed from a single build until a channel is chosen — `docs/goal/architecture/nest/update-channel.md` § The UI
+    - `tests/e2e-unified/tests/test_admin_update_channel.py::test_admin_moves_the_box_between_channels_and_the_status_follows_the_decision`
+    - `tests/e2e-unified/tests/test_admin_update_channel.py::test_a_pinned_box_follows_no_channel_until_one_is_chosen`
+37. [app] On a server the installer image does not run, the Nest page's update section says the server is not run from the image and shows the version it runs, and its channel choices and save are inert — `docs/goal/architecture/nest/update-channel.md` § The UI
+    - `tests/e2e-unified/tests/test_admin_update_channel.py::test_a_nest_the_image_does_not_run_says_so_and_its_controls_are_inert`
+38. [nest] A newly built server whose first download of the nest fails keeps trying until it succeeds, on every start, so a registry outage or a build not yet published never leaves it out of reach — `docs/goal/architecture/installers/vps.md` § What Happens Behind the Scenes
+    - `tests/e2e-unified/tests/platform/docker/test_first_boot_nest_up.py::test_runcmd_starts_the_unit_instead_of_the_compose`
+    - `tests/e2e-unified/tests/platform/docker/test_first_boot_nest_up.py::test_nest_up_retries_until_compose_succeeds`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.3-dev+23f5e0bc.dirty standalone |
+| web | ⚠ partial | 0.1.4-dev+52904896 standalone |
 | linux | ⚠ partial | 0.1.4-dev+52904896 standalone |
 | windows | ⚠ partial | 0.1.4-dev+52904896 standalone |
 | macos | ⚠ partial | 0.1.4-dev+52904896 standalone |
@@ -130,6 +144,7 @@ Stamped 2026-10-01 at e129e78aa0.
 | 3 | app | `tests/e2e-unified/tests/test_serving_port.py::test_serving_port_field_renders` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_serving_port.py::test_serving_port_round_trips` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_serving_port.py::test_serving_port_invalid_surfaces_error` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_host_maintenance.py::test_os_maintenance_status_not_reported_without_host_data` | tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_host_maintenance.py::test_os_maintenance_status_up_to_date` | web (linux): passed, linux (linux): passed, windows (windows): error, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_host_maintenance.py::test_os_restart_pending_shows_button_and_triggers` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_admin_nest.py::test_region_declaration_round_trips` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
@@ -152,12 +167,12 @@ Stamped 2026-10-01 at e129e78aa0.
 | 18 | nest | `tests/e2e-unified/tests/api/test_host_maintenance.py::test_os_fields_admin_gated_off_anonymous` | nest (linux): passed |
 | 19 | nest | `tests/e2e-unified/tests/platform/docker/test_host_reboot_coordinator.py::test_unattended_upgrades_on_with_its_own_reboot_off` | nest (linux): passed |
 | 19 | nest | `tests/e2e-unified/tests/platform/docker/test_host_reboot_coordinator.py::test_coordinator_reboots_idle_or_at_the_ceiling` | nest (linux): passed |
-| 20 | app | `tests/e2e-unified/tests/test_admin_nest.py::test_region_section_warns_when_the_authority_has_gone_quiet` | tui (linux): passed |
+| 20 | app | `tests/e2e-unified/tests/test_admin_nest.py::test_region_section_warns_when_the_authority_has_gone_quiet` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 21 | app | `tests/e2e-unified/tests/test_admin_web_app_origin.py::test_admin_flips_app_to_the_central_origin_and_back` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 22 | nest | `tests/e2e-unified/tests/api/test_web_app_origin.py::test_the_admin_choice_flips_app_to_the_central_origin_and_back` | nest (linux): passed |
 | 22 | nest | `tests/e2e-unified/tests/api/test_web_app_origin.py::test_a_domainless_box_serves_bundled_under_central` | nest (linux): passed |
 | 22 | nest | `tests/e2e-unified/tests/api/test_web_app_origin.py::test_a_non_admin_cannot_set_the_choice` | nest (linux): passed |
-| 23 | app | `tests/e2e-unified/tests/test_legal_takedown_notice.py::test_a_message_taken_down_from_a_report_shows_the_notice_to_a_member_who_reads_it_later` | tui (linux): passed |
+| 23 | app | `tests/e2e-unified/tests/test_legal_takedown_notice.py::test_a_message_taken_down_from_a_report_shows_the_notice_to_a_member_who_reads_it_later` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 24 | nest | `tests/e2e-unified/tests/api/test_admin_roster.py::test_the_identity_rotation_is_refused_while_an_admin_removal_is_pending` | nest (linux): passed |
 | 25 | app | `tests/e2e-unified/tests/test_admin_nest.py::test_the_rotation_confirm_stays_disabled_while_the_roster_is_unresolved` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 26 | nest | `tests/e2e-unified/tests/api/test_oauth_issuer.py::test_rotation_adds_a_key_and_keeps_serving_the_old_one` | nest (linux): passed |
@@ -171,9 +186,18 @@ Stamped 2026-10-01 at e129e78aa0.
 | 32 | nest | `tests/e2e-unified/tests/api/test_update_channel.py::test_an_unknown_kind_is_the_predates_the_choice_answer` | nest (linux): passed |
 | 32 | nest | `tests/e2e-unified/tests/api/test_update_channel.py::test_a_non_admin_cannot_read_or_set_it_and_an_unknown_channel_is_refused` | nest (linux): passed |
 | 33 | nest | `tests/e2e-unified/tests/api/test_update_channel.py::test_the_channel_head_version_is_read_from_the_registry_and_absent_without_it` | nest (linux): passed |
+| 34 | nest | `tests/e2e-unified/tests/platform/docker/test_update_channel_updater.py::test_the_updater_hands_itself_off_to_the_build_it_moved_the_nest_to` | nest (linux): passed |
+| 34 | nest | `tests/e2e-unified/tests/platform/docker/test_update_channel_updater.py::test_a_hand_off_killed_between_create_and_start_settles_to_one_updater` | nest (linux): passed |
 | 34 | nest | `tests/e2e-unified/tests/platform/docker/test_update_channel_updater.py::test_current_when_the_channel_head_is_the_running_build` | nest (linux): passed |
 | 34 | nest | `tests/e2e-unified/tests/platform/docker/test_update_channel_updater.py::test_hold_when_the_channel_head_is_older_than_the_running_build` | nest (linux): passed |
-| 34 | nest | `tests/e2e-unified/tests/platform/docker/test_update_channel_updater.py::test_apply_recreates_the_nest_on_the_newer_build_with_its_configuration` | nest (linux): passed |
+| 34 | nest | `tests/e2e-unified/tests/platform/docker/test_update_channel_updater.py::test_apply_recreates_the_nest_on_the_newer_build_with_its_configuration` | nest (linux): failed |
 | 34 | nest | `tests/e2e-unified/tests/platform/docker/test_update_channel_updater.py::test_a_channel_change_from_the_app_is_applied_on_the_next_poll` | nest (linux): failed |
 | 34 | nest | `tests/e2e-unified/tests/platform/docker/test_update_channel_updater.py::test_a_recreate_cut_short_is_put_back_at_the_next_start` | nest (linux): passed |
+| 34 | nest | `tests/e2e-unified/tests/platform/docker/test_update_channel_updater.py::test_a_pull_of_a_head_whose_blob_is_gone_is_reported_and_moves_nothing` | nest (linux): passed |
+| 35 | app | `tests/e2e-unified/tests/test_admin_block.py::test_the_admin_blocks_a_reported_post_and_unblocks_it_through_the_app` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 36 | app | `tests/e2e-unified/tests/test_admin_update_channel.py::test_admin_moves_the_box_between_channels_and_the_status_follows_the_decision` | web (linux): passed, tui (linux): passed |
+| 36 | app | `tests/e2e-unified/tests/test_admin_update_channel.py::test_a_pinned_box_follows_no_channel_until_one_is_chosen` | web (linux): passed, tui (linux): passed |
+| 37 | app | `tests/e2e-unified/tests/test_admin_update_channel.py::test_a_nest_the_image_does_not_run_says_so_and_its_controls_are_inert` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 38 | nest | `tests/e2e-unified/tests/platform/docker/test_first_boot_nest_up.py::test_runcmd_starts_the_unit_instead_of_the_compose` | nest (linux): passed |
+| 38 | nest | `tests/e2e-unified/tests/platform/docker/test_first_boot_nest_up.py::test_nest_up_retries_until_compose_succeeds` | nest (linux): passed |
 <!-- features-render:end -->

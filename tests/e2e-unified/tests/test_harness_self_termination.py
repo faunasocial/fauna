@@ -1106,6 +1106,18 @@ _POSIX_ONLY_SPAWNERS = {
     "tests/test_x_display_lock_sweep.py": (
         "spawns `true` for a certainly-dead pid; the Xvfb lock sweep it drills is Linux-only"
     ),
+    "helpers/linux_sync_agent.py": (
+        "the linux sync agent: a unix socket, an XDG tree and a session bus — no Windows path"
+    ),
+    "helpers/notification_bus.py": (
+        "spawns the fake org.freedesktop.Notifications daemon on a private D-Bus (the tray_bus case)"
+    ),
+    "tests/test_web_bridge_stuck_call.py": (
+        "the whole module is skipped off linux — the watchdog it drills reads /proc"
+    ),
+    "tests/test_web_bridge_watchdog.py": (
+        "the test that spawns is skipped off linux — the watchdog it drills reads /proc"
+    ),
 }
 # Not spawners: the mechanism's own definition, this file's toy wrappers, which
 # deliberately arm one half at a time to prove each half separately, and a file
@@ -1236,8 +1248,14 @@ def prebuild_memo_isolated():
     # seat-pair tests past their 60 s bound whenever the generated-file gates
     # were stale. A test pinning a hoist itself patches over its stub. The
     # cdylib's compile half (`_ensure_fauna_ffi_built`, the warm-pass job split
-    # out of the load on 2026-09-29) is the same class of real subprocess.
-    stubbed = ("_ensure_fauna_ffi_loaded", "_ensure_fauna_ffi_built", "_ensure_sync_agent_built")
+    # out of the load on 2026-09-29) is the same class of real subprocess. So
+    # are the apple session jobs any fake session selecting `ios` reaches — the
+    # full xcframework restore (`just apple-ffi-test`, with `macos` too), the iOS
+    # app's `xcodebuild` and the simulator: measured 2026-10-21, the seat-pair
+    # test's `[ios]` leg launched a real `just apple-ffi-test` beside a live one
+    # in the same checkout.
+    stubbed = ("_ensure_fauna_ffi_loaded", "_ensure_fauna_ffi_built", "_ensure_sync_agent_built",
+               "_restore_full_apple_ffi", "_ensure_ios_app_built", "_get_ios_setup")
     saved_fns = {name: getattr(mod, name) for name in stubbed}
     for name in stubbed:
         setattr(mod, name, lambda: None)
@@ -1263,6 +1281,11 @@ class _FakeItem:
 
     def get_closest_marker(self, name):
         return object() if name in self._markers else None
+
+    def iter_markers(self):
+        import types
+
+        return [types.SimpleNamespace(name=name) for name in sorted(self._markers)]
 
 
 def _fake_session(*items):
@@ -1427,6 +1450,50 @@ def test_prebuild_windows_app_respects_installed_product(
     unmarked = _FakeItem(fixturenames=["app"], params={"app": "windows"})
     mod._prebuild_binaries(_fake_session(unmarked))
     assert built == ["_ensure_nest_built", "app:windows"]
+
+
+@pytest.mark.timeout(60)
+def test_prebuild_builds_the_macos_sync_agent_a_real_agent_run_spawns(
+    monkeypatch, prebuild_memo_isolated
+):
+    """A macos launch reaches `macos_sync_agent_binary` through the launch
+    seam's `getfixturevalue` whenever the run's `real_sync_agent` posture is on
+    — no item's closure names it — so the prebuild must add it, or its build
+    lands inside the first such test's budget (and, on macOS, inside the warm
+    pass's held lane). Built only for a run that launches macos AND carries the
+    marker. The marker-named app itself is part of the same correction: the
+    prebuild's app set reads a non-parametrized suite's app marker, as the lane
+    choice (`_run_app_set`) always has."""
+    mod = prebuild_memo_isolated
+    built = []
+    monkeypatch.setattr(mod, "_ensure_sync_agent_built", lambda: built.append("agent"))
+    monkeypatch.setattr(mod, "_ensure_app_built", lambda name: built.append(f"app:{name}"))
+    monkeypatch.setattr(mod, "_ensure_nest_built", lambda: None)
+    monkeypatch.setattr(mod, "get_available_apps", lambda: ["macos", "tui"])
+
+    # The real shape (`test_sync_agent_status.py`): a non-parametrized suite
+    # marked `macos` that reaches the app and the agent through
+    # `getfixturevalue` — neither name is in its closure.
+    marked = _FakeItem(fixturenames=["nest_instance", "request"],
+                       markers={"macos", "real_sync_agent", "tier_3"})
+    mod._prebuild_binaries(_fake_session(marked))
+    assert built == ["agent", "app:macos"]
+
+    built.clear()
+    mod._prebuild_binaries(_fake_session(
+        _FakeItem(fixturenames=["app"], params={"app": "macos"}, markers={"real_sync_agent"})))
+    assert built == ["agent", "app:macos"]
+
+    for item, apps in (
+        (_FakeItem(fixturenames=["app"], params={"app": "macos"}), ["app:macos"]),
+        (_FakeItem(fixturenames=["app"], params={"app": "tui"}, markers={"real_sync_agent"}),
+         ["app:tui"]),
+        # A marker the run did not select builds nothing.
+        (_FakeItem(fixturenames=["request"], markers={"windows", "real_sync_agent"}), []),
+    ):
+        built.clear()
+        mod._prebuild_binaries(_fake_session(item))
+        assert built == apps, built
 
 
 @pytest.mark.timeout(60)

@@ -169,6 +169,9 @@ public struct AftermathProgress {
     public var mlsReseal: LocalizedText?
     /// Leg 4 — the capability-grant re-mint.
     public var grantRemint: LocalizedText?
+    /// Leg 8 — the subscriber-tier period-key rotation. Rendered right after
+    /// leg 4; its "nest too old" line is an exposure still open, so it shows.
+    public var periodRotation: LocalizedText?
     /// Leg 5 — the file corpus. Reports from the sync agent's own process, in
     /// no FFI app's sink; **always `nil`** here for the same structural
     /// reason as `mlsReseal` above.

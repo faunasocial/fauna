@@ -53,14 +53,15 @@ pub struct AliasControlsInput {
 /// Outcome of a uniqueness-bearing alias write. `Conflict` is the
 /// `UNIQUE (local_domain, pattern, kind)` violation (two aliases of the
 /// same kind can't share a pattern on a domain — `mail-aliases.md` § Cross-
-/// user uniqueness); `KeyHeldByOtherKind` is the exact-key tier's one-holder
-/// rule ([`exact_key_held_by_other_kind`]), which the UNIQUE index cannot see.
+/// user uniqueness); `KeyHeld` is the exact-key tier's one-holder
+/// rule ([`exact_key_held`] — another tier kind, or another account's handle,
+/// holds the key), which the UNIQUE index cannot see.
 /// The handlers map both to `fauna.bridges.conflicts_with_existing_alias`;
 /// bulk import tells them apart only to word its per-line outcome.
 #[derive(Debug)]
 pub enum AliasWriteError {
     Conflict,
-    KeyHeldByOtherKind,
+    KeyHeld,
     /// An expiry move on a row that is not a still-alive disposable.
     NotExtendable,
     Db(anyhow::Error),
@@ -72,9 +73,9 @@ impl std::fmt::Display for AliasWriteError {
             AliasWriteError::Conflict => {
                 write!(f, "alias pattern conflicts with an existing alias")
             }
-            AliasWriteError::KeyHeldByOtherKind => write!(
+            AliasWriteError::KeyHeld => write!(
                 f,
-                "alias address is held by an exact alias, forwarder or list"
+                "alias address is held by an exact alias, forwarder, list or handle"
             ),
             AliasWriteError::NotExtendable => {
                 write!(
@@ -133,7 +134,7 @@ impl CacheDb {
     /// from the wire) but is REJECTED for anything other than
     /// `"exact"` until a later slice lands the rest of
     /// the resolver. A key a forwarder or list already holds is
-    /// [`AliasWriteError::KeyHeldByOtherKind`].
+    /// [`AliasWriteError::KeyHeld`].
     pub async fn put_exact_alias(
         &self,
         local_domain: &str,
@@ -153,10 +154,10 @@ impl CacheDb {
         let actor = *actor_id;
         let now = now_epoch_millis();
         let conn = self.conn.lock().await;
-        if exact_key_held_by_other_kind(&conn, &local_domain, &pattern, ALIAS_KIND_EXACT)
+        if exact_key_held(&conn, &local_domain, &pattern, ALIAS_KIND_EXACT, &actor)
             .map_err(AliasWriteError::Db)?
         {
-            return Err(AliasWriteError::KeyHeldByOtherKind);
+            return Err(AliasWriteError::KeyHeld);
         }
         // Existing row on (local_domain, pattern, kind=exact)? Upsert
         // the actor_id but leave alias_id stable — alias_hits FK ties
@@ -300,7 +301,7 @@ impl CacheDb {
     /// resolver compares `LOWER(...)`); a `UNIQUE (local_domain, pattern,
     /// kind)` collision surfaces as [`AliasWriteError::Conflict`], and an
     /// exact-key-tier `kind` on a key another tier kind holds as
-    /// [`AliasWriteError::KeyHeldByOtherKind`].
+    /// [`AliasWriteError::KeyHeld`].
     ///
     /// This `account_aliases` taxonomy superseded — and fully replaced — the
     /// pre-taxonomy `local_part → target-string` model of the old
@@ -322,10 +323,10 @@ impl CacheDb {
         let now = now_epoch_millis();
         let spam = controls.spam_threshold_override.map(|v| v as f64);
         let conn = self.conn.lock().await;
-        if exact_key_held_by_other_kind(&conn, &local_domain, &pattern, kind)
+        if exact_key_held(&conn, &local_domain, &pattern, kind, &actor)
             .map_err(AliasWriteError::Db)?
         {
-            return Err(AliasWriteError::KeyHeldByOtherKind);
+            return Err(AliasWriteError::KeyHeld);
         }
         conn.execute(
             "INSERT INTO account_aliases
@@ -355,7 +356,7 @@ impl CacheDb {
     /// returns `Ok(false)` if no row matches `(alias_id, actor_id)`. A
     /// rename into an existing `(local_domain, pattern, kind)` is
     /// [`AliasWriteError::Conflict`]; renaming an exact-key-tier row onto a
-    /// key another tier kind holds is [`AliasWriteError::KeyHeldByOtherKind`].
+    /// key another tier kind holds is [`AliasWriteError::KeyHeld`].
     ///
     /// `extend_expiry_to` (epoch millis) moves a disposable's `expires_at` —
     /// the user's "extend" (`mail-aliases.md` § Don't do these: "the user can
@@ -399,10 +400,10 @@ impl CacheDb {
         {
             return Err(AliasWriteError::NotExtendable);
         }
-        if exact_key_held_by_other_kind(&conn, &local_domain, &pattern, &kind)
+        if exact_key_held(&conn, &local_domain, &pattern, &kind, &actor)
             .map_err(AliasWriteError::Db)?
         {
-            return Err(AliasWriteError::KeyHeldByOtherKind);
+            return Err(AliasWriteError::KeyHeld);
         }
         let n = conn
             .execute(
@@ -481,7 +482,7 @@ impl CacheDb {
     /// kind)` collision (a forwarder already on this key) surfaces as
     /// [`AliasWriteError::Conflict`]. A key an exact alias or a list already
     /// holds is a *different* `kind` the UNIQUE constraint does not catch —
-    /// [`AliasWriteError::KeyHeldByOtherKind`] (`exact_key_held_by_other_kind`).
+    /// [`AliasWriteError::KeyHeld`] (`exact_key_held`).
     pub async fn create_forwarder_alias(
         &self,
         admin_actor_id: &[u8; 32],
@@ -495,10 +496,10 @@ impl CacheDb {
         let alias_id = *Uuid::new_v4().as_bytes();
         let now = now_epoch_millis();
         let conn = self.conn.lock().await;
-        if exact_key_held_by_other_kind(&conn, &local_domain, &pattern, ALIAS_KIND_FORWARDER)
+        if exact_key_held(&conn, &local_domain, &pattern, ALIAS_KIND_FORWARDER, &actor)
             .map_err(AliasWriteError::Db)?
         {
-            return Err(AliasWriteError::KeyHeldByOtherKind);
+            return Err(AliasWriteError::KeyHeld);
         }
         conn.execute(
             "INSERT INTO account_aliases
@@ -676,6 +677,106 @@ impl CacheDb {
             }
         }
         Ok(false)
+    }
+
+    /// Whether an exact alias, forwarder or list holds `handle` against `actor`
+    /// taking it ([`alias_holds_handle`]) — a handle door's "taken" pre-check.
+    /// The handle writers repeat it under their own lock; this read only lets
+    /// a door answer with its own refusal code before anything is scheduled.
+    pub async fn alias_holds_handle(&self, handle: &str, actor: &[u8; 32]) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        alias_holds_handle(&conn, handle, actor)
+    }
+
+    /// The exact-key-tier row on `(local_domain, pattern)` — its holder and
+    /// kind (`exact` / `forwarder` / `list`), or `None` when the key is free.
+    /// At most one row holds a key ([`exact_key_held`]); a pre-existing
+    /// second holder answers with the oldest.
+    pub async fn exact_key_tier_holder(
+        &self,
+        local_domain: &str,
+        pattern: &str,
+    ) -> Result<Option<([u8; 32], String)>> {
+        let conn = self.conn.lock().await;
+        let row: Option<(Vec<u8>, String)> = conn
+            .query_row(
+                &format!(
+                    "SELECT actor_id, kind FROM account_aliases
+                     WHERE local_domain = ?1 AND pattern = ?2
+                       AND kind IN ('{ALIAS_KIND_EXACT}', '{ALIAS_KIND_FORWARDER}', '{ALIAS_KIND_LIST}')
+                     ORDER BY created_at, alias_id LIMIT 1"
+                ),
+                rusqlite::params![
+                    local_domain.to_ascii_lowercase(),
+                    pattern.to_ascii_lowercase()
+                ],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .context("exact-key tier holder")?;
+        row.map(|(actor, kind)| {
+            let actor: [u8; 32] = actor
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("account_aliases.actor_id is not 32 bytes"))?;
+            Ok((actor, kind))
+        })
+        .transpose()
+    }
+
+    /// Report every handle/alias collision that predates the exclusion — an
+    /// exact / forwarder / list key on a local part some OTHER account holds as
+    /// its handle, or a forwarder / list on any handle — once each, on the
+    /// admin audit log under [`HANDLE_COLLISION_AUDIT_ACTION`], target
+    /// `<pattern>@<local_domain>`. Nothing is reassigned or deleted (0.1.x owes
+    /// no compat, and no user data is destroyed to settle it): the report is
+    /// the admin's cue. A pair already reported is not written again, so a
+    /// boot pass is idempotent. Returns how many lines were written.
+    pub async fn audit_handle_alias_collisions(&self) -> Result<usize> {
+        let conn = self.conn.lock().await;
+        let pairs: Vec<(String, String, String)> = {
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT a.local_domain, a.pattern, a.kind
+                     FROM account_aliases a
+                     JOIN users u
+                       ON COALESCE(u.handle, '') != '' AND LOWER(u.handle) = a.pattern
+                     WHERE a.kind IN ('{ALIAS_KIND_EXACT}', '{ALIAS_KIND_FORWARDER}', '{ALIAS_KIND_LIST}')
+                       AND (a.actor_id != u.actor_id OR a.kind != '{ALIAS_KIND_EXACT}')
+                     ORDER BY a.local_domain, a.pattern"
+                ))
+                .context("prepare handle/alias collision scan")?;
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .context("handle/alias collision scan")?
+                .collect::<rusqlite::Result<_>>()
+                .context("read handle/alias collision row")?
+        };
+        let mut written = 0;
+        for (domain, pattern, kind) in pairs {
+            let target = format!("{pattern}@{domain}");
+            let seen = conn
+                .query_row(
+                    "SELECT 1 FROM audit_log WHERE action = ?1 AND target = ?2 LIMIT 1",
+                    rusqlite::params![HANDLE_COLLISION_AUDIT_ACTION, &target],
+                    |_| Ok(()),
+                )
+                .optional()
+                .context("handle/alias collision audit lookup")?;
+            if seen.is_some() {
+                continue;
+            }
+            super::admin::audit_on_conn(
+                &conn,
+                None,
+                HANDLE_COLLISION_AUDIT_ACTION,
+                Some(&target),
+                Some(&format!(
+                    "a {kind} key names another account's handle; one address has two \
+                     claimants — nothing was reassigned"
+                )),
+            )?;
+            written += 1;
+        }
+        Ok(written)
     }
 
     /// True iff `actor_id` already owns a wildcard-prefix alias — one wildcard
@@ -1087,27 +1188,37 @@ const ALIAS_SELECT_COLS: &str = "alias_id, actor_id, local_domain, kind, pattern
 /// has at most one holder across them.
 const EXACT_KEY_TIER_KINDS: [&str; 3] = [ALIAS_KIND_EXACT, ALIAS_KIND_FORWARDER, ALIAS_KIND_LIST];
 
-/// Whether a write of `kind` on `(local_domain, pattern)` (both already
-/// lower-cased) would give the exact-key tier a second holder: `kind` is a
-/// tier kind and a row of ANOTHER tier kind is on the key. The
-/// `UNIQUE (local_domain, pattern, kind)` index covers the same-kind case
-/// but is blind across kinds, and a second holder is a routing capture — an
-/// `exact` row shadows the list step and the forwarder behind it, because
-/// the resolver matches exact first.
+/// Whether `writer`'s write of `kind` on `(local_domain, pattern)` (both
+/// already lower-cased) would give the exact-key tier a second holder. Two
+/// ways it can:
+///
+/// - a row of ANOTHER tier kind is on the key. The `UNIQUE (local_domain,
+///   pattern, kind)` index covers the same-kind case but is blind across
+///   kinds, and a second holder is a routing capture — an `exact` row shadows
+///   the list step and the forwarder behind it, because the resolver matches
+///   exact first;
+/// - a registered handle names the local part ([`handle_holds_key`]). A handle
+///   is its actor's address on every active local domain (`mail-multidomain.md`
+///   § Multi-domain handles), so it holds that key on each of them whether or
+///   not the canonical row has been written yet.
 ///
 /// Every `account_aliases` writer of a tier kind calls this under the same
 /// connection lock (or transaction) as its write, so the check and the write
 /// are one step and no door — single create, bulk import, rename,
-/// forwarder create, list create — can skip it. A non-tier `kind` is never
-/// refused here.
-pub(crate) fn exact_key_held_by_other_kind(
+/// forwarder create, list create, the canonical-address writer — can skip it.
+/// A non-tier `kind` is never refused here.
+pub(crate) fn exact_key_held(
     conn: &rusqlite::Connection,
     local_domain: &str,
     pattern: &str,
     kind: &str,
+    writer: &[u8; 32],
 ) -> Result<bool> {
     if !EXACT_KEY_TIER_KINDS.contains(&kind) {
         return Ok(false);
+    }
+    if handle_holds_key(conn, pattern, kind, writer)? {
+        return Ok(true);
     }
     let held = conn
         .query_row(
@@ -1124,6 +1235,78 @@ pub(crate) fn exact_key_held_by_other_kind(
         .context("exact-key tier holder lookup")?;
     Ok(held.is_some())
 }
+
+/// Whether a registered handle holds the exact-key-tier key `pattern`
+/// (lower-cased) against `writer`'s write of `kind`. A handle and an
+/// exact / forwarder / list key are mutually exclusive on every active local
+/// domain (`mail-aliases.md` § Cross-user uniqueness): the one row a handle
+/// tolerates on its local part is its OWN actor's `exact` row — the canonical
+/// address mail-enable writes. Another actor's alias, and any forwarder or list
+/// (the handle's own actor's included), would take the handle's inbound mail
+/// while the handle still names it, so they are refused.
+fn handle_holds_key(
+    conn: &rusqlite::Connection,
+    pattern: &str,
+    kind: &str,
+    writer: &[u8; 32],
+) -> Result<bool> {
+    let held = conn
+        .query_row(
+            "SELECT 1 FROM users
+             WHERE COALESCE(handle, '') != '' AND LOWER(handle) = ?1
+               AND (actor_id != ?2 OR ?3 != ?4)
+             LIMIT 1",
+            rusqlite::params![pattern, &writer[..], kind, ALIAS_KIND_EXACT],
+            |_| Ok(()),
+        )
+        .optional()
+        .context("handle holder lookup")?;
+    Ok(held.is_some())
+}
+
+/// Whether an exact / forwarder / list row holds `handle` as its key on a local
+/// domain, against `actor` taking that handle — the handle-side mirror of
+/// [`handle_holds_key`], which every handle writer calls under the same
+/// connection lock (or transaction) as its write. The one row that never blocks
+/// is the actor's own `exact` alias: its address becomes its handle's.
+pub(crate) fn alias_holds_handle(
+    conn: &rusqlite::Connection,
+    handle: &str,
+    actor: &[u8; 32],
+) -> Result<bool> {
+    let held = conn
+        .query_row(
+            &format!(
+                "SELECT 1 FROM account_aliases
+                 WHERE pattern = ?1
+                   AND kind IN ('{ALIAS_KIND_EXACT}', '{ALIAS_KIND_FORWARDER}', '{ALIAS_KIND_LIST}')
+                   AND (actor_id != ?2 OR kind != '{ALIAS_KIND_EXACT}')
+                 LIMIT 1"
+            ),
+            rusqlite::params![handle.to_ascii_lowercase(), &actor[..]],
+            |_| Ok(()),
+        )
+        .optional()
+        .context("alias holder of handle lookup")?;
+    Ok(held.is_some())
+}
+
+/// A handle write refused because an exact alias, forwarder or list holds the
+/// handle's local part ([`alias_holds_handle`]). Typed so a handle door can
+/// answer it as "handle taken" rather than an internal fault.
+#[derive(Debug)]
+pub struct HandleHeldByAlias;
+
+impl std::fmt::Display for HandleHeldByAlias {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "handle is held by an exact alias, forwarder or list")
+    }
+}
+
+impl std::error::Error for HandleHeldByAlias {}
+
+/// The audit action a pre-existing handle/alias collision is reported under.
+pub const HANDLE_COLLISION_AUDIT_ACTION: &str = "mail.alias.handle_collision";
 
 fn map_alias_write_err(e: rusqlite::Error) -> AliasWriteError {
     if let rusqlite::Error::SqliteFailure(f, _) = &e

@@ -2267,6 +2267,7 @@ pub unsafe extern "C" fn fauna_profile_build_with_pictures(
             load_hint: None,
             inbox_mode: fauna_core::data::InboxMode::Open,
             recovery_head: None,
+            audience: fauna_core::data::ProfileAudience::ThisNest,
             updated_at: fauna_core::data::Timestamp(0),
         };
         fauna_client_profile::build_profile(&kp, &profile).map_err(|e| crate::FfiError::General {

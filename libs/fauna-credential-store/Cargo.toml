@@ -38,10 +38,8 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("e2e-agent
 
 [dependencies]
 anyhow = { workspace = true }
-chacha20poly1305 = { workspace = true }
 fauna-client-accounts = { workspace = true }
 fauna-core = { workspace = true }
-rand = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

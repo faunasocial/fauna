@@ -14,7 +14,9 @@
 //! report is filed still gets it. Every leg is idempotent on the receiver (a
 //! delivery is keyed on the origin's `report_ref`), so a re-send is always
 //! safe. A submit tries its delivery once inline, bounded, so the
-//! acknowledgement can name the home nest when it was reached.
+//! acknowledgement can name the home nest when it was reached. The same queue
+//! carries an enforcement act's obligation row to a foreign author's home
+//! ([`crate::moderation_federation`], the `obligation_deliver` call).
 //!
 //! Serving side: the receiver accepts a delivery only for a subject it hosts
 //! (never a relay for third nests), rides the channel's per-origin throttle
@@ -36,7 +38,7 @@ use fauna_protocol::{RpcError, Value, decode_strict, encode_canonical};
 
 use crate::db::moderation::{
     ABUSE_CALL_DELIVER, ABUSE_CALL_OUTCOME, ABUSE_CALL_WITHDRAW, AbuseReportOutboxEntry,
-    AbuseReportRow, ForwardedAbuseReport,
+    AbuseReportRow, ForwardedAbuseReport, OBLIGATION_CALL_DELIVER,
 };
 use crate::federation_router::{FederationRouterBuilder, RpcHandler, RpcKindMeta};
 use crate::routes::AppState;
@@ -68,13 +70,14 @@ const MAX_RETRY_DELAY_SECS: i64 = 6 * 3_600;
 
 /// A call no peer has answered for this long is dropped: a report stays on
 /// the reporter's own nest's queue whatever happens to its forward.
-const MAX_CALL_AGE_SECS: i64 = 7 * 24 * 3_600;
+pub(crate) const MAX_CALL_AGE_SECS: i64 = 7 * 24 * 3_600;
 
 fn kind_for(call: &str) -> Option<&'static str> {
     match call {
         ABUSE_CALL_DELIVER => Some(DELIVER_KIND),
         ABUSE_CALL_WITHDRAW => Some(WITHDRAW_KIND),
         ABUSE_CALL_OUTCOME => Some(OUTCOME_KIND),
+        OBLIGATION_CALL_DELIVER => Some(crate::moderation_federation::DELIVER_KIND),
         _ => None,
     }
 }
@@ -387,6 +390,16 @@ async fn try_call(
                     )
                     .await?;
             }
+            // An obligation row binds to the home that took it: the one nest
+            // whose relayed appeal its issuer accepts.
+            if entry.kind == OBLIGATION_CALL_DELIVER
+                && let (Some(pin), Ok(row_id)) = (pin, entry.report_id.parse::<i64>())
+            {
+                state
+                    .db
+                    .mark_obligation_delivered(row_id, &hex::encode(pin))
+                    .await?;
+            }
             state.db.finish_abuse_report_call(entry.id).await?;
             Ok(CallOutcome::Delivered)
         }
@@ -446,15 +459,22 @@ fn nudge(state: &Arc<AppState>) {
     });
 }
 
-/// The forwarder: drains the triad's queue every [`DRAIN_INTERVAL`].
+/// The forwarder: drains the triad's queue every [`DRAIN_INTERVAL`], its
+/// first pass after re-queueing the obligation deliveries a stop lost
+/// ([`crate::moderation_federation::reconcile_undelivered_obligations`]).
 pub fn spawn_abuse_report_forwarder(state: Arc<AppState>) {
     let scope = state.clone();
+    let mut reconciled = false;
     scope.scope_handle(crate::sweeper::spawn_periodic_sweeper(
         DRAIN_INTERVAL,
         false,
         move || {
             let state = state.clone();
+            let reconcile = !std::mem::replace(&mut reconciled, true);
             async move {
+                if reconcile {
+                    crate::moderation_federation::reconcile_undelivered_obligations(&state).await;
+                }
                 drain_abuse_report_calls(&state).await;
             }
         },
@@ -536,6 +556,35 @@ fn deliver_handler() -> RpcHandler {
             else {
                 return Err(not_hosted());
             };
+            // Both halves of the dedupe key are the caller's to choose, so a new
+            // report spends two per-target budgets — the account reported and
+            // the whole nest (the admin's queue and doorbell) — before anything
+            // is written. A re-delivery of a stored report stays free, and a
+            // refusal is `rate_limited`, which the sender's queue retries.
+            let origin = hex::encode(origin_nest_id);
+            if !state
+                .db
+                .forwarded_abuse_report_exists(&origin, &req.report_ref)
+                .await
+                .map_err(internal)?
+            {
+                let subject_key: [u8; 32] = fauna_core::hex32::decode(&subject_actor)
+                    .map_err(|_| internal("hosted subject actor is not 32-byte hex"))?;
+                let budget = &state.federation_target_budget;
+                if !budget.check_with_max(
+                    &subject_key,
+                    &[0u8; 32],
+                    "abuse_report",
+                    crate::bridge_rate_limit::ABUSE_REPORT_SUBJECT_TARGET_MAX,
+                ) || !budget.check_with_max(
+                    &[0u8; 32],
+                    &[0u8; 32],
+                    "abuse_report",
+                    crate::bridge_rate_limit::ABUSE_REPORT_NEST_TARGET_MAX,
+                ) {
+                    return Err(crate::rpc_errors::rate_limited());
+                }
+            }
             // The origin's declared address, recorded against its verified
             // id, is how the outcome finds its way back.
             crate::federation_handlers::resolve_origin_home_url(
@@ -549,7 +598,7 @@ fn deliver_handler() -> RpcHandler {
                 _ => None,
             };
             let copy = ForwardedAbuseReport {
-                origin_nest_id: hex::encode(origin_nest_id),
+                origin_nest_id: origin,
                 origin_report_ref: req.report_ref,
                 subject_kind: subject.kind().to_string(),
                 subject_id: subject.id().to_string(),

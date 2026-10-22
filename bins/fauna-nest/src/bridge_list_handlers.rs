@@ -528,9 +528,10 @@ fn send_list_message_handler() -> RpcHandler {
 
             // RFC 5322 §3.6: exactly one From field, before any cap is reserved
             // (`smtp-server.md` § Architectural rules → *Exactly one From
-            // field*). The outbound worker picks each copy's DKIM key by the
-            // From domain, read from the LAST From field, while a receiver's
-            // DMARC may align against the first.
+            // field*). The nest's signer signs nothing but a message with one
+            // From field naming one mailbox (`signable_from_mailbox`), and a
+            // receiver's DMARC may align against any of several fields, so a
+            // second field is refused here rather than left to go unsigned.
             let from_fields = fauna_mail::from_field::from_field_count(&req.message);
             if from_fields != 1 {
                 return Err(crate::rpc_errors::invalid_params_ns(
@@ -538,6 +539,19 @@ fn send_list_message_handler() -> RpcHandler {
                     format!(
                         "message must carry exactly one From header field, found {from_fields}"
                     ),
+                ));
+            }
+            // …and that one field names exactly one mailbox
+            // (`mail-multidomain.md` § From: header ownership → *Exactly one
+            // mailbox*), refused before the ownership question is asked: with
+            // two, `signable_from_mailbox` yields nothing, the check below
+            // is skipped, and every copy would leave carrying a foreign
+            // address. The count is the shared reader the other doors use.
+            let from_mailboxes = fauna_mail::envelope::from_mailboxes(&req.message).len();
+            if from_mailboxes != 1 {
+                return Err(crate::rpc_errors::invalid_params_ns(
+                    "bridges",
+                    format!("From field must name exactly one mailbox, found {from_mailboxes}"),
                 ));
             }
             // From: header ownership — this door's call of the one predicate

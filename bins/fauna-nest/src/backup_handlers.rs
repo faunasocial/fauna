@@ -926,11 +926,7 @@ fn custody_materialize_handler() -> RpcHandler {
             encode_reply(&CustodyMaterializeReply {
                 segments: outcome.segments,
                 records: outcome.records,
-                // The set's bytes are live in the scope now, so the custody copy
-                // is redundant — but it survives. Reclaiming it is the owner's
-                // separate, deliberate set-delete gesture (the ceremony deletes
-                // nothing, on success as on refusal).
-                custody_redundant: true,
+                landing_reclaimed: outcome.landing_reclaimed,
                 placements: outcome.placements,
                 remaining: outcome.remaining,
                 extra: Default::default(),
@@ -962,6 +958,7 @@ fn custody_recover_handler() -> RpcHandler {
                 inboxed: outcome.inboxed,
                 unplaceable: outcome.unplaceable,
                 floor: outcome.floor,
+                landing_reclaimed: outcome.landing_reclaimed,
                 extra: Default::default(),
             })
         })

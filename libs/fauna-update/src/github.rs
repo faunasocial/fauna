@@ -41,12 +41,8 @@ pub struct LatestRelease {
 /// counts as known whatever its asset names (resolving this platform's
 /// artifact is [`check_latest`]'s, for the apply step). `None` when the
 /// repository has published none.
-pub async fn latest_release(
-    client: &reqwest::Client,
-    repo: &str,
-    token: Option<&str>,
-) -> Result<Option<LatestRelease>> {
-    fetch_latest(client, repo, token)
+pub async fn latest_release(client: &reqwest::Client, repo: &str) -> Result<Option<LatestRelease>> {
+    fetch_latest(client, repo)
         .await?
         .map(release_version)
         .transpose()
@@ -62,31 +58,27 @@ pub async fn check_latest(
     current: &Version,
     artifact_prefix: &str,
     target: &str,
-    token: Option<&str>,
 ) -> Result<Option<ReleaseInfo>> {
-    match fetch_latest(client, repo, token).await? {
+    match fetch_latest(client, repo).await? {
         Some(release) => resolve_release_info(release, current, artifact_prefix, target),
         None => Ok(None),
     }
 }
 
 /// The release host's "newest release" answer for `repo`, or `None` when the
-/// repository has published none.
-async fn fetch_latest(
-    client: &reqwest::Client,
-    repo: &str,
-    token: Option<&str>,
-) -> Result<Option<Release>> {
+/// repository has published none. Anonymous, always: the request carries a
+/// fixed `User-Agent` and no credential — the `github_token` that once rode
+/// here as a `Bearer` header was a `nest.toml` knob no user or admin would
+/// choose, so it was REMOVED 2026-10-19 under `principles.md` § One
+/// configuration surface (a constant's stand-in); the anonymous rate limit is
+/// ample for one check a day, and the loop's back-off covers the rest.
+async fn fetch_latest(client: &reqwest::Client, repo: &str) -> Result<Option<Release>> {
     let url = format!("https://api.github.com/repos/{repo}/releases/latest");
 
-    let mut req = client
+    let req = client
         .get(&url)
         .header("User-Agent", "fauna-update")
         .header("Accept", "application/vnd.github+json");
-
-    if let Some(t) = token {
-        req = req.header("Authorization", format!("Bearer {t}"));
-    }
 
     let resp = req.send().await.context("GitHub API request failed")?;
 

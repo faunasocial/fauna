@@ -1,16 +1,18 @@
 <script lang="ts">
-  import { contentLabelStyle, confidencePercent } from '$lib/wasm';
-  import { resolveLocalized } from '$lib/i18n/localized';
-  import { IDS } from '$lib/generated/uiIds';
+  import { contentLabelStyle, confidencePercent } from '#lib/wasm';
+  import { resolveLocalized } from '#lib/i18n/localized';
+  import { IDS } from '#lib/generated/uiIds';
 
-  // `confidence` / `action`: a moderation-queue row's painted facts, published on
+  // `confidence` / `action` / `issuer`: a moderation-queue row's facts, published on
   // the badge as automation attributes (moderation.md § Element IDs → *Queue row
-  // facts*), exactly as the row paints them; absent on every other badge.
+  // facts*), exactly as the row paints them (`issuer` only on a row another nest
+  // delivered); absent on every other badge.
   let {
     label,
     confidence: confidenceFact = undefined,
     action: actionFact = undefined,
-  }: { label: string; confidence?: string; action?: string } = $props();
+    issuer: issuerFact = undefined,
+  }: { label: string; confidence?: string; action?: string; issuer?: string } = $props();
 
   function parseCategory(l: string): string {
     return l.split(':')[0] || l;
@@ -39,6 +41,7 @@
   data-testid={IDS.CONTENT_LABEL_BADGE}
   data-confidence={confidenceFact}
   data-action={actionFact}
+  data-issuer={issuerFact}
   title="{category}: {confidencePct}% confidence"
   style="background: {style.tint}26; color: {style.accent};"
 >{style.icon} {text}</span>

@@ -126,11 +126,41 @@ pub enum BoxRecoveryEntry {
 /// `docs/goal/behavior/onboarding.md` § 3b-bis.
 pub use fauna_core::nat_mode::NodeMode;
 
+/// The box's content-scanner declaration (`wired` / `absent` / `unknown`), as
+/// reported on `fauna.setup.status` — the third axis of the claim-time mail
+/// intent. Canonical definition in `fauna-core`
+/// (`fauna_core::mail_availability::ContentScanners`, beside the `mta_can_run`
+/// predicate that reads it). Per `docs/goal/behavior/onboarding.md` § 3b.
+pub use fauna_core::mail_availability::ContentScanners;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum IdentityOrigin {
     Created,
     Imported,
+}
+
+/// What the provisioning page shows of a door box's key
+/// (`provisioning-ssh-door-command`; `installers/vps.md` § The SSH door →
+/// *The key*). Carries no secret: the private key is in this device's
+/// `~/.ssh` (`key_path`) or waits in the machine for its one hand-over.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct SshDoorReadout {
+    pub domain: String,
+    /// `ssh <domain>` where this device wrote the key and its `Host` entry,
+    /// else `ssh -i fauna-<domain> root@<domain>` for the handed-over file.
+    pub command: String,
+    /// The private key's absolute path on a desktop app; `None` where the key
+    /// is handed over instead.
+    pub key_path: Option<String>,
+    /// `SHA256:…`, as `ssh-keygen -l` prints it.
+    pub fingerprint: String,
+    /// The one address the door admits, as the nest echoed it in the claim
+    /// reply (`installers/vps.md` § The SSH door → *One address*); the host's
+    /// door pass applies it within a minute of the claim. `None` until the
+    /// claim, or when the nest wrote none.
+    pub admitted_from: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -297,6 +327,14 @@ pub struct VpsConfigState {
     /// `docs/goal/behavior/onboarding.md` §5.
     #[serde(default)]
     pub enable_mail: Option<bool>,
+    /// The `vps-config-ssh-door-toggle`: whether the box is provisioned with a
+    /// key-only sshd admitting the admin's own address. **Default off** for
+    /// every box. Feeds `CloudInitParams::ssh_door` via
+    /// `run_provisioning_inner`. The key itself never lives here
+    /// (`OnboardingMachine::ssh_door_readout`).
+    /// `docs/goal/behavior/onboarding-provisioning.md` § 5.
+    #[serde(default)]
+    pub ssh_door: bool,
     /// Which builds the box's updater follows, set by the
     /// `vps-config-update-channel-row` radios. `None` = "not chosen — the
     /// default channel" (`OnboardingMachine::provision_update_channel`). Feeds
@@ -304,6 +342,16 @@ pub struct VpsConfigState {
     /// `docs/goal/behavior/onboarding-provisioning.md` §5.
     #[serde(default)]
     pub update_channel: Option<fauna_provisioning::cloud_init::UpdateChannel>,
+    /// What the registry said of each update channel when the page was entered
+    /// (`OnboardingMachine::probe_channel_availability`) — the input of the
+    /// default channel and of each row's description. Empty until the probe
+    /// lands, which keeps Stable. Not serialized: it is a reading of the
+    /// registry now, not a choice, so a resumed wizard reads it afresh.
+    /// `docs/goal/behavior/onboarding-provisioning.md` §5 → *What exists
+    /// decides the default*.
+    #[serde(skip)]
+    pub channel_availability:
+        Vec<fauna_provisioning::update_channel::availability::ChannelAvailability>,
     /// True while `verify_vps()` is in flight. See the matching field on
     /// `DnsConfigState` for rationale. Not serialized.
     #[serde(skip)]
@@ -583,6 +631,12 @@ pub(crate) struct State {
     /// FFI-friendly shape via `DnsRecordPlain`.
     pub dns_records: Vec<DnsRecordPlain>,
     pub error_message: Option<String>,
+    /// The last identity confirm the app has not yet reported a failed write
+    /// for: `(the screen confirmed on, the step the confirm landed on)`. Set by
+    /// every confirm arm (generated, imported, recovery entry), taken by
+    /// [`crate::OnboardingMachine::identity_commit_failed`], which puts the
+    /// wizard back on the first only while it still stands on the second.
+    pub identity_commit: Option<(OnboardingStep, OnboardingStep)>,
     pub is_loading: bool,
     /// The target nest's resolved NAT-mode seed (`node_mode`), as learned from
     /// the setup-status probe. `None` until the probe
@@ -592,6 +646,12 @@ pub(crate) struct State {
     /// private-ward when the handle targets a private network. Per
     /// `docs/goal/behavior/onboarding.md` § 3b-bis Defaulting note.
     pub node_mode_seed: Option<NodeMode>,
+    /// The target box's content-scanner declaration, learned from the same
+    /// setup-status probes that seed [`Self::node_mode_seed`]. `Unknown` until
+    /// a probe resolves (and for a nest outside the image). Read by
+    /// `email_enable_requested`'s third axis (`onboarding.md` § 3b → *Third
+    /// axis — the box's own build*).
+    pub content_scanners_seed: ContentScanners,
     /// A claim code the client already holds and wants the `ClaimCode` page to
     /// pre-fill its input with. Set by
     /// `navigate_to_claim_code_for_known_nest_with_code` — the factory-reset
@@ -833,6 +893,7 @@ impl State {
     pub(crate) fn clear_handle_check(&mut self) {
         self.nest_url = String::new();
         self.node_mode_seed = None;
+        self.content_scanners_seed = ContentScanners::Unknown;
         self.handle_enclosing_zone = None;
     }
 

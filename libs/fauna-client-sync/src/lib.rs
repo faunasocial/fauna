@@ -74,6 +74,12 @@ pub mod recover_wire;
 #[cfg(any(unix, windows))]
 pub mod reseed_wire;
 
+// The re-seed's delivery legs, wasm-clean: their shared pieces, and the
+// nest-held pull-back every app runs (`client-device-custodian.md`
+// § Implementation status today → *Nest-held pull-back leg*).
+pub mod reseed_leg;
+pub mod reseed_pull;
+
 // The projection readers' judge (writer-signed change records, ruling (3)):
 // Media items and version-history entries, verified before they are listed.
 pub mod row_judge;
@@ -82,6 +88,12 @@ pub mod row_judge;
 // the sync agent's verb and the conflict review list (ruling (10)(a)/(b)/(f)).
 pub mod restore_branch;
 pub use restore_branch::ChooseWinnerError;
+
+// The licensed manifest read — the snapshot entry reader and the archive
+// import's folder reads, gated by the judged row naming the manifest under
+// the path (`backup-restore.md` § Security Properties → Integrity).
+pub mod licensed_read;
+pub use licensed_read::{LicensedManifestReader, ManifestLicence, SetAddress};
 
 pub use fauna_protocol::sync;
 // The conflict kinds are namespaced `fauna.sync.conflicts.*` but their wire

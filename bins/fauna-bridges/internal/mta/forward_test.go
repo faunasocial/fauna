@@ -307,7 +307,7 @@ func TestForwardSuppressedTooLarge(t *testing.T) {
 		nil, // headers: no loop floors trip
 		big, actorBob,
 		"bob-personal@example.net", "<msg-42@example.org>", "forward-all",
-		wsrpc.ForwardCopyModeCopy,
+		wsrpc.ForwardCopyModeCopy, submissionForwardDoor,
 	)
 	if got := len(mc.forwardRequests); got != 0 {
 		t.Fatalf("over-budget forward must be suppressed before the RPC; got %d requests", got)
@@ -328,7 +328,7 @@ func TestForwardStillFiresJustUnderBudget(t *testing.T) {
 		nil,
 		raw, actorBob,
 		"bob-personal@example.net", "<msg-43@example.org>", "forward-all",
-		wsrpc.ForwardCopyModeCopy,
+		wsrpc.ForwardCopyModeCopy, submissionForwardDoor,
 	)
 	if got := len(mc.forwardRequests); got != 1 {
 		t.Fatalf("under-budget forward must fire; got %d requests", got)

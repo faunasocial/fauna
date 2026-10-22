@@ -950,7 +950,7 @@ impl CacheDb {
         let mut stmt = conn
             .prepare(
                 "SELECT id, subscriber_id, tier_name, created_at, kind, mlkem_encaps_key,
-                    payment_entitled, valid_until
+                    payment_entitled, valid_until, home_nest_url
              FROM subscribe_requests WHERE author_id = ?1 ORDER BY created_at ASC",
             )
             .context("prepare list subscribe requests")?;
@@ -965,6 +965,7 @@ impl CacheDb {
                     mlkem_encaps_key: row.get(5)?,
                     payment_entitled: row.get::<_, i64>(6)? != 0,
                     valid_until: row.get(7)?,
+                    home_nest_url: row.get(8)?,
                 })
             })
             .context("list subscribe requests")?;

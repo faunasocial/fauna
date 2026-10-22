@@ -647,17 +647,13 @@ def test_external_app_write_becomes_a_fauna_post(
         # scope (§ F2 detail), so it must survive untouched. ──
         seeded_avatar_cid = content_cid(SEEDED_AVATAR_BYTES)
         _put_blob(nest["url"], alice["token"], seeded_avatar_cid, SEEDED_AVATAR_BYTES)
+        seeded_profile_body = build_profile_with_pictures(
+            alice_secret,
+            display_name="Alice (seeded, pre-external-edit)",
+            avatar_cid=seeded_avatar_cid,
+        )
         with alice_ws:
-            alice_ws.call(
-                "fauna.profile.set",
-                {
-                    "body": build_profile_with_pictures(
-                        alice_secret,
-                        display_name="Alice (seeded, pre-external-edit)",
-                        avatar_cid=seeded_avatar_cid,
-                    )
-                },
-            )
+            alice_ws.call("fauna.profile.set", {"body": seeded_profile_body})
 
         before_profile = _fauna_profile(alice_ws, alice["actor_id_bytes"])
         assert before_profile.get("avatar"), (
@@ -783,6 +779,26 @@ def test_external_app_write_becomes_a_fauna_post(
                 f"the external profile edit changed {key!r}: {was!r} -> "
                 f"{after_profile.get(key)!r}"
             )
+
+        # And the owner's own word outlives it. The external edit is the
+        # nest-held sub-key's word, so the nest keeps Alice's last
+        # identity-signed profile beside it and serves it back on her OWN read
+        # as `last_direct_body` — the row every app's save and sign-in mirror
+        # take the profile's audience and harvest anchors from (`profile.md`
+        # § Where logic lives → *Profile publish/edit* → *Write semantics*).
+        # The in-process conformance witness signs the delegated write itself;
+        # only this leg drives it through the real PDS round trip. ──
+        with alice_ws:
+            own_read = alice_ws.call(
+                "fauna.profile.get", {"actor_id": alice["actor_id_bytes"].hex()}
+            )
+        assert own_read.get("last_direct_body") is not None, (
+            "the owner's own read over an external edit must carry her last "
+            f"identity-signed profile; reply keys: {sorted(own_read)}"
+        )
+        assert bytes(own_read["last_direct_body"]) == bytes(seeded_profile_body), (
+            "the served row must be exactly the profile Alice signed herself"
+        )
 
         # ── 10d. LEG 6c — AN EXTERNAL APP SETS A PICTURE FROM ITS OWN UPLOAD.
         # The other resolver: bytes this account uploaded through THIS PDS, so

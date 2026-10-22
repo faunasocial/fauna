@@ -1,18 +1,34 @@
+use crate::client::FaunaClient;
 use crate::i18n::strings::common;
 use adw::prelude::*;
 use fauna_client_notifications::NotificationDestination;
 use fauna_ui_ids as ids;
-use std::cell::RefCell;
+use gtk::glib;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 /// The shared decision's answer for each painted row, index-for-index with the
 /// list box's rows — read at activation time so a click never re-derives it.
 pub type Destinations = Rc<RefCell<Vec<Option<NotificationDestination>>>>;
 
+thread_local! {
+    /// Session-local set of notification ids whose muted-word collapse the user
+    /// revealed (`notifications.md` § Muted words rule 3) — render state, the
+    /// twin of the feed's `REVEALED_MUTED_POSTS`. The mute stays.
+    static REVEALED_MUTED_NOTIFICATIONS: RefCell<std::collections::HashSet<i64>> =
+        RefCell::new(std::collections::HashSet::new());
+}
+
 pub struct NotificationHandles {
     pub count_badge: gtk::Label,
     pub list_box: gtk::ListBox,
     pub destinations: Destinations,
+    /// `notification-clear` — live only while a row is shown.
+    pub clear_button: gtk::Button,
+    /// The newest `created_at` the page has painted — the bound a clear-all
+    /// sends, so a row that arrived after the user looked survives
+    /// (`notifications.md` § Retention rule 2). `None` on an empty page.
+    pub clear_up_to: Rc<Cell<Option<i64>>>,
 }
 
 /// Whether a row with this destination is offered as a control. The shared
@@ -111,6 +127,12 @@ pub fn build_notifications_view() -> (gtk::Box, NotificationHandles) {
     crate::testid::set_test_id(&mark_read_btn, ids::NOTIFICATION_MARK_READ);
     header.pack_end(&mark_read_btn);
 
+    let clear_btn = gtk::Button::with_label(crate::i18n::strings::notifications::CLEAR_ALL);
+    clear_btn.add_css_class("flat");
+    clear_btn.set_sensitive(false);
+    crate::testid::set_test_id(&clear_btn, ids::NOTIFICATION_CLEAR);
+    header.pack_end(&clear_btn);
+
     let count_badge = gtk::Label::new(Some(&common::unread_count("0")));
     count_badge.add_css_class("badge");
     crate::testid::set_test_id(&count_badge, ids::NOTIFICATION_COUNT_BADGE);
@@ -146,6 +168,8 @@ pub fn build_notifications_view() -> (gtk::Box, NotificationHandles) {
         count_badge,
         list_box,
         destinations: Rc::new(RefCell::new(Vec::new())),
+        clear_button: clear_btn,
+        clear_up_to: Rc::new(Cell::new(None)),
     };
     (outer, handles)
 }
@@ -170,36 +194,164 @@ pub fn build_notifications_view() -> (gtk::Box, NotificationHandles) {
 /// [`crate::client::format_epoch_us`] resolves the relative-time bucket through
 /// shared Rust (`fauna_core::format::relative_time`), never hand-rolled here.
 /// Returns the unread count so the caller can keep `AppState` in step.
+#[allow(clippy::too_many_arguments)]
 pub fn update_notifications_list(
     list_box: &gtk::ListBox,
     count_badge: &gtk::Label,
     destinations: &Destinations,
     family_gated_in: bool,
     items: &[fauna_client_notifications::notifications::NotifItem],
+    clear_button: &gtk::Button,
+    clear_up_to: &Cell<Option<i64>>,
+    client: &Rc<FaunaClient>,
 ) -> u32 {
     crate::views::layout::clear_list_box_rows(list_box);
     let mut painted = Vec::with_capacity(items.len());
 
+    // The muted-word collapse (§ Muted words): the shared decision over each
+    // row's relayed text, against the one in-memory list the conversation
+    // collapse reads (preloaded at login, refreshed by the Settings page).
+    let muted = crate::conversations::muted_keywords_cache();
     let mut unread = 0u32;
-    for item in items {
+    for (index, item) in items.iter().enumerate() {
+        // The unread badge counts every unread row, muted or not (rule 4).
         if !item.is_read {
             unread += 1;
         }
-        let row = build_notification_row(
-            &item.notif_type,
-            &crate::i18n::notification_text(item),
-            &crate::client::format_epoch_us(item.created_at),
-        );
-        // Where the row leads is shared Rust's call, never a local type table.
-        let dest = fauna_client_notifications::notification_destination(item);
-        row.set_activatable(navigable(&dest, family_gated_in));
+        let revealed = REVEALED_MUTED_NOTIFICATIONS.with(|s| s.borrow().contains(&item.id));
+        if !revealed && fauna_client_notifications::notification_muted(&muted, item) {
+            // A collapsed row is no tap target: it holds no destination.
+            painted.push(None);
+            list_box.append(&build_muted_row(
+                list_box,
+                destinations,
+                family_gated_in,
+                index,
+                item,
+                client,
+            ));
+            continue;
+        }
+        let (row, dest) = build_full_row(item, family_gated_in, client);
         painted.push(dest);
         list_box.append(&row);
     }
     *destinations.borrow_mut() = painted;
 
+    // Every loaded row counts toward the clear bound, a collapsed one too
+    // (§ Muted words rule 4).
+    clear_up_to.set(items.iter().map(|i| i.created_at).max());
+    clear_button.set_sensitive(!items.is_empty());
+
     count_badge.set_text(&common::unread_count(&unread.to_string()));
     unread
+}
+
+/// One open row — its shared text, and the destination it is activatable for.
+fn build_full_row(
+    item: &fauna_client_notifications::notifications::NotifItem,
+    family_gated_in: bool,
+    client: &Rc<FaunaClient>,
+) -> (gtk::ListBoxRow, Option<NotificationDestination>) {
+    let row = build_notification_row(
+        &item.notif_type,
+        &crate::i18n::notification_text(item),
+        &crate::client::format_epoch_us(item.created_at),
+        &dismiss_button(item, client),
+    );
+    // Where the row leads is shared Rust's call, never a local type table.
+    let dest = fauna_client_notifications::notification_destination(item);
+    row.set_activatable(navigable(&dest, family_gated_in));
+    (row, dest)
+}
+
+/// `notification-dismiss` for one row — greyed on a security notice inside its
+/// retention window by the shared predicate (`notifications.md` § Retention
+/// rule 2; the nest's refusal stays the authority). Every row carries one,
+/// collapsed or open (§ Muted words rule 4).
+fn dismiss_button(
+    item: &fauna_client_notifications::notifications::NotifItem,
+    client: &Rc<FaunaClient>,
+) -> gtk::Button {
+    let now_us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_micros()).unwrap_or(i64::MAX));
+    let button = gtk::Button::with_label(crate::i18n::strings::notifications::DISMISS);
+    button.add_css_class("flat");
+    button.set_sensitive(!fauna_client_notifications::notification_retained(
+        item, now_us,
+    ));
+    crate::testid::set_test_id(&button, ids::NOTIFICATION_DISMISS);
+    let (client, id) = (Rc::clone(client), item.id);
+    button.connect_clicked(move |_| client.dismiss_notification(id));
+    button
+}
+
+/// A muted-collapsed row (§ Muted words rule 3): the type icon, the placeholder
+/// in place of the sentence, the timestamp, the dismiss and the one other
+/// gesture — reveal, which swaps the full row in at the same index for this
+/// session. Not activatable and not a `notification-item`, so a muted sender's
+/// name never paints as a control.
+fn build_muted_row(
+    list_box: &gtk::ListBox,
+    destinations: &Destinations,
+    family_gated_in: bool,
+    index: usize,
+    item: &fauna_client_notifications::notifications::NotifItem,
+    client: &Rc<FaunaClient>,
+) -> gtk::ListBoxRow {
+    let top_line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    top_line.set_margin_top(8);
+    top_line.set_margin_bottom(8);
+    top_line.set_margin_start(12);
+    top_line.set_margin_end(12);
+
+    let type_icon = gtk::Label::new(Some(notification_type_glyph(&item.notif_type)));
+    crate::testid::set_test_id(&type_icon, ids::NOTIFICATION_TYPE_ICON);
+    top_line.append(&type_icon);
+
+    let placeholder = gtk::Label::new(Some(crate::i18n::strings::muted_words::COLLAPSED));
+    placeholder.add_css_class("dim-label");
+    placeholder.set_halign(gtk::Align::Start);
+    placeholder.set_hexpand(true);
+    crate::testid::set_test_id(&placeholder, ids::NOTIFICATION_MUTED);
+    top_line.append(&placeholder);
+
+    let reveal = gtk::Button::with_label(crate::i18n::strings::muted_words::REVEAL);
+    reveal.add_css_class("flat");
+    crate::testid::set_test_id(&reveal, ids::NOTIFICATION_MUTED_REVEAL_BUTTON);
+    top_line.append(&reveal);
+
+    let time_label = gtk::Label::new(Some(&crate::client::format_epoch_us(item.created_at)));
+    time_label.add_css_class("dim-label");
+    time_label.add_css_class("caption");
+    top_line.append(&time_label);
+    top_line.append(&dismiss_button(item, client));
+
+    let row = gtk::ListBoxRow::new();
+    row.set_child(Some(&top_line));
+    row.set_activatable(false);
+    {
+        let item = item.clone();
+        let client = Rc::clone(client);
+        let list_box = list_box.clone();
+        let destinations = Rc::clone(destinations);
+        // Weak: the row owns this button through its child.
+        let row_weak = glib::object::ObjectExt::downgrade(&row);
+        reveal.connect_clicked(move |_| {
+            REVEALED_MUTED_NOTIFICATIONS.with(|s| s.borrow_mut().insert(item.id));
+            let Some(row) = row_weak.upgrade() else {
+                return;
+            };
+            let (full, dest) = build_full_row(&item, family_gated_in, &client);
+            list_box.remove(&row);
+            list_box.insert(&full, index as i32);
+            if let Some(slot) = destinations.borrow_mut().get_mut(index) {
+                *slot = dest;
+            }
+        });
+    }
+    row
 }
 
 /// The glyph linux paints for a notification's type — delegates to the shared
@@ -214,6 +366,7 @@ pub fn build_notification_row(
     notif_type: &fauna_protocol::notifications::NotifType,
     body: &str,
     timestamp: &str,
+    dismiss: &gtk::Button,
 ) -> gtk::ListBoxRow {
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 4);
     vbox.set_margin_top(8);
@@ -244,6 +397,8 @@ pub fn build_notification_row(
     time_label.add_css_class("dim-label");
     time_label.add_css_class("caption");
     top_line.append(&time_label);
+
+    top_line.append(dismiss);
 
     vbox.append(&top_line);
 

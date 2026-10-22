@@ -339,13 +339,16 @@ OPS_DAY_CELL = 0
 def _require_authoring(app) -> None:
     """tui is the lead app for the authoring half (2026-09-27); the other six
     follow in their batched trickle-down — each arm that lands widens the
-    admitted set below (linux, web, then android)."""
+    admitted set below (linux, web, android, then windows)."""
     _require_surface(app)
     if not (
         app.driver.is_tui()
         or app.driver.is_linux()
         or app.driver.is_web()
         or app.driver.is_android()
+        or app.driver.is_windows()
+        or app.driver.is_macos()
+        or app.driver.is_ios()
     ):
         skip_unbuilt(
             app.driver,

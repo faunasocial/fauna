@@ -46,11 +46,14 @@ write-offs — is listed there as `cddl <Type> removed` / `cddl
 <Type>.<field> <transition>` (this gate) or `rust
 <module>::<Struct>.<wire_field> <transition>` (the struct gate below), and
 both gates skip exactly the listed findings: each entry excuses only its own
-transition (`removed` or `optional→required`) on its own key. The list only
-grows (a removed name never comes back under the same name, and both gates
-refuse one that does; each gate also independently refuses a head whose
+transition (`removed`, `optional→required` or `retyped→<Type>`) on its own
+key. The list only grows (a removed name never comes back under the same name,
+and both gates refuse one that does at every product version, the 0.1.x window
+included; each gate also independently refuses a head whose
 own-gate entries drop one the merge base carried, catching a deletion even
-without a revival), a line lands there only in the commit that carries the
+without a revival — the merge base's list is read leniently, so a line its
+grammar rejects there is skipped with a warning and never refuses the commit
+that removes it), a line lands there only in the commit that carries the
 ratification, and it is never a session's own call. The grammar is owned by
 `docs/goal/architecture/transport.md` § Schema and forward-compat discipline;
 the file's own header restates it for the reader editing it.

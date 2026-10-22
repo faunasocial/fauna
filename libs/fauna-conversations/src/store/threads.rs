@@ -215,12 +215,14 @@ impl Inner {
 /// What an inbound mail record says about its message beyond the
 /// [`MessageSnapshot`]: which mailbox and UID it rests under on the nest, and
 /// whether it carries IMAP `\Seen`
-/// ([`crate::backend::InboundMailRecord::has_seen_flag`]).
+/// ([`crate::backend::InboundMailRecord::has_seen_flag`]), and the warm-up's
+/// hold on a sent one ([`crate::backend::InboundMailRecord::warmup_hold`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MailArrival {
     pub mailbox: MailFeed,
     pub uid: u32,
     pub has_seen_flag: bool,
+    pub warmup_hold: Option<crate::backend::MailWarmupHold>,
 }
 
 /// What an inbound message parsed to beyond what its [`MessageSnapshot`]
@@ -1441,9 +1443,15 @@ mod tests {
             deleted: false,
             is_own: false,
             legal_takedown_ref: None,
+            admin_block_reason: None,
             labels: vec![],
             plane_ref: None,
             can_delete: false,
+            undelivered: false,
+            warmup_hold: None,
+            scan_result_lines: Vec::new(),
+            delivered_to: None,
+            withheld: None,
         }
     }
 

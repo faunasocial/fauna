@@ -80,13 +80,13 @@ const PUSH_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// simply not pushed this time; push is best-effort.
 const PUSH_DISPATCH_DEADLINE: Duration = Duration::from_secs(30);
 
-/// The strings a `web-push` payload and a `ws-device` frame carry — generic on
-/// purpose: a browser vendor's relay must not read the content, and the sync
-/// agent that posts a `ws-device` frame links no MLS, so it can render no more
-/// (`apps/common.md` § Push Notifications → *Transports*, § Content
-/// Encryption). Only `apns` carries the rich strings, encrypted.
-const GENERIC_TITLE: &str = "Fauna";
-const GENERIC_BODY: &str = "New message";
+// The strings a `web-push` payload and a `ws-device` frame carry — generic on
+// purpose: a browser vendor's relay must not read the content, and the sync
+// agent that posts a `ws-device` frame links no MLS, so it can render no more
+// (`apps/common.md` § Push Notifications → *Transports*, § Content
+// Encryption). Only `apns` carries the rich strings, encrypted. Owned by the
+// shared protocol crate, which the apps reading a payload back share.
+use fauna_protocol::push::{GENERIC_BODY, GENERIC_TITLE, WebPushPayload};
 
 /// Which of one actor's devices are present right now — the input to the
 /// per-device dispatch decision (module docs, § The per-device decision).
@@ -619,15 +619,14 @@ impl PushService {
         p256dh_b64: &str,
         auth_b64: &str,
     ) -> Result<u16> {
-        let payload_json =
-            serde_json::json!({ "title": GENERIC_TITLE, "body": GENERIC_BODY }).to_string();
+        let payload_json = WebPushPayload::generic().to_json();
 
         let p256dh = URL_SAFE_NO_PAD
             .decode(p256dh_b64)
             .context("decode p256dh")?;
         let auth_secret = URL_SAFE_NO_PAD.decode(auth_b64).context("decode auth")?;
 
-        let ciphertext = encrypt_payload(&p256dh, &auth_secret, payload_json.as_bytes())?;
+        let ciphertext = encrypt_payload(&p256dh, &auth_secret, &payload_json)?;
         let vapid_header = build_vapid_jwt(&self.vapid_key, &endpoint)?;
 
         let resp = client
@@ -1859,6 +1858,45 @@ mod tests {
                 .unwrap()
                 .is_empty(),
             "a row refused on its URL text alone must be removed"
+        );
+    }
+
+    /// The other half of the rule: a row whose text is dialable but whose name
+    /// the resolver refuses is skipped and KEPT, because that answer can change.
+    /// `.invalid` never resolves (RFC 6761), so no network decides the outcome.
+    #[tokio::test]
+    async fn a_resolver_refusal_is_skipped_and_kept() {
+        let db = make_db();
+        let actor_id = [0x18u8; 32];
+        let endpoint = "https://push.nonexistent.invalid/wp";
+        assert!(crate::ssrf::parse_https_url(endpoint).is_ok());
+        db.upsert_push_subscription(
+            &actor_id,
+            "unresolvable-name",
+            "web-push",
+            endpoint,
+            Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+            Some("AAAAAAAAAAAAAAAA"),
+        )
+        .await
+        .unwrap();
+        let svc = make_push_service(Arc::clone(&db));
+
+        svc.maybe_send_push(
+            &WsState::new(),
+            &DevicePresence::default(),
+            &actor_id,
+            "t",
+            "b",
+            "/app",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            db.list_push_subscriptions(&actor_id).await.unwrap().len(),
+            1,
+            "a row refused on a resolver's answer must be kept"
         );
     }
 

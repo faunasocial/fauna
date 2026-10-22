@@ -127,7 +127,7 @@ async fn recheck_claims_when_nest_reachable_and_unclaimed() {
         token: Some("tok".into()),
         expires_at: Some(0),
         domain: Some("example.test".into()),
-        deployment_seed: None,
+        ..Default::default()
     }));
     let m = seeded(fake.clone());
 
@@ -164,6 +164,7 @@ async fn recheck_does_not_consume_the_deployment_seed() {
         expires_at: Some(0),
         domain: Some("example.test".into()),
         deployment_seed: Some(seed_hex.clone().into()),
+        ..Default::default()
     }));
     let m = seeded(fake.clone());
 

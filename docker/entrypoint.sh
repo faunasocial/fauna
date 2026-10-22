@@ -10,17 +10,18 @@ set -euo pipefail
 # (private-mode.md § Implementation status today). `FAUNA_MODE` is read by the
 # nest binary itself (the pre-claim NAT seed — see the NAT-mode note below).
 PORT="${FAUNA_PORT:-3000}"
-# Bind address for nest's internal client-facing listener. Default 0.0.0.0 (all
-# interfaces): correct for the bridge-networked production image, where the
-# container network namespace isolates :${PORT} — only the co-resident processes
-# (SNI router, MTA, relay sidecar, all dialing 127.0.0.1:${PORT}) and the
-# explicitly published router ports reach it. The host-networking home bundle
-# (docker-compose.home.yml) sets FAUNA_BIND_ADDR=127.0.0.1 so nest's WS-RPC/HTTP
-# surface is NOT bound on the host's LAN interfaces (only the SNI-router :443 and
-# the MDA's IMAP on ${FAUNA_LAN_BIND_IP} are LAN-exposed there). Artifact-set IPC
-# wiring, never a human config knob. First-run only (baked
-# into the persisted nest.toml `listen`, like the port).
-BIND_ADDR="${FAUNA_BIND_ADDR:-0.0.0.0}"
+# Bind address for nest's internal client-facing listener. Default 127.0.0.1:
+# every co-resident dialer (SNI router, MTA, MDA, relay, ATProto bridge, the
+# HEALTHCHECK) reaches :${PORT} over loopback, and clients arrive through the SNI
+# router's :443. Binding the container's network interface too would hand the
+# listener to everything on the compose network — the scanner sidecars, whose
+# parsers a stranger feeds — as a non-loopback peer
+# (deployment-threat-model.md § Concern 1a, the container-hardening paragraph).
+# The host-networking home bundle (docker-compose.home.yml) sets the same value
+# explicitly. Artifact-set IPC wiring, never a human config knob. Reconciled into nest.toml `listen` on every boot (below the
+# first-run block), so a box first-booted on an all-interfaces image narrows on
+# its next pull.
+BIND_ADDR="${FAUNA_BIND_ADDR:-127.0.0.1}"
 # Optional ACME directory-URL override. When set, the nest's HTTP-01 client
 # orders against this CA instead of Let's Encrypt (a private/internal ACME CA,
 # another public CA, or the in-network `pebble` of the tier_4 acceptance).
@@ -42,16 +43,6 @@ if [ ! -f /data/nest.toml ]; then
 
     # Start from canonical default config
     cp /etc/fauna/default.toml /data/nest.toml
-
-    # ── Apply listen (bind address + port) override ────────────────
-    # Both default to the canonical `0.0.0.0:3000` already in default.toml, so
-    # this is a no-op (byte-identical nest.toml) when neither env is set — the
-    # bridge-networked production image is unchanged. The home bundle sets
-    # FAUNA_BIND_ADDR=127.0.0.1 (loopback) to drop the LAN exposure under host
-    # networking.
-    if [ "$PORT" != "3000" ] || [ "$BIND_ADDR" != "0.0.0.0" ]; then
-        sed -i "s/listen = \"0.0.0.0:3000\"/listen = \"${BIND_ADDR}:${PORT}\"/" /data/nest.toml
-    fi
 
     # ── NAT mode: no longer baked into nest.toml ───────────────────
     # The NAT axis (public/private) is now CLIENT-SET: a mutable `nest_nat_mode`
@@ -160,6 +151,12 @@ fi
 # of them permanently. The overlay verifies its own write and fails the boot
 # loudly rather than proceeding half-configured.
 /usr/local/bin/nest-toml-overlay.sh ensure-static-dir /data/nest.toml
+
+# ── [nest].listen reconcile — EVERY boot, not first-run ─────────────
+# The nest's bind address + port (BIND_ADDR / PORT above): artifact wiring, so
+# reconciled like static_dir — the loopback narrowing reaches boxes first-booted
+# while the image bound every interface.
+/usr/local/bin/nest-toml-overlay.sh ensure-listen /data/nest.toml "${BIND_ADDR}:${PORT}"
 
 # ── Inbound deliver key ─────────────────────────────────────────────
 # Shared secret between fauna-nest (FAUNA_INBOUND_DELIVER_KEY) and
@@ -385,7 +382,8 @@ done
 #     the always-up fauna-sni-router owns :443 and routes SNI mail.<domain> to
 #     the MDA's CalDAV over loopback 8444 (caldav_listen_https=127.0.0.1:8444),
 #     so nest and the MDA each terminate their own TLS and no process sees the
-#     union of plaintext. IMAP keeps the public-axis all-interfaces default.
+#     union of plaintext. IMAPS :993 keeps the NAT-axis default (published);
+#     plaintext :143 is pinned to loopback — unpublished, so out of a sidecar's reach.
 #
 #   • HOME-RELAY / LAN / bare-IP box (FAUNA_LAN_BIND_IP set). A box reached by a
 #     bare IP has no usable mail.<domain> SNI (the user types the IP), so the
@@ -411,7 +409,13 @@ if [ -n "$LAN_BIND_IP" ]; then
         echo "imap_listen_starttls = \"${LAN_BIND_IP}:143\""
     } >> /data/operator-hatch.toml
 else
-    echo 'caldav_listen_https = "127.0.0.1:8444"' >> /data/operator-hatch.toml
+    {
+        echo 'caldav_listen_https = "127.0.0.1:8444"'
+        # Plaintext STARTTLS IMAP: no compose bundle publishes :143, so nothing
+        # outside the container dials it — loopback, out of a sidecar's reach.
+        # :993 keeps the bridge's all-interfaces default: it is published.
+        echo 'imap_listen_starttls = "127.0.0.1:143"'
+    } >> /data/operator-hatch.toml
 fi
 if [ -n "${FAUNA_CLAMD_ADDR:-}" ]; then
     echo "clamd_addr = \"${FAUNA_CLAMD_ADDR}\"" >> /data/operator-hatch.toml
@@ -419,6 +423,21 @@ fi
 if [ -n "${FAUNA_RSPAMD_URL:-}" ]; then
     echo "rspamd_url = \"${FAUNA_RSPAMD_URL}\"" >> /data/operator-hatch.toml
 fi
+# The artifact's statement about itself: are content scanners wired? The MTA's
+# scan gate is fail-closed and the image ships no scanner of its own, so a box
+# whose compose wired neither sidecar (the social-only VPS, the home-relay box,
+# a single-container dev run) cannot accept inbound mail. The nest reads this
+# key once at boot — it keeps the MTA down and refuses set_mail_enabled(true)
+# on the public axis — and reports it on fauna.setup.status. Always written
+# (a hatch without it reads "absent" to the nest). Per
+# docs/goal/behavior/mail-bridge-lifecycle.md § Default-off on first claim →
+# "A box with no content scanners cannot enable mail".
+if [ -n "${FAUNA_CLAMD_ADDR:-}" ] && [ -n "${FAUNA_RSPAMD_URL:-}" ]; then
+    _content_scanners=wired
+else
+    _content_scanners=absent
+fi
+echo "content_scanners = \"${_content_scanners}\"" >> /data/operator-hatch.toml
 if [ -n "${FAUNA_MTA_MX_OVERRIDE:-}" ]; then
     echo "[mta_mx_override]" >> /data/operator-hatch.toml
     # Split the comma list into `domain=target` pairs; IFS='=' splits on the
@@ -436,9 +455,18 @@ chmod 0644 /data/operator-hatch.toml
 if [ -n "$LAN_BIND_IP" ]; then
     _mda_binds="caldav_bind_host=${LAN_BIND_IP} (direct, :admin-port) imap=${LAN_BIND_IP}:993/143 (LAN)"
 else
-    _mda_binds="caldav_listen_https=127.0.0.1:8444 (sni-router-fronted) imap=<private-axis-default>"
+    _mda_binds="caldav_listen_https=127.0.0.1:8444 (sni-router-fronted) imap=127.0.0.1:143 + <axis-default>:993"
 fi
-echo "Wrote /data/operator-hatch.toml (${_mda_binds} clamd_addr=${FAUNA_CLAMD_ADDR:-<unset>} rspamd_url=${FAUNA_RSPAMD_URL:-<unset>} mta_mx_override=${FAUNA_MTA_MX_OVERRIDE:-<unset>})"
+echo "Wrote /data/operator-hatch.toml (${_mda_binds} clamd_addr=${FAUNA_CLAMD_ADDR:-<unset>} rspamd_url=${FAUNA_RSPAMD_URL:-<unset>} mta_mx_override=${FAUNA_MTA_MX_OVERRIDE:-<unset>} content_scanners=${_content_scanners})"
+
+# ── Previous boot's router sidecar token ────────────────────────────
+# s6 starts fauna-sni-router BEFORE fauna-nest (so it stops after it — the nest's
+# WS 1001 drain leaves through the router's live splices; installers/docker.md
+# § s6-overlay Services). The nest re-mints every sidecar token at boot, so the
+# file left from the last boot is stale: remove it, and the router's run-script
+# waits for this boot's instead of earning a refused hello and a :443 restart.
+# Recreatable by definition — the nest writes a fresh one on every start.
+rm -f /data/sidecar-token-router
 
 # ── Hand off to s6-overlay ──────────────────────────────────────────
 exec /init

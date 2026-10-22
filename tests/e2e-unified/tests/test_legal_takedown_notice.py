@@ -32,10 +32,9 @@ first fetch of it follows the takedown. And the admin learns the message's
 record id the way the product hands it over: a member reports the message, and
 the queue row's *open takedown* pre-fills the console's conversation half
 (``moderation.md`` § User-initiated reporting → Where it lands). The same
-journey witnesses ``admin-nest``'s single-message takedown. It runs on tui
-alone: every app paints the conversation tombstone as presentation with no
-test id, and only tui's driver can read it, off the terminal stream the driver
-itself is.
+journey witnesses ``admin-nest``'s single-message takedown. It reads the
+bubble's ``dm-message-legal-takedown`` tombstone (owner-approved 2026-10-16),
+so it runs on every app that tags it; the others skip as unbuilt.
 """
 
 import time
@@ -44,6 +43,7 @@ import uuid
 import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
+from helpers.app_surface import app_name, skip_unbuilt
 from helpers.connection import wait_until_online
 from helpers.conversations_restart import wait_replica_settled
 from helpers.mail_dedicated_nest import login_as_nest_admin
@@ -63,7 +63,7 @@ from i18n.strings import S
 pytestmark = [pytest.mark.tier_3, pytest.mark.tui]
 
 REFERENCE = "Court order 77/2026"
-DONE_TAKEDOWN = "Taken down. A tombstone is served in its place and the author can appeal."
+DONE_TAKEDOWN = S.admin.nest_page.takedown_done
 WORKING = "Submitting…"
 
 # Named budgets (generous ceilings; deadline polls pay only the real delay).
@@ -86,6 +86,8 @@ def _poll(check, budget_s, tag):
 @pytest.mark.linux
 @pytest.mark.windows
 @pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
 @pytest.mark.feature("feed-read")
 def test_a_taken_down_post_shows_the_notice_in_a_quote_and_when_opened(admin_app):
     """post → quote + repost (both embeds show the words) → takedown through
@@ -217,18 +219,28 @@ def _bubble_index(seat, needle):
     return next(i for i, t in enumerate(texts) if needle in t)
 
 
-def _painted(seat, token):
-    """Whether ``token`` has reached the seat's terminal. The tombstone is
-    chrome — presentation with no test id, like the quoted post's — so the
-    witness reads what the terminal was sent; the tui driver IS that terminal
-    (``drivers/tui.py``, ``frame_stream_path``). ``token`` must be space-free:
-    the renderer skips unchanged cells, so a phrase need not reach the stream
-    as one run (``test_tui_render_control_char_strip.py``)."""
-    with open(seat.app.driver.frame_stream_path(), "rb") as stream:
-        return token.encode() in stream.read()
+def _tombstones(seat):
+    """The texts of every ``dm-message-legal-takedown`` tombstone the seat's
+    open thread paints."""
+    d = seat.app.driver
+    return [
+        d.get_text("dm-message-legal-takedown", index=i)
+        for i in range(d.count("dm-message-legal-takedown"))
+    ]
+
+
+# The apps whose bubble tags its tombstone `dm-message-legal-takedown`; the
+# rest paint it untagged until their trickle-down lands.
+_TOMBSTONE_TAGGED_APPS = ("tui", "linux", "web", "android")
 
 
 @pytest.mark.real_conversations
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.android
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
 @pytest.mark.feature("feed-read", "admin-nest")
 def test_a_message_taken_down_from_a_report_shows_the_notice_to_a_member_who_reads_it_later(
     room_seats, nest_instance
@@ -241,6 +253,14 @@ def test_a_message_taken_down_from_a_report_shows_the_notice_to_a_member_who_rea
     citation), confirm → the late reader opens their app and the thread shows
     the notice where the message would be, never its words, never an error."""
     author, reporter, reader = room_seats
+    if app_name(reader.app.driver) not in _TOMBSTONE_TAGGED_APPS:
+        skip_unbuilt(
+            reader.app.driver,
+            surface="dm-message-legal-takedown",
+            detail="the conversation bubble paints the legal-takedown tombstone "
+            "without its ui.yaml id (moderation.md § Legal takedown → App render)",
+            tracked="",
+        )
     token = uuid.uuid4().hex[:10]
     words = f"takedownbody{token}"
     reference = f"CourtOrder-{token}"
@@ -342,16 +362,20 @@ def test_a_message_taken_down_from_a_report_shows_the_notice_to_a_member_who_rea
     wait_thread_by_channel(reader, channel, what="the reopened reader's room")
     reader.app.conversations.navigate()
     reader.app.conversations.open_thread_by_channel(channel)
-    wait_for(
+    tombstones = wait_for(
         "the notice painting where the message would be",
-        lambda: _painted(reader, reference),
-        bool,
+        lambda: _tombstones(reader),
+        lambda ts: any(reference in t for t in ts),
         MESSAGE_BUDGET_S,
         diagnose=lambda: seat_story(reader),
     )
+    expected = S.moderation.legal_takedown.tombstone(reference=reference)
+    assert expected in [t.strip() for t in tombstones], (
+        f"the bubble paints the shared tombstone {expected!r}, got {tombstones!r}"
+    )
     # The barrier above makes these non-vacuous: the thread painted after the
     # walk that brought the record in, and the words came with it nowhere.
-    assert not _painted(reader, words), "the withheld words must never reach the reader"
+    assert not any(words in t for t in tombstones), "the tombstone never carries the words"
     painted = [
         reader.app.driver.get_text("dm-message-text", index=i)
         for i in range(reader.app.driver.count("dm-message-text"))

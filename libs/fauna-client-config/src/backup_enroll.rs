@@ -1267,6 +1267,7 @@ mod tests {
             subhandles: false,
             registration: None,
             moderation: ModerationInfo {
+                content_policy: None,
                 extra: Default::default(),
             },
             ..Default::default()

@@ -3889,8 +3889,10 @@ async fn upload_after_the_owner_flips_a_folder_back_to_private_seals_despite_a_s
     // The flip happens on another device: the nest now says private, and this
     // page has not refreshed.
     api.set_folders(vec![folder("site")]);
-    api.fail_writes(MediaApiError::BadRequest {
-        detail: "path_seal_required".into(),
+    api.fail_writes(MediaApiError::SealRequired {
+        detail: "this nest rests no plaintext paths (S9 flip): the record must carry \
+                 path_sealed — a seal-less writer cannot sync this set"
+            .into(),
     });
 
     let raw = b"<h1>must never rest in the clear</h1>".to_vec();
@@ -3925,6 +3927,59 @@ async fn upload_after_the_owner_flips_a_folder_back_to_private_seals_despite_a_s
             fauna_core::encoding::canonical_decode(&manifest_bytes).unwrap();
         assert!(manifest.is_sealed(), "the manifest names sealed chunks");
     }
+}
+
+/// A `path_seal_required` refusal re-reads the page snapshot, and the
+/// gesture's error survives that refresh.
+///
+/// The race the fresh read cannot close: the owner flips the folder back to
+/// private between this gesture's audience read and its record. The refusal
+/// reaches the page as the typed `SealRequired` carrying the nest's prose —
+/// which never spells the code — so the refresh must key on the variant.
+#[tokio::test]
+async fn a_path_seal_required_refusal_refreshes_the_snapshot_and_keeps_the_error() {
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_folders(vec![public_folder("site")]);
+    let uploader = Arc::new(FakeMediaBlobUploader::new("beef"));
+    let machine = MediaMachine::new(
+        CountingObserver::new(),
+        api.clone(),
+        Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
+        None,
+        None,
+        None,
+    );
+    machine.refresh(None).await;
+    api.fail_writes(MediaApiError::SealRequired {
+        detail: "this nest rests no plaintext paths (S9 flip): the record must carry \
+                 path_sealed — a seal-less writer cannot sync this set"
+            .into(),
+    });
+    let before = api.calls().len();
+
+    machine
+        .upload(
+            "site".into(),
+            "dev-1".into(),
+            "index.html".into(),
+            b"<h1>raced</h1>".to_vec(),
+            KEY.to_vec(),
+        )
+        .await;
+
+    let after: Vec<_> = api.calls().into_iter().skip(before).collect();
+    let record = after
+        .iter()
+        .position(|c| matches!(c, MediaNestCall::RecordMember { .. }))
+        .expect("the gesture reached its record");
+    assert!(
+        after[record + 1..].contains(&MediaNestCall::MediaSnapshot),
+        "the refusal re-reads the snapshot: {after:?}"
+    );
+    assert!(
+        machine.snapshot().error.is_some(),
+        "the refusal stays on the page after the refresh"
+    );
 }
 
 /// A failed folder read at upload time **seals**: the plaintext
@@ -5482,6 +5537,12 @@ async fn the_attested_predecessor_ids_reach_the_seams_reader() {
 
 /// The MLS join-filter double: the groups this client has joined.
 struct Joined(Vec<&'static str>);
+
+impl fauna_media_machine::FolderChannelOwners for Joined {
+    fn folder_channel_owner(&self, _: &[u8; 32]) -> Option<fauna_core::identity::ActorId> {
+        None
+    }
+}
 
 impl fauna_media_machine::MlsQuery for Joined {
     fn is_joined_shared_set(&self, gid: &str) -> bool {

@@ -14,8 +14,8 @@ import uniffi.fauna_conversations.ConversationsManager
  * `docs/goal/ui/search.md` § User actions + § Where logic lives → *Result
  * navigation (deep link)*). No Compose/Robolectric needed: the function takes
  * plain mocked collaborators and returns a plain `() -> Unit`, so this runs as
- * a fast JVM test with no native library — the [com.fauna.app.core.PostDetailMappingTest]
- * style applied to a render-lift's routing logic.
+ * a fast JVM test with no native library, applied to a render-lift's routing
+ * logic.
  */
 class SearchResultsScreenTest {
 

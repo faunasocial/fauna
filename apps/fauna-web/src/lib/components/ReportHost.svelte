@@ -13,12 +13,12 @@
   // A failed send keeps the sheet and reports on the PAGE's `error-message` (via
   // `onerror`); a failed block/hide lands there too, BESIDE the acknowledgement —
   // never silent.
-  import { identity } from '$lib/store';
-  import { resolveLocalized } from '$lib/i18n/localized';
-  import { IDS } from '$lib/generated/uiIds';
-  import { reportSheetView, reportFailed, type ReportTarget, type ReportForm } from '$lib/wasm';
-  import { moderationAbuseReportSubmit, knocksBlock, hideReported } from '$lib/rpc';
-  import { setHiddenContent } from '$lib/contentPolicy.svelte';
+  import { identity } from '#lib/store';
+  import { resolveLocalized } from '#lib/i18n/localized';
+  import { IDS } from '#lib/generated/uiIds';
+  import { reportSheetView, reportFailed, type ReportTarget, type ReportForm } from '#lib/wasm';
+  import { moderationAbuseReportSubmit, knocksBlock, hideReported } from '#lib/rpc';
+  import { setHiddenContent } from '#lib/contentPolicy.svelte';
 
   interface Props {
     /** The subject the opening verb chose; `null` closes the sheet. */

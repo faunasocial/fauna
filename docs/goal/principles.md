@@ -85,8 +85,10 @@ owner: [`architecture/encryption-at-rest.md`](architecture/encryption-at-rest.md
 folder whose owner sets its **audience** to `public` is world-readable by
 design — its content, names, and paths (they are URLs) rest unsealed,
 integrity-protected only. The flip to public is always an explicit per-folder
-owner confirm naming that consequence, and flipping back re-seals only future
-content (rotation cannot reclaim past secrecy). Everything else stays sealed —
+owner confirm naming that consequence. Flipping back re-seals the folder's
+content, what it held while public included, but no re-seal reclaims past
+secrecy: anything read or copied while public stays public. Everything else
+stays sealed —
 in particular, **paywalled web content is *not* this exception**: it stays
 sealed under the per-folder content key, decrypted at serve time by the nest's
 web-serve holder via a scoped, revocable capability grant. Concept owner:

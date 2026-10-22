@@ -364,7 +364,7 @@ pub struct WelcomeInbox {
     pub shared_by: Option<String>,
     /// The sharer's handle — the display name for the recipient's "Shared by
     /// ‹handle›" surface (`docs/goal/ui/folders.md` § Sharing). **Join rule**
-    /// (`docs/goal/architecture/federation.md` § Cross-nest shared folders +
+    /// (`docs/goal/architecture/federation-shared-folders.md` § Cross-nest shared folders +
     /// channel append → *The cross-nest owner label*): **bare** (with
     /// [`Self::shared_by_domain`] absent) for a same-nest sharer, nest-resolved
     /// from [`Self::shared_by`]'s local `users` row; **paired** with
@@ -420,23 +420,25 @@ pub struct WelcomeInbox {
     /// foreign set) and record it on accept.
     ///
     /// **Advisory-for-UI only — never an authorization input**
-    /// (`docs/goal/architecture/federation.md` § Cross-nest → *Recipient-side
+    /// (`docs/goal/architecture/federation-shared-folders.md` § Cross-nest → *Recipient-side
     /// access discovery*): it decides whether the client OFFERS a folder
     /// binding; the write kinds are gated on the home nest's own role row.
     /// Wire-additive: absent (a non-folder channel) ⇒ unknown ⇒ treated as reader.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub access: Option<String>,
     /// The home (= origin) nest's deployment `nest_actor_id` (hex 32-byte pubkey)
-    /// for a cross-nest `folder` share — the byte-plane SPKI-pin trust root the
-    /// recipient's agent graduates against (it holds no account on the home nest;
-    /// `docs/goal/architecture/security.md` § Transport trust). `None` for a
-    /// same-nest share or a relay-unaware origin ⇒ the byte plane keeps
-    /// `RequireWebPki`. Wire-additive.
+    /// for any cross-nest channel — stamped by the recipient's own nest from the
+    /// identity it verified on the delivering channel, never the peer's word:
+    /// the byte-plane SPKI-pin trust root a folder's agent and a room's
+    /// attachment read graduate against (the recipient holds no account on the
+    /// home nest; `docs/goal/architecture/transport-trust.md` § The post arm).
+    /// `None` for a same-nest Welcome ⇒ the byte plane keeps `RequireWebPki`.
+    /// Wire-additive.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub home_nest_actor_id: Option<String>,
     /// The folder's content residency (`"metadata_only"` / `"full"`) for a
     /// cross-nest `folder` share, stamped by the home (= origin) nest off its
-    /// own row beside [`Self::access`] (`docs/goal/architecture/federation.md`
+    /// own row beside [`Self::access`] (`docs/goal/architecture/federation-shared-folders.md`
     /// § Cross-nest shared folders + channel append → *Relay serving across
     /// nests*, the `residency` stamp) — what seeds the recipient's
     /// `ForeignFolder.residency`. `None` for a same-nest share (the recipient

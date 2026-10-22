@@ -1,0 +1,36 @@
+---
+interface Props { size?: number; delay?: string; }
+const { size = 110, delay = '0s' } = Astro.props;
+---
+<svg viewBox="0 0 120 140" width={size} height={Math.round((size * 140) / 120)}
+  class="critter" style={`--wave-delay:${delay}`} aria-hidden="true">
+  <ellipse cx="60" cy="134" rx="30" ry="5" class="critter-shadow" />
+  <!-- flat tail -->
+  <ellipse cx="94" cy="124" rx="21" ry="8" transform="rotate(-15 94 124)" fill="#5e5546" />
+  <!-- waving paw -->
+  <g class="wave" style="transform-origin: 80px 96px;">
+    <ellipse cx="86" cy="86" rx="5.5" ry="13" transform="rotate(-30 86 86)" fill="#5e5546" />
+    <circle cx="91" cy="74" r="4.6" fill="#6e6455" />
+  </g>
+  <!-- body -->
+  <ellipse cx="58" cy="102" rx="26" ry="28" fill="#6e6455" />
+  <ellipse cx="58" cy="109" rx="16" ry="17" fill="#f3e6ce" />
+  <ellipse cx="37" cy="100" rx="5.5" ry="11" transform="rotate(22 37 100)" fill="#5e5546" />
+  <ellipse cx="47" cy="131" rx="7" ry="4" fill="#5e5546" />
+  <ellipse cx="69" cy="131" rx="7" ry="4" fill="#5e5546" />
+  <!-- head -->
+  <circle cx="41" cy="42" r="6" fill="#5e5546" />
+  <circle cx="75" cy="42" r="6" fill="#5e5546" />
+  <circle cx="58" cy="58" r="23" fill="#6e6455" />
+  <ellipse cx="58" cy="68" rx="15" ry="10" fill="#f3e6ce" />
+  <circle cx="49" cy="54" r="3.2" fill="#2b2a24" />
+  <circle cx="67" cy="54" r="3.2" fill="#2b2a24" />
+  <ellipse cx="58" cy="64" rx="4" ry="3" fill="#2b2a24" />
+  <path d="M53 71 Q58 75 63 71" stroke="#2b2a24" stroke-width="2" fill="none" stroke-linecap="round" />
+  <g stroke="#8a8171" stroke-width="1.6" stroke-linecap="round">
+    <line x1="44" y1="66" x2="30" y2="62" />
+    <line x1="44" y1="70" x2="30" y2="73" />
+    <line x1="72" y1="66" x2="86" y2="62" />
+    <line x1="72" y1="70" x2="86" y2="73" />
+  </g>
+</svg>

@@ -727,14 +727,25 @@ public struct AdminUsersHubView: View {
         .padding(.vertical, 4)
     }
 
+    // A control at its bound is disabled, not clickable-and-guarded (admin.md § 2
+    // Section 5; e2e convention 11) — the same pure offset rules the VM turns pages by.
+    private var canPrevPage: Bool {
+        prevPageOffset(offset: Int64(vm.offset), pageSize: Int64(vm.pageSize)) != nil
+    }
+
+    private var canNextPage: Bool {
+        nextPageOffset(offset: Int64(vm.offset), total: Int64(vm.totalUsers), pageSize: Int64(vm.pageSize)) != nil
+    }
+
     private var paginationControls: some View {
         HStack(spacing: 12) {
             Button(L.admin.usersPage.prevPage) {
                 Task { await vm.prevPage() }
             }
             .controlSize(.small)
+            .disabled(!canPrevPage)
             .accessibilityIdentifier(Ids.adminUsersPrevPage)
-            .automationActivate(Ids.adminUsersPrevPage) {
+            .automationActivate(Ids.adminUsersPrevPage, isEnabled: { canPrevPage }) {
                 Task { await vm.prevPage() }
             }
 
@@ -746,8 +757,9 @@ public struct AdminUsersHubView: View {
                 Task { await vm.nextPage() }
             }
             .controlSize(.small)
+            .disabled(!canNextPage)
             .accessibilityIdentifier(Ids.adminUsersNextPage)
-            .automationActivate(Ids.adminUsersNextPage) {
+            .automationActivate(Ids.adminUsersNextPage, isEnabled: { canNextPage }) {
                 Task { await vm.nextPage() }
             }
         }

@@ -333,16 +333,189 @@ class FamilyActions:
         the content-verdict leg of test_family.py now runs (and passes) on
         tui instead of skipping."""
 
+    def require_content_collapse_ids(self) -> None:
+        """Skip unless this app tags the content-policy COLLAPSE arm —
+        ``content-policy-blocked-notice`` in state ``collapsed`` and
+        ``content-policy-collapsed-reveal-button`` (ids user-approved
+        2026-10-16). tui leads (2026-10-17); linux, web and android followed
+        (2026-10-18); windows and macos/ios paint the arm as untagged chrome and
+        lift the ids with their family batch."""
+        if not (
+            self.driver.is_tui()
+            or self.driver.is_linux()
+            or self.driver.is_web()
+            or self.driver.is_android()
+        ):
+            from helpers.app_surface import skip_unbuilt
+
+            skip_unbuilt(
+                self.driver,
+                surface="content-policy-collapsed-reveal-button",
+                detail="the collapse placeholder's state attribute and its reveal",
+                tracked="family-client-enforcement.md § Content policy",
+            )
+
+    def content_notice_blocked(self, scope: str) -> bool:
+        """Whether ``scope`` (``post-card[i]``) shows a content-policy BLOCK —
+        ``content-policy-blocked-notice`` in state ``blocked``.
+
+        Presence alone no longer says it: an app that tags the collapse arm
+        paints the same notice in state ``collapsed``, and the viewer's own
+        default spam/phishing thresholds collapse with no guardian involved. An
+        app that paints no ``state`` attribute paints no collapse notice at all,
+        so its notice is a block."""
+        if not self.driver.is_visible("content-policy-blocked-notice", scope=scope):
+            return False
+        state = self.driver.get_attr("content-policy-blocked-notice", "state", scope=scope)
+        return state in (None, "blocked")
+
+    def content_notice_reason(self, scope: str) -> str | None:
+        """The guardian's reason painted beside ``scope``'s content-policy
+        notice (``content-policy-blocked-reason``), or ``None`` when none
+        paints — a floor, the viewer's own threshold, an unreadable document
+        (``nest-rules.md`` § The shared rule editor → *The reason is the
+        member's to read*)."""
+        if self.driver.count("content-policy-blocked-reason", scope=scope) == 0:
+            return None
+        return self.driver.get_text("content-policy-blocked-reason", scope=scope)
+
+    def content_notice_text(self, scope: str) -> str | None:
+        """The text of ``scope``'s ``content-policy-blocked-notice`` — the
+        app's fixed frame, never the guardian's reason."""
+        if self.driver.count("content-policy-blocked-notice", scope=scope) == 0:
+            return None
+        return self.driver.get_text("content-policy-blocked-notice", scope=scope)
+
+    def require_policy_hints(self) -> None:
+        """Skip unless this app tags the editor's honest-bound hint
+        (``family-policy-screen-hint``, user-approved 2026-10-16). tui leads
+        (2026-10-17); linux, web and android followed (2026-10-18); windows and
+        macos/ios lift the id with their family batch."""
+        if not (
+            self.driver.is_tui()
+            or self.driver.is_linux()
+            or self.driver.is_web()
+            or self.driver.is_android()
+        ):
+            from helpers.app_surface import skip_unbuilt
+
+            skip_unbuilt(
+                self.driver,
+                surface="family-policy-screen-hint",
+                detail="the screen-time bound on the guardian's editor, tagged",
+                tracked="family-client-enforcement.md § Screen time",
+            )
+
+    def screen_hint_text(self) -> str:
+        if not self.driver.is_visible("family-policy-screen-hint"):
+            return ""
+        return self.driver.get_text("family-policy-screen-hint")
+
+    def require_content_hint(self) -> None:
+        """Skip unless this app paints the editor's content-category honest
+        bound (``family-policy-content-hint``, user-approved 2026-10-16). tui
+        leads (2026-10-21); the other apps lift the id with their family batch."""
+        if not self.driver.is_tui():
+            from helpers.app_surface import skip_unbuilt
+
+            skip_unbuilt(
+                self.driver,
+                surface="family-policy-content-hint",
+                detail="the content-category bound on the guardian's editor, tagged",
+                tracked="family-client-enforcement.md § Content policy",
+            )
+
+    def content_hint_text(self) -> str:
+        if not self.driver.is_visible("family-policy-content-hint"):
+            return ""
+        return self.driver.get_text("family-policy-content-hint")
+
+    # The apps whose family page mounts the shared rule editor in
+    # `family-policy-rules-section` in place of the four content-floor selects
+    # (nest-rules.md § The shared rule editor (b); the selects retire app by
+    # app as each one mounts it). A floor is then a category rule at the
+    # standard level, written through the editor and saved by its own button.
+    RULES_EDITOR_APPS = ("tui", "web", "linux", "android")
+    _RULE_REASON = "Set by the guardian"
+
+    def _mounts_rules_editor(self) -> bool:
+        from helpers.app_surface import app_name
+
+        return app_name(self.driver) in self.RULES_EDITOR_APPS
+
+    def _category_rule_row(self, category: str) -> int | None:
+        """The row of the category rule on `category`, or None."""
+        from i18n.strings import S
+
+        label = getattr(S.moderation.category, category)
+        editor = self._rule_editor()
+        for row in range(editor.rule_count()):
+            if (editor.has_control(row, "rule-editor-item-category-select")
+                    and editor.picked(row, "category") == label):
+                return row
+        return None
+
+    def _rule_editor(self):
+        from actions.rule_editor import RuleEditorActions
+
+        return RuleEditorActions(self.driver)
+
     def content_floor_label(self, category: str) -> str:
         """The rendered label of a content-floor select (`category` is one of
-        nsfw|spam|phishing|commercial)."""
-        return self.driver.get_text(f"family-policy-content-{category}-select")
+        nsfw|spam|phishing|commercial). On an app mounting the rule editor, the
+        floor label the category rule stands for (`Use my settings` when there
+        is none), so callers compare one vocabulary on every app."""
+        if not self._mounts_rules_editor():
+            return self.driver.get_text(f"family-policy-content-{category}-select")
+        from i18n.strings import S
+
+        editor = self._rule_editor()
+        editor.wait_loaded()
+        row = self._category_rule_row(category)
+        if row is None:
+            return self.CONTENT_FLOOR_LABELS["inherit"]
+        verdict = editor.picked(row, "verdict")
+        return self.CONTENT_FLOOR_LABELS[
+            "block" if verdict == S.rule_editor.verdict.block else "collapse"
+        ]
 
     def set_content_floor(self, category: str, value: str) -> None:
         """Set a per-category content floor. `category` is nsfw|spam|phishing|
-        commercial; `value` is the wire value inherit|collapse|block."""
-        self.driver.select(f"family-policy-content-{category}-select",
-                           self.CONTENT_FLOOR_LABELS[value])
+        commercial; `value` is the wire value inherit|collapse|block.
+
+        On an app mounting the rule editor this adds, edits or removes the
+        category rule and SAVES it at once (the editor's own button) — the
+        policy form's save leaves the rules as they are there."""
+        if not self._mounts_rules_editor():
+            self.driver.select(f"family-policy-content-{category}-select",
+                               self.CONTENT_FLOOR_LABELS[value])
+            return
+        from i18n.strings import S
+
+        editor = self._rule_editor()
+        editor.wait_loaded()
+        row = self._category_rule_row(category)
+        if value == "inherit":
+            if row is not None:
+                self.driver.click("rule-editor-item-remove-button",
+                                  scope=f"rule-editor-item[{row}]")
+        else:
+            if row is None:
+                row = editor.add_rule()
+                editor.pick(row, "category", getattr(S.moderation.category, category))
+            editor.pick(row, "verdict", S.rule_editor.verdict.block if value == "block"
+                        else S.rule_editor.verdict.collapse)
+        # A floor set before the editor carried no reason; every rule needs one.
+        for r in range(editor.rule_count()):
+            if not self.driver.get_text("rule-editor-item-reason-input",
+                                        scope=f"rule-editor-item[{r}]"):
+                editor.type_input(r, "reason", self._RULE_REASON)
+        deadline = time.monotonic() + editor.WAIT_S
+        while not editor.save_enabled() and time.monotonic() < deadline:
+            time.sleep(0.2)
+        assert editor.save_enabled(), f"the rules cannot be saved: {editor.status()!r}"
+        editor.save()
+        editor.wait_status(S.rule_editor.saved)
 
     def require_guardian_notify_client_supported(self) -> None:
         """Skip unless this app has landed Guardian Notify's client half
@@ -446,7 +619,7 @@ class FamilyActions:
     def heartbeat(self, minutes: int) -> None:
         """Advance the ward client's screen-time clock by `minutes` of foreground
         use and run one production heartbeat step (`screen_time_heartbeat` —
-        linux `main.rs`, web `$lib/screen-time-e2e.ts`).
+        linux `main.rs`, web `#lib/screen-time-e2e.ts`).
 
         This is testing.md convention 14's fake clock + run_now poke, and it is
         the ONLY honest way to test this pillar: screen time really is a
@@ -463,6 +636,36 @@ class FamilyActions:
 
     def screen_lock_message(self) -> str:
         return self.driver.get_text("screen-time-lock-message") or ""
+
+    # --- The store-consent lock (account-age-band.md § The account age band →
+    # the store-law developer duties bullet): a whole-app GLOBAL on the two
+    # store-distributed apps, keyed on the store's own signal for the person on
+    # this device — never on supervision or the band.
+
+    def inject_play_consent_signal(self, status, approval_date=None) -> None:
+        """Stand in for Play Age Signals' answer and run one store-consent round
+        (`store_consent_inject` — android `TestAgent.kt`). Only the platform
+        read is replaced: the app runs the real shared round
+        (`fauna_ffi::store_consent_round`) over it, writes its device-local state
+        back and paints the lock from the round's own message — the
+        `set_age_claim` precedent. `status` is `"APPROVED"` / `"PENDING"` /
+        `"DECLINED"` or None (Play reported no status); `approval_date` is
+        `YYYY-MM-DD` or None."""
+        self.driver.call_command(
+            "store_consent_inject",
+            {"play": {"status": status, "approval_date": approval_date}},
+            timeout=20,
+        )
+
+    def clear_store_consent_signal(self) -> None:
+        """Drop the injected signal; the next round reads the real store again."""
+        self.driver.call_command("store_consent_inject", {"clear": True}, timeout=20)
+
+    def store_consent_lock_visible(self) -> bool:
+        return not self.driver.is_absent("store-consent-lock")
+
+    def store_consent_lock_message(self) -> str:
+        return self.driver.get_text("store-consent-lock-message") or ""
 
     def save_policy(self) -> None:
         self.driver.click("family-policy-save-button")
@@ -698,8 +901,15 @@ class FamilyActions:
         """Skip unless this app renders the guardian's feature-limits rows (e2e
         convention 7). tui is the lead app (2026-10-04); the other six follow in
         one batched trickle-down — each arm that lands widens the admitted set
-        below (linux, then web)."""
-        if not (self.driver.is_tui() or self.driver.is_linux() or self.driver.is_web()):
+        below (linux, web, then windows)."""
+        if not (
+            self.driver.is_tui()
+            or self.driver.is_linux()
+            or self.driver.is_web()
+            or self.driver.is_windows()
+            or self.driver.is_macos()
+            or self.driver.is_ios()
+        ):
             from helpers.app_surface import skip_unbuilt
 
             skip_unbuilt(

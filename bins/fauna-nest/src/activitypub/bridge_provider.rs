@@ -317,7 +317,7 @@ impl BridgeProvider for ActivityPubProvider {
             .into_iter()
             .map(|f| BridgeFollow {
                 id: f.remote_actor_uri,
-                petname: None,
+                petname: f.petname,
                 created_at: Some(f.created_at),
                 extra: None,
                 unknown_keys: Default::default(),
@@ -390,17 +390,18 @@ impl BridgeProvider for ActivityPubProvider {
         state: &AppState,
         actor_id: &str,
         id: &str,
-        _petname: Option<&str>,
+        petname: Option<&str>,
         _extra: Option<Value>,
     ) -> Result<(), BridgeError> {
-        // `id` is the remote AP actor URI. The local actor URL comes from the
+        // `id` is the remote AP actor URI; the nickname rides on the row
+        // (`bridges.md` § Follows). The local actor URL comes from the
         // stored account row — the username is minted at enablement
         // (handle-derived) and must never be re-derived here.
         let conn = state.db.conn().await;
         let account = db_helpers::get_account(&conn, actor_id)
             .map_err(|e| BridgeError::provider_error(&e.to_string()))?
             .ok_or_else(|| BridgeError::provider_error("activitypub not linked"))?;
-        db_helpers::create_follow(&conn, actor_id, id, "outbound", None)
+        db_helpers::create_outbound_follow(&conn, actor_id, id, petname)
             .map_err(|e| BridgeError::provider_error(&e.to_string()))?;
         drop(conn);
 

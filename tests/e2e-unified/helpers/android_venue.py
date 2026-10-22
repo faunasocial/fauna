@@ -7,7 +7,11 @@ emulator's machine. A tunnel carries only ports named when it is dialed, so in
 a venue run nothing may come from `find_free_port()`: every port either side
 listens on is a constant in this file, and the command that forwards them is
 generated from the same constants (`tunnel_command`, printed by
-`just android-tunnel-spec`). This module is the ONE home of all three.
+`just android-tunnel-spec`). This module is the ONE home of all three -- and
+of the two things built on them: the `launchd` agents that keep the venue up on
+the emulator's machine (`launch_agents`, printed by `just android-venue-agents`)
+and the probe that says from the dev VM whether it is up (`probe_venue`,
+`just android-venue-probe`).
 
 The topology, by direction (the side that LISTENS is named first):
 
@@ -38,8 +42,10 @@ the venue's own keeps the two apart in both directions.
 from __future__ import annotations
 
 import os
+import plistlib
 import re
 import socket
+import subprocess
 import sys
 
 #: adb's default server port, on the machine the emulator runs on. The far end
@@ -60,6 +66,9 @@ NEST_PORTS = range(18600, 18632)
 
 #: The forwarding-only key the venue's setup creates on the emulator's machine.
 TUNNEL_KEY = "~/.ssh/fauna_android_e2e_tunnel"
+
+#: The AVD the venue's setup creates.
+AVD_NAME = "fauna-e2e"
 
 
 class AndroidVenueError(RuntimeError):
@@ -214,14 +223,23 @@ def tunnel_forwards() -> list[tuple[str, int, int]]:
     return forwards
 
 
-def tunnel_command(login: str, dev_vm_address: str) -> list[str]:
-    """The `ssh` argv the emulator's machine runs to dial the dev VM."""
+def tunnel_command(login: str, dev_vm_address: str, *, key: str = TUNNEL_KEY,
+                   batch: bool = False) -> list[str]:
+    """The `ssh` argv the emulator's machine runs to dial the dev VM.
+
+    `batch` is the unattended form the `launchd` agent runs: `BatchMode=yes`
+    makes ssh fail at once on anything that would prompt (an unknown host key,
+    a passphrase) instead of waiting on a terminal nobody is at; `launchd` then
+    retries it, and its log says why.
+    """
     for name, value in (("login", login), ("address", dev_vm_address)):
         if not _SSH_WORD.match(value or ""):
             # The output is pasted into a shell on another machine.
             raise AndroidVenueError(f"tunnel {name} {value!r} is not a plain user/host word")
-    argv = ["ssh", "-N", "-i", TUNNEL_KEY,
+    argv = ["ssh", "-N", "-i", key,
             "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=30"]
+    if batch:
+        argv += ["-o", "BatchMode=yes"]
     for flag, listen, target in tunnel_forwards():
         argv += [flag, f"127.0.0.1:{listen}:127.0.0.1:{target}"]
     return [*argv, f"{login}@{dev_vm_address}"]
@@ -255,5 +273,129 @@ def tunnel_spec(login: str = "", dev_vm_address: str = "") -> str:
     ])
 
 
+# ── The standing venue: `launchd` agents on the emulator's machine ─────────
+#
+# Brought up by hand, the venue is down after every restart of its machine and
+# every run that needs it waits on a person. So it runs as three `launchd` user
+# agents there, each `RunAtLoad` + `KeepAlive`: the adb server, the headless emulator, and the
+# tunnel. Three, not two, because each is one process `launchd` restarts on its
+# own -- an adb server daemonized from another agent's script would be
+# supervised by nobody. They are user agents, not an agent *session*: no
+# checkout and no toolchain; nothing runs there but `ssh` and the SDK's own
+# binaries (constraint 1). They are generated here, from the constants above,
+# because the tunnel alone carries one forward per port of three ranges -- a
+# plist written by hand would be a second home for every number in this file.
+
+#: Where the SDK lands with either install channel (host.md step 1). Left for
+#: the shell that writes the plists to expand: `launchd` expands neither `$HOME`
+#: nor `~`.
+_SDK = "$HOME/Library/Android/sdk"
+
+#: The agents' labels, in the order they are loaded.
+AGENT_LABELS = ("social.fauna.android-adb", "social.fauna.android-emulator",
+                "social.fauna.android-tunnel")
+
+
+def launch_agent_arguments(login: str, dev_vm_address: str) -> dict[str, list[str]]:
+    """Each agent's `ProgramArguments`, by label."""
+    return {
+        # The adb server in the foreground, listening on loopback only. The
+        # explicit host matters: adb's default listen socket is `localhost`, a
+        # name, not an address.
+        AGENT_LABELS[0]: [f"{_SDK}/platform-tools/adb", "-L",
+                          f"tcp:127.0.0.1:{REMOTE_ADB_PORT}", "server", "nodaemon"],
+        AGENT_LABELS[1]: [f"{_SDK}/emulator/emulator", "-avd", AVD_NAME, "-no-window",
+                          "-no-audio", "-no-boot-anim", "-no-snapshot"],
+        # macOS's own ssh, by path: a `launchd` agent is not handed a login
+        # shell's PATH.
+        AGENT_LABELS[2]: ["/usr/bin/ssh", *tunnel_command(
+            login, dev_vm_address, key="$HOME/.ssh/fauna_android_e2e_tunnel", batch=True)[1:]],
+    }
+
+
+def launch_agents(login: str = "", dev_vm_address: str = "") -> str:
+    """What `just android-venue-agents` prints: the shell script the user runs on
+    the emulator's machine, once, to write the three plists and load them."""
+    import getpass
+
+    login = login or getpass.getuser()
+    dev_vm_address = dev_vm_address or _this_machine_address()
+    lines = [
+        "# Run on the emulator's machine, once, after its SDK, AVD, tunnel key and",
+        "# one by-hand tunnel run are in place. Writes three launchd user agents",
+        "# and loads them; each restarts when it exits and starts at every login.",
+        "# To replace an installed set, first: for agent in <the three labels>;",
+        "# do launchctl bootout gui/$(id -u)/$agent; done",
+        "mkdir -p ~/Library/LaunchAgents ~/Library/Logs",
+    ]
+    for label, arguments in launch_agent_arguments(login, dev_vm_address).items():
+        log = f"$HOME/Library/Logs/fauna-{label.removeprefix('social.fauna.')}.log"
+        body = plistlib.dumps({
+            "Label": label,
+            "ProgramArguments": arguments,
+            "EnvironmentVariables": {"ANDROID_HOME": _SDK},
+            "RunAtLoad": True,
+            "KeepAlive": True,
+            "StandardOutPath": log,
+            "StandardErrorPath": log,
+        }, sort_keys=False).decode()
+        # The heredoc is unquoted so `$HOME` expands; nothing else in it may be
+        # read by the shell, which the validated login and address guarantee.
+        if "`" in body or body.count("$") != body.count("$HOME"):
+            raise AndroidVenueError(f"plist for {label} carries shell syntax")
+        lines += [f"cat > ~/Library/LaunchAgents/{label}.plist <<EOF", body.rstrip(), "EOF"]
+    lines += [
+        f"for agent in {' '.join(AGENT_LABELS)}; do",
+        "    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/$agent.plist",
+        "done",
+        "",
+        "# Then, on the dev VM, `just android-venue-probe` answers `venue UP` once",
+        "# the emulator has booted (about a minute).",
+    ]
+    return "\n".join(lines)
+
+
+# ── The probe: is the venue up, read from the dev VM ────────────────────────
+
+
+def probe_venue(timeout: float = 5) -> tuple[bool, str]:
+    """`(up, one line saying why)`, asked of the venue's tunnelled adb server.
+
+    Built from `android_device.adb_argv` with the venue's spec, never a hand-
+    written `-H/-P` form: only `-L tcp:127.0.0.1:<port>` makes a client facing a
+    dead port exit without starting a server (`resolve_adb_server`), and a local
+    server started on 18509 would leave the tunnel unable to bind it.
+    """
+    from helpers import android_device
+
+    argv = [*android_device.adb_argv(None, ADB_SERVER_SPEC), "devices"]
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False, (f"venue DOWN: the adb server at {ADB_SERVER_SPEC} did not answer "
+                       f"in {timeout:g} s")
+    except OSError as exc:
+        return False, f"venue UNKNOWN: adb cannot run on this machine ({exc.strerror or exc})"
+    if result.returncode != 0:
+        return False, (f"venue DOWN: nothing answers at {ADB_SERVER_SPEC} -- the tunnel "
+                       f"from the emulator's machine is not up, or its adb server is stopped")
+    rows = android_device.parse_adb_devices(result.stdout)
+    ready = [serial for serial, state in rows if state == "device"]
+    if not ready:
+        seen = ", ".join(f"{serial} {state}" for serial, state in rows) or "none attached"
+        return False, (f"venue DOWN: the tunnel and adb server answer, but no device is "
+                       f"ready ({seen}) -- the emulator is stopped or still booting")
+    return True, f"venue UP: {ADB_SERVER_SPEC} serves {', '.join(ready)}"
+
+
 if __name__ == "__main__":
-    print(tunnel_spec(*sys.argv[1:3]))
+    # The recipes run this file as a script: make `helpers` importable.
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if sys.argv[1:2] == ["--probe"]:
+        up, line = probe_venue()
+        print(line)
+        sys.exit(0 if up else 1)
+    if sys.argv[1:2] == ["--agents"]:
+        print(launch_agents(*sys.argv[2:4]))
+    else:
+        print(tunnel_spec(*sys.argv[1:3]))

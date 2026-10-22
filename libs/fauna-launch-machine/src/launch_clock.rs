@@ -73,38 +73,6 @@ pub use fauna_protocol::client_clock::now_millis_or_zero;
 /// [`now_millis_or_zero`].
 pub use fauna_protocol::client_clock::now_secs_or_zero;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The launch clock and the client clock every app-held bearer's refresh
-    /// reads are ONE clock: moving it here moves the one `fauna-client`'s
-    /// `TokenCache` and `fauna-anon-client`'s mint anchor read. Two statics
-    /// would let case M go green on a seat whose refresh never saw the offset.
-    /// One test for the process-global reason; reset before returning.
-    #[test]
-    fn the_launch_clock_is_the_client_clock() {
-        struct Reset;
-        impl Drop for Reset {
-            fn drop(&mut self) {
-                set_clock_offset_secs(0);
-            }
-        }
-        let _reset = Reset;
-
-        set_clock_offset_secs(-18_000);
-        assert_eq!(fauna_protocol::client_clock::clock_offset_secs(), -18_000);
-        assert!(
-            (now_secs_or_zero() - fauna_protocol::client_clock::now_secs_or_zero()).abs() <= 10,
-            "the launch clock must read the client clock's skewed instant"
-        );
-        fauna_protocol::client_clock::set_clock_offset_secs(7_200);
-        assert_eq!(clock_offset_secs(), 7_200);
-
-        set_clock_offset_secs(0);
-        assert!(
-            (fauna_core::data::Timestamp::now_secs_or_zero() - now_secs_or_zero()).abs() <= 10,
-            "reset must return the launch clock to the real one"
-        );
-    }
-}
+// The one-clock pin moves the process-global offset, so it lives alone in
+// `tests/launch_clock_is_the_client_clock.rs`: as a unit test it skewed the
+// clock under the lib's parallel tests that read it.

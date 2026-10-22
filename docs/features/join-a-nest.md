@@ -4,6 +4,12 @@ title: Join an existing nest
 section: getting in
 goal: docs/goal/behavior/onboarding.md § 3. Invite request
 guide: docs/guides/getting-started.md § Step 3a — Join with an invite
+absences:
+  web (outcome 12): "docs/goal/behavior/account-age-band.md § App surface"
+  linux (outcome 12): "docs/goal/behavior/account-age-band.md § App surface"
+  windows (outcome 12): "docs/goal/behavior/account-age-band.md § App surface"
+  macos (outcome 12): "docs/goal/behavior/account-age-band.md § App surface"
+  tui (outcome 12): "docs/goal/behavior/account-age-band.md § App surface"
 ---
 
 ## What a user gets
@@ -16,7 +22,7 @@ request shows you the reason and lets you ask again.
 
 ## Coverage contract
 
-Stamped 2026-10-01 at e129e78aa0.
+Stamped 2026-10-17 at 7295eb4a13.
 
 1. [app] Typing your handle tells you whether that nest knows you and what happens next — `docs/goal/behavior/onboarding.md` § 2. Handle entry
    - `tests/e2e-unified/tests/test_handle_entry_outcomes.py::test_nest_user_unregistered_routes_to_invite`
@@ -44,6 +50,7 @@ Stamped 2026-10-01 at e129e78aa0.
    - `tests/e2e-unified/tests/test_trust_prompt.py::test_joining_by_invite_code_offers_the_one_tap_trust`
    - `tests/e2e-unified/tests/test_trust_prompt.py::test_the_joiner_can_decline_and_still_reach_the_app`
    - `tests/e2e-unified/tests/test_trust_prompt.py::test_the_joiner_can_accept_and_still_reach_the_app`
+   - `tests/e2e-unified/tests/test_trust_prompt.py::test_an_admitted_users_first_sign_in_offers_the_trust_and_a_later_one_does_not`
 9. [nest] A paid membership code admits you like an invite code, wherever the nest takes invite codes — `docs/goal/behavior/monetization.md` § Pillar 4
    - `tests/e2e-unified/tests/api/test_membership_admission.py::test_a_paid_membership_code_admits_like_an_invite_code`
    - `tests/e2e-unified/tests/api/test_membership_admission.py::test_a_paid_membership_code_is_refused_when_the_nest_takes_no_codes`
@@ -51,17 +58,20 @@ Stamped 2026-10-01 at e129e78aa0.
    - `tests/e2e-unified/tests/api/test_membership_admission.py::test_a_join_request_a_verified_payment_backs_is_approved_without_an_admin`
 11. [nest] A sign-up whose app reports the person as a minor is refused and pointed to joining through a guardian — `docs/goal/architecture/nest/public-mode.md` § Registration Modes
     - `tests/e2e-unified/tests/api/test_registration_posture.py::test_a_sign_up_reported_as_a_minor_is_pointed_to_a_guardian`
+12. [app] Before you send a join request or redeem a code, you are told what age range your app store will share with the nest's administrators, and whether it is shared as verified or as declared — `docs/goal/behavior/account-age-band.md` § App surface
+    - `tests/e2e-unified/tests/test_invite_request_states.py::test_age_notice_is_declared_for_an_attestation_the_nest_did_not_list`
+    - `tests/e2e-unified/tests/test_invite_request_states.py::test_age_notice_follows_the_minted_nonces_platform_list`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.2-dev+4bc2efab standalone |
-| linux | ✅ full | 0.1.4-dev+52904896 standalone |
-| windows | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| macos | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| ios | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| web | ⚠ partial | 0.1.2-dev+4bc2efab standalone |
+| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
+| windows | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| macos | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| ios | ⚠ partial | 0.1.5-dev+61b844ca standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.2-dev+7663afa6 standalone |
 
@@ -71,7 +81,7 @@ Stamped 2026-10-01 at e129e78aa0.
 | 1 | app | `tests/e2e-unified/tests/test_handle_entry_outcomes.py::test_already_on_nest_handle_matches_enables_continue` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/test_handle_entry_outcomes.py::test_probe_error_transient_shows_retry` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_invite_request_submit_roundtrip.py::test_invite_request_submit_reaches_pending_review` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_invite_request_states.py::test_pending_review_shows_recheck_and_disables_continue` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_invite_request_states.py::test_pending_review_shows_recheck_and_disables_continue` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_pending_invite_journey.py::test_admin_approval_advances_the_requester_with_no_user_action` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_pending_invite_journey.py::test_a_denied_requester_reads_the_reason_and_can_resubmit` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_invite_request_states.py::test_denied_shows_reason_disables_continue` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
@@ -85,8 +95,12 @@ Stamped 2026-10-01 at e129e78aa0.
 | 8 | app | `tests/e2e-unified/tests/test_trust_prompt.py::test_joining_by_invite_code_offers_the_one_tap_trust` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_trust_prompt.py::test_the_joiner_can_decline_and_still_reach_the_app` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_trust_prompt.py::test_the_joiner_can_accept_and_still_reach_the_app` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 8 | app | `tests/e2e-unified/tests/test_trust_prompt.py::test_an_admitted_users_first_sign_in_offers_the_trust_and_a_later_one_does_not` | web (linux): failed, tui (linux): passed |
 | 9 | nest | `tests/e2e-unified/tests/api/test_membership_admission.py::test_a_paid_membership_code_admits_like_an_invite_code` | nest (linux): passed |
 | 9 | nest | `tests/e2e-unified/tests/api/test_membership_admission.py::test_a_paid_membership_code_is_refused_when_the_nest_takes_no_codes` | nest (linux): passed |
 | 10 | nest | `tests/e2e-unified/tests/api/test_membership_admission.py::test_a_join_request_a_verified_payment_backs_is_approved_without_an_admin` | nest (linux): passed |
 | 11 | nest | `tests/e2e-unified/tests/api/test_registration_posture.py::test_a_sign_up_reported_as_a_minor_is_pointed_to_a_guardian` | nest (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_invite_request_states.py::test_age_notice_is_declared_for_an_attestation_the_nest_did_not_list` | web (linux): skipped |
+| 12 | app | `tests/e2e-unified/tests/test_invite_request_states.py::test_age_notice_follows_the_minted_nonces_platform_list` | web (linux): skipped |
+| 12 | app | absent by design on web, linux, windows, macos, tui | — |
 <!-- features-render:end -->

@@ -579,13 +579,14 @@ public sealed partial class ConversationsPage : Page
             classToken: room is null
                 ? null
                 : FaunaConversationsMethods.RoomClassAttrToken(room.@class));
-        // `thread-room-notice` — the room's standing notice, which of the two (if
-        // any) holds decided by the shared `RoomNoticeFor` over the projected
-        // room's two facts, its sentence and `state` token by the shared helpers;
+        // `thread-room-notice` — the room's standing notice, which one (if any)
+        // holds decided by the shared `RoomNoticeFor` over the projected room's
+        // three facts, its sentence and `state` token by the shared helpers;
         // there is no `room.notice()` on the C# record to ask instead.
         var notice = room is null
             ? null
-            : FaunaConversationsMethods.RoomNoticeFor(room.awaitingKey, room.moderationUnverified);
+            : FaunaConversationsMethods.RoomNoticeFor(
+                room.awaitingKey, room.moderationUnverified, room.bridgeDisconnected);
         DetailThreadHeader.SetRoomNotice(
             notice is { } noticeForLabel ? FaunaConversationsMethods.RoomNoticeLabel(noticeForLabel) : null,
             notice is { } noticeForToken ? FaunaConversationsMethods.RoomNoticeAttrToken(noticeForToken) : null);
@@ -2008,8 +2009,9 @@ public sealed partial class ConversationsPage : Page
         return new FaunaApp.Controls.DmMessageView(
             Id: m.messageId,
             From: from,
-            SignatureValid: m.badges.signed,
             Encrypted: m.badges.encrypted,
+            Signed: m.badges.signed,
+            Verified: m.badges.verified,
             // Per-message bubble timestamp through the SAME shared bucketer the
             // conversation-list row uses (value-formatting.md § Conversation
             // timestamp); we only supply live `now` + the machine's local UTC

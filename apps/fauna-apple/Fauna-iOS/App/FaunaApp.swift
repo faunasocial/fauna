@@ -240,7 +240,6 @@ public struct FaunaApp: App {
 
     #if os(iOS)
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @State private var pushManager: PushManager?
     #endif
 
     public init() {
@@ -330,6 +329,12 @@ public struct FaunaApp: App {
                 // hosts hand it to `BridgeManagerVM` (family-safety.md §§
                 // Child-initiated contact requests / Feed-source approvals).
                 .environment(appState.familyStatus)
+                // The shared FaunaKit `SubscriptionTiersTab` reads
+                // `@Environment(WebPublishStore.self)` for the creator's web-site
+                // origin (the §4 provider form's return-URL display).
+                #if !FAUNA_KIDS
+                .environment(appState.webPublish)
+                #endif
                 // Inject the FaunaClient every `@Environment(FaunaClient.self)`
                 // view (admin shell, mail-settings, …) reads. **The observed slot
                 // is asked FIRST, the `@State` is only the fallback** — every path
@@ -752,29 +757,12 @@ public struct FaunaApp: App {
             #endif
         }
 
-        #if os(iOS)
-        // Initialize push notification manager
-        let pm = PushManager(api: faunaClient.api, deviceId: deviceId)
-        self.pushManager = pm
-        appDelegate.pushManager = pm
         // `appDelegate.appState` and the two drafts-rail VM slots are NOT set
         // here: this function is a branch (withheld for a pending-factory-reset
         // slot, re-entered only `if client == nil`), and the leave-flush door
         // must be reachable on every launch. They are wired in the scene's
         // `.onAppear`, where macOS wires its own — see the note there.
-        UNUserNotificationCenter.current().delegate = appDelegate
-
-        // The shared session start — the macOS twin of this line sits in
-        // `FaunaMacApp.completeAuthenticatedLaunch`: announce which device this
-        // connection serves, and re-arm APNs only for an install that already
-        // opted in (`PushManager.shouldRegisterAtLaunch` carries the reasoning:
-        // the OS permission is not the opt-in, it survives a switch-off
-        // untouched, so gating on it alone silently restored the subscription
-        // the user just deleted). One call, so the two targets cannot drift.
-        Task {
-            await pm.onSessionStart()
-        }
-        #endif
+        startPushSession(faunaClient, deviceId: deviceId)
 
         // ── The succession's closing act, on the SUCCESSOR's first
         // authenticated session (`identity-succession.md` § The RecoveryKey →
@@ -877,6 +865,31 @@ public struct FaunaApp: App {
     @MainActor
     private func applyHeldRoute() {
         if ConsentHandoff.shared.takeHeld() { showConnectedApps() }
+    }
+
+    /// The push session start, run by every sign-in path — the launch and the
+    /// e2e agent's session patch alike, so the patch exercises the same
+    /// announce a user's launch makes. The macOS twin is
+    /// `FaunaMacApp.startPushSession`: announce which device this connection
+    /// serves, and re-arm APNs only for an install that already opted in
+    /// (`PushManager.shouldRegisterAtLaunch` carries the reasoning: the OS
+    /// permission is not the opt-in, it survives a switch-off untouched, so
+    /// gating on it alone silently restored the subscription the user just
+    /// deleted). One call, so the two targets cannot drift. The AppDelegate's
+    /// slot is the one strong reference — a class-held slot, so a write from
+    /// the patch (which runs on the App value `init()` captured) is not lost
+    /// the way an App-struct `@State` write would be — and the Settings page
+    /// reads `PushManager.sessionManager`.
+    @MainActor
+    private func startPushSession(_ faunaClient: FaunaClient, deviceId: String) {
+        #if os(iOS)
+        let pm = PushManager(api: faunaClient.api, deviceId: deviceId)
+        appDelegate.pushManager = pm
+        UNUserNotificationCenter.current().delegate = appDelegate
+        Task {
+            await pm.onSessionStart()
+        }
+        #endif
     }
 
     @MainActor
@@ -1636,6 +1649,8 @@ public struct FaunaApp: App {
                     // Interaction bar → Repost, ratified 2026-08-10) — same as
                     // macOS, mirrors linux's identical state keys.
                     "reposted_post_id": post.repostedPostId ?? "",
+                    // A quote post's quoted original, beside it (tui/linux/web's key).
+                    "quoted_post_id": post.quotedPostId ?? "",
                     "viewer_repost_id": post.viewerRepostId ?? "",
                     // Every link preview with its state (render-model.md § D4)
                     // — same key as macOS, tui and linux.
@@ -1795,6 +1810,10 @@ public struct FaunaApp: App {
                 if !conversationsVM.manager.acceptCurrentRecipientChip() {
                     testAgentFailure(
                         "conversations_accept_recipient: \(acceptRecipientNoChipReason)")
+                } else {
+                    // The same follow-up the user's Enter runs
+                    // (`NewThreadComposeForm`'s `onAcceptCurrent`).
+                    await conversationsVM.refreshListSend(nil)
                 }
             case "conversations_real_resolve_send_new":
                 if let reason = await ConversationsSendTestCommand.resolveSendNew(command, vm: conversationsVM) {
@@ -2222,6 +2241,9 @@ public struct FaunaApp: App {
                     // valid API token — avoids the auth timing race.
                     try? await faunaClient.api.authenticate(secret: secret)
                     self.client = faunaClient
+                    // This patch is a sign-in too: the same push session start
+                    // (the presence announce) the launch path makes.
+                    startPushSession(faunaClient, deviceId: deviceId)
                     await faunaClient.start()
                     // Critical-alerts session-start + periodic re-sweep loop —
                     // the e2e session-patch path calls the full `start()`
@@ -2537,10 +2559,10 @@ public struct FaunaApp: App {
         // session start (`PushManager.onSessionStart`), while the bit is set.
         // `#if os(iOS)`-gated because `pushManager` itself is (the `swift
         // build --target FaunaiOS` host typecheck excludes it). Through
-        // `appDelegate.pushManager` — the same observed-slot door
-        // `enterOptimistically` writes alongside the raw `@State` — not the
-        // raw property: this function is `appState.onSwitchAccount`-reachable,
-        // and a raw read is the row 376 bug class.
+        // `appDelegate.pushManager` — the class-held slot `startPushSession`
+        // writes, the only one there is: this function is
+        // `appState.onSwitchAccount`-reachable, and an App-struct `@State`
+        // read is the row 376 bug class.
         #if os(iOS)
         await appDelegate.pushManager?.dropActorRow()
         #endif
@@ -2648,6 +2670,7 @@ public struct FaunaApp: App {
         appState.session.pendingWebdavEnable = false
         appState.session.pendingTrustPromptGranted = false
         appState.session.pendingRecoveryKitHex = nil
+        appState.session.pendingDnsCredential = nil
 
         client = nil
         appState.liveClient = nil
@@ -2703,7 +2726,8 @@ public struct FaunaApp: App {
             dismissWizard: { appState.isAddingAccount = false },
             switchAccount: { actorId, confirmed in
                 try? await self.switchAccount(to: actorId, confirmed: confirmed)
-            }
+            },
+            reportRefused: AccountSwitcherVM.postAddRefused
         )
     }
 

@@ -16,7 +16,7 @@ that in the admin area.
 
 ## Coverage contract
 
-Stamped 2026-10-01 at dc4b94e0f1.
+Stamped 2026-10-21 at 77c610862e.
 
 1. [nest] The app is served at the nest's address, distinct from the info page, with its scripts typed correctly and its security headers present — `docs/goal/behavior/web-content-hosting.md` § Serving the SPA is artifact wiring
    - `tests/e2e-unified/tests/platform/docker/test_spa_serving.py::test_app_path_serves_the_spa_not_the_info_page`
@@ -27,7 +27,7 @@ Stamped 2026-10-01 at dc4b94e0f1.
    - `tests/e2e-unified/tests/platform/docker/test_spa_serving.py::test_a_box_with_no_static_dir_self_heals_on_restart`
 3. [nest] A nest that carries no copy of the app answers its app address as not found, never with its information page or anyone's website — `docs/goal/behavior/web-content-hosting.md` § Serving the SPA is artifact wiring
    - `tests/e2e-unified/tests/api/test_web_app_origin.py::test_the_admin_choice_flips_app_to_the_central_origin_and_back`
-4. [nest] The app address refuses to be framed by another site whatever it answers, including when it sends you on to the central app — `docs/goal/behavior/web-content-hosting.md` § Same-origin security model
+4. [nest] The app address refuses to be framed by another site whatever it answers, including when it sends you on to the Fauna project's own address for the app — `docs/goal/behavior/web-content-hosting.md` § Same-origin security model
    - `tests/e2e-unified/tests/api/test_web_app_origin.py::test_the_admin_choice_flips_app_to_the_central_origin_and_back`
 5. [nest] The app page your nest serves runs only its own scripts, with no inline or outside scripts and no plugins — `docs/goal/behavior/web-content-hosting.md` § Implementation status today
    - `tests/e2e-unified/tests/platform/docker/test_spa_serving.py::test_the_served_app_runs_only_its_own_scripts`
@@ -36,7 +36,7 @@ Stamped 2026-10-01 at dc4b94e0f1.
    - `tests/e2e-unified/tests/api/test_web_served_headers.py::test_no_door_of_the_nest_ever_sets_a_cookie`
 7. [nest] A request for one of the app's script or style files that the nest does not have is answered as not found, never with the app's page — `docs/goal/behavior/web-content-hosting.md` § The nest-served `/app/` and the central origin
    - `tests/e2e-unified/tests/test_static_serving.py::test_missing_asset_under_the_hashed_tree_is_not_found_not_the_page`
-8. [app] Arriving at the app from a nest that sends visitors to the central app, the sign-in page already names that nest, and a link naming anything that is not a nest address is quietly ignored — `docs/goal/behavior/onboarding.md` § 2. Handle entry (`handle_entry`)
+8. [app] Arriving at the app from a nest that sends visitors to the Fauna project's own address for the app, the sign-in page already names that nest, and a link naming anything that is not a nest address is quietly ignored — `docs/goal/behavior/onboarding.md` § 2. Handle entry (`handle_entry`)
    - `tests/e2e-unified/tests/test_onboarding_nest_hint.py::test_the_nest_hint_prefills_the_domain_part_and_the_check_still_runs`
    - `tests/e2e-unified/tests/test_onboarding_nest_hint.py::test_an_unclassifiable_nest_hint_is_dropped_silently`
 

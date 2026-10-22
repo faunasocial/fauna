@@ -163,10 +163,9 @@ pub fn build(
     // Legal-takedown tombstone (moderation.md § Categories & enforcement item 1):
     // the nest withheld the sealed envelope under a legal obligation, so the bubble
     // collapses (like `deleted`) to the shared localized tombstone rendered in place
-    // of the withheld body — never a blank/failed-decrypt bubble. No dedicated test
-    // ID (presentation, like the post quoted-post tombstone `document.rs` /
-    // ContentLabelBadge; a new e2e id would need ui.yaml approval first, § UI
-    // Consistency A). The DOM twin is web `+page.svelte`'s legal_takedown_ref arm.
+    // of the withheld body — never a blank/failed-decrypt bubble. ui.yaml
+    // `dm-message-legal-takedown`, the twin of `dm-message-deleted`. The DOM twin
+    // is web `+page.svelte`'s legal_takedown_ref arm.
     if let Some(reference) = &msg.legal_takedown_ref {
         let tombstone = gtk::Label::new(Some(
             &crate::i18n::strings::moderation::legal_takedown::tombstone(reference),
@@ -176,7 +175,26 @@ pub fn build(
         tombstone.set_halign(gtk::Align::Start);
         tombstone.set_wrap(true);
         tombstone.set_xalign(0.0);
+        crate::testid::set_test_id(&tombstone, ids::DM_MESSAGE_LEGAL_TAKEDOWN);
         bubble.append(&tombstone);
+        bubble.append(&message_timestamp_label(msg.timestamp_ms, is_selected));
+        bubble.set_overflow(gtk::Overflow::Hidden);
+        return bubble;
+    }
+
+    // Admin-block notice (moderation.md § Admin block of a reported item): a
+    // withheld record (empty document) collapses to the shared notice exactly as
+    // the tombstone above does; the author's own blocked message keeps its body
+    // and paints the notice beside it (decision 4) — see `append_full_content`.
+    // No dedicated test ID (presentation; a new e2e id would need ui.yaml approval).
+    if let (Some(reason), AdminBlockPaint::InPlace) = (
+        &msg.admin_block_reason,
+        admin_block_paint(
+            msg.admin_block_reason.is_some(),
+            msg.document.blocks.is_empty(),
+        ),
+    ) {
+        bubble.append(&admin_block_notice_label(reason));
         bubble.append(&message_timestamp_label(msg.timestamp_ms, is_selected));
         bubble.set_overflow(gtk::Overflow::Hidden);
         return bubble;
@@ -211,13 +229,13 @@ pub fn build(
     // the guardian floor enforces on it — a no-op unless content_notify is on.
     // Deduped per message per local day; the app's flush tick reports the batch.
     crate::content_policy::note_enforcement(&msg.message_id.0, &msg.labels);
-    // A REGION verdict paints the region's own placeholder (the region, its
-    // authority, the authority's reason verbatim) — the same verb as the family
-    // arm below, better attributed; a revealed region `collapse` falls through
-    // to the ordinary arms (tui's `conversations/mod.rs` order).
-    if let Some(withheld) = crate::region::region_verdict(&composed)
-        && (withheld.verb == fauna_client_region::RegionVerb::Block
-            || !crate::conversations::is_content_revealed(&msg.message_id))
+    // A REGION or NEST verdict paints its own placeholder (the region and its
+    // authority, or the nest's domain, and the publisher's reason verbatim) —
+    // the same verb as the family arm below, better attributed; a revealed
+    // `collapse` falls through to the ordinary arms (tui's
+    // `conversations/mod.rs` order).
+    if let Some(withheld) = crate::nest_rules::Withheld::from_verdict(&composed)
+        && (withheld.is_block() || !crate::conversations::is_content_revealed(&msg.message_id))
     {
         let b = bubble.clone();
         let mid = msg.message_id.clone();
@@ -228,7 +246,7 @@ pub fn build(
         let cl = client.clone();
         let rth = rt.clone();
         let latest = Rc::clone(latest_by_id);
-        bubble.append(&crate::region::placeholder_box(&withheld, move || {
+        bubble.append(&withheld.placeholder_box(move || {
             crate::conversations::reveal_content(mid.clone());
             let Some(m) = latest.borrow().get(&mid).cloned() else {
                 return;
@@ -265,10 +283,16 @@ pub fn build(
         placeholder.set_wrap(true);
         placeholder.set_xalign(0.0);
         crate::testid::set_test_id(&placeholder, ids::CONTENT_POLICY_BLOCKED_NOTICE);
+        crate::testid::set_test_attr(&placeholder, "state", "blocked");
         if composed.reported() {
             crate::testid::set_test_attr(&placeholder, "source", "reported");
         }
         bubble.append(&placeholder);
+        // The guardian rule's reason, verbatim beside the frame (`nest-rules.md`
+        // § The shared rule editor → *The reason is the member's to read*).
+        if let Some(reason) = crate::content_policy::reason_label(&composed) {
+            bubble.append(&reason);
+        }
         bubble.append(&message_timestamp_label(msg.timestamp_ms, is_selected));
         bubble.set_overflow(gtk::Overflow::Hidden);
         return bubble;
@@ -288,9 +312,7 @@ pub fn build(
             &msg.body,
         )
     {
-        let placeholder = gtk::Label::new(Some(
-            crate::i18n::strings::conversations::detail::MUTED_WORD,
-        ));
+        let placeholder = gtk::Label::new(Some(crate::i18n::strings::muted_words::COLLAPSED));
         placeholder.add_css_class("dim-label");
         placeholder.add_css_class("message-deleted");
         placeholder.set_halign(gtk::Align::Start);
@@ -298,8 +320,7 @@ pub fn build(
         crate::testid::set_test_id(&placeholder, ids::DM_MESSAGE_MUTED);
         bubble.append(&placeholder);
 
-        let reveal =
-            gtk::Button::with_label(crate::i18n::strings::conversations::detail::MUTED_REVEAL);
+        let reveal = gtk::Button::with_label(crate::i18n::strings::muted_words::REVEAL);
         reveal.add_css_class("flat");
         reveal.set_halign(gtk::Align::Start);
         crate::testid::set_test_id(&reveal, ids::DM_MESSAGE_MUTED_REVEAL_BUTTON);
@@ -351,7 +372,10 @@ pub fn build(
     // collapsed with a session-local reveal — the same shape as the muted collapse
     // above but its own reveal set (`REVEALED_CONTENT`). `Block` above already
     // returned, so only `Collapse` reaches here; the floor itself persists (the
-    // guardian relaxing it is what stops future collapse).
+    // guardian relaxing it is what stops future collapse). The block arm's
+    // notice in `state="collapsed"` beside
+    // `content-policy-collapsed-reveal-button` (ids user-approved 2026-10-16),
+    // the feed's twin.
     if content_verdict == RenderVerdict::Collapse
         && !crate::conversations::is_content_revealed(&msg.message_id)
     {
@@ -361,11 +385,17 @@ pub fn build(
         placeholder.add_css_class("message-deleted");
         placeholder.set_halign(gtk::Align::Start);
         placeholder.set_xalign(0.0);
+        crate::testid::set_test_id(&placeholder, ids::CONTENT_POLICY_BLOCKED_NOTICE);
+        crate::testid::set_test_attr(&placeholder, "state", "collapsed");
         bubble.append(&placeholder);
+        if let Some(reason) = crate::content_policy::reason_label(&composed) {
+            bubble.append(&reason);
+        }
 
         let reveal = gtk::Button::with_label(crate::i18n::strings::family::CONTENT_REVEAL_BUTTON);
         reveal.add_css_class("flat");
         reveal.set_halign(gtk::Align::Start);
+        crate::testid::set_test_id(&reveal, ids::CONTENT_POLICY_COLLAPSED_REVEAL_BUTTON);
         // Reveal in place: clear the placeholder + button, render the full
         // content the same way the normal (non-collapsed) path below does.
         // Reads off `latest_by_id` at click time — see the muted-reveal arm's
@@ -436,6 +466,61 @@ pub fn build(
 /// somewhere to land its mark. `selected` is always present (`"true"`/
 /// `"false"`), never omitted when false, so a test can tell "not selected"
 /// apart from "this app never painted the attribute" (testing.md point 6).
+/// How a message carrying `admin_block_reason` paints (moderation.md § Admin
+/// block of a reported item, decision 4): in place of the bubble for a withheld
+/// record (empty document — the Rust `MessageSnapshot::admin_block_in_place`),
+/// beside the author's kept body otherwise.
+#[derive(Debug, PartialEq, Eq)]
+enum AdminBlockPaint {
+    None,
+    InPlace,
+    Beside,
+}
+
+fn admin_block_paint(has_reason: bool, document_empty: bool) -> AdminBlockPaint {
+    match (has_reason, document_empty) {
+        (false, _) => AdminBlockPaint::None,
+        (true, true) => AdminBlockPaint::InPlace,
+        (true, false) => AdminBlockPaint::Beside,
+    }
+}
+
+/// The words of a `dm-message-withheld-badge`: the shared lines joined ` · `.
+fn withheld_badge_text(withheld: &fauna_conversations::message::WithheldOwnMessage) -> String {
+    withheld
+        .lines
+        .iter()
+        .map(crate::report::resolve_nested)
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// `dm-message-withheld-badge` — a flat button whose tap asks the app to open the queue
+/// row's appeal (`FaunaClient::open_withheld_appeal`).
+fn withheld_badge(
+    withheld: &fauna_conversations::message::WithheldOwnMessage,
+    client: &std::rc::Rc<crate::client::FaunaClient>,
+) -> gtk::Button {
+    let badge = gtk::Button::with_label(&withheld_badge_text(withheld));
+    badge.add_css_class("flat");
+    badge.set_halign(gtk::Align::Start);
+    crate::testid::set_test_id(&badge, ids::DM_MESSAGE_WITHHELD_BADGE);
+    let content_id = withheld.content_id.clone();
+    let client = std::rc::Rc::clone(client);
+    badge.connect_clicked(move |_| client.open_withheld_appeal(content_id.clone()));
+    badge
+}
+
+fn admin_block_notice_label(reason: &str) -> gtk::Label {
+    let notice = gtk::Label::new(Some(&crate::report::admin_block_notice(reason)));
+    notice.add_css_class("dim-label");
+    notice.add_css_class("message-deleted");
+    notice.set_halign(gtk::Align::Start);
+    notice.set_wrap(true);
+    notice.set_xalign(0.0);
+    notice
+}
+
 fn message_timestamp_label(then_ms: i64, is_selected: bool) -> gtk::Label {
     let now_ms = fauna_core::data::Timestamp::now_millis_or_zero() as i64;
     let time_label = gtk::Label::new(Some(&crate::i18n::conversation_timestamp(then_ms, now_ms)));
@@ -554,6 +639,25 @@ fn append_full_content(
     crate::testid::set_test_id(&body, ids::DM_MESSAGE_TEXT);
     bubble.append(&body);
 
+    // The author's own blocked message: the notice right below the kept body — unless the
+    // withheld badge below carries it, so the bubble says it once.
+    if let Some(reason) = &msg.admin_block_reason
+        && !msg
+            .withheld
+            .as_ref()
+            .is_some_and(|w| w.carries_block_notice())
+    {
+        bubble.append(&admin_block_notice_label(reason));
+    }
+
+    // The author's own message the nest withholds, matched to their queue row
+    // (`MessageSnapshot::withheld`; `moderation.md` § Legal takedown → *App render*, the
+    // fourth surface): the shared lines side by side, resolved nested, and one tap opens
+    // that row's appeal on the Moderation page.
+    if let Some(withheld) = &msg.withheld {
+        bubble.append(&withheld_badge(withheld, client));
+    }
+
     // Inline remote images render BLOCKED until revealed (html-mail Slice 3 — the
     // privacy perimeter: untrusted inbound mail/DM content must never auto-fetch
     // remote refs / tracking pixels). The per-message `load-remote-content-button`
@@ -588,6 +692,77 @@ fn append_full_content(
     // Attachments are no longer appended here: the manager projects each into an
     // `Attachment` block after the body (render-model.md § D2), so `render_to_widget`
     // paints them in body order as part of the one document walk above.
+
+    // An own message its bridge never took (`MessageSnapshot::undelivered`, the
+    // shared answer; `apps/bridges.md` § Phase G → *When the bridge stops
+    // serving*): said in words under the body, which stays in view
+    // (`ui/conversations.md` § Element IDs → `dm-message-undelivered`). Twin of
+    // tui's label of the same id.
+    if msg.undelivered {
+        let undelivered = gtk::Label::new(Some(
+            crate::i18n::strings::conversations::unified::DM_MESSAGE_UNDELIVERED,
+        ));
+        undelivered.add_css_class("dim-label");
+        undelivered.set_halign(gtk::Align::Start);
+        undelivered.set_xalign(0.0);
+        undelivered.set_wrap(true);
+        crate::testid::set_test_id(&undelivered, ids::DM_MESSAGE_UNDELIVERED);
+        bubble.append(&undelivered);
+    }
+
+    // An own sent mail the fresh-IP warm-up is holding back
+    // (`MessageSnapshot::warmup_hold`; `mail-deliverability.md` § Enforcement at
+    // submission time): when it goes out and how many are ahead of it, in the
+    // shared wording, which falls silent once the release has come. Twin of
+    // tui's label of the same id.
+    if let Some(line) = msg.warmup_hold.as_ref().and_then(|hold| {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        fauna_conversations::message::warmup_deferred_text(hold, now_secs)
+    }) {
+        let deferred = gtk::Label::new(Some(&line));
+        deferred.add_css_class("dim-label");
+        deferred.set_halign(gtk::Align::Start);
+        deferred.set_xalign(0.0);
+        deferred.set_wrap(true);
+        crate::testid::set_test_id(&deferred, ids::DM_MESSAGE_WARMUP_DEFERRED);
+        bubble.append(&deferred);
+    }
+
+    // The alias a received mail message arrived on, and its label
+    // (`MessageSnapshot::delivered_to`, the shared wording resolved when the
+    // thread opened; `mail-aliases.md` § Label). Twin of tui's label of the
+    // same id.
+    if let Some(line) = &msg.delivered_to {
+        let delivered = gtk::Label::new(Some(line));
+        delivered.add_css_class("dim-label");
+        delivered.set_halign(gtk::Align::Start);
+        delivered.set_xalign(0.0);
+        delivered.set_wrap(true);
+        crate::testid::set_test_id(&delivered, ids::DM_MESSAGE_DELIVERED_TO_ALIAS);
+        bubble.append(&delivered);
+    }
+
+    // A received mail message's own perimeter scan verdict — ClamAV, rspamd, the
+    // action taken — as the shared lines (`MessageSnapshot::scan_result_lines`,
+    // read when the thread opened; `mail-content-scanning.md` § User sees their
+    // own message's row). One element, the lines in order, resolved through
+    // linux's i18n runtime; twin of tui's label of the same id.
+    if !msg.scan_result_lines.is_empty() {
+        let lines: Vec<String> = msg
+            .scan_result_lines
+            .iter()
+            .map(crate::report::resolve_nested)
+            .collect();
+        let scan = gtk::Label::new(Some(&lines.join(" · ")));
+        scan.add_css_class("dim-label");
+        scan.set_halign(gtk::Align::Start);
+        scan.set_xalign(0.0);
+        scan.set_wrap(true);
+        crate::testid::set_test_id(&scan, ids::DM_MESSAGE_SCAN_RESULT);
+        bubble.append(&scan);
+    }
 
     // Aggregated reactions under the bubble (`dm-reaction-pill[i]` — emoji + count,
     // own highlighted, tap-to-toggle). Rendered only when the message carries any;
@@ -916,4 +1091,20 @@ fn build_actions_button(
         btn.connect_clicked(move |_| pop.popup());
     }
     btn
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AdminBlockPaint, admin_block_paint};
+
+    #[test]
+    fn an_admin_blocked_message_paints_in_place_only_for_a_withheld_record() {
+        // A withheld record (empty document) collapses to the notice alone.
+        assert_eq!(admin_block_paint(true, true), AdminBlockPaint::InPlace);
+        // The author's kept body (non-empty document) paints with the notice beside it.
+        assert_eq!(admin_block_paint(true, false), AdminBlockPaint::Beside);
+        // An unblocked message paints no notice either way.
+        assert_eq!(admin_block_paint(false, false), AdminBlockPaint::None);
+        assert_eq!(admin_block_paint(false, true), AdminBlockPaint::None);
+    }
 }

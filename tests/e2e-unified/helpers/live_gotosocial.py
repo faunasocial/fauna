@@ -156,7 +156,7 @@ def _indent(text: str, spaces: int) -> str:
 
 
 def provision_gotosocial_peer(token: str, zone: dict, runid: str,
-                              *, scratch_dir: str) -> "LiveGoToSocialPeer":
+                              *, dns_token: str, scratch_dir: str) -> "LiveGoToSocialPeer":
     """Create VPS #2 (the GoToSocial peer) + its public A record, wait for the
     real Let's Encrypt cert to serve, and return a driven peer.
 
@@ -222,7 +222,7 @@ def provision_gotosocial_peer(token: str, zone: dict, runid: str,
 
     # Publish the public A record so the ACME HTTP-01 challenge resolves. The
     # RRset name carries the run anchor, so the box fixture's DNS sweep clears it.
-    _publish_a(token, zone["id"], rrset_name, ipv4)
+    _publish_a(dns_token, zone["id"], rrset_name, ipv4)
     print(f"[gts-peer] published A {rrset_name}.{zone['name']} -> {ipv4}")
 
     # Return WITHOUT blocking on the cert: the caller kicks off VPS #1's

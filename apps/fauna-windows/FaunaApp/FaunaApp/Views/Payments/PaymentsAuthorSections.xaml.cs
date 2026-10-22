@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml.Controls;
 using Windows.ApplicationModel.DataTransfer;
 using FaunaApp.Core.Models;
 using FaunaApp.Core.ViewModels;
+using S = FaunaApp.Core.Services.Strings;
 
 namespace FaunaApp.Views.Payments;
 
@@ -26,6 +27,8 @@ namespace FaunaApp.Views.Payments;
 public sealed partial class PaymentsAuthorSections : UserControl
 {
     private ProfileViewModel? _vm;
+    /// <summary>The viewer's own handle — the one input the web-site origin resolve needs.</summary>
+    private string? _handle;
 
     public PaymentsAuthorSections()
     {
@@ -34,9 +37,10 @@ public sealed partial class PaymentsAuthorSections : UserControl
 
     /// <summary>Bind to the page's view model. Called once, from the host page's
     /// <c>Page_Loaded</c>, before its first <see cref="UpdateDerivedUi"/>.</summary>
-    public void Attach(ProfileViewModel vm)
+    public void Attach(ProfileViewModel vm, string? handle = null)
     {
         _vm = vm;
+        _handle = handle;
         ProvidersList.ItemsSource = vm.Providers;
         ClaimsList.ItemsSource = vm.Claims;
         // §4's kind select is static (the shared fauna-payments registry) — populate
@@ -78,6 +82,9 @@ public sealed partial class PaymentsAuthorSections : UserControl
             case nameof(ProfileViewModel.ProviderWebhookUrl):
                 ProviderWebhookUrlBox.Text = _vm.ProviderWebhookUrl;
                 return true;
+            case nameof(ProfileViewModel.ProviderReturnUrl):
+                PaintReturnUrl();
+                return true;
             default:
                 return false;
         }
@@ -105,6 +112,10 @@ public sealed partial class PaymentsAuthorSections : UserControl
     {
         if (_vm is null) return;
         _vm.OpenProviderForm();
+        PaintReturnUrl();
+        // Hydrate the web-site origin once as the form opens; the display repaints
+        // through the VM's ProviderReturnUrl change when the read lands.
+        _ = _vm.HydrateSiteOriginAsync(_handle);
         ProviderSecretBox.Password = "";
         PopulateComboBox(ProviderKindSelect, _vm.KnownProviderKinds, _vm.ProviderFormKind);
         PopulateComboBox(ProviderTierSelect, _vm.TierNames, _vm.ProviderFormTier);
@@ -142,6 +153,25 @@ public sealed partial class PaymentsAuthorSections : UserControl
     {
         var dp = new DataPackage();
         dp.SetText(ProviderWebhookUrlBox.Text);
+        Clipboard.SetContent(dp);
+    }
+
+    /// <summary>Paint the return-URL display: the URL, or the "turn on your public web
+    /// address" line with an inert copy button while the creator has none.</summary>
+    private void PaintReturnUrl()
+    {
+        if (_vm is null) return;
+        var url = _vm.ProviderReturnUrl;
+        ProviderReturnUrlBox.Text = url.Length > 0 ? url : S.Get("subscriptions/return_url_unavailable");
+        ProviderReturnUrlCopyButton.IsEnabled = url.Length > 0;
+    }
+
+    /// <summary>Copy the return URL to the clipboard (inert while unavailable).</summary>
+    private void CopyProviderReturnUrl_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm is null || _vm.ProviderReturnUrl.Length == 0) return;
+        var dp = new DataPackage();
+        dp.SetText(_vm.ProviderReturnUrl);
         Clipboard.SetContent(dp);
     }
 

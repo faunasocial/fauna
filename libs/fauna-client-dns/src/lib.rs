@@ -614,6 +614,52 @@ pub fn cert_status_text(cert: Option<&CertStatusRow>) -> String {
     text
 }
 
+/// The most characters of CA text one `admin-dns-cert-issuance-error` line
+/// shows — the nest's own byte cap on the stored detail
+/// (`fauna_acme_http01::ISSUANCE_ERROR_DETAIL_MAX_BYTES`), so in practice
+/// nothing the nest serves is cut here.
+pub const CERT_ISSUANCE_ERROR_DETAIL_MAX_CHARS: usize = 4096;
+
+/// One `admin-dns-cert-issuance-error` line: the app-owned wrapper for the
+/// failing order, with the CA's text inserted as **data**
+/// (`tls-certificates.md` § Keeping the cert alive, *The admin sees why
+/// issuance is failing*). The only place the order is switched on, so all 7
+/// apps word it identically.
+///
+/// The CA text is third-party: it goes through the project's one plain-line
+/// sanitizer ([`fauna_core::control_chars::sanitize_plain_line`]) so it cannot
+/// forge a second line or carry a terminal escape, and every app paints the
+/// result as plain text, never markup.
+///
+/// Gated on `local-clock` like [`cert_status_text`], for the local date; an
+/// app without the OS timezone database (web) renders the date itself and
+/// calls [`cert_issuance_error_line`].
+#[cfg(feature = "local-clock")]
+pub fn cert_issuance_error_text(e: &CertIssuanceErrorRow) -> String {
+    cert_issuance_error_line(
+        e,
+        &fauna_core::format::format_unix_local_date(e.failed_at_unix),
+    )
+}
+
+/// [`cert_issuance_error_text`] with the failure's local `date` already
+/// rendered by the caller — the ungated core every app's line goes through.
+/// Exported over UniFFI (android, apple, windows pass their own local date) and
+/// over wasm (`certIssuanceErrorLine`).
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn cert_issuance_error_line(e: &CertIssuanceErrorRow, date: &str) -> String {
+    use fauna_i18n::strings::admin::dns::cert;
+    let error = fauna_core::control_chars::sanitize_plain_line(
+        &e.detail,
+        CERT_ISSUANCE_ERROR_DETAIL_MAX_CHARS,
+    );
+    match e.order {
+        Some(CertIssuanceOrder::Domain) => cert::issuance_failed_domain(date, &error),
+        Some(CertIssuanceOrder::IpBridge) => cert::issuance_failed_ip(date, &error),
+        None => cert::issuance_failed(date, &error),
+    }
+}
+
 /// Read-only snapshot the per-app UI renders for `admin-dns`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -9680,6 +9726,46 @@ mod tests {
         assert_eq!(
             no_expiry_reported, "Certificate: Expiring soon",
             "a non-positive not_after_unix must render the bare state, no expiry clause: {no_expiry_reported:?}"
+        );
+    }
+
+    #[cfg(feature = "local-clock")]
+    #[test]
+    fn cert_issuance_error_text_names_the_order_and_keeps_the_cas_text_as_data() {
+        let row = |order: Option<CertIssuanceOrder>, detail: &str| CertIssuanceErrorRow {
+            order,
+            detail: detail.to_string(),
+            // 2026-07-22T00:00:00Z, the fixed literal the badge test above pins.
+            failed_at_unix: 1_784_678_400,
+        };
+        let date = fauna_core::format::format_unix_local_date(1_784_678_400);
+
+        let detail = "urn:ietf:params:acme:error:connection: mail.example.com: <b>Timeout</b> & \"fetching\"";
+        assert_eq!(
+            cert_issuance_error_text(&row(Some(CertIssuanceOrder::Domain), detail)),
+            format!("Certificate request failed ({date}): {detail}"),
+            "the domain order's wrapper, with markup-looking CA text inserted untouched"
+        );
+        assert_eq!(
+            cert_issuance_error_text(&row(Some(CertIssuanceOrder::IpBridge), "ip refused")),
+            format!("IP address certificate request failed ({date}): ip refused"),
+        );
+        assert_eq!(
+            cert_issuance_error_text(&row(None, "newer order")),
+            format!("Certificate request failed ({date}): newer order"),
+            "an order a newer nest added still shows its error, without an order label"
+        );
+
+        // CA text is third-party: it must not forge a second line or reach the
+        // terminal as an escape sequence.
+        let hostile = cert_issuance_error_text(&row(
+            Some(CertIssuanceOrder::Domain),
+            "line one\nFAKE: all fine\x1b[2J\u{202E}",
+        ));
+        assert_eq!(
+            hostile,
+            format!("Certificate request failed ({date}): line one FAKE: all fine[2J"),
+            "control, escape and bidi characters are neutralised: {hostile:?}"
         );
     }
 }

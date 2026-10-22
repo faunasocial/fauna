@@ -123,20 +123,7 @@ impl CacheDb {
         table: &'static str,
     ) -> Result<T> {
         let conn = self.conn.lock().await;
-        let json: Option<String> = conn
-            .query_row(
-                &format!("SELECT overrides_json FROM {table} WHERE id = 1"),
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .with_context(|| format!("read {table} row"))?;
-        match json {
-            Some(s) => {
-                serde_json::from_str(&s).with_context(|| format!("decode {table} overrides JSON"))
-            }
-            None => Ok(T::default()),
-        }
+        read_singleton_json_in(&conn, table)
     }
 
     /// Upsert the single JSON-blob `overrides_json` row into `table`. Idempotent
@@ -189,6 +176,30 @@ pub(super) fn set_singleton_column_in<T: ToSql>(
     )
     .with_context(|| format!("upsert {table}"))?;
     Ok(())
+}
+
+/// [`CacheDb::read_singleton_json`] over an **already-open** connection or
+/// transaction — for a caller that must read the singleton in the same
+/// transaction as its write (the `&self` form takes the connection mutex and
+/// would deadlock there).
+pub(super) fn read_singleton_json_in<T: DeserializeOwned + Default>(
+    conn: &rusqlite::Connection,
+    table: &'static str,
+) -> Result<T> {
+    let json: Option<String> = conn
+        .query_row(
+            &format!("SELECT overrides_json FROM {table} WHERE id = 1"),
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .with_context(|| format!("read {table} row"))?;
+    match json {
+        Some(s) => {
+            serde_json::from_str(&s).with_context(|| format!("decode {table} overrides JSON"))
+        }
+        None => Ok(T::default()),
+    }
 }
 
 #[cfg(test)]

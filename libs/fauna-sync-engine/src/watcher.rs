@@ -140,16 +140,19 @@ impl FsWatcher {
                     // inotify both surface a queue overflow this way, and it is
                     // precisely the "events were lost" signal — dropping it
                     // silently is how a lost write becomes unexplainable.
-                    Err(e) => tracing::warn!(
-                        error_kind = ?e.kind,
-                        paths = ?e
+                    Err(e) => {
+                        let redacted: Vec<String> = e
                             .paths
                             .iter()
                             .map(|p| fauna_core::log_redact::log_path(&p.to_string_lossy()))
-                            .collect::<Vec<_>>(),
-                        "watcher: the OS reported a watch error — events may have been \
-                         LOST; anything missed syncs only at the next rescan"
-                    ),
+                            .collect();
+                        tracing::warn!(
+                            error_kind = ?e.kind,
+                            paths = ?redacted,
+                            "watcher: the OS reported a watch error — events may have been \
+                             LOST; anything missed syncs only at the next rescan"
+                        )
+                    }
                 }
             })?;
 

@@ -370,6 +370,16 @@ static void call_UniffiForeignFutureCompleteVoid(
 
 
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_CORE_FN_FUNC_MAIL_UNAVAILABLE_HERE
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_CORE_FN_FUNC_MAIL_UNAVAILABLE_HERE
+int8_t uniffi_fauna_core_fn_func_mail_unavailable_here(RustBuffer node_mode, RustBuffer scanners, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_CORE_FN_FUNC_MTA_CAN_RUN
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_CORE_FN_FUNC_MTA_CAN_RUN
+int8_t uniffi_fauna_core_fn_func_mta_can_run(RustBuffer node_mode, RustBuffer scanners, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_CORE_FN_FUNC_PERIMETER_MAIL_SCORE_ROWS
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_CORE_FN_FUNC_PERIMETER_MAIL_SCORE_ROWS
 RustBuffer uniffi_fauna_core_fn_func_perimeter_mail_score_rows(int32_t spam_score_milli, RustBuffer clamav, RustBuffer rspamd, RustBuffer verdicts, RustCallStatus *out_status
@@ -638,6 +648,18 @@ void ffi_fauna_core_rust_future_free_void(uint64_t handle
 #ifndef UNIFFI_FFIDEF_FFI_FAUNA_CORE_RUST_FUTURE_COMPLETE_VOID
 #define UNIFFI_FFIDEF_FFI_FAUNA_CORE_RUST_FUTURE_COMPLETE_VOID
 void ffi_fauna_core_rust_future_complete_void(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_CORE_CHECKSUM_FUNC_MAIL_UNAVAILABLE_HERE
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_CORE_CHECKSUM_FUNC_MAIL_UNAVAILABLE_HERE
+uint16_t uniffi_fauna_core_checksum_func_mail_unavailable_here(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_CORE_CHECKSUM_FUNC_MTA_CAN_RUN
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_CORE_CHECKSUM_FUNC_MTA_CAN_RUN
+uint16_t uniffi_fauna_core_checksum_func_mta_can_run(void
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_CORE_CHECKSUM_FUNC_PERIMETER_MAIL_SCORE_ROWS

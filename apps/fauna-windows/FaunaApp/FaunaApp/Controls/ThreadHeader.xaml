@@ -128,8 +128,9 @@
 
         <!-- Row 2 — the room's standing notice (`thread-room-notice`,
              `ui/conversations.md` § Element IDs): ONE text element, painted only
-             while a notice holds — moderation-unverified or awaiting-key, the
-             latter winning when both hold (the shared `RoomNoticeFor`). Its
+             while a notice holds — moderation-unverified, awaiting-key or
+             bridge-disconnected, which one speaks decided by the shared
+             `RoomNoticeFor`. Its
              `state` attribute rides HelpText, the `thread-room-class` shape, and
              like it carries no static Name. A caption line of its own for the
              same narrow-pane reason as the class statement above; COLLAPSED —

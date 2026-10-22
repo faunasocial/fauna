@@ -30,6 +30,16 @@
 if [ "${FAUNA_MODE:-public}" = "private" ]; then
     exec s6-svc -d /run/service/fauna-mail-bridge-mta
 fi
+# No content scanners wired (a social-only VPS, a single-container run): the
+# scan gate is fail-closed, so an MTA here would 451 every inbound message.
+# The durable twin of the nest's `mta_can_run` — the entrypoint declares the
+# same fact as the hatch's content_scanners = "absent", which the nest reads to
+# keep the MTA down and refuse set_mail_enabled(true). Per
+# docs/goal/behavior/mail-bridge-lifecycle.md § Default-off on first claim →
+# "A box with no content scanners cannot enable mail".
+if [ -z "${FAUNA_CLAMD_ADDR:-}" ] || [ -z "${FAUNA_RSPAMD_URL:-}" ]; then
+    exec s6-svc -d /run/service/fauna-mail-bridge-mta
+fi
 if [ ! -e /data/imap-enabled ]; then
     exec s6-svc -d /run/service/fauna-mail-bridge-mta
 fi

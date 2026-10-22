@@ -10,9 +10,9 @@ reference:
    state (a claimed admin + a regular user), active on the regular user.
    ``build_registry_seed`` writes the exact logical-key layout the wasm
    ``LocalStorageSecretStore`` reads verbatim (the registry is the only identity
-   source; nothing is mirrored). Web has no
-   ``seed_credentials`` driver hook, so we write the keys via ``eval_js`` (the web
-   escape hatch), then authenticate the SPA as the active account via the proven
+   source; nothing is mirrored). The launch carries it as ``seed_credentials``,
+   which the web driver writes into the origin and boots over, as every native
+   driver does with its credential file; then authenticate the SPA as the active account via the proven
    ``set_state`` session patch (in-memory auth, no silent-challenge race — the
    same mechanism ``logged_in_app`` uses) and land on the Account settings page.
 2. Account settings lists BOTH accounts with the active one marked; the active
@@ -131,16 +131,6 @@ def _seed_two_accounts(nest_instance, node_url, active="user", second="admin"):
     return seed, user_actor, user_secret, admin_actor, admin_secret
 
 
-def _seed_registry(driver, seed):
-    """Write the registry seed map into localStorage. Web has no pre-navigation
-    hook, so mutate the loaded page's localStorage via eval_js (the fauna/index +
-    fauna/{actor}/* keys the wasm registry reads verbatim)."""
-    script = ";".join(
-        f"localStorage.setItem({json.dumps(k)},{json.dumps(v)})" for k, v in seed.items()
-    )
-    driver.eval_js(script)
-
-
 @pytest.mark.feature("multiple-accounts")
 def test_web_account_switcher_lists_switches_and_reveals_admin(nest_instance, spa_url):
     seed, user_actor, user_secret, _admin_actor, _admin_secret = _seed_two_accounts(
@@ -148,7 +138,7 @@ def test_web_account_switcher_lists_switches_and_reveals_admin(nest_instance, sp
     )
 
     driver = create_driver("web")
-    driver.launch({"url": spa_url + "/app/"})
+    driver.launch({"url": spa_url + "/app/", "seed_credentials": seed})
     try:
         # (1) Seed the registry, then authenticate as the active (regular) account
         # via the session patch (in-memory, no challenge) and land on the Account
@@ -159,7 +149,7 @@ def test_web_account_switcher_lists_switches_and_reveals_admin(nest_instance, sp
         # (non-admin) active identity has no admin shell. The helper waits for the
         # ROWS (not just the container) — loadAccounts() populates the #each
         # asynchronously.
-        _auth_on_account_page(driver, seed, user_secret, "user", user_actor, spa_url)
+        _auth_on_account_page(driver, user_secret, "user", user_actor, spa_url)
         assert driver.count(SWITCHER_ITEM) == 2, "both seeded accounts must be listed"
         assert driver.count(ACTIVE_INDICATOR) == 1, (
             "exactly one row (the active/user row) carries the active indicator"
@@ -191,9 +181,9 @@ def test_web_remove_account_shrinks_switcher_live(nest_instance, spa_url):
     )
 
     driver = create_driver("web")
-    driver.launch({"url": spa_url + "/app/"})
+    driver.launch({"url": spa_url + "/app/", "seed_credentials": seed})
     try:
-        _auth_on_account_page(driver, seed, user_secret, "user", user_actor, spa_url)
+        _auth_on_account_page(driver, user_secret, "user", user_actor, spa_url)
         # Both accounts listed, active on the regular user (row 0); the admin
         # (row 1) is the non-active row, so it carries the (only) remove button.
         assert driver.count(SWITCHER_ITEM) == 2, "both seeded accounts must be listed"
@@ -315,9 +305,9 @@ def test_web_removing_an_identity_deletes_its_data_and_leaves_the_others(
         )
 
     driver = create_driver("web")
-    driver.launch({"url": spa_url + "/app/"})
+    driver.launch({"url": spa_url + "/app/", "seed_credentials": seed})
     try:
-        _auth_on_account_page(driver, seed, user_secret, "user", user_actor, spa_url)
+        _auth_on_account_page(driver, user_secret, "user", user_actor, spa_url)
 
         # Give the second identity a real session of its own, so it has data to lose.
         switch_to(1, other_actor)
@@ -342,8 +332,14 @@ def test_web_removing_an_identity_deletes_its_data_and_leaves_the_others(
         assert f"fauna/{other_actor}/secret" in other_keys, (
             f"precondition: the second identity's secret is in this browser; its keys are {other_keys}"
         )
+        # `{actor}/writer-unstamped` is excluded: it marks a writer key minted
+        # but not yet stamped onto a store, and the remaining account's own
+        # first store open clears it (`fauna-account-plane` principal_bundle
+        # `mark_writer_unstamped`) — whenever that open lands, removal or not
+        # (measured 2026-10-14: the user's marker read "gone").
         kept_before = [
-            k for k in driver.eval_js("Object.keys(localStorage)") if other_actor not in k
+            k for k in driver.eval_js("Object.keys(localStorage)")
+            if other_actor not in k and not k.endswith("/writer-unstamped")
         ]
 
         # The switch's reload lands wherever the app routes a load; the remove
@@ -412,23 +408,18 @@ def _seed_one_account(nest_instance, node_url):
     return seed, user_actor, user_secret
 
 
-def _auth_on_account_page(driver, seed, secret, handle, actor, spa_url):
-    """Seed the registry + authenticate as ``actor`` via the session patch and land
-    on the Account settings page — the shared arrangement of every test in this file.
+def _auth_on_account_page(driver, secret, handle, actor, spa_url):
+    """Authenticate a seeded launch as ``actor`` via the session patch and land on
+    the Account settings page — the shared arrangement of every test in this file.
 
-    The ``hard_reload()`` is load-bearing, not tidiness. Web has no pre-navigation
-    seeding hook, so ``launch()`` boots the SPA with EMPTY localStorage and the root
-    layout's unauthenticated guard fires ``goto('/app/onboarding')``
-    (``+layout.svelte`` § the ``/app`` root-index redirect). Seeding afterwards makes
-    credentials appear *mid-boot*, so that redirect races the session patch's own
-    nav — whoever lands last wins, and when the guard wins the Account page never
-    mounts and every later step fails on a `count=0` element that was simply never
-    navigated to. Re-booting over the now-seeded localStorage removes the race at the
-    source: the guard sees credentials, takes no redirect, and the nav patch below is
-    the only navigation in play (testing.md § point 14 — assert latency-independent
-    state; delete the dependency rather than widen a timeout)."""
-    _seed_registry(driver, seed)
-    driver.hard_reload()
+    The driver was launched with ``seed_credentials``, so it has already booted
+    the SPA a second time over the seeded localStorage (``drivers/web.py::launch``):
+    the first boot read an empty store and took the signed-out redirect, and a
+    seed landing mid-boot used to race it. That re-boot takes a redirect of its
+    OWN, and the nav patch waits for it to land (``_await_boot_landed``): left in
+    flight, it supersedes the patch's navigation and the Account page never
+    mounts (testing.md § point 14 — assert latency-independent state)."""
+    _await_boot_landed(driver)
     driver.set_state({
         "session": {
             "authenticated": True,
@@ -441,6 +432,41 @@ def _auth_on_account_page(driver, seed, secret, handle, actor, spa_url):
     })
     driver.wait_for(SWITCHER_LIST, timeout=30)
     driver.wait_for(SWITCHER_ITEM, timeout=30)
+
+
+def _await_boot_landed(driver, *, budget_s=60):
+    """Wait until a signed-in boot's own redirect has landed: the page has left
+    both the ``/app`` root index and ``/app/onboarding``.
+
+    A boot over stored credentials redirects once, asynchronously: from the root
+    index the layout guard goes to ``/app/conversations`` after wasm and a
+    factory-reset slot read (``RootShell.svelte::routeAppRoot``), and from
+    onboarding the launch machine goes to ``/app/feed`` once its silent
+    challenge settles (``applyLaunchPhase``'s ``Online`` arm). Either ``goto``
+    supersedes a navigation still in flight, so a nav patch sent before it
+    lands is lost (measured 2026-10-14: the page ended on
+    ``/app/conversations``, no ``account-switcher-list``). A 0.8 s settle-sleep
+    in ``hard_reload`` used to hide this by timing alone. ``location.pathname``
+    changes only once a SvelteKit navigation commits, so reading it is the
+    landing itself, not a guess (convention 14)."""
+    deadline = time.monotonic() + budget_s
+    path = None
+    while time.monotonic() < deadline:
+        try:
+            path = driver.eval_js("location.pathname")
+        except RuntimeError as e:
+            # The redirect may be a full load; its context swap is not an answer.
+            if "Execution context was destroyed" not in str(e):
+                raise
+            path = None
+        if path and path.startswith("/app/") and path != "/app/" and not path.startswith("/app/onboarding"):
+            return
+        time.sleep(0.2)
+    raise AssertionError(
+        f"the signed-in boot never left {path!r} for the app within {budget_s}s — "
+        "booted signed out (onboarding), or its redirect never fired; console tail:\n"
+        + "\n".join(driver.console_log()[-40:])
+    )
 
 
 def _admin_tab_absent_off_settings(driver, what):
@@ -544,11 +570,11 @@ def test_web_add_account_appends_second_identity_to_registry(nest_instance, spa_
     seed, first_actor, first_secret = _seed_one_account(nest_instance, spa_url)
 
     driver = create_driver("web")
-    driver.launch({"url": spa_url + "/app/"})
+    driver.launch({"url": spa_url + "/app/", "seed_credentials": seed})
     try:
         # (1) Seed ONE account + authenticate as it (in-memory, no challenge) and
         # land on the Account settings page — the pre-append single-identity state.
-        _auth_on_account_page(driver, seed, first_secret, "user", first_actor, spa_url)
+        _auth_on_account_page(driver, first_secret, "user", first_actor, spa_url)
         assert driver.count(SWITCHER_ITEM) == 1, "exactly one account before Add account"
 
         # (2) "Add account" → append-mode onboarding (`?add=1`), a fresh wizard at
@@ -670,9 +696,9 @@ def test_web_add_account_pending_invite_submit_switches_the_live_session(nest_in
     handle = f"addpending-{int(time.time() * 1000)}"
 
     driver = create_driver("web")
-    driver.launch({"url": spa_url + "/app/"})
+    driver.launch({"url": spa_url + "/app/", "seed_credentials": seed})
     try:
-        _auth_on_account_page(driver, seed, first_secret, "user", first_actor, spa_url)
+        _auth_on_account_page(driver, first_secret, "user", first_actor, spa_url)
         assert driver.count(SWITCHER_ITEM) == 1, "exactly one account before Add account"
 
         driver.click(ADD_BUTTON)
@@ -741,10 +767,10 @@ def test_web_add_account_abandon_recovers_prior_identity_on_current_load(nest_in
     seed, first_actor, first_secret = _seed_one_account(nest_instance, spa_url)
 
     driver = create_driver("web")
-    driver.launch({"url": spa_url + "/app/"})
+    driver.launch({"url": spa_url + "/app/", "seed_credentials": seed})
     try:
         # (1) One account, authenticated as it, on the Account settings page.
-        _auth_on_account_page(driver, seed, first_secret, "user", first_actor, spa_url)
+        _auth_on_account_page(driver, first_secret, "user", first_actor, spa_url)
         assert driver.count(SWITCHER_ITEM) == 1, "exactly one account before Add account"
 
         # (2) Add account → append onboarding → import the second identity. The import
@@ -827,9 +853,9 @@ def test_web_require_confirm_gates_switch_decline_then_approve(nest_instance, sp
     )
 
     driver = create_driver("web")
-    driver.launch({"url": spa_url + "/app/"})
+    driver.launch({"url": spa_url + "/app/", "seed_credentials": seed})
     try:
-        _auth_on_account_page(driver, seed, user_secret, "user", user_actor, spa_url)
+        _auth_on_account_page(driver, user_secret, "user", user_actor, spa_url)
         assert driver.count(SWITCHER_ITEM) == 2, "both seeded accounts must be listed"
 
         # (1) Flag the ADMIN row (row 1) through its own toggle — the UI write path.
@@ -891,7 +917,7 @@ def test_web_admin_auto_default_flags_admin_and_explicit_off_sticks(
     """The admin auto-default (`long-term-store.md` § Multi-account evolution —
     "Default off; a client turns it on for its admin identity"): authenticating as
     the ADMIN account auto-enables its require-confirm flag at web's am-i-admin
-    observation (the `+layout.svelte` nav-gate probe that reveals `admin-tab`),
+    observation (the `RootShell.svelte` nav-gate probe that reveals `admin-tab`),
     with NO user tap — asserted against the persisted index; the regular account
     stays unflagged. The auto-defaulted flag must also RENDER once the Account
     page re-reads the registry (a stale OFF would make the flag impossible to
@@ -905,9 +931,9 @@ def test_web_admin_auto_default_flags_admin_and_explicit_off_sticks(
     )
 
     driver = create_driver("web")
-    driver.launch({"url": spa_url + "/app/"})
+    driver.launch({"url": spa_url + "/app/", "seed_credentials": seed})
     try:
-        _auth_on_account_page(driver, seed, admin_secret, "admin", admin_actor, spa_url)
+        _auth_on_account_page(driver, admin_secret, "admin", admin_actor, spa_url)
         # NOTE: no admin-tab wait here — Settings is the sidebar-SWAP shell (its
         # rail replaces the app sidebar), so admin-tab is not in the DOM on
         # /app/settings/* at all. The root layout still runs its am-i-admin nav
@@ -983,7 +1009,7 @@ def test_web_admin_auto_default_flags_admin_and_explicit_off_sticks(
 # `localStorage.removeItem('fauna_node_url')`: the per-actor `nest_url` slot
 # is the only place a binding lives, so a direct delete of a bare key would
 # leave it and the binding would survive the reset. Exercised via the test-only
-# `window.__fauna_clearNestBindingForTest` hook (`+layout.svelte`) — the same
+# `window.__fauna_clearNestBindingForTest` hook (`RootShell.svelte`) — the same
 # `accountsClearNestBinding` call the admin-nest page's handler makes — so the
 # reload-resurrection property is proven without a live
 # `fauna.admin.factory_reset` round trip + nest restart.
@@ -996,9 +1022,9 @@ def test_web_clear_nest_binding_does_not_resurrect_on_reload(nest_instance, spa_
     )
 
     driver = create_driver("web")
-    driver.launch({"url": spa_url + "/app/"})
+    driver.launch({"url": spa_url + "/app/", "seed_credentials": seed})
     try:
-        _auth_on_account_page(driver, seed, user_secret, "user", user_actor, spa_url)
+        _auth_on_account_page(driver, user_secret, "user", user_actor, spa_url)
 
         # Precondition: the per-actor slot holds the bound nest url — what a
         # walk-away has to clear.
@@ -1063,9 +1089,9 @@ def test_web_switching_to_an_identity_the_device_cannot_sign_in_as_is_refused(
     seed.pop(f"fauna/{admin_actor}/secret")
 
     driver = create_driver("web")
-    driver.launch({"url": spa_url + "/app/"})
+    driver.launch({"url": spa_url + "/app/", "seed_credentials": seed})
     try:
-        _auth_on_account_page(driver, seed, user_secret, "user", user_actor, spa_url)
+        _auth_on_account_page(driver, user_secret, "user", user_actor, spa_url)
         assert driver.count(SWITCHER_ITEM) == 2, "both seeded accounts must be listed"
 
         label = driver.get_text(ITEM_HANDLE, index=1)
@@ -1236,7 +1262,8 @@ def test_web_switching_identity_keeps_device_settings_and_moves_drafts(nest_inst
             return dev.call("fauna.drafts.get", {"path": "posts"}).get("blob")
 
     driver = create_driver("web")
-    driver.launch({"url": spa_url + "/app/", "push_service_stand_in": WEB_PUSH_STAND_IN})
+    driver.launch({"url": spa_url + "/app/", "seed_credentials": seed,
+                   "push_service_stand_in": WEB_PUSH_STAND_IN})
     feed = FeedActions(driver)
 
     def push_state():
@@ -1263,7 +1290,7 @@ def test_web_switching_identity_keeps_device_settings_and_moves_drafts(nest_inst
         return feed.compose_body_text()
 
     try:
-        _auth_on_account_page(driver, seed, user_secret, "user", user_actor, spa_url)
+        _auth_on_account_page(driver, user_secret, "user", user_actor, spa_url)
 
         # (1) As the user: a device choice and a draft.
         assert push_state() == "off", "precondition: a fresh install is never opted in"

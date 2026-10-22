@@ -1,0 +1,29 @@
+---
+interface Props { size?: number; delay?: string; }
+const { size = 110, delay = '0s' } = Astro.props;
+---
+{/* The one critter with no arm to raise, so the wave is an eye stalk — which
+    is the thing a snail actually moves. */}
+<svg viewBox="0 0 120 140" width={size} height={Math.round((size * 140) / 120)}
+  class="critter" style={`--wave-delay:${delay}`} aria-hidden="true">
+  <ellipse cx="60" cy="134" rx="32" ry="5" class="critter-shadow" />
+  <!-- foot -->
+  <ellipse cx="60" cy="126" rx="36" ry="11" fill="#cbb2a6" />
+  <!-- shell, worn on the back -->
+  <circle cx="76" cy="86" r="28" fill="#c9853f" />
+  <circle cx="76" cy="86" r="20" fill="#dda05b" />
+  <circle cx="76" cy="86" r="12" fill="#c9853f" />
+  <circle cx="76" cy="86" r="5" fill="#dda05b" />
+  <!-- head -->
+  <ellipse cx="42" cy="108" rx="20" ry="18" fill="#cbb2a6" />
+  <!-- eye stalks: one still, one waving -->
+  <path d="M32 94 Q28 80 27 73" stroke="#cbb2a6" stroke-width="5" fill="none" stroke-linecap="round" />
+  <circle cx="27" cy="69" r="5.5" fill="#cbb2a6" />
+  <circle cx="27" cy="69" r="2.4" fill="#2b2a24" />
+  <g class="wave" style="transform-origin: 52px 96px;">
+    <path d="M52 96 Q54 82 56 75" stroke="#cbb2a6" stroke-width="5" fill="none" stroke-linecap="round" />
+    <circle cx="56" cy="71" r="5.5" fill="#cbb2a6" />
+    <circle cx="56" cy="71" r="2.4" fill="#2b2a24" />
+  </g>
+  <path d="M34 116 Q42 122 50 116" stroke="#2b2a24" stroke-width="2" fill="none" stroke-linecap="round" />
+</svg>

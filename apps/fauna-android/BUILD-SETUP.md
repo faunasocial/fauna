@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- **JDK 17** — `sudo apt install -y openjdk-17-jdk-headless`
+- **JDK 21** — `sudo apt install -y openjdk-21-jdk-headless`
 - **Android SDK** — platform-tools, build-tools 35.0.0, platform android-36
 
 ## ARM64 (aarch64) Host Setup

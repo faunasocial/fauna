@@ -6,10 +6,10 @@ channel 3 (the background silent challenge).
 (ratified 2026-07-23); ``tests/e2e-unified/ui.yaml`` page ``launch_identity_changed``.
 
 Web has two live post-auth re-check points (`nest-identity-escalation.ts`'s own
-doc comment names both): channel 1 is `$lib/api.ts`'s `getAuthToken`, whose wasm
+doc comment names both): channel 1 is `#lib/api.ts`'s `getAuthToken`, whose wasm
 `challengeVerify` (the silent challenge since 2026-09-23, `login.md` § When to
 use which) possession-verifies its `cert_binding` against the TOFU pin on every
-re-mint; channel 3 is `$lib/store.ts`'s `refreshFromServer`, the background
+re-mint; channel 3 is `#lib/store.ts`'s `refreshFromServer`, the background
 silent challenge `test_nest_identity_pin_post_auth.py` already covers end to
 end (verdict → escalation → recovery round trip). Both funnel through the SAME
 `escalateIfNestIdentityChanged` and the SAME blocking surface, so this module
@@ -123,7 +123,7 @@ def test_post_auth_identity_change_bearer_remint_channel(web_pin_env):
     blocking surface.
 
     ``bearer_force_refresh`` drives ``getAuthToken(secret, undefined, true)`` —
-    the production re-mint ``$lib/api.ts``'s WS-RPC token provider calls on a
+    the production re-mint ``#lib/api.ts``'s WS-RPC token provider calls on a
     4401 — whose own catch escalates (``security.md`` § Post-auth surfacing,
     channel 1). Positive-only: the surface + recovery round trip is already
     proven end to end for channel 3 in

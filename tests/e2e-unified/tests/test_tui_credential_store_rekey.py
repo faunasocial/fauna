@@ -53,7 +53,7 @@ OLD_PASSPHRASE = "correct-horse-battery"
 NEW_PASSPHRASE = "staple-gun-tuesday"
 
 # Element IDs (tests/e2e-unified/ui.yaml § settings — the credential-store
-# family, user-approved 2026-08-06 — and § tui-unlock).
+# family, user-approved 2026-08-06 — and § unlock).
 SECTION = "credential-store-section"
 STATUS = "credential-store-status"
 REKEY_BUTTON = "credential-store-rekey-button"
@@ -107,7 +107,7 @@ def _rekey_submit(driver, current: str, new: str, confirm: str):
     driver.click(SUBMIT)
 
 
-@pytest.mark.feature("identity-protected-on-this-device")
+@pytest.mark.feature("identity-sealed-under-a-passphrase")
 def test_change_passphrase_relaunch_old_refused_new_unlocks(
     launch_client, tui_app_path, rekey_unclaimed_nest, tmp_path, request
 ):

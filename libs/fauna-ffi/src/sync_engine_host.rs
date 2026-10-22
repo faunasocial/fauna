@@ -48,14 +48,10 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 use fauna_client::{AuthClient, NestClient};
-use fauna_core::data::ContentHash;
 use fauna_core::folder_keys::FolderRef;
 use fauna_mls::engine::MlsEngine;
 use fauna_sync_engine::db::SyncDb;
-use fauna_sync_engine::engine::SnapshotFileToRestore;
-use fauna_sync_engine::engine_lifecycle::{
-    EngineCredential, EngineParams, build_engine, build_restore_engine,
-};
+use fauna_sync_engine::engine_lifecycle::{EngineCredential, EngineParams, build_engine};
 use fauna_sync_engine::progress::ProgressTx;
 
 use crate::FfiError;
@@ -488,15 +484,16 @@ async fn ingest(
 /// (`docs/goal/behavior/backup-restore.md` § 4 + § Restoring Files, re-ratified
 /// 2026-07-14).
 ///
-/// The snapshot's per-file `manifest_hash` (which the FFI snapshot mirror
-/// deliberately drops) is read here server-side from the `SnapshotsClient::get`
-/// protocol reply and never crosses back to Swift. Each file is fetched +
-/// decrypted + verified + written by [`build_restore_engine`] +
-/// [`fauna_sync_engine::engine::SyncEngine::restore_snapshot_files_to_dir`], so a
-/// **sealed** snapshot — which the server-side ZIP route now refuses loudly —
-/// restores correctly here, where the owner `BackupKey` lives.
+/// A thin adapter over the ONE whole-snapshot restore entry point,
+/// [`fauna_sync_engine::engine_lifecycle::restore_snapshot_into_dir`], which tui's
+/// `snapshot-restore-button` calls too (`docs/goal/ui/backups.md` § Where logic
+/// lives → *Whole-snapshot restore*). It reads the snapshot custody-wired over
+/// `get_for_restore`, so a **sealed** snapshot restores here, where the owner
+/// `BackupKey` lives, and the snapshot's per-file `manifest_hash` (which the FFI
+/// snapshot mirror deliberately drops) never crosses back to Swift. This adapter
+/// adds only the seed check and the throw-on-partial contract below.
 ///
-/// ⚠ That last claim was **false from the S9 flip until 2026-08-03**, and the shape of the lie is worth keeping: the *bytes* half
+/// ⚠ The restore was **broken from the S9 flip until 2026-08-03**, and the shape of the lie is worth keeping: the *bytes* half
 /// was always right — the seed was here and the chunks decrypted fine — while
 /// the *listing* half read keyless, so there were never any rows to walk. The
 /// two halves of "restores correctly" are wired separately, and only one of them
@@ -533,51 +530,28 @@ async fn restore(
     )
     .map_err(|e| format!("snapshot restore: {e}"))?;
 
-    // ⚠ `get_for_restore`, and custody-wired — NOT the bare `SnapshotsClient::new`
-    // this used to build. A keyless client renders every
-    // sealed row to `Omit`, `render_paths` drops them, and this fn returned
-    // `files_restored: 0` with `Ok` — an empty directory reported as a successful
-    // restore, while the seed that would have opened them sat in `ctx.credential`
-    // and got spent on the chunks a few lines below. Both halves matter: the
-    // custody makes the rows render, and `get_for_restore` makes any FUTURE
-    // regression loud instead of silent (`fauna-client-snapshots`).
-    let snapshot =
-        crate::snapshots_client::owner_read_snapshots_client(Arc::clone(&ctx.nest_rpc), &secret)
-            .get_for_restore(snapshot_id)
-            .await
-            .map_err(|e| format!("fetch snapshot {snapshot_id}: {e}"))?;
-    if let Some(kind) = &snapshot.message_kind {
-        return Err(format!(
-            "snapshot {snapshot_id} is a '{kind}' message-kind snapshot — restore it via \
-             fauna.filesync.snapshot.restore_message_kind, not the file walk"
-        ));
-    }
-
-    let files = snapshot_files_to_restore(&snapshot.files)?;
-    let set = fauna_client_snapshots::SnapshotSet::of(&snapshot);
-
-    // The snapshot reader's nonce source: this seat's custody — the resolver
-    // the listing read above already rendered sealed paths through.
-    let snapshot_nonces = crate::snapshots_client::folder_key_resolver(&ctx.nest_rpc, &secret)
-        .map(fauna_client_sync::SetNonceSource::Resolver);
-    let engine = build_restore_engine(
+    // The shared entry point reads the listing custody-wired over
+    // `get_for_restore` — the custody makes the sealed rows render, and
+    // `get_for_restore` makes any future regression loud instead of an empty
+    // directory reported as `Ok` (`fauna-client-snapshots`).
+    let summary = fauna_sync_engine::engine_lifecycle::restore_snapshot_into_dir(
         Arc::clone(&ctx.auth),
         Arc::clone(&ctx.nest_rpc),
         ctx.device_id,
-        secret_hex,
-        snapshot_nonces,
-    );
-    let summary = engine
-        .restore_snapshot_files_to_dir(&set, &files, &output_dir)
-        .await
-        .map_err(|e| format!("restore snapshot {snapshot_id}: {e:#}"))?;
+        &secret,
+        crate::snapshots_client::folder_key_resolver(&ctx.nest_rpc, &secret),
+        snapshot_id,
+        &output_dir,
+    )
+    .await
+    .map_err(|e| format!("{e:#}"))?;
 
     // The shared walk (`fauna_sync_engine::engine::restore_snapshot_walk`) no
     // longer aborts the whole restore on one bad file — it writes everything
     // recoverable and names the rest in `summary.unverified`. Fail the command
     // loudly on a non-empty list rather than let `Ok` read as "every file
-    // restored" when some were refused: the same contract `cmd_restore`'s own
-    // `restore_summary_error` keeps for the CLI host of this walk.
+    // restored" when some were refused — this host's contract with Swift; tui,
+    // the other caller of the shared entry point, lists them on the page instead.
     if !summary.unverified.is_empty() {
         return Err(format!(
             "restore incomplete: {} file(s) failed their whole-file integrity check and \
@@ -592,33 +566,6 @@ async fn restore(
         bytes_written: summary.bytes_written,
         skipped: summary.skipped,
     })
-}
-
-/// Map a snapshot's file entries to the restore walk's inputs.
-///
-/// **Only regular files** carry a restorable manifest (the nest records the value
-/// `"regular"`, **not** `"file"` — `bins/fauna-nest/src/db/sync_storage.rs`).
-/// Directories are recreated by the write path and symlinks are not materialized
-/// by this v1 walk, so both are dropped here. A malformed `manifest_hash` (not 32
-/// bytes) is a hard error — a corrupt listing must not silently restore a subset.
-pub(crate) fn snapshot_files_to_restore(
-    files: &[fauna_protocol::filesync::SnapshotFileEntry],
-) -> Result<Vec<SnapshotFileToRestore>, String> {
-    files
-        .iter()
-        .filter(|f| f.file_type == "regular")
-        .map(|f| {
-            let raw: [u8; 32] = f
-                .manifest_hash
-                .as_ref()
-                .try_into()
-                .map_err(|_| format!("{}: manifest hash is not 32 bytes", f.path))?;
-            Ok(SnapshotFileToRestore {
-                relative_path: f.path.clone(),
-                manifest_hash: ContentHash::from_digest_raw(raw),
-            })
-        })
-        .collect()
 }
 
 /// Read every tracked file's display state straight from the set's state DB.
@@ -816,24 +763,6 @@ pub(crate) fn file_provider_host_context(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fauna_protocol::ByteBuf;
-    use fauna_protocol::filesync::SnapshotFileEntry;
-    use std::collections::BTreeMap;
-
-    fn entry(path: &str, file_type: &str, manifest: Vec<u8>) -> SnapshotFileEntry {
-        SnapshotFileEntry {
-            path: path.into(),
-            manifest_hash: ByteBuf::from(manifest),
-            size_bytes: 0,
-            mtime: 0,
-            mode: 0,
-            file_type: file_type.into(),
-            symlink_target: None,
-            path_hash: None,
-            path_sealed: None,
-            extra: BTreeMap::new(),
-        }
-    }
 
     /// A status read must not *create* the thing it reads. `SyncDb::open` is
     /// open-**or-create** (it even `create_dir_all`s the parent), so reading a
@@ -951,38 +880,6 @@ mod tests {
             got.bytes_pending, 2_400,
             "whole-file size of the uploading file only"
         );
-    }
-
-    /// Guards the `file_type == "regular"` predicate. The nest records regular
-    /// files as `"regular"` (NOT `"file"`); a wrong literal here would silently
-    /// map **zero** files and restore an empty folder with no error — the
-    /// silent-feature-death class (testing.md convention 10). Directories +
-    /// symlinks are correctly dropped.
-    #[test]
-    fn only_regular_files_map_to_restore_inputs() {
-        let files = vec![
-            entry("a.txt", "regular", vec![1u8; 32]),
-            entry("sub", "directory", vec![]),
-            entry("link", "symlink", vec![2u8; 32]),
-            entry("nested/c.bin", "regular", vec![3u8; 32]),
-        ];
-        let out = snapshot_files_to_restore(&files).expect("map");
-        assert_eq!(out.len(), 2, "only the two regular files survive");
-        assert_eq!(out[0].relative_path, "a.txt");
-        assert_eq!(out[1].relative_path, "nested/c.bin");
-        assert_eq!(
-            out[0].manifest_hash,
-            ContentHash::from_digest_raw([1u8; 32]),
-            "raw 32-byte manifest_hash resolves to the right ContentHash"
-        );
-    }
-
-    /// A corrupt listing (manifest hash not 32 bytes) is a hard error, never a
-    /// silent partial restore.
-    #[test]
-    fn malformed_manifest_hash_is_a_hard_error() {
-        let files = vec![entry("bad.txt", "regular", vec![1u8; 16])];
-        assert!(snapshot_files_to_restore(&files).is_err());
     }
 
     /// Build a host context over `state_dir` with an unconnected fake nest — enough

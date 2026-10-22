@@ -7,7 +7,18 @@
 #[cfg(feature = "relay")]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    fauna_iroh_relay::run().await
+    let result = fauna_iroh_relay::run().await;
+    // A refused credential is a routine end, not a crash: exit `EX_CONFIG` so
+    // `docker logs` reads honestly and s6 restarts us against nest's fresh token
+    // (`transport.md`, the sidecar credential's lifetime).
+    if let Err(e) = &result
+        && e.downcast_ref::<fauna_sidecar_client::CredentialRefused>()
+            .is_some()
+    {
+        eprintln!("{e}");
+        std::process::exit(fauna_sidecar_client::EXIT_CREDENTIAL_REFUSED);
+    }
+    result
 }
 
 #[cfg(not(feature = "relay"))]

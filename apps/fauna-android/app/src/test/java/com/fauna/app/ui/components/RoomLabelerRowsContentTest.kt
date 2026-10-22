@@ -2,6 +2,7 @@ package com.fauna.app.ui.components
 
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -94,6 +95,14 @@ class RoomLabelerRowsContentTest {
         render(snapshot("aa" to "wasm", "bb" to "list", "cc" to "text-model"), draft(labelers = listOf("aa")))
         composeTestRule.onAllNodesWithTag(Ids.ROOM_LABELER_TOGGLE).assertCountEquals(2)
         composeTestRule.onAllNodesWithTag(Ids.ROOM_LABELER_INSPECT_BUTTON).assertCountEquals(2)
+    }
+
+    @Test
+    fun toggleTextNamesTheKindAndAnIdPrefix() {
+        val id = "0123456789abcdef0123"
+        render(snapshot(id to "wasm"), draft(labelers = emptyList()))
+        composeTestRule.onNodeWithTag(Ids.ROOM_LABELER_TOGGLE)
+            .assertTextContains("wasm · 0123456789abcdef…", substring = true)
     }
 
     @Test

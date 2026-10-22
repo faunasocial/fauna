@@ -16,6 +16,7 @@ use std::time::Duration;
 use fauna_client_config::{MailStore, StoreError};
 use fauna_core::data::{MailConfig, MailCredential, MsekFingerprint};
 use fauna_core::mail_rows::{MailRows, MailStateRow};
+use fauna_core::secret::SecretArray32;
 
 use super::AccountStoreHandle;
 
@@ -418,6 +419,10 @@ impl MailStore for AccountMailStore {
         self.handle(false).await?.write_state(state).await
     }
 
+    async fn clear_rotation(&self, new_msek: SecretArray32) -> Result<bool, StoreError> {
+        self.handle(false).await?.clear_rotation(new_msek).await
+    }
+
     async fn put_credential(&self, credential: MailCredential) -> Result<bool, StoreError> {
         self.handle(false).await?.put_credential(credential).await
     }
@@ -430,6 +435,17 @@ impl MailStore for AccountMailStore {
         self.handle(false)
             .await?
             .mark_wrapped(credential_id, fingerprint)
+            .await
+    }
+
+    async fn mark_token_minted(
+        &self,
+        credential_id: String,
+        minted_at: u64,
+    ) -> Result<bool, StoreError> {
+        self.handle(false)
+            .await?
+            .mark_token_minted(credential_id, minted_at)
             .await
     }
 
@@ -453,5 +469,46 @@ impl MailStore for AccountMailStore {
 
     async fn walk(&self) -> Result<(), StoreError> {
         self.handle(true).await?.walk().await
+    }
+}
+
+/// The mail import's remembered source (`fauna.state.mail-import-source`)
+/// over the seat's account runtime — the production
+/// [`MailImportSourceStore`](fauna_client_config::MailImportSourceStore) every
+/// app hands the import wizard, the [`AccountMailStore`] shape: each call
+/// waits [`ACCOUNT_HANDLE_WAIT`] for a runtime, and a read then crosses the
+/// handle's first-listing gate, so a wizard opened in the first seconds after
+/// sign-in prefills from the account's record rather than from nothing.
+#[derive(Clone)]
+pub struct AccountMailImportSourceStore {
+    source: AccountHandleSource,
+}
+
+impl AccountMailImportSourceStore {
+    pub fn new(source: AccountHandleSource) -> Self {
+        Self { source }
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl fauna_client_config::MailImportSourceStore for AccountMailImportSourceStore {
+    async fn load(
+        &self,
+    ) -> Result<Option<fauna_core::mail_import_source::RememberedImportSource>, StoreError> {
+        let handle = wait_for_account_handle(&self.source, "the remembered import source")
+            .await
+            .ok_or_else(|| StoreError::Load(RUNTIME_ABSENT.into()))?;
+        fauna_client_config::MailImportSourceStore::load(&handle).await
+    }
+
+    async fn save(
+        &self,
+        next: Option<fauna_core::mail_import_source::RememberedImportSource>,
+    ) -> Result<(), StoreError> {
+        let handle = wait_for_account_handle(&self.source, "the remembered import source")
+            .await
+            .ok_or_else(|| StoreError::Save(RUNTIME_ABSENT.into()))?;
+        fauna_client_config::MailImportSourceStore::save(&handle, next).await
     }
 }

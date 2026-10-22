@@ -22,3 +22,5 @@ serde_json = { workspace = true }
 # Test-only: the tests cross-check our hand-built CIDs against the reference
 # multihash implementation; production hashes with blake3 directly.
 multihash-codetable = { version = "0.2", features = ["blake3"] }
+# Test-only: property tests over the strict decoder (`tests/proptest_decode.rs`).
+proptest = { workspace = true }

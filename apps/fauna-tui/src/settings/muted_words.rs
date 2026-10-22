@@ -6,7 +6,8 @@
 //!
 //! A person manages their single user-global muted-keyword list here: add a term
 //! (`muted-word-input` + `muted-word-add-button`), see the terms (`muted-word-item`
-//! rows: `muted-word-text` + `muted-word-remove-button`), empty state
+//! rows: `muted-word-text` + `muted-word-remove-button` + the
+//! `muted-word-level-select` Hide / Show less picker), empty state
 //! (`muted-word-empty`). linux is the reference leg
 //! (`apps/fauna-linux/src/settings/muted_words.rs`); tui is the seventh and last
 //! client to lift it (priority #1).
@@ -39,7 +40,8 @@ use fauna_i18n::strings::muted_words as t;
 use fauna_ui_ids as ids;
 
 use super::{Action, SettingsField, SettingsState};
-use crate::element::{Element, Field, Gesture};
+use crate::element::{Element, Field, Gesture, SelectTarget};
+use fauna_core::scoring::MutedKeywordLevel;
 
 /// The Muted words sub-page's state — the persisted list plus the one local
 /// input buffer.
@@ -127,10 +129,30 @@ pub(super) fn muted_words_elements(state: &SettingsState) -> Vec<Element> {
     if mw.snapshot.shows_empty_state() {
         els.push(Element::label(ids::MUTED_WORD_EMPTY, t::EMPTY));
     }
-    for (i, word) in mw.snapshot.terms().into_iter().enumerate() {
+    for (i, keyword) in mw.keywords().iter().enumerate() {
+        let word = keyword.keyword.clone();
         els.push(Element::label(ids::MUTED_WORD_ITEM, word.clone()));
         els.push(
             Element::label(ids::MUTED_WORD_TEXT, word.clone()).within(ids::MUTED_WORD_ITEM, i),
+        );
+        // The level picker (`ui/settings.md` § Muted words — the level picker):
+        // its value is the row's level through the shared classification —
+        // no weight is compared or spelled here — and it is the whole
+        // difference a soft row shows.
+        let level = keyword.level();
+        els.push(
+            Element::select(
+                ids::MUTED_WORD_LEVEL_SELECT,
+                level.value(),
+                SelectTarget::MutedWordLevel { row: i },
+                MutedKeywordLevel::ALL
+                    .iter()
+                    .map(|l| l.value().to_string())
+                    .collect(),
+            )
+            .display_value(level_label(level))
+            .enabled(!mw.busy)
+            .within(ids::MUTED_WORD_ITEM, i),
         );
         els.push(
             Element::gesture_button(
@@ -152,6 +174,15 @@ pub(super) fn muted_words_elements(state: &SettingsState) -> Vec<Element> {
         .nav_back(),
     );
     els
+}
+
+/// A level's picker label — the one per-app piece, since the label is i18n
+/// and the level is shared.
+fn level_label(level: MutedKeywordLevel) -> &'static str {
+    match level {
+        MutedKeywordLevel::Hide => t::LEVEL_HIDE,
+        MutedKeywordLevel::ShowLess => t::LEVEL_SHOW_LESS,
+    }
 }
 
 // ── The shared-call sequencing (the only logic here; everything else is shared) ──
@@ -181,9 +212,11 @@ pub(crate) enum MutedWordsMutation {
     Add(String),
     /// `muted-word-remove-button` — remove one stored row's term.
     Remove(String),
+    /// `muted-word-level-select` — set one stored row's term to a level.
+    SetLevel(String, MutedKeywordLevel),
 }
 
-/// Apply one add/remove gesture through the shared delta.
+/// Apply one add/remove/level gesture through the shared delta.
 ///
 /// The delta form is the fix, not a convenience: the old shape sent the PAGE'S
 /// list wholesale (`words() + push` / `filter`), so a term another device
@@ -200,6 +233,9 @@ pub(super) async fn mutate_word(
         MutedWordsMutation::Add(term) => preference_surfaces::add_muted_word(&store, &term).await,
         MutedWordsMutation::Remove(term) => {
             preference_surfaces::remove_muted_word(&store, &term).await
+        }
+        MutedWordsMutation::SetLevel(term, level) => {
+            preference_surfaces::set_muted_word_level(&store, &term, level).await
         }
     }
     .map_err(preference_surfaces::plane_failure)
@@ -354,15 +390,52 @@ mod tests {
         let mut state = state_with(&["spam"]);
         state.muted_words.busy = true;
         let els = muted_words_elements(&state);
-        for id in ["muted-word-add-button", "muted-word-remove-button"] {
+        for id in [
+            "muted-word-add-button",
+            "muted-word-remove-button",
+            "muted-word-level-select",
+        ] {
             let el = els.iter().find(|e| e.id == id).unwrap();
             assert!(!el.enabled, "{id} must be disabled while busy");
         }
         // …and re-enabled once it settles.
         state.muted_words.busy = false;
         let els = muted_words_elements(&state);
-        for id in ["muted-word-add-button", "muted-word-remove-button"] {
+        for id in [
+            "muted-word-add-button",
+            "muted-word-remove-button",
+            "muted-word-level-select",
+        ] {
             assert!(els.iter().find(|e| e.id == id).unwrap().enabled);
+        }
+    }
+
+    /// Each row's level picker sits within its own row, reads the row's level
+    /// through the shared classification, and offers exactly the two levels —
+    /// a soft row differs from a hidden one by the picker's value alone.
+    #[test]
+    fn each_row_paints_its_level_picker_from_the_stored_weight() {
+        let mut state = state_with(&["spam", "lottery"]);
+        state.muted_words.snapshot.keywords[1].weight = MutedKeywordLevel::ShowLess.weight();
+        let els = muted_words_elements(&state);
+        for (row, want) in [(0usize, "hide"), (1, "show-less")] {
+            let picker = els
+                .iter()
+                .find(|e| {
+                    e.id == "muted-word-level-select"
+                        && e.path == vec![("muted-word-item".to_string(), row)]
+                })
+                .unwrap_or_else(|| panic!("no muted-word-level-select at row {row}"));
+            assert_eq!(picker.text, want, "row {row}'s level");
+            match &picker.role {
+                crate::element::Role::Select {
+                    target, options, ..
+                } => {
+                    assert_eq!(*target, SelectTarget::MutedWordLevel { row });
+                    assert_eq!(options, &vec!["hide".to_string(), "show-less".to_string()]);
+                }
+                other => panic!("muted-word-level-select must be a select; was {other:?}"),
+            }
         }
     }
 

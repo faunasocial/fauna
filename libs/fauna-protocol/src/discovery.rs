@@ -392,9 +392,14 @@ pub struct RegistrationInfo {
 /// Moderation policy summary.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ModerationInfo {
-    // No field today: the nest carries no scanning obligations for clients (the
-    // in-nest classifier stack was retired, content-scoring.md § Architectural
-    // rules). The struct is the slot a moderation summary grows into.
+    // The nest carries no scanning obligations for clients (the in-nest
+    // classifier stack was retired, content-scoring.md § Architectural rules).
+    /// The nest admin's published rules, signed by the nest
+    /// (`nest-rules.md` § The nest content policy → *Carriage*). Absent when the
+    /// admin has published none. A member verifies it against `nest_id` and
+    /// keeps the last-accepted document per nest with its sequence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_policy: Option<crate::content_policy::SignedContentPolicy>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -575,6 +580,19 @@ pub struct SetupStatusReply {
     /// via the mutable `fauna.setup.nat_mode` kind. Always resolved (an unset
     /// row falls back to the seed), so always present.
     pub node_mode: String,
+    /// The deployment's content-scanner declaration — an open string enum,
+    /// `"wired"` / `"absent"` / `"unknown"` (`fauna_core::mail_availability::
+    /// ContentScanners`'s wire form; parse with `ContentScanners::from_wire`, so
+    /// an unrecognised value and a reply without the field — `""` — read
+    /// `unknown`). Read by the nest once at boot from the artifact's hatch.
+    /// With `node_mode` it decides `mail_unavailable_here`, which every client
+    /// machine computes in shared Rust to hide the mail enable on a box that
+    /// cannot run the MTA. Anonymous like `node_mode`: a missing mail perimeter
+    /// is already visible as a closed port 25 (`mail-bridge-lifecycle.md`
+    /// § Default-off on first claim → *A box with no content scanners cannot
+    /// enable mail*).
+    #[serde(default)]
+    pub content_scanners: String,
     /// `CARGO_PKG_VERSION` of the running nest.
     pub version: String,
     /// Whether the mail subsystem's nest-side config query is healthy. `false`
@@ -597,6 +615,15 @@ pub struct SetupStatusReply {
     /// rather than silently disabling it).
     #[serde(default = "default_true")]
     pub auto_enable_mail_for_new_users: bool,
+    /// Deployment policy: the admin's own Microsoft app registration for the
+    /// Outlook import, set via `fauna.bridges.set_microsoft_registration`.
+    /// Absent ⇒ the project's registration (the Rust constant
+    /// `fauna_mail::imap_client::MICROSOFT`) — `mailbox-migration.md`
+    /// § Microsoft sign-in, *An admin-supplied registration*. Public
+    /// identifiers, not secrets; every app's import wizard and the admin's
+    /// `admin-mail` section read it from here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub microsoft_registration: Option<crate::microsoft_registration::MicrosoftRegistrationStatus>,
     /// Deployment policy: the client-set **registration posture** — the wire string
     /// of [`crate::node_policy::RegistrationMode`] (`open` / `invite_required` /
     /// `closed`). The admin sets it via `fauna.admin.set_registration_mode` and
@@ -679,6 +706,16 @@ pub struct SetupStatusReply {
     /// when DKIM is not provisioned.
     #[serde(default)]
     pub dkim_records: Vec<DkimRecord>,
+    /// Host-OS maintenance: whether the nest read a `host-status` file from the
+    /// host's root-owned `/data/maintenance-host` mount — the only case in which
+    /// the other `os_*` fields are a host's report rather than their defaults.
+    /// `false` on a box without the host channel (a hand-built box, dev,
+    /// desktop), before the host's first write, and for every anonymous or
+    /// non-admin caller (the `os_*` admin gate). The admin client then shows
+    /// "OS status not reported by this host", never "OS up to date". Authority:
+    /// `installers/vps.md` § Host OS Maintenance § 4.
+    #[serde(default)]
+    pub os_host_status_present: bool,
     /// Host-OS maintenance: the number of pending **security** updates on the
     /// host Ubuntu box (an onboarded VPS — `installers/vps.md` § Host OS
     /// Maintenance). The host's `fauna-reboot-coordinator` writes the live count
@@ -710,6 +747,14 @@ pub struct SetupStatusReply {
     /// See [`Self::os_security_updates_pending`].
     #[serde(default)]
     pub os_last_patched_at: Option<i64>,
+    /// The SSH door (`installers/vps.md` § The SSH door): the one address the
+    /// host's door admits — the address the admin claimed the box from, read
+    /// from the host's own record of the admission. `None` on a door-less box,
+    /// before the host has admitted the address, and on a nest without the
+    /// host-OS maintenance channel. Admin-only, like the `os_*` fields: an
+    /// anonymous or non-admin caller always reads `None`.
+    #[serde(default)]
+    pub ssh_door_admitted_from: Option<String>,
     /// Deployment policy: the admin's choice of what this nest's `/app/`
     /// answers — the wire spelling of
     /// [`crate::web_app_origin::WebAppOrigin`] (`bundled` / `central`), set via
@@ -728,6 +773,24 @@ pub struct SetupStatusReply {
     pub web_app_origin_domainless: bool,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
+}
+
+impl SetupStatusReply {
+    /// Whether this box cannot enable mail — [`Self::node_mode`] and
+    /// [`Self::content_scanners`] folded through
+    /// `fauna_core::mail_availability::mail_unavailable_here`, the one place a
+    /// client reads the fact off the wire (both Mail-page machines call it;
+    /// `mail-bridge-lifecycle.md` § Default-off on first claim → *A box with no
+    /// content scanners cannot enable mail*, reader 3). An unrecognised
+    /// `node_mode` reads public, as the onboarding machine's seed does.
+    pub fn mail_unavailable_here(&self) -> bool {
+        use fauna_core::mail_availability::{ContentScanners, mail_unavailable_here};
+        use fauna_core::nat_mode::NodeMode;
+        mail_unavailable_here(
+            NodeMode::from_wire_str(&self.node_mode).unwrap_or(NodeMode::Public),
+            ContentScanners::from_wire(&self.content_scanners),
+        )
+    }
 }
 
 /// Serde default for [`SetupStatusReply::mail_subsystem_ok`] — a missing field
@@ -775,6 +838,7 @@ mod tests {
                 extra: BTreeMap::new(),
             }),
             moderation: ModerationInfo {
+                content_policy: None,
                 extra: BTreeMap::new(),
             },
             web_serving_domain: Some("nest.example".into()),
@@ -801,6 +865,7 @@ mod tests {
             subhandles: false,
             registration: None,
             moderation: ModerationInfo {
+                content_policy: None,
                 extra: BTreeMap::new(),
             },
             // A domainless box: the registration domain reads `"unknown"`, and
@@ -854,6 +919,7 @@ mod tests {
             subhandles: false,
             registration: None,
             moderation: ModerationInfo {
+                content_policy: None,
                 extra: BTreeMap::new(),
             },
         };
@@ -1018,6 +1084,9 @@ mod tests {
             // Proves the resolved NAT axis rides the wire so `nat_mode_choice`
             // can pre-select it.
             node_mode: "public".into(),
+            // Non-default (serde default empty) — proves the declaration rides
+            // the wire.
+            content_scanners: "absent".into(),
             version: "0.1.0".into(),
             // Non-default (the serde default is `true`) so the round-trip proves
             // the flag is actually carried on the wire, not silently defaulted.
@@ -1025,6 +1094,15 @@ mod tests {
             // Same — non-default (serde default `true`) proves the policy flag
             // rides the wire and isn't silently re-defaulted on decode.
             auto_enable_mail_for_new_users: false,
+            // Non-default (serde default `None`) — proves the admin's
+            // registration rides the wire to every app's import wizard.
+            microsoft_registration: Some(
+                crate::microsoft_registration::MicrosoftRegistrationStatus {
+                    client_id: "0b5c1a2e-3f4d-4e5a-8b6c-7d8e9f0a1b2c".into(),
+                    tenant: "common".into(),
+                    extra: BTreeMap::new(),
+                },
+            ),
             registration_mode: None,
             max_free_users: None,
             // Non-default (serde default `false`) — proves it rides the wire.
@@ -1052,10 +1130,12 @@ mod tests {
             // Non-default host-OS-maintenance fields (serde defaults are 0 /
             // false / None) — prove the os_* values ride the wire so the admin
             // client can render the patch/reboot indicator.
+            os_host_status_present: true,
             os_security_updates_pending: 3,
             os_reboot_pending: true,
             os_reboot_deferred_since: Some(1_719_500_000),
             os_last_patched_at: Some(1_719_400_000),
+            ssh_door_admitted_from: Some("203.0.113.7".into()),
             web_app_origin: "central".into(),
             web_app_origin_target: Some("https://app.fauna.social/app/?nest=nest.example".into()),
             web_app_origin_domainless: true,
@@ -1064,6 +1144,7 @@ mod tests {
         let bytes1 = encode_canonical(&chosen).unwrap();
         let decoded: SetupStatusReply = decode(&bytes1).unwrap();
         assert_eq!(chosen, decoded);
+        assert!(decoded.os_host_status_present);
         assert_eq!(decoded.os_security_updates_pending, 3);
         assert!(decoded.os_reboot_pending);
         assert_eq!(decoded.os_reboot_deferred_since, Some(1_719_500_000));
@@ -1080,8 +1161,21 @@ mod tests {
             decoded.dkim_records[0].public_dns_value,
             "v=DKIM1; k=ed25519; p=AAAA"
         );
+        assert_eq!(decoded.content_scanners, "absent");
         let bytes2 = encode_canonical(&decoded).unwrap();
         assert_eq!(bytes1, bytes2);
+
+        // A reply from a nest predating `content_scanners` decodes, and the
+        // field reads `unknown` through the shared parser (today's behaviour —
+        // the enable stays offered).
+        let mut older: BTreeMap<String, Value> = decode(&bytes1).unwrap();
+        older.remove("content_scanners");
+        let decoded: SetupStatusReply = decode(&encode_canonical(&older).unwrap()).unwrap();
+        assert_eq!(decoded.content_scanners, "");
+        assert_eq!(
+            fauna_core::mail_availability::ContentScanners::from_wire(&decoded.content_scanners),
+            fauna_core::mail_availability::ContentScanners::Unknown
+        );
 
         // A reply carrying the retired storage `mode` key (any unknown key) is
         // absorbed by the catch-all, never refused.
@@ -1092,5 +1186,33 @@ mod tests {
             decoded.extra.get("mode"),
             Some(&Value::String("Encrypted".into()))
         );
+    }
+
+    #[test]
+    fn mail_unavailable_here_folds_the_two_reported_axes() {
+        // (node_mode, content_scanners, unavailable)
+        let table = [
+            ("public", "absent", true),
+            ("public", "wired", false),
+            ("public", "unknown", false),
+            // A nest predating the field: the enable stays offered.
+            ("public", "", false),
+            ("private", "absent", false),
+            ("private", "wired", false),
+            // An unrecognised axis reads public.
+            ("", "absent", true),
+        ];
+        for (node_mode, content_scanners, unavailable) in table {
+            let reply = SetupStatusReply {
+                node_mode: node_mode.into(),
+                content_scanners: content_scanners.into(),
+                ..Default::default()
+            };
+            assert_eq!(
+                reply.mail_unavailable_here(),
+                unavailable,
+                "{node_mode:?} {content_scanners:?}"
+            );
+        }
     }
 }

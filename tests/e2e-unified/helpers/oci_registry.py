@@ -18,8 +18,17 @@ It is plain Python, deliberately NOT a third-party registry image (which would
 be an image add to vet). It answers anonymously (``GET /v2/`` → 200, the shape
 the shared client treats as "no token needed") and serves exactly what a pull
 needs: manifests by tag or digest (``HEAD`` and ``GET``) and blobs by digest.
-The Docker daemon pulls from it over plain HTTP because it binds
-``127.0.0.0/8``, which the daemon treats as an insecure registry by default.
+It serves TLS on ``127.0.0.1`` and is named ``localhost:<port>``, because that
+is what both of Docker's image stores pull without any daemon configuration.
+Plain HTTP is NOT: the containerd snapshotter store (the default for a fresh
+install, and the self-hosted CI runner's) dials a loopback registry over HTTPS and never falls
+back — the 2026-10-20 ``tier4-deploy-e2e.yml`` runs refused every pull from
+``127.0.0.1:<port>`` and from ``localhost:<port>`` alike. Over HTTPS both stores
+treat a registry resolving into ``127.0.0.0/8`` as insecure and skip
+verification. The binaries do verify: each run mints a throwaway CA and a leaf
+for ``localhost``/``127.0.0.1``, and :attr:`OciRegistry.env` hands both seams the
+origin and the CA (``FAUNA_E2E_UPDATE_REGISTRY_CA``, PEM), which an e2e build
+trusts and a release build never reads (convention 15).
 
 Two ways to fill it:
 
@@ -29,7 +38,7 @@ Two ways to fill it:
 * :meth:`OciRegistry.from_image` — a REAL image exported with ``docker save``
   (an OCI layout since Docker 25), re-published under a chosen version label.
   The label is rewritten in the config blob, so each variant is a distinct image
-  (its config digest is its image id) sharing every layer with the original —
+  (its own config digest, so its own image id) sharing every layer with the original —
   "a newer build" without building anything (tier_4).
 
 ``requests`` records ``"<METHOD> <path>"`` once each answer is written.
@@ -38,10 +47,16 @@ Two ways to fill it:
 from __future__ import annotations
 
 import contextlib
+import datetime
+import ipaddress
 import hashlib
+import io
 import json
 import platform
+import secrets
+import ssl
 import subprocess
+import tempfile
 import tarfile
 import threading
 from dataclasses import dataclass
@@ -54,6 +69,10 @@ REPOSITORY = "faunasocial/nest"
 
 #: The label the decision reads (`update_channel::VERSION_LABEL`).
 VERSION_LABEL = "org.opencontainers.image.version"
+
+#: The label naming the build's commit (`update_channel::REVISION_LABEL`), which
+#: the nest's `update overdue` decision compares with its own.
+REVISION_LABEL = "org.opencontainers.image.revision"
 
 OCI_INDEX = "application/vnd.oci.image.index.v1+json"
 OCI_MANIFEST = "application/vnd.oci.image.manifest.v1+json"
@@ -77,6 +96,70 @@ def digest_of(data: bytes) -> str:
 
 def _canonical(obj: dict) -> bytes:
     return json.dumps(obj, separators=(",", ":"), sort_keys=True).encode()
+
+
+def _mint_tls() -> tuple[str, bytes, bytes]:
+    """A throwaway CA and a leaf it signs for ``localhost`` and ``127.0.0.1``:
+    ``(ca_pem, leaf_chain_pem, leaf_key_pem)``. A CA and a leaf, not one
+    self-signed certificate, because rustls refuses a CA certificate presented
+    as the end entity; the key-identifier and key-usage extensions are what a
+    strict verifier (Python 3.13+'s default) demands of a chain."""
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    ca_key = ec.generate_private_key(ec.SECP256R1())
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "oci-registry test CA")])
+    ca = (
+        x509.CertificateBuilder()
+        .subject_name(ca_name)
+        .issuer_name(ca_name)
+        .public_key(ca_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(minutes=5))
+        .not_valid_after(now + datetime.timedelta(days=2))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=False, content_commitment=False, key_encipherment=False,
+                data_encipherment=False, key_agreement=False, key_cert_sign=True,
+                crl_sign=True, encipher_only=False, decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()), critical=False)
+        .sign(ca_key, hashes.SHA256())
+    )
+    key = ec.generate_private_key(ec.SECP256R1())
+    leaf = (
+        x509.CertificateBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")]))
+        .issuer_name(ca_name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(minutes=5))
+        .not_valid_after(now + datetime.timedelta(days=2))
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(
+            x509.SubjectAlternativeName(
+                [x509.DNSName("localhost"), x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]
+            ),
+            critical=False,
+        )
+        .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), critical=False
+        )
+        .sign(ca_key, hashes.SHA256())
+    )
+    pem = serialization.Encoding.PEM
+    key_pem = key.private_bytes(
+        pem, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
+    )
+    return ca.public_bytes(pem).decode(), leaf.public_bytes(pem), key_pem
 
 
 @dataclass(frozen=True)
@@ -163,6 +246,18 @@ class OciRegistry:
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self._server.daemon_threads = True
+        self.ca_pem, chain_pem, key_pem = _mint_tls()
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        with tempfile.TemporaryDirectory() as scratch:
+            cert, key = Path(scratch, "cert.pem"), Path(scratch, "key.pem")
+            cert.write_bytes(chain_pem)
+            key.write_bytes(key_pem)
+            context.load_cert_chain(cert, key)
+        # The handshake runs on the handler's first read, in its own thread, so
+        # one slow client never stalls the accept loop.
+        self._server.socket = context.wrap_socket(
+            self._server.socket, server_side=True, do_handshake_on_connect=False
+        )
         self._thread: threading.Thread | None = None
 
     # ── lifecycle ────────────────────────────────────────────────────────────
@@ -188,14 +283,24 @@ class OciRegistry:
 
     @property
     def host(self) -> str:
-        """``127.0.0.1:<port>`` — the registry part of an image reference."""
-        host, port = self._server.server_address[:2]
-        return f"{host}:{port}"
+        """``localhost:<port>`` — the registry part of an image reference (the
+        module docstring says why ``localhost``, not the bound address)."""
+        port = self._server.server_address[1]
+        return f"localhost:{port}"
 
     @property
     def origin(self) -> str:
         """What a binary is handed as its registry origin (no trailing slash)."""
-        return f"http://{self.host}"
+        return f"https://{self.host}"
+
+    @property
+    def env(self) -> dict[str, str]:
+        """The environment a binary's e2e seam reads this registry from: its
+        origin and the CA its certificate chains to."""
+        return {
+            "FAUNA_E2E_UPDATE_REGISTRY_ORIGIN": self.origin,
+            "FAUNA_E2E_UPDATE_REGISTRY_CA": self.ca_pem,
+        }
 
     @property
     def repository(self) -> str:
@@ -280,11 +385,14 @@ class OciRegistry:
             self.tag(tag, index_digest)
         return Published(index=index_digest, manifest=manifest_digest, config=config_digest)
 
-    def synthetic(self, tag: str, version: str | None, arch: str | None = None) -> Published:
+    def synthetic(self, tag: str, version: str | None, arch: str | None = None,
+                  revision: str | None = None) -> Published:
         """Publish a layerless image under ``tag`` whose config carries
-        ``version`` as its version label (``None``: no label) — a head to READ,
-        never to pull."""
+        ``version`` as its version label (``None``: no label) and, given one,
+        ``revision`` as its revision label — a head to READ, never to pull."""
         labels = {} if version is None else {VERSION_LABEL: version}
+        if revision is not None:
+            labels[REVISION_LABEL] = revision
         config = {
             "architecture": arch or platform_arch(),
             "os": "linux",
@@ -305,6 +413,33 @@ class OciRegistry:
         for layer in layout.layers:
             self.put_blob_file(layer["digest"], layout.blob_path(layer["digest"]))
         return self._publish(config, layout.layers, tag)
+
+    def with_missing_layer(self, layout: "SavedImage", version: str) -> Published:
+        """Publish the saved image with ``version`` as its label and one extra
+        layer whose blob this registry never serves: its manifest and config
+        read whole (a head the decision applies), and a pull fails on the
+        blob — the registry serving a head whose blob is gone."""
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            data = secrets.token_hex(16).encode()
+            info = tarfile.TarInfo("gone")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+        layer = buf.getvalue()
+        digest = digest_of(layer)
+        config = json.loads(layout.config_bytes)
+        config.setdefault("config", {})
+        labels = dict(config["config"].get("Labels") or {})
+        labels[VERSION_LABEL] = version
+        config["config"]["Labels"] = labels
+        config["rootfs"]["diff_ids"] = [*config["rootfs"]["diff_ids"], digest]
+        for existing in layout.layers:
+            self.put_blob_file(existing["digest"], layout.blob_path(existing["digest"]))
+        media_type = layout.layers[-1].get("mediaType", "application/vnd.oci.image.layer.v1.tar")
+        if media_type.endswith("+gzip") or media_type.endswith(".gzip"):
+            media_type = "application/vnd.oci.image.layer.v1.tar"
+        layers = [*layout.layers, {"mediaType": media_type, "digest": digest, "size": len(layer)}]
+        return self._publish(config, layers, None)
 
 
 class SavedImage:

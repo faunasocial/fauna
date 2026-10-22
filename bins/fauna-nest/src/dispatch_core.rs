@@ -66,8 +66,10 @@ pub const MAX_INFLIGHT_HANDLERS: usize = 2048;
 ///   ([`AppState::revoke_actor_authority_sparing_caller`]) — `conn_id` +
 ///   `correlation_id`;
 /// - *where is the caller?*, asked by the bearer mints for new-IP detection
-///   (`login.md` § the handshake's side effects) — `peer_ip`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///   (`login.md` § the handshake's side effects) — `peer_ip`;
+/// - *which cert was this connection served?*, asked by every channel-binding
+///   producer (`auth_handlers::served_spki`) — `served_name`.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CallerRef {
     pub conn_id: u64,
     pub correlation_id: u64,
@@ -88,6 +90,12 @@ pub struct CallerRef {
     /// while a handler that admits the developer carve-out
     /// (`third-party.md` § Developer loop) asks this. `false` when unknown.
     pub loopback_peer: bool,
+    /// The TLS server name the connection was accepted under
+    /// (`served_name.rs`): `None` on the plain listener and on a no-SNI dial.
+    /// Recorded on BOTH connection classes. Read by the channel-binding
+    /// producers, which sign the SPKI of the cert served for *this* name
+    /// (`transport-trust.md` Axis 1, *the cert it served this connection*).
+    pub served_name: Option<std::sync::Arc<str>>,
 }
 
 /// Run `fut` as the handler of `caller` — what [`spawn_dispatch`] wraps every
@@ -114,7 +122,15 @@ tokio::task_local! {
 /// or `None` outside a handler (a background sweep, the eviction ladder, the
 /// pending-action executor) or on a plane that has no client connection.
 pub fn current_caller() -> Option<CallerRef> {
-    CALLER.try_with(|c| *c).ok()
+    CALLER.try_with(|c| c.clone()).ok()
+}
+
+/// The TLS server name the currently-running handler's connection was
+/// accepted under ([`CallerRef::served_name`]) — what a channel-binding
+/// producer scopes its SPKI read by. `None` wherever [`current_caller`] is,
+/// on the plain listener, and on a no-SNI dial.
+pub fn current_served_name() -> Option<std::sync::Arc<str>> {
+    current_caller().and_then(|c| c.served_name)
 }
 
 /// The currently-running handler's client address, rendered for storage — the
@@ -156,6 +172,13 @@ pub trait DispatchSink: Send + Sync + 'static {
     /// is `Some`.
     fn caller_loopback_peer(&self) -> bool {
         false
+    }
+
+    /// The TLS server name this connection was accepted under, if any. Feeds
+    /// [`CallerRef::served_name`]; only read when [`Self::caller_conn_id`] is
+    /// `Some`.
+    fn caller_served_name(&self) -> Option<std::sync::Arc<str>> {
+        None
     }
 
     /// Idempotency lookup for `key`. Each impl owns its cache representation; the
@@ -418,12 +441,14 @@ pub async fn spawn_dispatch<S: DispatchSink>(
     let handler_kind = kind.clone();
     let handler_state = Arc::clone(&state);
     // Read off the sink here rather than inside the task: the task owns no
-    // `Arc<S>`, and a `Copy` pair is cheaper to move than one.
+    // `Arc<S>`, and this small record (two ids, an address, a flag and one
+    // `Arc<str>`) is cheaper to move than one.
     let caller = sink.caller_conn_id().map(|conn_id| CallerRef {
         conn_id,
         correlation_id,
         peer_ip: sink.caller_peer_ip(),
         loopback_peer: sink.caller_loopback_peer(),
+        served_name: sink.caller_served_name(),
     });
     // spawn-ok(request-scoped): one RPC, bounded by two named mechanisms — the
     // `MAX_INFLIGHT_HANDLERS` permit moved in above, and the per-kind

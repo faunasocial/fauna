@@ -287,12 +287,17 @@ async fn handle_subscriptions(
 /// `GET /api/v1/test/push/presence?actor_id=<hex>` — which of the actor's
 /// devices are present right now, as the dispatch would decide it this instant
 /// ([`crate::ws::WsState::device_presence`]): `{"announced": [device_id…],
-/// "app": [device_id…], "stand_in": [device_id…], "any_unannounced": bool}` —
-/// `announced` is every announced device of either kind, `app` and
-/// `stand_in` the two kinds apart. A client announces asynchronously on every
-/// (re)connect, so this is the causal barrier a witness waits on before it
-/// triggers a push it expects a `ws-device` row to deliver. Consumer:
-/// `tests/e2e-unified/tests/platform/windows/test_agent_push_arm_end_to_end.py`.
+/// "app": [device_id…], "stand_in": [device_id…], "any_unannounced": bool,
+/// "connections": [{conn_id, announced, device_bound}…]}` — `announced` is
+/// every announced device of either kind, `app` and `stand_in` the two kinds
+/// apart, `connections` each live connection on its own. A client announces
+/// asynchronously on every (re)connect, so this is the causal barrier a witness
+/// waits on before it triggers a push it expects a `ws-device` row to deliver;
+/// and a presence witness's self-diagnosis (convention 6): when a relay row it
+/// expects dialled stays quiet, `connections` says which live connection of the
+/// actor announced nothing. Consumers:
+/// `tests/e2e-unified/tests/platform/windows/test_agent_push_arm_end_to_end.py`
+/// and `tests/e2e-unified/tests/test_push_settings.py`.
 async fn handle_presence(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(q): axum::extract::Query<ActorQuery>,
@@ -304,11 +309,20 @@ async fn handle_presence(
     let presence = state.ws.device_presence(&actor_id);
     let announced: std::collections::BTreeSet<&String> =
         presence.app.iter().chain(&presence.stand_in).collect();
+    let connections: Vec<_> = state
+        .ws
+        .presence_connections(&actor_id)
+        .into_iter()
+        .map(|(conn_id, announced, device_bound)| {
+            json!({"conn_id": conn_id, "announced": announced, "device_bound": device_bound})
+        })
+        .collect();
     Json(json!({
         "announced": announced,
         "app": presence.app,
         "stand_in": presence.stand_in,
         "any_unannounced": presence.any_unannounced,
+        "connections": connections,
     }))
     .into_response()
 }

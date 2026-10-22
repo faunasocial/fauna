@@ -118,6 +118,7 @@ public struct MailSettingsView: View {
                         MailRotateKeysSheet(vm: vm) { showingRotate = false }
                     }
                     serveSection
+                    if vm.enabled { forwardingSection }
                     muaSection
                 }
                 statusSection
@@ -133,6 +134,11 @@ public struct MailSettingsView: View {
             guard let client else { return }
             let handle = client.sessionMaterial?.handle ?? ""
             await vm.configure(api: client.api, handle: handle)
+        }
+        // The aftermath's mail burn settling while this page is open: re-read, so
+        // the burned credentials show as revoked without re-opening the page.
+        .onChange(of: client?.mailSettledGeneration) { _, _ in
+            Task { await vm.rehydrateOnSettle() }
         }
     }
 
@@ -295,6 +301,47 @@ public struct MailSettingsView: View {
             // value only flips after the nest write returns, so with no nest it
             // could never move.
             .faunaGate("fauna.bridges.set_mail_serving_enabled")
+        }
+    }
+
+    // MARK: - Forwarding (mail-forwarding.md)
+
+    /// Two save-on-Enter inputs (no save button): the forward-all address and the
+    /// hourly forwarding limit. Parsing and refusals come from the shared
+    /// `fauna_client_mail_settings` draft parsers via the VM; refusals paint on the
+    /// page's `error-message`.
+    private var forwardingSection: some View {
+        groupedSection(title: L.mailSettings.forwardingTitle) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(L.mailSettings.forwardAllToLabel)
+                TextField(L.mailSettings.forwardAllToLabel, text: $vm.forwardAllToDraft)
+                    .accessibilityIdentifier(Ids.mailSettingsForwardAllToInput)
+                    .automationField(
+                        Ids.mailSettingsForwardAllToInput,
+                        text: $vm.forwardAllToDraft,
+                        commit: { Task { await vm.commitForwardAllTo() } }
+                    )
+                    .onSubmit { Task { await vm.commitForwardAllTo() } }
+                    .faunaGate("fauna.bridges.set_forward_all_to")
+                Text(L.mailSettings.forwardAllToSubtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(L.mailSettings.forwardPerHourLabel)
+                TextField(L.mailSettings.forwardPerHourLabel, text: $vm.forwardPerHourDraft)
+                    .accessibilityIdentifier(Ids.mailSettingsForwardPerHourInput)
+                    .automationField(
+                        Ids.mailSettingsForwardPerHourInput,
+                        text: $vm.forwardPerHourDraft,
+                        commit: { Task { await vm.commitForwardPerHour() } }
+                    )
+                    .onSubmit { Task { await vm.commitForwardPerHour() } }
+                    .faunaGate("fauna.bridges.set_forward_per_hour")
+                Text(vm.forwardPerHourHintText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 

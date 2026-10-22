@@ -382,6 +382,10 @@ pub struct QueueRowView {
     /// Whether `admin-nest-report-open-takedown-button` renders — posts and
     /// messages only ([`takedown_prefill`]).
     pub can_open_takedown: bool,
+    /// Whether `admin-nest-report-block-button` renders — posts and messages
+    /// only ([`crate::block::block_form_view`]; `moderation.md` § Admin block
+    /// of a reported item: a block is of one item).
+    pub can_block: bool,
 }
 
 pub fn queue_row_view(entry: &AbuseReportQueueEntry) -> QueueRowView {
@@ -393,6 +397,7 @@ pub fn queue_row_view(entry: &AbuseReportQueueEntry) -> QueueRowView {
         note: entry.note.clone(),
         excerpt: entry.excerpt.clone(),
         can_open_takedown: takedown_prefill(&entry.subject).is_some(),
+        can_block: crate::block::block_form_view(&entry.subject, false).can_submit,
     }
 }
 
@@ -701,6 +706,7 @@ mod tests {
         assert_eq!(row.subject_id, "bafyrecord");
         assert_eq!(row.excerpt.as_deref(), Some("the words"));
         assert!(row.can_open_takedown);
+        assert!(row.can_block, "a message is one item — the block arms");
         let actor_row = queue_row_view(&AbuseReportQueueEntry {
             subject: AbuseReportSubject::Actor {
                 actor_id: "ef".repeat(32),
@@ -708,6 +714,10 @@ mod tests {
             ..entry
         });
         assert!(!actor_row.can_open_takedown);
+        assert!(
+            !actor_row.can_block,
+            "an account has the account levers, never a block"
+        );
     }
 
     #[test]

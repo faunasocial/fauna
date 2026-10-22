@@ -446,7 +446,7 @@ pub(crate) async fn serve_segment_part(
     kind: &str,
     segment_id: u32,
     part: fauna_peer_sync::store_serve::SegmentPart,
-) -> Result<Option<Vec<u8>>, FleetSegmentError> {
+) -> Result<Option<fauna_peer_sync::store_serve::SegmentPartBody>, FleetSegmentError> {
     let (admission, scope) = admit_custodied_fleet_segment_plane(state, device_key, actor, kind)
         .await
         .map_err(|_| FleetSegmentError::Refused)?;

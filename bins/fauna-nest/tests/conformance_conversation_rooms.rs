@@ -8653,14 +8653,11 @@ use fauna_core::room_post::RoomPostSeal;
 /// uploads before it creates a gated post.
 async fn router_with_reader_nest_and_posts() -> (RpcRouter, Arc<AppState>) {
     let db = Arc::new(CacheDb::open_in_memory().unwrap());
-    let blob_dir = tempfile::tempdir().unwrap();
-    let blob_path = blob_dir.path().to_path_buf();
-    std::mem::forget(blob_dir); // outlives the test process; never deleted under test
+    let mut state = booted_reader_nest(db.clone()).await;
+    let blob_path = state.test_scratch_path("blobs");
     let backup = Arc::new(
-        fauna_nest::backup::service::BackupService::new(db.clone(), None, false, blob_path, None)
-            .unwrap(),
+        fauna_nest::backup::service::BackupService::new(db, None, false, blob_path, None).unwrap(),
     );
-    let mut state = booted_reader_nest(db).await;
     state.backup_service = Some(backup);
     let state = Arc::new(state);
     let mut b = RpcRouter::builder();

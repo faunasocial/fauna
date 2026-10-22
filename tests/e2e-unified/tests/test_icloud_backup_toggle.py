@@ -33,6 +33,7 @@ pytestmark = [
     pytest.mark.tier_3,
     pytest.mark.macos,
     pytest.mark.ios,
+    pytest.mark.feature("identity-in-your-cloud-keychain"),
 ]
 
 

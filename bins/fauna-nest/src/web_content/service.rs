@@ -174,6 +174,24 @@ pub struct WebContentService {
     render_faults: std::sync::Mutex<std::collections::HashSet<[u8; 32]>>,
 }
 
+/// Re-render every publishing site of `state`'s web service after a publisher
+/// policy the public pages fold moved, logging what failed — the one caller
+/// shape both policy writers share (the region tier's, and the nest admin's
+/// rules write). `cause` names what moved.
+pub async fn rerender_after_publisher_policy_change(state: &crate::routes::AppState, cause: &str) {
+    let Some(wcs) = &state.web_content_service else {
+        return;
+    };
+    match wcs.rerender_after_publisher_policy_change(cause).await {
+        Ok(0) => {}
+        Ok(failed) => tracing::warn!(
+            failed,
+            "{cause}: some sites failed to re-render and were cleared"
+        ),
+        Err(e) => tracing::error!("{cause}: cannot list the publishing sites: {e:#}"),
+    }
+}
+
 impl Drop for WebContentService {
     /// Wake the restore retry so it sees the service gone and ends.
     fn drop(&mut self) {
@@ -603,15 +621,17 @@ impl WebContentService {
     /// takedown → *Posts*). The takedown handler triggers that render itself —
     /// [`crate::moderation_handlers`] — so "taken_down" means the site is shut.
     ///
-    /// **The region fold rides the same render** (`region-blocking.md` § The
-    /// content plane → *The nest-as-publisher leg*): with a content policy in
-    /// force for the declared situs, each post's labels are folded through the
+    /// **The publisher fold rides the same render** (`region-blocking.md` § The
+    /// content plane → *The nest-as-publisher leg*; `nest-rules.md` § The nest
+    /// content policy → *The publisher leg*): with a content policy in force for
+    /// the declared situs, or rules the nest's admin published, each post's
+    /// labels are folded through the
     /// shared engine and a blocked or collapsed post renders the reasoned
     /// placeholder on every page that carries it — its own page, the index,
     /// the feed, any template listing it, and a gated post's sealed full page (withheld
     /// outright under a block). The pages are static, so a change of what is in
     /// force re-renders every publishing site through
-    /// [`Self::rerender_after_region_policy_change`].
+    /// [`Self::rerender_after_publisher_policy_change`].
     ///
     /// **A render that completes discharges the actor's owed-render marker**
     /// (`web_render_owed`, [`Self::render_owed`]) — whichever door asked for
@@ -763,13 +783,14 @@ impl WebContentService {
         // The web-serve holder's live grant snapshot — read once per render.
         let grant_set = self.holder.as_ref().map(|h| h.registry.current());
         let now = crate::db::now_epoch_secs() as u64;
-        // The nest-as-publisher leg (`region-blocking.md` § The content plane):
-        // the declared situs chain's content policies, read once per render.
+        // The nest-as-publisher leg (`region-blocking.md` § The content plane;
+        // `nest-rules.md` § The publisher leg): the declared situs chain's
+        // content policies and the nest's own rules, read once per render.
         let registry = self
             .region_registry
             .clone()
             .unwrap_or_else(crate::region_tier::relay_registry);
-        let policies = super::region::situs_policies(&self.db, &registry).await?;
+        let policies = super::region::publisher_policies(&self.db, &registry).await?;
         let mut scores = self.region_scores.begin(actor_id);
         // A public context per post, plus — for a gated post whose tier the
         // holder wields — the decrypted full text destined for the sealed page,
@@ -777,7 +798,7 @@ impl WebContentService {
         struct RenderPost {
             ctx: PostContext,
             full: Option<(String, String, [u8; 32], Zeroizing<[u8; 32]>)>,
-            region: Option<super::region::RegionPlacement>,
+            region: Option<super::region::PagePlacement>,
         }
         let mut items: Vec<RenderPost> = Vec::with_capacity(published.len());
         for (post_id_bytes, slug) in published {
@@ -1128,13 +1149,15 @@ impl WebContentService {
         }))
     }
 
-    /// Re-render every publishing site because the region content policy in
-    /// force for the declared situs moved — a region declared, re-declared or
-    /// withdrawn, a newer document accepted, a de-listed one retired
-    /// (`region-blocking.md` § The content plane → *The nest-as-publisher
-    /// leg*). The pages are static, so without this a page rendered under the
-    /// old policy would keep serving until some unrelated publish re-rendered
-    /// it.
+    /// Re-render every publishing site because a publisher policy the public
+    /// pages fold moved: the region content policy in force for the declared
+    /// situs — a region declared, re-declared or withdrawn, a newer document
+    /// accepted, a de-listed one retired (`region-blocking.md` § The content
+    /// plane → *The nest-as-publisher leg*) — or the nest admin's own rules
+    /// (`nest-rules.md` § The nest content policy → *The publisher leg*).
+    /// `cause` names which, for the error. The pages are static, so without
+    /// this a page rendered under the old policy would keep serving until some
+    /// unrelated publish re-rendered it.
     ///
     /// Each site takes [`Self::rerender_after_moderation_change`]'s
     /// fail-closed shape, for the same reason: a site whose render fails is
@@ -1146,17 +1169,16 @@ impl WebContentService {
     /// short by a restart. **It marks nothing itself**: every publishing site
     /// was already marked owed by the policy-moving write that got here — the
     /// `nest_region` declaration write, `put_relay_artifact` or
-    /// `retire_relay_artifact`, each carrying the mark in its own transaction
-    /// (`db/region_tier.rs`) — so the boot drain finishes a walk the nest did
-    /// not, *and* covers a nest that stopped before the walk began. A mark of
-    /// its own here would only re-roll nonces the policy write already wrote.
-    pub async fn rerender_after_region_policy_change(&self) -> Result<usize> {
+    /// `retire_relay_artifact` (`db/region_tier.rs`), or
+    /// `put_nest_content_policy` (`db/content_policy.rs`), each carrying the
+    /// mark in its own transaction — so the boot drain finishes a walk the nest
+    /// did not, *and* covers a nest that stopped before the walk began. A mark
+    /// of its own here would only re-roll nonces the policy write already
+    /// wrote.
+    pub async fn rerender_after_publisher_policy_change(&self, cause: &str) -> Result<usize> {
         let mut failed = 0;
         for actor in self.db.list_web_publishing_actors().await? {
-            if let Err(e) = self
-                .rerender_fail_closed(&actor, "a region policy change")
-                .await
-            {
+            if let Err(e) = self.rerender_fail_closed(&actor, cause).await {
                 failed += 1;
                 tracing::warn!(
                     actor = %hex::encode(&actor[..4]),

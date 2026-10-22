@@ -1,3 +1,4 @@
+#if !FAUNA_KIDS
 import SwiftUI
 import FaunaKit
 
@@ -40,3 +41,4 @@ struct DnsConfigView: View {
         }
     }
 }
+#endif // !FAUNA_KIDS

@@ -9,9 +9,9 @@
   // page, including the admin/settings shells that bypass the normal sidebar
   // layout. Non-dismissable by design — an alert disappears only when the
   // condition that raised it re-checks clean.
-  import { criticalAlerts } from '$lib/critical-alerts';
-  import { resolveLocalized } from '$lib/i18n/localized';
-  import { IDS } from '$lib/generated/uiIds';
+  import { criticalAlerts } from '#lib/critical-alerts';
+  import { resolveLocalized } from '#lib/i18n/localized';
+  import { IDS } from '#lib/generated/uiIds';
 </script>
 
 {#if $criticalAlerts.length > 0}

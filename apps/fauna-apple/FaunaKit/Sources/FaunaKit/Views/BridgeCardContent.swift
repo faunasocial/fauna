@@ -92,19 +92,25 @@ public struct BridgeCardContent: View {
         }
 
         ForEach(bridge.settings) { setting in
-            if setting.type == "bool" {
+            // Which control paints is the shared classifier's call
+            // (`fauna_client_bridges::setting_control`) — no spelling is matched here.
+            switch settingControl(settingType: setting.type) {
+            case .toggle:
                 Toggle(setting.label, isOn: Binding(
                     get: { setting.value.boolValue ?? false },
                     set: { newVal in
                         Task { await vm.updateSetting(bridge: bridge, key: setting.key, value: newVal) }
                     }
                 ))
-            } else if setting.type == "text" {
+            case .number:
+                BridgeNumberSettingRow(setting: setting, vm: vm, bridge: bridge)
+            case .text, .select, .unknown:
+                // Read-only line: apple has no editable text or picker row yet,
+                // and a setting_type this build predates (a newer nest) is
+                // shown, never dropped.
                 LabeledContent(setting.label) {
                     Text(setting.value.stringValue ?? "").font(.caption)
                 }
-            } else if setting.type == "number" {
-                BridgeNumberSettingRow(setting: setting, vm: vm, bridge: bridge)
             }
         }
     }

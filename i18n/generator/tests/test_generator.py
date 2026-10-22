@@ -388,6 +388,15 @@ onboarding:
         # Must be valid Python
         ast.parse(output)
 
+    def test_python_reserved_keyword_placeholder_escaped(self):
+        # A placeholder named like a Python keyword (`{pass}`) is a parameter
+        # name too: escaped the same way, in the signature and the f-string.
+        tree = parse_yaml('reports:\n  row: "{pass} of {count} passed"\n')
+        output = emit_python(tree)
+        assert "def row(*, pass_: str, count: str) -> str:" in output
+        assert 'return f"{pass_} of {count} passed"' in output
+        ast.parse(output)
+
     def test_python_non_keyword_unchanged(self):
         tree = parse_yaml(self.KEYWORD_YAML)
         output = emit_python(tree)

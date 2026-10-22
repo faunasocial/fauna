@@ -368,6 +368,10 @@ criteria = "safe-to-deploy"
 version = "1.0.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.base64]]
+version = "0.23.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.base64-simd]]
 version = "0.8.0"
 criteria = "safe-to-deploy"
@@ -537,11 +541,15 @@ version = "0.1.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.c2pa]]
-version = "0.90.3"
+version = "0.91.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.c2pa_cbor]]
-version = "0.77.2"
+version = "0.78.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.c2pa_raw_crypto]]
+version = "0.1.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.cairo-rs]]
@@ -1529,7 +1537,7 @@ version = "2.3.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.id3]]
-version = "1.17.1"
+version = "1.17.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.ident_case]]
@@ -2020,10 +2028,6 @@ criteria = "safe-to-deploy"
 version = "0.8.1"
 criteria = "safe-to-deploy"
 
-[[exemptions.mp4]]
-version = "0.14.0"
-criteria = "safe-to-deploy"
-
 [[exemptions.multer]]
 version = "3.1.0"
 criteria = "safe-to-deploy"
@@ -2113,7 +2117,7 @@ version = "0.25.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.nix]]
-version = "0.31.2"
+version = "0.31.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.no-std-compat]]
@@ -2276,6 +2280,10 @@ criteria = "safe-to-deploy"
 version = "0.2.0"
 criteria = "safe-to-run"
 
+[[exemptions.openmls]]
+version = "0.9.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.openmls_basic_credential]]
 version = "0.6.0"
 criteria = "safe-to-deploy"
@@ -2390,6 +2398,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.pem]]
 version = "3.0.6"
+criteria = "safe-to-deploy"
+
+[[exemptions.pem]]
+version = "4.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.pem-rfc7468]]
@@ -4085,7 +4097,11 @@ version = "0.11.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.zip]]
-version = "8.6.0"
+version = "9.0.4"
+criteria = "safe-to-deploy"
+
+[[exemptions.zlib-rs]]
+version = "0.6.8"
 criteria = "safe-to-deploy"
 
 [[exemptions.zopfli]]

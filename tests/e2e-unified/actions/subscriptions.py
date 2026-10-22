@@ -597,6 +597,13 @@ class SubscriptionsActions:
         kind (recomputes as the kind select changes)."""
         return self.driver.get_text("subscription-provider-form-webhook-url")
 
+    def provider_return_url(self) -> str:
+        """The §4 form's live return-URL display — the post-checkout redirect
+        to paste into the provider's checkout settings for the currently
+        selected kind (recomputes as the kind select changes). Built on the
+        creator's web-site origin, so it needs a public web address."""
+        return self.driver.get_text("subscription-provider-form-return-url")
+
     # --- §5 Manual claim codes (Pillar 3 — monetization.md § Pillar 3) ---
 
     def mint_claim(self, tier: str) -> None:
@@ -631,6 +638,35 @@ class SubscriptionsActions:
                 return True
             time.sleep(0.3)
         return len(self.claim_codes()) >= min_count
+
+    def claim_void_text(self, index: int = 0) -> str:
+        """The row's `subscription-claim-void-button` text — "Void", or, once
+        armed, the consequence its second press has."""
+        return self.driver.get_text(
+            "subscription-claim-void-button", scope=f"subscription-claim-row[{index}]")
+
+    def has_claim_void_button(self, index: int = 0) -> bool:
+        return self.driver.count(
+            "subscription-claim-void-button", scope=f"subscription-claim-row[{index}]") > 0
+
+    def arm_claim_void(self, index: int = 0) -> None:
+        """First press on the row's Void: arms the confirm in place (the same
+        button's text turns into the consequence) — nothing is sent yet."""
+        self.driver.click(
+            "subscription-claim-void-button", scope=f"subscription-claim-row[{index}]")
+
+    def confirm_claim_void(self, index: int = 0) -> None:
+        """Second press on the armed row's Void: `fauna.payments.claims.void`."""
+        self.driver.click(
+            "subscription-claim-void-button", scope=f"subscription-claim-row[{index}]")
+
+    def wait_for_claim_status(self, expected: str, index: int = 0, timeout: float = 10.0) -> bool:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.claim_status(index) == expected:
+                return True
+            time.sleep(0.3)
+        return self.claim_status(index) == expected
 
     # --- Slice B: consumer side (subscription-settings page) ---
 

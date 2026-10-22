@@ -54,6 +54,8 @@ pytestmark = [
     pytest.mark.web,
     pytest.mark.android,
     pytest.mark.windows,
+    pytest.mark.macos,
+    pytest.mark.ios,
 ]
 
 FIRST = "the member's first message"

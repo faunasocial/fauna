@@ -234,6 +234,43 @@ impl<'de> Deserialize<'de> for KeyAccess {
     }
 }
 
+/// Which act a [`FollowIntent`] states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FollowIntentKind {
+    Subscribe,
+    Unsubscribe,
+}
+
+/// A subscriber's own signed statement that they subscribe to (or leave) an
+/// author's tier homed on **another nest** — the user's half of the federated
+/// follow's subscribe twin (`docs/goal/behavior/federated-follow.md`
+/// § Decision 2, *The intent*). The subscriber's nest carries it verbatim to
+/// the author's nest and never signs or alters it; the author's nest verifies
+/// it under [`crate::data::Capability::Follow`] and binds `home_nest_id` to the
+/// carrying nest's verified identity, so a hostile nest can neither speak for a
+/// user nor claim one homed elsewhere.
+///
+/// `created_at` orders a subscriber's intents for one `(author, tier)`: the
+/// author's nest keeps the latest it has seen and an older one changes nothing,
+/// so a replayed subscribe can never undo a later unsubscribe.
+///
+/// Signed via `fauna_cbor::SignedEnvelope` (sign-over-CID) by the subscriber's
+/// identity, or by a device whose `DeviceAuthorization` grants `Follow`; it
+/// rides in the embed-as-bytes wire shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FollowIntent {
+    pub subscriber: ActorId,
+    pub author: ActorId,
+    pub tier: String,
+    pub kind: FollowIntentKind,
+    /// The nest id of the subscriber's own nest — the only nest that may
+    /// carry this intent.
+    #[serde(with = "serde_bytes")]
+    pub home_nest_id: [u8; 32],
+    pub created_at: Timestamp,
+}
+
 /// Broadcast key blob: period key encrypted to each subscriber's public key.
 ///
 /// Signed via `fauna_cbor::SignedEnvelope` (sign-over-CID); the envelope

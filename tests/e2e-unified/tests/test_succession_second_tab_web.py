@@ -27,7 +27,7 @@ This file witnesses outcomes **9** and **10** of
   switched; the kit and the sweep view are parked across it.
 * **10** — a tab whose pin still names the RETIRED id, booted after the
   recovery, comes up signed in as the successor with its own pin re-pointed:
-  rider 2 at web's boot (``$lib/accounts`` ``accountsBoot()``, over the shared
+  rider 2 at web's boot (``#lib/accounts`` ``accountsBoot()``, over the shared
   ``terminal_successor_of``). Measured to discriminate: with that one hop
   removed the tab boots as the retired identity, the nest refuses it
   (``fauna.auth.superseded``) and the test goes red.
@@ -52,7 +52,7 @@ diagnostics now quote each tab's console chain lines
 (``helpers/succession_ceremony.py::closing_act_console``), so a recurrence names
 its own broken link. The one mechanism in today's tree with the exact
 "no kit, empty error surface" shape is web's one-shot background silent sign-in
-(``$lib/store`` ``refreshFromServer``: a transient failure left
+(``#lib/store`` ``refreshFromServer``: a transient failure left
 ``identity.registered`` false for the page, and the closing act gates on it).
 That refresh now retries a transient failure, witnessed deterministically by
 ``test_silent_sign_in_retry_web.py``.
@@ -94,7 +94,7 @@ pytestmark = [pytest.mark.tier_3, pytest.mark.web]
 CONVERSATIONS_NAV = {"nav": {"stack": [{"view": "conversations"}]}}
 NEW_CONVERSATION_BUTTON = "new-conversation-button"
 ERROR_MESSAGE = "error-message"
-#: This tab's account pin (`$lib/tabPin`) — `sessionStorage`, per-tab, and web's
+#: This tab's account pin (`#lib/tabPin`) — `sessionStorage`, per-tab, and web's
 #: twin of a native bound launch's `FAUNA_BOUND_ACCOUNT`.
 PIN_KEY = "fauna_tab_account"
 
@@ -123,7 +123,7 @@ def _signed_in_as(driver, actor: str) -> bool:
 
     Deliberately NOT also asserting ``session.authenticated``: that field is
     ``identity.registered``, which only the silent challenge's completion sets
-    (`$lib/store`), so a seat arranged through the session patch publishes no
+    (`#lib/store`), so a seat arranged through the session patch publishes no
     such key at all. The identity the tab resolved is the observable here; that
     it is a WORKING session is what the Status-page reads assert.
     """
@@ -329,17 +329,10 @@ def test_web_a_tab_pinned_to_the_retired_id_comes_up_as_the_successor(nest_insta
     )
 
     tab_a = create_driver("web")
-    tab_a.launch({"url": spa_url + "/app/"})
+    # ── the profile: one account, booted from the store ─────────────────────
+    tab_a.launch({"url": spa_url + "/app/", "seed_credentials": seed})
     tab_c = None
     try:
-        # ── the profile: one account, booted from the store ─────────────────
-        tab_a.eval_js(
-            ";".join(
-                f"localStorage.setItem({json.dumps(k)},{json.dumps(v)})"
-                for k, v in seed.items()
-            )
-        )
-        tab_a.hard_reload()
         wait_until(
             lambda: _signed_in_as(tab_a, old_actor)
             and _session(tab_a).get("authenticated"),

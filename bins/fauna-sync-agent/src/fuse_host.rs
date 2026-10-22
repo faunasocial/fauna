@@ -154,7 +154,7 @@ impl Drop for MountedRoot {
         drop(self.session.take());
         // Only now released: the guard finds its mount gone and leaves.
         drop(self.guard.take());
-        tracing::info!(path = %self.mount_point.display(), "on-demand root unmounted");
+        tracing::info!(path = %fauna_core::log_redact::log_path(&self.mount_point.to_string_lossy()), "on-demand root unmounted");
     }
 }
 
@@ -184,8 +184,8 @@ pub(crate) fn mount_over(
     match CrashGuard::spawn(reach.mount_point()) {
         Ok(guard) => mounted.guard = Some(guard),
         Err(e) => tracing::warn!(
-            folder,
-            path = %reach.mount_point().display(),
+            folder = %fauna_core::log_redact::log_folder_name(folder),
+            path = %fauna_core::log_redact::log_path(&reach.mount_point().to_string_lossy()),
             error = %e,
             "no crash guard for the on-demand root; a crash leaves it to the boot sweep"
         ),
@@ -239,12 +239,12 @@ fn mount_with(
     let session = fuser::spawn_mount(fs, reach.mount_point(), &config).with_context(|| {
         format!(
             "mounting the on-demand root over {}",
-            reach.mount_point().display()
+            fauna_core::log_redact::log_path(&reach.mount_point().to_string_lossy())
         )
     })?;
     tracing::info!(
-        folder,
-        path = %reach.mount_point().display(),
+        folder = %fauna_core::log_redact::log_folder_name(folder),
+        path = %fauna_core::log_redact::log_path(&reach.mount_point().to_string_lossy()),
         "on-demand root mounted"
     );
     Ok(MountedRoot {
@@ -513,16 +513,16 @@ pub(crate) fn sweep_ghost_mounts(locations: &[PathBuf]) -> usize {
             .status()
         {
             Ok(status) if status.success() => {
-                tracing::info!(path = %mount_point.display(), "swept a leftover on-demand mount");
+                tracing::info!(path = %fauna_core::log_redact::log_path(&mount_point.to_string_lossy()), "swept a leftover on-demand mount");
                 swept += 1;
             }
             Ok(status) => tracing::warn!(
-                path = %mount_point.display(),
+                path = %fauna_core::log_redact::log_path(&mount_point.to_string_lossy()),
                 %status,
                 "could not unmount a leftover on-demand mount"
             ),
             Err(e) => tracing::warn!(
-                path = %mount_point.display(),
+                path = %fauna_core::log_redact::log_path(&mount_point.to_string_lossy()),
                 error = %e,
                 "could not run the unmount helper on a leftover on-demand mount"
             ),
@@ -684,7 +684,10 @@ impl crate::bridge::PlaceholderInvalidator for FuseInvalidator {
         _mtime: i64,
         _is_dir: bool,
     ) -> Result<()> {
-        bail!("a FUSE root places no placeholder on its disk ({rel})")
+        bail!(
+            "a FUSE root places no placeholder on its disk ({})",
+            fauna_core::log_redact::log_path(rel)
+        )
     }
 
     fn placeholders_off_disk(&self) -> bool {

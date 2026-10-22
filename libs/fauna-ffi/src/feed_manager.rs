@@ -81,6 +81,18 @@ impl FfiFeedManager {
         self.inner.add_observer(observer);
     }
 
+    /// A second manager over ONE author's posts — the profile page's Posts tab
+    /// (`feed.md` § State & data shape → *The author window*): the same
+    /// transport, signing secret and installed seams, its own empty list state
+    /// and no observers, selection `author_selected = actor_id` (hex). The
+    /// caller attaches its observer and loads the first page with
+    /// `refresh_current_feed`, then pages with `load_more`.
+    pub fn author_window(&self, actor_id: String) -> Arc<FfiFeedManager> {
+        Arc::new(Self {
+            inner: Arc::new(self.inner.author_window(actor_id)),
+        })
+    }
+
     /// Drop all registered observers (call at sign-out so stale receiver loops
     /// close — each authenticated-window build attaches a fresh observer).
     pub fn clear_observers(&self) {
@@ -646,6 +658,23 @@ impl FfiFeedManager {
         self.inner.resolve_post_unlock_offer(post_id).await;
     }
 
+    /// Name a post's remote author from their own signed profile and fold it
+    /// into the matching `PostSummary.author_display` — and that of every
+    /// rendered post by the same author and home — then notify (`ui/feed.md`
+    /// § The read model → *The remote author's byline*). Drives `post-author`
+    /// and `feed-post-detail-author` through the card's existing
+    /// `peer_display_label` chain.
+    ///
+    /// Call it once per rendered post from the same pump that drives
+    /// `resolve_media`, guarded on `home_nest_url != null` and
+    /// `author_display == null`. One relay per author and home per window,
+    /// and fire-once by construction: every outcome — no shown profile, an
+    /// unreachable home, a profile that does not verify — writes an empty
+    /// face, so the guard closes and the card reads the id.
+    pub async fn resolve_author_face(&self, post_id: String) {
+        self.inner.resolve_author_face(post_id).await;
+    }
+
     /// Make the post `post_id` names renderable whether or not the feed query
     /// ever loaded it (`ui/search.md` § Where logic lives → *Result navigation
     /// (deep link)*) — the deep-link door a search hit needs, since it can
@@ -654,6 +683,18 @@ impl FfiFeedManager {
     /// in [`fauna_feed::FeedSnapshot::deep_linked_post`] costs no round trip.
     pub async fn resolve_post(&self, post_id: String) -> fauna_feed::PostResolution {
         self.inner.resolve_post(post_id).await
+    }
+
+    /// [`Self::resolve_post`] for a link that names the post's home nest
+    /// (`ui/feed.md` § The read model → *A post homed on another nest*): this
+    /// nest first, and on its not-found the home through this nest's relay.
+    /// A relayed post carries `home_nest_url`, where its bytes are fetched.
+    pub async fn resolve_post_from(
+        &self,
+        post_id: String,
+        nest_url: String,
+    ) -> fauna_feed::PostResolution {
+        self.inner.resolve_post_from(post_id, nest_url).await
     }
 
     /// `feed-post-view-thread-button` — open the Bluesky thread page for the
@@ -1415,6 +1456,24 @@ mod tests {
         assert!(snap.bridge_feeds.is_empty());
         assert_eq!(snap.selected_feed, None);
         assert!(!snap.trending_selected);
+        assert_eq!(snap.author_selected, None);
+    }
+
+    /// The author window face hands back a SEPARATE manager selecting the
+    /// author, and leaves the one it was opened from on its timeline.
+    #[test]
+    fn author_window_is_a_separate_manager_selecting_the_author() {
+        let nest = NestClient::new(
+            "wss://127.0.0.1:0/ws".into(),
+            ActorKeypair::from_secret([3u8; 32]),
+        );
+        let mgr = FfiFeedManager::new(nest, [3u8; 32]);
+        let author = "ab".repeat(32);
+        let window = mgr.author_window(author.clone());
+        assert_eq!(window.snapshot().author_selected, Some(author));
+        assert!(window.snapshot().posts.is_empty());
+        assert_eq!(mgr.snapshot().author_selected, None);
+        assert!(!Arc::ptr_eq(&mgr.inner, &window.inner));
     }
 
     /// The room compose door stages the room answer and its teaser, and the

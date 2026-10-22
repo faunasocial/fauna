@@ -20,18 +20,18 @@ public class AdminAliasesViewModelTests
     public async Task Load_ProjectsForwardersAndDomains()
     {
         var fake = new FakeForwarderMachine(
-            forwarders: new[] { FakeForwarderMachine.Row("ab", "example.com", "info", "real@example.net") },
-            domains: new[] { "example.com", "other.test" });
+            forwarders: new[] { FakeForwarderMachine.Row("ab", "example.org", "info", "real@example.net") },
+            domains: new[] { "example.org", "other.test" });
         var vm = new AdminAliasesViewModel(fake);
 
         await vm.LoadCommand.ExecuteAsync(null);
 
         var row = Assert.Single(vm.Forwarders);
-        Assert.Equal("info@example.com", row.Address);
+        Assert.Equal("info@example.org", row.Address);
         Assert.Equal("real@example.net", row.Target);
         Assert.Equal("ab", row.AliasIdHex);
         // The hosted-domain picker options (a forwarder must live on one).
-        Assert.Equal(new[] { "example.com", "other.test" }, vm.Domains);
+        Assert.Equal(new[] { "example.org", "other.test" }, vm.Domains);
         Assert.Null(vm.Error);
         Assert.False(vm.IsLoading);
     }
@@ -39,25 +39,25 @@ public class AdminAliasesViewModelTests
     [Fact]
     public async Task Create_AddsForwarder_AndRelists()
     {
-        var fake = new FakeForwarderMachine(domains: new[] { "example.com" });
+        var fake = new FakeForwarderMachine(domains: new[] { "example.org" });
         var vm = new AdminAliasesViewModel(fake);
         await vm.LoadCommand.ExecuteAsync(null);
 
-        await vm.CreateAsync("example.com", "sales", "team@offsite.example");
+        await vm.CreateAsync("example.org", "sales", "team@offsite.example");
 
         var row = Assert.Single(vm.Forwarders);
-        Assert.Equal("sales@example.com", row.Address);
+        Assert.Equal("sales@example.org", row.Address);
         Assert.Equal("team@offsite.example", row.Target);
         Assert.Null(vm.Error);
     }
 
     [Theory]
     [InlineData(null, "info", "x@y.example")]     // no hosted domain selected yet
-    [InlineData("example.com", "", "x@y.example")]  // empty local part
-    [InlineData("example.com", "info", "   ")]      // blank target
+    [InlineData("example.org", "", "x@y.example")]  // empty local part
+    [InlineData("example.org", "info", "   ")]      // blank target
     public async Task Create_BlankField_IsNoOp(string? domain, string? pattern, string? target)
     {
-        var fake = new FakeForwarderMachine(domains: new[] { "example.com" });
+        var fake = new FakeForwarderMachine(domains: new[] { "example.org" });
         var vm = new AdminAliasesViewModel(fake);
         await vm.LoadCommand.ExecuteAsync(null);
 
@@ -72,12 +72,12 @@ public class AdminAliasesViewModelTests
     public async Task Create_Collision_SurfacesError_AndKeepsList()
     {
         var fake = new FakeForwarderMachine(
-            forwarders: new[] { FakeForwarderMachine.Row("01", "example.com", "info", "a@b.example") },
-            domains: new[] { "example.com" });
+            forwarders: new[] { FakeForwarderMachine.Row("01", "example.org", "info", "a@b.example") },
+            domains: new[] { "example.org" });
         var vm = new AdminAliasesViewModel(fake);
         await vm.LoadCommand.ExecuteAsync(null);
 
-        await vm.CreateAsync("example.com", "info", "c@d.example");
+        await vm.CreateAsync("example.org", "info", "c@d.example");
 
         // The nest-class rejection rides the snapshot error → admin-aliases-action-error.
         Assert.Equal("conflicts_with_existing_alias", vm.Error);
@@ -89,8 +89,8 @@ public class AdminAliasesViewModelTests
     public async Task Delete_RemovesForwarder()
     {
         var fake = new FakeForwarderMachine(
-            forwarders: new[] { FakeForwarderMachine.Row("22", "example.com", "info", "a@b.example") },
-            domains: new[] { "example.com" });
+            forwarders: new[] { FakeForwarderMachine.Row("22", "example.org", "info", "a@b.example") },
+            domains: new[] { "example.org" });
         var vm = new AdminAliasesViewModel(fake);
         await vm.LoadCommand.ExecuteAsync(null);
         var id = Assert.Single(vm.Forwarders).AliasIdHex;

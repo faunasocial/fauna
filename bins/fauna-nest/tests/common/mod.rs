@@ -5,6 +5,7 @@
 //! be `mod common;`-ed into a test that needs only one of its helpers.
 #![allow(dead_code)]
 
+pub mod backup_nests;
 pub mod encrypted_keyblob;
 
 use std::sync::Arc;
@@ -488,7 +489,6 @@ pub fn config_with_db_path(db_path: String) -> Arc<NestConfig> {
         submission: None,
         acme: None,
         email: None,
-        update: Default::default(),
     })
 }
 
@@ -506,7 +506,6 @@ pub fn test_config(policy: SubmissionPolicy) -> Arc<NestConfig> {
         submission: Some(SubmissionSection { policy }),
         acme: None,
         email: None,
-        update: Default::default(),
     })
 }
 
@@ -1634,10 +1633,9 @@ pub fn trusted_resolver(primary: &str, mx_sni: &str) -> Arc<dyn ServedCertSpki> 
     resolver_from_pem(&leaf.pem(), &leaf_key.serialize_pem())
 }
 
-/// Load a PEM cert+key pair into a live `MultiDomainCertResolver`. Leaks the
-/// temp dir it reads from — the resolver only reads the PEM at load time, so
-/// keeping the files until process exit is harmless and avoids a guard. Same
-/// two files, same exact body under the same name.
+/// Load a PEM cert+key pair into a live `MultiDomainCertResolver`. The
+/// temp dir is removed on return — the resolver only reads the PEM at load
+/// time. Same two files, same exact body under the same name.
 fn resolver_from_pem(cert_pem: &str, key_pem: &str) -> Arc<dyn ServedCertSpki> {
     let dir = tempfile::tempdir().unwrap();
     let cert_path = dir.path().join("fullchain.pem");
@@ -1645,7 +1643,7 @@ fn resolver_from_pem(cert_pem: &str, key_pem: &str) -> Arc<dyn ServedCertSpki> {
     std::fs::write(&cert_path, cert_pem).unwrap();
     std::fs::write(&key_path, key_pem).unwrap();
     let resolver = MultiDomainCertResolver::from_pem(&cert_path, &key_path).expect("load leaf");
-    std::mem::forget(dir);
+    drop(dir);
     Arc::new(resolver)
 }
 

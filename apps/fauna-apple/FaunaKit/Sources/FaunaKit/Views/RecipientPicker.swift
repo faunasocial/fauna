@@ -25,15 +25,25 @@ public struct RecipientPicker: View {
     public var onInputChange: (String) -> Void
     public var onAcceptCurrent: () -> Void
     public var onAcceptSuggestion: (TypedAddress) -> Void
+    /// The bridges serving this account (`ConversationsSnapshot.bridges`): their
+    /// labels name who the picker also reaches (a chrome line, no id) and give a
+    /// bridged address its declared display. Empty paints no line.
+    public let bridges: [BridgeIdentitySnapshot]
+
+    private func display(_ addr: TypedAddress) -> String {
+        typedAddressDisplayWithBridges(addr: addr, bridges: bridges)
+    }
 
     public init(
         state: RecipientPickerState,
+        bridges: [BridgeIdentitySnapshot] = [],
         liveResolveState: @escaping () -> ResolveState,
         onInputChange: @escaping (String) -> Void = { _ in },
         onAcceptCurrent: @escaping () -> Void = {},
         onAcceptSuggestion: @escaping (TypedAddress) -> Void = { _ in }
     ) {
         self.state = state
+        self.bridges = bridges
         self.liveResolveState = liveResolveState
         self.onInputChange = onInputChange
         self.onAcceptCurrent = onAcceptCurrent
@@ -86,7 +96,7 @@ public struct RecipientPicker: View {
             if !state.chips.isEmpty {
                 HStack(spacing: 6) {
                     ForEach(Array(state.chips.enumerated()), id: \.offset) { _, chip in
-                        automationText(Ids.recipientPickerChip, ConversationsUI.display(chip))
+                        automationText(Ids.recipientPickerChip, display(chip))
                             .font(.caption)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 3)
@@ -118,15 +128,24 @@ public struct RecipientPicker: View {
                         Text(ConversationsUI.rail(for: sugg).map { ConversationsUI.glyphEmoji(railGlyph(rail: $0)) } ?? "")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
-                        Text(ConversationsUI.display(sugg)).font(.caption)
+                        Text(display(sugg)).font(.caption)
                         Spacer()
                     }
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier(Ids.recipientPickerSuggestion)
-                .automationActivate(Ids.recipientPickerSuggestion, value: { ConversationsUI.display(sugg) }) {
+                .automationActivate(Ids.recipientPickerSuggestion, value: { display(sugg) }) {
                     onAcceptSuggestion(sugg)
                 }
+            }
+
+            // Who the picker also reaches — the serving bridges' declared
+            // labels; chrome, no id (android's `bridgeLabels` line).
+            if !bridges.isEmpty {
+                Text(L.conversations.unified.recipientPickerBridges(
+                    bridges: bridges.map(\.label).joined(separator: ", ")))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Text(resolveText(state.resolveState))

@@ -213,6 +213,11 @@ public enum ActorScope {
         // CLEAR the snapshot, so the outgoing account's number never stays on
         // the home screen (android's `refoldForAccountSwitch`).
         WidgetUnreadPublisher.shared.clear()
+        // The process-held muted-word list (notifications.md § Muted words):
+        // the incoming account must not collapse, or silence a knock toast, by
+        // the departing one's words.
+        MutedWordsHolder.shared.clear()
+        NotificationsVM.revealedMutedIds = []
 
         // Shared statics keyed to the outgoing identity. Read by the views and by
         // the test agent's state serialization, so a survivor reports the departed

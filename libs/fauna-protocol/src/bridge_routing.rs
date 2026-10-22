@@ -949,7 +949,9 @@ pub struct SetSpamThresholdOverrideReply {}
 //
 // `docs/goal/behavior/mail-policy-config.md` § Tier 3 — the user's own
 // `mail.account.receive_enabled` and `mail.account.send_enabled`, both on by
-// default. Stored per-actor in `mail_account_settings` beside the other
+// default, and `mail.account.scan_result_visible` (on by default; off hides
+// the scan-verdict row from received messages, `mail-content-scanning.md`
+// § Per-account opt-out for visible scan details). Stored per-actor in `mail_account_settings` beside the other
 // per-account mail settings. Receive off → the resolver refuses mail to the
 // account's addresses with a 550 (role addresses excepted); send off → every
 // door the user's own act sends through refuses with
@@ -978,7 +980,7 @@ pub const SENDER_NOT_OWNED_CODE: &str = "fauna.bridges.sender_not_owned";
 pub const SUBMITTER_NOT_PROVEN_CODE: &str = "fauna.bridges.submitter_not_proven";
 
 /// `fauna.bridges.get_mail_switches` (User) — `()` request; returns the
-/// calling actor's receive and send switches.
+/// calling actor's on/off mail switches.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct GetMailSwitchesRequest {}
 
@@ -986,18 +988,28 @@ pub struct GetMailSwitchesRequest {}
 pub struct GetMailSwitchesReply {
     pub receive_enabled: bool,
     pub send_enabled: bool,
+    /// `mail.account.scan_result_visible`: off, the app's shared projection
+    /// paints no `dm-message-scan-result` row. Additive — a reply without it
+    /// reads the default, on.
+    #[serde(default = "scan_result_visible_default")]
+    pub scan_result_visible: bool,
     /// Forward-compat catch-all (transport.md § Schema and forward-compat
     /// discipline, rule 4) — an app-callable kind, so client↔nest wire.
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
 
+fn scan_result_visible_default() -> bool {
+    true
+}
+
 impl Default for GetMailSwitchesReply {
-    /// Both on — the catalog default for an account that never set either.
+    /// All on — the catalog default for an account that never set any.
     fn default() -> Self {
         Self {
             receive_enabled: true,
             send_enabled: true,
+            scan_result_visible: true,
             extra: BTreeMap::new(),
         }
     }
@@ -1011,6 +1023,8 @@ pub struct SetMailSwitchesRequest {
     pub receive_enabled: Option<bool>,
     #[serde(default)]
     pub send_enabled: Option<bool>,
+    #[serde(default)]
+    pub scan_result_visible: Option<bool>,
     /// Forward-compat catch-all (transport.md § Schema and forward-compat
     /// discipline, rule 4) — an app-callable kind, so client↔nest wire.
     #[serde(flatten, default)]
@@ -1686,6 +1700,13 @@ pub struct MailDomainRow {
     #[serde(default)]
     pub catch_all_cleared_by_succession_at: Option<i64>,
 }
+
+/// MTA-STS cert-mode default for a domain an admin adds: `expand_primary` (the
+/// shared-DNS-provider case) — `mail-multidomain.md` § Adding a new local domain
+/// step 3. The one place the string is spelled for a sender of
+/// [`AddLocalDomainRequest`]: every app's admin-dns page and the cli's
+/// `admin_domain_add` send it.
+pub const DEFAULT_CERT_MODE: &str = "expand_primary";
 
 /// `fauna.bridges.add_local_domain` (Admin). `is_primary` is **not** a
 /// parameter — the nest sets it to `true` iff no active domain exists
@@ -3459,7 +3480,9 @@ pub enum SpamDisposition {
 // tree serialized that copy either. So the unified type is a strict union
 // (protocol's serde attributes + fauna-mail's UniFFI derives + `Default`)
 // and no byte moves. The full measurement lives on the definition.
-pub use fauna_core::mail_scan::{ClamavVerdict, RspamdRuleContribution, RspamdScore};
+pub use fauna_core::mail_scan::{
+    ClamavVerdict, RspamdRuleContribution, RspamdScore, ScanActionTaken,
+};
 
 /// A sealed mail body that crossed on the **bulk-byte plane** instead of inline
 /// in the RPC frame (`smtp-server.md` § Message size limits; the rule:
@@ -3761,49 +3784,6 @@ pub struct ReportRejectedScanReply {
     /// is idempotent (`INSERT OR REPLACE` on the same id).
     #[serde(with = "serde_bytes")]
     pub message_id: Vec<u8>,
-}
-
-/// What the nest did with a scanned message — the `message_scan_results.
-/// action_taken` column as a type (`mail-content-scanning.md` § Per-message
-/// scan-result storage). `RejectedMalware` appears only on reject-at-perimeter
-/// forensic rows, which belong to no recipient, so a user's own read never
-/// returns it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ScanActionTaken {
-    Delivered,
-    RejectedMalware,
-    Junked,
-    Tagged,
-    /// An action a newer nest added that this app does not know: shown as a
-    /// neutral verdict. Never written.
-    #[serde(other, skip_serializing)]
-    Unknown,
-}
-
-impl ScanActionTaken {
-    /// The column spelling — identical to the serde name.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Delivered => "delivered",
-            Self::RejectedMalware => "rejected_malware",
-            Self::Junked => "junked",
-            Self::Tagged => "tagged",
-            Self::Unknown => "unknown",
-        }
-    }
-
-    /// Parse the column spelling; `None` for anything else.
-    pub fn from_column(s: &str) -> Option<Self> {
-        [
-            Self::Delivered,
-            Self::RejectedMalware,
-            Self::Junked,
-            Self::Tagged,
-        ]
-        .into_iter()
-        .find(|a| a.as_str() == s)
-    }
 }
 
 /// `fauna.bridges.get_message_scan_result` (User) — the caller's own received
@@ -5374,6 +5354,17 @@ pub struct StartImportSessionRequest {
     /// client-side, before any session exists.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub date_from: String,
+    /// The scope step's "Import duplicates anyway" choice
+    /// (`mailbox-migration.md` § Opt-out per session): `true` when every
+    /// message of this session is sent with `skip_dedup`.
+    ///
+    /// Recorded for the reason `date_from` is: a resume after a client
+    /// restart knows only the row (§ Resume protocol step 3), and one that
+    /// guessed would either import a second copy of mail the user never asked
+    /// to duplicate or quietly drop the snapshot they did ask for. Additive:
+    /// an omitted flag round-trips to `false`, the dedup-on default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skip_dedup: bool,
     /// The client-minted sealed label over `source_descriptor`
     /// (`fauna_core::label_custody::seal_import_source`), stored verbatim by
     /// the nest so the descriptor stops resting in plaintext
@@ -5599,6 +5590,12 @@ pub enum ClientImportOutcomeKind {
     TooLarge { size: u64 },
     /// The source failed to hand the message over — a failure.
     SourceUnreadable { reason: String },
+    /// The person chose to leave it out — the full-mailbox notice's "Skip the
+    /// rest" (`mailbox-migration.md` § Failure handling → Nest-side errors) —
+    /// a skip. Never a quota refusal: recorded on the message the full
+    /// mailbox turned away, it is what lifts that mailbox's quota hold
+    /// (§ Progress lives nest-side → *The quota hold*).
+    SkippedByUser,
     /// A kind a newer client added that this nest does not know: counted as
     /// a failure, the conservative reading. Never written.
     #[serde(other, skip_serializing)]
@@ -5649,6 +5646,12 @@ pub struct ImportSessionInfo {
     /// unbounded, and is also what an absent key round-trips to.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub date_from: String,
+    /// The session's "Import duplicates anyway" choice, as recorded at
+    /// `start_import_session` (§ Opt-out per session) — what a resumed walk
+    /// sends as every message's `skip_dedup`. `false`, the default, is also
+    /// what an absent key round-trips to.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skip_dedup: bool,
     /// The sealed label over `source_descriptor`, for a reader whose plaintext
     /// sibling has been scrubbed (§ Resume protocol step 1 renders the source
     /// of every resumable session).
@@ -5707,6 +5710,25 @@ pub struct FailImportSessionRequest {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ImportSessionActionReply {
     pub session: ImportSessionInfo,
+}
+
+/// Reply for `fauna.bridges.discard_import_session` — a failed import's
+/// Dismiss (`mailbox-migration.md` § A failed import is a record the wizard
+/// shows until the user moves on): the terminal row is gone. `existed = false`
+/// is a missing row, which is the answer a second discard gives and
+/// deliberately not an error — the twin of [`DiscardExportBlobReply`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct DiscardImportSessionReply {
+    pub existed: bool,
+    /// Forward-compat catch-all: unknown keys from a newer peer are
+    /// preserved here and re-emitted on encode (transport.md § Schema
+    /// and forward-compat discipline, rule 4). This kind is APP-callable,
+    /// so it is client↔nest wire and rule 4's in-image `strict` opt-out
+    /// does not reach it: within a major, an older peer must tolerate a
+    /// newer one's added field in BOTH directions
+    /// (version-compatibility.md § I2).
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 /// `fauna.bridges.push.import_progress` — emitted to the importer's own
@@ -9033,6 +9055,7 @@ mod tests {
             error_reason: String::new(),
             scope: vec!["INBOX".into(), "Sent".into()],
             date_from: "2023-11-14".into(),
+            skip_dedup: true,
             source_sealed: Some(ByteBuf::from(vec![0xA1u8; 48])),
             source_hash: Some(ByteBuf::from(vec![0xB2u8; 32])),
         };
@@ -9188,6 +9211,48 @@ mod tests {
             .expect("a new client must accept a date-less reply, not reject it");
         assert_eq!(decoded.scope, vec!["INBOX".to_string()]);
         assert!(decoded.date_from.is_empty());
+    }
+
+    /// The duplicates choice rides the start request and comes back on the
+    /// session row; left out, it is `false` both ways — and a `false` is never
+    /// written, so a session that kept dedup on encodes as it did before the
+    /// field existed (§ Opt-out per session).
+    #[test]
+    fn the_duplicates_choice_round_trips_and_defaults_off() {
+        let on = StartImportSessionRequest {
+            source_descriptor: "gmail:imap.gmail.com:alice".into(),
+            skip_dedup: true,
+            ..Default::default()
+        };
+        let decoded: StartImportSessionRequest = decode(&encode_canonical(&on).unwrap()).unwrap();
+        assert!(decoded.skip_dedup);
+
+        let off = StartImportSessionRequest {
+            source_descriptor: "gmail:imap.gmail.com:alice".into(),
+            ..Default::default()
+        };
+        let map: BTreeMap<String, Value> = decode(&encode_canonical(&off).unwrap()).unwrap();
+        assert!(
+            !map.contains_key("skip_dedup"),
+            "a false flag is never written"
+        );
+
+        let info = ImportSessionInfo {
+            session_id: "s".into(),
+            skip_dedup: true,
+            ..Default::default()
+        };
+        let back: ImportSessionInfo = decode(&encode_canonical(&info).unwrap()).unwrap();
+        assert!(back.skip_dedup);
+        let absent: ImportSessionInfo = decode(
+            &encode_canonical(&ImportSessionInfo {
+                session_id: "s".into(),
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(!absent.skip_dedup);
     }
 
     /// Bidirectional compat for the sealed-source pair (`version-compatibility.md`:

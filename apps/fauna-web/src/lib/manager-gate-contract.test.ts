@@ -51,6 +51,8 @@ import { stripComments } from "./source-contract.ts";
 const PAGES: Record<string, URL> = {
   feed: new URL("../routes/feed/+page.svelte", import.meta.url),
   conversations: new URL("../routes/conversations/+page.svelte", import.meta.url),
+  // The feed card's verbs, shared by the feed page and the profile's Posts tab.
+  "feed card host": new URL("./feed-post-host.svelte.ts", import.meta.url),
 };
 
 /** The guard opener — `!manager` anywhere in an `if` condition, first term or

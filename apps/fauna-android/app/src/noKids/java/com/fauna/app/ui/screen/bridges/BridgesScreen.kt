@@ -12,8 +12,13 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -31,22 +36,40 @@ import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.viewmodel.BridgesVM
+import com.fauna.app.ui.viewmodel.SettingsAdminGateVM
+import com.fauna.app.ui.util.resolveLocalized
+import com.fauna.ffi.FfiInstalledPlugin
+import com.fauna.ffi.FfiPluginCard
+import com.fauna.app.ui.util.AutomationAttributePack
 import com.fauna.ffi.FfiBridgeFollow
+import com.fauna.ffi.FfiFollowRequestRow
 import com.fauna.ffi.FfiBridgeSetting
 import com.fauna.ffi.FfiBridgeStatus
 import com.fauna.ffi.FfiCborValue
 import com.fauna.ffi.FfiLinkBlock
+import com.fauna.ffi.FfiSettingControl
 import com.fauna.ffi.bridgeLinkBlock
 import com.fauna.ffi.bridgeModeApplies
 import com.fauna.ffi.followDisplay
 import com.fauna.ffi.isUnifiedBridgesPageBridge
+import com.fauna.ffi.settingControl
 import social.fauna.generated.Ids
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun BridgesScreen(navController: NavController? = null, vm: BridgesVM = hiltViewModel()) {
+fun BridgesScreen(
+    navController: NavController? = null,
+    vm: BridgesVM = hiltViewModel(),
+    adminGate: SettingsAdminGateVM = hiltViewModel(),
+) {
     val bridges by vm.bridges.collectAsState()
+    val isAdmin by adminGate.isAdmin.collectAsState()
+    val plugins by vm.plugins.collectAsState()
+    val pluginInstallOpened by vm.pluginInstallOpened.collectAsState()
+    val pluginCards by vm.pluginCards.collectAsState()
+    val pluginBindOpened by vm.pluginBindOpened.collectAsState()
     val follows by vm.follows.collectAsState()
+    val followRequests by vm.followRequests.collectAsState()
     val isLoading by vm.isLoading.collectAsState()
     val error by vm.error.collectAsState()
     val feedAsks by vm.feedAsks.collectAsState()
@@ -54,7 +77,14 @@ fun BridgesScreen(navController: NavController? = null, vm: BridgesVM = hiltView
     val context = LocalContext.current
     val appMessages = LocalAppMessages.current
 
-    LaunchedEffect(Unit) { vm.refresh() }
+    LaunchedEffect(Unit) {
+        vm.refresh()
+        // The settings cards are every account's (`fauna.plugins.available`).
+        vm.refreshPluginCards()
+    }
+
+    // The installed plugins are the admin's alone (`fauna.plugins.list`).
+    LaunchedEffect(isAdmin) { if (isAdmin) vm.refreshPlugins() }
 
     LaunchedEffect(error) {
         appMessages.showError(error)
@@ -85,6 +115,7 @@ fun BridgesScreen(navController: NavController? = null, vm: BridgesVM = hiltView
             BridgeCard(
                 bridge = bridge,
                 bridgeFollows = follows[bridge.id] ?: emptyList(),
+                followRequests = followRequests[bridge.id] ?: emptyList(),
                 onLink = { mode, fields ->
                     vm.linkBridge(bridge.id, mode, fields) { url ->
                         UrlOpener.open(context, url)
@@ -94,10 +125,215 @@ fun BridgesScreen(navController: NavController? = null, vm: BridgesVM = hiltView
                 onUpdateSetting = { key, value -> vm.updateSetting(bridge.id, key, value) },
                 onAddFollow = { id, petname -> vm.addFollow(bridge.id, id, petname) },
                 onRemoveFollow = { followId -> vm.removeFollow(bridge.id, followId) },
+                onResolveFollowRequest = { id, approve -> vm.resolveFollowRequest(bridge.id, id, approve) },
                 sourceAsks = remember(feedAsks, refusedFeed, bridge.id) {
                     sourceAskRows(feedAsks, refusedFeed, bridge.id)
                 },
                 onAskSource = vm::requestFeedSource,
+            )
+        }
+        // Every installed plugin's settings card, after the bridges, for every account.
+        pluginCards?.let { cards ->
+            items(cards, key = { it.principalIdHex }) { card ->
+                PluginCard(
+                    card = card,
+                    onPress = { vm.pressPluginCard(card) },
+                    onUpdateSetting = { key, value -> vm.updatePluginSetting(card.principalIdHex, key, value) },
+                )
+            }
+            if (pluginBindOpened) {
+                item(key = "plugin-bind-opened") {
+                    Text(
+                        stringResource(R.string.bridges_plugin_bind_opened),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+        if (isAdmin) {
+            item(key = "plugins") {
+                PluginsSection(
+                    plugins = plugins,
+                    installOpened = pluginInstallOpened,
+                    onInstall = { url -> vm.installPlugin(url) {} },
+                    onUninstall = vm::uninstallPlugin,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * One account's settings card for an installed plugin, as one more
+ * `bridge-card` (`third-party.md` § The principal model → *Hosted principals*):
+ * the shared `plugin_card_text`'s name, badge and publisher as text, its verb as
+ * the card's `bridge-action-button` — Connect while unbound, Disconnect while
+ * bound, carrying the plugin's `client_id` and a `bound` value so a reader can
+ * tell which card is which plugin's — and, once bound, its settings through the
+ * one settings renderer ([SettingRow]). Reference painter:
+ * `apps/fauna-tui/src/bridges.rs::plugin_card_elements`.
+ */
+@Composable
+internal fun PluginCard(
+    card: FfiPluginCard,
+    onPress: () -> Unit,
+    onUpdateSetting: (String, FfiCborValue) -> Unit,
+) {
+    val context = LocalContext.current
+    Card(modifier = Modifier.fillMaxWidth().testTag(Ids.BRIDGE_CARD)) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(card.name, style = MaterialTheme.typography.titleMedium)
+            Text(
+                "${resolveLocalized(context, card.badge).orEmpty()}\n${resolveLocalized(context, card.publisher).orEmpty()}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            // The settings are the bound account's own values; unbound there are none.
+            val settingsGate = faunaGate("fauna.plugins.set_settings")
+            card.settings.forEach { SettingRow(it, onUpdateSetting, enabled = settingsGate.enabled) }
+            if (card.settings.isNotEmpty()) DisabledControlReasonText(settingsGate.reason)
+            val gate = faunaGate(if (card.bound) "fauna.principals.revoke" else "fauna.plugins.bind")
+            val label = stringResource(if (card.bound) R.string.bridges_plugin_disconnect else R.string.bridges_plugin_connect)
+            val buttonModifier = Modifier
+                .testTag(Ids.BRIDGE_ACTION_BUTTON)
+                .semantics {
+                    stateDescription = AutomationAttributePack.pack(
+                        "client_id" to card.clientId,
+                        "bound" to if (card.bound) "true" else "false",
+                    )
+                }
+            if (card.bound) {
+                OutlinedButton(
+                    onClick = onPress,
+                    enabled = gate.enabled,
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                    modifier = buttonModifier,
+                ) { Text(label) }
+            } else {
+                Button(onClick = onPress, enabled = gate.enabled, modifier = buttonModifier) { Text(label) }
+            }
+            DisabledControlReasonText(gate.reason)
+        }
+    }
+}
+
+/**
+ * The admin's hosted plugins (`bridges.md` § Hosted plugins on this page): one
+ * `bridge-plugin-item` per installed plugin — its name, publisher and runner
+ * status, each the shared row's text (`installed_plugin_text`) — Uninstall behind
+ * an inline confirm, then the install entry, the document URL an admin gives
+ * (`third-party.md` § The runner contract → *The install-approval leg*).
+ * Reference painter: `apps/fauna-tui/src/bridges.rs::plugin_elements`.
+ */
+@Composable
+internal fun PluginsSection(
+    plugins: List<FfiInstalledPlugin>?,
+    installOpened: Boolean,
+    onInstall: (String) -> Unit,
+    onUninstall: (String) -> Unit,
+) {
+    val context = LocalContext.current
+    // The install row whose inline uninstall confirm is open.
+    var armed by remember { mutableStateOf<String?>(null) }
+    var url by remember { mutableStateOf("") }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(stringResource(R.string.bridges_plugins_heading), style = MaterialTheme.typography.titleMedium)
+        if (plugins != null) {
+            if (plugins.isEmpty()) {
+                Text(
+                    stringResource(R.string.bridges_plugins_empty),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            plugins.forEach { row ->
+                val isArmed = armed == row.principalIdHex
+                Card(modifier = Modifier.fillMaxWidth().testTag(Ids.BRIDGE_PLUGIN_ITEM)) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            row.name,
+                            style = MaterialTheme.typography.titleSmall,
+                            modifier = Modifier
+                                .testTag(Ids.BRIDGE_PLUGIN_NAME)
+                                .semantics { stateDescription = row.clientId },
+                        )
+                        Text(
+                            resolveLocalized(context, row.publisher).orEmpty(),
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.testTag(Ids.BRIDGE_PLUGIN_PUBLISHER),
+                        )
+                        Text(
+                            row.status.joinToString("\n") { resolveLocalized(context, it).orEmpty() },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .testTag(Ids.BRIDGE_PLUGIN_STATUS)
+                                .semantics { stateDescription = row.state },
+                        )
+                        if (isArmed) {
+                            Text(
+                                stringResourceFmt(R.string.bridges_plugin_uninstall_prompt, row.name),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        val uninstallGate = faunaGate("fauna.plugins.uninstall")
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(
+                                onClick = {
+                                    if (isArmed) {
+                                        armed = null
+                                        onUninstall(row.principalIdHex)
+                                    } else {
+                                        armed = row.principalIdHex
+                                    }
+                                },
+                                enabled = uninstallGate.enabled,
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                                modifier = Modifier.testTag(Ids.BRIDGE_PLUGIN_UNINSTALL),
+                            ) {
+                                Text(
+                                    stringResource(
+                                        if (isArmed) R.string.bridges_plugin_uninstall_confirm
+                                        else R.string.bridges_plugin_uninstall,
+                                    ),
+                                )
+                            }
+                            if (isArmed) {
+                                TextButton(onClick = { armed = null }) {
+                                    Text(stringResource(R.string.bridges_plugin_uninstall_cancel))
+                                }
+                            }
+                        }
+                        DisabledControlReasonText(uninstallGate.reason)
+                    }
+                }
+            }
+        }
+        OutlinedTextField(
+            value = url,
+            onValueChange = { url = it },
+            label = { Text(stringResource(R.string.bridges_plugin_install_label)) },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
+            modifier = Modifier.fillMaxWidth().testTag(Ids.BRIDGE_PLUGIN_INSTALL_URL),
+        )
+        val installGate = faunaGate("fauna.plugins.install", enabled = url.isNotBlank())
+        Button(
+            onClick = {
+                onInstall(url)
+                url = ""
+            },
+            enabled = installGate.enabled,
+            modifier = Modifier.testTag(Ids.BRIDGE_PLUGIN_INSTALL_SUBMIT),
+        ) {
+            Text(stringResource(R.string.bridges_plugin_install_submit))
+        }
+        DisabledControlReasonText(installGate.reason)
+        if (installOpened) {
+            Text(
+                stringResource(R.string.bridges_plugin_install_opened),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }
@@ -120,6 +356,11 @@ internal fun BridgeCard(
     onUpdateSetting: (String, FfiCborValue) -> Unit,
     onAddFollow: (String, String?) -> Unit,
     onRemoveFollow: (String) -> Unit,
+    // The waiting follow requests (bridges.md § Follow requests) — shown only
+    // for a bridge that declares `supportsFollowRequests`; the embeds whose
+    // provider never does (Bluesky) take the empty defaults.
+    followRequests: List<FfiFollowRequestRow> = emptyList(),
+    onResolveFollowRequest: (String, Boolean) -> Unit = { _, _ -> },
     // The ward's feed-source ask rows for THIS card (family-safety.md
     // § Feed-source approvals) — `sourceAskRows(...)` computed by the stateful
     // caller; empty (the default, and the common case) paints nothing.
@@ -139,7 +380,10 @@ internal fun BridgeCard(
             Spacer(Modifier.height(8.dp))
 
             if (bridge.linked) {
-                LinkedSection(bridge, bridgeFollows, onUnlink, onUpdateSetting, onAddFollow, onRemoveFollow)
+                LinkedSection(
+                    bridge, bridgeFollows, followRequests, onUnlink, onUpdateSetting,
+                    onAddFollow, onRemoveFollow, onResolveFollowRequest,
+                )
             } else {
                 UnlinkedSection(bridge, onLink)
             }
@@ -194,14 +438,20 @@ internal fun SourceAskSection(rows: SourceAskRows, onAsk: (FeedTriple) -> Unit) 
 private fun LinkedSection(
     bridge: FfiBridgeStatus,
     bridgeFollows: List<FfiBridgeFollow>,
+    followRequests: List<FfiFollowRequestRow>,
     onUnlink: () -> Unit,
     onUpdateSetting: (String, FfiCborValue) -> Unit,
     onAddFollow: (String, String?) -> Unit,
     onRemoveFollow: (String) -> Unit,
+    onResolveFollowRequest: (String, Boolean) -> Unit,
 ) {
     // Identity
     bridge.identity?.let { id ->
-        Text("${id.label}: ${id.display}", style = MaterialTheme.typography.bodyMedium)
+        Text(
+            "${id.label}: ${id.display}",
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.testTag(Ids.BRIDGE_IDENTITY),
+        )
         Spacer(Modifier.height(8.dp))
     }
 
@@ -218,13 +468,15 @@ private fun LinkedSection(
             Spacer(Modifier.height(4.dp))
             bridgeFollows.forEach { follow ->
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
-                        .testTag(Ids.BRIDGE_FOLLOW_ITEM),
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    // The item id sits on the display text itself, so a row's
+                    // read-back is the shared display line (the nickname, else
+                    // the id), not the row's joined children.
                     Text(
                         followDisplay(follow.id, follow.petname),
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.weight(1f).testTag(Ids.BRIDGE_FOLLOW_ITEM),
                         style = MaterialTheme.typography.bodyMedium
                     )
                     IconButton(onClick = { onRemoveFollow(follow.id) },
@@ -234,6 +486,42 @@ private fun LinkedSection(
                 }
             }
             AddFollowRow(onAddFollow)
+        }
+    }
+
+    // Follow requests: the heading keeps its count at zero; each row paints the
+    // shared `display` line and forwards two clicks.
+    if (bridge.supportsFollowRequests) {
+        Spacer(Modifier.height(8.dp))
+        Column {
+            Text(
+                stringResource(R.string.bridges_follow_requests)
+                    .replace("{count}", followRequests.size.toString()),
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.testTag(Ids.BRIDGE_FOLLOW_REQUESTS_LIST),
+            )
+            Spacer(Modifier.height(4.dp))
+            followRequests.forEach { request ->
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                        .testTag(Ids.BRIDGE_FOLLOW_REQUEST_ITEM),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        request.display,
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    TextButton(onClick = { onResolveFollowRequest(request.id, true) },
+                        modifier = Modifier.testTag(Ids.BRIDGE_FOLLOW_REQUEST_APPROVE)) {
+                        Text(stringResource(R.string.bridges_approve_follow_request))
+                    }
+                    TextButton(onClick = { onResolveFollowRequest(request.id, false) },
+                        modifier = Modifier.testTag(Ids.BRIDGE_FOLLOW_REQUEST_REFUSE)) {
+                        Text(stringResource(R.string.bridges_refuse_follow_request))
+                    }
+                }
+            }
         }
     }
 
@@ -260,10 +548,19 @@ private fun LinkedSection(
 @Composable
 private fun SettingRow(
     setting: FfiBridgeSetting,
-    onUpdate: (String, FfiCborValue) -> Unit
+    onUpdate: (String, FfiCborValue) -> Unit,
+    // A plugin card's rows are `OnlineOnly` (`fauna.plugins.set_settings`): the
+    // card desensitizes them offline. A bridge's stay live (`OfflineSafe`).
+    enabled: Boolean = true,
 ) {
-    when (setting.settingType) {
-        "bool" -> {
+    // A row is `bridge-setting[<key>]` — keyed by the setting, whatever control
+    // its type paints (the `settings-nav-row[<key>]` idiom; ui.yaml
+    // `elements.bridge-setting`).
+    val rowTag = "${Ids.BRIDGE_SETTING}[${setting.key}]"
+    // Which control paints is the shared classifier's call
+    // (`fauna_client_bridges::setting_control`) — no spelling is matched here.
+    when (settingControl(setting.settingType)) {
+        FfiSettingControl.TOGGLE -> {
             Row(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -272,11 +569,13 @@ private fun SettingRow(
                 Text(setting.label)
                 Switch(
                     checked = setting.value.boolOrFalse(),
-                    onCheckedChange = { onUpdate(setting.key, FfiCborValue.Bool(it)) }
+                    onCheckedChange = { onUpdate(setting.key, FfiCborValue.Bool(it)) },
+                    enabled = enabled,
+                    modifier = Modifier.testTag(rowTag),
                 )
             }
         }
-        "select" -> {
+        FfiSettingControl.SELECT -> {
             val options = setting.options ?: return
             var expanded by remember { mutableStateOf(false) }
             val currentLabel = options.find {
@@ -290,7 +589,11 @@ private fun SettingRow(
             ) {
                 Text(setting.label)
                 Box {
-                    TextButton(onClick = { expanded = true }) {
+                    TextButton(
+                        onClick = { expanded = true },
+                        enabled = enabled,
+                        modifier = Modifier.testTag(rowTag),
+                    ) {
                         Text(currentLabel)
                     }
                     DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
@@ -307,13 +610,15 @@ private fun SettingRow(
                 }
             }
         }
-        "number" -> {
+        FfiSettingControl.NUMBER -> {
             var numberText by remember(setting.value) {
                 mutableStateOf(setting.value.displayText())
             }
             fun commit() {
+                if (numberText == setting.value.displayText()) return
                 com.fauna.ffi.parseCountI64(numberText)?.let { onUpdate(setting.key, FfiCborValue.Integer(it)) }
             }
+            val commitNow by rememberUpdatedState(::commit)
             OutlinedTextField(
                 value = numberText,
                 onValueChange = { numberText = it },
@@ -321,14 +626,28 @@ private fun SettingRow(
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
                 keyboardActions = KeyboardActions(onDone = { commit() }),
-                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                enabled = enabled,
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                    .testTag(rowTag).commitOnTap { commitNow() },
             )
         }
-        else -> {
-            // Text field for "text" type and any unknown types
+        FfiSettingControl.UNKNOWN -> {
+            // Forward-compat fallback: a setting_type this build predates (a
+            // newer nest) — a read-only line, never a dropped setting.
+            Text(
+                "${setting.label}: ${setting.value.displayText()}",
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).testTag(rowTag),
+            )
+        }
+        FfiSettingControl.TEXT -> {
             var textValue by remember(setting.value) {
                 mutableStateOf(setting.value.displayText())
             }
+            val commitNow by rememberUpdatedState({
+                if (textValue != setting.value.displayText()) {
+                    onUpdate(setting.key, FfiCborValue.Text(textValue))
+                }
+            })
             Row(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -338,16 +657,35 @@ private fun SettingRow(
                     value = textValue,
                     onValueChange = { textValue = it },
                     label = { Text(setting.label) },
-                    modifier = Modifier.weight(1f),
-                    singleLine = true
+                    modifier = Modifier.weight(1f).testTag(rowTag)
+                        .commitOnTap { commitNow() },
+                    singleLine = true,
+                    enabled = enabled,
                 )
-                TextButton(onClick = { onUpdate(setting.key, FfiCborValue.Text(textValue)) }) {
+                TextButton(onClick = { onUpdate(setting.key, FfiCborValue.Text(textValue)) }, enabled = enabled) {
                     Text(stringResource(R.string.common_save))
                 }
             }
         }
     }
 }
+
+/**
+ * A tap on an editable commits it — the automation vocabulary's meaning of a
+ * click on a field (tui's `Role::InputCommit`, linux's `Entry::activate`), and
+ * harmless to a person: [commit] is the field's own Done / Save action, so a tap
+ * that changes nothing sends nothing. Observed on the initial pass and never
+ * consumed, so the field's own focus and caret handling is untouched.
+ */
+private fun Modifier.commitOnTap(commit: () -> Unit): Modifier =
+    pointerInput(Unit) {
+        awaitPointerEventScope {
+            while (true) {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+                if (event.type == PointerEventType.Release) commit()
+            }
+        }
+    }
 
 @Composable
 private fun AddFollowRow(onAddFollow: (String, String?) -> Unit) {
@@ -363,14 +701,14 @@ private fun AddFollowRow(onAddFollow: (String, String?) -> Unit) {
             value = followId,
             onValueChange = { followId = it },
             label = { Text(stringResource(R.string.bridges_id_to_follow)) },
-            modifier = Modifier.weight(1f),
+            modifier = Modifier.weight(1f).testTag(Ids.BRIDGE_FOLLOW_ID_INPUT),
             singleLine = true
         )
         OutlinedTextField(
             value = petname,
             onValueChange = { petname = it },
             label = { Text(stringResource(R.string.bridges_petname_optional)) },
-            modifier = Modifier.weight(1f),
+            modifier = Modifier.weight(1f).testTag(Ids.BRIDGE_FOLLOW_PETNAME_INPUT),
             singleLine = true
         )
         IconButton(

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { identity } from '$lib/store';
+  import { identity } from '#lib/store';
   import {
     familyStatus,
     familyPolicyUpdate,
@@ -21,21 +21,23 @@
     type FamilyIncomingTransferInfo,
     type FamilyApprovalEntry,
     type ReachPolicy,
-  } from '$lib/rpc';
+    familySaveContentRules,
+  } from '#lib/rpc';
   import {
     ensureWasm,
     offlineAffordance,
     type AuthoredRow,
     type PolicyEditorHandle,
+    type RuleEditorHandle,
+    openRuleEditorForGuardian,
     unknownSenderOptions,
     feedSourcesOptions,
     unknownPeerDmOptions,
     unknownSenderLabelRaw,
     feedSourcesLabelRaw,
     unknownPeerDmLabelRaw,
-    contentFloorOptions,
-    contentFloorLabelRaw,
     reachPolicySummaryFull,
+    policySummaryReasonText,
     contentNoticeLine,
     usageTodayLine,
     approvalDisplayTextRaw,
@@ -44,21 +46,23 @@
     parseDailyMinutes,
     validateScreenTime,
     ageBandLine,
-  } from '$lib/wasm';
-  import { setWardScreenTime } from '$lib/screenTime.svelte';
-  import { setGuardianHalf } from '$lib/contentPolicy.svelte';
-  import { resolveLocalized, resolveLocalizedNested } from '$lib/i18n/localized';
-  import type { FamilyAgeBandInfo } from '$lib/rpc';
-  import { toBytes, actorHex, actorIdFromHex } from '$lib/hex';
-  import { approvalText } from '$lib/family-approvals';
-  import { approvalTimestamp } from '$lib/value-format';
-  import { blockedPeerRows, type BlockedPeer } from '$lib/ward-asks';
-  import { setWardAsksFromStatus } from '$lib/wardAsks.svelte';
-  import { t } from '$lib/i18n/strings';
-  import { IDS } from '$lib/generated/uiIds';
-  import { connectionStatus } from '$lib/store';
-  import { makeOfflineGate } from '$lib/offline-gate';
-  import FeaturePolicyEditor from '$lib/components/FeaturePolicyEditor.svelte';
+  } from '#lib/wasm';
+  import { NEST_RULES_LANG } from '#lib/nestRules.svelte';
+  import { setWardScreenTime } from '#lib/screenTime.svelte';
+  import { setGuardianHalf } from '#lib/contentPolicy.svelte';
+  import { resolveLocalized, resolveLocalizedNested } from '#lib/i18n/localized';
+  import type { FamilyAgeBandInfo } from '#lib/rpc';
+  import { toBytes, actorHex, actorIdFromHex } from '#lib/hex';
+  import { approvalText } from '#lib/family-approvals';
+  import { approvalTimestamp } from '#lib/value-format';
+  import { blockedPeerRows, type BlockedPeer } from '#lib/ward-asks';
+  import { setWardAsksFromStatus } from '#lib/wardAsks.svelte';
+  import { t } from '#lib/i18n/strings';
+  import { IDS } from '#lib/generated/uiIds';
+  import { connectionStatus } from '#lib/store';
+  import { makeOfflineGate } from '#lib/offline-gate';
+  import RuleEditor from '#lib/components/RuleEditor.svelte';
+  import FeaturePolicyEditor from '#lib/components/FeaturePolicyEditor.svelte';
 
   // The `family` page (family-safety.md § App surface) — role-dependent
   // sections off ONE `fauna.family.status` read: the guardian section (wards +
@@ -68,7 +72,7 @@
   // (FamilyViewModel / FamilyPage.xaml — the reference client, priority #3);
   // shaped like the admin-users hub (sections of rows, per-row selects, a
   // page-level actionError). All calls go through the shared `FamilyClient` via
-  // $lib/rpc's wasm seam — no composition in the page.
+  // #lib/rpc's wasm seam — no composition in the page.
   //
   // ui.yaml's `family:` block carries exactly one (non-indexed) policy-editor
   // element set, so a guardian with multiple wards edits one at a time:
@@ -121,10 +125,15 @@
   // editor. Same label-not-wire <select> contract as the two reach knobs above.
   // Default `inherit` = the unsupervised-equivalent (the ward's own thresholds
   // decide); default Notify off.
-  let policyContentNsfwLabel = $state<string>(t.family.value_inherit);
-  let policyContentSpamLabel = $state<string>(t.family.value_inherit);
-  let policyContentPhishingLabel = $state<string>(t.family.value_inherit);
-  let policyContentCommercialLabel = $state<string>(t.family.value_inherit);
+  // The guardian's mounting of the shared rule editor (`family-policy-rules-section`,
+  // nest-rules.md § The shared rule editor (b)) — it superseded the four
+  // content-floor selects. Re-opened on every load of the selected ward, over the
+  // ward's content policy (its rule document, with every floor still set shown as
+  // a rule beside it); its own save writes the content pillar and nothing else.
+  let rulesEditor = $state<RuleEditorHandle | null>(null);
+  let rulesKey = $state(0);
+  let rulesStatus = $state('');
+  let rulesSaving = $state(false);
   let policyContentNotify = $state(false);
 
   let contactAddInput = $state('');
@@ -190,16 +199,6 @@
   function unknownPeerDmWire(label: string): string {
     return unknownPeerDmOptions().find((o) => resolveLocalized(o.label) === label)?.value ?? 'hold';
   }
-  // The four content-floor selects share the same label↔wire bridge — the
-  // catalog + fail-closed rule are shared Rust (`content_floor_options` /
-  // `content_floor_label`); an unrecognized value fails closed to `block`.
-  function contentFloorLabel(wire: string): string {
-    return resolveLocalized(contentFloorLabelRaw(wire));
-  }
-  function contentFloorWire(label: string): string {
-    return contentFloorOptions().find((o) => resolveLocalized(o.label) === label)?.value ?? 'block';
-  }
-
   // The <select>s' option lists, in the ratified catalog order — resolved once
   // wasm is ready (see onMount) rather than at module-eval time.
   // Screen time (§ Screen time, Slice E) — the guardian's three inputs, held as
@@ -212,7 +211,6 @@
   let unknownSenderOptionLabels = $state<string[]>([]);
   let feedSourcesOptionLabels = $state<string[]>([]);
   let unknownPeerDmOptionLabels = $state<string[]>([]);
-  let contentFloorOptionLabels = $state<string[]>([]);
 
   /** The supervised side's read-only `family-policy-summary` — the four reach
    *  knobs PLUS each non-inherit content floor and, when on, the Notify line, as
@@ -231,8 +229,16 @@
     if (usageTodayMinutes !== undefined && usageTodayMinutes !== null) {
       lines.push(usageTodayLine(usageTodayMinutes, p.screen_time?.daily_minutes ?? undefined));
     }
+    // A line a rule of the guardian's document makes carries that rule's reason,
+    // appended verbatim as "{label}: {value} — {reason}" (`nest-rules.md` § The
+    // shared rule editor → *The reason is the member's to read*); every other
+    // line is unchanged.
     return lines
-      .map((line) => `${resolveLocalized(line.label)}: ${resolveLocalized(line.value)}`)
+      .map((line) => {
+        const text = `${resolveLocalized(line.label)}: ${resolveLocalized(line.value)}`;
+        const reason = policySummaryReasonText(line, NEST_RULES_LANG);
+        return reason ? `${text} — ${reason}` : text;
+      })
       .join('\n');
   }
 
@@ -262,7 +268,7 @@
       .join('; ');
   }
 
-  // The row's display text lives in $lib/family-approvals (the one shared
+  // The row's display text lives in #lib/family-approvals (the one shared
   // rendering rule, unit-tested there): `peer_address` for a `mail_hold`
   // (localized no-sender label when empty — a held null-path message),
   // `summary` for every other kind.
@@ -288,12 +294,10 @@
     // fail-closed `hold` (see `unknownPeerDmLabel`'s doc comment).
     policyUnknownPeerDmLabel = unknownPeerDmLabel(w.policy.unknown_peer_dm ?? 'allow');
     policyUnknownPeerDmEdited = false;
-    // An absent content_policy is the all-inherit unsupervised-equivalent default.
-    const cp = w.policy.content_policy;
-    policyContentNsfwLabel = contentFloorLabel(cp?.nsfw ?? 'inherit');
-    policyContentSpamLabel = contentFloorLabel(cp?.spam ?? 'inherit');
-    policyContentPhishingLabel = contentFloorLabel(cp?.phishing ?? 'inherit');
-    policyContentCommercialLabel = contentFloorLabel(cp?.commercial ?? 'inherit');
+    // An absent content_policy is the all-inherit unsupervised-equivalent default:
+    // an editor with no rules.
+    rulesEditor = openRuleEditorForGuardian(w.policy.content_policy ?? null);
+    rulesKey += 1;
     policyContentNotify = w.policy.content_notify ?? false;
     // Screen time: an absent pillar is the unsupervised-equivalent default —
     // every field empty, i.e. no limit. Stored minutes render back through the
@@ -394,7 +398,6 @@
       unknownSenderOptionLabels = unknownSenderOptions().map((o) => resolveLocalized(o.label));
       feedSourcesOptionLabels = feedSourcesOptions().map((o) => resolveLocalized(o.label));
       unknownPeerDmOptionLabels = unknownPeerDmOptions().map((o) => resolveLocalized(o.label));
-      contentFloorOptionLabels = contentFloorOptions().map((o) => resolveLocalized(o.label));
       await refresh();
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);
@@ -431,12 +434,9 @@
         unknown_peer_dm: policyUnknownPeerDmEdited
           ? unknownPeerDmWire(policyUnknownPeerDmLabel)
           : undefined,
-        content_policy: {
-          nsfw: contentFloorWire(policyContentNsfwLabel),
-          spam: contentFloorWire(policyContentSpamLabel),
-          phishing: contentFloorWire(policyContentPhishingLabel),
-          commercial: contentFloorWire(policyContentCommercialLabel),
-        },
+        // The content pillar is the rule editor's own save; absent here means
+        // "leave unchanged", so this form never rewrites the ward's rules.
+        content_policy: undefined,
         content_notify: policyContentNotify,
         // Present, so an all-empty editor CLEARS every limit. Absent would mean
         // "leave the pillar unchanged" and could never remove one.
@@ -446,6 +446,26 @@
       await refresh();
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  /** The rule editor's save (`family-policy-rules-section`): the shared
+   *  `FamilyClient::save_content_rules` re-reads the ward and writes the content
+   *  pillar with every other optional pillar absent. The page then re-reads, so
+   *  what paints is what the nest stored. */
+  async function saveRules() {
+    const s = secret();
+    if (!s || !selectedWard || !rulesEditor) return;
+    actionError = '';
+    rulesSaving = true;
+    try {
+      await familySaveContentRules(s, toBytes(selectedWard.actor_id), rulesEditor.documentBytes());
+      rulesStatus = t.rule_editor.saved;
+      await refresh();
+    } catch (e) {
+      rulesStatus = e instanceof Error ? e.message : String(e);
+    } finally {
+      rulesSaving = false;
     }
   }
 
@@ -765,41 +785,28 @@
             </select>
           </label>
 
-          <!-- ── Content policy (v1.x pillar 2, family-safety.md § Content
-               policy) — a per-category floor: inherit | collapse | block. The
-               same label-not-wire <select> contract as the reach knobs. -->
-          <label class="field">
-            <span>{t.family.policy_content_nsfw_label}</span>
-            <select data-testid={IDS.FAMILY_POLICY_CONTENT_NSFW_SELECT} bind:value={policyContentNsfwLabel}>
-              {#each contentFloorOptionLabels as label (label)}
-                <option value={label}>{label}</option>
-              {/each}
-            </select>
-          </label>
-          <label class="field">
-            <span>{t.family.policy_content_spam_label}</span>
-            <select data-testid={IDS.FAMILY_POLICY_CONTENT_SPAM_SELECT} bind:value={policyContentSpamLabel}>
-              {#each contentFloorOptionLabels as label (label)}
-                <option value={label}>{label}</option>
-              {/each}
-            </select>
-          </label>
-          <label class="field">
-            <span>{t.family.policy_content_phishing_label}</span>
-            <select data-testid={IDS.FAMILY_POLICY_CONTENT_PHISHING_SELECT} bind:value={policyContentPhishingLabel}>
-              {#each contentFloorOptionLabels as label (label)}
-                <option value={label}>{label}</option>
-              {/each}
-            </select>
-          </label>
-          <label class="field">
-            <span>{t.family.policy_content_commercial_label}</span>
-            <select data-testid={IDS.FAMILY_POLICY_CONTENT_COMMERCIAL_SELECT} bind:value={policyContentCommercialLabel}>
-              {#each contentFloorOptionLabels as label (label)}
-                <option value={label}>{label}</option>
-              {/each}
-            </select>
-          </label>
+          <!-- ── Content rules (family-safety.md § App surface → *Content rules*):
+               the guardian's mounting of the shared rule editor, where the four
+               per-category floor selects stood. Its own save; the policy form's
+               save below sends the content pillar absent. -->
+          <div class="content-rules" data-testid={IDS.FAMILY_POLICY_RULES_SECTION}>
+            <h3>{t.rule_editor.family_section}</h3>
+            {#if rulesEditor && $identity?.secretHex}
+              {#key rulesKey}
+                <RuleEditor
+                  secretHex={$identity.secretHex}
+                  editor={rulesEditor}
+                  writeKind="fauna.family.policy.update"
+                  status={rulesStatus}
+                  saving={rulesSaving}
+                  onsave={saveRules}
+                  onchange={() => (rulesStatus = '')}
+                />
+              {/key}
+            {:else}
+              <p class="muted">{t.rule_editor.loading}</p>
+            {/if}
+          </div>
 
           <!-- Guardian Notify (family-safety.md § Guardian Notify) — category +
                count only, never content; default off. -->
@@ -845,7 +852,7 @@
           <!-- § Screen time's conforming-client bound, stated on the surface
                that exposes the knob (the same rule the feed_sources caveat
                follows for pillar 1). -->
-          <p class="caveat">{t.family.policy_screen_caveat}</p>
+          <p class="caveat" data-testid={IDS.FAMILY_POLICY_SCREEN_HINT}>{t.family.policy_screen_caveat}</p>
 
           <button class="btn primary" data-testid={IDS.FAMILY_POLICY_SAVE_BUTTON}
             use:offlineGate={{ kind: 'fauna.family.policy.update' }} onclick={savePolicy}

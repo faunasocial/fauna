@@ -9,7 +9,12 @@ use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Child, Command};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// How long a request waits for the freshly spawned server to bind. A fixed
+/// ten 100 ms retries (about 1.2 s with the spawn sleep) lost the race on a
+/// loaded box during a public-CI replay (2026-10-21), while the server was fine.
+const CONNECT_DEADLINE: Duration = Duration::from_secs(10);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -100,7 +105,7 @@ fn start_server_with_sdk(
 }
 
 /// Sends a raw HTTP/1.1 request and returns (status_code, body).
-/// Retries connection up to 10 times with 100ms delay to handle server startup race.
+/// Retries the connection for up to `CONNECT_DEADLINE` to handle the server startup race.
 fn http_request(port: u16, method: &str, path: &str, token: Option<&str>) -> (u16, String) {
     http_request_timeout(port, method, path, token, Duration::from_secs(10))
 }
@@ -113,13 +118,11 @@ fn http_request_timeout(
     timeout: Duration,
 ) -> (u16, String) {
     let addr = format!("127.0.0.1:{port}");
+    let deadline = Instant::now() + CONNECT_DEADLINE;
     let mut stream = None;
-    for _ in 0..10 {
+    while stream.is_none() && Instant::now() < deadline {
         match TcpStream::connect(&addr) {
-            Ok(s) => {
-                stream = Some(s);
-                break;
-            }
+            Ok(s) => stream = Some(s),
             Err(_) => std::thread::sleep(Duration::from_millis(100)),
         }
     }

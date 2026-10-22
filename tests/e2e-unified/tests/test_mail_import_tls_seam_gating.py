@@ -40,6 +40,7 @@ Pure text analysis of Rust sources and Cargo manifests — no build, no driver.
 """
 
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -51,6 +52,9 @@ pytestmark = pytest.mark.tier_1
 _REPO = Path(__file__).resolve().parents[3]
 _NATIVE = _REPO / "libs" / "fauna-mail" / "src" / "imap_client" / "native.rs"
 _SEED_TEST = _REPO / "libs" / "fauna-mail" / "tests" / "imap_client_trust_seed.rs"
+_HOST_MAP_TEST = _REPO / "libs" / "fauna-mail" / "tests" / "imap_client_host_map_seed.rs"
+_CONFTEST = _REPO / "tests" / "e2e-unified" / "conftest.py"
+_PRESETS = _REPO / "libs" / "fauna-client-mail-settings" / "src" / "import.rs"
 
 # The two production sites that build a source-IMAP trust store. Both must go
 # through `NativeImapConnector::new`, which is where the seed lives.
@@ -68,6 +72,19 @@ _SEAM_GATE = '#[cfg(any(test, debug_assertions, feature = "test-helpers"))]'
 # The env var's name, as the Python harness spells it. Half 4 pins the Rust side
 # to this string.
 _SEED_ENV = "FAUNA_E2E_IMAP_EXTRA_CA_PEM"
+
+# The preset-host redirect seed (`e2e-gated-seeds.md` § The preset-host
+# redirect seed): the seventh seed, on the same door. It moves where a mapped
+# host is DIALLED — never the name the handshake verifies — and the harness maps
+# one host, the Outlook preset's.
+_HOST_MAP_ENV = "FAUNA_E2E_IMAP_HOST_MAP"
+
+# Each seed on `NativeImapConnector::new`: (constant, gated reader). The reader
+# is the live switch; each carries a `cfg(not(...))` no-op twin.
+_NEW_SEEDS = (
+    ("E2E_EXTRA_CA_ENV", "e2e_extra_root"),
+    ("E2E_HOST_MAP_ENV", "e2e_host_redirects"),
+)
 
 # Crates whose `test-helpers` feature reaches this seam. `fauna-mail` declares
 # it; `fauna-client-mail-settings` forwards it (the linux/tui construction site),
@@ -104,7 +121,8 @@ def test_the_seed_constant_and_its_reader_are_both_gated():
     for. The reader alone is worse: it is the live switch.
     """
     gated = _gated_items()
-    for item in ("E2E_EXTRA_CA_ENV", "e2e_extra_root"):
+    items = [name for seed in _NEW_SEEDS for name in seed] + ["parse_host_map"]
+    for item in items:
         assert item in gated, (
             f"`{item}` is no longer directly under {_SEAM_GATE} in "
             "libs/fauna-mail/src/imap_client/native.rs. It is the e2e source-trust "
@@ -116,9 +134,10 @@ def test_the_seed_constant_and_its_reader_are_both_gated():
         )
 
 
-def test_the_seed_is_read_only_from_inside_the_gated_reader():
-    """`NativeImapConnector::new` reaches the env var through the gated helper
-    and nowhere else.
+@pytest.mark.parametrize("reader", [reader for _const, reader in _NEW_SEEDS])
+def test_the_seed_is_read_only_from_inside_the_gated_reader(reader):
+    """`NativeImapConnector::new` reaches each seed's env var through its gated
+    helper and nowhere else.
 
     The failure this catches is a well-meant inline: moving the `env::var` call
     up into `new`'s body "to save a function" drops it out from under the gate,
@@ -129,37 +148,42 @@ def test_the_seed_is_read_only_from_inside_the_gated_reader():
 
     # Anchor on the GATE + definition together, not on the name alone: the
     # module also carries a `cfg(not(...))` no-op twin of the same signature
-    # (convention 15's production plumbing), so a bare `find("fn
-    # e2e_extra_root")` would resolve to whichever of the two happens to be
-    # written first — making this test pass or fail on declaration order.
+    # (convention 15's production plumbing), so a bare `find("fn <reader>")`
+    # would resolve to whichever of the two happens to be written first —
+    # making this test pass or fail on declaration order.
     gated = re.search(
-        re.escape(_SEAM_GATE) + r"\s*\n\s*fn e2e_extra_root\b",
+        re.escape(_SEAM_GATE) + r"\s*\n\s*fn " + reader + r"\b",
         text,
     )
     assert gated, (
-        "libs/fauna-mail/src/imap_client/native.rs has no `e2e_extra_root` "
+        f"libs/fauna-mail/src/imap_client/native.rs has no `{reader}` "
         f"directly under {_SEAM_GATE}. The reader is the live switch; ungated it "
-        "is a trust-anchor override in every release artifact."
+        "ships in every release artifact."
     )
 
-    body_start = gated.end()
+    # Every environment read sits inside a function that is itself directly
+    # under the gate — the nearest `fn` before each `std::env::var(` is one of
+    # the gated items.
+    gated_items = set(_gated_items())
     for occurrence in re.finditer(r"std::env::var\(", text):
-        assert occurrence.start() > body_start, (
+        enclosing = re.findall(r"\bfn (\w+)", text[: occurrence.start()])
+        assert enclosing and enclosing[-1] in gated_items, (
             "libs/fauna-mail/src/imap_client/native.rs reads the process "
-            "environment OUTSIDE the gated `e2e_extra_root` reader. The seed's "
-            "compile-time exclusion is the security boundary, and `new()` itself "
-            "is unconditional — inlining the read up into it (\"to save a "
-            "function\") puts it in every release artifact while leaving the gate "
-            "sitting on a helper nothing calls."
+            f"environment inside `{enclosing[-1] if enclosing else '?'}`, which is "
+            "not directly under the seam gate. The seeds' compile-time exclusion "
+            "is the security boundary, and `new()` itself is unconditional — "
+            "inlining a read up into it (\"to save a function\") puts it in every "
+            "release artifact while leaving the gate sitting on a helper nothing "
+            "calls."
         )
 
     twin = re.search(
         r"#\[cfg\(not\(any\(test, debug_assertions, feature = \"test-helpers\"\)\)\)\]"
-        r"\s*\n\s*fn e2e_extra_root\b",
+        r"\s*\n\s*fn " + reader + r"\b",
         text,
     )
     assert twin, (
-        "the production no-op twin of `e2e_extra_root` is gone, so `new()` no "
+        f"the production no-op twin of `{reader}` is gone, so `new()` no "
         "longer compiles in a shipped build — or, worse, the gate was widened so "
         "one body serves both. The twin IS the statement that a release build "
         "has no seed (convention 15)."
@@ -191,22 +215,95 @@ def test_the_seed_only_adds_a_trust_anchor():
     )
 
 
-def test_the_rust_and_harness_spellings_of_the_seed_agree():
-    """The env var's name is identical on both sides of the seam.
+@pytest.mark.parametrize(
+    ("seed_env", "seed_test"),
+    [(_SEED_ENV, _SEED_TEST), (_HOST_MAP_ENV, _HOST_MAP_TEST)],
+    ids=["trust", "host-map"],
+)
+def test_the_rust_and_harness_spellings_of_the_seed_agree(seed_env, seed_test):
+    """Each env var's name is identical on both sides of the seam.
 
     Nothing but this string connects the Rust reader to the Python harness that
     sets it, so a rename on either side does not fail — it silently stops seeding,
     and the wizard's TLS handshake starts failing for what looks like an app bug.
     """
     native = _NATIVE.read_text(encoding="utf-8")
-    assert f'"{_SEED_ENV}"' in native, (
-        f"libs/fauna-mail/src/imap_client/native.rs no longer names {_SEED_ENV}. "
+    assert f'"{seed_env}"' in native, (
+        f"libs/fauna-mail/src/imap_client/native.rs no longer names {seed_env}. "
         "The harness sets that exact string; a rename on one side alone leaves the "
-        "seed permanently unset and every source TLS handshake failing."
+        "seed permanently unset."
     )
-    seed_test = _SEED_TEST.read_text(encoding="utf-8")
-    assert f'"{_SEED_ENV}"' in seed_test, (
-        f"libs/fauna-mail/tests/imap_client_trust_seed.rs no longer names {_SEED_ENV}"
+    assert f'"{seed_env}"' in seed_test.read_text(encoding="utf-8"), (
+        f"{seed_test.relative_to(_REPO)} no longer names {seed_env}"
+    )
+    assert f'env["{seed_env}"]' in _CONFTEST.read_text(encoding="utf-8"), (
+        f"tests/e2e-unified/conftest.py no longer writes {seed_env} — the Rust "
+        "reader is then never seeded"
+    )
+
+
+def test_the_host_map_refuses_a_non_loopback_target():
+    """Loopback only, even under the gate (`e2e-gated-seeds.md` § The
+    preset-host redirect seed, the terms): the seed may point a connection
+    nowhere but into the harness's own box. The parser checks the address and
+    panics, and the Rust unit test that pins it is still there by name — as the
+    Microsoft authority seed's plaintext refusal is pinned above."""
+    text = _NATIVE.read_text(encoding="utf-8")
+    parser = text[text.find("fn parse_host_map") :]
+    parser = parser[: parser.find("\n}\n")]
+    assert "is_loopback()" in parser and ("panic!(" in parser or "assert!(" in parser), (
+        "`parse_host_map` no longer refuses a non-loopback address — the "
+        "preset-host redirect seed could then point a source connection off the box."
+    )
+    assert re.search(
+        r"#\[should_panic[^\]]*FAUNA_E2E_IMAP_HOST_MAP[^\]]*\]\s*\n\s*"
+        r"fn the_host_map_refuses_a_non_loopback_target\b",
+        text,
+    ), (
+        "native.rs's `the_host_map_refuses_a_non_loopback_target` unit test is gone "
+        "or no longer expects a panic naming the variable."
+    )
+
+
+def test_the_harness_maps_the_outlook_host_and_no_other():
+    """The harness writes one entry, for the Outlook preset's host, spelled as
+    the Rust preset spells it.
+
+    One host is a term of the ruling, not a convenience: mapping Gmail's or
+    iCloud's host would serve a witness whose payload is a user's app password,
+    which needs its own ruling (`e2e-gated-seeds.md` § The preset-host redirect
+    seed, ground (2) re-weighed). And a spelling drift between the harness and
+    `provider_preset` would leave the map naming a host the app never dials —
+    the walk then reaches for Microsoft's real server.
+    """
+    presets = _PRESETS.read_text(encoding="utf-8")
+    m = re.search(r'ImportSourceKind::Outlook => Some\(\("([^"]+)"', presets)
+    assert m, "provider_preset's Outlook arm is no longer a literal host in import.rs"
+    preset_host = m.group(1)
+
+    sys.path.insert(0, str(_REPO / "tests" / "e2e-unified" / "fakes"))
+    import fake_imap_source
+
+    assert fake_imap_source.OUTLOOK_IMAP_HOST == preset_host, (
+        f"the harness's OUTLOOK_IMAP_HOST ({fake_imap_source.OUTLOOK_IMAP_HOST!r}) "
+        f"is not provider_preset's Outlook host ({preset_host!r})"
+    )
+
+    conftest = _CONFTEST.read_text(encoding="utf-8")
+    writes = re.findall(r'env\["' + _HOST_MAP_ENV + r'"\] = (.+)', conftest)
+    assert writes == ['f"{host}=127.0.0.1:{port}"'], (
+        f"conftest.py must write {_HOST_MAP_ENV} exactly once, as the one entry "
+        f"`f\"{{host}}=127.0.0.1:{{port}}\"`; found {writes!r}"
+    )
+    assert "host, port = session_preset_redirect()" in conftest, (
+        f"conftest.py's {_HOST_MAP_ENV} entry no longer comes from "
+        "`fake_imap_source.session_preset_redirect()`"
+    )
+    source = Path(fake_imap_source.__file__).read_text(encoding="utf-8")
+    body = source[source.find("def session_preset_redirect") :]
+    body = body[: body.find("\ndef ")]
+    assert "return OUTLOOK_IMAP_HOST, " in body, (
+        "`session_preset_redirect` no longer returns the Outlook preset's host"
     )
 
 
@@ -323,7 +420,7 @@ def test_the_microsoft_authority_seed_is_gated_with_a_production_twin():
         )
     assert f'"{_AUTHORITY_ENV}"' in text, (
         f"oauth_device.rs no longer names {_AUTHORITY_ENV}, the spelling "
-        "`e2e-automation-surface-gating.md` § The Microsoft authority seed rules."
+        "`e2e-gated-seeds.md` § The Microsoft authority seed rules."
     )
 
 

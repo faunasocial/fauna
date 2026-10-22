@@ -1,0 +1,46 @@
+---
+interface Props { size?: number; delay?: string; }
+const { size = 110, delay = '0s' } = Astro.props;
+---
+<svg viewBox="0 0 120 140" width={size} height={Math.round((size * 140) / 120)}
+  class="critter" style={`--wave-delay:${delay}`} aria-hidden="true">
+  <ellipse cx="58" cy="134" rx="26" ry="5" class="critter-shadow" />
+  <!-- tail, curling up behind -->
+  <path d="M78 116 Q104 112 100 90" stroke="#c9a06a" stroke-width="8"
+    fill="none" stroke-linecap="round" />
+  <!-- waving paw -->
+  <g class="wave" style="transform-origin: 78px 96px;">
+    <ellipse cx="84" cy="86" rx="5.5" ry="13" transform="rotate(-30 84 86)" fill="#c9a06a" />
+    <circle cx="89" cy="74" r="4.6" fill="#e0c08a" />
+  </g>
+  <!-- body -->
+  <ellipse cx="58" cy="102" rx="25" ry="27" fill="#e0c08a" />
+  <ellipse cx="58" cy="109" rx="15" ry="16" fill="#f7e8d4" />
+  <ellipse cx="40" cy="92" rx="8" ry="3" transform="rotate(-20 40 92)" fill="#c9a06a" />
+  <ellipse cx="40" cy="101" rx="8" ry="3" transform="rotate(-20 40 101)" fill="#c9a06a" />
+  <ellipse cx="37" cy="100" rx="5.5" ry="11" transform="rotate(22 37 100)" fill="#c9a06a" />
+  <ellipse cx="47" cy="131" rx="7" ry="4" fill="#c9a06a" />
+  <ellipse cx="69" cy="131" rx="7" ry="4" fill="#c9a06a" />
+  <!-- ears, tucked behind the head -->
+  <path d="M40 42 L35 19 L54 33 Z" fill="#e0c08a" />
+  <path d="M76 42 L81 19 L62 33 Z" fill="#e0c08a" />
+  <path d="M42 39 L39 26 L50 34 Z" fill="#e8a1b0" />
+  <path d="M74 39 L77 26 L66 34 Z" fill="#e8a1b0" />
+  <!-- head -->
+  <circle cx="58" cy="56" r="22" fill="#e0c08a" />
+  <ellipse cx="52" cy="41" rx="6" ry="2.4" fill="#c9a06a" />
+  <ellipse cx="64" cy="41" rx="6" ry="2.4" fill="#c9a06a" />
+  <ellipse cx="48" cy="53" rx="4.5" ry="5.5" fill="#3e7c4f" />
+  <ellipse cx="68" cy="53" rx="4.5" ry="5.5" fill="#3e7c4f" />
+  <ellipse cx="48" cy="53" rx="1.7" ry="4.4" fill="#2b2a24" />
+  <ellipse cx="68" cy="53" rx="1.7" ry="4.4" fill="#2b2a24" />
+  <path d="M54 64 L62 64 L58 68 Z" fill="#e8a1b0" />
+  <path d="M58 68 Q54 72 50 69" stroke="#2b2a24" stroke-width="1.8" fill="none" stroke-linecap="round" />
+  <path d="M58 68 Q62 72 66 69" stroke="#2b2a24" stroke-width="1.8" fill="none" stroke-linecap="round" />
+  <g stroke="#a8845a" stroke-width="1.6" stroke-linecap="round">
+    <line x1="44" y1="64" x2="28" y2="60" />
+    <line x1="44" y1="68" x2="28" y2="71" />
+    <line x1="72" y1="64" x2="88" y2="60" />
+    <line x1="72" y1="68" x2="88" y2="71" />
+  </g>
+</svg>

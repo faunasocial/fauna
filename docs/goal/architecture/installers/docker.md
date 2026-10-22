@@ -57,7 +57,7 @@ the `labeler` half is ABI-load-bearing — dropping it is a linker failure, reco
 in the Dockerfile). A parallel `rust-wasm` stage builds the WASM modules for the
 web SPA.
 
-**Go** (an exact-patch-pinned `golang:1.26.9-bookworm` — never a floating
+**Go** (an exact-patch-pinned `golang:1.26.10-bookworm` — never a floating
 `golang:1.26-bookworm` tag, so the shipped toolchain is reproducible and
 `govulncheck` scans exactly what ships; kept in sync with
 `bins/fauna-bridges/go.mod`'s `toolchain` directive by a dedicated
@@ -121,7 +121,14 @@ it **as root**, before their `s6-setuidgid` drop, and export it as an env the
 dropped process inherits; env, never argv, since `/proc/<pid>/cmdline` is
 world-readable while `/proc/<pid>/environ` is own-UID-only. The shared
 `/data/operator-hatch.toml` (deployment topology — bind addresses, scanner
-endpoints, MX overrides; no secret) is `0644` so both bridges read it. A redeploy
+endpoints, MX overrides; no secret) is `0644` so both bridges read it. The
+entrypoint also writes the artifact's one self-declaration onto it:
+`content_scanners = "wired"` when both `FAUNA_CLAMD_ADDR` and
+`FAUNA_RSPAMD_URL` are set, `"absent"` otherwise — the nest reads it at boot as
+the box's "no mail perimeter" fact (ruled 2026-10-17; consequence and readers
+owned by [`../../behavior/mail-bridge-lifecycle.md`](../../behavior/mail-bridge-lifecycle.md)
+§ Default-off on first claim → *A box with no content scanners cannot enable
+mail*). A redeploy
 onto a pre-split `/data` volume migrates a legacy flat `/data/keys/{role}.key`
 into the per-role subdir + re-owns it (entrypoint), preserving the enrolled
 service-user identity.
@@ -147,6 +154,10 @@ wiring only.
 | `fauna-mail-bridge-mta` | `down` by default; up via socket when `/data/imap-enabled` exists; **never starts when `FAUNA_MODE=private`** (run-script gate — a private home box relays outbound via its public peer) | Go mail bridge, MTA role — SMTP MX (25) + submission (465/587). One process, one keypair (`/data/keys/mta/mta.key`, fauna-mta-owned) |
 | `fauna-mail-bridge-mda` | `down` by default; up via socket when any of the `/data/{imap,caldav,carddav,webdav}-enabled` flags exists | Go mail bridge, MDA role — IMAP (993/143) + CalDAV. Distinct keypair (`/data/keys/mda/mda.key`, fauna-mda-owned) |
 | `fauna-atproto-bridge` | `down` by default; up via socket when `/data/atproto-enabled` exists — raised by `mail_enable::set_atproto_enabled` the first time any user reaches a hosted `IntegrationLevel` via `fauna.bridges.atproto.set_integration_level` | Out-of-process ATProto PDS bridge — XRPC/OAuth on loopback `127.0.0.1:8447`, SNI-fronted at `pds.<domain>` (`fauna-sni-router` row above); terminates `pds.<domain>` TLS itself via its own sealed cert blob. Own keypair (`/data/keys/atproto/atproto.pds.key`, fauna-atproto-owned). `atproto-pds-full.md` § Wire & process topology |
+
+**Shutdown order — the nest stops while the router still splices (ruled 2026-10-20).** On a deployed box every client reaches the nest through `fauna-sni-router`'s `:443` (the nest binds container loopback), and s6-rc stops a service's dependents before the service itself. So `fauna-nest` **depends on** `fauna-sni-router` (`docker/s6/fauna-nest/dependencies.d/fauna-sni-router`), never the reverse: at `docker stop` the bridges stop, then the nest receives its SIGTERM and sends its WS 1001 drain out through the router's live splices, and only then is the router stopped. The router itself, on SIGTERM, stops accepting and keeps every live splice until its backend closes, bounded by a 10 s drain grace (`bins/fauna-sni-router/src/main.rs::DRAIN_GRACE`), so a shutdown that signals both at once still lets the 1001 through. The price of the order is at start: the router starts first, before the nest has re-minted this boot's sidecar tokens, so the entrypoint deletes the previous boot's `/data/sidecar-token-router` and the router's run-script waits (bounded) for the fresh one rather than earning a refused hello and a `:443` restart. Pinned statically by tier_1 `tests/e2e-unified/tests/test_s6_shutdown_order.py`; the 1001 through the real image by tier_4 `tests/platform/docker/test_graceful_shutdown.py` (the drain itself: [`../transport-connection.md`](../transport-connection.md) § Graceful shutdown).
+
+**The shutdown budget — s6-overlay's defaults leave the nest about 12 of the 15 s (measured 2026-10-20).** The image sets neither `S6_SERVICES_GRACETIME` nor `S6_KILL_GRACETIME`, so both keep s6-overlay's 3000 ms defaults, and neither cuts the nest's drain. Measured on the image (s6-overlay 3.2.0.2) with a stand-in `fauna-nest` run-script that took 12 s to exit after its SIGTERM: s6-rc waited the full 12 s before marking the service down, and setting `S6_SERVICES_GRACETIME=500` changed nothing, so nothing in s6 bounds the nest's stop and docker's `stop_grace_period` SIGKILL is its only bound. What the defaults do cost is a fixed tail of about 3 s after the last service is down (setting `S6_KILL_GRACETIME=500` shrank it to about 0.65 s): with a 2 s nest stop the container exited 5.2 s after `docker stop`, and with the 12 s one docker killed it at 15 s (exit 137). **The router's drain must therefore cost nothing after the nest has gone**, and a draining router ends a splice as soon as its backend has closed and its last bytes reached the client, without waiting for the client to close its own half: measured the same day, an app that had read its 1001 but not yet closed its socket held the router for its whole 10 s `DRAIN_GRACE`, so an idle 0.07 s nest stop already took 13.4 s, and any nest stop over about 1.6 s ended in SIGKILL. With that, the nest's whole stop (the 7 s drain wait plus finalize and checkpoint, [`../transport-connection.md`](../transport-connection.md) § Graceful shutdown) has about 12 s and fits with room to spare, so the s6 defaults stand. Pinned by the router's `tests/sigterm_drain.rs` (a backend that closes cleanly ends the splice while the client's half stays open) and by tier_4 `test_graceful_shutdown.py::test_slow_nest_stop_fits_s6_grace`, which holds the real nest's SIGTERM back 8 s and asserts the client still gets 1001 and the container exits 0.
 
 **Two enable mechanisms coexist, by design:**
 
@@ -262,14 +273,14 @@ admin's client-persisted state exists, overridden by it after).
 | `FAUNA_DOMAIN` | **Retired / removed** — the box boots **domainless** and learns its domain from the admin's **claim handle** (persisted as the primary `mail_domains` row, which IS the nest's identity). No longer read by `entrypoint.sh`, `docker-compose*.yml`, the install scripts, or `cloud_init.rs`. Authority: [`../nest/domains-and-tls-bootstrap.md`](../nest/domains-and-tls-bootstrap.md) § Env contract. | — (removed) |
 | `FAUNA_MODE` | `public` (default) \| `private` — **pre-claim NAT-mode seed only** (any other value is ignored → public). Overridden by the app-set `nest_nat_mode` row once the admin chooses in the wizard/admin panel. Owner: [`../nest/common.md`](../nest/common.md) § NAT mode. Also gates the MTA run-script (never starts private-side). | Seed |
 | `FAUNA_LAN_BIND_IP` | Home-relay private box: LAN IP to bind the MDA IMAP 993/143 + CalDAV (`<LAN-IP>:8443`, the `caldav_bind_host` hatch) listeners on. Deployment topology. See [`home-relay.md`](home-relay.md). | Artifact-set IPC |
-| `FAUNA_BIND_ADDR` | Nest listener bind address (the home bundle sets `127.0.0.1` under host networking) | Artifact-set IPC |
+| `FAUNA_BIND_ADDR` | Nest listener bind address; default `127.0.0.1` — every dialer is co-resident and clients arrive through the SNI router's `:443` ([`../deployment-threat-model.md`](../deployment-threat-model.md) § Concern 1a); reconciled into `nest.toml` every boot (the home bundle states the same value under host networking) | Artifact-set IPC |
 | `FAUNA_PORT` | Nest's internal listen port behind the `:443` SNI router (default: `3000`; kept off 8443 so 8443 means CalDAV) | Artifact-set IPC |
 | `FAUNA_CLAIM_CODE` | Non-interactive claim-code injection (provisioning writes it; see § Admin Claim Code) | Artifact-set IPC |
 | `FAUNA_DEPLOYMENT_SEED` | Box-recovery identity seed, read by the nest binary (inert once an identity exists). Custody story: [`../nest/box-recovery.md`](../nest/box-recovery.md). Passed through compose (`docker-compose*.yml`) + both install scripts. | Artifact-set IPC (recovery input) |
 | `FAUNA_ACME_DIRECTORY_URL` | ACME directory override → `[acme] directory_url`. Set only by the tier_4 pebble harness; the CA is otherwise the constant Let's Encrypt (same owner). | Artifact-set IPC (test) |
 | `FAUNA_CORS_ORIGINS` | Comma-separated CORS origins boot seed; the live surface is the app-set `fauna.admin.set_cors_origins` state | Seed |
-| `FAUNA_IMAGE_TAG` | The image tag the bundle pulls (`${FAUNA_IMAGE_TAG:-latest}` on the `image:` line; channels owned by [`../image-pipeline.md`](../image-pipeline.md) § Image tags & channels) — and, repeated into the nest's environment in all three bundles, the **update-channel seed**: read only while no admin has chosen a channel from the app; a non-channel tag seeds a *pinned* box. Owner: [`../nest/update-channel.md`](../nest/update-channel.md) § The channel as nest state. | Seed |
-| `FAUNA_CLAMD_ADDR` / `FAUNA_RSPAMD_URL` | Content-scan sidecar addresses → `operator-hatch.toml` (compose defaults `clamd:3310` / `http://rspamd:11333`) | Artifact-set IPC |
+| `FAUNA_IMAGE_TAG` | The image tag the bundle pulls (`${FAUNA_IMAGE_TAG:-latest}` on the `image:` line; channels owned by [`../image-pipeline.md`](../image-pipeline.md) § Image tags & channels) — and, repeated into the nest's environment in all three bundles, the **update-channel seed**: read only while no admin has chosen a channel from the app; a non-channel tag seeds a *pinned* box. Its **presence** is also what tells the nest it runs from the image, where an updater can enact a channel: a nest started with no such variable — the installers' nest service, a nest installed directly on Linux — follows no channel and asks the registry nothing. Owner: [`../nest/update-channel.md`](../nest/update-channel.md) § The channel as nest state (the seed; *Where the channel applies*). | Seed |
+| `FAUNA_CLAMD_ADDR` / `FAUNA_RSPAMD_URL` | Content-scan sidecar addresses → `operator-hatch.toml` (compose defaults `clamd:3310` / `http://rspamd:11333`); their joint presence is also the hatch's `content_scanners` declaration (§ s6-overlay Services) | Artifact-set IPC |
 | `FAUNA_MTA_MX_OVERRIDE` | Test-harness MX override → `operator-hatch.toml` | Artifact-set IPC (test) |
 | `FAUNA_LOG_LEVEL` | Bridge log level (s6 run-scripts, default `info`) | Artifact-set IPC |
 
@@ -330,11 +341,13 @@ of the self-signed floor) that no deployment path ever sets — see § Health Ch
 | 993 / 143 | TCP | IMAPS / IMAP | If email enabled |
 | 8445 / 8446 | TCP | `fauna-iroh-relay` P2P relay sidecar, HTTPS/HTTP (SNI-router backend, `relay.<domain>`) | Internal |
 | 8447 | TCP | `fauna-atproto-bridge` XRPC/OAuth loopback (SNI-router backend, `pds.<domain>`) | Internal |
-| 3478 | UDP | STUN endpoint discovery (P2P) | Optional |
+| 7842 | UDP | P2P relay address discovery (`fauna-iroh-relay` binds it; the compose and the cloud-init publish it — this row said 3478 until 2026-10-17) | Optional |
 
 The bridges/router bind the privileged ports inside the container under their
 non-root per-role UIDs via `CAP_NET_BIND_SERVICE` (see § Multi-Stage Build,
 `setcap`).
+
+**A published port is not filtered by the host's `ufw`.** Docker writes its own packet-filter rules for every port the compose publishes, and for IPv4 they run ahead of the rules `ufw` manages, so on a hand-built box `ufw` neither opens nor closes the nest's ports over IPv4 — only the host's own services (sshd) follow it. Over IPv6 the compose's default network has no address, so a connection to a published port reaches Docker's userland proxy on the host as ordinary inbound traffic, which `ufw` does filter: there the `ufw allow` lines decide (qualified 2026-10-19). A hand-built box that must be closed to everyone but its admin during the claim window is closed at the provider's firewall, which sits in front of the host (the app provisions no cloud firewall; a provisioned box's claim window is closed by its claim, `vps.md` § Admin Claim). Stated 2026-10-19 for the internet-server guide's claim-window step (it settles the first consistency review's "whether `ufw` protects a hand-built box's claim window").
 
 ## Persistent Volume
 
@@ -354,7 +367,7 @@ A single named volume is mounted at `/data`.
 │   └── router/proxy-secret  (SNI-router PROXY-v2 secret)
 ├── atproto/              (0700, fauna-atproto-owned — the ATProto PDS bridge's WAL SQLite repo store; re-derivable from nest state, a cache not precious)
 ├── inbound-deliver-key   (the inbound deliver secret, generated by the entrypoint)
-├── operator-hatch.toml   (bridge deployment-topology overrides — bind addresses, clamd_addr / rspamd_url, MX override; written by entrypoint.sh, 0644)
+├── operator-hatch.toml   (bridge deployment-topology overrides — bind addresses, clamd_addr / rspamd_url, MX override, the content_scanners declaration the nest reads; written by entrypoint.sh, 0644)
 ├── imap-enabled, caldav-enabled, carddav-enabled, webdav-enabled, atproto-enabled
 │                         (flag files — written by nest on the admin's app toggles; the MDA gates on their OR, the MTA on imap-enabled, the ATProto bridge on atproto-enabled; brought up via the supervisor socket)
 ├── maintenance/ maintenance-host/  (host-OS-maintenance channel — vps.md § Host OS Maintenance)

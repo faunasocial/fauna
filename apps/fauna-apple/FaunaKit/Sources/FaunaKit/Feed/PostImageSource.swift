@@ -2,33 +2,20 @@ import Foundation
 
 /// What a `post-image` surface actually paints for one blob hash.
 ///
-/// apple is one of the two apps whose post image is a URL the platform fetches
-/// and decodes natively — `AsyncImage(url:)` here, `<img src>` on web — so no
-/// Swift code ever holds the bytes and there is nothing to route unconditionally
-/// through the shared manager. The other five apps (tui, linux, windows,
-/// android) pass *every* hash through `FeedManager::open_media_bytes` before
-/// decoding, with no is-this-post-restricted branch anywhere in them. That split
-/// is a declared two-shape rule, not drift to resolve: `docs/goal/ui/media.md`
-/// § Encryption at rest owns it and names which apps are in which shape.
-///
-/// So apple asks `FeedManager::is_sealed_media(hash)` *before* rendering:
-///
-///   - a public post's blob is plaintext on the wire, so the URL **is** the
-///     render — and only that path can ever use the nest's `?thumb=1` smaller
-///     blob, a *separate* blob the uploader generated (the nest cannot render
-///     one; it cannot read the bytes).
-///   - a tier-restricted post's attachment is AEAD-sealed under the same
-///     per-post key its body opened under, so no URL can render it. The bytes
-///     have to come back through `open_media_bytes` and go out as an
-///     already-decoded platform image.
+/// Every post image is bytes this app fetched from the post's own home through
+/// the shared post-blob plane (`FfiPostBlobHosts`), opened through
+/// `FeedManager::open_media_bytes` (a sealed item opens under its post's key; any
+/// other hash comes back untouched) and decoded here — the shape tui, linux,
+/// windows and android keep, and the only one that reaches a post homed on another
+/// nest (`docs/goal/ui/media.md` § Encryption at rest; `feed.md` § The read model
+/// → *A post homed on another nest*). No platform `AsyncImage(url:)` ever dials a
+/// blob route, so there is no URL case.
 public enum PostImageSource {
-    /// A nest blob URL the platform fetches and decodes itself.
-    case url(URL)
-    /// Bytes this client fetched and the shared manager opened.
+    /// Bytes this app fetched through the plane and the shared manager opened.
     case decoded(FaunaPlatformImage)
-    /// Sealed, and the bytes are not open yet — paint the placeholder while the
-    /// fetch runs. Never the URL: it would serve AEAD ciphertext.
-    case sealedPending
+    /// The bytes are not open yet — paint the placeholder while the fetch runs.
+    /// Never ciphertext: a sealed item is decoded only after the manager opens it.
+    case pending
     /// A bridged post's picture (`render-model.md` § D6c, a `ProxiedImage` block)
     /// whose bytes have not landed — paint the placeholder, addressed by the
     /// nest-relative `path`. The bytes are plaintext but the route wants the
@@ -36,37 +23,23 @@ public enum PostImageSource {
     /// and go out as ``decoded(_:)`` — never a URL handed to `AsyncImage`, which
     /// cannot carry one.
     case proxiedPending(String)
-    /// No blob URL at all (pre-auth) — paint nothing.
+    /// Not signed in — paint nothing.
     case unavailable
 
-    /// The decision itself, as a pure function of the three facts the view model
+    /// The decision itself, as a pure function of the two facts the view model
     /// can supply.
     ///
-    /// Kept separate from ``FeedVM/postImage(_:)`` so the rule can be tested: the
-    /// sealed branch is one `if` that is trivially easy to get backwards, and
-    /// getting it backwards hands AEAD ciphertext to an image decoder. web keeps
-    /// its half of the same rule in `$lib/media-src.ts` for the same reason.
-    ///
     /// - Parameters:
-    ///   - isSealed: the shared manager's own answer (`FeedManager::is_sealed_media`).
-    ///     apple never guesses this — the manager holds the keys.
-    ///   - blobURL: the plain `GET /api/v1/blob/<hash>` URL, `nil` before login.
+    ///   - signedIn: whether there is an `APIClient` to fetch with.
     ///   - opened: the decoded bytes for this hash, if an earlier fetch landed.
-    public static func resolve(isSealed: Bool,
-                               blobURL: URL?,
-                               opened: FaunaPlatformImage?) -> PostImageSource {
-        guard isSealed else {
-            // The overwhelmingly common answer, and every answer before a gated
-            // post is unlocked: the plain blob URL, thumbnail variant and all.
-            guard let blobURL else { return .unavailable }
-            return .url(blobURL)
-        }
+    public static func resolve(signedIn: Bool, opened: FaunaPlatformImage?) -> PostImageSource {
         if let opened { return .decoded(opened) }
-        return .sealedPending
+        guard signedIn else { return .unavailable }
+        return .pending
     }
 
     /// The source for a bridged post's `ProxiedImage`, as the same pure function
-    /// shape as ``resolve(isSealed:blobURL:opened:)``. No seal branch: the nest
+    /// shape as ``resolve(signedIn:opened:)``. No seal branch: the nest
     /// proxies a third party's public bytes, so there is nothing to open.
     ///
     /// - Parameters:

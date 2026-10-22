@@ -2723,7 +2723,7 @@ END:VCALENDAR\r\n";
             },
             AttendeeInfo {
                 name: "Carol".into(),
-                email: "carol@example.com".into(),
+                email: "carol@example.net".into(),
                 partstat: "NEEDS-ACTION".into(),
                 fauna_status: "invited".into(),
             },
@@ -2735,7 +2735,7 @@ END:VCALENDAR\r\n";
     fn meeting_with_carol(partstat: &str) -> String {
         let (event, mut attendees) = sample_meeting();
         attendees[1].partstat = partstat.into();
-        generate_ical(&event, &attendees, "alice@example.com")
+        generate_ical(&event, &attendees, "alice@example.net")
     }
 
     #[test]
@@ -2745,20 +2745,20 @@ END:VCALENDAR\r\n";
         let msg = build_attendee_reply_imip(
             &answered,
             Some(&prior),
-            "Carol@example.com",
+            "Carol@Example.net",
             "2026-06-04T12:30:00Z",
         )
         .expect("an accepted invitation owes the organizer a REPLY");
         // The roster's spelling, not the session's, and the organizer alone.
-        assert_eq!(msg.from, "carol@example.com");
-        assert_eq!(msg.recipients, vec!["alice@example.com".to_string()]);
+        assert_eq!(msg.from, "carol@example.net");
+        assert_eq!(msg.recipients, vec!["alice@example.net".to_string()]);
         let raw = String::from_utf8(msg.raw_rfc5322).unwrap();
         assert!(raw.contains("method=REPLY"), "{raw}");
         assert!(raw.contains("METHOD:REPLY"), "{raw}");
         let body = &raw[raw.find("BEGIN:VCALENDAR").unwrap()..];
         let roster = parse_ical_attendees(body);
         assert_eq!(roster.len(), 1, "a REPLY names only the responder: {body}");
-        assert_eq!(roster[0].email, "carol@example.com");
+        assert_eq!(roster[0].email, "carol@example.net");
         assert_eq!(roster[0].partstat, "ACCEPTED");
         assert!(body.contains("UID:kickoff-uid-1"), "{body}");
     }
@@ -2769,19 +2769,19 @@ END:VCALENDAR\r\n";
         let dtstamp = "2026-06-04T12:30:00Z";
         // Re-storing an unchanged answer (a calendar app syncing) sends nothing.
         assert!(
-            build_attendee_reply_imip(&prior, Some(&prior), "carol@example.com", dtstamp).is_none()
+            build_attendee_reply_imip(&prior, Some(&prior), "carol@example.net", dtstamp).is_none()
         );
         // No answer yet.
         let pending = meeting_with_carol("NEEDS-ACTION");
-        assert!(build_attendee_reply_imip(&pending, None, "carol@example.com", dtstamp).is_none());
+        assert!(build_attendee_reply_imip(&pending, None, "carol@example.net", dtstamp).is_none());
         // Not on the roster.
-        assert!(build_attendee_reply_imip(&prior, None, "dave@example.com", dtstamp).is_none());
+        assert!(build_attendee_reply_imip(&prior, None, "dave@example.net", dtstamp).is_none());
         // The organizer's own PUT is the organizer fan-out's, never a REPLY.
-        assert!(build_attendee_reply_imip(&prior, None, "alice@example.com", dtstamp).is_none());
+        assert!(build_attendee_reply_imip(&prior, None, "alice@example.net", dtstamp).is_none());
         // An event with no organizer has nobody to reply to.
         let (event, attendees) = sample_meeting();
         let orphan = generate_ical(&event, &attendees, "").replace("ORGANIZER:mailto:\r\n", "");
-        assert!(build_attendee_reply_imip(&orphan, None, "carol@example.com", dtstamp).is_none());
+        assert!(build_attendee_reply_imip(&orphan, None, "carol@example.net", dtstamp).is_none());
     }
 
     #[test]
@@ -2790,7 +2790,7 @@ END:VCALENDAR\r\n";
         let accepted = meeting_with_carol("ACCEPTED");
         let declined = meeting_with_carol("DECLINED");
         let changed =
-            build_attendee_reply_imip(&declined, Some(&accepted), "carol@example.com", dtstamp)
+            build_attendee_reply_imip(&declined, Some(&accepted), "carol@example.net", dtstamp)
                 .expect("changing an answer owes the organizer the new one");
         assert!(
             String::from_utf8(changed.raw_rfc5322)
@@ -2798,7 +2798,7 @@ END:VCALENDAR\r\n";
                 .contains("PARTSTAT=DECLINED")
         );
         // No prior body readable: the answer is sent rather than lost.
-        assert!(build_attendee_reply_imip(&accepted, None, "carol@example.com", dtstamp).is_some());
+        assert!(build_attendee_reply_imip(&accepted, None, "carol@example.net", dtstamp).is_some());
     }
 
     #[test]
@@ -2808,7 +2808,7 @@ END:VCALENDAR\r\n";
             ITipMethod::Request,
             &event,
             &attendees,
-            "alice@example.com",
+            "alice@example.net",
             "2026-06-04T12:00:00Z",
         );
         // METHOD precedes the VEVENT, at the VCALENDAR level.
@@ -2821,9 +2821,9 @@ END:VCALENDAR\r\n";
         // DTSTAMP is mandatory in an iTIP VEVENT (RFC 5545).
         assert!(ics.contains("DTSTAMP:20260604T120000Z"));
         // Organizer + the full attendee roster ride along.
-        assert!(ics.contains("ORGANIZER:mailto:alice@example.com"));
+        assert!(ics.contains("ORGANIZER:mailto:alice@example.net"));
         assert!(ics.contains("mailto:bob@example.com"));
-        assert!(ics.contains("mailto:carol@example.com"));
+        assert!(ics.contains("mailto:carol@example.net"));
         assert!(ics.contains("UID:kickoff-uid-1"));
         // The body round-trips through the WASM-safe parser.
         let parsed = parse_ical(&ics).unwrap();
@@ -2851,12 +2851,12 @@ END:VCALENDAR\r\n";
             ITipMethod::Reply,
             &event,
             &responder,
-            "alice@example.com",
+            "alice@example.net",
             "2026-06-04T12:30:00Z",
         );
         assert!(ics.contains("METHOD:REPLY"));
         assert!(ics.contains("REQUEST-STATUS:2.0;Success"));
-        assert!(ics.contains("ORGANIZER:mailto:alice@example.com"));
+        assert!(ics.contains("ORGANIZER:mailto:alice@example.net"));
         assert!(ics.contains("ATTENDEE;CN=Bob;PARTSTAT=ACCEPTED:mailto:bob@example.com"));
         // Only the one responding attendee.
         let parsed = parse_ical_attendees(&ics);
@@ -2874,7 +2874,7 @@ END:VCALENDAR\r\n";
             ITipMethod::Cancel,
             &event,
             &attendees,
-            "alice@example.com",
+            "alice@example.net",
             "2026-06-04T13:00:00Z",
         );
         assert!(ics.contains("METHOD:CANCEL"));
@@ -2888,10 +2888,10 @@ END:VCALENDAR\r\n";
         // The METHOD-less writer stays a bare VCALENDAR (no METHOD/DTSTAMP),
         // so the stored-body path is byte-for-byte unchanged by the refactor.
         let (event, attendees) = sample_meeting();
-        let plain = generate_ical(&event, &attendees, "alice@example.com");
+        let plain = generate_ical(&event, &attendees, "alice@example.net");
         assert!(!plain.contains("METHOD:"));
         assert!(!plain.contains("DTSTAMP:"));
-        assert!(plain.contains("ORGANIZER:mailto:alice@example.com"));
+        assert!(plain.contains("ORGANIZER:mailto:alice@example.net"));
         assert!(plain.contains("mailto:bob@example.com"));
     }
 
@@ -2911,7 +2911,7 @@ END:VCALENDAR\r\n";
                 partstat: "ACCEPTED".into(),
                 fauna_status: "going".into(),
             }],
-            "alice@example.com",
+            "alice@example.net",
             "2026-06-04T12:30:00Z",
         );
         let merged = apply_reply_to_roster(&stored, &reply);
@@ -2925,7 +2925,7 @@ END:VCALENDAR\r\n";
         // Carol is untouched.
         let carol = merged
             .iter()
-            .find(|a| a.email == "carol@example.com")
+            .find(|a| a.email == "carol@example.net")
             .unwrap();
         assert_eq!(carol.partstat, "NEEDS-ACTION");
     }

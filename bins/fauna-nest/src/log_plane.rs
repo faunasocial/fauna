@@ -59,6 +59,13 @@ pub enum LogSource {
     ContentProcessor,
     /// The iroh-relay sidecar (internal duplex).
     Relay,
+    /// The sni-router, the public :443 front (internal duplex).
+    Router,
+    /// The Fauna updater, through the report file it writes into the nest
+    /// container with the engine socket it holds — the socket is its
+    /// credential (`nest/update-channel.md` § What the updater reports;
+    /// `crate::updater_report`).
+    Updater,
 }
 
 impl LogSource {
@@ -72,6 +79,8 @@ impl LogSource {
             LogSource::Atproto => "atproto",
             LogSource::ContentProcessor => "content_processor",
             LogSource::Relay => "relay",
+            LogSource::Router => "router",
+            LogSource::Updater => "updater",
         }
     }
 
@@ -83,11 +92,13 @@ impl LogSource {
             LogSource::Atproto => 2,
             LogSource::ContentProcessor => 3,
             LogSource::Relay => 4,
+            LogSource::Router => 5,
+            LogSource::Updater => 6,
         }
     }
 }
 
-const SOURCE_COUNT: usize = 5;
+const SOURCE_COUNT: usize = 7;
 
 /// Per-source rate-limit state. `tokens` is a plain float — this is process
 /// state, not wire data (the DAG-CBOR float ban applies to the wire only).
@@ -332,6 +343,24 @@ mod tests {
         assert_eq!(ring.len(), 1);
         assert_eq!(ring[0].target, "mta:tls.handshake_failed");
         assert_eq!(ring[0].message, "boom");
+        assert_eq!(ring[0].level, LogLevel::Warn);
+    }
+
+    #[test]
+    fn the_updaters_report_lands_as_updater_entries_through_the_same_gate() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        let mut report = fauna_provisioning::update_channel::report::Report::default();
+        report.push(1_000, "warn", "decision.hold", "holding on test".into());
+        report.push(1_001, "info", "Bad Event", "refused by the charset".into());
+        let batch = crate::updater_report::Reader::default()
+            .read(&report.to_bytes())
+            .unwrap();
+        let out = admit_at(LogSource::Updater, &batch, 5_000);
+        assert_eq!((out.accepted, out.rejected), (1, 1));
+        let ring = fauna_log::snapshot_remote();
+        assert_eq!(ring.len(), 1);
+        assert_eq!(ring[0].target, "updater:decision.hold");
         assert_eq!(ring[0].level, LogLevel::Warn);
     }
 

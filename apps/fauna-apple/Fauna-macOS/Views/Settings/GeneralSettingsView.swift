@@ -63,6 +63,8 @@ struct GeneralSettingsView: View {
                         .textSelection(.enabled)
                 }
 
+                TermsLinkButton(id: Ids.settingsTermsLink)
+
                 Button(updates.buttonLabel) { updates.check() }
                     .disabled(updates.isChecking)
                     .accessibilityIdentifier(Ids.settingsCheckUpdatesButton)

@@ -1,7 +1,7 @@
 //! Resolved Backups-page destination-row text, shared between tui and linux
 //! (the two native shells that render a `BackupDestinationStatusItem`/
 //! [`crate::audit::DestinationAuditRecord`] row directly in Rust — web
-//! composes the same two-level split client-side in `$lib/value-format.ts`).
+//! composes the same two-level split client-side in `#lib/value-format.ts`).
 //!
 //! Each function here used to be one function hand-duplicated in both apps:
 //! extract the row's field, get "now", delegate to
@@ -164,6 +164,7 @@ mod tests {
                 last_attempt_at: None,
                 verified_ledger_generations: Default::default(),
                 accepted_regressions: Default::default(),
+                retained_head_sightings: Default::default(),
                 seat_settled_under: None,
             },
             verdict: None,
@@ -187,6 +188,7 @@ mod tests {
                 last_attempt_at: None,
                 verified_ledger_generations: Default::default(),
                 accepted_regressions: Default::default(),
+                retained_head_sightings: Default::default(),
                 seat_settled_under: None,
             },
             verdict: None,

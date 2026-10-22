@@ -73,17 +73,13 @@ const STRANGER_NEST: [u8; 32] = [0xF0; 32];
 // Harness
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// A real disk blob store for a test destination, `for_test`-style (pid +
-/// sequence tempdir, no cleanup — the same pattern as `AppState::for_test`'s
-/// own segment/acme dirs). The custody charge is derived from what this store
-/// actually holds, so a destination fixture without one refuses every record.
-fn test_backup_service(db: &Arc<CacheDb>) -> Option<Arc<BackupService>> {
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let root = std::env::temp_dir().join(format!(
-        "fauna-test-custody-{}-{}",
-        std::process::id(),
-        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
+/// A real disk blob store for a test destination, under the `base` state's
+/// scratch root so it is removed with the state (the same root as
+/// `AppState::for_test`'s own segment/acme dirs). The custody charge is
+/// derived from what this store actually holds, so a destination fixture
+/// without one refuses every record.
+fn test_backup_service(db: &Arc<CacheDb>, base: &AppState) -> Option<Arc<BackupService>> {
+    let root = base.test_scratch_path("custody");
     Some(Arc::new(
         BackupService::new(db.clone(), None, false, root, None).unwrap(),
     ))
@@ -97,9 +93,10 @@ async fn destination() -> (
     Arc<AppState>,
 ) {
     let db = Arc::new(CacheDb::open_in_memory().unwrap());
+    let base = AppState::for_test(db.clone());
     let state = Arc::new(AppState {
-        backup_service: test_backup_service(&db),
-        ..AppState::for_test(db)
+        backup_service: test_backup_service(&db, &base),
+        ..base
     });
     let mut b = RpcRouter::builder();
     backup_handlers::register_backup_handlers(&mut b);
@@ -1012,8 +1009,9 @@ async fn start_nest() -> (String, Arc<AppState>) {
     getrandom::fill(&mut secret).unwrap();
     let signing_key = SigningKey::from_bytes(&secret);
     let verifying_key = signing_key.verifying_key();
+    let base = AppState::for_test(db.clone());
     let state = Arc::new(AppState {
-        backup_service: test_backup_service(&db),
+        backup_service: test_backup_service(&db, &base),
         nest_identity: Arc::new(NestIdentity {
             signing_key,
             verifying_key,
@@ -1029,7 +1027,7 @@ async fn start_nest() -> (String, Arc<AppState>) {
             backup_handlers::register_backup_handlers(&mut b);
             b.build()
         }),
-        ..AppState::for_test(db)
+        ..base
     });
     let app = fauna_nest::build_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

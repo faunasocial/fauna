@@ -71,6 +71,7 @@ fun AdminSettingsScreen(
         membershipTiers = membershipTiers,
         onBack = { navController.exitAdminToPrimary() },
         onSaveTier = vm::saveTier,
+        onDeleteTier = vm::deleteTier,
         onAddTier = vm::addTier,
         addFormGeneration = tierAddGeneration,
         onAddRefused = appMessages::showError,
@@ -87,6 +88,8 @@ fun AdminSettingsContent(
     membershipTiers: List<FfiAdminMembershipTier> = emptyList(),
     onBack: () -> Unit,
     onSaveTier: (String, Long, Long, Long, Long, Long) -> Unit,
+    // Fires with the row's tier name; the VM removes it and refetches.
+    onDeleteTier: (String) -> Unit = {},
     // The add-a-tier form: `onAddTier` fires with the trimmed name + the five
     // parsed caps; `onAddRefused` carries a local refusal's already-worded
     // sentence to the banner; `addFormGeneration` bumps on a successful create
@@ -131,7 +134,7 @@ fun AdminSettingsContent(
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             // ── Tier definitions (in-place cap editing, admin.md § 3) ──
-            TiersSection(tiers, onSaveTier, parseCap)
+            TiersSection(tiers, onSaveTier, onDeleteTier, parseCap)
             TierAddForm(onAddTier, addFormGeneration, onAddRefused, parseCap)
             // ── Membership designations (monetization.md § Pillar 4) ──
             MembershipSection(
@@ -151,6 +154,7 @@ fun AdminSettingsContent(
 private fun TiersSection(
     tiers: List<FfiAdminTier>,
     onSaveTier: (String, Long, Long, Long, Long, Long) -> Unit,
+    onDeleteTier: (String) -> Unit,
     parseCap: (String) -> Long?,
 ) {
     Column(modifier = Modifier.testTag(Ids.ADMIN_SETTINGS_TIERS_SECTION)) {
@@ -166,7 +170,7 @@ private fun TiersSection(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         } else {
-            tiers.forEach { tier -> TierRow(tier, onSaveTier, parseCap) }
+            tiers.forEach { tier -> TierRow(tier, onSaveTier, onDeleteTier, parseCap) }
         }
     }
 }
@@ -175,6 +179,7 @@ private fun TiersSection(
 private fun TierRow(
     tier: FfiAdminTier,
     onSaveTier: (String, Long, Long, Long, Long, Long) -> Unit,
+    onDeleteTier: (String) -> Unit,
     parseCap: (String) -> Long?,
 ) {
     // Each field pre-fills with the persisted value; an empty/unparseable edit
@@ -212,6 +217,15 @@ private fun TierRow(
                 modifier = Modifier.testTag(Ids.ADMIN_SETTINGS_TIER_SAVE_BUTTON),
             ) { Text(stringResource(R.string.admin_settings_page_save_tier)) }
             DisabledControlReasonText(saveTierGate.reason)
+            // On every row, `free`'s included (which tier is removable is the
+            // nest's call); no confirm. tui's `admin::Action::DeleteTier`.
+            val deleteTierGate = faunaGate("fauna.admin.tiers.delete")
+            OutlinedButton(
+                onClick = { onDeleteTier(tier.name) },
+                enabled = deleteTierGate.enabled,
+                modifier = Modifier.testTag(Ids.ADMIN_SETTINGS_TIER_DELETE_BUTTON),
+            ) { Text(stringResource(R.string.admin_settings_page_delete_tier)) }
+            DisabledControlReasonText(deleteTierGate.reason)
         }
     }
 }

@@ -1169,6 +1169,7 @@ async fn v1x_pillars_persist_and_a_v1_shaped_update_leaves_them_intact() {
             spam: ContentFloor::Collapse,
             phishing: ContentFloor::Inherit,
             commercial: ContentFloor::Inherit,
+            document: None,
         }),
         screen_time: Some(ScreenTimePolicy {
             window_start: Some(1260), // 21:00
@@ -1292,6 +1293,158 @@ async fn v1x_pillars_persist_and_a_v1_shaped_update_leaves_them_intact() {
         ward_policy().await.content_policy,
         with_pillars.content_policy,
         "a refused write leaves the stored pillar intact"
+    );
+}
+
+/// The guardian's content rule document (`nest-rules.md` § The shared rule
+/// editor (b)): the shared editor writes it as `ContentPolicy.document` through
+/// `fauna.family.policy.update`. Storing it clears the four floors (the editor
+/// showed each set floor as a rule, so the document is the whole rule set); a
+/// floors-only write — an app still painting the four selects — leaves it
+/// unchanged; a document the shared validator refuses for publisher `guardian`
+/// is refused and clobbers nothing.
+#[tokio::test]
+async fn a_guardian_rule_document_persists_clears_the_floors_and_is_validated() {
+    use fauna_core::content_policy::{
+        BundledScorer, ContentPolicyDocument, ContentRule, ContentVerdict, REASON_DEFAULT_KEY,
+        ScorerKind,
+    };
+    let db = Arc::new(CacheDb::open_in_memory().unwrap());
+    let st = state(db.clone());
+    let r = router();
+    let admin = admin_actor(&st).await;
+    let guardian = guardian_user(&db, "parent").await;
+    let child = admit_ward(&r, st.clone(), admin, guardian, "kid").await;
+
+    let update = async |policy: ReachPolicy| -> Result<Bytes, RpcError> {
+        dispatch(
+            &r,
+            st.clone(),
+            guardian,
+            "fauna.family.policy.update",
+            encode(&FamilyPolicyUpdateRequest {
+                supervised_actor_id: ByteBuf::from(child.to_vec()),
+                policy,
+                extra: Default::default(),
+            }),
+        )
+        .await
+    };
+    let ward_content = async || -> Option<ContentPolicy> {
+        let reply: FamilyStatusReply = decode(
+            &dispatch(
+                &r,
+                st.clone(),
+                child,
+                "fauna.family.status",
+                encode(&FamilyStatusRequest {
+                    extra: Default::default(),
+                }),
+            )
+            .await
+            .expect("ward status ok"),
+        )
+        .unwrap();
+        reply
+            .policy
+            .expect("ward sees an active policy")
+            .content_policy
+    };
+    let with_content = |content: ContentPolicy| ReachPolicy {
+        content_policy: Some(content),
+        ..Default::default()
+    };
+
+    // A floor set the old way first.
+    update(with_content(ContentPolicy {
+        nsfw: ContentFloor::Block,
+        ..Default::default()
+    }))
+    .await
+    .expect("floors ok");
+
+    // The editor's write: a document carrying the floor as a rule, plus one more.
+    let rule = |factor: &str, verdict, code: &str| ContentRule {
+        factor: factor.into(),
+        min_permille: 500,
+        verdict,
+        reason_code: code.into(),
+        reason: [(
+            REASON_DEFAULT_KEY.to_string(),
+            "Not for this account".to_string(),
+        )]
+        .into(),
+        extra: Default::default(),
+    };
+    let mut document = ContentPolicyDocument::empty();
+    document
+        .rules
+        .push(rule("nsfw", ContentVerdict::Block, "rule-1"));
+    document
+        .rules
+        .push(rule("spam", ContentVerdict::Collapse, "rule-2"));
+    update(with_content(ContentPolicy {
+        document: Some(document.clone()),
+        ..Default::default()
+    }))
+    .await
+    .expect("document ok");
+    let stored = ward_content()
+        .await
+        .expect("a stored document is a content pillar");
+    assert_eq!(stored.document.as_ref(), Some(&document));
+    assert_eq!(
+        [stored.nsfw, stored.spam, stored.phishing, stored.commercial],
+        [ContentFloor::Inherit; 4],
+        "storing a document clears the floors"
+    );
+
+    // A floors-only write leaves the document in force.
+    update(with_content(ContentPolicy {
+        commercial: ContentFloor::Collapse,
+        ..Default::default()
+    }))
+    .await
+    .expect("floors-only ok");
+    let after = ward_content().await.unwrap();
+    assert_eq!(after.document.as_ref(), Some(&document));
+    assert_eq!(after.commercial, ContentFloor::Collapse);
+
+    // The shared validator decides: a rule without a reason, and a content-id
+    // list (a region's instrument only), are refused, clobbering nothing.
+    let mut no_reason = document.clone();
+    no_reason.rules[0].reason.clear();
+    let mut list = document.clone();
+    list.scorers.push(BundledScorer {
+        name: "ids".into(),
+        kind: ScorerKind::List,
+        bytes: vec![1, 2, 3],
+        extra: Default::default(),
+    });
+    list.rules[1].factor = "guardian:ids".into();
+    for bad in [no_reason, list] {
+        let err = update(with_content(ContentPolicy {
+            document: Some(bad),
+            ..Default::default()
+        }))
+        .await
+        .expect_err("a malformed guardian document is refused");
+        assert_eq!(err.code, "fauna.family.invalid_params");
+    }
+    assert_eq!(ward_content().await.unwrap(), after);
+
+    // Removing every rule authors nothing: an empty document clears the
+    // stored one, and the ward's content pillar reads as having no document.
+    update(with_content(ContentPolicy {
+        document: Some(ContentPolicyDocument::empty()),
+        ..Default::default()
+    }))
+    .await
+    .expect("an empty document ok");
+    assert_eq!(
+        ward_content().await,
+        None,
+        "no floor and no document is no pillar"
     );
 }
 

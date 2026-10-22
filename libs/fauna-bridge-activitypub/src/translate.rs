@@ -906,6 +906,7 @@ mod tests {
                     load_hint: None,
                     inbox_mode: inbox_mode.clone(),
                     recovery_head: None,
+                    audience: fauna_core::data::ProfileAudience::ThisNest,
                     updated_at: Timestamp(0),
                 };
                 let person = fauna_profile_to_ap_person(
@@ -1358,6 +1359,7 @@ mod tests {
             load_hint: None,
             inbox_mode: InboxMode::Open,
             recovery_head: None,
+            audience: fauna_core::data::ProfileAudience::ThisNest,
             updated_at: Timestamp(1_710_892_800_000_000),
         };
         let person = fauna_profile_to_ap_person(
@@ -1394,6 +1396,7 @@ mod tests {
             load_hint: None,
             inbox_mode: InboxMode::Open,
             recovery_head: None,
+            audience: fauna_core::data::ProfileAudience::ThisNest,
             updated_at: Timestamp(0),
         };
         let person =

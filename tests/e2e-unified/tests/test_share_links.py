@@ -71,7 +71,7 @@ def _share_link_setup(request, app, nest_instance):
     # The private set (the default `private` audience) and its one file —
     # seeded through the SAME device the public file is recorded from, so the
     # seed spends one of the account's device slots, not two. On a live box the
-    # dedicated user sits on `free`, whose cap (3 on dev.example.com) the second
+    # dedicated user sits on `free`, whose cap (3 on the dev nest) the second
     # seed device filled before the app's own machine registered: the app was
     # refused
     # (`device limit reached for your tier`), its account runtime torn down,

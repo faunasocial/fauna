@@ -183,7 +183,7 @@ def assert_no_relaunch(driver, trigger, settled, *, budget_s=10.0, what="the ges
     # Read through a short tolerant poll: after a relaunch the app is
     # mid-rebuild, and on web the agent has to be re-injected into the new
     # document before it can answer at all. The counter itself survives that
-    # (`$lib/generation-e2e` keeps it in `sessionStorage`) — which is precisely
+    # (`#lib/generation-e2e` keeps it in `sessionStorage`) — which is precisely
     # what this read depends on, and why an in-memory web counter would read 0
     # here and turn the whole assertion into a false pass.
     #

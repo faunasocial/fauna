@@ -38,7 +38,13 @@ import time
 
 import pytest
 
-from helpers.web_tabs import open_same_account_tab
+from helpers.web_tabs import (
+    HOLD_LOCK_JS,
+    RELEASE_LOCK_JS,
+    REGISTRY_LOCK,
+    lock_queue as _lock_queue,
+    open_same_account_tab,
+)
 
 pytestmark = [pytest.mark.tier_3, pytest.mark.web]
 
@@ -48,46 +54,9 @@ ACCOUNT_PAGE_NAV = {
 SWITCHER_ITEM = "account-switcher-item"
 REQUIRE_CONFIRM_TOGGLE = "account-require-confirm-toggle"
 
-#: The one origin-wide registry mutation lock. The name is the historical one
-#: (`fauna_client_accounts::WEB_MUTATION_LOCK_NAME`), kept so tabs of an older
-#: and a newer build still exclude each other.
-REGISTRY_LOCK = "fauna.accounts.migrate"
-
 # Convention 14: a named, generous ceiling on latency-independent state (a page
 # boot plus one Web Locks round trip), never a settle-sleep.
 BUDGET_S = 60.0
-
-HOLD_LOCK_JS = f"""
-(() => {{
-  window.__faunaTestLockRelease = null;
-  const held = new Promise((resolve) => {{ window.__faunaTestLockRelease = resolve; }});
-  window.__faunaTestLockDone = navigator.locks.request(
-    {json.dumps(REGISTRY_LOCK)}, {{ mode: 'exclusive' }}, () => held,
-  );
-  return true;
-}})()
-"""
-
-RELEASE_LOCK_JS = """
-(async () => {
-  window.__faunaTestLockRelease();
-  await window.__faunaTestLockDone;
-  return true;
-})()
-"""
-
-QUERY_LOCKS_JS = """
-(async () => {
-  const q = await navigator.locks.query();
-  return { held: q.held.map((l) => l.name), pending: q.pending.map((l) => l.name) };
-})()
-"""
-
-
-def _lock_queue(driver) -> dict:
-    """The origin's Web Locks state as ``{"held": [...], "pending": [...]}`` —
-    origin-wide, so either tab reads the same answer."""
-    return driver.eval_js(QUERY_LOCKS_JS) or {"held": [], "pending": []}
 
 
 def _require_confirm_flag(driver, actor: str):

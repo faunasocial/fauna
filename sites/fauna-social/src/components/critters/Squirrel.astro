@@ -1,0 +1,38 @@
+---
+interface Props { size?: number; delay?: string; }
+const { size = 110, delay = '0s' } = Astro.props;
+---
+{/* Deliberately a GREY squirrel with a raised, curling tail. The earlier russet
+    squirrel (#c0653b / #a5522e, low bushy tail) read as a second fox on the
+    front page — Fox.astro is #e8863a / #d0702a with the same silhouette (user,
+    2026-07-29). The cool palette and the upright tail are what keep the two
+    apart; don't warm this back up. */}
+<svg viewBox="0 0 120 140" width={size} height={Math.round((size * 140) / 120)}
+  class="critter" style={`--wave-delay:${delay}`} aria-hidden="true">
+  <ellipse cx="58" cy="134" rx="25" ry="5" class="critter-shadow" />
+  <!-- tail: raised, curling forward over the back -->
+  <path d="M40 116 Q14 104 20 72 Q26 46 48 42 Q28 58 30 80 Q32 104 50 108 Z" fill="#7d8890" />
+  <path d="M38 110 Q22 100 26 76 Q30 58 44 50 Q32 64 34 82 Q36 100 46 104 Z" fill="#a8b2b8" />
+  <!-- waving paw (behind body) -->
+  <g class="wave" style="transform-origin: 80px 94px;">
+    <ellipse cx="86" cy="84" rx="5" ry="12" transform="rotate(-28 86 84)" fill="#7d8890" />
+    <circle cx="90" cy="73" r="4.2" fill="#8e9aa0" />
+  </g>
+  <!-- body -->
+  <ellipse cx="60" cy="104" rx="22" ry="25" fill="#8e9aa0" />
+  <ellipse cx="60" cy="110" rx="13" ry="16" fill="#f3e6ce" />
+  <ellipse cx="44" cy="100" rx="5" ry="10" transform="rotate(20 44 100)" fill="#7d8890" />
+  <!-- head -->
+  <path d="M46 44 L42 26 L56 36 Z" fill="#8e9aa0" />
+  <path d="M74 44 L78 26 L64 36 Z" fill="#8e9aa0" />
+  <path d="M48 41 L46 31 L54 37 Z" fill="#7d8890" />
+  <path d="M72 41 L74 31 L66 37 Z" fill="#7d8890" />
+  <circle cx="60" cy="58" r="20" fill="#8e9aa0" />
+  <ellipse cx="60" cy="66" rx="11" ry="8" fill="#f3e6ce" />
+  <circle cx="52" cy="54" r="3" fill="#2b2a24" />
+  <circle cx="68" cy="54" r="3" fill="#2b2a24" />
+  <ellipse cx="60" cy="62" rx="3" ry="2.4" fill="#2b2a24" />
+  <path d="M55 68 Q60 72 65 68" stroke="#2b2a24" stroke-width="2" fill="none" stroke-linecap="round" />
+  <ellipse cx="50" cy="130" rx="7" ry="4" fill="#7d8890" />
+  <ellipse cx="70" cy="130" rx="7" ry="4" fill="#7d8890" />
+</svg>

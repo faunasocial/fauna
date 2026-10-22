@@ -58,6 +58,8 @@ struct ClaimCodeView: View {
                 if let error = vm.errorMessage {
                     ErrorBanner(message: error)
                 }
+
+                TermsNotice()
             }
             .padding()
         }

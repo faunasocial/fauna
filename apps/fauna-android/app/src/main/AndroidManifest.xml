@@ -61,6 +61,15 @@
             android:foregroundServiceType="dataSync"
             android:exported="false" />
 
+        <!-- Push: the UnifiedPush connector's callbacks (core/push/FaunaPushService) -->
+        <service
+            android:name=".core.push.FaunaPushService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="org.unifiedpush.android.connector.PUSH_EVENT" />
+            </intent-filter>
+        </service>
+
         <!-- DocumentsProvider for system file picker -->
         <provider
             android:name=".provider.FaunaDocumentsProvider"

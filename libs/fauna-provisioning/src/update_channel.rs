@@ -1,8 +1,10 @@
 //! Which builds a running box follows, and the one rule that decides whether it
 //! moves: the update channel ([`UpdateChannel`]), the never-downgrade decision
 //! ([`decide`]) the Fauna updater runs to act and the nest runs to explain, the
-//! constants both share, and — for every target but WASM — the anonymous
-//! registry read that resolves a channel's head ([`registry`]).
+//! constants both share, the updater's report file both read and write
+//! ([`report`]), the anonymous registry read that resolves a channel's head
+//! ([`registry`]), and what the setup wizard learns from it — which channels
+//! have a build at all ([`availability`]).
 //!
 //! Owner: `docs/goal/architecture/nest/update-channel.md` § The decision and
 //! § The updater. Which pipeline moves each tag is
@@ -13,8 +15,9 @@ use std::time::Duration;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
-#[cfg(not(target_arch = "wasm32"))]
+pub mod availability;
 pub mod registry;
+pub mod report;
 
 /// Which builds a provisioned box's automatic updater follows — the
 /// `vps-config-update-channel-row` choice on `vps_config`
@@ -107,12 +110,20 @@ impl UpdateChannel {
 
     /// The channel a box follows while no admin has chosen one, from the image
     /// tag it was installed with (`FAUNA_IMAGE_TAG`): a channel tag seeds that
-    /// channel, any other tag seeds none — the box is *pinned* — and an absent
-    /// (or empty, as an unset `${VAR}` interpolates) tag seeds Stable, matching
-    /// the compose default `${FAUNA_IMAGE_TAG:-latest}`.
+    /// channel; any other tag seeds none — the box is *pinned*; an empty tag
+    /// (an unset `${VAR}` interpolated without a default) seeds Stable,
+    /// matching the compose default `${FAUNA_IMAGE_TAG:-latest}`. An **absent**
+    /// variable seeds none either: every bundle repeats the tag into the
+    /// nest's environment, so a nest with no variable at all is one the image
+    /// does not run — a Windows service, a macOS daemon, a Linux package, a
+    /// local build — where no updater holds the socket and no channel can be
+    /// enacted (`nest/update-channel.md` § The channel as nest state → *Where
+    /// the channel applies*). Whether a channel applies at all is the
+    /// variable's presence, read by the nest beside this seed.
     pub fn seeded_from(tag: Option<&str>) -> Option<Self> {
         match tag {
-            None | Some("") => Some(Self::Stable),
+            None => None,
+            Some("") => Some(Self::Stable),
             Some(tag) => Self::from_image_tag(tag),
         }
     }
@@ -123,6 +134,11 @@ impl UpdateChannel {
 /// The image label carrying the product version the `Dockerfile` stamps from
 /// the workspace version at build — what [`decide`] compares.
 pub const VERSION_LABEL: &str = "org.opencontainers.image.version";
+
+/// The image label carrying the commit the build was made from — the
+/// `Dockerfile` stamps it from the same `FAUNA_BUILD_COMMIT` the nest binary is
+/// compiled with.
+pub const REVISION_LABEL: &str = "org.opencontainers.image.revision";
 
 /// The container label that puts a container under the updater's management
 /// (`social.fauna.update=true`), replacing Watchtower's
@@ -450,16 +466,18 @@ mod tests {
 
     /// `nest/update-channel.md` § The channel as nest state → *The seed*: a
     /// channel tag seeds its channel, any other tag seeds none (pinned), and an
-    /// absent variable seeds Stable, matching the compose default.
+    /// absent variable is a nest the image does not run and seeds none.
     #[test]
-    fn the_seed_follows_the_tag_pins_on_any_other_and_defaults_to_stable() {
+    fn the_seed_follows_the_tag_pins_on_any_other_and_is_none_without_the_variable() {
         use UpdateChannel::*;
         assert_eq!(UpdateChannel::seeded_from(Some("test")), Some(Test));
         assert_eq!(UpdateChannel::seeded_from(Some("latest")), Some(Stable));
         assert_eq!(UpdateChannel::seeded_from(Some("dev")), Some(Dev));
         assert_eq!(UpdateChannel::seeded_from(Some("sha-abc")), None);
-        assert_eq!(UpdateChannel::seeded_from(None), Some(Stable));
-        // An empty value is what an unset `${VAR}` interpolates to: absent.
+        // An empty value is what an unset `${VAR}` interpolates to without a
+        // default: the compose default, Stable.
         assert_eq!(UpdateChannel::seeded_from(Some("")), Some(Stable));
+        // No variable at all: a packaged or installer nest, no channel.
+        assert_eq!(UpdateChannel::seeded_from(None), None);
     }
 }

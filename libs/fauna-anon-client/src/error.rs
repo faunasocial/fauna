@@ -91,6 +91,13 @@ impl fauna_protocol::RpcErrorClass for AnonClientError {
     fn is_subprotocol_mismatch(&self) -> bool {
         matches!(self, AnonClientError::SubprotocolMismatch)
     }
+
+    fn is_connection_lost(&self) -> bool {
+        matches!(
+            self,
+            AnonClientError::RpcDisconnected { .. } | AnonClientError::WebSocket(_)
+        )
+    }
 }
 
 impl From<RpcError> for AnonClientError {
@@ -123,6 +130,29 @@ mod tests {
             in_flight,
             fauna_i18n::strings::error::protocol::DISCONNECTED
         );
+    }
+
+    /// Only the socket going away is a lost connection: a timeout, a decode
+    /// failure, a refusal and a too-old subprotocol leave a redial nothing to
+    /// fix.
+    #[test]
+    fn only_a_dropped_socket_is_a_lost_connection() {
+        use fauna_protocol::RpcErrorClass;
+        assert!(
+            AnonClientError::RpcDisconnected {
+                was_in_flight: true
+            }
+            .is_connection_lost()
+        );
+        assert!(AnonClientError::WebSocket("reset".into()).is_connection_lost());
+        for other in [
+            AnonClientError::RpcTimeout,
+            AnonClientError::Decode("x".into()),
+            AnonClientError::SubprotocolMismatch,
+            AnonClientError::Rpc(RpcError::new("fauna.x", "errors.x")),
+        ] {
+            assert!(!other.is_connection_lost(), "{other:?}");
+        }
     }
 
     /// Regression: `Self::Rpc`'s `Display` used to print the raw wire `key`

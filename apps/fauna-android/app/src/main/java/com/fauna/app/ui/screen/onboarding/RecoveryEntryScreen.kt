@@ -18,7 +18,6 @@ import androidx.lifecycle.viewModelScope
 import androidx.navigation.NavController
 import com.fauna.app.R
 import com.fauna.app.core.OnboardingHost
-import com.fauna.app.core.ShellLog
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.ffi.FfiAccountRegistry
 import com.fauna.ffi.onboarding.OnboardingStep
@@ -83,15 +82,17 @@ class RecoveryEntryVM @Inject constructor(
             }
             is RecoveryEntryOutcome.Restored,
             is RecoveryEntryOutcome.RestoredPredecessorsLost -> {
+                // A failed write is loud (`identityCommitFailed` paints it on
+                // `error-message`); the outcome's own line must not cover it.
                 host.machine.effectiveSecret()?.let { secret ->
-                    try {
-                        registry.confirmIdentity(secret, host.appendMode)
-                    } catch (e: Exception) {
-                        ShellLog.w(
-                            "RecoveryEntryVM",
-                            "persist_confirmed_identity (registry commit + read-back) failed: ${e.message}",
-                        )
-                    }
+                    val committed = commitConfirmedIdentity(
+                        host,
+                        registry,
+                        secret,
+                        context.getString(R.string.onboarding_session_error_persist_successor),
+                        "RecoveryEntryVM",
+                    )
+                    if (!committed) return
                 }
             }
             else -> {}

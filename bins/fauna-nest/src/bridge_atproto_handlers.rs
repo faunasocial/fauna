@@ -914,7 +914,9 @@ pub(crate) async fn project_consent_row(
     out.install = match row.start {
         ConsentStartKind::Install => state.plugins.pending_info(&row.consent_id),
         ConsentStartKind::PluginBind => {
-            crate::plugins_handlers::installed_info(state, &row.client_id).await
+            crate::plugins_handlers::installed_info(state, &row.client_id)
+                .await
+                .map(|info| fauna_protocol::atproto_pds::ConsentInstallInfo { bind: true, ..info })
         }
         _ => None,
     }
@@ -1526,6 +1528,31 @@ fn resolve_consent_handler() -> RpcHandler {
                         extra: Default::default(),
                     });
                 }
+            }
+            // An admin-plane string resolves nothing for a resolving account
+            // that holds no admin authority (`authorization-server.md`
+            // § Scope grammar → *The admin arms*): the uniform answer the
+            // chosen-folder rule gives, so the row stays pending and the
+            // outside learns nothing. The per-RPC read on the nest (rule (e))
+            // is the floor; this keeps a member from minting a grant that
+            // can only ever be refused.
+            if req.approved
+                && let Some(row) = &row
+                && row.scopes.split_whitespace().any(|s| {
+                    matches!(
+                        fauna_bridge_atproto::fauna_scope::arm_of(s),
+                        Some(
+                            fauna_bridge_atproto::fauna_scope::FaunaScopeArm::AdminRead
+                                | fauna_bridge_atproto::fauna_scope::FaunaScopeArm::AdminRw
+                        )
+                    )
+                })
+                && !state.db.is_admin(&actor_id[..]).await.map_err(internal)?
+            {
+                return encode_reply(&ResolveConsentReply {
+                    resolved: false,
+                    extra: Default::default(),
+                });
             }
             let resolved = state
                 .db
@@ -4000,9 +4027,8 @@ async fn round_trip_profile_update(
     cert_bytes: &[u8],
 ) -> Result<ExternalWriteResult, RpcError> {
     use fauna_bridge_atproto::outbound::PROFILE_SELF_RKEY;
-    use fauna_core::data::{InboxMode, Profile, Timestamp};
+    use fauna_core::data::Timestamp;
     use fauna_core::encoding::{EmbedAsBytes, canonical_decode, canonical_encode, sign_envelope};
-    use fauna_core::identity::ActorId;
 
     // Re-checked here as the GUARANTEE; the up-front `check_write_input_shape`
     // pass is what makes it decidable before any row is applied.
@@ -4023,28 +4049,7 @@ async fn round_trip_profile_update(
     // Read-modify-write over the current profile. An account with no profile
     // row yet gets a fresh one — there is nothing to preserve, so the empty
     // fields below are the honest starting state, not a loss.
-    let current = crate::profile_handlers::latest_profile_bytes(state, actor).await?;
-    let mut profile = match current {
-        Some(bytes) => {
-            fauna_core::encoding::decode_profile(&bytes)
-                .map_err(|e| internal(format!("stored profile does not decode: {e}")))?
-                .0
-        }
-        None => Profile {
-            actor_id: ActorId(*actor),
-            display_name: None,
-            bio: None,
-            avatar: None,
-            banner: None,
-            links: Vec::new(),
-            nests: Vec::new(),
-            admin_nests: Vec::new(),
-            load_hint: None,
-            inbox_mode: InboxMode::Open,
-            recovery_head: None,
-            updated_at: Timestamp::now(),
-        },
-    };
+    let mut profile = crate::profile_handlers::current_or_fresh_profile(state, actor).await?;
     profile.display_name = parsed.display_name;
     profile.bio = parsed.bio;
     // Authoritative, absence included — and each field independent of the other,
@@ -8401,6 +8406,7 @@ mod tests {
                 load_hint: None,
                 inbox_mode: InboxMode::Open,
                 recovery_head: Some(fauna_core::recovery::ChainHead::new([3u8; 32], 1)),
+                audience: fauna_core::data::ProfileAudience::ThisNest,
                 updated_at: Timestamp(1),
             }
         }
@@ -10094,6 +10100,68 @@ mod tests {
         /// approval is recorded — so the read-back the token is minted from
         /// carries the qualified string, nothing re-resolved. One choice
         /// qualifies every bare folder verb; other scopes pass untouched.
+        /// The admin arms (`authorization-server.md` § Scope grammar → *The
+        /// admin arms*): approving a row carrying an admin string resolves
+        /// nothing for a member — the uniform answer — and resolves for an
+        /// admin; a deny needs no authority.
+        #[tokio::test]
+        async fn an_admin_string_is_approved_only_by_an_admin() {
+            let state = fixture_state().await;
+            seed_user_and_bridge(&state).await;
+            let opened =
+                create_with_scopes(&state, &["fauna:admin:read:dashboard", "openid"]).await;
+            assert!(
+                !resolve_choosing(&state, USER, &opened.consent_id, true, None)
+                    .await
+                    .unwrap()
+                    .resolved,
+                "a member cannot approve an admin string"
+            );
+            assert_eq!(fetch(&state, &opened.consent_id).await.status, "pending");
+
+            state.db.add_admin_actor(&USER).await.unwrap();
+            assert!(
+                resolve_choosing(&state, USER, &opened.consent_id, true, None)
+                    .await
+                    .unwrap()
+                    .resolved
+            );
+            assert_eq!(fetch(&state, &opened.consent_id).await.status, "approved");
+
+            let denied =
+                create_with_scopes(&state, &["fauna:admin:read:dashboard", "openid"]).await;
+            // Demote (another admin seated first — the roster never drops its
+            // last superadmin) and deny as a member again.
+            state.db.add_admin_actor(&BRIDGE).await.unwrap();
+            assert_eq!(
+                state.db.remove_admin_actor(&USER).await.unwrap(),
+                crate::db::admin::RosterWrite::Applied
+            );
+            assert!(
+                resolve_choosing(&state, USER, &denied.consent_id, false, None)
+                    .await
+                    .unwrap()
+                    .resolved,
+                "a deny takes no authority"
+            );
+        }
+
+        /// The `rw` verb is an admin string too: a member's approve of it
+        /// resolves nothing and the row stays pending.
+        #[tokio::test]
+        async fn an_admin_rw_string_is_not_approved_by_a_member() {
+            let state = fixture_state().await;
+            seed_user_and_bridge(&state).await;
+            let opened = create_with_scopes(&state, &["fauna:admin:rw:users", "openid"]).await;
+            assert!(
+                !resolve_choosing(&state, USER, &opened.consent_id, true, None)
+                    .await
+                    .unwrap()
+                    .resolved
+            );
+            assert_eq!(fetch(&state, &opened.consent_id).await.status, "pending");
+        }
+
         #[tokio::test]
         async fn a_bare_folder_scope_is_qualified_by_the_cards_chosen_folder() {
             let state = fixture_state().await;

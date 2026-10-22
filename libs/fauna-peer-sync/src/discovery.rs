@@ -209,7 +209,9 @@ pub fn bind_carried_endpoints(
 ///
 /// A NEST-form row (`custodian_nest_url` set) is not a peer target: it has
 /// zero candidates and the nest runs no peer endpoint, so it is
-/// [`custodian_nest_targets`]'s, dialed over the nest wire and only when the
+/// `fauna_account_plane::custodian_nest_targets`'s (its own decode loop over
+/// the same rows — this crate cannot depend on the plane crate, whose
+/// `fauna-client-capabilities` dependency depends on this one), dialed over the nest wire and only when the
 /// owner's own nest did not answer (`account-replica-posture.md` § Replica
 /// posture → *The custody grant + ceremony*, the custodian-NEST serve door
 /// bullet, ruling 6).
@@ -222,35 +224,6 @@ pub async fn custodian_dial_targets<B: StoreBackend>(
         .into_iter()
         .filter(|value| value.custodian_nest_url.is_none())
         .map(|value| dial_target_from(value.endpoints, our_lan_ips))
-        .collect())
-}
-
-/// One NEST-form custodian the owner's fleet may restore from: the custody
-/// grant it holds (checked against the dialer's revocation view before any
-/// dial) and the URL the host's accept bound to its key.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CustodianNestTarget {
-    pub grant_id: Vec<u8>,
-    /// The counterparty's string, as the row carries it — unvalidated here;
-    /// the dial site applies the counterparty URL policy.
-    pub url: String,
-}
-
-/// The owner-fleet side's NEST-form custodians: one per
-/// `fauna.state.custodian-endpoints` row carrying `custodian_nest_url` — the
-/// complement of [`custodian_dial_targets`].
-pub async fn custodian_nest_targets<B: StoreBackend>(
-    store: &AccountStore<B>,
-) -> Result<Vec<CustodianNestTarget>> {
-    Ok(custodian_rows(store)
-        .await?
-        .into_iter()
-        .filter_map(|value| {
-            value.custodian_nest_url.map(|url| CustodianNestTarget {
-                grant_id: value.grant_id,
-                url,
-            })
-        })
         .collect())
 }
 
@@ -721,9 +694,8 @@ mod tests {
         assert_eq!(dialed, vec![SIBLING, LATER]);
     }
 
-    /// The same rule on the custodian rows both custodian readers share: an
-    /// honest DEVICE-form and NEST-form row on either side of the bad one
-    /// stay targets of their readers.
+    /// The same rule on the custodian rows: an honest DEVICE-form row beside
+    /// the bad one stays a target, and the NEST-form row is not one.
     #[tokio::test]
     async fn an_undecodable_custodian_endpoints_row_is_skipped_not_fatal() {
         use fauna_core::custodian_endpoints::CustodianEndpoints;
@@ -735,6 +707,7 @@ mod tests {
         };
         let nest_form = CustodianEndpoints {
             grant_id: vec![0xD0; 16],
+            endpoints: endpoints([0xC5; 32]),
             custodian_nest_url: Some("https://custodian.example/".into()),
             ..Default::default()
         };
@@ -765,14 +738,8 @@ mod tests {
             .map(|t| t.node_id)
             .collect();
         assert_eq!(dialed, vec![SIBLING]);
-        let nests = custodian_nest_targets(&store).await.unwrap();
-        assert_eq!(
-            nests,
-            vec![CustodianNestTarget {
-                grant_id: nest_form.grant_id.clone(),
-                url: "https://custodian.example/".into(),
-            }]
-        );
+        // The NEST-form row is no peer target (its reader is the plane
+        // crate's, with its own pin).
     }
 
     /// And on the share leg: one bad row of a set does not hide its members,

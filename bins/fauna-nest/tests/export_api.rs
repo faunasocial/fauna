@@ -9,9 +9,8 @@ use fauna_nest::token_store::TokenStore;
 
 async fn start_server() -> (String, Arc<fauna_nest::routes::AppState>) {
     let db = Arc::new(CacheDb::open_in_memory().unwrap());
-    let dir = tempfile::tempdir().unwrap();
-    let dir_path = dir.path().to_path_buf();
-    std::mem::forget(dir);
+    let base = fauna_nest::routes::AppState::for_test(db.clone());
+    let dir_path = base.test_scratch_path("blobs");
     let backup_svc =
         Arc::new(BackupService::new(db.clone(), None, false, dir_path.clone(), None).unwrap());
     let tokens = Arc::new(TokenStore::new());
@@ -21,7 +20,7 @@ async fn start_server() -> (String, Arc<fauna_nest::routes::AppState>) {
             token_store: tokens.clone(),
             ..Default::default()
         },
-        ..fauna_nest::routes::AppState::for_test(db.clone())
+        ..base
     });
 
     let app = fauna_nest::build_router(state.clone());
@@ -62,11 +61,18 @@ async fn export_returns_valid_zip() {
         .unwrap();
     let token = state.auth.token_store.insert(actor_id, 3600).await;
 
-    // Add a confirmed contact
+    // Add a confirmed contact whose edge recorded its peer's verified home
+    // nest (`contacts.peer_nest_id`) — the export carries the row whole.
     let peer = ActorKeypair::generate();
+    let peer_nest_id = [0x5au8; 32];
     state
         .db
-        .upsert_contact(&actor_id.0, &peer.actor_id().0, "confirmed")
+        .upsert_contact_from(
+            &actor_id.0,
+            &peer.actor_id().0,
+            "confirmed",
+            Some(&peer_nest_id),
+        )
         .await
         .unwrap();
 
@@ -102,7 +108,7 @@ async fn export_returns_valid_zip() {
 
     // Verify expected files exist
     let file_names: Vec<String> = (0..archive.len())
-        .map(|i| archive.by_index(i).unwrap().name().to_string())
+        .map(|i| archive.by_index(i).unwrap().name().unwrap().into_owned())
         .collect();
 
     assert!(
@@ -137,6 +143,7 @@ async fn export_returns_valid_zip() {
         let arr = contacts.as_array().expect("contacts should be an array");
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["status"], "confirmed");
+        assert_eq!(arr[0]["peer_nest_id"], hex::encode(peer_nest_id));
     }
 
     // Verify at least one inbox entry exists
@@ -266,7 +273,7 @@ fn read_archive(zip_bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
     let mut out = Vec::new();
     for i in 0..archive.len() {
         let mut f = archive.by_index(i).unwrap();
-        let name = f.name().to_string();
+        let name = f.name().unwrap().into_owned();
         let mut buf = Vec::new();
         f.read_to_end(&mut buf).unwrap();
         out.push((name, buf));

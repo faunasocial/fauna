@@ -42,7 +42,8 @@ use fauna_client::NestClient;
 #[cfg(feature = "payments")]
 use fauna_client_payments::PaymentsClient;
 use fauna_client_subscriptions::SubscriptionsClient;
-use fauna_core::identity::ActorId;
+use fauna_core::identity::{ActorId, ActorKeypair};
+use fauna_core::secret::SecretString;
 use fauna_i18n::strings::subscriptions as s;
 use fauna_protocol::subscriptions::MineSubscription;
 
@@ -78,10 +79,15 @@ impl SubscriptionsState {
         self.claim_input.clone()
     }
 
-    /// The creator this row unsubscribes from, or `None` if the list moved under
-    /// the click (a re-read between paint and gesture).
-    pub(super) fn author_at(&self, index: usize) -> Option<ActorId> {
-        self.mine.get(index).map(|sub| sub.author_id)
+    /// What leaving this row's subscription names — the creator, the tier being
+    /// left and the creator's home nest when it is another — or `None` if the
+    /// list moved under the click (a re-read between paint and gesture).
+    pub(super) fn leave_at(&self, index: usize) -> Option<Leave> {
+        self.mine.get(index).map(|sub| Leave {
+            author: sub.author_id,
+            tier: sub.tier.clone(),
+            home_nest_url: sub.home_nest_url.clone(),
+        })
     }
 
     /// The trimmed claim code, or `None` when the buffer holds nothing to
@@ -93,6 +99,16 @@ impl SubscriptionsState {
     }
 }
 
+/// One row's leave, resolved from the painted list at gesture time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Leave {
+    pub(crate) author: ActorId,
+    pub(crate) tier: String,
+    /// The creator's home nest when they live on another one (`mine.list`'s
+    /// `home_nest_url`); `None` is this nest.
+    pub(crate) home_nest_url: Option<String>,
+}
+
 /// What the page asks the nest for. One op family because all three end the
 /// same way — a fresh `mine.list` — which is what makes the awaited click return
 /// with the settled list rather than the pre-click frame.
@@ -100,8 +116,13 @@ impl SubscriptionsState {
 pub(crate) enum ConsumerOp {
     /// The nav-edge read (`route_subpage`).
     Hydrate,
-    /// `subscription-mine-unsubscribe-button` — `fauna.subscriptions.unsubscribe`.
-    Unsubscribe(ActorId),
+    /// `subscription-mine-unsubscribe-button` — `fauna.subscriptions.unsubscribe`,
+    /// carrying the subscriber's own signed intent when the creator lives on
+    /// another nest (`SubscriptionsClient::unsubscribe_across_nests`).
+    Unsubscribe {
+        leave: Leave,
+        secret_hex: SecretString,
+    },
     /// `subscription-claim-redeem-button` — `fauna.payments.claims.redeem`.
     #[cfg(feature = "payments")]
     RedeemClaim(String),
@@ -130,11 +151,16 @@ pub(crate) async fn run(nest: Arc<NestClient>, op: ConsumerOp) -> ConsumerRead {
     let mut claim_redeemed = false;
     let mutation = match op {
         ConsumerOp::Hydrate => Ok(()),
-        ConsumerOp::Unsubscribe(author_id) => subs
-            .unsubscribe(author_id)
-            .await
-            .map(|_| ())
-            .map_err(|e| format!("unsubscribe: {e}")),
+        ConsumerOp::Unsubscribe { leave, secret_hex } => {
+            match ActorKeypair::from_secret_hex(secret_hex.as_str()) {
+                Ok(me) => subs
+                    .unsubscribe_across_nests(leave.author, leave.tier, &me, leave.home_nest_url)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| format!("unsubscribe: {e}")),
+                Err(e) => Err(format!("unsubscribe: {e}")),
+            }
+        }
         #[cfg(feature = "payments")]
         ConsumerOp::RedeemClaim(code) => PaymentsClient::new(Arc::clone(&nest))
             .claims_redeem(code)
@@ -315,6 +341,7 @@ mod tests {
 
     fn sub(author: [u8; 32], tier: &str, status: &str, handle: Option<&str>) -> MineSubscription {
         MineSubscription {
+            home_nest_url: None,
             author_id: ActorId(author),
             tier: tier.to_string(),
             status: status.to_string(),
@@ -607,14 +634,27 @@ mod tests {
     /// rather than to the wrong creator.
     #[test]
     fn unsubscribe_resolves_the_row_index_to_its_creator() {
-        let app = app_with(vec![
-            sub([0x01; 32], "gold", "active", None),
-            sub([0x02; 32], "silver", "active", None),
-        ]);
+        let mut remote = sub([0x02; 32], "followers", "active", None);
+        remote.home_nest_url = Some("https://home.test".into());
+        let app = app_with(vec![sub([0x01; 32], "gold", "active", None), remote]);
         assert_eq!(
-            app.settings.subscriptions.author_at(1),
-            Some(ActorId([0x02; 32]))
+            app.settings.subscriptions.leave_at(0),
+            Some(Leave {
+                author: ActorId([0x01; 32]),
+                tier: "gold".into(),
+                home_nest_url: None,
+            })
         );
-        assert_eq!(app.settings.subscriptions.author_at(2), None);
+        // A creator on another nest: the leave names their home, so the
+        // unsubscribe carries the subscriber's intent there.
+        assert_eq!(
+            app.settings.subscriptions.leave_at(1),
+            Some(Leave {
+                author: ActorId([0x02; 32]),
+                tier: "followers".into(),
+                home_nest_url: Some("https://home.test".into()),
+            })
+        );
+        assert_eq!(app.settings.subscriptions.leave_at(2), None);
     }
 }

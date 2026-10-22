@@ -574,6 +574,89 @@ async fn contacts_list_enriches_local_peer_handle_and_domain() {
         federated.domain, None,
         "federated peer has no domain on this nest"
     );
+    // Neither edge formed from a federation knock, so neither records an
+    // origin nest and neither carries a home (§ State & data shape).
+    assert_eq!(local.home_nest_url, None, "a local peer carries no home");
+    assert_eq!(
+        federated.home_nest_url, None,
+        "an edge with no recorded origin carries no home"
+    );
+}
+
+/// A contact edge's home is resolved at READ time from the edge's recorded
+/// origin nest through `nest_addresses`, proven addresses first — so an
+/// address proven after the knock reaches the row, and an asserted-only
+/// sighting never outranks a proven one (`docs/goal/ui/contacts.md` § State &
+/// data shape; the directory rule of `behavior/federated-follow.md`
+/// § Decision 1). The edge itself is written by a federation knock — the
+/// cross-nest leg is pinned in `conformance_federation_channel.rs`.
+#[tokio::test]
+async fn contacts_list_resolves_a_recorded_origin_to_its_proven_home() {
+    let db = Arc::new(CacheDb::open_in_memory().unwrap());
+    let state = Arc::new(AppState::for_test(db.clone()));
+    let mut b = RpcRouter::builder();
+    contacts_handlers::register_contacts_handlers(&mut b);
+    let router = b.build();
+
+    let actor = [11u8; 32];
+    let peer = [44u8; 32];
+    let origin = [0x0eu8; 32];
+    state
+        .db
+        .upsert_contact_from(&actor, &peer, "pending", Some(&origin))
+        .await
+        .unwrap();
+
+    let list = |state: Arc<AppState>| {
+        let router = &router;
+        async move {
+            let reply: ContactListReply = decode(
+                &dispatch(
+                    router,
+                    state,
+                    actor,
+                    "fauna.contacts.list",
+                    encode(&ContactListRequest {
+                        extra: BTreeMap::new(),
+                    }),
+                )
+                .await
+                .expect("list ok"),
+            )
+            .unwrap();
+            assert_eq!(reply.contacts.len(), 1);
+            reply.contacts[0].home_nest_url.clone()
+        }
+    };
+
+    assert_eq!(
+        list(state.clone()).await,
+        None,
+        "an origin with no known address answers no home"
+    );
+
+    // An asserted-only sighting first, then a proven address: the proven one
+    // wins even though it was seen later.
+    state
+        .db
+        .record_nest_address(&origin, "https://asserted.example", false)
+        .await
+        .unwrap();
+    assert_eq!(
+        list(state.clone()).await.as_deref(),
+        Some("https://asserted.example"),
+        "with only a sighting, the sighting is the home"
+    );
+    state
+        .db
+        .record_nest_address(&origin, "https://proven.example", true)
+        .await
+        .unwrap();
+    assert_eq!(
+        list(state.clone()).await.as_deref(),
+        Some("https://proven.example"),
+        "a proven address outranks an asserted one"
+    );
 }
 
 #[tokio::test]

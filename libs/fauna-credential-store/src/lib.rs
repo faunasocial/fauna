@@ -45,7 +45,8 @@
 //!   reads/writes the per-namespace `{dir}/{app}.json` file instead of
 //!   libsecret.
 //! - `FAUNA_E2E_FORCE_HEADLESS_STORE` — test-only: forces the headless
-//!   resolution onto the sealed backend on a desktop dev box.
+//!   resolution onto its file arm on a desktop dev box (the sealed file for
+//!   tui, the unattended plain file for the device shell).
 //!
 //! ⚠ **A release-profile e2e build must enable `e2e-agent`, or all three are
 //! silently inert.** That is not hypothetical: the Flatpak real-session seam
@@ -375,17 +376,21 @@ fn apply_namespace_override(default_app: &str, over: Option<String>) -> String {
 /// the process, silently erasing nothing. Resolution is an env read plus an
 /// `RwLock` read, and the erase touches a handful of keys per account, so
 /// paying it per call is free.
-struct LateBoundNamespace(&'static str);
+///
+/// Resolved through [`CredentialStore::account_store`], the slot's writer's
+/// own resolution, so on a headless box the erase reaches the same `0600`
+/// file the writer filled.
+struct LateBoundAccountStore;
 
-impl SecretStore for LateBoundNamespace {
+impl SecretStore for LateBoundAccountStore {
     fn get(&self, key: &str) -> Option<String> {
-        CredentialStore::new(self.0).get(key)
+        CredentialStore::account_store().get(key)
     }
     fn set(&self, key: &str, value: &str) {
-        CredentialStore::new(self.0).set(key, value);
+        CredentialStore::account_store().set(key, value);
     }
     fn delete(&self, key: &str) {
-        CredentialStore::new(self.0).delete(key);
+        CredentialStore::account_store().delete(key);
     }
 }
 
@@ -406,7 +411,7 @@ impl SecretStore for LateBoundNamespace {
 /// sign-out marker the app writes there — a different mechanism, owned by
 /// `apps/sync-agent.md` § Credential model.
 fn account_scoped_aux_stores() -> Vec<Arc<dyn SecretStore>> {
-    vec![Arc::new(LateBoundNamespace(ACCOUNT_STORE_NAMESPACE))]
+    vec![Arc::new(LateBoundAccountStore)]
 }
 
 /// The account registry over `app_store`, **erase-complete**: its
@@ -663,20 +668,37 @@ pub(crate) fn lock_file_at(path: &Path) -> Option<std::fs::File> {
 /// Read the account→value map for one namespace. A missing or unparseable file
 /// reads as empty, matching libsecret's "no items" → `None` contract.
 ///
-/// **This arm deliberately keeps the collapsed contract the sealed arm split**
-/// (`sealed::SealedFileStore::try_read_map`, 2026-08-31): there, an unreadable
-/// map read as empty and then written back destroyed a *production* namespace
-/// of client-only-resident key material. Here it cannot — [`cred_file_dir`] is
-/// compiled out of a shipped build, so this backend holds only harness
-/// fixtures, and its own writes are tmp+rename, so nothing it does can produce
-/// the unparseable file in the first place. The asymmetry is the reachability
-/// difference, not drift; if this backend ever becomes production-reachable it
-/// needs the same fallible twin.
+/// Reads only: a mutation reads through [`cred_file_read_for_write`], which
+/// refuses an unreadable map rather than writing it back empty — the split
+/// the sealed arm made (`sealed::SealedFileStore::try_read_map`, 2026-08-31),
+/// needed here since the unattended arm made this backend production-reachable
+/// ([`CredentialStore::new_with_unattended_fallback`]).
 pub fn cred_file_read(dir: &Path, app: &str) -> BTreeMap<String, String> {
-    match std::fs::read(cred_file_path(dir, app)) {
+    match std::fs::read(cred_file_path(dir, app)).map(zeroize::Zeroizing::new) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
         Err(_) => BTreeMap::new(),
     }
+}
+
+/// The read half of a file-arm mutation: the map, or `None` when the file
+/// exists but cannot be read or parsed — the mutation is then dropped with a
+/// warning, because writing back the empty map [`cred_file_read`] would answer
+/// destroys the only copy of the namespace's keys. A missing file is the one
+/// honest empty.
+fn cred_file_read_for_write(dir: &Path, app: &str) -> Option<BTreeMap<String, String>> {
+    let bytes = match std::fs::read(cred_file_path(dir, app)).map(zeroize::Zeroizing::new) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(BTreeMap::new()),
+        Err(e) => {
+            tracing::warn!("[account-store] file store unreadable, write dropped: {e:#}");
+            return None;
+        }
+    };
+    serde_json::from_slice(&bytes)
+        .inspect_err(|e| {
+            tracing::warn!("[account-store] file store unparseable, write dropped: {e:#}");
+        })
+        .ok()
 }
 
 /// Write the account→value map for one namespace as 0600 JSON. The file holds
@@ -717,7 +739,7 @@ pub fn cred_file_write(
     fauna_core::secret_file::write_secret_file_0600_at(
         &path,
         &tmp,
-        &serde_json::to_vec_pretty(map)?,
+        &zeroize::Zeroizing::new(serde_json::to_vec_pretty(map)?),
     )
 }
 
@@ -1042,12 +1064,13 @@ pub fn forced_keyring_reach() -> Option<KeyringReach> {
     None
 }
 
-/// Why the headless-fallback resolution landed on the sealed file
-/// ([`CredentialStore::sealed_arm_cause`]) — what the client reads to decide
-/// whether the user is owed a word about the protected store.
+/// Why a fallback resolution left the OS store for a file arm — the sealed
+/// file ([`CredentialStore::sealed_arm_cause`], tui) or the unattended plain
+/// file ([`CredentialStore::unattended_arm_cause`], the device shell); what
+/// the client reads to decide what the user is owed a word about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SealedArmCause {
-    /// ② a sealed file already holds this namespace (data-present wins).
+pub enum HeadlessArmCause {
+    /// ② the arm's file already holds this namespace (data-present wins).
     ExistingFile,
     /// The test-only [`force_headless_store`] carve-out.
     Forced,
@@ -1062,34 +1085,40 @@ pub enum SealedArmCause {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HeadlessArm {
     Keyring,
-    Sealed(SealedArmCause),
+    /// The constructor's file arm — sealed or unattended.
+    Fallback(HeadlessArmCause),
 }
 
-/// Steps ②–④ of [`CredentialStore::new_with_headless_fallback`], pure: the
-/// probe runs only when neither an existing sealed file nor the test-only
-/// force has already decided.
+/// Steps ②–④ of [`CredentialStore::new_with_headless_fallback`] and
+/// [`CredentialStore::new_with_unattended_fallback`], pure: the probe runs
+/// only when neither an existing file for the arm nor the test-only force has
+/// already decided.
 fn resolve_headless_arm(
-    sealed_exists: bool,
+    file_exists: bool,
     forced_headless: bool,
     reach: impl FnOnce() -> KeyringReach,
 ) -> HeadlessArm {
-    if sealed_exists {
-        return HeadlessArm::Sealed(SealedArmCause::ExistingFile);
+    if file_exists {
+        return HeadlessArm::Fallback(HeadlessArmCause::ExistingFile);
     }
     if forced_headless {
-        return HeadlessArm::Sealed(SealedArmCause::Forced);
+        return HeadlessArm::Fallback(HeadlessArmCause::Forced);
     }
     match reach() {
         KeyringReach::Usable => HeadlessArm::Keyring,
-        KeyringReach::Locked => HeadlessArm::Sealed(SealedArmCause::KeyringLocked),
-        KeyringReach::Absent => HeadlessArm::Sealed(SealedArmCause::KeyringAbsent),
+        KeyringReach::Locked => HeadlessArm::Fallback(HeadlessArmCause::KeyringLocked),
+        KeyringReach::Absent => HeadlessArm::Fallback(HeadlessArmCause::KeyringAbsent),
     }
 }
 
 /// The backend for [`CredentialStore`], resolved once at construction.
 enum SecretStoreBackend {
-    /// `FAUNA_E2E_CREDENTIAL_DIR` file store — a generic per-namespace map.
-    File(PathBuf),
+    /// The plain `0600` per-namespace map ([`cred_file_path`]): the
+    /// `FAUNA_E2E_CREDENTIAL_DIR` file store, or — cause `Some` — the
+    /// unattended arm under the caller's data dir, which rests the items on
+    /// file permissions alone ([`CredentialStore::unattended_arm_cause`],
+    /// `apps/cli.md` § The device shell → *Credentials*).
+    File(PathBuf, Option<HeadlessArmCause>),
     /// The OS-native secure store (the desktop-session default): the session
     /// Secret Service, or the macOS login Keychain ([`mac_keychain`]).
     Keyring,
@@ -1097,7 +1126,7 @@ enum SecretStoreBackend {
     /// the headless arm (`apps/tui.md` § Credential storage). Constructed
     /// locked; the client unlocks/creates it before launch routing runs. The
     /// cause is why resolution chose it ([`CredentialStore::sealed_arm_cause`]).
-    Sealed(sealed::SealedFileStore, SealedArmCause),
+    Sealed(sealed::SealedFileStore, HeadlessArmCause),
     /// The app's own platform secure store, lent over the foreign seam
     /// ([`install_foreign_store`]) — the phones' arm, where the native one is
     /// inert. Keys are namespace-prefixed ([`foreign_key`]).
@@ -1138,7 +1167,7 @@ fn resolve_backend(
 ) -> SecretStoreBackend {
     match (has_native_arm, redirect, foreign) {
         (false, _, Some(store)) => SecretStoreBackend::Foreign(store),
-        (_, Some(dir), _) => SecretStoreBackend::File(dir),
+        (_, Some(dir), _) => SecretStoreBackend::File(dir, None),
         _ => SecretStoreBackend::Keyring,
     }
 }
@@ -1148,13 +1177,29 @@ fn resolve_backend(
 /// file / libsecret keyring / sealed passphrase file / the app's foreign
 /// store). Construct with [`CredentialStore::new`] (desktop-only clients and
 /// the shared account-store slot) or
-/// [`CredentialStore::new_with_headless_fallback`] (tui) and hand to
+/// [`CredentialStore::new_with_headless_fallback`] (tui) or
+/// [`CredentialStore::new_with_unattended_fallback`] (the device shell) and hand to
 /// `AccountRegistry::new` (whose `launch_persistence()` mints the launch
 /// adapter — there is no store-taking adapter constructor, so the registry's
 /// mutation-lock choice always travels with it).
 pub struct CredentialStore {
     app: String,
     backend: SecretStoreBackend,
+    /// Set only by [`Self::with_scratch_file_backend`]: the file backend's dir,
+    /// removed when the store drops. Declared last so it drops after the
+    /// backend.
+    _scratch: Option<ScratchDir>,
+}
+
+/// A directory removed recursively on drop — the test-owned dir behind
+/// [`CredentialStore::with_scratch_file_backend`] (`testing.md` § Test
+/// temp-dir hygiene).
+struct ScratchDir(PathBuf);
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 impl CredentialStore {
@@ -1184,7 +1229,11 @@ impl CredentialStore {
                  rides the app's platform store over the foreign seam"
             );
         }
-        Self { app, backend }
+        Self {
+            app,
+            backend,
+            _scratch: None,
+        }
     }
 
     /// Foreign-backed store over an explicit namespace + store — the twin of
@@ -1195,6 +1244,7 @@ impl CredentialStore {
         Self {
             app: app.into(),
             backend: SecretStoreBackend::Foreign(store),
+            _scratch: None,
         }
     }
 
@@ -1218,19 +1268,107 @@ impl CredentialStore {
         if let Some(dir) = cred_file_dir() {
             return Self {
                 app,
-                backend: SecretStoreBackend::File(dir),
+                backend: SecretStoreBackend::File(dir, None),
+                _scratch: None,
             };
         }
         let sealed_exists = sealed::sealed_file_path(&data_dir, &app).exists();
         let backend =
             match resolve_headless_arm(sealed_exists, force_headless_store(), keyring_reach) {
                 HeadlessArm::Keyring => SecretStoreBackend::Keyring,
-                HeadlessArm::Sealed(cause) => SecretStoreBackend::Sealed(
+                HeadlessArm::Fallback(cause) => SecretStoreBackend::Sealed(
                     sealed::SealedFileStore::new(app.clone(), data_dir),
                     cause,
                 ),
             };
-        Self { app, backend }
+        Self {
+            app,
+            backend,
+            _scratch: None,
+        }
+    }
+
+    /// [`Self::new`] plus the **unattended file fallback** — the device
+    /// shell's constructor (`apps/cli.md` § The device shell →
+    /// *Credentials*): a process with no human surface to ask for a
+    /// passphrase. The resolution order of
+    /// [`Self::new_with_headless_fallback`], with the plain `0600` file
+    /// ([`cred_file_path`] under `data_dir`) where that one has the sealed
+    /// file:
+    ///
+    /// 1. `FAUNA_E2E_CREDENTIAL_DIR` set → the e2e **file** backend.
+    /// 2. A file already holds this namespace in `data_dir` → that **file**
+    ///    (data-present wins: a box that was headless when the account was
+    ///    connected never silently switches to an empty keyring).
+    /// 3. `FAUNA_E2E_FORCE_HEADLESS_STORE` (test-only) → the **file**.
+    /// 4. [`keyring_reach`] finds a usable OS store → **keyring**.
+    /// 5. Otherwise (locked or absent) → the **file**, with the cause kept as
+    ///    [`Self::unattended_arm_cause`] — the client declares the arm to the
+    ///    user whenever it is `Some`.
+    ///
+    /// Never creates a `.sealed` file, and never needs an unlock.
+    pub fn new_with_unattended_fallback(default_app: &str, data_dir: PathBuf) -> Self {
+        Self::unattended_resolved(resolved_namespace(default_app), data_dir, keyring_reach)
+    }
+
+    /// The account-store slot ([`ACCOUNT_STORE_NAMESPACE`]: the writer key and
+    /// the rest of the principal bundle) — the ONE resolution its writer, its
+    /// load-only readers (the sync agent) and its erase
+    /// ([`account_scoped_aux_stores`]) share, so the app and the agent beside
+    /// it reach the same row on every box. [`Self::account_store_over`] the
+    /// sync state base ([`fauna_core::platform_ids::sync_state_base`]): on a
+    /// box with no usable OS store both processes land on the one `0600` file
+    /// `<state base>/fauna-account-store.json`, since the agent can answer no
+    /// passphrase and so can never share a sealed file
+    /// (`sync-agent-credentials.md` § Credential model).
+    ///
+    /// A build barred from the live keyring (a unit-test binary) never takes
+    /// the file arm at the real base — it would rest a test's keys in the
+    /// developer's own `~/.config/fauna/sync` — and stays on [`Self::new`];
+    /// a test pins the arm with [`Self::account_store_over`] on a tempdir.
+    pub fn account_store() -> Self {
+        match fauna_core::platform_ids::sync_state_base() {
+            Some(base) if live_keyring_allowed() => Self::account_store_over(base),
+            _ => Self::new(ACCOUNT_STORE_NAMESPACE),
+        }
+    }
+
+    /// [`Self::account_store`] over an explicit state base. On a target with
+    /// no native arm (the phones) the slot is the app's foreign store and
+    /// there is no file arm: [`Self::new`].
+    pub fn account_store_over(state_base: PathBuf) -> Self {
+        if HAS_NATIVE_KEYRING_ARM {
+            Self::new_with_unattended_fallback(ACCOUNT_STORE_NAMESPACE, state_base)
+        } else {
+            Self::new(ACCOUNT_STORE_NAMESPACE)
+        }
+    }
+
+    /// [`Self::new_with_unattended_fallback`] over an explicit namespace and
+    /// probe — the probe injected so the resolution is pinned on every host
+    /// without touching a keyring.
+    fn unattended_resolved(
+        app: String,
+        data_dir: PathBuf,
+        reach: impl FnOnce() -> KeyringReach,
+    ) -> Self {
+        if let Some(dir) = cred_file_dir() {
+            return Self {
+                app,
+                backend: SecretStoreBackend::File(dir, None),
+                _scratch: None,
+            };
+        }
+        let file_exists = cred_file_path(&data_dir, &app).exists();
+        let backend = match resolve_headless_arm(file_exists, force_headless_store(), reach) {
+            HeadlessArm::Keyring => SecretStoreBackend::Keyring,
+            HeadlessArm::Fallback(cause) => SecretStoreBackend::File(data_dir, Some(cause)),
+        };
+        Self {
+            app,
+            backend,
+            _scratch: None,
+        }
     }
 
     /// File-backed store at an explicit dir + namespace — for tests that must
@@ -1238,7 +1376,20 @@ impl CredentialStore {
     pub fn with_file_backend(app: impl Into<String>, dir: PathBuf) -> Self {
         Self {
             app: app.into(),
-            backend: SecretStoreBackend::File(dir),
+            backend: SecretStoreBackend::File(dir, None),
+            _scratch: None,
+        }
+    }
+
+    /// [`Self::with_file_backend`] over a dir the store OWNS: `dir` is removed,
+    /// contents and all, when the store drops — for a unit test's private
+    /// namespace, so a test run leaves nothing behind in the temp dir
+    /// (`testing.md` § Test temp-dir hygiene). Never for a real namespace.
+    pub fn with_scratch_file_backend(app: impl Into<String>, dir: PathBuf) -> Self {
+        Self {
+            app: app.into(),
+            backend: SecretStoreBackend::File(dir.clone(), None),
+            _scratch: Some(ScratchDir(dir)),
         }
     }
 
@@ -1246,15 +1397,16 @@ impl CredentialStore {
     /// [`Self::with_file_backend`], for tests driving the unlock/create or
     /// change-passphrase surfaces env-free. Constructed locked, exactly like
     /// resolution arm ⑤ of [`Self::new_with_headless_fallback`] when no OS
-    /// store answered ([`SealedArmCause::KeyringAbsent`]).
+    /// store answered ([`HeadlessArmCause::KeyringAbsent`]).
     pub fn with_sealed_backend(app: impl Into<String>, dir: PathBuf) -> Self {
         let app = app.into();
         Self {
             backend: SecretStoreBackend::Sealed(
                 sealed::SealedFileStore::new(app.clone(), dir),
-                SealedArmCause::KeyringAbsent,
+                HeadlessArmCause::KeyringAbsent,
             ),
             app,
+            _scratch: None,
         }
     }
 
@@ -1275,6 +1427,7 @@ impl CredentialStore {
                 store,
                 items_in_files: like.items_rest_in_files(),
             },
+            _scratch: None,
         }
     }
 
@@ -1283,7 +1436,7 @@ impl CredentialStore {
     /// never sweep a developer's real keyring namespace.
     pub fn file_backend_dir(&self) -> Option<&Path> {
         match &self.backend {
-            SecretStoreBackend::File(dir) => Some(dir),
+            SecretStoreBackend::File(dir, _) => Some(dir),
             SecretStoreBackend::Keyring
             | SecretStoreBackend::Sealed(..)
             | SecretStoreBackend::Foreign(_)
@@ -1298,7 +1451,7 @@ impl CredentialStore {
     /// store standing in for one.
     pub fn items_rest_in_files(&self) -> bool {
         match &self.backend {
-            SecretStoreBackend::File(_) => true,
+            SecretStoreBackend::File(..) => true,
             SecretStoreBackend::Detached { items_in_files, .. } => *items_in_files,
             SecretStoreBackend::Keyring
             | SecretStoreBackend::Sealed(..)
@@ -1326,7 +1479,7 @@ impl CredentialStore {
     /// today; an `Err` keeps a future one from believing it wiped anything.
     pub fn delete_namespace(&self) -> Result<(), anyhow::Error> {
         match &self.backend {
-            SecretStoreBackend::File(dir) => cred_file_remove(dir, &self.app),
+            SecretStoreBackend::File(dir, _) => cred_file_remove(dir, &self.app),
             SecretStoreBackend::Keyring => keyring_delete_namespace(&self.app),
             SecretStoreBackend::Sealed(store, _) => store.delete_namespace(),
             SecretStoreBackend::Foreign(_) => Err(anyhow::anyhow!(
@@ -1353,11 +1506,22 @@ impl CredentialStore {
     }
 
     /// Why resolution chose the sealed file, when it did — `None` on every
-    /// other arm. [`SealedArmCause::KeyringLocked`] is the one cause behind
+    /// other arm. [`HeadlessArmCause::KeyringLocked`] is the one cause behind
     /// which a protected OS store exists but could not be used.
-    pub fn sealed_arm_cause(&self) -> Option<SealedArmCause> {
+    pub fn sealed_arm_cause(&self) -> Option<HeadlessArmCause> {
         match &self.backend {
             SecretStoreBackend::Sealed(_, cause) => Some(*cause),
+            _ => None,
+        }
+    }
+
+    /// Why resolution chose the unattended plain file, when it did — `None`
+    /// on every other arm, the e2e file included. `Some` means the items rest
+    /// on file permissions alone, which the client declares to the user
+    /// (`apps/cli.md` § The device shell → *Credentials*).
+    pub fn unattended_arm_cause(&self) -> Option<HeadlessArmCause> {
+        match &self.backend {
+            SecretStoreBackend::File(_, cause) => *cause,
             _ => None,
         }
     }
@@ -1380,7 +1544,9 @@ impl SecretStore for CredentialStore {
     fn get(&self, key: &str) -> Option<String> {
         let account = key;
         match &self.backend {
-            SecretStoreBackend::File(dir) => cred_file_read(dir, &self.app).get(account).cloned(),
+            SecretStoreBackend::File(dir, _) => {
+                cred_file_read(dir, &self.app).get(account).cloned()
+            }
             SecretStoreBackend::Keyring => keyring_get(&self.app, account),
             SecretStoreBackend::Sealed(store, _) => store.get(account),
             SecretStoreBackend::Foreign(store) => store.get(&foreign_key(&self.app, account)),
@@ -1391,7 +1557,7 @@ impl SecretStore for CredentialStore {
     fn set(&self, key: &str, value: &str) {
         let account = key;
         match &self.backend {
-            SecretStoreBackend::File(dir) => {
+            SecretStoreBackend::File(dir, _) => {
                 // The lock spans the read AND the write: an unserialized RMW
                 // loses the other writer's key, or resurrects a namespace a
                 // concurrent `delete_namespace` just wiped — see
@@ -1399,7 +1565,9 @@ impl SecretStore for CredentialStore {
                 let _lock = lock_cred_file(dir, &self.app);
                 #[cfg(test)]
                 tests::run_rmw_hook(dir, &self.app);
-                let mut map = cred_file_read(dir, &self.app);
+                let Some(mut map) = cred_file_read_for_write(dir, &self.app) else {
+                    return;
+                };
                 map.insert(account.to_string(), value.to_string());
                 if let Err(e) = cred_file_write(dir, &self.app, &map) {
                     tracing::warn!("[account-store] folder {account:?} failed: {e:#}");
@@ -1417,9 +1585,11 @@ impl SecretStore for CredentialStore {
     fn delete(&self, key: &str) {
         let account = key;
         match &self.backend {
-            SecretStoreBackend::File(dir) => {
+            SecretStoreBackend::File(dir, _) => {
                 let _lock = lock_cred_file(dir, &self.app);
-                let mut map = cred_file_read(dir, &self.app);
+                let Some(mut map) = cred_file_read_for_write(dir, &self.app) else {
+                    return;
+                };
                 if map.remove(account).is_some()
                     && let Err(e) = cred_file_write(dir, &self.app, &map)
                 {
@@ -1473,12 +1643,12 @@ mod tests {
         let never = || -> KeyringReach { panic!("the probe must not run here") };
         assert_eq!(
             resolve_headless_arm(true, false, never),
-            HeadlessArm::Sealed(SealedArmCause::ExistingFile),
+            HeadlessArm::Fallback(HeadlessArmCause::ExistingFile),
             "② an existing sealed file wins without consulting the probe"
         );
         assert_eq!(
             resolve_headless_arm(false, true, never),
-            HeadlessArm::Sealed(SealedArmCause::Forced),
+            HeadlessArm::Fallback(HeadlessArmCause::Forced),
             "the test-only force skips the probe"
         );
         assert_eq!(
@@ -1488,12 +1658,12 @@ mod tests {
         );
         assert_eq!(
             resolve_headless_arm(false, false, || KeyringReach::Locked),
-            HeadlessArm::Sealed(SealedArmCause::KeyringLocked),
+            HeadlessArm::Fallback(HeadlessArmCause::KeyringLocked),
             "④ an OS store that answered but is locked is its own cause"
         );
         assert_eq!(
             resolve_headless_arm(false, false, || KeyringReach::Absent),
-            HeadlessArm::Sealed(SealedArmCause::KeyringAbsent),
+            HeadlessArm::Fallback(HeadlessArmCause::KeyringAbsent),
             "④ no OS store at all — the SSH/headless case"
         );
     }
@@ -1507,9 +1677,100 @@ mod tests {
         let sealed = CredentialStore::with_sealed_backend("fauna-tui", dir.clone());
         assert_eq!(
             sealed.sealed_arm_cause(),
-            Some(SealedArmCause::KeyringAbsent),
+            Some(HeadlessArmCause::KeyringAbsent),
             "the explicit sealed constructor stands in for arm ④'s silent case"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The unattended constructor (`apps/cli.md` § The device shell →
+    /// *Credentials*): with no usable OS store it lands on the plain `0600`
+    /// file under the caller's data dir — no passphrase, never a `.sealed`
+    /// file — and says why, the way the sealed arm does; a usable store still
+    /// wins when no file holds the namespace yet.
+    #[test]
+    fn the_unattended_arm_rests_in_a_0600_file_and_never_seals() {
+        let dir = fresh_dir();
+        let usable =
+            CredentialStore::unattended_resolved("fauna-cli-test".into(), dir.clone(), || {
+                KeyringReach::Usable
+            });
+        assert_eq!(arm_of(&usable.backend), "keyring");
+        assert_eq!(usable.unattended_arm_cause(), None);
+        let locked =
+            CredentialStore::unattended_resolved("fauna-cli-test".into(), dir.clone(), || {
+                KeyringReach::Locked
+            });
+        assert_eq!(
+            locked.unattended_arm_cause(),
+            Some(HeadlessArmCause::KeyringLocked)
+        );
+        let store =
+            CredentialStore::unattended_resolved("fauna-cli-test".into(), dir.clone(), || {
+                KeyringReach::Absent
+            });
+        assert_eq!(
+            store.unattended_arm_cause(),
+            Some(HeadlessArmCause::KeyringAbsent)
+        );
+        assert_eq!(store.sealed_arm_cause(), None);
+        assert!(store.items_rest_in_files());
+        assert!(!store.needs_unlock(), "no passphrase, no human step");
+        store.set("cli/principals", "acct\thandle\n");
+        let path = cred_file_path(&dir, "fauna-cli-test");
+        assert!(path.exists(), "the item rests under the data dir");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        assert!(
+            !sealed::sealed_file_path(&dir, "fauna-cli-test").exists(),
+            "the unattended arm never creates a sealed file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ② for the unattended arm: a file already holding the namespace wins
+    /// without the probe, so a relaunch reads what the last launch wrote and
+    /// a keyring that became usable since cannot strand it.
+    #[test]
+    fn an_existing_unattended_file_wins_without_the_probe() {
+        let dir = fresh_dir();
+        CredentialStore::unattended_resolved("fauna-cli-test".into(), dir.clone(), || {
+            KeyringReach::Absent
+        })
+        .set("cli/principals", "kept");
+        let again =
+            CredentialStore::unattended_resolved("fauna-cli-test".into(), dir.clone(), || {
+                panic!("the probe must not run when the file exists")
+            });
+        assert_eq!(
+            again.unattended_arm_cause(),
+            Some(HeadlessArmCause::ExistingFile)
+        );
+        assert_eq!(again.get("cli/principals").as_deref(), Some("kept"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The file arm is production-reachable through the unattended arm, so a
+    /// file it cannot parse is never read as empty and written back — the
+    /// sealed arm's fallible read, on the plain file that is the only copy of
+    /// the device's keys.
+    #[test]
+    fn an_unreadable_file_is_never_overwritten() {
+        let dir = fresh_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = cred_file_path(&dir, "fauna-cli-test");
+        std::fs::write(&path, b"{not json").unwrap();
+        let store =
+            CredentialStore::unattended_resolved("fauna-cli-test".into(), dir.clone(), || {
+                KeyringReach::Absent
+            });
+        store.set("cli/principals", "x");
+        store.delete("cli/other");
+        assert_eq!(std::fs::read(&path).unwrap(), b"{not json");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1587,7 +1848,7 @@ mod tests {
     // -----------------------------------------------------------------------
     // `CredentialStore::new` resolves its backend from the environment, and the
     // erase must resolve the account-store namespace *exactly the way its
-    // writer does* (`production_credential_store()` is the same constructor) —
+    // writer does* (`production_credential_store()` is `CredentialStore::account_store`) —
     // so a test cannot simply hand the sweep a file-pinned store and still be
     // asserting the production path. Setting `FAUNA_E2E_CREDENTIAL_DIR` would
     // work but the process environment is shared by the whole test binary.
@@ -1915,7 +2176,7 @@ mod tests {
 
     fn arm_of(backend: &SecretStoreBackend) -> &'static str {
         match backend {
-            SecretStoreBackend::File(_) => "file",
+            SecretStoreBackend::File(..) => "file",
             SecretStoreBackend::Keyring => "keyring",
             SecretStoreBackend::Sealed(..) => "sealed",
             SecretStoreBackend::Foreign(_) => "foreign",
@@ -2188,7 +2449,7 @@ mod tests {
     /// Pinning the backend and not the namespace is the whole point. The erase
     /// has to resolve the account-store namespace exactly the way its writer
     /// does (`production_credential_store()` is literally
-    /// `CredentialStore::new(ACCOUNT_STORE_NAMESPACE)`), so handing the sweep a
+    /// `CredentialStore::account_store()`), so handing the sweep a
     /// `with_file_backend` store would assert a path production never takes.
     fn seeded_split(dir: &Path) -> (AccountRegistry, CredentialStore, String) {
         assert!(
@@ -2207,7 +2468,7 @@ mod tests {
             .expect("A registers as account #1");
         assert_eq!(reg.active().as_deref(), Some(actor.as_str()), "A is active");
 
-        let account_store = CredentialStore::new(ACCOUNT_STORE_NAMESPACE);
+        let account_store = CredentialStore::account_store();
         for key in account_store_slots(&actor) {
             account_store.set(&key, "deadbeef");
         }

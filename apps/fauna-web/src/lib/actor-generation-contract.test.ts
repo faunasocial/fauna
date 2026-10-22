@@ -118,15 +118,29 @@ function* srcFiles(dir: URL): Generator<URL> {
   }
 }
 
-Deno.test("no webPage store write exists outside web-publish.ts", () => {
-  const offenders: string[] = [];
+/** Every non-test source file but the seam itself. */
+function seamOutsiders(): Array<{ path: string; src: string }> {
+  const out: Array<{ path: string; src: string }> = [];
   for (const u of srcFiles(new URL("../", import.meta.url))) {
     if (u.pathname.endsWith("/lib/web-publish.ts")) continue;
     if (u.pathname.endsWith(".test.ts")) continue;
-    if (/\bwebPage\s*\.\s*(set|update)\s*\(/.test(stripComments(Deno.readTextFileSync(u)))) {
-      offenders.push(u.pathname);
-    }
+    out.push({ path: u.pathname, src: stripComments(Deno.readTextFileSync(u)) });
   }
+  return out;
+}
+
+Deno.test("no webPage store write exists outside web-publish.ts", () => {
+  // Every spelling of a store write: the method calls, Svelte's `$store = …`
+  // auto-subscription assignment, and a destructured `set`/`update`. Measured
+  // 2026-10-15: the `$webPage = …` form passed the method-call regex alone.
+  const writes = [
+    /\bwebPage\s*\.\s*(set|update)\s*\(/,
+    /\$webPage\s*(=(?!=)|\+=|\?\?=|\|\|=)/,
+    /\{[^}]*\b(set|update)\b[^}]*\}\s*=\s*webPage\b/,
+  ];
+  const offenders = seamOutsiders()
+    .filter(({ src }) => writes.some((re) => re.test(src)))
+    .map(({ path }) => path);
   if (offenders.length) {
     throw new Error(
       `webPage is written outside the web-publish.ts seam: ${offenders.join(", ")} — ` +
@@ -135,41 +149,94 @@ Deno.test("no webPage store write exists outside web-publish.ts", () => {
   }
 });
 
-/** The text of `async function <name>(…) { … }` up to the next top-level
- *  function — crude, like the rest of this file. */
-function handlerBody(src: string, name: string): string {
-  const start = src.search(new RegExp(`async function ${name}\\(`));
-  if (start < 0) throw new Error(`WebSettingsSection has no async function ${name}`);
-  const rest = src.slice(start + 1);
-  const next = rest.search(/\n {2}(async )?function |\n<\/script>/);
-  return src.slice(start, next < 0 ? undefined : start + 1 + next);
+/** Each `function <name>(…) { … }` in `src` (async or not, any indent, `export`
+ *  or not), its body running to the next function header or `</script>` —
+ *  crude, like the rest of this file: an arrow-function handler is folded into
+ *  the function above it. */
+function functionBodies(src: string): Array<{ name: string; body: string }> {
+  const header = /^[ \t]*(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(/gm;
+  const starts = [...src.matchAll(header)].map((m) => ({ name: m[1], at: m.index! }));
+  return starts.map(({ name, at }, i) => {
+    let end = i + 1 < starts.length ? starts[i + 1].at : src.length;
+    const script = src.indexOf("</script>", at);
+    if (script >= 0 && script < end) end = script;
+    return { name, body: src.slice(at, end) };
+  });
 }
 
-for (const name of ["hydrate", "onToggle", "unpublish"]) {
-  Deno.test(`WebSettingsSection.${name} guards its own webPage write`, () => {
-    const src = stripComments(
-      Deno.readTextFileSync(new URL("./components/WebSettingsSection.svelte", import.meta.url)),
-    );
-    const body = handlerBody(src, name);
+// The census is DERIVED, not hand-listed: every function anywhere in the SPA
+// that calls a guarded writer. A hand-picked list of handler names was this
+// test's blind spot — a new handler that captured too late passed silently
+// (measured 2026-10-15), the same drift the
+// RAILS note above records.
+const WRITER_CALL = /\b(setWebPage|patchWebPage)\s*\(/;
+const writerCallers = seamOutsiders().flatMap(({ path, src }) =>
+  functionBodies(src)
+    .filter(({ body }) => WRITER_CALL.test(body))
+    .map(({ name, body }) => ({ label: `${path.split("/src/")[1]}::${name}`, body }))
+);
+
+Deno.test("the webPage writer census still finds Settings → Web's three handlers", () => {
+  // Guards the derivation itself: a parser that silently finds nothing would
+  // turn every per-caller test below into a vacuous pass.
+  const found = writerCallers.map((c) => c.label);
+  for (const name of ["hydrate", "onToggle", "unpublish"]) {
+    if (!found.includes(`lib/components/WebSettingsSection.svelte::${name}`)) {
+      throw new Error(`writer census lost WebSettingsSection.${name}; found: ${found.join(", ")}`);
+    }
+  }
+});
+
+for (const { label, body } of writerCallers) {
+  Deno.test(`${label} guards its own webPage write`, () => {
     const capture = body.indexOf("sameActorSince()");
     const firstAwait = body.indexOf("await ");
     if (capture < 0 || (firstAwait >= 0 && capture > firstAwait)) {
-      throw new Error(`${name} must capture sameActorSince() before its first await`);
+      throw new Error(`${label} must capture sameActorSince() before its first await`);
     }
     if (!/\b(setWebPage|patchWebPage)\([\s\S]*?stillThisActor/.test(body)) {
-      throw new Error(`${name} must hand its own stillThisActor to setWebPage/patchWebPage`);
+      throw new Error(`${label} must hand its own stillThisActor to setWebPage/patchWebPage`);
     }
   });
 }
 
+/** The body of top-level `export [async] function <name>(` in `src`, to its
+ *  closing column-0 brace. */
+function exportedBody(src: string, name: string): string {
+  const at = src.search(new RegExp(`export (?:async )?function ${name}\\(`));
+  if (at < 0) throw new Error(`web-publish.ts must export ${name}`);
+  const end = src.indexOf("\n}", at);
+  return src.slice(at, end < 0 ? undefined : end);
+}
+
 Deno.test("web-publish.ts exports the guarded writers and checks the predicate in each", () => {
+  // Bounded to each writer's own body: a fixed-width window from
+  // `setWebPage` reached `patchWebPage`'s check, so dropping `setWebPage`'s
+  // re-check passed (measured 2026-10-15).
   const src = sourceOf(RAILS["web-publish.ts"]);
   for (const fn of ["setWebPage", "patchWebPage"]) {
-    const at = src.search(new RegExp(`export function ${fn}\\(`));
-    if (at < 0) throw new Error(`web-publish.ts must export ${fn}`);
-    if (!/stillThisActor\(\)/.test(src.slice(at, at + 400))) {
+    const body = exportedBody(src, fn);
+    const check = body.indexOf("stillThisActor()");
+    const write = body.search(/\bwebPage\s*\.\s*(set|update)\s*\(/);
+    if (check < 0 || write < 0 || check > write) {
       throw new Error(`${fn} must consult stillThisActor() before writing the store`);
     }
+  }
+});
+
+Deno.test("ensureWebPageHydrated re-checks the generation after its last await", () => {
+  // Its own leg: the rail test above counts `stillThisActor()` across the whole
+  // file, and the two writers satisfy that count on their own, so dropping this
+  // re-check passed (measured 2026-10-15).
+  const body = exportedBody(sourceOf(RAILS["web-publish.ts"]), "ensureWebPageHydrated");
+  const write = body.indexOf("webPage.set(");
+  const lastAwait = body.lastIndexOf("await ", write);
+  const check = body.indexOf("stillThisActor()", lastAwait);
+  if (write < 0 || lastAwait < 0 || check < 0 || check > write) {
+    throw new Error(
+      "ensureWebPageHydrated must re-check stillThisActor() between its last await " +
+        "and its webPage.set — a hydrate begun as A must not land for B",
+    );
   }
 });
 

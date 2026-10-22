@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material3.*
@@ -50,8 +51,12 @@ import com.fauna.app.BuildConfig
 import com.fauna.app.R
 import com.fauna.app.ui.components.RoomLabelerRows
 import com.fauna.app.core.ContentPolicyInputs
+import com.fauna.app.core.PendingAppealStore
 import com.fauna.app.core.RegionPlaneHost
 import com.fauna.app.core.RegionSubject
+import com.fauna.app.ui.components.GuardianReason
+import com.fauna.app.ui.components.NestBlockWitness
+import com.fauna.app.ui.components.NestPlaceholder
 import com.fauna.app.ui.components.RegionBlockWitness
 import com.fauna.app.ui.components.RegionPlaceholder
 import com.fauna.ffi.FfiRegionPlaceholder
@@ -77,10 +82,13 @@ import com.fauna.app.ui.util.FaunaGateVerdict
 import com.fauna.app.ui.util.ValueFormat
 import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.localized
+import com.fauna.app.ui.util.localizedNested
+import com.fauna.app.ui.util.resolveLocalizedNested
 import com.fauna.app.ui.viewmodel.ConversationsVM
 import com.fauna.ffi.composeDecorationPlan
 import com.fauna.ffi.composeShowMarkersDimRanges
 import com.fauna.ffi.decorationMap
+import com.fauna.ffi.adminBlockNotice
 import com.fauna.ffi.legalTakedownTombstone
 import com.fauna.ffi.matchesMutedKeywords
 import com.fauna.ffi.urlHost
@@ -93,8 +101,10 @@ import uniffi.fauna_conversations.MessageSnapshot
 // directly and web reaches through its wasm twins, so nothing below hand-types
 // a token, a label, a choice list or a staging rule (priority #2).
 import uniffi.fauna_conversations.ReplyPreview
+import uniffi.fauna_conversations.RoomSearchNav
 import uniffi.fauna_conversations.RoomSettingsDraft
 import uniffi.fauna_conversations.RoomSettingsEdit
+import uniffi.fauna_conversations.WithheldGround
 import uniffi.fauna_conversations.roomClassAttrToken
 import uniffi.fauna_conversations.roomClassLabel
 import uniffi.fauna_conversations.roomNoticeAttrToken
@@ -126,6 +136,7 @@ import uniffi.fauna_conversations.TypedAddress
 import uniffi.fauna_conversations.quicksetEmojis
 import uniffi.fauna_conversations.tryParseTypedAddress
 import uniffi.fauna_conversations.typedAddressDisplayWithBridges
+import uniffi.fauna_conversations.warmupDeferredText
 import uniffi.fauna_core.LocalizedText
 import uniffi.fauna_core.RenderDocument
 import social.fauna.generated.Ids
@@ -278,6 +289,18 @@ fun ConversationDetailScreen(
         scope.launch { runCatching { manager.toggleReaction(threadId, msgId, emoji) } }
     }
 
+    // A thread just opened: read the scan verdict of each received mail message in it
+    // (`dm-message-scan-result`; the snapshot notify repaints — mail-content-scanning.md
+    // § User sees their own message's row), and the alias each arrived on
+    // (`dm-message-delivered-to-alias`; mail-aliases.md § Label).
+    LaunchedEffect(threadId) {
+        runCatching { manager.refreshMessageScanResults(threadId) }
+        runCatching { manager.refreshDeliveredAliases(threadId) }
+        // …and the queue rows each own withheld message's badge matches
+        // (`dm-message-withheld-badge`; moderation.md § Legal takedown → App render).
+        runCatching { manager.refreshWithheldMessages(threadId) }
+    }
+
     // Re-resolve the thread detail whenever the snapshot ticks (the manager is
     // the single source of truth; threadDetail() is the FFI read for one thread).
     val detail: ThreadDetail? = remember(snapshot, threadId) {
@@ -413,6 +436,32 @@ fun ConversationDetailScreen(
         onLeaveRoom = {
             scope.launch { runCatching { manager.leaveRoom(threadId) } }
         },
+        // The room's search strip (`room-search.md` § The surface): the button
+        // opens/closes it on the manager (view state on the detail, never a draft
+        // here), the submit runs `room_search` — the leg, the rows and their
+        // typed targets are the manager's — and a hit opens through its target.
+        onToggleRoomSearch = {
+            if (detail?.room?.search != null) manager.closeRoomSearch(threadId)
+            else manager.openRoomSearch(threadId)
+        },
+        onSubmitRoomSearch = { query ->
+            scope.launch { runCatching { manager.roomSearch(threadId, query) } }
+        },
+        onOpenRoomSearchHit = { nav ->
+            when (nav) {
+                // The manager closes the strip and lands the selection; the
+                // detail's selected-message scroll brings the row into view.
+                is RoomSearchNav.Message -> manager.selectThreadAndMessage(nav.threadId, nav.messageId)
+                // The Search page's `Post` door onto the feed's `post_detail`,
+                // relayed to the room's home when the target names one. The
+                // feed is excised from the kids build, which has no such route.
+                is RoomSearchNav.Post -> if (!BuildConfig.KIDS) {
+                    val id = java.net.URLEncoder.encode(nav.postId, "UTF-8")
+                    val home = nav.homeNestUrl?.let { java.net.URLEncoder.encode(it, "UTF-8") }.orEmpty()
+                    navController.navigate("feed/post/$id?source=&home=$home")
+                }
+            }
+        },
         onAddParticipantInputChange = {
             // Typing owes a probe — same rule as new-thread compose.
             manager.setAddParticipantRecipientInput(it)
@@ -478,7 +527,15 @@ fun ConversationDetailScreen(
         // flips the reveal set + re-emits, so the re-resolved thread detail projects
         // RemoteImage.revealed = true onto this message and the bubble recomposes.
         // Mirrors onReply's direct manager wiring (the Content stays FFI-free).
-        onRevealRemoteImages = { msgId -> manager.revealRemoteImages(msgId) },
+        // Fauna Kids never reveals (the button is not rendered there): `BuildConfig.KIDS`
+        // keeps the call itself out of that build.
+        onRevealRemoteImages = { msgId -> if (!BuildConfig.KIDS) manager.revealRemoteImages(msgId) },
+        // `dm-message-withheld-badge`: the queue's own appeal on the matched row — the
+        // Moderation page reads the queue and opens the draft (`PendingAppealStore`).
+        onAppealWithheld = { contentId ->
+            PendingAppealStore.set(contentId)
+            navController.navigate("moderation")
+        },
         // Muted-keyword collapse (moderation.md § Muted keywords): the client-held list +
         // the session-local revealed set + the one-tap reveal (adds the message id to the
         // set; the mute is untouched). The Content stays FFI-free — the match runs inside
@@ -612,6 +669,12 @@ fun ConversationDetailContent(
     onWithdrawRoomInvite: (String) -> Unit = {},
     // `room-leave-confirm`: the walk-out, outside Save's staged set.
     onLeaveRoom: () -> Unit = {},
+    // The community room's search strip: `room-search-button` opens/closes it,
+    // `room-search-submit-button` submits the typed query, and a result row opens
+    // its typed target. Defaults `{}` keep the Content/test harness FFI-free.
+    onToggleRoomSearch: () -> Unit = {},
+    onSubmitRoomSearch: (String) -> Unit = {},
+    onOpenRoomSearchHit: (RoomSearchNav) -> Unit = {},
     onReplyAll: (String) -> Unit = {},
     onAddReplyRecipient: (String) -> Unit = {},
     onRemoveReplyRecipient: (TypedAddress) -> Unit = {},
@@ -708,6 +771,9 @@ fun ConversationDetailContent(
     // render-model.md § D3) — routed to the shared manager by the stateful screen.
     // `{}` keeps the Content/test harness FFI-free.
     onRevealRemoteImages: (String) -> Unit = {},
+    // `dm-message-withheld-badge` tap, by the queue row's `content_id` (the stateful screen
+    // stores it and navigates to the Moderation page). `{}` keeps the harness FFI-free.
+    onAppealWithheld: (String) -> Unit = {},
     // Muted-keyword collapse (moderation.md § Muted keywords): the client-held muted list
     // (the bubble matches it at render via the shared `matchesMutedKeywords`), the
     // session-local set of revealed message ids, and the one-tap reveal. Defaults keep the
@@ -833,10 +899,15 @@ fun ConversationDetailContent(
                     // stays shut, which is the same refusal the greyed button
                     // already expresses.
                     onRoomSettings = { roomSettingsDraft = roomSettingsSeed(detail) },
+                    onRoomSearch = onToggleRoomSearch,
                     onKeepMember = onKeepMember,
                     onRemoveParticipant = onRemoveParticipant,
                 )
                 HorizontalDivider()
+                // The room's search strip, between the header and the stream;
+                // while a submitted query stands its rows take the stream's place.
+                val roomSearch = detail.room?.search
+                if (roomSearch != null) RoomSearchStrip(onSubmit = onSubmitRoomSearch)
                 // Messages area takes the remaining height so the compose bar
                 // stays pinned at the bottom (conversations.md §"Empty states":
                 // header + compose bar visible, bubble area blank).
@@ -861,7 +932,9 @@ fun ConversationDetailContent(
                     }
                 }
                 Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                    if (detail.messages.isEmpty()) {
+                    if (roomSearchReplacesStream(roomSearch)) {
+                        RoomSearchResults(search = roomSearch!!, onOpenHit = onOpenRoomSearchHit)
+                    } else if (detail.messages.isEmpty()) {
                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             Text(
                                 stringResource(R.string.conversations_detail_no_messages),
@@ -900,6 +973,7 @@ fun ConversationDetailContent(
                                 }
                                 val reported = decision.reported
                                 RegionBlockWitness("conversation:${msg.messageId}", decision.isRegionBlocked)
+                                NestBlockWitness("conversation:${msg.messageId}", decision.isNestBlocked)
                                 val reportTarget = remember(msg.messageId, msg.isOwn, msg.body, senderActor) {
                                     messageReportTarget(msg, senderActor)
                                 }
@@ -925,6 +999,7 @@ fun ConversationDetailContent(
                                     // flips the reveal set + re-emits, so the next
                                     // thread detail projects RemoteImage.revealed = true.
                                     onRevealRemoteImages = { onRevealRemoteImages(msg.messageId) },
+                                    onAppealWithheld = onAppealWithheld,
                                     // Muted-keyword collapse (moderation.md § Muted keywords):
                                     // match the current list at render; a session-revealed id
                                     // shows in full (the mute stays).
@@ -938,6 +1013,11 @@ fun ConversationDetailContent(
                                     // arm (never revealable), a `collapse` behind a reveal.
                                     contentVerdict = decision.verdict,
                                     regionPlaceholder = decision.placeholder,
+                                    nestPlaceholder = decision.nestPlaceholder,
+                                    // The guardian rule's reason, verbatim beside the family
+                                    // frame (nest-rules.md § The shared rule editor → *The
+                                    // reason is the member's to read*).
+                                    guardianReason = decision.guardianReason,
                                     // Reactions / delete affordances — capability-gated,
                                     // never rail-branched (rule #5). delete is further
                                     // gated on msg.canDelete inside the bubble.
@@ -1443,6 +1523,7 @@ private fun ThreadHeader(
     onAddParticipant: () -> Unit,
     onRename: () -> Unit,
     onRoomSettings: () -> Unit,
+    onRoomSearch: () -> Unit,
     onKeepMember: (ByteArray) -> Unit,
     onRemoveParticipant: (TypedAddress) -> Unit,
 ) {
@@ -1514,6 +1595,20 @@ private fun ThreadHeader(
                     )
                 }
             }
+            // The room's search door, beside the editor's — painted iff the shared
+            // capability says this room's words are searchable for this seat
+            // (`room-search.md` § The surface); never a class branch here.
+            if (caps.canSearchRoom) {
+                IconButton(
+                    onClick = onRoomSearch,
+                    modifier = Modifier.testTag(Ids.ROOM_SEARCH_BUTTON),
+                ) {
+                    Icon(
+                        Icons.Default.Search,
+                        contentDescription = stringResource(R.string.conversations_unified_room_search),
+                    )
+                }
+            }
         }
         // The room's class statement, read off the projected room and never
         // computed here — the class is a pure function of the member set,
@@ -1533,11 +1628,15 @@ private fun ThreadHeader(
                     .semantics { stateDescription = roomClassAttrToken(room.`class`) },
             )
             // `thread-room-notice` — the one honest line a room with a standing
-            // caveat carries: shared `roomNoticeFor` decides which state speaks
-            // (awaiting-key wins), `roomNoticeLabel` is the copy and
-            // `roomNoticeAttrToken` the `state` token (rides `stateDescription`).
-            // Absent while neither fact holds.
-            roomNoticeFor(room.awaitingKey, room.moderationUnverified)?.let { notice ->
+            // caveat carries: shared `roomNoticeFor` decides which state speaks,
+            // `roomNoticeLabel` is the copy and `roomNoticeAttrToken` the
+            // `state` token (rides `stateDescription`). Absent while no fact
+            // holds.
+            roomNoticeFor(
+                room.awaitingKey,
+                room.moderationUnverified,
+                room.bridgeDisconnected,
+            )?.let { notice ->
                 Text(
                     roomNoticeLabel(notice),
                     style = MaterialTheme.typography.labelSmall,
@@ -1753,6 +1852,7 @@ private fun MessageBubble(
     resolveLinkPreview: (String) -> Unit = {},
     loadLinkPreviewImageBytes: suspend (String) -> ByteArray? = { null },
     onRevealRemoteImages: () -> Unit = {},
+    onAppealWithheld: (String) -> Unit = {},
     // Muted-keyword collapse (moderation.md § Muted keywords) — the current muted-word
     // list (matched at render via the shared `matchesMutedKeywords`) + a session-local
     // "revealed" flag + the one-tap reveal. Unlike the remote-image reveal (a manager
@@ -1774,6 +1874,13 @@ private fun MessageBubble(
     // (region-blocking.md § The blocked render) — painted AHEAD of the family
     // arms below; a revealed `collapse` shares [contentRevealed].
     regionPlaceholder: FfiRegionPlaceholder? = null,
+    // The nest's placeholder when a rule of the nest the message was read through
+    // drove the verdict (nest-rules.md § The nest source in the engine) — the
+    // region's twin, painted in the same place.
+    nestPlaceholder: com.fauna.ffi.FfiNestPlaceholder? = null,
+    // The guardian rule's reason, painted beside the family-policy frame
+    // (`content-policy-blocked-reason`); null for a floor or any other source.
+    guardianReason: String? = null,
     // `dm-message-report-button` (moderation.md § User-initiated reporting): `null`
     // paints nothing — own messages and mail/bridged messages have no verb.
     onReport: (() -> Unit)? = null,
@@ -1822,8 +1929,7 @@ private fun MessageBubble(
     // collapses (like `deleted`) to the shared localized tombstone rendered in place
     // of the withheld body — never a blank/failed-decrypt bubble. Mirrors linux
     // message_bubble.rs / web +page.svelte and the post FeedScreen quoted tombstone.
-    // No dedicated testTag (presentation; a new e2e id needs ui.yaml approval first,
-    // § UI Consistency A).
+    // ui.yaml `dm-message-legal-takedown`, the twin of `dm-message-deleted`.
     val legalTakedownRef = msg.legalTakedownRef
     if (legalTakedownRef != null) {
         Column(
@@ -1831,6 +1937,28 @@ private fun MessageBubble(
         ) {
             Text(
                 localized(legalTakedownTombstone(legalTakedownRef)).orEmpty(),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag(Ids.DM_MESSAGE_LEGAL_TAKEDOWN),
+            )
+            MessageTimestamp(msg.timestampMs, isSelected)
+        }
+        return
+    }
+
+    // Admin-block notice (moderation.md § Admin block of a reported item): a withheld
+    // record (empty document) collapses the bubble to the shared notice exactly as the
+    // tombstone above does; the author's own blocked message keeps its body and paints
+    // the notice beside it, below the body. No dedicated testTag (presentation; a new
+    // e2e id needs ui.yaml approval first).
+    val adminBlockReason = msg.adminBlockReason
+    val adminBlockShape = adminBlockPaint(adminBlockReason, msg.document.blocks.size)
+    if (adminBlockReason != null && adminBlockShape == AdminBlockPaint.IN_PLACE) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp).selectedMessageMark(isSelected),
+        ) {
+            Text(
+                localizedNested(adminBlockNotice(adminBlockReason)).orEmpty(),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -1856,6 +1984,19 @@ private fun MessageBubble(
         }
         return
     }
+    if (nestPlaceholder != null && (nestPlaceholder.verb == "block" || !contentRevealed)) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp).selectedMessageMark(isSelected),
+        ) {
+            NestPlaceholder(
+                nestPlaceholder,
+                witnessKey = "conversation:${msg.messageId}",
+                onReveal = { contentRevealed = true },
+            )
+            MessageTimestamp(msg.timestampMs, isSelected)
+        }
+        return
+    }
 
     // Content-policy BLOCK (a guardian floor) — collapse the bubble to a
     // policy-naming notice in place of the body, NO reveal (family-safety.md
@@ -1874,8 +2015,11 @@ private fun MessageBubble(
                 ),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.testTag(Ids.CONTENT_POLICY_BLOCKED_NOTICE),
+                modifier = Modifier
+                    .testTag(Ids.CONTENT_POLICY_BLOCKED_NOTICE)
+                    .semantics { stateDescription = "blocked" },
             )
+            GuardianReason(guardianReason)
             MessageTimestamp(msg.timestampMs, isSelected)
         }
         return
@@ -1893,7 +2037,7 @@ private fun MessageBubble(
             modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp).selectedMessageMark(isSelected),
         ) {
             Text(
-                stringResource(R.string.conversations_detail_muted_word),
+                stringResource(R.string.muted_words_collapsed),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.testTag(Ids.DM_MESSAGE_MUTED),
@@ -1902,7 +2046,7 @@ private fun MessageBubble(
                 onClick = onRevealMuted,
                 modifier = Modifier.testTag(Ids.DM_MESSAGE_MUTED_REVEAL_BUTTON),
             ) {
-                Text(stringResource(R.string.conversations_detail_muted_reveal))
+                Text(stringResource(R.string.muted_words_reveal))
             }
             MessageTimestamp(msg.timestampMs, isSelected)
         }
@@ -1912,8 +2056,9 @@ private fun MessageBubble(
     // Content-policy COLLAPSE (a guardian `collapse` floor OR the viewer's own
     // spam/phishing threshold — the every-user un-darking of moderation.md § item
     // 1) — collapse behind a one-tap, session-local reveal; the floor persists.
-    // After the muted arm (both are revealable collapses). Presentation only, no
-    // test id: v1 e2e drives the block case (the linux/web precedent).
+    // After the muted arm (both are revealable collapses). The block arm's notice
+    // in `state="collapsed"` beside `content-policy-collapsed-reveal-button` (ids
+    // user-approved 2026-10-16), the feed's twin.
     if (contentVerdict == "collapse" && !contentRevealed) {
         Column(
             modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp).selectedMessageMark(isSelected),
@@ -1922,8 +2067,15 @@ private fun MessageBubble(
                 stringResource(R.string.family_content_collapsed_notice),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .testTag(Ids.CONTENT_POLICY_BLOCKED_NOTICE)
+                    .semantics { stateDescription = "collapsed" },
             )
-            TextButton(onClick = { contentRevealed = true }) {
+            GuardianReason(guardianReason)
+            TextButton(
+                onClick = { contentRevealed = true },
+                modifier = Modifier.testTag(Ids.CONTENT_POLICY_COLLAPSED_REVEAL_BUTTON),
+            ) {
                 Text(stringResource(R.string.family_content_reveal_button))
             }
             MessageTimestamp(msg.timestampMs, isSelected)
@@ -2036,7 +2188,34 @@ private fun MessageBubble(
             msg.document,
             modifier = Modifier.testTag(Ids.DM_MESSAGE_TEXT),
         )
-        if (documentHasBlockedRemoteImage(msg.document)) {
+        // The author's own blocked message: the notice right below the kept body — unless the
+        // withheld badge below carries it (the UniFFI record has no methods, so the Rust
+        // `WithheldOwnMessage::carries_block_notice` reads off the ground here), so the
+        // bubble says it once.
+        val withheld = msg.withheld
+        if (adminBlockReason != null && withheld?.ground != WithheldGround.BLOCKED) {
+            Text(
+                localizedNested(adminBlockNotice(adminBlockReason)).orEmpty(),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        // The author's own message the nest withholds, matched to their queue row
+        // (`MessageSnapshot.withheld`; moderation.md § Legal takedown → App render, the
+        // fourth surface): the shared lines side by side, resolved nested; one tap opens that
+        // row's appeal on the Moderation page.
+        if (withheld != null) {
+            TextButton(
+                onClick = { onAppealWithheld(withheld.contentId) },
+                modifier = Modifier.testTag(Ids.DM_MESSAGE_WITHHELD_BADGE),
+            ) {
+                Text(withheld.lines.map { localizedNested(it).orEmpty() }.joinToString(" · "))
+            }
+        }
+        // Not in Fauna Kids: the reveal would make the device fetch from whatever site
+        // hosts the picture, and the kids build talks to no party but its push
+        // distributor — so a remote image stays a placeholder there.
+        if (!BuildConfig.KIDS && documentHasBlockedRemoteImage(msg.document)) {
             TextButton(
                 onClick = onRevealRemoteImages,
                 modifier = Modifier.testTag(Ids.LOAD_REMOTE_CONTENT_BUTTON),
@@ -2115,6 +2294,59 @@ private fun MessageBubble(
             if (att.c2pa) {
                 C2paBadge()
             }
+        }
+
+        // An own message its bridge never took (`MessageSnapshot.undelivered`, the shared
+        // answer; apps/bridges.md § Phase G → *When the bridge stops serving*): said in words
+        // under the body, which stays in view. Twin of tui's label of the same id.
+        if (msg.undelivered) {
+            Text(
+                stringResource(R.string.conversations_unified_dm_message_undelivered),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag(Ids.DM_MESSAGE_UNDELIVERED),
+            )
+        }
+
+        // An own sent mail the fresh-IP warm-up is holding back (`MessageSnapshot.warmupHold`;
+        // mail-deliverability.md § Enforcement at submission time): when it goes out and how
+        // many are ahead of it, in the shared wording (`warmupDeferredText`), which falls
+        // silent once the release has come. Twin of tui's label of the same id.
+        val warmupLine = msg.warmupHold?.let { warmupDeferredText(it, System.currentTimeMillis() / 1000) }
+        if (warmupLine != null) {
+            Text(
+                warmupLine,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag(Ids.DM_MESSAGE_WARMUP_DEFERRED),
+            )
+        }
+
+        // The alias a received mail message arrived on, and its label
+        // (`MessageSnapshot.deliveredTo`, the shared wording resolved when the thread opened;
+        // mail-aliases.md § Label). Twin of tui's label of the same id.
+        msg.deliveredTo?.let { line ->
+            Text(
+                line,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag(Ids.DM_MESSAGE_DELIVERED_TO_ALIAS),
+            )
+        }
+
+        // A received mail message's own perimeter scan verdict (`MessageSnapshot.scanResultLines`,
+        // read when the thread opened; mail-content-scanning.md § User sees their own message's
+        // row): one element, the shared lines in order. Twin of tui's label of the same id.
+        if (msg.scanResultLines.isNotEmpty()) {
+            val scanContext = LocalContext.current
+            Text(
+                msg.scanResultLines
+                    .mapNotNull { resolveLocalizedNested(scanContext, it) }
+                    .joinToString(" · "),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag(Ids.DM_MESSAGE_SCAN_RESULT),
+            )
         }
 
         // Aggregated reactions under the bubble (`dm-reaction-pill[i]` — emoji +
@@ -2447,3 +2679,19 @@ private fun MessageActionsMenu(
         }
     }
 }
+
+/**
+ * How a DM message carrying `adminBlockReason` paints (`moderation.md` § Admin block of a
+ * reported item, decision 4): [IN_PLACE] for a withheld record (an empty document — the Rust
+ * `MessageSnapshot::admin_block_in_place`), [BESIDE] for the author's own blocked message
+ * (the body is kept, the notice paints right after it), [NONE] when unblocked. The UniFFI
+ * record carries no methods, so the predicate is read off `document.blocks` here.
+ */
+internal enum class AdminBlockPaint { NONE, IN_PLACE, BESIDE }
+
+internal fun adminBlockPaint(adminBlockReason: String?, documentBlockCount: Int): AdminBlockPaint =
+    when {
+        adminBlockReason == null -> AdminBlockPaint.NONE
+        documentBlockCount == 0 -> AdminBlockPaint.IN_PLACE
+        else -> AdminBlockPaint.BESIDE
+    }

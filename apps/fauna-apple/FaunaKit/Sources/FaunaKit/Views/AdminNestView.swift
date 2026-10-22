@@ -104,11 +104,19 @@ public struct AdminNestView: View {
                 //    AdminNatModeMachine) ──
                 natModeSection
 
+                // ── Web-app origin (admin.md § N Nest → Web-app origin) —
+                //    directly after NAT mode ──
+                webAppOriginSection
+
                 // ── Read-only host-OS-maintenance status + "restart now" ──
                 osMaintenanceSection
 
                 // ── Declared region (admin.md § N Nest → Declared region, row 146) ──
                 regionSection
+
+                // ── Feature limits (admin.md § N Nest → Feature limits) —
+                //    directly after Declared region ──
+                featureLimitsSection
 
                 // ── Deployment-identity rotation ──
                 seedRotateSection
@@ -288,6 +296,85 @@ public struct AdminNestView: View {
         Task { await vm.saveNatMode() }
     }
 
+    /// Web-app origin (`admin-nest-web-app-origin-*`, admin.md § N Nest →
+    /// *Web-app origin*; web-content-hosting.md § Same-origin security model) —
+    /// what this nest's own address answers when someone opens the app there.
+    /// Paint only: every sentence, the central radio's label and the `canSet`
+    /// verdict are the shared `FfiAdminWebAppOriginView` fold (tui's
+    /// `admin/nest.rs`, the reference leg). Radios stay unmarked and disabled
+    /// until the read lands and whenever `canSet` is false — pre-marking
+    /// bundled would state a choice the nest may not hold. A radio pick is
+    /// local; the save commits it. Hand-painted radios, as `natModeRadio`.
+    private var webAppOriginSection: some View {
+        let view = vm.webAppOriginView
+        let loading = L.admin.nestPage.webAppOriginLoading
+        return GroupBox {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(L.admin.nestPage.webAppOriginLabel).fontWeight(.medium)
+                Text(L.admin.nestPage.webAppOriginDesc)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                webAppOriginRadio(mode: .bundled, id: Ids.adminNestWebAppOriginBundledRadio,
+                                  label: L.admin.nestPage.webAppOriginBundled)
+                webAppOriginRadio(mode: .central, id: Ids.adminNestWebAppOriginCentralRadio,
+                                  label: view.map { renderLocalizedText($0.centralLabel) } ?? loading)
+                HStack {
+                    automationText(Ids.adminNestWebAppOriginStatus,
+                                   view.map { renderLocalizedText($0.status) } ?? loading)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button(L.admin.nestPage.webAppOriginSave) { saveWebAppOrigin() }
+                        .disabled(!vm.webAppOriginEditable || vm.webAppOriginDraft == nil)
+                        .accessibilityIdentifier(Ids.adminNestWebAppOriginSaveButton)
+                        .automationActivate(Ids.adminNestWebAppOriginSaveButton,
+                                            isEnabled: { vm.webAppOriginEditable && vm.webAppOriginDraft != nil }) {
+                            saveWebAppOrigin()
+                        }
+                        // Picking a radio is local; the commit is
+                        // `fauna.admin.web_app_origin.set`.
+                        .faunaGate("fauna.admin.web_app_origin.set")
+                }
+                if let view {
+                    Text(renderLocalizedText(view.scope))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(Ids.adminNestWebAppOriginSection)
+        .automationValue(Ids.adminNestWebAppOriginSection, text: { L.admin.nestPage.webAppOriginLabel })
+    }
+
+    /// One web-app-origin radio (`admin-nest-web-app-origin-{bundled,central}-radio`).
+    private func webAppOriginRadio(mode: FfiWebAppOrigin, id: String, label: String) -> some View {
+        let selected = vm.webAppOriginDraft == mode
+        return Button(action: { vm.selectWebAppOrigin(mode) }) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: selected ? "largecircle.fill.circle" : "circle")
+                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                Text(label).foregroundStyle(.primary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!vm.webAppOriginEditable)
+        .accessibilityIdentifier(id)
+        .automationActivate(id,
+                            isEnabled: { vm.webAppOriginEditable },
+                            value: { vm.webAppOriginDraft == mode ? "on" : "off" }) {
+            vm.selectWebAppOrigin(mode)
+        }
+    }
+
+    /// Save action, shared by the Button and its `automationActivate` sibling.
+    private func saveWebAppOrigin() {
+        Task { await vm.saveWebAppOrigin() }
+    }
+
     /// Read-only host-OS-maintenance status (installers/vps.md § Host OS Maintenance
     /// § 4) — the patch/reboot state of an onboarded VPS's host Ubuntu box, read off
     /// the `os_*` fields on `fauna.setup.status`. The status line is always present;
@@ -413,6 +500,29 @@ public struct AdminNestView: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(Ids.adminNestRegionSection)
         .automationValue(Ids.adminNestRegionSection, text: { L.admin.nestPage.regionLabel })
+    }
+
+    /// Admin host of the shared `feature-policy-editor` (`admin-nest-feature-limits-*`;
+    /// dynamic-features.md § Authoring surfaces): one row per registry member,
+    /// the authored document in words and an edit button. Paints only — the
+    /// rows, the editor and every judgement are `FeatureAuthoringHost`'s.
+    @ViewBuilder
+    private var featureLimitsSection: some View {
+        if let host = vm.featureAuthoring {
+            GroupBox {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(L.features.adminSectionTitle).fontWeight(.medium)
+                    Text(L.features.adminSectionDesc)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    FeatureAuthoringRows(host: host, ids: .admin)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier(Ids.adminNestFeatureLimitsSection)
+            .automationValue(Ids.adminNestFeatureLimitsSection, text: { L.features.adminSectionTitle })
+        }
     }
 
     /// Validate the region-code edit buffer client-side via the shared

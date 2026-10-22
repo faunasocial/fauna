@@ -72,11 +72,11 @@ Stamped 2026-09-19 at acb58fddf3.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| linux | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| windows | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| macos | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| ios | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
+| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
+| windows | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| macos | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| ios | ⚠ partial | 0.1.5-dev+61b844ca standalone |
 | android |  no run recorded | |
 | tui | ⚠ partial | 0.1.2-dev+7663afa6 standalone |
 
@@ -91,11 +91,11 @@ Stamped 2026-09-19 at acb58fddf3.
 | 3 | app | `tests/e2e-unified/tests/test_sign_out_web.py::test_web_sign_out_erases_the_account_registry` | web (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_sign_out_web.py::test_web_sign_out_retires_the_enrollment_and_erases_the_account_store` | web (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_sign_out_web.py::test_web_load_after_a_tab_closed_mid_sign_out_finishes_the_sign_out` | web (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_bearer_cache_web.py::test_web_sign_out_then_new_identity_posts_as_itself` | web (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_bearer_cache_web.py::test_web_sign_out_then_new_identity_posts_as_itself` | web (linux): failed |
 | 4 | app | `tests/e2e-unified/tests/test_delete_account.py::test_delete_account_via_confirm_field` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_pending_actions.py::test_a_scheduled_handle_change_is_visible_and_cancellable` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_pending_actions.py::test_a_queued_account_delete_is_visible_and_cancellable` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_pending_actions.py::test_an_admins_deletion_of_this_account_is_listed_and_cancellable` | linux (linux): passed, tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_pending_actions.py::test_a_queued_account_delete_is_visible_and_cancellable` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_pending_actions.py::test_an_admins_deletion_of_this_account_is_listed_and_cancellable` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 6 | nest | `tests/e2e-unified/tests/api/test_onboarding.py::test_alice_self_service_onboarding` | nest (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_sign_out.py::test_a_sign_out_that_cannot_erase_everything_says_so` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_sign_out.py::test_a_sign_out_whose_credentials_cannot_be_erased_says_so` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |

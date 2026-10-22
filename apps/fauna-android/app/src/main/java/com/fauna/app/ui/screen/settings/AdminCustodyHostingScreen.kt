@@ -153,10 +153,9 @@ fun AdminCustodyHostingContent(
                     Text(it, style = MaterialTheme.typography.bodyMedium)
                 }
 
-                rows.forEachIndexed { i, row ->
+                rows.forEach { row ->
                     val key = row.hostActorId + ":" + row.grantId.joinToString(",")
                     HostingRow(
-                        index = i,
                         row = row,
                         armed = armedKey == key,
                         working = working,
@@ -176,7 +175,6 @@ fun AdminCustodyHostingContent(
 /** One `admin-custody-hosting-row` card. */
 @Composable
 private fun HostingRow(
-    index: Int,
     row: FfiAdminHostingRow,
     armed: Boolean,
     working: Boolean,
@@ -193,7 +191,7 @@ private fun HostingRow(
         FfiReceiptState.NO_RECEIPT_YET -> stringResource(R.string.admin_custody_hosting_receipt_none)
     }
 
-    Card(modifier = Modifier.fillMaxWidth().testTag("${Ids.ADMIN_CUSTODY_HOSTING_ROW}-$index")) {
+    Card(modifier = Modifier.fillMaxWidth().testTag(Ids.ADMIN_CUSTODY_HOSTING_ROW)) {
         Column(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -201,30 +199,30 @@ private fun HostingRow(
             FieldRow(
                 caption = stringResource(R.string.admin_custody_hosting_host),
                 value = shortId(row.hostActorId),
-                valueTestTag = "${Ids.ADMIN_CUSTODY_HOSTING_HOST}-$index",
+                valueTestTag = Ids.ADMIN_CUSTODY_HOSTING_HOST,
                 monospace = true,
             )
             FieldRow(
                 caption = stringResource(R.string.admin_custody_hosting_owner),
                 value = shortId(row.ownerActorId),
-                valueTestTag = "${Ids.ADMIN_CUSTODY_HOSTING_OWNER}-$index",
+                valueTestTag = Ids.ADMIN_CUSTODY_HOSTING_OWNER,
                 monospace = true,
             )
             FieldRow(
                 caption = stringResource(R.string.admin_custody_hosting_url),
                 value = row.ownerNestUrl,
-                valueTestTag = "${Ids.ADMIN_CUSTODY_HOSTING_URL}-$index",
+                valueTestTag = Ids.ADMIN_CUSTODY_HOSTING_URL,
                 monospace = true,
             )
             FieldRow(
                 caption = stringResource(R.string.admin_custody_hosting_budget),
                 value = budgetText(row.retainedBytesCap),
-                valueTestTag = "${Ids.ADMIN_CUSTODY_HOSTING_BUDGET}-$index",
+                valueTestTag = Ids.ADMIN_CUSTODY_HOSTING_BUDGET,
             )
             FieldRow(
                 caption = stringResource(R.string.admin_custody_hosting_held),
                 value = heldText(row.heldBytes),
-                valueTestTag = "${Ids.ADMIN_CUSTODY_HOSTING_HELD}-$index",
+                valueTestTag = Ids.ADMIN_CUSTODY_HOSTING_HELD,
             )
             FieldRow(
                 caption = "",
@@ -232,12 +230,12 @@ private fun HostingRow(
                 // because stop alone does not free them.
                 value = if (row.stopped) stringResource(R.string.admin_custody_hosting_stopped)
                         else stringResource(R.string.admin_custody_hosting_active),
-                valueTestTag = "${Ids.ADMIN_CUSTODY_HOSTING_STOPPED}-$index",
+                valueTestTag = Ids.ADMIN_CUSTODY_HOSTING_STOPPED,
             )
             FieldRow(
                 caption = "",
                 value = receiptText,
-                valueTestTag = "${Ids.ADMIN_CUSTODY_HOSTING_RECEIPT}-$index",
+                valueTestTag = Ids.ADMIN_CUSTODY_HOSTING_RECEIPT,
             )
 
             if (armed) {
@@ -287,7 +285,7 @@ private fun HostingRow(
                         onClick = onArm,
                         enabled = !working,
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
-                        modifier = Modifier.testTag("${Ids.ADMIN_CUSTODY_HOSTING_REMOVE_BUTTON}-$index"),
+                        modifier = Modifier.testTag(Ids.ADMIN_CUSTODY_HOSTING_REMOVE_BUTTON),
                     ) { Text(stringResource(R.string.admin_custody_hosting_remove)) }
                 }
             }

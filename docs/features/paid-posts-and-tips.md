@@ -53,7 +53,7 @@ Stamped 2026-10-01 at f5dec3d933.
 13. [app] You are never offered a purchase of a post you sold yourself — `docs/goal/behavior/monetization.md` § Per-post pay-to-unlock
    - `tests/e2e-unified/tests/test_paid_post_offers.py::test_you_are_never_offered_your_own_sold_post`
 14. [app] A post you have bought is not offered to you again while the author's approval is still on its way — `docs/goal/behavior/monetization.md` § Per-post pay-to-unlock
-   - (none)
+   - `tests/e2e-unified/tests/test_paid_post_offers.py::test_a_bought_post_is_not_offered_again_while_the_approval_is_on_its_way`
 15. [nest] A post you buy stays unlocked for you with no end date — `docs/goal/behavior/monetization.md` § Per-post pay-to-unlock
    - `tests/e2e-unified/tests/api/test_payments_webhook.py::test_a_bought_post_stays_unlocked_with_no_end_date`
 16. [app] With no tier of your own, a folder's paywall control is unavailable and tells you to create a tier first — `docs/goal/ui/folders.md` § Element IDs
@@ -73,13 +73,13 @@ Stamped 2026-10-01 at f5dec3d933.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.3-dev+a7a1fa35 standalone |
-| linux | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| windows | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| macos | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| ios | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
+| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
+| windows | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| macos | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| ios | ⚠ partial | 0.1.5-dev+61b844ca standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.3-dev+6e958b22 standalone |
+| tui | ✅ full | 0.1.4-dev+df282566 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -89,7 +89,7 @@ Stamped 2026-10-01 at f5dec3d933.
 | 3 | app | `tests/e2e-unified/tests/test_sell_post.py::test_sell_post_mints_an_unlock_tier_and_gates_the_post` | web (linux): passed, web (windows): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 3 | app | `tests/e2e-unified/tests/test_sell_post.py::test_sell_post_buyer_redeems_claim_and_unseals` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_sell_post.py::test_sell_post_teaser_price_and_self_serve_buy` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_sell_post.py::test_sell_post_existing_subscriber_reads_it_free` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): failed, ios (macos): failed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_sell_post.py::test_sell_post_existing_subscriber_reads_it_free` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): failed, ios (macos): failed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_feed_tips.py::test_a_tipped_post_shows_its_total_and_count` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_feed_tips.py::test_tips_with_no_readable_amount_show_the_count_and_no_total` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_feed_tips.py::test_the_attribution_window_names_every_tipper_it_was_given` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
@@ -105,7 +105,7 @@ Stamped 2026-10-01 at f5dec3d933.
 | 11 | app | `tests/e2e-unified/tests/test_paid_post_offers.py::test_a_sold_post_is_never_offered_as_a_tier_or_an_audience` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_paid_post_offers.py::test_a_sold_post_is_never_offered_as_a_tier_or_an_audience` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 13 | app | `tests/e2e-unified/tests/test_paid_post_offers.py::test_you_are_never_offered_your_own_sold_post` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 14 | app | (none) | — |
+| 14 | app | `tests/e2e-unified/tests/test_paid_post_offers.py::test_a_bought_post_is_not_offered_again_while_the_approval_is_on_its_way` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 15 | nest | `tests/e2e-unified/tests/api/test_payments_webhook.py::test_a_bought_post_stays_unlocked_with_no_end_date` | nest (linux): passed |
 | 16 | app | `tests/e2e-unified/tests/test_folder_paywall.py::test_folder_paywall_select_is_unavailable_without_a_tier` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 17 | nest | `tests/e2e-unified/tests/api/test_web_paywall.py::test_anonymous_visitor_pays_or_redeems_on_the_teaser` | nest (linux): passed |

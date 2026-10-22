@@ -91,6 +91,26 @@
                             Click="CopyProviderWebhookUrl_Click"
                             Content="{loc:Localize Key=profile/copy_id}" />
                 </Grid>
+                <!-- The sibling display for the paywall return door — the redirect to
+                     set in the provider's checkout settings, built on the web-site
+                     origin; names the missing public address when there is none. -->
+                <Grid ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" VerticalAlignment="Center"
+                               Text="{loc:Localize Key=subscriptions/return_url_label}" />
+                    <TextBox Grid.Column="1" x:Name="ProviderReturnUrlBox"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionProviderFormReturnUrl}"
+                             IsReadOnly="True" />
+                    <Button Grid.Column="2" x:Name="ProviderReturnUrlCopyButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionProviderFormReturnUrlCopyButton}"
+                            Click="CopyProviderReturnUrl_Click"
+                            IsEnabled="False"
+                            Content="{loc:Localize Key=profile/copy_id}" />
+                </Grid>
                 <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
                     <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionProviderFormCancel}"
                             Click="CancelProviderForm_Click"

@@ -325,9 +325,9 @@ def _launch_two_account_seat(switch_app, request, nest_instance, user_a, user_b)
             active=user_a["actor_id_hex"],
         )
         driver = create_driver("web")
-        driver.launch({"url": spa_url + "/app/"})
+        driver.launch({"url": spa_url + "/app/", "seed_credentials": seed})
         _auth_on_account_page(
-            driver, seed, bytes(user_a["signing_key"]).hex(), "a", user_a["actor_id_hex"], spa_url
+            driver, bytes(user_a["signing_key"]).hex(), "a", user_a["actor_id_hex"], spa_url
         )
         return driver
 

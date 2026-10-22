@@ -108,6 +108,27 @@ public final class AdminMailVM {
     /// in `snapshot.baselinePublishResult`.
     public func publishSpamBaseline() async { await dispatch(.publishSpamBaseline) }
 
+    /// The standing-publish switch — its own gesture and its own dispatch, off the
+    /// PERSISTED group, never a Spam-group draft (mail-spam.md § Cold start Path 2
+    /// → *Standing publish*).
+    public func setBaselineStandingPublish(_ enabled: Bool) async {
+        await dispatch(.setBaselineStandingPublish(enabled: enabled))
+    }
+
+    // MARK: - Mail health readout (read-only section + its two buttons)
+
+    /// A fresh blocklist self-check + diagnostics run, then a re-read of the
+    /// readout (mail-deliverability.md § The mail health readout).
+    public func recheckHealth() async { await dispatch(.recheckHealth) }
+
+    /// One press of a confirm button — the shared machine holds the same-button
+    /// two-click: the first press arms it (`snapshot.armed`), the second
+    /// dispatches the guarded action, and any re-read disarms. The view only
+    /// relabels the armed button; nothing is armed on the Swift side.
+    public func press(_ button: MailPolicyConfirm) async {
+        await dispatch(.press(button: button))
+    }
+
     // MARK: - Plumbing
 
     private func dispatch(_ action: MailPolicyAction) async {

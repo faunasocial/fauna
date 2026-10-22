@@ -504,9 +504,20 @@ impl StagedPair {
 
     /// [`SegmentPair::verify_against`] for the staged pair.
     pub fn verify_against(&self, advertised: &SegmentRef) -> Result<()> {
-        verify_dat_hash(&self.dat_blake3_hex, advertised)?;
-        verify_meta_hash(&self.meta_blake3_hex, advertised)
+        verify_pair_hashes(&self.dat_blake3_hex, &self.meta_blake3_hex, advertised)
     }
+}
+
+/// [`SegmentPair::verify_against`] over the two halves' BLAKE3s already taken
+/// (hex) — for a caller that hashed each half as it streamed it, such as a
+/// source nest sealing its own pair off disk.
+pub fn verify_pair_hashes(
+    dat_blake3_hex: &str,
+    meta_blake3_hex: &str,
+    advertised: &SegmentRef,
+) -> Result<()> {
+    verify_dat_hash(dat_blake3_hex, advertised)?;
+    verify_meta_hash(meta_blake3_hex, advertised)
 }
 
 /// The two open files a [`StagedPair`] is written through, a chunk at a time.
@@ -917,10 +928,14 @@ pub fn is_placement_serve_kind(tag: &str) -> bool {
 }
 
 /// The reserved set names — [`reserved_backup_set_name`] and its inverse
-/// [`parse_reserved_backup_set_name`] — live in `fauna_protocol::segments`
+/// [`parse_reserved_backup_set_name`], and the landing pair
+/// [`landing_set_name`] / [`parse_landing_set_name`] — live in `fauna_protocol::segments`
 /// since 2026-10-10, beside [`BACKUP_SET_KINDS`], for the same reason as
 /// [`BACKED_UP_KINDS`]; re-exported so every arm keeps its import path.
-pub use fauna_protocol::segments::{parse_reserved_backup_set_name, reserved_backup_set_name};
+pub use fauna_protocol::segments::{
+    landing_set_name, parse_landing_set_name, parse_reserved_backup_set_name,
+    reserved_backup_set_name,
+};
 
 /// This device's synced replica of a covered folder, read as the backup
 /// audit's covered-folder mirror plane population
@@ -1609,6 +1624,30 @@ mod tests {
                 "{name} must not parse as a folder mirror set"
             );
         }
+    }
+
+    /// A crashed pass's staged pair is removed once it is over a day old; a
+    /// younger one may be a concurrent pass's live transfer and is kept.
+    #[tokio::test]
+    async fn the_sweep_removes_a_stale_staged_pair_and_keeps_a_fresh_one() {
+        let staging = tempfile::tempdir().unwrap();
+        let stale = staging.path().join("stale");
+        let fresh = staging.path().join("fresh");
+        for dir in [&stale, &fresh] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("half.dat"), b"staged").unwrap();
+        }
+        let old = std::time::SystemTime::now()
+            - std::time::Duration::from_secs(STALE_STAGING_SECS + 3_600);
+        std::fs::File::open(&stale)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        sweep_stale_staging(staging.path()).await;
+
+        assert!(!stale.exists());
+        assert!(fresh.join("half.dat").exists());
     }
 
     /// The two axes stay disjoint: neither parser answers for the other's

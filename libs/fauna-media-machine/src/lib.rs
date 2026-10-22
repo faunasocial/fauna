@@ -52,7 +52,7 @@ pub use fauna_core::followed_media::{
     FollowedFetchError, FollowedFileEntry, FollowedMediaScope, FollowedMediaSource,
 };
 pub use folder_keys::{FolderKeyResolver, ResolvedCustody, ResolvedFolderKeys};
-pub use machine::{MediaMachine, MlsQuery};
+pub use machine::{FolderChannelOwners, MediaMachine, MlsQuery};
 #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
 pub use nest_api::{FakeMediaNestApi, MediaNestCall};
 pub use nest_api::{MediaApiError, MediaNestApi};

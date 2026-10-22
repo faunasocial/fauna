@@ -228,7 +228,9 @@ pub async fn register_core(
         _ => {}
     }
 
-    // Check handle not already taken.
+    // Check handle not already taken — as a handle, or as a mail address an
+    // exact alias, forwarder or list holds (one address, one owner:
+    // `mail-aliases.md` § Cross-user uniqueness).
     match state.db.resolve_handle(handle).await {
         Ok(Some(_)) => return Err(RegisterError::HandleTaken),
         Err(e) => {
@@ -236,6 +238,14 @@ pub async fn register_core(
             return Err(RegisterError::Internal("internal error".into()));
         }
         Ok(None) => {}
+    }
+    match state.db.alias_holds_handle(handle, &actor_bytes).await {
+        Ok(true) => return Err(RegisterError::HandleTaken),
+        Err(e) => {
+            tracing::error!("handle alias-holder check error: {e}");
+            return Err(RegisterError::Internal("internal error".into()));
+        }
+        Ok(false) => {}
     }
 
     // Check handle not in cooldown for a different actor.
@@ -463,7 +473,10 @@ pub async fn register_core(
         .await
     {
         let debug_msg = format!("{e:?}");
-        if debug_msg.contains("UNIQUE") {
+        if debug_msg.contains("UNIQUE")
+            || e.downcast_ref::<crate::db::mail_aliases::HandleHeldByAlias>()
+                .is_some()
+        {
             return Err(RegisterError::HandleTaken);
         }
         tracing::error!("create user error: {e}");

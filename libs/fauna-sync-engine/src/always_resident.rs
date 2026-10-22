@@ -120,8 +120,9 @@ pub fn rescan_interval() -> Duration {
 /// `adopted_rescan_ms`) to pin that a seat launched with a
 /// `FAUNA_E2E_RESCAN_MS` value really runs at it — the pin the removed headless
 /// daemon's applied-row line used to carry, and without which the cadence went dead
-/// config twice unnoticed. `folder_r` is the already-redacted folder name.
-pub fn log_rescan_armed(folder_r: &str, interval: Duration) {
+/// config twice unnoticed. `folder` is the plaintext folder name; it is redacted here.
+pub fn log_rescan_armed(folder: &str, interval: Duration) {
+    let folder_r = fauna_core::log_redact::log_folder_name(folder);
     tracing::info!(
         rescan_interval_ms = u64::try_from(interval.as_millis()).unwrap_or(u64::MAX),
         "{folder_r}: rescan tick armed"
@@ -129,9 +130,10 @@ pub fn log_rescan_armed(folder_r: &str, interval: Duration) {
 }
 
 /// The resident root's pending-download pass
-/// ([`SyncEngine::materialize_placeholder_rows`]), logged. `folder_r` is the
-/// already-redacted folder name.
-async fn materialize_placeholder_rows(engine: &SyncEngine, folder_r: &str) {
+/// ([`SyncEngine::materialize_placeholder_rows`]), logged. `folder` is the
+/// plaintext folder name; it is redacted here.
+async fn materialize_placeholder_rows(engine: &SyncEngine, folder: &str) {
+    let folder_r = fauna_core::log_redact::log_folder_name(folder);
     match engine.materialize_placeholder_rows().await {
         Ok(0) => {}
         Ok(n) => tracing::info!(fetched = n, "{folder_r}: pending placeholders downloaded"),
@@ -230,13 +232,14 @@ pub async fn reseal_predecessor_sealed(engine: &SyncEngine, folder: &str) {
 /// under a retired set nonce re-signed onto the live one. First of the start
 /// passes, so the re-seal pass behind it reads heads under the live nonce.
 pub async fn rerecord_under_live_nonce(engine: &SyncEngine, folder: &str) {
+    let folder_r = fauna_core::log_redact::log_folder_name(folder);
     match engine.rerecord_under_live_nonce().await {
         Ok(0) => {}
         Ok(n) => {
-            tracing::info!("folder {folder}: re-recorded {n} head(s) under the set's live nonce")
+            tracing::info!("folder {folder_r}: re-recorded {n} head(s) under the set's live nonce")
         }
         Err(e) => tracing::error!(
-            "folder {folder}: re-record under the live nonce failed (retries next engine \
+            "folder {folder_r}: re-record under the live nonce failed (retries next engine \
              start): {e}"
         ),
     }
@@ -255,13 +258,14 @@ pub async fn rerecord_under_live_nonce(engine: &SyncEngine, folder: &str) {
 /// ([`SyncEngine::prebind_owed_rows`] — `encryption-at-rest.md` § Readable
 /// classes → *Who may move a plaintext head*).
 pub async fn reseal_pending_under_current(engine: &SyncEngine, folder: &str) {
+    let folder_r = fauna_core::log_redact::log_folder_name(folder);
     match engine.reseal_pending_under_current().await {
         Ok(0) => {}
         Ok(n) => tracing::info!(
-            "folder {folder}: re-sealed {n} pre-bind file(s) under the current content key"
+            "folder {folder_r}: re-sealed {n} pre-bind file(s) under the current content key"
         ),
         Err(e) => tracing::error!(
-            "folder {folder}: pre-bind re-seal pass failed (retries next engine start): {e}"
+            "folder {folder_r}: pre-bind re-seal pass failed (retries next engine start): {e}"
         ),
     }
 }
@@ -884,6 +888,49 @@ async fn next_connected(
     }
 }
 
+/// The sibling registry's next admission — pending forever with no registry;
+/// `None` once the registry is gone (the caller parks the arm).
+async fn next_admission(rx: &mut Option<tokio::sync::watch::Receiver<u64>>) -> Option<()> {
+    let Some(rx) = rx.as_mut() else {
+        return std::future::pending().await;
+    };
+    rx.changed().await.ok()
+}
+
+/// One sibling row pull ([`SyncEngine::pull_sibling_changes`]) — after every
+/// nest pull, so a sibling's copy of a row the nest just confirmed is already
+/// current, and on each admission. Best-effort: a failed pass is retried by
+/// the next trigger.
+async fn pull_siblings(engine: &SyncEngine, folder: &str) {
+    let folder_r = fauna_core::log_redact::log_folder_name(folder);
+    match engine.pull_sibling_changes().await {
+        Ok(report) if report.rows > 0 || report.dropped > 0 => {
+            tracing::debug!(folder = %folder_r, ?report, "sibling row pull");
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("sibling row pull ({folder_r}): {e:#}"),
+    }
+}
+
+/// One *Free up space* sweep's tally ([`EngineCommand::FreeLocationSpace`]) —
+/// the engine-side form of the IPC `FreeSpaceRun`, which the host projects it
+/// to. Lives as long as the host keeps it: derived, never stored.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FreeSpaceTally {
+    /// The sweep is still walking the location.
+    pub running: bool,
+    /// Files whose bytes were given back.
+    pub freed_files: u64,
+    /// Their recorded sizes.
+    pub freed_bytes: u64,
+    /// Files the dehydration gate kept: this device may hold the only copy (a
+    /// change the nest has not recorded, or an own record in a metadata-only
+    /// folder).
+    pub kept_unsynced: u64,
+    /// Files kept because they are pinned.
+    pub kept_pinned: u64,
+}
+
 /// A command a host routes INTO a running resident engine over its per-folder
 /// channel — the invoke-and-reply sibling of the wake nudge (fire-and-forget).
 /// Defined in the shared crate so every resident host (the per-user agent
@@ -925,6 +972,18 @@ pub enum EngineCommand {
     /// by definition and refuses.
     FreeSpace {
         rel: String,
+        reply: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
+    },
+    /// *Free up space* for the whole location — the location-grain verb
+    /// (`on-demand-files.md` § The free-up-space gesture where the OS offers
+    /// none): every file with bytes on this device goes down the same road one
+    /// [`Self::FreeSpace`] takes, one file per turn of the loop, so an open
+    /// waits for at most one file's proof. Replies `Ok` once the sweep is
+    /// accepted (a press while one runs joins it); the outcome accrues in
+    /// `tally`, which the host reads back. The on-demand loop answers it; a
+    /// resident root refuses.
+    FreeLocationSpace {
+        tally: Arc<std::sync::Mutex<FreeSpaceTally>>,
         reply: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
     },
     /// Pin (`true` — *always keep on this device*: a cloud-only file hydrates
@@ -989,9 +1048,11 @@ pub async fn answer_engine_command(engine: &SyncEngine, cmd: EngineCommand) {
             let _ =
                 reply.send(ingest_share_page(engine, &proven_actor_hex, &rows, spool_dir).await);
         }
-        // The on-demand loop intercepts both before they reach this answer; a
+        // The on-demand loop intercepts all three before they reach this answer; a
         // resident root has every file on its disk and no pin to keep.
-        EngineCommand::FreeSpace { reply, .. } | EngineCommand::SetPinned { reply, .. } => {
+        EngineCommand::FreeSpace { reply, .. }
+        | EngineCommand::FreeLocationSpace { reply, .. }
+        | EngineCommand::SetPinned { reply, .. } => {
             let _ = reply.send(Err(anyhow::anyhow!(
                 "this folder keeps every file on this device (always-resident): there is \
                  nothing to free and nothing to pin"
@@ -1212,7 +1273,7 @@ pub async fn run_watch_loop(
     // used to strand.
     let _ = LocalWriteHost::converge(&*engine, &folder).await;
 
-    log_rescan_armed(&folder_r, rescan_interval);
+    log_rescan_armed(&folder, rescan_interval);
     let mut rescan_tick = tokio::time::interval(rescan_interval);
     rescan_tick.tick().await; // consume the immediate first tick
 
@@ -1260,18 +1321,22 @@ pub async fn run_watch_loop(
     // ones. It used to be `None` without `p2p-share`, which parked the arm
     // forever and left the mode with no healing trigger but the rescan tick.
     let mut conn_rx = Some(engine.control_plane().connection_state());
+    // The sibling registry's admission signal — subscribed before the first
+    // sibling pull below, so an admission landing during it is still seen.
+    let mut admissions = engine.sibling_admissions();
     if let Err(e) = engine.pull_remote_changes().await {
         tracing::error!("initial pull ({folder_r}): {e}");
     }
+    pull_siblings(&engine, &folder).await;
     // A `Placeholder` row on a resident root is a pending download, never a
     // delete — what an on-demand→always flip leaves behind, past the anchor the
     // pull reads from (`on-demand-files-linux.md` § Linux FUSE binding, the flips
     // rule). After the pull, so a head it just moved is the one fetched; the
     // tick below retries what failed.
-    materialize_placeholder_rows(&engine, &folder_r).await;
+    materialize_placeholder_rows(&engine, &folder).await;
     // Third-party deposits parked while this seat was down — after the pull,
     // so an item another seat already adopted is found landed, not re-adopted.
-    adopt_parked_deposits(&engine, &folder_r).await;
+    adopt_parked_deposits(&engine, &folder).await;
     // The once-per-start corpus passes — AFTER the first pull, so every local
     // row a re-seal reads is the fold of everything the nest held at start. A
     // pass run ahead of it re-sealed whatever head this seat last saw: a seat
@@ -1347,8 +1412,9 @@ pub async fn run_watch_loop(
                 if let Err(e) = engine.pull_remote_changes().await {
                     tracing::error!("pull ({folder_r}): {e}");
                 }
-                materialize_placeholder_rows(&engine, &folder_r).await;
-                adopt_parked_deposits(&engine, &folder_r).await;
+                pull_siblings(&engine, &folder).await;
+                materialize_placeholder_rows(&engine, &folder).await;
+                adopt_parked_deposits(&engine, &folder).await;
             }
 
             // Off-cadence roster refresh: the control plane just reached
@@ -1393,6 +1459,7 @@ pub async fn run_watch_loop(
                         if let Err(e) = engine.pull_remote_changes().await {
                             tracing::error!("reconnect pull ({folder_r}): {e}");
                         }
+                        pull_siblings(&engine, &folder).await;
                         engine.refresh_share_writer_roster().await;
                     }
                     // The control plane is gone for good. Park the arm rather
@@ -1410,9 +1477,21 @@ pub async fn run_watch_loop(
                 if let Err(e) = engine.pull_remote_changes().await {
                     tracing::error!("nudge pull ({folder_r}): {e}");
                 }
+                pull_siblings(&engine, &folder).await;
                 // A deposit's nudge reaches the owner's seats alone; the pass
                 // is one list call when nothing is parked.
-                adopt_parked_deposits(&engine, &folder_r).await;
+                adopt_parked_deposits(&engine, &folder).await;
+            }
+
+            // A sibling was admitted (a new or replaced channel): pull its rows
+            // now rather than a tick from now — with no nest answering, this
+            // and the tick are the only triggers (`p2p-shared-set-build.md`
+            // § Build design — the same-account row leg, decision 4).
+            admitted = next_admission(&mut admissions) => {
+                match admitted {
+                    Some(()) => pull_siblings(&engine, &folder).await,
+                    None => admissions = None,
+                }
             }
 
             // Invoke-and-reply command from the host (the pipe server's caller
@@ -1433,11 +1512,12 @@ pub async fn run_watch_loop(
 /// root flips to the platform's in-sync mark. Best-effort: a failed pass is
 /// retried by the next one, and nothing is retired that is not durable.
 pub async fn adopt_parked_deposits(engine: &SyncEngine, folder: &str) -> Vec<String> {
+    let folder_r = fauna_core::log_redact::log_folder_name(folder);
     match engine.adopt_deposits().await {
         Ok(done) => {
             if done != crate::engine::DepositAdoption::default() {
                 tracing::info!(
-                    folder,
+                    folder = %folder_r,
                     adopted = done.adopted,
                     already_landed = done.already_landed,
                     deferred = done.deferred,
@@ -1447,7 +1527,7 @@ pub async fn adopt_parked_deposits(engine: &SyncEngine, folder: &str) -> Vec<Str
             done.landed
         }
         Err(e) => {
-            tracing::warn!("deposit adoption ({folder}): {e:#}");
+            tracing::warn!("deposit adoption ({folder_r}): {e:#}");
             Vec::new()
         }
     }

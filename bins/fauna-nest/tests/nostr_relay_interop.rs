@@ -1153,3 +1153,98 @@ async fn a_derived_reply_reads_back_with_marked_tags_in_a_real_client() {
     );
     anon.disconnect().await;
 }
+
+/// Read relay frames off a raw socket, skipping the connect-time `AUTH`
+/// challenge, until `want` accepts one (or 5 s pass).
+async fn next_frame_where(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    want: impl Fn(&serde_json::Value) -> bool,
+) -> serde_json::Value {
+    use futures_util::StreamExt;
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("relay reply within 5s")
+            .expect("stream open")
+            .expect("ws ok");
+        let v: serde_json::Value = serde_json::from_str(msg.into_text().unwrap().as_str()).unwrap();
+        if v[0] != "AUTH" && want(&v) {
+            return v;
+        }
+    }
+}
+
+/// The per-connection NIP-42 AUTH budget (`UNAUTHED_AUTH_PER_MINUTE`, 6) at the
+/// raw wire: six AUTH events carrying a bad challenge get the ordinary
+/// `auth: invalid signature or challenge` refusal; the seventh is refused
+/// loudly with the `rate-limited:` prefix before any Schnorr verify.
+#[tokio::test]
+async fn auth_past_its_per_connection_budget_is_rate_limited() {
+    use fauna_bridge_nostr::types::{Tag, UnsignedEvent};
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let relay = spawn_relay().await;
+    link_custodial(&relay.state, "actor-auth-budget").await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(&relay.url).await.unwrap();
+    let kp = Keypair::generate();
+
+    for attempt in 1..=7u32 {
+        let event = kp.sign_event(UnsignedEvent {
+            pubkey: kp.public_key_bytes(),
+            created_at: 1_700_000_000 + u64::from(attempt),
+            kind: 22242,
+            tags: vec![
+                Tag(vec!["relay".into(), relay.url.clone()]),
+                Tag(vec!["challenge".into(), "not-the-issued-challenge".into()]),
+            ],
+            content: String::new(),
+        });
+        let frame = serde_json::json!(["AUTH", event]).to_string();
+        ws.send(WsMessage::Text(frame.into())).await.unwrap();
+        let reply = next_frame_where(&mut ws, |v| v[0] == "OK").await;
+        assert_eq!(reply[2], false, "attempt {attempt}: {reply}");
+        let expected = if attempt <= 6 {
+            "auth: invalid signature or challenge"
+        } else {
+            "rate-limited: too many AUTH attempts"
+        };
+        assert_eq!(reply[3], expected, "attempt {attempt}: {reply}");
+    }
+}
+
+/// The unauthenticated message budget (`UNAUTHED_MSGS_PER_MINUTE`, 60) at the
+/// raw wire: 60 REQs are served (one EOSE each), the 61st is `CLOSED` with the
+/// full `rate-limited:` text. Every REQ reuses one subscription id, so the
+/// separate 32-subscription cap can never be what answers.
+#[tokio::test]
+async fn unauthed_req_past_the_message_budget_is_closed_rate_limited() {
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let relay = spawn_relay().await;
+    link_custodial(&relay.state, "actor-msg-budget").await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(&relay.url).await.unwrap();
+
+    for _ in 0..61 {
+        ws.send(WsMessage::Text(r#"["REQ","budget",{}]"#.into()))
+            .await
+            .unwrap();
+    }
+    let mut eose = 0;
+    let closed = loop {
+        let v = next_frame_where(&mut ws, |v| v[0] == "EOSE" || v[0] == "CLOSED").await;
+        if v[0] == "CLOSED" {
+            break v;
+        }
+        eose += 1;
+    };
+    assert_eq!(
+        eose, 60,
+        "the first 60 REQs are served, got {eose} before {closed}"
+    );
+    assert_eq!(closed[1], "budget");
+    assert_eq!(closed[2], "rate-limited: too many messages, slow down");
+}

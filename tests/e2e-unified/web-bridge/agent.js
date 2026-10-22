@@ -118,7 +118,7 @@ window.__faunaTestAgent = {
     const nav = { stack, modal: null };
 
     // --- The `barrier` self-test's observable (convention 14) ---
-    // Published by `$lib/barrier-e2e` through the app's automation surface, so
+    // Published by `#lib/barrier-e2e` through the app's automation surface, so
     // it exists only in a test-capable build (convention 15) — hence the guard
     // rather than a bare call.
     const barrierProbe =
@@ -132,7 +132,7 @@ window.__faunaTestAgent = {
         : null;
     // --- Session generation (convention 14's negative-assert observable) ---
     // Teardowns this seat has INITIATED. Backed by `sessionStorage` in
-    // `$lib/generation-e2e`, deliberately: web's teardown is a document
+    // `#lib/generation-e2e`, deliberately: web's teardown is a document
     // navigation, so an in-memory counter would reset to 0 across exactly the
     // relaunch this key exists to detect — a false PASS, not a missing signal.
     const sessionGeneration =
@@ -144,7 +144,7 @@ window.__faunaTestAgent = {
     // outcome as ID-less prose and then NAVIGATES AWAY (`performSwitch`), so by
     // the time a journey can read anything, the document that held the report is
     // gone — which is why this rides `sessionStorage` rather than a store, the
-    // same reasoning `$lib/generation-e2e.ts` records for the teardown counter.
+    // same reasoning `#lib/generation-e2e.ts` records for the teardown counter.
     // tui's twin is `App::succession_sweep`, declared to outlive
     // `clear_session()` at the account switch.
     //
@@ -191,7 +191,7 @@ window.__faunaTestAgent = {
     // above: `{started: 0, completed: 0}` means "this tab has run no cycle yet",
     // `null` means "this app has no leg"
     // (`fauna_e2e_agent::CONV_RECEIVE_CYCLES_KEY`). `exit` is `"stalled"` while
-    // a pass has outrun the pump's ceiling (`$lib/receive-pump`), else `null` —
+    // a pass has outrun the pump's ceiling (`#lib/receive-pump`), else `null` —
     // the frame checker's `receive-loop-alive` reads it.
     const convReceiveCycles =
       typeof window.__fauna_convReceiveCycles === "function"
@@ -242,7 +242,7 @@ window.__faunaTestAgent = {
         : null;
     // --- New-message OS banners fired, + the diff-tick counters (the witness) ---
     // `{started, completed, fired: [{thread_id, label}]}` off
-    // `$lib/message-banner`'s log — the web read of
+    // `#lib/message-banner`'s log — the web read of
     // `fauna_e2e_agent::MESSAGE_BANNERS_KEY`. Absent hook ⇒ null, and here that
     // refusal carries more weight than anywhere above: the assertions this key
     // serves are mostly negative, so an empty list from a tab with no leg would
@@ -252,7 +252,7 @@ window.__faunaTestAgent = {
         ? window.__fauna_messageBanners()
         : null;
     // --- The transport's state + the gate's verdict on it (the barrier) ---
-    // `{state, online}` off `$lib/e2e-automation`'s accessor, which reads the
+    // `{state, online}` off `#lib/e2e-automation`'s accessor, which reads the
     // `connectionStatus` store and asks the `connectionIsOnline` wasm face.
     // Absent hook ⇒ null, the same loud refusal as above — and note the
     // boolean is NOT derived here: the offline word list has exactly one
@@ -405,6 +405,15 @@ window.__faunaTestAgent = {
       // The quote carrier: an empty-commentary quote's card text is only its
       // folded embed, so a test finds it by the post it quotes. tui's key.
       quoted_post_id: p.quoted_post_id ?? null,
+      // The author face (feed.md § The read model → *The remote author's
+      // byline*): null until the author's resolve has answered, then the
+      // face — an empty one when the author shows none. tui's key.
+      author_display: p.author_display
+        ? {
+            handle: p.author_display.handle ?? null,
+            display_name: p.author_display.display_name ?? null,
+          }
+        : null,
       // Every link preview in the body with its state, in body order (the
       // shared `RenderDocument::link_previews` — render-model.md § D4), so a
       // test can wait for a preview to FAIL before reading "no card". Omitted
@@ -470,7 +479,7 @@ window.__faunaTestAgent = {
     // `connection_reports` (every report the transport published vs. how many
     // changed its word) and `painted_errors` (every error surface a painted
     // frame showed), both counted by the natives' shared Rust in the core wasm
-    // chunk (`$lib/loud-surface-e2e`). Absent hook, or a bundle with no leg ⇒
+    // chunk (`#lib/loud-surface-e2e`). Absent hook, or a bundle with no leg ⇒
     // null, which the journeys refuse loudly rather than read as zero
     // (`fauna_e2e_agent::{CONNECTION_REPORTS_KEY, PAINTED_ERRORS_KEY}`).
     const connectionReports =
@@ -498,19 +507,32 @@ window.__faunaTestAgent = {
       account_pump_cycles: accountPumpCycles,
       serving_enablement: servingEnablement,
       message_banners: messageBanners,
-      // Convention 17's `region-block-never-silent` counts (`$lib/region.svelte`):
+      // Convention 17's `region-block-never-silent` counts (`#lib/region.svelte`):
       // OMITTED when the SPA has no hook, which the invariant reads as n/a.
       ...(typeof window.__fauna_regionBlockRender === "function"
         ? { region_block_render: window.__fauna_regionBlockRender() }
         : {}),
-      // The `enable_caldav_mailbox` command's outcome (`$lib/mail-caldav-e2e`),
+      // The nest's twin (`nest-block-never-silent`, `#lib/nestRules.svelte`), and
+      // the one-line changed notice naming the nest (`nest-rules.md` § Acceptance
+      // at joining, and a change of rules — it adds no element id): null while
+      // there is none.
+      ...(typeof window.__fauna_nestBlockRender === "function"
+        ? { nest_block_render: window.__fauna_nestBlockRender() }
+        : {}),
+      ...(typeof window.__fauna_wardRuleDocumentRules === "function"
+        ? { ward_rule_document_rules: window.__fauna_wardRuleDocumentRules() }
+        : {}),
+      ...(typeof window.__fauna_nestRulesChangedNotice === "function"
+        ? { nest_rules_changed_notice: window.__fauna_nestRulesChangedNotice() }
+        : {}),
+      // The `enable_caldav_mailbox` command's outcome (`#lib/mail-caldav-e2e`),
       // in linux's exact wire shape (`{ok: true}` / `{ok: false, error}`) — the
       // key `helpers/mail_dedicated_nest.py` polls. OMITTED until a run
       // completes, which is how the helper tells "not finished" from "failed".
       ...(window.__fauna_caldav_mailbox_reply
         ? { caldav_mailbox_reply: window.__fauna_caldav_mailbox_reply }
         : {}),
-      // The `serve_enable_folder` command's outcome (`$lib/conversations`), in
+      // The `serve_enable_folder` command's outcome (`#lib/conversations`), in
       // tui's exact wire shape (`{ok: true, served_sets}` / `{ok: false,
       // error}`) — the key `helpers/webdav_roundtrip.py` polls, omitted until a
       // run completes.
@@ -663,7 +685,7 @@ window.__faunaTestAgent = {
       // - Hard reload reloads every module fresh — wasm boilerplate
       //   reinitializes default(), the machine constructs cleanly.
       // The cost is ~200ms per test reset. Worth it for determinism.
-      // Drop the nest dial override too ($lib/api). Clearing it is as
+      // Drop the nest dial override too (#lib/api). Clearing it is as
       // load-bearing as installing it: the override outlives the wizard that
       // installed it, so a stale one would point the NEXT test's launch at a
       // torn-down nest (`fauna_launch_machine::dial` — the same reason the Rust
@@ -733,7 +755,7 @@ window.__faunaTestAgent = {
         // `set_state`.
         clearAccountRegistry();
         // ...and this TAB's own pin (+ its nest-url sibling, `sessionStorage`,
-        // `$lib/tabPin.ts`) — the registry sweep above only ever touched
+        // `#lib/tabPin.ts`) — the registry sweep above only ever touched
         // `localStorage`, so a tab pinned to the OUTGOING actor (by an earlier
         // real page load) would otherwise keep naming it for the rest of the
         // tab's life: `accountsSessionMaterial()` then fails closed for every
@@ -750,7 +772,7 @@ window.__faunaTestAgent = {
       // there. The patch's device id lands in the account's own per-actor
       // slot, which is the ONE value `devices.md` § This-device marker needs
       // to do both jobs (the id the app registers with is the id the marker
-      // compares against — `$lib/device-id`'s `getDeviceId(actorId)` reads it
+      // compares against — `#lib/device-id`'s `getDeviceId(actorId)` reads it
       // back; without it web minted its own on first read, mirroring tui's `media::adopt_device_id_hex` + linux's
       // `sync::adopt_device_id_hex`).
       const current = readRegistryActive();

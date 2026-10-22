@@ -24,7 +24,7 @@ import javax.inject.Singleton
  * and written by BOTH `WebSettingsVM` (the `web-settings` Published-posts
  * section) and `FeedVM` (the feed ⋯-menu), so the two surfaces can never
  * disagree about a creator's address. The android twin of linux's
- * `crate::settings::web` thread-local cache / web's `$lib/web-publish`
+ * `crate::settings::web` thread-local cache / web's `#lib/web-publish`
  * Svelte store.
  */
 @Singleton

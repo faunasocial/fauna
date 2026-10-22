@@ -129,7 +129,7 @@ async fn validate_recipient_rejects_then_resolves_after_member_creates_alias() {
 // intermediate" — flipping `disabled = true` MUST be undoable, else the
 // nest can be driven into a client-causable unrecoverable state (a
 // disabled `<handle>@<domain>` would 550-bounce all inbound forever with
-// no client-side recovery — the live `test@example.com` manual-testing
+// no client-side recovery — the live nest's admin-address manual-testing
 // bug). So `fauna.bridges.enable_account_alias` is the reverse of revoke,
 // and the canonical `<handle>@<domain>` exact alias (primary mailbox +
 // AUTH identity) is protected from `revoke` / `delete` with

@@ -1,4 +1,4 @@
-import { base } from "$app/paths";
+import { asset } from "$app/paths";
 import { toArrayBufferView } from "./bytes";
 
 export interface C2paResult {
@@ -30,7 +30,7 @@ async function getC2pa(): Promise<C2paSdk> {
   if (!c2paInstance) {
     const { createC2pa } = await import("@contentauth/c2pa-web");
     c2paInstance = await createC2pa({
-      wasmSrc: `${base}/c2pa.wasm`,
+      wasmSrc: asset('c2pa.wasm'),
     });
   }
   return c2paInstance;

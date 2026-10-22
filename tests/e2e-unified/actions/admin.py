@@ -4,6 +4,7 @@ import time
 from typing import TYPE_CHECKING
 
 from drivers.http_bridge import SelectOptionNotOffered
+from helpers.indexed_rows import row_texts
 
 if TYPE_CHECKING:
     from drivers.base import PlatformDriver
@@ -188,19 +189,43 @@ class AdminActions:
         """All soft-deleted domain names on admin-dns (`admin-dns-removed-domain-name`)."""
         return [t or "" for t in self.driver.get_texts("admin-dns-removed-domain-name")]
 
-    def remove_domain(self, domain: str) -> None:
-        """Soft-delete the local mail domain named `domain` from admin-dns.
+    def press_domain_remove(self, domain: str) -> None:
+        """Press the remove control on the row of the active domain `domain`.
 
-        Resolves the domain's row by name: the per-row
-        `admin-dns-domain-remove-button` index aligns with `admin-dns-domain-name`
-        because the client renders a remove button on EVERY row (just insensitive
-        on the primary — `apps/fauna-linux/src/views/admin.rs`, "present on every
-        row so the e2e index aligns"). A single click dispatches
-        `fauna.bridges.remove_local_domain` (no confirm dialog; soft-delete with a
-        30-day restore window). Async round-trip — poll `dns_domain_names()` /
-        `dns_removed_domain_names()` for the result rather than asserting here."""
+        Resolves the row by name: the per-row `admin-dns-domain-remove-button`
+        index aligns with `admin-dns-domain-name` because the app renders a
+        remove button on EVERY row (just insensitive on the primary). On an app
+        with the remove-confirm dialog (``mail-multidomain.md`` § Removing a
+        local domain) the press opens it and removes nothing; on an app not yet
+        lifted onto it the press removes."""
         idx = self.dns_domain_names().index(domain)  # ValueError if absent — fail loud
         self.driver.click("admin-dns-domain-remove-button", index=idx)
+
+    def remove_confirm_open(self) -> bool:
+        """Is the remove-confirm dialog (``admin-dns-domain-remove-confirm-modal``)
+        open? It opens on the same frame as the press — no wait. Read as
+        presence, never visibility, so ``assert not`` is exact on every app."""
+        return not self.driver.is_absent("admin-dns-domain-remove-confirm-modal")
+
+    def confirm_domain_remove(self) -> None:
+        """Press the open remove-confirm dialog's confirm — the act that removes."""
+        self.driver.click("admin-dns-domain-remove-confirm-button")
+
+    def cancel_domain_remove(self) -> None:
+        """Press the open remove-confirm dialog's cancel — nothing is removed."""
+        self.driver.click("admin-dns-domain-remove-cancel-button")
+
+    def remove_domain(self, domain: str) -> None:
+        """Soft-delete the local mail domain named `domain` from admin-dns: press
+        its row's remove control, then the confirm the press opens (soft-delete
+        with a 30-day restore window). An app not yet lifted onto the confirm
+        removes on the press itself and opens no dialog, so the confirm is
+        pressed only when the dialog is there — that branch goes when all seven
+        apps carry the dialog. Async round-trip — poll `dns_domain_names()` /
+        `dns_removed_domain_names()` for the result rather than asserting here."""
+        self.press_domain_remove(domain)
+        if self.remove_confirm_open():
+            self.confirm_domain_remove()
         time.sleep(1)
 
     # --- Primary-domain rename on admin-dns (mail-primary-domain-rename.md § UX) ---
@@ -344,6 +369,15 @@ class AdminActions:
         / expiring (`tls-certificates.md` § C.4). A pure read — renders on every
         app, web included."""
         return [t or "" for t in self.driver.get_texts("admin-dns-cert-status")]
+
+    def cert_issuance_errors(self) -> list[str]:
+        """The deployment-level failing-order lines
+        (`admin-dns-cert-issuance-error`): one per nest-placed ACME order whose
+        last attempt failed, worded by the shared formatter around the CA's own
+        text (`tls-certificates.md` § Keeping the cert alive, *The admin sees
+        why issuance is failing*). Empty when no order is failing. A pure read —
+        every app, web included."""
+        return [t or "" for t in self.driver.get_texts("admin-dns-cert-issuance-error")]
 
     def cert_issue_button_count(self) -> int:
         """How many per-domain get/renew-certificate buttons
@@ -741,20 +775,57 @@ class AdminActions:
     def report_dismiss(self, index: int = 0) -> None:
         self.driver.click("admin-nest-report-dismiss-button", index=index)
 
+    # ── Admin block of a reported item (admin-nest; moderation.md § Admin block
+    #    of a reported item) — the Block verb on a queue row, the one armed
+    #    confirm it shares with Unblock, and the blocked list below the queue. ──
+
+    def report_block(self, index: int = 0) -> None:
+        """Arm the block confirm for a queue row. An account report paints no
+        block button, so ``index`` is the button's own occurrence."""
+        self.driver.click("admin-nest-report-block-button", index=index)
+
+    def block_confirm_summary(self) -> str:
+        """The armed block/unblock confirm's text (names verb + item + reason)."""
+        return self.driver.get_text("admin-nest-report-block-confirm-summary")
+
+    def block_confirm(self) -> None:
+        """Dispatch the armed block or unblock (`fauna.moderation.admin_block`)."""
+        self.driver.click("admin-nest-report-block-confirm-button")
+
+    def block_cancel(self) -> None:
+        """Disarm the block confirm, touching nothing."""
+        self.driver.click("admin-nest-report-block-cancel-button")
+
+    def blocked_rows(self) -> list[str]:
+        """Every blocked item's text (`admin-nest-blocked-item`, flat indexed)."""
+        return [
+            self.driver.get_text("admin-nest-blocked-item", index=i)
+            for i in range(self.driver.count("admin-nest-blocked-item"))
+        ]
+
+    def blocked_index(self, needle: str) -> int:
+        """The index of the first blocked row whose text contains ``needle``, or -1."""
+        for i, text in enumerate(self.blocked_rows()):
+            if needle in text:
+                return i
+        return -1
+
+    def unblock(self, index: int = 0) -> None:
+        """Arm the unblock confirm for the blocked row at ``index``."""
+        self.driver.click("admin-nest-blocked-unblock-button", index=index)
+
     # ── Outside-app sign-in keys (admin-nest; authorization-server.md § The
     #    issuer → Two rotation arms) — the nest-held OAuth issuer key set and
     #    its refresh-token secret. Callers navigate_nest() and poll
-    #    `admin-nest-oauth-key-item-0` rendered first (the navigate_nest
+    #    `admin-nest-oauth-key-item` row 0 rendered first (the navigate_nest
     #    contract: controls load async). ──
 
     def oauth_key_rows(self) -> list[str]:
-        """Every served key's line, signer first (`admin-nest-oauth-key-item-{n}`,
-        the literal per-row ids). Empty while the set has not answered — the
-        `admin-nest-oauth-key-reason` line carries why."""
-        rows = []
-        while self.driver.count(f"admin-nest-oauth-key-item-{len(rows)}") > 0:
-            rows.append(self.driver.get_text(f"admin-nest-oauth-key-item-{len(rows)}"))
-        return rows
+        """Every served key's line, signer first (the indexed
+        `admin-nest-oauth-key-item`, read in either id form while the apps
+        move — `helpers.indexed_rows`). Empty while the set has not answered —
+        the `admin-nest-oauth-key-reason` line carries why."""
+        return row_texts(self.driver, "admin-nest-oauth-key-item")
 
     def oauth_rotate(self) -> None:
         """The ordinary rotation — dispatches on the press, no confirm
@@ -863,6 +934,96 @@ class AdminActions:
         self.driver.set_state({"nav": {"stack": [{"view": "admin"}]}})
         self.navigate_custody_hosting()
 
+    # ── admin-mail-reports (dmarc-reporting.md § Admin pane summary surface) ──
+
+    def open_mail_reports(self) -> None:
+        """Open the Mail reports page by its rail row (``admin-nav-row
+        [admin-mail-reports]``) when the app paints one, else by the nav patch.
+        The page reads the window on open; poll `mail_reports_answered()`."""
+        row = "admin-nav-row[admin-mail-reports]"
+        if self.driver.count(row) > 0:
+            self.driver.click(row)
+        else:
+            self.driver.set_state({
+                "nav": {
+                    "stack": [
+                        {"view": "admin"},
+                        {"view": "admin", "id": "admin-mail-reports"},
+                    ]
+                },
+            })
+
+    def mail_reports_answered(self) -> bool:
+        """True once a window read has ANSWERED: the totals paint only then —
+        on the empty path too — so an unanswered page and an empty one stay
+        apart (ui.yaml `admin-mail-reports`)."""
+        return self.driver.count("admin-mail-reports-messages") > 0
+
+    def refresh_mail_reports(self) -> None:
+        self.driver.click("admin-mail-reports-refresh-button")
+
+    def select_mail_reports_window(self, days: int) -> None:
+        """Pick the report window by its raw day count (7 / 30 / 90)."""
+        self.driver.select("admin-mail-reports-window-select", str(days))
+
+    def mail_reports_window(self) -> str:
+        return self.driver.get_text("admin-mail-reports-window-select")
+
+    def select_mail_reports_domain(self, domain: str) -> None:
+        """Pick one local domain, or "" for every domain."""
+        self.driver.select("admin-mail-reports-domain-select", domain)
+
+    def mail_reports_messages_text(self) -> str:
+        return self.driver.get_text("admin-mail-reports-messages")
+
+    def mail_reports_alignment_text(self) -> str:
+        return self.driver.get_text("admin-mail-reports-alignment")
+
+    def mail_reports_dispositions_text(self) -> str:
+        return self.driver.get_text("admin-mail-reports-dispositions")
+
+    def mail_reports_empty_shown(self) -> bool:
+        return self.driver.count("admin-mail-reports-empty") > 0
+
+    def mail_reports_sources(self) -> list[tuple[str, str]]:
+        """The top-source rows as rendered: (source IP, messages text)."""
+        return list(zip(
+            self.driver.get_texts("admin-mail-reports-source-ip"),
+            self.driver.get_texts("admin-mail-reports-source-count"),
+        ))
+
+    def mail_reports_senders(self) -> list[tuple[str, str]]:
+        """The top-sender rows as rendered: (header-From domain, messages text)."""
+        return list(zip(
+            self.driver.get_texts("admin-mail-reports-sender-domain"),
+            self.driver.get_texts("admin-mail-reports-sender-count"),
+        ))
+
+    def mail_report_index(self, submitter_fragment: str) -> int | None:
+        """The index of the first report row whose submitter contains
+        `submitter_fragment`, or None. Reports are nest-wide, so a test finds
+        ITS row by its own reporting peer, never by position."""
+        for i, s in enumerate(self.driver.get_texts("admin-mail-reports-report-submitter")):
+            if submitter_fragment in s:
+                return i
+        return None
+
+    def mail_report_row(self, index: int) -> dict[str, str]:
+        """Row `index`'s rendered leaves."""
+        return {
+            leaf: self.driver.get_text(f"admin-mail-reports-report-{leaf}", index=index)
+            for leaf in ("submitter", "domain", "period", "messages", "pass")
+        }
+
+    def open_mail_report(self, index: int) -> None:
+        self.driver.click("admin-mail-reports-report-view-button", index=index)
+
+    def mail_report_raw(self) -> str | None:
+        """The opened report's XML, or None while no report is open."""
+        if self.driver.count("admin-mail-reports-raw") == 0:
+            return None
+        return self.driver.get_text("admin-mail-reports-raw")
+
     def hosting_registry_answered(self) -> bool:
         """True once the nest has ANSWERED the registry read.
 
@@ -967,6 +1128,30 @@ class AdminActions:
             time.sleep(0.3)
         return self.driver.count("log-entry") >= minimum
 
+    # --- Logs: the admin audit log section (admin.md § The admin audit log on
+    # admin-logs) — below the log lines, loaded with the page ---
+
+    def audit_entries(self) -> list[str]:
+        """The `admin-audit-entry` rows, newest first (when · admin · action ·
+        target, composed by `fauna_client_admin::audit_log_view`)."""
+        return self.driver.get_texts("admin-audit-entry")
+
+    def audit_integrity_text(self) -> str:
+        """The `admin-audit-integrity-status` line — whether the chain checks
+        out through the entries shown."""
+        if self.driver.count("admin-audit-integrity-status") == 0:
+            return ""
+        return self.driver.get_text("admin-audit-integrity-status")
+
+    def audit_more_enabled(self) -> bool:
+        """Whether `admin-audit-more-button` can page older entries (disabled
+        once the whole record is shown)."""
+        return self.driver.is_enabled("admin-audit-more-button")
+
+    def audit_more(self) -> None:
+        """Page older audit entries (`admin-audit-more-button`)."""
+        self.driver.click("admin-audit-more-button")
+
     def service_status_text(self, service: str) -> str:
         """The `admin-service-{service}-status` badge text (e.g. Enabled/Disabled)."""
         return self.driver.get_text(f"admin-service-{service}-status") or ""
@@ -1031,6 +1216,11 @@ class AdminActions:
             self.driver.count("admin-calendar-caldav-port-input") > 0
             and self.driver.count("admin-calendar-caldav-port-save-button") > 0
         )
+
+    def caldav_port_help_text(self) -> str:
+        """The CalDAV-port field's help line (`admin-calendar-caldav-port-help-text`):
+        the port applies only to a nest with no domain (admin.md § 8 Calendar)."""
+        return self.driver.get_text("admin-calendar-caldav-port-help-text") or ""
 
     def set_caldav_port(self, value: str) -> None:
         """Clear + type into the `admin-calendar-caldav-port-input` (no save).
@@ -1283,18 +1473,39 @@ class AdminActions:
         (no settle sleep — convention 14)."""
         self.driver.click("admin-nest-web-app-origin-save-button")
 
+    # --- Nest page update channel (nest/update-channel.md § The UI; every
+    #     sentence is fauna_client_admin::admin_update_channel_view) ---
+
+    def update_channel_status_text(self) -> str:
+        """The `admin-nest-update-channel-status` line — what the box follows
+        now and when a change takes effect."""
+        return self.driver.get_text("admin-nest-update-channel-status") or ""
+
+    def select_update_channel(self, channel: str) -> None:
+        """Click `admin-nest-update-channel-{channel}-radio` (stable/test/dev) —
+        local, nothing reaches the nest until the save."""
+        assert channel in ("stable", "test", "dev"), f"unknown update channel {channel!r}"
+        self.driver.click(f"admin-nest-update-channel-{channel}-radio")
+
+    def save_update_channel(self) -> None:
+        """Click `admin-nest-update-channel-save-button` —
+        `fauna.admin.update_channel.set`. Async; callers poll the status line
+        (no settle sleep — convention 14)."""
+        self.driver.click("admin-nest-update-channel-save-button")
+
     # --- Nest page host-OS-maintenance indicator + restart-now
     #     (installers/vps.md § Host OS Maintenance § 4) ---
 
     def os_maintenance_status_present(self) -> bool:
         """Whether the host-OS-maintenance status line (`nest-os-maintenance-status`)
         rendered on the admin-nest page. Always present (it reads the os_* fields off
-        `fauna.setup.status`; defaults to 'OS up to date')."""
+        `fauna.setup.status`; 'OS status not reported by this host' when the nest
+        reads no host-status file)."""
         return self.driver.count("nest-os-maintenance-status") > 0
 
     def os_maintenance_status_text(self) -> str:
-        """The host-OS-maintenance status line text — 'OS up to date' /
-        'Security updates pending' / 'Restart pending — …'."""
+        """The host-OS-maintenance status line text — 'OS status not reported by
+        this host' / 'OS up to date' / 'Security updates pending' / 'Restart pending — …'."""
         return self.driver.get_text("nest-os-maintenance-status")
 
     def os_updates_count_present(self) -> bool:
@@ -1354,6 +1565,14 @@ class AdminActions:
         """Clear + type into an `admin-mail-*` raw-integer entry (no save)."""
         self.driver.clear_and_type(element_id, value)
 
+    def save_mail_microsoft_registration(self, client_id: str, tenant: str) -> None:
+        """Type the deployment's own Microsoft registration into its two
+        `admin-mail` fields and press `admin-mail-microsoft-save-button` (both
+        empty clears it back to the default)."""
+        self.driver.clear_and_type("admin-mail-microsoft-client-id-input", client_id)
+        self.driver.clear_and_type("admin-mail-microsoft-tenant-input", tenant)
+        self.driver.click("admin-mail-microsoft-save-button")
+
     def save_mail_spam(self) -> None:
         """Click the Spam/inbound-perimeter Save button (full PUT via
         `fauna.bridges.put_spam_policy`; async — callers poll the outcome)."""
@@ -1361,13 +1580,42 @@ class AdminActions:
         time.sleep(1)
 
     def publish_spam_baseline(self) -> None:
-        """Click the deployment-baseline publish button
-        (`admin-mail-publish-spam-baseline-button` → the shared
-        `MailPolicyAction::PublishSpamBaseline` → `fauna.bridges.publish_spam_baseline`).
-        The reply is stashed client-side (no page refresh), so callers poll the
-        result text rather than a read twin. Async — callers poll the outcome."""
+        """Publish the deployment baseline, through its confirm where the app
+        has one (`mail-spam.md` § Cold start step 1). The first press of
+        `admin-mail-publish-spam-baseline-button` either publishes (an app still
+        on one click — the reply lands in the result text) or only arms the
+        same-button confirm (`MailPolicyConfirm::PublishSpamBaseline` — the
+        button relabels to its confirm sentence); in the second case a second
+        press publishes. The reply is stashed client-side (no page refresh), so
+        callers poll the result text rather than a read twin."""
+        from helpers.waiting import wait_until
+        from i18n.strings import S
+
+        before = self.publish_spam_baseline_result()
+        self.press_publish_spam_baseline()
+        confirm = S.admin.mail_page.publish_spam_baseline_confirm
+        try:
+            # Either outcome ends the wait; neither is asserted here — a slow
+            # one-click publish is still the caller's to poll for.
+            wait_until(
+                lambda: self.publish_spam_baseline_text() == confirm
+                or self.publish_spam_baseline_result() != before,
+                15.0,
+            )
+        except AssertionError:
+            pass
+        if self.publish_spam_baseline_text() == confirm:
+            self.press_publish_spam_baseline()
+
+    def press_publish_spam_baseline(self) -> None:
+        """One press of `admin-mail-publish-spam-baseline-button` — on an app
+        with the same-button confirm, the first arms and the second publishes."""
         self.driver.click("admin-mail-publish-spam-baseline-button")
-        time.sleep(1)
+
+    def publish_spam_baseline_text(self) -> str:
+        """The publish button's label: its resting label, or the confirm
+        sentence while a first press holds it armed."""
+        return self.driver.get_text("admin-mail-publish-spam-baseline-button") or ""
 
     def publish_spam_baseline_result(self) -> str:
         """The deployment-baseline publish outcome text
@@ -1424,6 +1672,23 @@ class AdminActions:
         self.driver.click("admin-mail-alias-save-button")
         time.sleep(1)
 
+    def toggle_mail_dmarc_ruf_publish(self) -> None:
+        """Flip the `admin-mail-dmarc-ruf-publish-toggle` draft — the forensic-report
+        opt-in. Local until `save_mail_dmarc` (an in-group toggle, not a dispatch)."""
+        self.driver.click("admin-mail-dmarc-ruf-publish-toggle")
+
+    def select_mail_dmarc_fo_mode(self, tag: str) -> None:
+        """Pick the `fo=` tag (`1` / `0` / `d` / `s`) on
+        `admin-mail-dmarc-fo-mode-select` — a raw-value picker; local until Save."""
+        self.driver.select("admin-mail-dmarc-fo-mode-select", tag)
+
+    def save_mail_dmarc(self) -> None:
+        """Click the DMARC-reports Save button (full PUT via
+        `fauna.bridges.put_dmarc_policy`; the group reads back via the
+        `get_dmarc_policy` twin, not `get_mail_config`; async — callers poll the
+        outcome)."""
+        self.driver.click("admin-mail-dmarc-save-button")
+
     def toggle_mail_enabled(self) -> None:
         """Flip the `admin-mail-enabled-toggle` (dispatches
         `fauna.bridges.set_mail_enabled`; async — callers poll the outcome)."""
@@ -1475,6 +1740,22 @@ class AdminActions:
         link rather than opening it)."""
         return self.driver.get_attr("admin-mail-health-delist-link", "href") or ""
 
+    def mail_health_sender_dashboards_note(self) -> str:
+        """The text of `admin-mail-health-sender-dashboards-note`, the static
+        help under the readout ('' while it is not rendered)."""
+        if self.driver.count("admin-mail-health-sender-dashboards-note") == 0:
+            return ""
+        return self.driver.get_text("admin-mail-health-sender-dashboards-note") or ""
+
+    def mail_health_sender_dashboard_targets(self) -> list[str]:
+        """Where each `admin-mail-health-sender-dashboard-link` leads, in
+        occurrence order (`[gmail]`, `[outlook]`): the URL every app publishes
+        on the link as its `href` attribute, as for the delist link."""
+        return [
+            href or ""
+            for href in self.driver.get_attrs("admin-mail-health-sender-dashboard-link", "href")
+        ]
+
     def recheck_mail_health(self) -> None:
         """Click `admin-mail-health-recheck-button` (the shared
         `MailPolicyAction::RecheckHealth`: a blocklist self-check + a diagnostics
@@ -1495,6 +1776,27 @@ class AdminActions:
         """The second click — dispatches the shared
         `MailPolicyAction::ResetWarmup` (`fauna.bridges.outbound_warmup_reset`)."""
         self.driver.click("admin-mail-health-warmup-reset-button")
+
+    def mail_list_unsubscribe_secret_rotate_text(self) -> str:
+        """The unsubscribe-secret rotate button's label — it relabels to the
+        confirm sentence once armed (the same-button two-click; no confirm id)."""
+        return self.driver.get_text("admin-mail-list-unsubscribe-secret-rotate-button") or ""
+
+    def press_mail_list_unsubscribe_secret_rotate(self) -> None:
+        """One press of `admin-mail-list-unsubscribe-secret-rotate-button`: the
+        first arms the confirm, the second rotates
+        (`fauna.bridges.rotate_list_unsubscribe_secret`). Async — callers poll."""
+        self.driver.click("admin-mail-list-unsubscribe-secret-rotate-button")
+
+    def mail_forward_srs_secret_rotate_text(self) -> str:
+        """The forwarding-secret rotate button's label (relabels once armed)."""
+        return self.driver.get_text("admin-mail-forward-srs-secret-rotate-button") or ""
+
+    def press_mail_forward_srs_secret_rotate(self) -> None:
+        """One press of `admin-mail-forward-srs-secret-rotate-button`: the first
+        arms the confirm, the second rotates (`fauna.bridges.rotate_srs_secret`).
+        Async — callers poll."""
+        self.driver.click("admin-mail-forward-srs-secret-rotate-button")
 
     def dashboard_has_card(self, title: str) -> bool:
         """Check if a dashboard stat card with the given title is visible."""
@@ -1570,6 +1872,16 @@ class AdminActions:
         persisted values."""
         self.driver.click(
             "admin-settings-tier-save-button", scope=f"admin-settings-tier-item[{index}]"
+        )
+
+    def delete_tier(self, *, index: int) -> None:
+        """Delete a tier definition via `admin-settings-tier-delete-button`
+        (`fauna.admin.tiers.delete`), scoped to `admin-settings-tier-item[index]`.
+        No confirm dialog: on success the page refetches `tiers.list` and the row
+        is gone; the nest's refusal (tier in use, or `free`) shows on
+        `error-message`."""
+        self.driver.click(
+            "admin-settings-tier-delete-button", scope=f"admin-settings-tier-item[{index}]"
         )
 
     # --- Settings: defining a new tier (admin.md § 3 — `admin-settings-tier-add-*`) ---
@@ -1827,7 +2139,8 @@ class AdminActions:
     #     public-mode.md § Registration & Identity; user-approved IDs 2026-08-15) ---
 
     def admit_user(self, actor_hex: str, handle: str | None = None,
-                   tier: str = "free", guardian: str | None = None) -> None:
+                   tier: str = "free", guardian: str | None = None,
+                   age_band: str | None = None) -> None:
         """Admit a known actor id directly (one ``fauna.admin.users.create``
         call from the Admit section). ``handle=None`` leaves the handle field
         blank — the deliberate handle-less admission (`public-mode.md`
@@ -1839,13 +2152,21 @@ class AdminActions:
         ``admin-users-admit-guardian-select`` — the admitted account becomes
         supervised by that guardian (`family-safety.md` § The guardianship
         link, *Set at admission*). Requires a ``handle`` (the nest refuses a
-        supervised handle-less admission)."""
+        supervised handle-less admission).
+
+        ``age_band``, when given, is the option VALUE to select in
+        ``admin-users-admit-age-band-select`` (``u13`` | ``13-15`` | ``16-17`` |
+        ``18+``) — enabled only once a guardian is selected, so it is picked
+        after the guardian (`family-safety.md` § App surface → *Age-band
+        surfaces*)."""
         self.driver.clear_and_type("admin-users-admit-actor-input", actor_hex)
         if handle is not None:
             self.driver.clear_and_type("admin-users-admit-handle-input", handle)
         self._pick_tier("admin-users-admit-tier-select", tier)
         if guardian is not None:
             self.driver.select("admin-users-admit-guardian-select", guardian)
+        if age_band is not None:
+            self.driver.select("admin-users-admit-age-band-select", age_band)
         # The page renders Admit always-enabled; what desensitizes it is the
         # app's offline gate (`account-offline-mutation.md` § The offline-mutation
         # contract, class 3 — `fauna.admin.users.create` is online-only) while
@@ -1876,6 +2197,25 @@ class AdminActions:
                        "pair and windows follow in their trickle-down legs",
                 tracked=" (Admit-section guardian "
                         "picker trickle-down)",
+            )
+
+    def require_admit_age_band_supported(self) -> None:
+        """Skip unless this app renders the Admit section's age-band select
+        (e2e convention 7 — the platform check lives in the action layer).
+        tui led; web, linux and android followed; the apple pair and
+        windows follow with their Admit guardian picker legs."""
+        d = self.driver
+        if not (d.is_tui() or d.is_web() or d.is_linux() or d.is_android()):
+            from helpers.app_surface import skip_unbuilt
+
+            skip_unbuilt(
+                self.driver,
+                surface="admin-users-admit-age-band-select",
+                detail="built on tui, web, linux and android; the apple "
+                       "pair and windows follow with their Admit guardian "
+                       "picker legs",
+                tracked=" (Admit-section age-band "
+                        "select trickle-down)",
             )
 
     def user_count(self) -> int:
@@ -2079,11 +2419,28 @@ class AdminActions:
         """Deadline-poll row ``index`` until its cut-off control shows the
         ``active`` side — the evict/cancel click's own caused transition
         (convention 14), in place of a fixed settle. Raises, self-diagnosing,
-        when the row never flips (convention 6)."""
+        when the row never flips (convention 6).
+
+        Polls the control the row flips TO, a positive read each pass: a
+        negative ``is_visible_scrolled`` runs web's whole scroll timeout on the
+        absent control (`PlatformDriver.is_visible_scrolled`). The refetch
+        rebuilds the row under the poll, so a scroll that caught the control
+        mid-rebuild (web: "Element is not attached to the DOM") reads as "not
+        yet" and the next pass looks again."""
+        control = "admin-users-cancel-eviction-button" if active else "admin-users-evict-button"
+        scope = f"user-row[{index}]"
+
+        def flipped() -> bool:
+            try:
+                return self.driver.is_visible_scrolled(control, scope=scope)
+            except RuntimeError as e:
+                if "not attached to the DOM" in str(e):
+                    return False
+                raise
+
         deadline = time.monotonic() + budget_s
-        while self.user_eviction_active(index) != active:
+        while not flipped():
             if time.monotonic() >= deadline:
-                control = "admin-users-cancel-eviction-button" if active else "admin-users-evict-button"
                 raise AssertionError(
                     f"row {index} never flipped to eviction_active={active} within {budget_s}s; "
                     f"{self.driver.diagnose(control)} "

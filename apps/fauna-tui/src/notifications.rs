@@ -26,8 +26,8 @@ use std::sync::Arc;
 use fauna_client::NestClient;
 use fauna_client_notifications::{
     NotificationDestination, NotificationText, NotificationsClient, notification_destination,
-    notification_text,
-    notifications::{NotifItem, NotifType},
+    notification_muted, notification_text,
+    notifications::{NotifItem, NotifType, is_security_notice_retained},
 };
 use fauna_i18n::strings::common as t;
 use tokio::sync::mpsc::UnboundedSender;
@@ -43,6 +43,10 @@ pub struct NotificationsState {
     nest: Option<Arc<NestClient>>,
     pub items: Vec<NotifItem>,
     pub unread: i64,
+    /// Rows the user revealed past their muted-word collapse — per-row and
+    /// session-local, the mute stays (`behavior/notifications.md` § Muted words
+    /// rule 3; the `crate::conversations` `revealed_muted` shape).
+    pub revealed_muted: std::collections::HashSet<i64>,
 }
 
 /// Build the page state at the post-auth hook and start the initial fetch
@@ -81,13 +85,21 @@ pub fn spawn_refresh(
     crate::app::spawn_nav_refresh!(nav_enter_op(state), tx, session_generation, Notifications);
 }
 
-/// The page's own gesture (`behavior/notifications.md` § User actions). Row
+/// The page's own gestures (`behavior/notifications.md` § User actions). Row
 /// activation is NOT here — it navigates to another page, so it rides
 /// [`crate::element::Gesture::OpenNotification`] and
 /// [`open_notification`], the `OpenSearchResult` shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     MarkAllRead,
+    /// `notification-dismiss[i]` — delete the row of this id (§ Retention
+    /// rule 2).
+    Dismiss(i64),
+    /// `notification-clear` — delete every row up to the newest one shown.
+    ClearAll,
+    /// `notification-muted-reveal-button[i]` — paint the collapsed row of this
+    /// id in full for the session (§ Muted words rule 3).
+    RevealMuted(i64),
 }
 
 impl Action {
@@ -97,6 +109,9 @@ impl Action {
         match self {
             // `notifications_mark_read(None)` — the whole-list form.
             Action::MarkAllRead => Some("fauna.notifications.mark_read"),
+            Action::Dismiss(_) => Some("fauna.notifications.dismiss"),
+            Action::ClearAll => Some("fauna.notifications.clear"),
+            Action::RevealMuted(_) => None,
         }
     }
 }
@@ -104,12 +119,36 @@ impl Action {
 /// Local half of a gesture → its network half (the feed/conversations split:
 /// the agent awaits the op, the keyboard spawns it).
 pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
+    if let Action::RevealMuted(id) = action {
+        // A render decision over rows already loaded: one set insert, no write.
+        app.notifications.revealed_muted.insert(id);
+        return None;
+    }
     let st = &app.notifications;
     match action {
         Action::MarkAllRead => Some(Op::MarkAllRead {
             nest: st.nest.clone()?,
         }),
+        Action::Dismiss(id) => Some(Op::Dismiss {
+            nest: st.nest.clone()?,
+            id,
+        }),
+        Action::ClearAll => Some(Op::Clear {
+            nest: st.nest.clone()?,
+            up_to: clear_up_to(&st.items)?,
+        }),
+        Action::RevealMuted(_) => None,
     }
+}
+
+/// The `up_to` a clear-all sends: the newest `created_at` the page has shown,
+/// so a row that arrived after the user looked survives (§ Retention rule 2).
+/// Every loaded row counts — a muted row collapsed in the paint is still on
+/// the page, and clear reaches it exactly as an open one (§ Muted words rule
+/// 4). `None` on an empty page, where the button is disabled: a clear with no
+/// bound would delete rows the user never saw.
+fn clear_up_to(items: &[NotifItem]) -> Option<i64> {
+    items.iter().map(|item| item.created_at).max()
 }
 
 /// The network half. Every variant refetches after its mutation — the reply is
@@ -118,6 +157,8 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
 pub enum Op {
     Refresh { nest: Arc<NestClient> },
     MarkAllRead { nest: Arc<NestClient> },
+    Dismiss { nest: Arc<NestClient>, id: i64 },
+    Clear { nest: Arc<NestClient>, up_to: i64 },
 }
 
 /// What an [`Op`] resolved to; folded back into the page by [`apply_outcome`].
@@ -147,6 +188,23 @@ impl Op {
                 let client = NotificationsClient::new(Arc::clone(&nest));
                 if let Err(e) = client.notifications_mark_read(None).await {
                     return Outcome::Failed(format!("mark read: {e}"));
+                }
+                fetch(nest).await
+            }
+            // A `fauna.notifications.retained` refusal (a security notice the
+            // greyed button let through at the window's edge) is an error like
+            // any other here: it lands on `error-message`, never a silent no-op.
+            Op::Dismiss { nest, id } => {
+                let client = NotificationsClient::new(Arc::clone(&nest));
+                if let Err(e) = client.notifications_dismiss(id).await {
+                    return Outcome::Failed(format!("dismiss: {e}"));
+                }
+                fetch(nest).await
+            }
+            Op::Clear { nest, up_to } => {
+                let client = NotificationsClient::new(Arc::clone(&nest));
+                if let Err(e) = client.notifications_clear(Some(up_to)).await {
+                    return Outcome::Failed(format!("clear: {e}"));
                 }
                 fetch(nest).await
             }
@@ -290,11 +348,14 @@ fn format_epoch_us(us: i64) -> String {
 }
 
 /// The ordered ui.yaml element list (page `notifications` + the
-/// `notification-row` component: `notification-item` + `notification-type-icon`,
-/// both FLAT indexed ids — one per row in registration order, like the
-/// conversations bubble children).
+/// `notification-row` component: `notification-type-icon`, `notification-item`
+/// and `notification-dismiss`, all FLAT indexed ids — one per row in
+/// registration order, like the conversations bubble children).
 pub fn elements(app: &App) -> Vec<Element> {
     let st = &app.notifications;
+    let now_us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_micros()).unwrap_or(i64::MAX));
     let mut out = vec![
         Element::label(ids::PAGE_HEADING, t::NOTIFICATIONS),
         Element::label(
@@ -306,6 +367,12 @@ pub fn elements(app: &App) -> Vec<Element> {
             t::MARK_ALL_READ,
             true,
             Gesture::Notifications(Action::MarkAllRead),
+        ),
+        Element::gesture_button(
+            ids::NOTIFICATION_CLEAR,
+            fauna_i18n::strings::notifications::CLEAR_ALL,
+            !st.items.is_empty(),
+            Gesture::Notifications(Action::ClearAll),
         ),
     ];
     for item in &st.items {
@@ -321,25 +388,59 @@ pub fn elements(app: &App) -> Vec<Element> {
             NotificationText::Verbatim(text) => text,
         };
         let when = format_epoch_us(item.created_at);
-        let text = if when.is_empty() {
-            summary
-        } else {
-            format!("{summary}  ·  {when}")
+        let stamped = |text: &str| {
+            if when.is_empty() {
+                text.to_string()
+            } else {
+                format!("{text}  ·  {when}")
+            }
         };
-        // Only render a control for a row this app can actually act on
-        // (`behavior/notifications.md` § Don't do these — a clickable row that
-        // silently does nothing reads as a broken button, not an honest "this
-        // one goes nowhere"). Which rows those are is the SHARED decision;
-        // `navigable` only subtracts what tui cannot reach right now.
-        out.push(match navigable(app, item) {
-            Some(dest) => Element::gesture_button(
-                ids::NOTIFICATION_ITEM,
-                text,
+        // The muted-word collapse (§ Muted words): the shared decision over the
+        // row's relayed text, against the one in-memory list the conversation
+        // collapse reads too. Painted like the conversation's collapsed bubble —
+        // placeholder and timestamp, its reveal, no tap target — and the
+        // dismiss below stays (rule 4: the mute is a render verb, never a delete
+        // guard).
+        if !st.revealed_muted.contains(&item.id)
+            && notification_muted(app.settings.muted_words.keywords(), item)
+        {
+            out.push(Element::label(
+                ids::NOTIFICATION_MUTED,
+                stamped(fauna_i18n::strings::muted_words::COLLAPSED),
+            ));
+            out.push(Element::gesture_button(
+                ids::NOTIFICATION_MUTED_REVEAL_BUTTON,
+                fauna_i18n::strings::muted_words::REVEAL,
                 true,
-                Gesture::OpenNotification(dest),
-            ),
-            None => Element::label(ids::NOTIFICATION_ITEM, text),
-        });
+                Gesture::Notifications(Action::RevealMuted(item.id)),
+            ));
+        } else {
+            let text = stamped(&summary);
+            // Only render a control for a row this app can actually act on
+            // (`behavior/notifications.md` § Don't do these — a clickable row that
+            // silently does nothing reads as a broken button, not an honest "this
+            // one goes nowhere"). Which rows those are is the SHARED decision;
+            // `navigable` only subtracts what tui cannot reach right now.
+            out.push(match navigable(app, item) {
+                Some(dest) => Element::gesture_button(
+                    ids::NOTIFICATION_ITEM,
+                    text,
+                    true,
+                    Gesture::OpenNotification(dest),
+                ),
+                None => Element::label(ids::NOTIFICATION_ITEM, text),
+            });
+        }
+        // Every row carries its dismiss — a muted row's collapsed paint keeps
+        // it too (§ Muted words rule 4: the mute is a render verb, never a
+        // delete guard). Greyed on a security notice inside its window by the
+        // shared predicate; the nest's refusal stays the authority.
+        out.push(Element::gesture_button(
+            ids::NOTIFICATION_DISMISS,
+            fauna_i18n::strings::notifications::DISMISS,
+            !is_security_notice_retained(&item.notif_type, item.created_at, now_us),
+            Gesture::Notifications(Action::Dismiss(item.id)),
+        ));
     }
     out
 }
@@ -368,20 +469,27 @@ mod tests {
         }
     }
 
-    /// ui.yaml `notifications`: heading, badge, mark-read; then one
-    /// (type-icon, item) pair per row in registration order — flat indexed ids.
+    /// ui.yaml `notifications`: heading, badge, mark-read, clear; then one
+    /// (type-icon, item, dismiss) triple per row in registration order — flat
+    /// indexed ids.
     #[test]
     fn the_page_paints_exactly_the_ui_yaml_elements() {
         let mut app = crate::app::tests::test_app();
-        let ids: Vec<String> = elements(&app).iter().map(|e| e.id.clone()).collect();
+        let els = elements(&app);
+        let ids: Vec<String> = els.iter().map(|e| e.id.clone()).collect();
         assert_eq!(
             ids,
             vec![
                 "page-heading",
                 "notification-count-badge",
-                "notification-mark-read"
+                "notification-mark-read",
+                "notification-clear",
             ],
-            "the empty page paints the three chrome elements and no rows"
+            "the empty page paints the four chrome elements and no rows"
+        );
+        assert!(
+            !els[3].enabled,
+            "clear-all on an empty page has no shown row to bound it"
         );
 
         app.notifications.items = vec![item("like", "A liked your post", false)];
@@ -394,13 +502,214 @@ mod tests {
                 "page-heading",
                 "notification-count-badge",
                 "notification-mark-read",
+                "notification-clear",
                 "notification-type-icon",
                 "notification-item",
+                "notification-dismiss",
             ],
         );
         assert!(els[1].text.contains('1'), "badge shows the nest count");
-        assert_eq!(els[3].text, "♥");
-        assert!(els[4].text.starts_with("A liked your post"));
+        assert!(els[3].enabled, "clear-all is live once a row is shown");
+        assert_eq!(els[4].text, "♥");
+        assert!(els[5].text.starts_with("A liked your post"));
+        assert_eq!(els[6].text, fauna_i18n::strings::notifications::DISMISS);
+    }
+
+    // ── Muted words (`behavior/notifications.md` § Muted words) ────────────
+
+    fn knock(id: i64, message: &str) -> NotifItem {
+        let mut row = item("knock", "a knock", false);
+        row.id = id;
+        row.body = Some(
+            fauna_protocol::LocalizedText::new("notifications.row_knock")
+                .with_arg("sender", "abcd1234")
+                .with_arg("message", message),
+        );
+        row
+    }
+
+    fn muting(app: &mut crate::app::App, word: &str) {
+        app.settings.muted_words.snapshot.keywords =
+            vec![fauna_core::data::MutedKeyword::new(word)];
+    }
+
+    /// A row whose relayed text carries a Hide word paints the placeholder, its
+    /// type icon, the reveal, the timestamp and its dismiss — never the sentence
+    /// and never the row's tap target; the other rows paint as before.
+    #[test]
+    fn a_muted_row_collapses_behind_its_reveal() {
+        use crate::element::Role;
+        let mut app = crate::app::tests::test_app();
+        muting(&mut app, "spoiler");
+        app.notifications.items = vec![knock(7, "a SPOILER inside"), knock(8, "hello")];
+        let els = elements(&app);
+        let ids: Vec<&str> = els.iter().skip(4).map(|e| e.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "notification-type-icon",
+                "notification-muted",
+                "notification-muted-reveal-button",
+                "notification-dismiss",
+                "notification-type-icon",
+                "notification-item",
+                "notification-dismiss",
+            ]
+        );
+        assert!(!els.iter().any(|e| e.text.contains("SPOILER")));
+        let reveal = els
+            .iter()
+            .find(|e| e.id == ids::NOTIFICATION_MUTED_REVEAL_BUTTON)
+            .unwrap();
+        assert!(matches!(
+            reveal.role,
+            Role::Button(Gesture::Notifications(Action::RevealMuted(7)))
+        ));
+        let dismiss = els
+            .iter()
+            .find(|e| e.id == ids::NOTIFICATION_DISMISS)
+            .unwrap();
+        assert!(matches!(
+            dismiss.role,
+            Role::Button(Gesture::Notifications(Action::Dismiss(7)))
+        ));
+    }
+
+    /// The reveal is one session-local set insert — no wire call — after which
+    /// the row paints in full.
+    #[test]
+    fn the_reveal_paints_the_row_in_full() {
+        let mut app = crate::app::tests::test_app();
+        muting(&mut app, "spoiler");
+        app.notifications.items = vec![knock(7, "a spoiler inside")];
+        assert_eq!(Action::RevealMuted(7).wire_kind(), None);
+        assert!(apply_local(&mut app, Action::RevealMuted(7)).is_none());
+        let els = elements(&app);
+        assert!(!els.iter().any(|e| e.id == ids::NOTIFICATION_MUTED));
+        assert!(
+            els.iter()
+                .any(|e| e.id == ids::NOTIFICATION_ITEM && e.text.contains("a spoiler inside"))
+        );
+    }
+
+    /// A security notice paints in full whatever its args carry (rule 5).
+    #[test]
+    fn a_security_notice_is_never_collapsed() {
+        let mut app = crate::app::tests::test_app();
+        muting(&mut app, "203.0.113");
+        let mut notice = item("security.notice", "sign-in from 203.0.113.7", false);
+        notice.body = Some(
+            fauna_protocol::LocalizedText::new("notifications.row_security_new_token")
+                .with_arg("ip", "203.0.113.7"),
+        );
+        app.notifications.items = vec![notice];
+        let els = elements(&app);
+        assert!(!els.iter().any(|e| e.id == ids::NOTIFICATION_MUTED));
+        assert!(
+            els.iter()
+                .any(|e| e.id == ids::NOTIFICATION_ITEM && e.text.contains("203.0.113.7"))
+        );
+    }
+
+    // ── The user's two deletes (`behavior/notifications.md` § Retention
+    //    rule 2) ────────────────────────────────────────────────────────────
+
+    fn now_us() -> i64 {
+        i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_micros(),
+        )
+        .unwrap()
+    }
+
+    /// Every row — whatever its type, read state or navigability — carries its
+    /// own dismiss, bound to its own id. The collapsed paint of a muted row,
+    /// when it lands, must keep this: § Muted words rule 4 says dismiss and
+    /// clear reach a collapsed row exactly as an open one.
+    #[test]
+    fn every_row_carries_a_dismiss_bound_to_its_own_id() {
+        use crate::element::Role;
+        let mut app = crate::app::tests::test_app();
+        let mut rows = vec![
+            item("like", "a", false),
+            item("reply", "b", true),
+            item("knock", "c", false),
+            item("test", "", false),
+        ];
+        for (n, row) in rows.iter_mut().enumerate() {
+            row.id = 10 + n as i64;
+        }
+        app.notifications.items = rows;
+        let painted = elements(&app);
+        let dismiss: Vec<&Element> = painted
+            .iter()
+            .filter(|e| e.id == ids::NOTIFICATION_DISMISS)
+            .collect();
+        assert_eq!(
+            dismiss.len(),
+            painted
+                .iter()
+                .filter(|e| e.id == ids::NOTIFICATION_ITEM)
+                .count()
+        );
+        for (n, el) in dismiss.iter().enumerate() {
+            assert!(el.enabled);
+            assert!(
+                matches!(el.role, Role::Button(Gesture::Notifications(Action::Dismiss(id))) if id == 10 + n as i64),
+                "row {n}'s dismiss must delete row {n}, got {:?}",
+                el.role
+            );
+        }
+    }
+
+    /// The security-notice window greys the dismiss through the SHARED
+    /// predicate: a notice inside its 14 days is greyed, one past it is the
+    /// user's to remove, and any other type is never greyed however young.
+    #[test]
+    fn the_dismiss_is_greyed_only_on_a_security_notice_inside_its_window() {
+        let mut app = crate::app::tests::test_app();
+        let hour = 3_600_000_000;
+        let mut young_notice = item("security.notice", "new sign-in", false);
+        young_notice.created_at = now_us() - hour;
+        let mut old_notice = item("security.notice", "old sign-in", false);
+        old_notice.created_at = now_us() - 15 * 24 * hour;
+        let mut young_like = item("like", "liked", false);
+        young_like.created_at = now_us() - hour;
+        app.notifications.items = vec![young_notice, old_notice, young_like];
+        let enabled: Vec<bool> = elements(&app)
+            .iter()
+            .filter(|e| e.id == ids::NOTIFICATION_DISMISS)
+            .map(|e| e.enabled)
+            .collect();
+        assert_eq!(enabled, vec![false, true, true]);
+    }
+
+    /// Clear-all is bounded by the newest row the page has shown — every
+    /// loaded row, so a muted (collapsed) row is swept like any other — and
+    /// sends nothing from an empty page.
+    #[test]
+    fn clear_all_is_bounded_by_the_newest_shown_row() {
+        assert_eq!(clear_up_to(&[]), None);
+        let mut rows = vec![item("like", "a", false), item("reply", "b", false)];
+        rows[0].created_at = 500;
+        rows[1].created_at = 900;
+        assert_eq!(clear_up_to(&rows), Some(900));
+    }
+
+    /// The offline gate reads each gesture's wire kind — the two deletes name
+    /// the two kinds the nest registers.
+    #[test]
+    fn the_deletes_issue_their_own_wire_kinds() {
+        assert_eq!(
+            Action::Dismiss(3).wire_kind(),
+            Some("fauna.notifications.dismiss")
+        );
+        assert_eq!(
+            Action::ClearAll.wire_kind(),
+            Some("fauna.notifications.clear")
+        );
     }
 
     /// The row paints the catalog sentence for its `body`, not the nest's
@@ -417,11 +726,11 @@ mod tests {
         app.notifications.items = vec![row];
         let els = elements(&app);
         assert!(
-            els[4]
+            els[5]
                 .text
                 .starts_with(&fauna_i18n::strings::notifications::row_like("alice")),
             "painted {:?}",
-            els[4].text
+            els[5].text
         );
     }
 
@@ -434,7 +743,7 @@ mod tests {
             "notifications.row_not_minted_yet",
         ));
         app.notifications.items = vec![row];
-        assert!(elements(&app)[4].text.starts_with("ENGLISH FALLBACK"));
+        assert!(elements(&app)[5].text.starts_with("ENGLISH FALLBACK"));
     }
 
     /// An empty server summary falls back to the shared default body — the
@@ -445,7 +754,7 @@ mod tests {
         app.notifications.items = vec![item("reply", "", true)];
         let els = elements(&app);
         assert!(
-            els[4]
+            els[5]
                 .text
                 .starts_with(fauna_i18n::strings::notifications::DEFAULT_BODY)
         );

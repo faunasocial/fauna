@@ -77,6 +77,14 @@ def _cfg_attrs_above(lines: list[str], i: int) -> str:
     the contiguous prelude and keep only the attribute lines, so the needle must
     appear inside a real cfg. Multi-line `#[cfg(all(...))]` bodies are kept: the
     walk collects lines, not balanced attributes.
+
+    The prelude also ends at the PREVIOUS item or statement — a code line ending
+    `;` or `}` — not only at a blank line. Otherwise a `lib.rs` that declares its
+    modules with no blank lines between them lends one `mod`'s gate to every
+    neighbour above or below it in the run: on 2026-10-15 that counted 564
+    production module files (`share_glue.rs` and `share_pump.rs` among them) as
+    flavor-gated, so the harness-env sweep skipped them whole. Stopping early can only
+    shrink the attribute text, never invent a gate.
     """
     out: list[str] = []
     j = i - 1
@@ -85,6 +93,8 @@ def _cfg_attrs_above(lines: list[str], i: int) -> str:
         if not stripped or stripped == "}":
             break
         if not stripped.startswith("//"):
+            if stripped.split("//", 1)[0].rstrip().endswith((";", "}")):
+                break
             out.append(stripped)
         j -= 1
     return "\n".join(reversed(out))
@@ -206,6 +216,27 @@ def test_the_harness_seed_exports_ship_in_no_app_flavor():
     assert built[1] == checked[1], (
         "`e2e-ffi-flavor-check` must type-check exactly the flavor `e2e-ffi` builds, or the "
         f"gate goes green over a library that no longer builds: {built[1]!r} vs {checked[1]!r}"
+    )
+
+
+def test_no_c_symbol_is_exported_outside_the_gated_cabi_module():
+    # The cfg on `pub mod cabi;` gates only what lives under it: a hand-written
+    # `extern "C"` export anywhere else in fauna-ffi ships in every flavor. A
+    # release `nm -D` measured 0 `fauna_*` symbols in the production flavor and
+    # all 71 cabi exports in the e2e one at 2026-10-15; this keeps the source
+    # shape that measurement relies on.
+    src = _REPO / "libs" / "fauna-ffi" / "src"
+    export = re.compile(r'no_mangle|export_name|extern\s+"C"\s+fn')
+    outside = [
+        f"{path.relative_to(_REPO)}:{n}"
+        for path in sorted(src.rglob("*.rs"))
+        if path != src / "cabi.rs" and (src / "cabi") not in path.parents
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if export.search(line)
+    ]
+    assert not outside, (
+        "fauna-ffi exports a C symbol outside the `e2e-harness`-gated `cabi` module, "
+        f"so it ships in every app flavor: {outside!r}"
     )
 
 
@@ -2064,6 +2095,12 @@ def _enclosing_scope_cfg_attrs(lines: list[str], i: int) -> str:
             header = _signature_header_above(lines, j)
             if header is not None:
                 return _cfg_attrs_above(lines, header)
+            # A gated block expression — `#[cfg(feature = "test-hooks")] { … }`
+            # (the nest's `required_client_subprotocol`): the block's own
+            # attribute is the gate; anything weaker keeps climbing outward.
+            block = _cfg_attrs_above(lines, j)
+            if _rust_cfg_is_flavor_gated(block):
+                return block
             depth = 0
         j -= 1
     return ""
@@ -2151,6 +2188,70 @@ fn download_dir(
     assert "cfg" not in _enclosing_scope_cfg_attrs(ungated, call), (
         "the climb borrowed a preceding sibling's gate for an ungated fn"
     )
+
+
+def test_contiguous_mod_decls_do_not_lend_each_other_a_gate():
+    """A `lib.rs` declaring its modules with no blank line between them must not
+    lend one `mod`'s flavor gate to its neighbours: fauna-sync-engine's run
+    (`share_probe` gated, `share_glue`/`share_pump` around it not) made the
+    sweep skip 564 production module files whole, and an ungated share knob
+    passed."""
+    decls = """\
+/// The driver.
+#[cfg(all(feature = "p2p-share", feature = "account-runtime"))]
+pub mod share_glue;
+/// The probe.
+#[cfg(all(
+    feature = "p2p-share",
+    any(debug_assertions, feature = "e2e-agent")
+))]
+pub mod share_probe;
+/// The pump.
+#[cfg(all(feature = "p2p-share", feature = "account-runtime"))]
+pub mod share_pump;
+""".splitlines()
+    gate = {
+        m.group(1): _rust_cfg_is_flavor_gated(_cfg_attrs_above(decls, i))
+        for i, line in enumerate(decls)
+        if (m := _RUST_MOD_DECL.match(line))
+    }
+    assert gate == {"share_glue": False, "share_probe": True, "share_pump": False}, gate
+
+
+def test_enclosing_scope_climb_honours_a_gated_block_expression():
+    """A read inside a `#[cfg(feature = "test-hooks")] { … }` block is gated by
+    the block's own attribute (the nest's `required_client_subprotocol`); the
+    climb must find it, and must not take an ungated block's neighbour's gate."""
+    gated = """\
+pub(crate) fn required_client_subprotocol() -> &'static str {
+    #[cfg(feature = "test-hooks")]
+    {
+        static OVERRIDE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        if let Some(token) = OVERRIDE
+            .get_or_init(|| std::env::var("FAUNA_TEST_REQUIRED_SUBPROTOCOL").ok())
+            .as_deref()
+        {
+            return token;
+        }
+    }
+    "fauna.v1"
+}
+""".splitlines()
+    call = next(i for i, line in enumerate(gated) if "FAUNA_TEST_REQUIRED_SUBPROTOCOL" in line)
+    assert _rust_cfg_is_flavor_gated(_enclosing_scope_cfg_attrs(gated, call))
+
+    ungated = """\
+fn knob() -> u64 {
+    #[cfg(feature = "test-hooks")]
+    let _probe = ();
+    {
+        let v = std::env::var("FAUNA_SOME_KNOB").ok();
+    }
+    0
+}
+""".splitlines()
+    call = next(i for i, line in enumerate(ungated) if "FAUNA_SOME_KNOB" in line)
+    assert not _rust_cfg_is_flavor_gated(_enclosing_scope_cfg_attrs(ungated, call))
 
 
 def test_production_env_allowlist_is_live_and_holds_no_harness_knob():

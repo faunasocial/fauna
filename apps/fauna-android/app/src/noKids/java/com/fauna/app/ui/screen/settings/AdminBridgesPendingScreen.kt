@@ -20,11 +20,13 @@ import androidx.navigation.NavController
 import com.fauna.app.R
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.navigation.LocalAppMessages
+import com.fauna.app.ui.util.FaunaGateVerdict
 import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.viewmodel.AdminBridgesPendingVM
 import uniffi.fauna_client_mail_settings.ApprovedBridgeView
 import uniffi.fauna_client_mail_settings.BridgeApprovalStatus
+import uniffi.fauna_client_mail_settings.BridgeConfirm
 import uniffi.fauna_client_mail_settings.PendingBridgeView
 import uniffi.fauna_client_mail_settings.bridgeDisplayName
 import social.fauna.generated.Ids
@@ -67,8 +69,10 @@ fun AdminBridgesPendingScreen(
         displayName = { role -> resolveLocalized(context, bridgeDisplayName(role)).orEmpty() },
         onBack = { navController.exitAdminToPrimary() },
         onApprove = vm::approve,
-        onReject = vm::reject,
-        onRotate = vm::rotate,
+        armed = snapshot.armed,
+        onArm = vm::arm,
+        onDisarm = vm::disarm,
+        onConfirm = vm::confirm,
         // The shared absolute-local timestamp door (`value-formatting.md` § Absolute
         // local timestamp display), injected so the stateless Content stays FFI-free
         // under Robolectric (the DevicesScreen `memberEnrolledAt` idiom).
@@ -85,8 +89,10 @@ fun AdminBridgesPendingContent(
     displayName: (String) -> String,
     onBack: () -> Unit,
     onApprove: (String, String) -> Unit,
-    onReject: (String) -> Unit,
-    onRotate: (String) -> Unit,
+    armed: BridgeConfirm?,
+    onArm: (BridgeConfirm) -> Unit,
+    onDisarm: () -> Unit,
+    onConfirm: () -> Unit,
     formatTimestamp: (Long) -> String = { "" },
 ) {
     Scaffold(
@@ -145,7 +151,10 @@ fun AdminBridgesPendingContent(
                         displayName = displayName,
                         formatTimestamp = formatTimestamp,
                         onApprove = onApprove,
-                        onReject = onReject,
+                        rejectOpen = (armed as? BridgeConfirm.Reject)?.pubkeyHex == bridge.pubkeyHex,
+                        onArm = onArm,
+                        onDisarm = onDisarm,
+                        onConfirm = onConfirm,
                     )
                 }
             }
@@ -166,7 +175,10 @@ fun AdminBridgesPendingContent(
                         working = working,
                         displayName = displayName,
                         formatTimestamp = formatTimestamp,
-                        onRotate = onRotate,
+                        rotateOpen = (armed as? BridgeConfirm.Rotate)?.pubkeyHex == bridge.pubkeyHex,
+                        onArm = onArm,
+                        onDisarm = onDisarm,
+                        onConfirm = onConfirm,
                     )
                 }
             }
@@ -182,9 +194,11 @@ private fun PendingBridgeCard(
     displayName: (String) -> String,
     formatTimestamp: (Long) -> String,
     onApprove: (String, String) -> Unit,
-    onReject: (String) -> Unit,
+    rejectOpen: Boolean,
+    onArm: (BridgeConfirm) -> Unit,
+    onDisarm: () -> Unit,
+    onConfirm: () -> Unit,
 ) {
-    var rejectArmed by remember { mutableStateOf(false) }
     val firstSeen = remember(bridge.firstSeenAt) { formatTimestamp(bridge.firstSeenAt.toLong()) }
 
     Card(modifier = Modifier.fillMaxWidth().testTag(Ids.ADMIN_BRIDGES_PENDING_CARD)) {
@@ -226,14 +240,12 @@ private fun PendingBridgeCard(
                 valueTestTag = "admin-bridges-pending-first-seen-at",
             )
 
+            val approveGate = faunaGate("fauna.bridges.approve_pending_bridge", enabled = !working)
             // A REJECT is a commit — the fourth time this fan-out has met that
             // shape, after the family transfer-decline, the paywall copy-link
-            // and the admit-queue deny. Refusing an admission is still a nest
-            // write, so it declares exactly as the approve beside it does.
-            val approveGate = faunaGate("fauna.bridges.approve_pending_bridge", enabled = !working)
-            // Gates whole, arm click included — the `mail-spam-reset-model-button`
-            // precedent: a two-click inline confirm has no opener and reveals
-            // nothing, so arming a control that cannot fire is theatre.
+            // and the admit-queue deny. The CONFIRM declares (as the rotate
+            // confirm below does); the opener stays live, because the warning it
+            // reveals is worth reading with no nest.
             val rejectGate = faunaGate("fauna.bridges.reject_pending_bridge", enabled = !working)
             Row(
                 modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
@@ -245,29 +257,24 @@ private fun PendingBridgeCard(
                     modifier = Modifier.testTag(Ids.ADMIN_BRIDGES_PENDING_APPROVE_BUTTON),
                 ) { Text(stringResource(R.string.admin_bridges_pending_approve)) }
                 OutlinedButton(
-                    onClick = {
-                        // Two-click inline confirm (mail-bridge-lifecycle.md
-                        // § rejection flow gates reject behind a confirm; no
-                        // separate ui.yaml element prescribed).
-                        if (rejectArmed) {
-                            rejectArmed = false
-                            onReject(bridge.pubkeyHex)
-                        } else {
-                            rejectArmed = true
-                        }
-                    },
-                    enabled = rejectGate.enabled,
+                    // Opens `admin-bridges-reject-confirm` through the shared machine's
+                    // sync arm (mail-bridge-lifecycle.md § Pending approval, the
+                    // rejection flow).
+                    onClick = { onArm(BridgeConfirm.Reject(pubkeyHex = bridge.pubkeyHex)) },
+                    enabled = !working,
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
                     modifier = Modifier.testTag(Ids.ADMIN_BRIDGES_PENDING_REJECT_BUTTON),
-                ) {
-                    Text(
-                        if (rejectArmed) stringResource(R.string.common_confirm)
-                        else stringResource(R.string.admin_bridges_pending_reject),
-                    )
-                }
+                ) { Text(stringResource(R.string.admin_bridges_pending_reject)) }
             }
-            // One reason for the pair — both close on the same verdict.
-            DisabledControlReasonText(approveGate.reason ?: rejectGate.reason)
+            if (rejectOpen) {
+                RejectBridgeConfirm(
+                    gate = rejectGate,
+                    onConfirm = onConfirm,
+                    onCancel = onDisarm,
+                )
+            } else {
+                DisabledControlReasonText(approveGate.reason)
+            }
         }
     }
 }
@@ -284,9 +291,11 @@ private fun ApprovedBridgeCard(
     working: Boolean,
     displayName: (String) -> String,
     formatTimestamp: (Long) -> String,
-    onRotate: (String) -> Unit,
+    rotateOpen: Boolean,
+    onArm: (BridgeConfirm) -> Unit,
+    onDisarm: () -> Unit,
+    onConfirm: () -> Unit,
 ) {
-    var rotateOpen by remember { mutableStateOf(false) }
     val approvedAt = remember(bridge.approvedAt) {
         bridge.approvedAt?.let { formatTimestamp(it.toLong()) } ?: "—"
     }
@@ -321,11 +330,8 @@ private fun ApprovedBridgeCard(
             if (rotateOpen) {
                 RotateBridgeConfirm(
                     working = working,
-                    onConfirm = {
-                        onRotate(bridge.pubkeyHex)
-                        rotateOpen = false
-                    },
-                    onCancel = { rotateOpen = false },
+                    onConfirm = onConfirm,
+                    onCancel = onDisarm,
                 )
             } else {
                 Row(
@@ -333,7 +339,7 @@ private fun ApprovedBridgeCard(
                     horizontalArrangement = Arrangement.End,
                 ) {
                     OutlinedButton(
-                        onClick = { rotateOpen = true },
+                        onClick = { onArm(BridgeConfirm.Rotate(pubkeyHex = bridge.pubkeyHex)) },
                         enabled = !working,
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
                         modifier = Modifier.testTag(Ids.ADMIN_BRIDGES_APPROVED_ROTATE_BUTTON),
@@ -341,6 +347,44 @@ private fun ApprovedBridgeCard(
                 }
             }
         }
+    }
+}
+
+/**
+ * The reject-pending-bridge confirm form (`admin-bridges-reject-confirm` element
+ * set), rendered inline under the pending card — the same shape as
+ * [RotateBridgeConfirm] (mail-bridge-lifecycle.md § Pending approval, the rejection
+ * flow). The CONFIRM declares `reject_pending_bridge` through [gate].
+ */
+@Composable
+private fun RejectBridgeConfirm(
+    gate: FaunaGateVerdict,
+    onConfirm: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp).testTag(Ids.ADMIN_BRIDGES_REJECT_CONFIRM),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(stringResource(R.string.admin_bridges_reject_title), style = MaterialTheme.typography.titleMedium)
+        Text(
+            stringResource(R.string.admin_bridges_reject_warning),
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.testTag(Ids.ADMIN_BRIDGES_REJECT_WARNING_TEXT),
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                onClick = onConfirm,
+                enabled = gate.enabled,
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                modifier = Modifier.testTag(Ids.ADMIN_BRIDGES_REJECT_CONFIRM_BUTTON),
+            ) { Text(stringResource(R.string.admin_bridges_reject_confirm)) }
+            OutlinedButton(
+                onClick = onCancel,
+                modifier = Modifier.testTag(Ids.ADMIN_BRIDGES_REJECT_CANCEL_BUTTON),
+            ) { Text(stringResource(R.string.admin_bridges_reject_cancel)) }
+        }
+        DisabledControlReasonText(gate.reason)
     }
 }
 
@@ -356,7 +400,7 @@ private fun RotateBridgeConfirm(
     onCancel: () -> Unit,
 ) {
     Column(
-        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp).testTag(Ids.ADMIN_BRIDGES_ROTATE_CONFIRM),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Text(stringResource(R.string.admin_bridges_rotate_title), style = MaterialTheme.typography.titleMedium)

@@ -80,7 +80,8 @@ SEED_MOUNT = "/run/fauna/claim-code-seed"
 
 @pytest.fixture(scope="module")
 def docker_image():
-    """Build the image once for this module (reuse-aware via FAUNA_REUSE_IMAGE)."""
+    """Resolve this tree's keyed image once for this module (``docker_build``
+    reuses it when present)."""
     docker_build(get_repo_root())
     yield IMAGE_TAG
 
@@ -104,7 +105,7 @@ def mounted_claim_nest(docker_image, tmp_path):
     cmd = [
         "docker", "run", "-d", *fence_cpuset_args(),
         "--name", name,
-        "-p", f"127.0.0.1:{port}:3000",
+        "-p", f"127.0.0.1:{port}:443",
         "-e", "FAUNA_MODE=public",
         "-e", "FAUNA_PORT=3000",
         # The cloud-init claim-code mount: read-only, staged OFF /data.
@@ -246,7 +247,7 @@ def env_claim_nest(docker_image):
     cmd = [
         "docker", "run", "-d", *fence_cpuset_args(),
         "--name", name,
-        "-p", f"127.0.0.1:{port}:3000",
+        "-p", f"127.0.0.1:{port}:443",
         "-e", "FAUNA_MODE=public",
         "-e", "FAUNA_PORT=3000",
         "-e", f"FAUNA_CLAIM_CODE={code}",

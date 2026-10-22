@@ -111,6 +111,8 @@ async fn subscribe(
     mlkem_encaps_key: Option<Vec<u8>>,
 ) -> Result<SubscribeReply, RpcError> {
     let req = SubscribeRequest {
+        home_nest_url: None,
+        intent: None,
         author_id: author,
         tier: TIER.to_string(),
         mlkem_encaps_key: mlkem_encaps_key.map(ByteBuf::from),

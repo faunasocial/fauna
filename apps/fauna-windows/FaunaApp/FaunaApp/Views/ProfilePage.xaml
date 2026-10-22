@@ -171,11 +171,15 @@
                 <StackPanel Orientation="Horizontal" Spacing="8">
                     <TextBox x:Name="PrivateLabelBox" MinWidth="220"
                              AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileLabelField}"
+                             TextChanged="PrivateLabel_TextChanged"
                              PlaceholderText="{loc:Localize Key=profile/private_label_add}" />
                     <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileLabelAddButton}"
                             Click="PrivateLabelAdd_Click"
                             Content="{loc:Localize Key=profile/private_label_add}" />
                 </StackPanel>
+                <!-- The completion rows (RenderPrivateSuggestions): flat-indexed,
+                     painted in code once something is typed. -->
+                <StackPanel x:Name="PrivateLabelSuggestions" Spacing="2" />
                 <Button x:Name="PrivateSaveButton"
                         AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfilePrivateSaveButton}"
                         Style="{StaticResource AccentButtonStyle}"

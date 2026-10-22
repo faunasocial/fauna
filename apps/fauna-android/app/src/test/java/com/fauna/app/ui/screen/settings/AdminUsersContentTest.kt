@@ -160,7 +160,7 @@ class AdminUsersContentTest {
         onNextPage: () -> Unit = {},
         onPrevPage: () -> Unit = {},
         onSaveRegistration: (FfiRegistrationMode, String, Boolean) -> Unit = { _, _, _ -> },
-        onAdmitUser: (String, String, String, ByteArray?) -> Unit = { _, _, _, _ -> },
+        onAdmitUser: (String, String, String, ByteArray?, String?) -> Unit = { _, _, _, _, _ -> },
         // FFI-free stub for the shared `admin_user_row_controls` decision — the
         // real screen injects `com.fauna.ffi.adminUserRowControls`, which Robolectric
         // can't load. Default = an active user (evict + suspend, no restore); tests
@@ -316,7 +316,7 @@ class AdminUsersContentTest {
         var admitted: Triple<String, String, String>? = null
         val actorHex = "a".repeat(64)
         var guardian: ByteArray? = byteArrayOf(1)
-        render(onAdmitUser = { actor, handle, tier, g -> admitted = Triple(actor, handle, tier); guardian = g })
+        render(onAdmitUser = { actor, handle, tier, g, _ -> admitted = Triple(actor, handle, tier); guardian = g })
         composeTestRule.onNodeWithTag("admin-users-admit-actor-input")
             .performScrollTo().performTextInput(actorHex)
         composeTestRule.onNodeWithTag("admin-users-admit-handle-input")
@@ -336,7 +336,7 @@ class AdminUsersContentTest {
         render(
             users = listOf(this.guardian),
             requests = emptyList(),
-            onAdmitUser = { _, _, _, g -> picked = g },
+            onAdmitUser = { _, _, _, g, _ -> picked = g },
         )
         composeTestRule.onNodeWithTag("admin-users-admit-actor-input")
             .performScrollTo().performTextInput("c".repeat(64))
@@ -352,7 +352,7 @@ class AdminUsersContentTest {
         // tui/linux's own idiom: nothing here clears the drafts on submit —
         // success feedback is the new row in the Users-section refetch.
         val actorHex = "b".repeat(64)
-        render(onAdmitUser = { _, _, _, _ -> })
+        render(onAdmitUser = { _, _, _, _, _ -> })
         composeTestRule.onNodeWithTag("admin-users-admit-actor-input")
             .performScrollTo().performTextInput(actorHex)
         composeTestRule.onNodeWithTag("admin-users-admit-button")

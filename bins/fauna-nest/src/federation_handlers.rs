@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 use fauna_core::data::{
     ArrivalOrigin, InboxMode, ReachVerdict, SupervisedReach, unauthenticated_reach_verdict,
 };
-use fauna_protocol::posts::LegalTakedownMarker;
+use fauna_protocol::posts::{AdminBlockMarker, LegalTakedownMarker};
 use fauna_protocol::wrapped_blob::{BulkByteAccess, BulkByteMintPurpose};
 use fauna_protocol::{RpcError, decode_strict, encode_canonical};
 
@@ -50,8 +50,8 @@ use crate::federation_router::{
 use crate::feed_routes::{RemoteQueryRequest, RemoteQueryResponse, remote_query_feed_core};
 use crate::routes::parse_32_bytes;
 use crate::routes::{
-    AppState, GetPostOutcome, InboxDeliveryOutcome, InboxRejection, InboxRejectionDisposition,
-    deliver_inbox_payload_core, get_post_core,
+    AppState, GetPostOutcome, InboxArrival, InboxDeliveryOutcome, InboxRejection,
+    InboxRejectionDisposition, deliver_inbox_payload_core, get_post_core,
 };
 
 // ── helpers ────────────────────────────────────────────────────────────────
@@ -123,9 +123,12 @@ pub fn register_federation_handlers(b: &mut FederationRouterBuilder) {
     register_succession_federation_handlers(b);
     register_sync_federation_handlers(b);
     register_post_federation_handlers(b);
+    register_profile_federation_handlers(b);
+    crate::follow_federation::register_follow_federation_handlers(b);
     register_feed_federation_handlers(b);
     register_reports_federation_handlers(b);
     crate::abuse_report_federation::register_abuse_report_federation_handlers(b);
+    crate::moderation_federation::register_moderation_federation_handlers(b);
     register_trends_federation_handlers(b);
 }
 
@@ -196,7 +199,7 @@ pub struct FedWelcomeDeliverRequest {
     /// its own `folder_member_access` row (never client-asserted), exactly as
     /// [`Self::set_name`] is resolved. Without it a cross-nest recipient cannot
     /// discover its own grant at all: its nest holds no role row for a foreign
-    /// set. `federation.md` § Cross-nest → *Recipient-side access discovery*.
+    /// set. `federation-shared-folders.md` § Cross-nest → *Recipient-side access discovery*.
     ///
     /// **Advisory-for-UI only on the receiving side** — same trust class as
     /// `set_name` (peer-asserted text). It decides whether the recipient's
@@ -212,9 +215,11 @@ pub struct FedWelcomeDeliverRequest {
     /// origin nest IS the set's home, so this is the identity root the recipient's
     /// agent needs to graduate an SPKI pin for the direct byte-plane dial (the
     /// recipient holds no account there). Resolved from the origin's own identity,
-    /// never peer-asserted. Wire-additive: absent from an old peer ⇒ the byte
-    /// plane falls back to `RequireWebPki` (never weaker). `security.md`
-    /// § Transport trust, the federation-granted Axis-2 row.
+    /// never peer-asserted. Wire-additive. The receiving nest no longer reads
+    /// it: it stamps the identity it verified on the delivering channel itself,
+    /// for every channel type (`welcome.deliver`'s handler; `transport-trust.md`
+    /// § The post arm). `security.md` § Transport trust, the federation-granted
+    /// Axis-2 row.
     #[serde(default)]
     pub home_nest_actor_id: Option<String>,
     /// The folder's content residency, resolved by the ORIGIN nest — the
@@ -232,7 +237,7 @@ pub struct FedWelcomeDeliverRequest {
     /// Welcome names IS the owner. Both-or-neither with [`Self::owner_domain`].
     /// The receiving nest forwards the pair to its recipient only once it bound
     /// the domain to the connection's verified `origin_nest_id`
-    /// ([`verified_owner_label`]); `federation.md` § Cross-nest shared
+    /// ([`verified_owner_label`]); `federation-shared-folders.md` § Cross-nest shared
     /// folders + channel append → *The cross-nest owner label*. Wire-additive: absent
     /// from an old peer ⇒ an unnamed sharer, as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -260,7 +265,7 @@ pub struct FedWelcomeDeliverReply {
 ///
 /// `requesting_handle` + `requesting_domain` carry the requesting member's
 /// `handle@domain` **as its own home nest (the originator) joins it from its
-/// `users` row** — the id→handle ruling's mechanism (`federation.md` § Cross-nest
+/// `users` row** — the id→handle ruling's mechanism (`federation-shared-folders.md` § Cross-nest
 /// shared folders + channel append, the id→handle bullet, ratified 2026-09-10):
 /// no nest asks another what handle an actor wears; the member's home nest
 /// volunteers it on the drain it already originates, and this nest records it
@@ -300,6 +305,13 @@ pub struct FedChannelFetchMessage {
     /// marker still never receives the content — fail-safe.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legal_takedown: Option<LegalTakedownMarker>,
+    /// Present iff the serving nest's admin blocked this message after a
+    /// report — the envelope is withheld (empty) and this carries the reason
+    /// (the relayed twin of `ChannelFetchEntry.admin_block`; `moderation.md`
+    /// § Admin block of a reported item). Additive and fail-safe like
+    /// `legal_takedown`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_block: Option<AdminBlockMarker>,
     /// A **community room's** category verdicts for this message — the
     /// relayed twin of `ChannelFetchEntry.labels`, so a member homed on
     /// another nest reads what the room's named labelers derived exactly as a
@@ -337,7 +349,7 @@ pub struct FedChannelFetchReply {
 
 /// `fauna.federation.channel.actors` request — the cross-nest roster read a peer
 /// nest relays on a member's behalf (the roster-read twin of `channel.fetch`;
-/// `federation.md` § Cross-nest). `requesting_actor_id` is the member (on the
+/// `federation-shared-folders.md` § Cross-nest). `requesting_actor_id` is the member (on the
 /// originating peer nest) whose add-participant heal needs the channel home's
 /// authoritative roster union; this nest authorizes by that member's recorded
 /// channel membership bound to the verified peer `nest_id`, exactly as the
@@ -436,7 +448,7 @@ pub struct FedRoomRosterRequest {
 /// **Handles ride this reply, and that is the point.** The roster's names are
 /// what every member of the room is already shown; the requester is a member
 /// the home nest itself admitted and pinned. This is emphatically *not* the
-/// refused id→handle oracle (`federation.md` § Cross-nest shared folders +
+/// refused id→handle oracle (`federation-shared-folders.md` § Cross-nest shared folders +
 /// channel append, the id→handle bullet): that shape answered "what handle
 /// does actor X wear?" to any nest holding an id, under a gate that could
 /// verify nothing about the asker. Here the asker must prove — through the
@@ -490,6 +502,31 @@ pub struct FedRoomLabelsRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FedRoomLabelsReply {
     pub labels: fauna_protocol::posts::PostRoomLabelsReply,
+}
+
+/// `fauna.federation.conversation.room.search.fetch` request — a room's
+/// foreign member searching the room's derived corpus through its own home
+/// nest (`../architecture/federation.md` § Federation residue surface, the
+/// *room search* row). The same-nest `RoomSearchRequest` body plus the
+/// requester the room home binds to the verified origin.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FedRoomSearchRequest {
+    pub requesting_actor_id: String,
+    pub room_id: String,
+    pub query: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_posts: bool,
+}
+
+/// `fauna.federation.conversation.room.search.fetch` reply — the hits in the
+/// same [`fauna_protocol::conversations::RoomSearchReply`] shape the
+/// same-nest door serves, so the relaying nest forwards rather than
+/// re-encodes and a foreign member is answered exactly as a member homed here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FedRoomSearchReply {
+    pub search: fauna_protocol::conversations::RoomSearchReply,
 }
 
 /// `fauna.federation.conversation.roster.report` request — a room's foreign
@@ -814,6 +851,16 @@ pub fn register_conversations_federation_handlers(b: &mut FederationRouterBuilde
         },
     );
     b.add(
+        "fauna.federation.conversation.room.search.fetch",
+        RpcKindMeta {
+            // Idempotent pure read of a derived view: serving the same hits
+            // twice registers nothing on either nest.
+            forbid_replay: false,
+            default_deadline: Duration::from_secs(30),
+            handler: room_search_fetch_handler(),
+        },
+    );
+    b.add(
         "fauna.federation.conversation.roster.report",
         RpcKindMeta {
             // Idempotent by construction: the report replaces the floor
@@ -885,15 +932,34 @@ pub fn register_conversations_federation_handlers(b: &mut FederationRouterBuilde
     );
 }
 
-/// Maps onto `state.db.take_key_package` — the same destructive consume the HTTP
-/// twin `channel_routes::fetch_key_package` does, returning a one-time KP if the
-/// pool is non-empty else the last-resort KP without deleting it (§ Key packages).
+/// Maps onto `state.db.take_key_package` — the same destructive consume the
+/// same-nest `fauna.conversations.keypackage.fetch` does, returning a one-time
+/// KP if the pool is non-empty else the last-resort KP without deleting it —
+/// under the **per-target budget** (`federation.md` § Key packages — privacy &
+/// exhaustion). This kind is open federation: any fresh keypair passes the
+/// hello, and the wire names no requester, so no relationship can gate it and
+/// the per-nest throttle is keyed on an id the caller mints. The target's own
+/// bucket is the one key strangers cannot multiply: past it the fetch is
+/// served the last-resort KP, consuming nothing — the target stays reachable
+/// and the one-time pool cannot be drained.
 fn keypackage_fetch_handler() -> RpcHandler {
     Box::new(|state, _origin_nest_id, payload| {
         Box::pin(async move {
             let req: FedKeypackageFetchRequest = decode(&payload)?;
             let target = parse_actor(&req.target_actor_id)?;
-            let key_package = state.db.take_key_package(&target).await.map_err(internal)?;
+            // A bucket per named target, arbitrary ids included: their number
+            // is bounded by the channel's per-source-IP throttle on this kind
+            // and the limiter sweep, as the per-nest buckets are.
+            let key_package =
+                if state
+                    .keypackage_fetch_target_limit
+                    .check(&target, &[0u8; 32], "keypackage")
+                {
+                    state.db.take_key_package(&target).await
+                } else {
+                    state.db.last_resort_key_package(&target).await
+                }
+                .map_err(internal)?;
             encode_reply(&FedKeypackageFetchReply { key_package })
         })
     })
@@ -1043,8 +1109,16 @@ fn welcome_deliver_handler() -> RpcHandler {
             let home_nest_url =
                 resolve_origin_home_url(&state, &origin_nest_id, req.origin_nest_url.as_deref())
                     .await?;
+            // …and that home's identity, from the same verified origin: the
+            // channel's home IS the relaying nest, so the identity this nest
+            // proved on the channel is the root the recipient's byte plane
+            // graduates its pin against — a room's attachment read as a
+            // folder's chunk plane (`transport-trust.md` § The post arm). This
+            // nest's own proof, never the peer's `req.home_nest_actor_id`, and
+            // only beside a URL it resolved.
+            let home_nest_actor_id = home_nest_url.as_ref().map(|_| hex::encode(origin_nest_id));
 
-            // The cross-nest owner label (`federation.md` § Cross-nest shared
+            // The cross-nest owner label (`federation-shared-folders.md` § Cross-nest shared
             // folders + channel append → *The cross-nest owner label*): the
             // origin — the set's home — stamped its owner's handle + its own
             // domain; this nest forwards the pair only once the domain binds
@@ -1082,7 +1156,7 @@ fn welcome_deliver_handler() -> RpcHandler {
                         // The sharer's actor id stays unstamped cross-nest, so
                         // the recipient gate reads every relayed folder welcome
                         // as a stranger knock — the label below names, never
-                        // admits (folders.md § Sharing; federation.md § … *The
+                        // admits (folders.md § Sharing; federation-shared-folders.md § … *The
                         // cross-nest owner label*, trust rule).
                         shared_by: None,
                         // The domain-verified owner label, paired: a handle
@@ -1104,12 +1178,10 @@ fn welcome_deliver_handler() -> RpcHandler {
                         // client offer a folder binding; enforcement stays on the
                         // origin (= home) nest's write-kind gate.
                         access: req.access.clone(),
-                        // Origin (= home) nest's deployment identity + owner-chosen
-                        // cadence, carried through from the relay `req`. The former
-                        // is the byte-plane SPKI-pin trust root the recipient's
-                        // agent graduates against; the latter is the cadence the
-                        // recipient applies (its own nest holds no `folders` row).
-                        home_nest_actor_id: req.home_nest_actor_id.clone(),
+                        // The home's identity this nest verified on the channel
+                        // (above) — the byte-plane SPKI-pin trust root the
+                        // recipient graduates against, for every channel type.
+                        home_nest_actor_id: home_nest_actor_id.clone(),
                         // The home nest's residency stamp, carried through
                         // verbatim like `access`.
                         residency: req.residency.clone(),
@@ -1121,6 +1193,19 @@ fn welcome_deliver_handler() -> RpcHandler {
                 .map_err(internal)?,
             );
 
+            // F10: enforce the recipient's inbox tier quota (leg-parity with
+            // `inbox.deliver`), so a Welcome flood can't grow the inbox past the
+            // tier limit. `push_inbox_with_quota` accounts the bytes; `check_quota`
+            // rejects an over-limit / suspended recipient first — before the
+            // payload spills, so a refusal leaves no blob behind for the sweep's
+            // grace to carry.
+            let enforce_quota = *state.enforce_tier_quotas.read().await;
+            if enforce_quota
+                && let Err(e) = state.db.check_quota(&recipient, inbox_bytes.len()).await
+            {
+                return Err(forbidden(format!("inbox quota: {e}")));
+            }
+
             let blob_hash = if let Some(ps) = &state.payload_store {
                 ps.store(&inbox_bytes)
                     .await
@@ -1131,14 +1216,7 @@ fn welcome_deliver_handler() -> RpcHandler {
                 None
             };
 
-            // F10: enforce the recipient's inbox tier quota (leg-parity with
-            // `inbox.deliver`), so a Welcome flood can't grow the inbox past the
-            // tier limit. `push_inbox_with_quota` accounts the bytes; `check_quota`
-            // rejects an over-limit / suspended recipient first.
-            let row_id = if *state.enforce_tier_quotas.read().await {
-                if let Err(e) = state.db.check_quota(&recipient, inbox_bytes.len()).await {
-                    return Err(forbidden(format!("inbox quota: {e}")));
-                }
+            let row_id = if enforce_quota {
                 state
                     .db
                     .push_inbox_with_quota(&recipient, &inbox_bytes, blob_hash.as_ref())
@@ -1172,7 +1250,7 @@ fn welcome_deliver_handler() -> RpcHandler {
                     set_name_sealed: req.set_name_sealed.clone(),
                     set_name_hash: req.set_name_hash.clone(),
                     access: req.access.clone(),
-                    home_nest_actor_id: req.home_nest_actor_id.clone(),
+                    home_nest_actor_id,
                     residency: req.residency.clone(),
                     extra: std::collections::BTreeMap::new(),
                 }),
@@ -1275,6 +1353,10 @@ fn channel_fetch_handler() -> RpcHandler {
                 &channel_id,
                 req.after,
                 limit,
+                // A relayed serve: the caller is a nest, which names no
+                // author, so a blocked record is withheld (`moderation.md`
+                // decision 4).
+                None,
             )
             .await
             .map_err(internal)?;
@@ -1311,10 +1393,11 @@ fn channel_fetch_handler() -> RpcHandler {
                 .into_iter()
                 .zip(verdicts)
                 .map(
-                    |((seq, envelope, legal_ref), derived)| FedChannelFetchMessage {
+                    |((seq, envelope, withhold), derived)| FedChannelFetchMessage {
                         seq,
                         envelope,
-                        legal_takedown: LegalTakedownMarker::from_ref(legal_ref),
+                        legal_takedown: withhold.legal_takedown_marker(),
+                        admin_block: withhold.admin_block_marker(),
                         labels: derived.labels,
                         scores: derived.scores,
                         author: authors.remove(&seq),
@@ -1328,7 +1411,7 @@ fn channel_fetch_handler() -> RpcHandler {
 
 /// `fauna.federation.channel.actors` — serve a channel's authoritative roster
 /// union to a member on a peer nest (the roster-read twin of the `channel.fetch`
-/// relay; `federation.md` § Cross-nest). This is the add-participant heal's
+/// relay; `federation-shared-folders.md` § Cross-nest). This is the add-participant heal's
 /// discriminator for a member whose channel is foreign-homed
 /// (`mls-group-key-material.md` § M2 *Admitting a member*, chat bullet).
 ///
@@ -1517,6 +1600,49 @@ fn room_labels_fetch_handler() -> RpcHandler {
             )
             .await?;
             encode_reply(&FedRoomLabelsReply { labels })
+        })
+    })
+}
+
+/// `fauna.federation.conversation.room.search.fetch` — search a room homed
+/// here for its foreign member, so a member homed elsewhere finds what a
+/// member homed here finds (`../architecture/federation.md` § Federation
+/// residue surface, the *room search* row). It is also the discovery door a
+/// room post takes to a foreign member until the federated follow lands: a
+/// post hit plus the room's home opens through `posts.get_remote`.
+///
+/// **Authorization**: [`require_foreign_member`] — the `channel.fetch` gate
+/// verbatim (a room id *is* its channel id) — **and the floor on top of it**,
+/// for [`room_labels_fetch_handler`]'s reason: the same-nest door's own gate
+/// is a live floor seat, and the two doors may not drift on who a hit
+/// reaches. That seat check is the body's own first gate
+/// ([`crate::conversations_handlers::room_search_for`], the body the
+/// same-nest door runs), so it is stacked here by construction, never
+/// restated: a requester the binding admits but the floor does not seat is
+/// refused there with the same-nest door's `permission_denied`.
+///
+/// **Read-only on every hop**: hits name positions, post ids and ranks and no
+/// text, and serving them registers nothing.
+fn room_search_fetch_handler() -> RpcHandler {
+    Box::new(|state, origin_nest_id, payload| {
+        Box::pin(async move {
+            let req: FedRoomSearchRequest = decode(&payload)?;
+            let requester = parse_actor(&req.requesting_actor_id)?;
+            let room_id = parse_id32(&req.room_id, "room_id")?;
+            require_foreign_member(&state, &room_id, &requester, &origin_nest_id).await?;
+            let search = crate::conversations_handlers::room_search_for(
+                &state,
+                &requester,
+                &fauna_protocol::conversations::RoomSearchRequest {
+                    room_id: req.room_id,
+                    query: req.query,
+                    limit: req.limit,
+                    include_posts: req.include_posts,
+                    extra: std::collections::BTreeMap::new(),
+                },
+            )
+            .await?;
+            encode_reply(&FedRoomSearchReply { search })
         })
     })
 }
@@ -1936,14 +2062,15 @@ fn map_inbox_rejection(r: InboxRejection) -> RpcError {
 /// `deliver_to_inbox`/`store_knock`) the HTTP twin `POST /api/v1/inbox/{actor}`
 /// runs — the channel is now the carrier for cross-nest social inbox delivery.
 fn inbox_deliver_handler() -> RpcHandler {
-    Box::new(|state, _origin_nest_id, payload| {
+    Box::new(|state, origin_nest_id, payload| {
         Box::pin(async move {
             let req: FedInboxDeliverRequest = decode(&payload)?;
             let recipient = parse_actor(&req.recipient_actor_id)?;
             let body = Bytes::from(req.payload_bytes);
-            match deliver_inbox_payload_core(&state, &recipient, &body, ArrivalOrigin::Federation)
-                .await
-            {
+            // The channel's authenticated peer — what a knock's pending edge
+            // records as the peer's home nest (`store_knock`).
+            let arrival = InboxArrival::Federation { origin_nest_id };
+            match deliver_inbox_payload_core(&state, &recipient, &body, arrival).await {
                 InboxDeliveryOutcome::Delivered(row_id) => encode_reply(&FedInboxDeliverReply {
                     inbox_id: Some(row_id),
                 }),
@@ -1956,7 +2083,7 @@ fn inbox_deliver_handler() -> RpcHandler {
     })
 }
 
-// ── cross-nest shared folders + channel append (Phase 2 — federation.md
+// ── cross-nest shared folders + channel append (Phase 2 — federation-shared-folders.md
 // § Cross-nest shared folders + channel append, ratified 2026-07-18) ────────
 //
 // One structural gate for the whole family ([`require_foreign_member`]): serve
@@ -1977,7 +2104,7 @@ fn inbox_deliver_handler() -> RpcHandler {
 ///
 /// **First authenticated use PINS the binding**: the first success here stamps `confirmed_at`, and from then on the
 /// standing-based rebind arm of `register_foreign_channel_member` refuses to
-/// move the grant (`federation.md` § Cross-nest shared folders + channel
+/// move the grant (`federation-shared-folders.md` § Cross-nest shared folders + channel
 /// append, the TOFU bullet). This is the one seam every exercising call from
 /// the bound nest flows through, which is what makes it the pin's honest
 /// witness — an outbound Welcome-relay ack is contact with the
@@ -2138,7 +2265,7 @@ impl Drop for VerificationInFlight {
 
 /// The owner label a set's HOME nest stamps on the two carriers it
 /// originates — the cross-nest folder Welcome relay and the federated
-/// content-key read reply (`federation.md` § Cross-nest shared folders +
+/// content-key read reply (`federation-shared-folders.md` § Cross-nest shared folders +
 /// channel append → *The cross-nest owner label*, *Carrier*): `owner`'s
 /// handle off this nest's own `users` row and this nest's handle domain,
 /// **both or neither** (a handle without a domain would cross a nest boundary
@@ -2236,7 +2363,7 @@ pub(crate) enum DomainBinding {
 
 /// Bind `domain` to `origin_nest_id` **from the domain end** — the one
 /// verification behind every domain-bound name a peer volunteers
-/// (`federation.md` § Cross-nest shared folders + channel append, the
+/// (`federation-shared-folders.md` § Cross-nest shared folders + channel append, the
 /// id→handle bullet and *The cross-nest owner label*'s trust rule): the
 /// anonymous discovery chain [`FederationChannelPool::resolve_domain_nest_id`]
 /// (cached per domain, singleflighted, negative-cached, under the resolver's
@@ -2276,7 +2403,7 @@ pub(crate) async fn bind_domain_to_origin(
 
 /// The cross-nest owner label a relayed folder Welcome may carry to its
 /// recipient — the receiving nest's half of *The cross-nest owner label*'s
-/// trust rule (`federation.md` § Cross-nest shared folders + channel append):
+/// trust rule (`federation-shared-folders.md` § Cross-nest shared folders + channel append):
 /// the pair the origin stamped ([`FedWelcomeDeliverRequest::owner_handle`] /
 /// `owner_domain`), forwarded only when its domain binds to the
 /// handshake-verified `origin_nest_id`. The Welcome is a one-shot delivery and
@@ -2305,7 +2432,7 @@ pub(crate) async fn verified_owner_label(
 }
 
 /// Record the `handle@domain` a foreign member's home nest announced on the
-/// member's own relayed drain — the id→handle ruling (`federation.md`
+/// member's own relayed drain — the id→handle ruling (`federation-shared-folders.md`
 /// § Cross-nest shared folders + channel append, the id→handle bullet, ratified
 /// 2026-09-10).
 ///
@@ -2762,7 +2889,7 @@ pub struct FedFolderChangesFetchReply {
     pub changes: Vec<fauna_protocol::sync::SyncChange>,
     /// The requester's **current** access grant on this set, stamped by this
     /// (the home) nest from its own `folder_member_access` row — the refresh
-    /// half of *Recipient-side access discovery* (`federation.md` § Cross-nest).
+    /// half of *Recipient-side access discovery* (`federation-shared-folders.md` § Cross-nest).
     /// Free to compute: the handler already resolved membership for the gate.
     ///
     /// See [`caller_access_stamp`] for why **every** federated folder read
@@ -2825,7 +2952,7 @@ pub struct FedFolderContentKeyFetchReply {
     pub residency: Option<String>,
     /// The set's owner's handle + this (the home) nest's handle domain — see
     /// [`owner_label_stamp`]. The member's own nest forwards the pair only on
-    /// a warm domain binding (`federation.md` § … *The cross-nest owner
+    /// a warm domain binding (`federation-shared-folders.md` § … *The cross-nest owner
     /// label*); both `None` ⇒ the member keeps what it holds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_handle: Option<String>,
@@ -2834,7 +2961,7 @@ pub struct FedFolderContentKeyFetchReply {
 }
 
 /// `fauna.federation.folder.actors.fetch` request — the cross-nest writer
-/// roster read (`federation.md` § Cross-nest…, *The cross-nest writer roster
+/// roster read (`federation-shared-folders.md` § Cross-nest…, *The cross-nest writer roster
 /// read*): which actors hold `writer` on the set, for the writer-signed
 /// change-record reader (`mls-group-key-material.md` § M2, ruling (3)).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2865,7 +2992,7 @@ pub struct FedFolderActorsFetchReply {
 /// out of that reuse by construction:
 ///
 /// - **Folder-channel Commit admission (2026-08-24 re-ratification,
-///   `federation.md` § Cross-nest shared folders + channel append —
+///   `federation-shared-folders.md` § Cross-nest shared folders + channel append —
 ///   supersedes the old S2 claimant-only refusal)**: a `Commit` is admitted
 ///   from any actor on the channel roster, a foreign member included — the
 ///   nest can see THAT an envelope is a Commit, never WHAT it changes, so
@@ -3205,7 +3332,7 @@ fn folder_content_key_fetch_handler() -> RpcHandler {
 }
 
 /// `fauna.federation.folder.actors.fetch` — the cross-nest writer roster read
-/// (`federation.md` § Cross-nest…, *The cross-nest writer roster read*): the
+/// (`federation-shared-folders.md` § Cross-nest…, *The cross-nest writer roster read*): the
 /// family's structural gate, the S7 claim-resolve, then the **same** projection
 /// the same-nest `members.list_actors` serves
 /// ([`crate::folder_handlers::actor_roster_for_channel`]) with every `handle`
@@ -3239,7 +3366,7 @@ fn folder_actors_fetch_handler() -> RpcHandler {
     })
 }
 
-/// The **write-kind** gate (`federation.md` § Cross-nest…, gate bullet): the structural [`require_foreign_member`] binding **then** the
+/// The **write-kind** gate (`federation-shared-folders.md` § Cross-nest…, gate bullet): the structural [`require_foreign_member`] binding **then** the
 /// owner-granted `access == 'writer'` role for the claimed set. The peer's
 /// signature is attribution; the authorization is state THIS nest wrote (the
 /// owner's claimant-gated `members.set_access`). Returns the resolved
@@ -3269,7 +3396,7 @@ async fn require_foreign_writer(
 
 /// Stamp the requester's **current** access grant on a federated folder read
 /// reply — the refresh half of *Recipient-side access discovery*
-/// (`federation.md` § Cross-nest; ratified 2026-07-20).
+/// (`federation-shared-folders.md` § Cross-nest; ratified 2026-07-20).
 ///
 /// **Every federated folder READ reply carries this, uniformly.** The ratified
 /// design named `changes.fetch` as the carrier; `content_key.fetch` is stamped
@@ -3301,7 +3428,7 @@ async fn caller_access_stamp(
 }
 
 /// Stamp the folder's content residency on a federated folder read reply —
-/// beside [`caller_access_stamp`], on the same three replies (`federation.md`
+/// beside [`caller_access_stamp`], on the same three replies (`federation-shared-folders.md`
 /// § Cross-nest shared folders + channel append → *Relay serving across
 /// nests*, the `residency` stamp). The member's custody record keeps it and
 /// its engine arms from it what a same-nest seat arms from its row: the upload
@@ -3450,7 +3577,7 @@ fn folder_changes_record_handler() -> RpcHandler {
 
 /// `fauna.federation.folder.write_token.mint` — gate ([`require_foreign_writer`]),
 /// then mint a **short-lived, write-only** bulk-byte token bound to the foreign
-/// writer's actor id (`federation.md` § Cross-nest…, contract point (ii)). TTL is the Rust constant [`FOREIGN_WRITE_TOKEN_TTL_SECS`] — no config
+/// writer's actor id (`federation-shared-folders.md` § Cross-nest…, contract point (ii)). TTL is the Rust constant [`FOREIGN_WRITE_TOKEN_TTL_SECS`] — no config
 /// knob (no-operator invariant). The token is TTL-bound, **not** revocation-checked
 /// per POST: eviction/demotion refuses the next *mint*, and an outstanding token's
 /// residual window is one TTL constant (accepted, parity with "generations already
@@ -3504,7 +3631,7 @@ pub struct FedFolderReadTokenMintReply {
 }
 
 /// `fauna.federation.folder.read_token.mint` — the read-scoped twin of
-/// [`folder_write_token_mint_handler`] (`federation.md` § Cross-nest shared
+/// [`folder_write_token_mint_handler`] (`federation-shared-folders.md` § Cross-nest shared
 /// folders + channel append → *Relay serving across nests*). Gate:
 /// [`require_foreign_member`] alone — a reader holds no write grant to mint
 /// under — on a channel that is a claimed folder's. The token is `Read`, so
@@ -3561,7 +3688,7 @@ fn folder_read_token_mint_handler() -> RpcHandler {
 /// **not** revocation-checked per POST (a leave/evict refuses the next *mint*;
 /// an outstanding token's residual window is one TTL). Unlike the folder plane
 /// there is no metering to route: conversations carry no owner-pays byte cap
-/// (`federation.md` § Cross-nest → *Substrate vs. policy*), so the POST is
+/// (`federation-shared-folders.md` § Cross-nest → *Substrate vs. policy*), so the POST is
 /// bounded by `BLOB_BODY_LIMIT` alone, exactly as a same-nest member's is. The
 /// bytes are reclaimed by the ordinary blob GC once the record naming them is
 /// gone (`backup-restore.md` § 9 step 2g).
@@ -3635,12 +3762,12 @@ pub fn register_folder_federation_handlers(b: &mut FederationRouterBuilder) {
     // typically unbound — no MLS group, no channel, no roster row to gate on.
     // Its gate is the inverse shape (`folder_public::resolve_public_folder`),
     // which is exactly why the design refused an audience arm on
-    // `folder.changes.fetch` (`federation.md` § The public folder read plane).
+    // `folder.changes.fetch` (`federation-shared-folders.md` § The public folder read plane).
     b.add(
         "fauna.federation.folder.public.fetch",
         meta(folder_public_fetch_handler()),
     );
-    // Relay serving across nests (`federation.md` § Cross-nest shared folders
+    // Relay serving across nests (`federation-shared-folders.md` § Cross-nest shared folders
     // + channel append → *Relay serving across nests*): the member's nest
     // leases a seat on the home nest, and the home nest asks the member's nest
     // to push an ask. Both replay-safe — a re-sent announce renews the same
@@ -3779,7 +3906,7 @@ fn folder_serve_announce_handler() -> RpcHandler {
 
 /// Whether a leased foreign seat still passes the write gate it was admitted
 /// on — read at every walk, so a removal or a demotion drops the seat at the
-/// next ask (`federation.md` § … → *Relay serving across nests*). The same
+/// next ask (`federation-shared-folders.md` § … → *Relay serving across nests*). The same
 /// two facts [`require_foreign_writer`] checks — the member bound to the
 /// leasing nest, holding `writer` — read without confirming the binding.
 pub(crate) async fn foreign_seat_still_admitted(
@@ -3848,7 +3975,7 @@ fn folder_chunk_wanted_handler() -> RpcHandler {
     })
 }
 
-/// TTL for a cross-nest writer's byte-plane token (`federation.md` § Cross-nest…,
+/// TTL for a cross-nest writer's byte-plane token (`federation-shared-folders.md` § Cross-nest…,
 /// contract point (ii)). A Rust constant, never a config knob — the
 /// no-operator invariant. 10 minutes matches the same-nest WebDAV bulk token
 /// (`bridge_blob_handlers::BULK_BYTE_TOKEN_TTL_SECS`): long enough for a bounded
@@ -4422,6 +4549,11 @@ pub struct FedMlsBufferedMessage {
     /// (see [`FedChannelFetchMessage::legal_takedown`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legal_takedown: Option<LegalTakedownMarker>,
+    /// Present iff the serving nest's admin blocked this buffered message —
+    /// `envelope` withheld (empty). Additive (see
+    /// [`FedChannelFetchMessage::admin_block`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_block: Option<AdminBlockMarker>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4689,6 +4821,9 @@ fn mls_pull_handler() -> RpcHandler {
                 &channels,
                 req.since_seq,
                 crate::segments::SERVE_PAGE_MAX_RECORDS,
+                // A paired nest's pull: no author exemption (`moderation.md`
+                // decision 4).
+                None,
             )
             .await
             .map_err(internal)?;
@@ -4700,7 +4835,12 @@ fn mls_pull_handler() -> RpcHandler {
             // with a loud error.
             let (rows, rest) = crate::segments::take_page_within_budget(
                 rows,
-                |(_, _, body, _): &(i64, [u8; 32], Vec<u8>, Option<String>)| body.len(),
+                |(_, _, body, _): &(
+                    i64,
+                    [u8; 32],
+                    Vec<u8>,
+                    crate::segments::records_db::ConvWithhold,
+                )| body.len(),
             );
             if rows.is_empty()
                 && let Some((seq, channel, body, _)) = rest.first()
@@ -4718,11 +4858,12 @@ fn mls_pull_handler() -> RpcHandler {
             }
             let messages: Vec<FedMlsBufferedMessage> = rows
                 .into_iter()
-                .map(|(seq, channel, body, legal_ref)| FedMlsBufferedMessage {
+                .map(|(seq, channel, body, withhold)| FedMlsBufferedMessage {
                     seq,
                     channel_id: channel.to_vec(),
                     envelope: body,
-                    legal_takedown: LegalTakedownMarker::from_ref(legal_ref),
+                    legal_takedown: withhold.legal_takedown_marker(),
+                    admin_block: withhold.admin_block_marker(),
                 })
                 .collect();
             let up_to = messages.last().map(|m| m.seq).unwrap_or(req.since_seq);
@@ -5187,6 +5328,71 @@ pub struct FedPostGetReply {
     /// field still sees an empty `post` (content withheld) — fail-safe.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legal_takedown: Option<LegalTakedownMarker>,
+    /// Present iff this nest's admin blocked the post after a report — `post`
+    /// is then withheld (empty) and this names the reason (`moderation.md`
+    /// § Admin block of a reported item, decision 3: *Disclosed*, the HTTP
+    /// twin's 403). A peer is never the author, so it never gets the body.
+    /// Additive and fail-safe like `legal_takedown`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_block: Option<AdminBlockMarker>,
+}
+
+/// `fauna.federation.profile.get` — a peer fetches an actor's latest signed
+/// profile, served only with the actor's own consent (`federation.md`
+/// § Federation residue surface, the *Profile read across nests* row;
+/// `profile.md` § Where logic lives → *The remote read*).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FedProfileGetRequest {
+    /// Hex-encoded `actor_id` (32 bytes).
+    pub actor_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FedProfileGetReply {
+    /// The stored signed `Profile` wire, verbatim — the bytes this nest's own
+    /// `fauna.profile.get` serves; the reader's client verifies the signature.
+    #[serde(with = "serde_bytes")]
+    pub profile: Vec<u8>,
+}
+
+pub fn register_profile_federation_handlers(b: &mut FederationRouterBuilder) {
+    b.add("fauna.federation.profile.get", meta(profile_get_handler()));
+}
+
+/// The home's serve of [`FedProfileGetRequest`]: the latest stored profile of
+/// an actor this nest hosts, verbatim, ONLY when that profile decodes through
+/// the shared signed-only verify with `audience = Everyone`. Every other case
+/// — not hosted, no profile, `ThisNest`, an audience this build does not name,
+/// a stored row that no longer verifies — is the one `not_found`, so a peer
+/// learns nothing about whether the actor publishes a profile.
+fn profile_get_handler() -> RpcHandler {
+    Box::new(|state, _origin_nest_id, payload| {
+        Box::pin(async move {
+            let req: FedProfileGetRequest = decode(&payload)?;
+            let actor = parse_id32(&req.actor_id, "actor_id")?;
+            let refused = || not_found("profile not served to other nests");
+            let hosted = state
+                .db
+                .get_user(&actor)
+                .await
+                .map_err(|_| internal("storage error"))?;
+            if hosted.is_none() {
+                return Err(refused());
+            }
+            let Some(bytes) = crate::profile_handlers::latest_profile_bytes(&state, &actor)
+                .await
+                .map_err(|_| internal("storage error"))?
+            else {
+                return Err(refused());
+            };
+            match fauna_core::encoding::decode_profile(&bytes) {
+                Ok((profile, _)) if profile.audience.is_everyone() => {
+                    encode_reply(&FedProfileGetReply { profile: bytes })
+                }
+                _ => Err(refused()),
+            }
+        })
+    })
 }
 
 pub fn register_post_federation_handlers(b: &mut FederationRouterBuilder) {
@@ -5198,65 +5404,92 @@ pub fn register_post_federation_handlers(b: &mut FederationRouterBuilder) {
     b.add("fauna.federation.post.get", meta(post_get_handler()));
 }
 
+/// A verified post envelope as `fauna.federation.post.forward` and
+/// `fauna.federation.follow.deliver` carry it: the decoded post, the stored
+/// `EmbedAsBytes` wire and its content-addressed id.
+pub(crate) struct ForwardedPost {
+    pub post: fauna_core::data::Post,
+    pub stored_bytes: Vec<u8>,
+    pub post_id: [u8; 32],
+}
+
+/// The one decode of a relayed post envelope, shared by the paired forward and
+/// the federated follow's delivery (`federated-follow.md` § Decision 1 — one
+/// decode helper, two kinds): rebuild the wire (the delegated-authoring cert
+/// re-inserted, so the id matches the origin's), verify the post's own author
+/// envelope, and apply the future `created_at` bound. Every gate past this is
+/// the kind's own.
+pub(crate) fn decode_forwarded_post(
+    req: &FedPostForwardRequest,
+) -> Result<ForwardedPost, RpcError> {
+    if req.post_envelope.len() != 100 {
+        return Err(invalid_request("invalid post_envelope (need 100 bytes)"));
+    }
+    // The delegated-authoring cert (D10), when present, is re-inserted into
+    // the reconstructed wire so both the receive verify AND the re-stored
+    // bytes retain it (identical content-addressed `post_id` to the origin).
+    let signer_auth = match &req.signer_auth {
+        Some(cert_bytes) => Some(Box::new(
+            fauna_core::encoding::canonical_decode::<fauna_core::encoding::EmbedAsBytes>(
+                cert_bytes,
+            )
+            .map_err(|_| invalid_request("invalid signer_auth cert"))?,
+        )),
+        None => None,
+    };
+    // Decode + verify the post's own author signature (the end-to-end author
+    // binding; the channel authenticated the relaying nest), accepting a
+    // delegated authoring sub-key's signature when the cert rides (D10).
+    let wire = fauna_core::encoding::EmbedAsBytes {
+        envelope: req.post_envelope.clone(),
+        bytes: req.post_bytes.clone(),
+        signer_auth,
+    };
+    let (post_bytes, post_env) = wire
+        .clone()
+        .into_signed()
+        .map_err(|_| invalid_request("invalid envelope"))?;
+    let post: fauna_core::data::Post = fauna_core::encoding::decode_signed_bytes(&post_bytes)
+        .map_err(|_| invalid_request("invalid post"))?;
+    if fauna_core::encoding::verify_authoring_envelope(
+        &post,
+        &post_bytes,
+        &post_env,
+        wire.signer_auth.as_deref(),
+        &fauna_core::data::Capability::Post,
+        post.created_at,
+    )
+    .is_err()
+    {
+        return Err(invalid_request("invalid post signature"));
+    }
+    // Same future-created_at bound the local ingest door applies
+    // (`crate::storage::reject_future_created_at`) — the federation legs never
+    // call `Storage::ingest_post`, so they need their own call to the check.
+    if let Err(reason) = crate::storage::reject_future_created_at(post.created_at) {
+        return Err(invalid_request(format!(
+            "ingest rejected: {}",
+            reason.as_snake_case()
+        )));
+    }
+    let stored_bytes = fauna_core::encoding::canonical_encode(&wire).map_err(internal)?;
+    let post_id: [u8; 32] = *blake3::hash(&stored_bytes).as_bytes();
+    Ok(ForwardedPost {
+        post,
+        stored_bytes,
+        post_id,
+    })
+}
+
 fn post_forward_handler() -> RpcHandler {
     Box::new(|state, origin_nest_id, payload| {
         Box::pin(async move {
             let req: FedPostForwardRequest = decode(&payload)?;
-            if req.post_envelope.len() != 100 {
-                return Err(invalid_request("invalid post_envelope (need 100 bytes)"));
-            }
-            // The delegated-authoring cert (D10), when present, is re-inserted
-            // into the reconstructed wire so both the receive verify AND the
-            // re-served/re-stored bytes retain it (identical content-addressed
-            // `post_id` to the origin nest).
-            let signer_auth = match &req.signer_auth {
-                Some(cert_bytes) => Some(Box::new(
-                    fauna_core::encoding::canonical_decode::<fauna_core::encoding::EmbedAsBytes>(
-                        cert_bytes,
-                    )
-                    .map_err(|_| invalid_request("invalid signer_auth cert"))?,
-                )),
-                None => None,
-            };
-            // Decode + verify the post's own author signature (kept — the
-            // end-to-end author binding; only the relay nest-sig is dropped),
-            // accepting a delegated authoring sub-key's signature when the cert
-            // rides (D10).
-            let wire = fauna_core::encoding::EmbedAsBytes {
-                envelope: req.post_envelope.clone(),
-                bytes: req.post_bytes.clone(),
-                signer_auth,
-            };
-            let (post_bytes, post_env) = wire
-                .clone()
-                .into_signed()
-                .map_err(|_| invalid_request("invalid envelope"))?;
-            let post: fauna_core::data::Post =
-                fauna_core::encoding::decode_signed_bytes(&post_bytes)
-                    .map_err(|_| invalid_request("invalid post"))?;
-            if fauna_core::encoding::verify_authoring_envelope(
-                &post,
-                &post_bytes,
-                &post_env,
-                wire.signer_auth.as_deref(),
-                &fauna_core::data::Capability::Post,
-                post.created_at,
-            )
-            .is_err()
-            {
-                return Err(invalid_request("invalid post signature"));
-            }
-
-            // Same future-created_at bound the local ingest door applies
-            // (`crate::storage::reject_future_created_at`) — the federation
-            // leg never calls `Storage::ingest_post`, so it needs its own
-            // call to the shared check.
-            if let Err(reason) = crate::storage::reject_future_created_at(post.created_at) {
-                return Err(invalid_request(format!(
-                    "ingest rejected: {}",
-                    reason.as_snake_case()
-                )));
-            }
+            let ForwardedPost {
+                post,
+                stored_bytes,
+                post_id,
+            } = decode_forwarded_post(&req)?;
 
             // Paired-only submission policy: gate on the verified peer nest_id
             // AND the pairing's `post_forward` capability — the relay grant
@@ -5269,23 +5502,18 @@ fn post_forward_handler() -> RpcHandler {
                 .as_ref()
                 .map(|s| &s.policy)
                 .unwrap_or(&SubmissionPolicy::Open);
-            if *policy == SubmissionPolicy::PairedOnly {
-                let authorized = state
-                    .db
-                    .pairing_has_capability(
-                        &post.author.0,
-                        &origin_nest_id,
-                        fauna_protocol::pair::capability::POST_FORWARD,
-                    )
-                    .await
-                    .unwrap_or(false);
-                if !authorized {
-                    return Err(forbidden("nest not paired for this actor"));
-                }
+            let paired = state
+                .db
+                .pairing_has_capability(
+                    &post.author.0,
+                    &origin_nest_id,
+                    fauna_protocol::pair::capability::POST_FORWARD,
+                )
+                .await
+                .unwrap_or(false);
+            if *policy == SubmissionPolicy::PairedOnly && !paired {
+                return Err(forbidden("nest not paired for this actor"));
             }
-
-            let stored_bytes = fauna_core::encoding::canonical_encode(&wire).map_err(internal)?;
-            let post_id: [u8; 32] = *blake3::hash(&stored_bytes).as_bytes();
 
             // A post this nest has seen deleted is never re-ingested by replay
             // (`feed.md` § State & data shape → *Post deletion*): its signed
@@ -5314,6 +5542,24 @@ fn post_forward_handler() -> RpcHandler {
             // result. Forwards for one post come from one origin's outbox
             // (serial retries), so exists-then-store is race-free in practice.
             let newly_stored = !state.db.post_exists(&post_id).await.map_err(internal)?;
+
+            // Under `open`, a post relayed with no `post_forward` pairing is a
+            // stranger's: any fresh keypair passes the hello and any fresh
+            // author key signs, so such posts share one whole-nest budget
+            // (`private-mode.md` § Post Forwarding, step 2). Only a new store
+            // spends it — a redelivery stays free — and a refused forward stays
+            // in the sender's outbox for its next retry.
+            if !paired
+                && newly_stored
+                && !state.federation_target_budget.check_with_max(
+                    &[0u8; 32],
+                    &[0u8; 32],
+                    "post_forward",
+                    crate::bridge_rate_limit::POST_FORWARD_UNPAIRED_TARGET_MAX,
+                )
+            {
+                return Err(crate::rpc_errors::rate_limited());
+            }
 
             // Store the embed-as-bytes wire shape (content-addressed post_id):
             // body → `__post` segment store, projection with empty payload.
@@ -5376,6 +5622,15 @@ fn post_delete_handler() -> RpcHandler {
                 .map_err(|_| invalid_request("invalid signed tombstone"))?;
             let digest = crate::db::posts::cid_to_digest(&tombstone.post_id);
 
+            // The follow arm (`federated-follow.md` § Decision 5): a row a
+            // federated follow delivered here is deleted only on the word of
+            // the home that delivered it, and the paired gate is not its.
+            let follow_custody =
+                crate::follow_delivery::delete_custody(&state, &origin_nest_id, &digest).await?;
+            if follow_custody == Some(false) {
+                return Err(forbidden("this nest did not deliver this post"));
+            }
+
             // Paired-only submission policy: gate on the verified peer nest_id
             // AND the pairing's `post_forward` capability — the same grant that
             // authorized the original forward. A delete rides the forward
@@ -5386,7 +5641,7 @@ fn post_delete_handler() -> RpcHandler {
                 .as_ref()
                 .map(|s| &s.policy)
                 .unwrap_or(&SubmissionPolicy::Open);
-            if *policy == SubmissionPolicy::PairedOnly {
+            if follow_custody.is_none() && *policy == SubmissionPolicy::PairedOnly {
                 let authorized = state
                     .db
                     .pairing_has_capability(
@@ -5426,6 +5681,9 @@ fn post_delete_handler() -> RpcHandler {
     })
 }
 
+/// Serves a single post's stored bytes to a peer nest. Two originators: the
+/// trend import (`exchange_originator`, which verifies and ingests) and the
+/// deep-link door's relay `fauna.posts.get_remote` (which forwards unstored).
 fn post_get_handler() -> RpcHandler {
     Box::new(|state, _origin_nest_id, payload| {
         Box::pin(async move {
@@ -5437,6 +5695,7 @@ fn post_get_handler() -> RpcHandler {
                 GetPostOutcome::Found(bytes) => encode_reply(&FedPostGetReply {
                     post: bytes,
                     legal_takedown: None,
+                    admin_block: None,
                 }),
                 // Legally taken down: the body is withheld from the peer-nest
                 // fetch (never propagates across federation), but the
@@ -5450,6 +5709,17 @@ fn post_get_handler() -> RpcHandler {
                 GetPostOutcome::LegalTakedown { reference } => encode_reply(&FedPostGetReply {
                     post: Vec::new(),
                     legal_takedown: LegalTakedownMarker::from_ref(Some(reference)),
+                    admin_block: None,
+                }),
+                // Blocked by this nest's admin after a report: withheld from
+                // the peer and DISCLOSED with the reason, the HTTP twin's 403
+                // posture (`moderation.md` § Admin block of a reported item,
+                // decision 3). `caller = None` is never the author, so the
+                // body arm is unreachable here and withholds all the same.
+                GetPostOutcome::AdminBlocked { reason, .. } => encode_reply(&FedPostGetReply {
+                    post: Vec::new(),
+                    legal_takedown: None,
+                    admin_block: AdminBlockMarker::from_reason(Some(&reason)),
                 }),
                 GetPostOutcome::NotFound => Err(not_found("post not found")),
                 GetPostOutcome::Error => Err(internal("storage error")),
@@ -5641,6 +5911,26 @@ pub async fn import_report_entries(
                 .map_err(PeerImportError::Db)?;
         }
     }
+    // The table-wide cap, once per batch: the per-peer cap is keyed on an id
+    // the peer mints for free. An evicted row may have been a hash's only peer
+    // word, so its aggregate recomputes.
+    for (content_hash, factor) in state
+        .db
+        .trim_peer_reports()
+        .await
+        .map_err(PeerImportError::Db)?
+    {
+        let key = crate::db::reports::ReportKey {
+            content_hash,
+            factor,
+            content_kind: "mail".to_string(),
+        };
+        state
+            .db
+            .recompute_report_score(&key)
+            .await
+            .map_err(PeerImportError::Db)?;
+    }
     Ok(imported)
 }
 
@@ -5776,6 +6066,19 @@ pub async fn import_trend_entries(
                 .await
                 .map_err(PeerImportError::Db)?;
         }
+    }
+    // The table-wide cap, once per batch (as `import_report_entries`).
+    for content_id in state
+        .db
+        .trim_peer_trends()
+        .await
+        .map_err(PeerImportError::Db)?
+    {
+        state
+            .db
+            .recompute_trend_score(&content_id, now_us)
+            .await
+            .map_err(PeerImportError::Db)?;
     }
     Ok(imported)
 }
@@ -6191,7 +6494,7 @@ mod require_foreign_member_tests {
     use crate::routes::AppState;
 
     /// First authenticated contact from the bound home nest PINS the binding
-    /// (`federation.md` § Cross-nest shared folders + channel append, the TOFU
+    /// (`federation-shared-folders.md` § Cross-nest shared folders + channel append, the TOFU
     /// bullet): a mismatched origin is refused and stamps nothing;
     /// the bound origin's first served call stamps `confirmed_at`; the stamp
     /// is idempotent. The pin's effect on the rebind arm is pinned in

@@ -10,7 +10,7 @@ pinned by `test_ffi_flavor_split.py`, the sync-agent IPC half by
 2026-09-02, and the gap was not theoretical: a `grep -rl "__fauna_"
 /usr/share/fauna-web` inside `ghcr.io/faunasocial/nest:latest` found
 `__fauna_message_banner_mount_count` — installed bare, ungated, from
-`$lib/components/MessageBanner.svelte`'s `onMount`, in every build. It is a
+`#lib/components/MessageBanner.svelte`'s `onMount`, in every build. It is a
 mount counter and carries no capability, which is exactly why nobody noticed;
 the convention is a *surface* rule, and a surface is what it was.
 
@@ -20,13 +20,13 @@ and both accepted here:
   (a) *A lexical guard.* `if (__FAUNA_E2E_AUTOMATION__) { … }` — a vite `define`
       constant that a production `vite build` folds to `false` and strips. This
       is the idiom for a hook that must live in a production module because it
-      has to run at module load (`$lib/onboarding/machine.svelte.ts`) or inside a
+      has to run at module load (`#lib/onboarding/machine.svelte.ts`) or inside a
       component lifecycle (`MessageBanner.svelte`, since this pin).
   (b) *An unreachable installer.* The write sits in an exported `install*`
-      function whose only importer is `$lib/e2e-automation`, itself imported only
+      function whose only importer is `#lib/e2e-automation`, itself imported only
       from `+layout.svelte`'s `if (__FAUNA_E2E_AUTOMATION__)` branch — so Rollup
-      tree-shakes the function out. `installRpcTestHooks` (`$lib/rpc`) and
-      `installCommandHook` (`$lib/e2e-commands`) are this shape.
+      tree-shakes the function out. `installRpcTestHooks` (`#lib/rpc`) and
+      `installCommandHook` (`#lib/e2e-commands`) are this shape.
 
 **Nothing here is hand-listed.** (b)'s membership is *derived* — the pin finds
 each write's enclosing exported function and walks the real `import { … } from`
@@ -51,7 +51,7 @@ _REPO = Path(__file__).resolve().parents[3]
 _WEB_SRC = _REPO / "apps" / "fauna-web" / "src"
 
 #: The automation module itself: its sole importer is `+layout.svelte`'s
-#: `if (__FAUNA_E2E_AUTOMATION__) import('$lib/e2e-automation')` branch, so the
+#: `if (__FAUNA_E2E_AUTOMATION__) import('#lib/e2e-automation')` branch, so the
 #: whole chunk is absent from a production build. Its own header states the rule
 #: this pin enforces ("add new `window.__fauna_*` hooks here (or behind the same
 #: flag), never bare in a component").
@@ -206,9 +206,9 @@ def test_no_ungated_fauna_hook_is_installed_from_web_source():
         "a `window.__fauna_*` hook reaches a production web bundle "
         "(e2e-conventions.md point 15):\n  "
         + "\n  ".join(violations)
-        + f"\n\nEither move the install into `$lib/{_AUTOMATION_HOME.split('/')[-1]}` "
+        + f"\n\nEither move the install into `#lib/{_AUTOMATION_HOME.split('/')[-1]}` "
         f"(or an installer only it imports), or wrap it in `if ({_GUARD}) {{ … }}` "
-        "the way `$lib/onboarding/machine.svelte.ts` does for the hooks that must "
+        "the way `#lib/onboarding/machine.svelte.ts` does for the hooks that must "
         "run at module load. If the value is genuinely wanted in production, it is "
         "not a test hook: give it a real name outside the `__fauna_` namespace."
     )

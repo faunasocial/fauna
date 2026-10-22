@@ -184,7 +184,7 @@ Actor A (Nest-1)              Nest-1              Nest-2              Actor B (N
    `nest_url` B's drain later relays over is bound to Nest-2's handshake-**verified**
    view of Nest-1, never the per-request declared string, and B's client marks a
    same-nest channel explicitly so a hostile re-delivery cannot re-home it
-   (`../architecture/federation.md` § Cross-nest shared folders + channel append).
+   (`../architecture/federation-shared-folders.md` § Cross-nest shared folders + channel append).
 
 3. **Message flow** — All messages flow through the channel's **home nest** (Nest-1,
    the group creator's nest), posted with `fauna.conversations.channel.send` and
@@ -211,7 +211,7 @@ Actor A (Nest-1)              Nest-1              Nest-2              Actor B (N
    kind** `fauna.conversations.channel.send_remote { channel_id, nest_url, … }` on its
    own Nest-2, which originates `fauna.federation.channel.append` to Nest-1 — the
    mutating twin of the step-3 fetch, gated by the same membership-bound-to-home-nest
-   check (`../architecture/federation.md` § Cross-nest shared folders + channel
+   check (`../architecture/federation-shared-folders.md` § Cross-nest shared folders + channel
    append owns the kind + gate). A distinct kind — not an additive `nest_url` on
    `channel.send` — is deliberate: an old Nest-2 ignoring the additive field would
    silently perpetuate the blackhole, while an unknown kind fails loud ("your nest
@@ -259,7 +259,7 @@ the real, live, cross-app group-chat mechanism. (The legacy
 from any shipped client UI, was retired 2026-09-26 —
 [`groups.md`](groups.md).)
 
-*Room-model note (ratified 2026-09-08): this fork is the **end-to-end class** of the room model — owner [`conversation-rooms.md`](conversation-rooms.md) — and membership lifts out of the rail: the room's floor roster on its home nest is a member-reported mirror of the MLS membership (never a read authority), roles arrive as an owner-signed authorization policy in the MLS group context that members verify before applying a commit, and history for joiners is per-room policy realized by re-sealing a `history/<channel_hex>` slice to the newcomer. Nothing in this section's mechanics changes; what the room model adds, and its current build status, are owned by that doc's § Implementation status today. The `Bridged` adapter half is owned by [`../ui/conversations.md`](../ui/conversations.md) § Where logic lives → *The `Bridged` adapter*.*
+*Room-model note (ratified 2026-09-08): this fork is the **end-to-end class** of the room model — owner [`conversation-rooms.md`](conversation-rooms.md) — and membership lifts out of the rail: the room's floor roster on its home nest is a member-reported mirror of the MLS membership (never a read authority), roles arrive as an owner-signed authorization policy in the MLS group context that members verify before applying a commit, and history for joiners is per-room policy realized by re-sealing a `history/<channel_hex>` slice to the newcomer. Nothing in this section's mechanics changes; what the room model adds, and its current build status, are owned by that doc's § Implementation status today. The `Bridged` adapter half is owned by [`bridged-adapter.md`](bridged-adapter.md) § Where logic lives → *The `Bridged` adapter*.*
 
 - **Trigger.** `ConversationsManager::confirm_add_participant`
   (`libs/fauna-conversations/src/manager.rs:1913`) — driven by the

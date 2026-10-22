@@ -354,9 +354,16 @@ fn sign_profile(args: Args) -> Result<(), String> {
     let display_name = decode_text(args.display_name.as_deref(), "--display-name")?;
     let bio = decode_text(args.bio.as_deref(), "--bio")?;
 
-    let body =
-        fauna_client_profile::build_edited_profile(&identity, None, &[], display_name, bio, vec![])
-            .map_err(|e| format!("signing the profile: {e}"))?;
+    let body = fauna_client_profile::build_edited_profile(
+        &identity,
+        None,
+        None,
+        &[],
+        display_name,
+        bio,
+        vec![],
+    )
+    .map_err(|e| format!("signing the profile: {e}"))?;
 
     println!("body={}", encode_hex(&body));
     Ok(())

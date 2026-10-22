@@ -162,6 +162,12 @@ pub(crate) enum Cmd {
         next: Box<fauna_core::data::DnsConfig>,
         reply: oneshot::Sender<Result<bool>>,
     },
+    /// The mail import's remembered source
+    /// ([`AccountStoreHandle::write_mail_import_source`]) — `None` forgets it.
+    WriteMailImportSource {
+        next: Option<Box<fauna_core::mail_import_source::RememberedImportSource>>,
+        reply: oneshot::Sender<Result<bool>>,
+    },
     /// The consent-time mint's manifest row
     /// ([`AccountStoreHandle::write_kind_manifest`]).
     WriteKindManifest {
@@ -201,6 +207,14 @@ pub(crate) enum Cmd {
         now: fauna_core::data::Timestamp,
         reply: oneshot::Sender<Result<bool>>,
     },
+    /// The rotation sentinel's clear door
+    /// ([`AccountStoreHandle::clear_mail_rotation`]), boxed: it carries the
+    /// MSEK′ the clear names.
+    ClearMailRotation {
+        new_msek: Box<fauna_core::secret::SecretArray32>,
+        now: fauna_core::data::Timestamp,
+        reply: oneshot::Sender<Result<bool>>,
+    },
     /// A mail credential's put door
     /// ([`AccountStoreHandle::put_mail_credential`]), boxed: it carries the
     /// secret.
@@ -214,6 +228,14 @@ pub(crate) enum Cmd {
     MarkMailCredentialWrapped {
         credential_id: String,
         fingerprint: fauna_core::data::MsekFingerprint,
+        now: fauna_core::data::Timestamp,
+        reply: oneshot::Sender<Result<bool>>,
+    },
+    /// A mail credential's token-mint-stamp door
+    /// ([`AccountStoreHandle::mark_mail_credential_token_minted`]).
+    MarkMailCredentialTokenMinted {
+        credential_id: String,
+        minted_at: u64,
         now: fauna_core::data::Timestamp,
         reply: oneshot::Sender<Result<bool>>,
     },
@@ -412,6 +434,12 @@ pub(crate) enum Cmd {
         generations: std::collections::BTreeSet<[u8; 32]>,
         reply: oneshot::Sender<Result<crate::generation_let_go::LetGoReport>>,
     },
+    /// The restore gesture from a custodian nest
+    /// ([`AccountStoreHandle::restore_from_custodian`]).
+    RestoreFromCustodian {
+        url: String,
+        reply: oneshot::Sender<Result<crate::host_legs::CustodianRestoreOutcome>>,
+    },
     /// The same action's durable intent, staged BEFORE the nest deletion
     /// ([`AccountStoreHandle::stage_fleet_removal`]).
     StageFleetRemoval {
@@ -524,7 +552,9 @@ impl Cmd {
     ///   [`AccountStatePlane::origination_mints`] first) and mints after it.
     /// - **Pass-bound:** `ReconcileNow` (a pass of its own); `PublishOwn`
     ///   (the publish step, which a pass runs too); `Settled` (the
-    ///   barrier — answered between passes by definition); `RetireEnrollment`
+    ///   barrier — answered between passes by definition);
+    ///   `RestoreFromCustodian` (it walks both account-state planes, as a
+    ///   pass does, so it never interleaves with one); `RetireEnrollment`
     ///   and `Shutdown` (they end the principal's sessions, which no pass may
     ///   be mid-flight for); `DeadGenerations` and `LetGo` (they ask the
     ///   holder and retire at the nest, and the dead read must not race a
@@ -561,12 +591,15 @@ impl Cmd {
             | Cmd::WriteBackupDestinations { .. }
             | Cmd::MergeDestinationMarks { .. }
             | Cmd::WriteDns { .. }
+            | Cmd::WriteMailImportSource { .. }
             | Cmd::WriteKindManifest { .. }
             | Cmd::PutAppCredential { .. }
             | Cmd::RevokeAppCredential { .. }
             | Cmd::WriteMailState { .. }
+            | Cmd::ClearMailRotation { .. }
             | Cmd::PutMailCredential { .. }
             | Cmd::MarkMailCredentialWrapped { .. }
+            | Cmd::MarkMailCredentialTokenMinted { .. }
             | Cmd::RevokeMailCredential { .. }
             | Cmd::RetireMailGeneration { .. }
             | Cmd::PutFollow { .. }
@@ -604,6 +637,7 @@ impl Cmd {
             | Cmd::RetireEnrollment { .. }
             | Cmd::DeadGenerations { .. }
             | Cmd::LetGo { .. }
+            | Cmd::RestoreFromCustodian { .. }
             | Cmd::Shutdown { .. } => false,
         }
     }
@@ -652,14 +686,17 @@ impl Cmd {
                 Some(mp::KIND_BACKUP)
             }
             Cmd::WriteDns { .. } => Some(mp::KIND_DNS),
+            Cmd::WriteMailImportSource { .. } => Some(mp::KIND_MAIL_IMPORT_SOURCE),
             Cmd::WriteKindManifest { .. } => Some(mp::KIND_KIND_MANIFEST),
             Cmd::PutAppCredential { .. } | Cmd::RevokeAppCredential { .. } => {
                 Some(mp::KIND_ATPROTO)
             }
             Cmd::PutFollow { .. } | Cmd::Unfollow { .. } => Some(mp::KIND_FOLLOWS),
             Cmd::WriteMailState { .. }
+            | Cmd::ClearMailRotation { .. }
             | Cmd::PutMailCredential { .. }
             | Cmd::MarkMailCredentialWrapped { .. }
+            | Cmd::MarkMailCredentialTokenMinted { .. }
             | Cmd::RevokeMailCredential { .. }
             | Cmd::RetireMailGeneration { .. } => Some(mp::KIND_MAIL),
             Cmd::MergeSuccessionLedger { .. }
@@ -1368,6 +1405,45 @@ impl AccountStoreHandle {
         rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
     }
 
+    /// The mail import's remembered source (`fauna.state.mail-import-source`)
+    /// — `None` when nothing is remembered. A local read behind the
+    /// first-listing gate, as [`Self::dns`]: a replica that has not listed
+    /// the fleet scope yet — a fresh device, or this one relaunched over a
+    /// fresh store — refuses rather than answering "nothing remembered" for
+    /// a record the account holds.
+    pub async fn mail_import_source(
+        &self,
+    ) -> Result<Option<fauna_core::mail_import_source::RememberedImportSource>> {
+        super::handle_source::read_gate(
+            self,
+            fauna_protocol::merge_policy::KIND_MAIL_IMPORT_SOURCE,
+        )
+        .await?;
+        Ok(crate::mail_import_source_rows::mail_import_source_of(
+            &self
+                .states_of_kind(fauna_protocol::merge_policy::KIND_MAIL_IMPORT_SOURCE)
+                .await?,
+        ))
+    }
+
+    /// Remember `next` as the mail import's source, or forget it (`None`) —
+    /// whole-record latest-wins, stamped on the store thread. Whether anything
+    /// was written (`mail_import_source_rows` owns the mechanics).
+    pub async fn write_mail_import_source(
+        &self,
+        next: Option<fauna_core::mail_import_source::RememberedImportSource>,
+    ) -> Result<bool> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd
+            .send(Cmd::WriteMailImportSource {
+                next: next.map(Box::new),
+                reply,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?;
+        rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
+    }
+
     /// Publish the consent's verified kind manifest as the account's
     /// `fauna.state.kind-manifest` row for `client_id`, stamped on the store
     /// thread — step (1) of the consent-time mint (`third-party-kinds.md`
@@ -1542,6 +1618,25 @@ impl AccountStoreHandle {
         rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
     }
 
+    /// Clear the mail rotation sentinel — only when the stored one names
+    /// `new_msek` (a clear naming a different MSEK′ writes nothing). Whether
+    /// anything was written; the writer door's refusals surface as `Err`.
+    pub async fn clear_mail_rotation(
+        &self,
+        new_msek: fauna_core::secret::SecretArray32,
+    ) -> Result<bool> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd
+            .send(Cmd::ClearMailRotation {
+                new_msek: Box::new(new_msek),
+                now: fauna_core::data::Timestamp::now(),
+                reply,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?;
+        rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
+    }
+
     /// Put one mail credential at `credential/<credential_id>` — a
     /// read-join-put, so a marker the store holds is never undone. Whether
     /// anything was written; the writer door's refusals surface as `Err`.
@@ -1574,6 +1669,29 @@ impl AccountStoreHandle {
             .send(Cmd::MarkMailCredentialWrapped {
                 credential_id,
                 fingerprint,
+                now: fauna_core::data::Timestamp::now(),
+                reply,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?;
+        rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
+    }
+
+    /// Record that a fresh outbound submission token issued at `minted_at`
+    /// was provisioned for `credential_id` (the token-mint stamp,
+    /// `mail-credentials.md` rule 10). Whether anything was written (`false`
+    /// for an absent or marked row, or one already naming a mint at least as
+    /// recent).
+    pub async fn mark_mail_credential_token_minted(
+        &self,
+        credential_id: String,
+        minted_at: u64,
+    ) -> Result<bool> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd
+            .send(Cmd::MarkMailCredentialTokenMinted {
+                credential_id,
+                minted_at,
                 now: fauna_core::data::Timestamp::now(),
                 reply,
             })
@@ -2078,6 +2196,25 @@ impl AccountStoreHandle {
                 .states_of_kind(fauna_protocol::merge_policy::KIND_FOLDER_KEYS)
                 .await?,
         )
+    }
+
+    /// [`Self::folder_keys`] for a read a decision is derived from — the
+    /// succession cut's "which owned sets are un-cut" (`succession-cut.md`
+    /// ruling (11)(a)).
+    ///
+    /// **It crosses the read gate** ([`super::handle_source::read_gate`]): on
+    /// a replica that has never listed the fleet scope — a successor's first
+    /// launch above all — or that holds rows under a generation it may still
+    /// be keyed for (the unkeyed hold — the kind is tip-sealed), custody holds
+    /// none of the account's sets, and an empty answer reads as "this account
+    /// owns no set". The read is refused
+    /// ([`super::handle_source::ScopeNotReady`]) instead. The plain read stays
+    /// ungated: a key lookup and a read-join-put lose nothing to a listing
+    /// that lands later.
+    pub async fn listed_folder_keys(&self) -> Result<fauna_core::data::FoldersConfig> {
+        super::handle_source::read_gate(self, fauna_protocol::merge_policy::KIND_FOLDER_KEYS)
+            .await?;
+        self.folder_keys().await
     }
 
     /// Join `replica` into this account's ATProto identity custody
@@ -3074,6 +3211,32 @@ impl AccountStoreHandle {
         rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
     }
 
+    /// Restore from the custodian NEST at `url` — the user's gesture, whatever
+    /// the own nest's state, never standing (`account-replica-posture.md`
+    /// § Replica posture → *Corollary — the cold device*; the surface is
+    /// `ui/nests.md` § Trust facet — restore from a custodian nest). One dial
+    /// path with the pump's registry arm: the URL policy, the revocation view
+    /// for an address a custody row names, the custodied-fleet handshake, the
+    /// pull-only walk of both account-state planes, then the content scopes
+    /// derived after them. `Ok` carries every outcome the user is told, a
+    /// refusal included; `Err` is a host that cannot dial (no enrollment
+    /// witness yet, a host with no custodian leg) or a store failure.
+    /// Pass-bound.
+    pub async fn restore_from_custodian(
+        &self,
+        url: impl Into<String>,
+    ) -> Result<crate::host_legs::CustodianRestoreOutcome> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd
+            .send(Cmd::RestoreFromCustodian {
+                url: url.into(),
+                reply,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?;
+        rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
+    }
+
     /// Resolves once the runtime has shut down — the store thread exited and
     /// dropped its command receiver — so a task serving this account can end
     /// on the *event* rather than discover it at its next tick
@@ -3201,6 +3364,34 @@ impl fauna_client_config::SuccessionLedgerStore for AccountStoreHandle {
         let identity = self.ledger_identity()?;
         AccountStoreHandle::raise_grant_marks(self, identity.self_actor, predecessor)
             .await
+            .map_err(|e| fauna_client_config::StoreError::Save(format!("{e:#}")))
+    }
+}
+
+/// The remembered-import-source seam
+/// (`fauna_client_config::MailImportSourceStore`), on the runtime handle like
+/// the kind-manifest seam below.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl fauna_client_config::MailImportSourceStore for AccountStoreHandle {
+    async fn load(
+        &self,
+    ) -> Result<
+        Option<fauna_core::mail_import_source::RememberedImportSource>,
+        fauna_client_config::StoreError,
+    > {
+        self.mail_import_source()
+            .await
+            .map_err(|e| fauna_client_config::StoreError::Load(format!("{e:#}")))
+    }
+
+    async fn save(
+        &self,
+        next: Option<fauna_core::mail_import_source::RememberedImportSource>,
+    ) -> Result<(), fauna_client_config::StoreError> {
+        self.write_mail_import_source(next)
+            .await
+            .map(|_| ())
             .map_err(|e| fauna_client_config::StoreError::Save(format!("{e:#}")))
     }
 }
@@ -3423,6 +3614,15 @@ impl fauna_client_config::MailStore for AccountStoreHandle {
             .map_err(|e| fauna_client_config::StoreError::Save(format!("{e:#}")))
     }
 
+    async fn clear_rotation(
+        &self,
+        new_msek: fauna_core::secret::SecretArray32,
+    ) -> Result<bool, fauna_client_config::StoreError> {
+        self.clear_mail_rotation(new_msek)
+            .await
+            .map_err(|e| fauna_client_config::StoreError::Save(format!("{e:#}")))
+    }
+
     async fn put_credential(
         &self,
         credential: fauna_core::data::MailCredential,
@@ -3438,6 +3638,16 @@ impl fauna_client_config::MailStore for AccountStoreHandle {
         fingerprint: fauna_core::data::MsekFingerprint,
     ) -> Result<bool, fauna_client_config::StoreError> {
         self.mark_mail_credential_wrapped(credential_id, fingerprint)
+            .await
+            .map_err(|e| fauna_client_config::StoreError::Save(format!("{e:#}")))
+    }
+
+    async fn mark_token_minted(
+        &self,
+        credential_id: String,
+        minted_at: u64,
+    ) -> Result<bool, fauna_client_config::StoreError> {
+        self.mark_mail_credential_token_minted(credential_id, minted_at)
             .await
             .map_err(|e| fauna_client_config::StoreError::Save(format!("{e:#}")))
     }
@@ -3738,6 +3948,19 @@ where
             let r = crate::dns_rows::write_dns(local.store, local.fleet_plane, me, &next).await;
             return wrote(r, |written| *written, local.publish_due, reply);
         }
+        // The remembered import source: a whole-record LWW put (or tombstone)
+        // through the fleet plane's writer door — `mail_import_source_rows`
+        // owns the mechanics.
+        Cmd::WriteMailImportSource { next, reply } => {
+            let r = crate::mail_import_source_rows::write_mail_import_source(
+                local.store,
+                local.fleet_plane,
+                me,
+                next.as_deref(),
+            )
+            .await;
+            return wrote(r, |written| *written, local.publish_due, reply);
+        }
         // The kind-manifest row: a whole-row LWW put through the fleet plane's
         // writer door — `kind_manifest_rows` owns the mechanics.
         Cmd::WriteKindManifest {
@@ -3812,6 +4035,20 @@ where
                 .await;
             return wrote(r, |written| *written, local.publish_due, reply);
         }
+        Cmd::ClearMailRotation {
+            new_msek,
+            now,
+            reply,
+        } => {
+            let r = crate::mail_rows::clear_mail_rotation(
+                local.store,
+                local.fleet_plane,
+                &new_msek,
+                now,
+            )
+            .await;
+            return wrote(r, |written| *written, local.publish_due, reply);
+        }
         Cmd::PutMailCredential {
             credential,
             now,
@@ -3833,6 +4070,22 @@ where
                 local.fleet_plane,
                 &credential_id,
                 fingerprint,
+                now,
+            )
+            .await;
+            return wrote(r, |written| *written, local.publish_due, reply);
+        }
+        Cmd::MarkMailCredentialTokenMinted {
+            credential_id,
+            minted_at,
+            now,
+            reply,
+        } => {
+            let r = crate::mail_rows::mark_credential_token_minted(
+                local.store,
+                local.fleet_plane,
+                &credential_id,
+                minted_at,
                 now,
             )
             .await;

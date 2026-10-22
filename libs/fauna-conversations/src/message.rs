@@ -144,6 +144,23 @@ pub struct MessageSnapshot {
     /// no-user-data-loss).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legal_takedown_ref: Option<String>,
+    /// `Some(reason_token)` iff this nest's admin **blocked** this message after
+    /// a report (`moderation.md` § Admin block of a reported item) — the report
+    /// reason's wire token. For every viewer but the author the relay withheld
+    /// the sealed envelope, so [`document`](Self::document) / [`body`](Self::body)
+    /// are empty and every app renders the shared `adminBlockNotice(reason)`
+    /// (`fauna_core::obligation::admin_block_notice`) **in place of the
+    /// bubble** — the [`legal_takedown_ref`](Self::legal_takedown_ref) twin,
+    /// with the same best-effort boundary (a copy synced before the block
+    /// stands). On the author's own devices the nest serves the body (its
+    /// attested author, decision 4): the message carries its body AND this
+    /// reason, and the notice paints **beside the bubble**
+    /// ([`admin_block_in_place`](Self::admin_block_in_place) tells the two
+    /// apart). Additive, and absent from the at-rest blob for every other
+    /// message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub admin_block_reason: Option<String>,
     /// Per-category content-label verdicts (`moderation.md` § Per-row badge
     /// data path, ratified 2026-07-16) — the client-side twin of
     /// `fauna_feed::PostSummary::labels`. Populated post-decrypt by
@@ -187,6 +204,368 @@ pub struct MessageSnapshot {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     #[cfg_attr(feature = "uniffi", uniffi(default = false))]
     pub can_delete: bool,
+    /// Whether this is the viewer's **own message that its bridge never
+    /// took**: the bridge that carried the room was disconnected with the
+    /// message still queued, and the nest deleted the undeliverable item and
+    /// stamped the Sent copy (`apps/bridges.md` § Phase G → *When the bridge
+    /// stops serving*, consequence 3). Painted as `dm-message-undelivered`
+    /// under the body, which stays in view so the user can send it again.
+    /// Projected on every [`crate::ConversationsManager::thread_detail`] from
+    /// the rail's answer ([`crate::backend::RailBackend::message_undelivered`]),
+    /// like [`Self::can_delete`]: the stamp can land long after this device
+    /// stored the message. Additive (`serde` + UniFFI defaults), so the
+    /// at-rest slice stays byte-identical for every other message.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    pub undelivered: bool,
+    /// The fresh-IP warm-up's hold on the viewer's **own sent mail**: the nest
+    /// accepted it but will deliver it only when the ramp allows
+    /// (`mail-deliverability.md` § Enforcement at submission time). Painted as
+    /// `dm-message-warmup-deferred` under the body, worded by
+    /// [`warmup_deferred_text`] — which also drops it once the release time
+    /// has passed. Projected on every
+    /// [`crate::ConversationsManager::thread_detail`] from what the latest
+    /// `Sent` read said, like [`Self::undelivered`]. Additive (`serde` + UniFFI
+    /// defaults), so the at-rest slice stays byte-identical for every other
+    /// message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub warmup_hold: Option<crate::backend::MailWarmupHold>,
+    /// The perimeter scan verdict of a **received** mail message, as the
+    /// lines its `dm-message-scan-result` row paints — ClamAV, rspamd, the
+    /// action taken, each a [`fauna_core::localized::LocalizedText`] from the
+    /// shared [`fauna_core::mail_scan::scan_result_lines`]
+    /// (`mail-content-scanning.md` § User sees their own message's row).
+    /// Empty — and the row absent — for every other message, and for a
+    /// received one whose scan row has not been read yet or does not exist.
+    /// Projected on every [`crate::ConversationsManager::thread_detail`] from
+    /// the manager's cache, which
+    /// [`crate::ConversationsManager::refresh_message_scan_results`] fills
+    /// when the thread opens; never stored, so the at-rest slice stays
+    /// byte-identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "uniffi", uniffi(default = []))]
+    pub scan_result_lines: Vec<fauna_core::localized::LocalizedText>,
+    /// The "Delivered to: <address> [<label>]" tag of a **received** mail
+    /// message — the alias it arrived on, as its `dm-message-delivered-to-alias`
+    /// paints it ([`delivered_to_text`]; `mail-aliases.md` § Label). `None` —
+    /// and the tag absent — for every other message, for one with no
+    /// delivery stamp, and until the account's alias rows have been read.
+    /// Projected on every [`crate::ConversationsManager::thread_detail`] from
+    /// the stamps kept at ingest and the rows
+    /// [`crate::ConversationsManager::refresh_delivered_aliases`] reads when
+    /// the thread opens; never stored, so the at-rest slice stays
+    /// byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub delivered_to: Option<String>,
+    /// The nest's withholding of the viewer's **own** fauna-native message —
+    /// its legal takedown or its admin block, as the author's moderation
+    /// queue row records it — painted as `dm-message-withheld-badge` beside
+    /// the body, whose tap opens that row's appeal (`moderation.md` § Legal
+    /// takedown → *App render*, the fourth surface). The author's devices
+    /// keep the real copy and never receive the tombstone, so without it the
+    /// thread says nothing. Matched by record digest: the queue row's
+    /// `content_id` is this message's [`PlaneRef::record_digest`]. Projected
+    /// on every [`crate::ConversationsManager::thread_detail`] from the rows
+    /// [`crate::ConversationsManager::refresh_withheld_messages`] reads when
+    /// the thread opens; never stored, so the at-rest slice stays
+    /// byte-identical — and never through
+    /// [`legal_takedown_ref`](Self::legal_takedown_ref) (which collapses the
+    /// bubble) or [`admin_block_reason`](Self::admin_block_reason) (which
+    /// names one ground only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub withheld: Option<WithheldOwnMessage>,
+}
+
+/// Why the nest withholds a message from the conversation — the two
+/// enforcement acts that write the author's queue row for a conversation
+/// record (`moderation.md` § Legal takedown → *Conversations*, § Admin block
+/// of a reported item).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum WithheldGround {
+    /// A legal takedown (`ObligationAction::TakenDown`).
+    TakenDown,
+    /// An admin block after a report (`ObligationAction::Blocked`).
+    Blocked,
+}
+
+impl WithheldGround {
+    /// The ground an obligation-action discriminant names, `None` for every
+    /// action that withholds nothing from a conversation.
+    pub fn from_obligation_action(action: u8) -> Option<Self> {
+        use fauna_core::obligation::ObligationAction;
+        if action == ObligationAction::TakenDown as u8 {
+            Some(Self::TakenDown)
+        } else if action == ObligationAction::Blocked as u8 {
+            Some(Self::Blocked)
+        } else {
+            None
+        }
+    }
+}
+
+/// One of the viewer's own conversation records the nest withholds, as the
+/// author's queue row (`fauna.moderation.actions`) names it — what the rail
+/// answers [`crate::ConversationsManager::refresh_withheld_messages`] with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WithheldRecord {
+    /// The queue row's `content_id`: the record digest, lowercase hex.
+    pub content_id: String,
+    pub ground: WithheldGround,
+    /// The handle domain of the nest whose admin decided, on a row another
+    /// nest delivered; `None` for this nest's own decision.
+    pub issuer_nest: Option<String>,
+    /// The row's microsecond timestamp — the newest row for a record wins.
+    pub timestamp: i64,
+}
+
+impl WithheldRecord {
+    /// The record a queue row names, `None` for a row that is not a
+    /// conversation record's withholding (every post row, every classifier
+    /// row) — the one filter, so no rail glue re-derives it.
+    pub fn from_queue_row(
+        content_type: &str,
+        content_id: &str,
+        action: u8,
+        issuer_nest: Option<String>,
+        timestamp: i64,
+    ) -> Option<Self> {
+        if content_type != "conversation" || content_id.is_empty() {
+            return None;
+        }
+        Some(Self {
+            content_id: content_id.to_ascii_lowercase(),
+            ground: WithheldGround::from_obligation_action(action)?,
+            issuer_nest: issuer_nest.filter(|nest| !nest.is_empty()),
+            timestamp,
+        })
+    }
+}
+
+/// The projection behind `dm-message-withheld-badge` (see
+/// [`MessageSnapshot::withheld`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct WithheldOwnMessage {
+    /// The matched queue row's `content_id` — what the appeal names.
+    pub content_id: String,
+    pub ground: WithheldGround,
+    /// The deciding nest's handle domain, on a row another nest delivered.
+    pub issuer_nest: Option<String>,
+    /// The badge's words, side by side: the ground — the block notice with
+    /// its reason when this copy carries one, so the bubble paints ONE notice
+    /// and never the badge beside a second — then the shared "decided by
+    /// {nest}" suffix when another nest decided, then the appeal entry. The
+    /// ground line's argument is itself a key: resolve nested.
+    pub lines: Vec<fauna_core::localized::LocalizedText>,
+}
+
+impl WithheldOwnMessage {
+    /// The badge for `record` on a message whose copy carries
+    /// `admin_block_reason` (the author-exempt fetch of a blocked record,
+    /// painted beside the body).
+    pub fn new(record: &WithheldRecord, admin_block_reason: Option<&str>) -> Self {
+        use fauna_core::localized::LocalizedText;
+        use fauna_core::obligation::{
+            ObligationAction, admin_block_notice, obligation_action_label,
+        };
+        let ground = match (record.ground, admin_block_reason) {
+            (WithheldGround::Blocked, Some(reason)) => admin_block_notice(reason),
+            (WithheldGround::Blocked, None) => {
+                obligation_action_label(ObligationAction::Blocked as u8)
+            }
+            (WithheldGround::TakenDown, _) => {
+                obligation_action_label(ObligationAction::TakenDown as u8)
+            }
+        };
+        let mut lines = vec![ground];
+        if let Some(nest) = &record.issuer_nest {
+            lines.push(LocalizedText::key_arg(
+                fauna_client_moderation::ISSUED_BY_KEY,
+                "nest",
+                nest.clone(),
+            ));
+        }
+        lines.push(LocalizedText::key(WITHHELD_APPEAL_KEY));
+        Self {
+            content_id: record.content_id.clone(),
+            ground: record.ground,
+            issuer_nest: record.issuer_nest.clone(),
+            lines,
+        }
+    }
+
+    /// Whether this badge already says what the beside-body block notice
+    /// would — an app then paints the badge alone.
+    pub fn carries_block_notice(&self) -> bool {
+        self.ground == WithheldGround::Blocked
+    }
+}
+
+/// The appeal entry's word — the queue's own `appeal-button` label, since the
+/// badge opens the same appeal.
+pub const WITHHELD_APPEAL_KEY: &str = "moderation.appeal";
+
+impl MessageSnapshot {
+    /// Whether the admin-block notice stands **in place of** the bubble — the
+    /// relay withheld the body, so there is nothing else to paint. `false` for
+    /// the author's own blocked message, which keeps its body and paints the
+    /// notice beside it (`moderation.md` § Admin block of a reported item,
+    /// decision 4), and for every unblocked message.
+    pub fn admin_block_in_place(&self) -> bool {
+        self.admin_block_reason.is_some() && self.document.blocks.is_empty()
+    }
+}
+
+/// The `dm-message-delivered-to-alias` line for a received message's kept
+/// delivery stamps ([`fauna_mail::aliases::delivered::delivery_stamps`]) and
+/// the account's alias rows — the one wording every app paints
+/// (`mail-aliases.md` § Label): the alias's own label, or, when it has none,
+/// the alias kind plus its pattern (the caught domain, for a catch-all; the
+/// kind alone for a row deleted since delivery). `None` when the shared
+/// resolver resolves nothing.
+pub fn delivered_to_text(
+    stamps: &[u8],
+    rows: &[fauna_mail::aliases::delivered::AliasLabelRow],
+) -> Option<String> {
+    use fauna_i18n::strings::mail_aliases as t;
+    use fauna_mail::aliases::delivered::{DeliveredAliasKind, delivered_alias};
+    let hit = delivered_alias(stamps, rows)?;
+    let label = if !hit.label.is_empty() {
+        hit.label
+    } else {
+        let (kind, detail) = match &hit.kind {
+            DeliveredAliasKind::Exact => (t::KIND_EXACT, hit.pattern.clone()),
+            DeliveredAliasKind::Subaddress => (t::KIND_SUBADDRESS, hit.pattern.clone()),
+            DeliveredAliasKind::WildcardPrefix => (t::KIND_WILDCARD, hit.pattern.clone()),
+            DeliveredAliasKind::Disposable => (t::KIND_DISPOSABLE, hit.pattern.clone()),
+            DeliveredAliasKind::Catchall { domain } => (t::KIND_CATCHALL, Some(domain.clone())),
+        };
+        match detail {
+            Some(detail) => format!("{kind} {detail}"),
+            None => kind.to_string(),
+        }
+    };
+    Some(t::delivered_to(&hit.address, &label))
+}
+
+/// The `dm-message-warmup-deferred` line for a held sent message — the one
+/// wording every app paints: the release time in the viewer's local clock and
+/// the queue position. `None` once `now_secs` has reached the release, so a
+/// thread left open past midnight UTC stops saying the message waits.
+///
+/// Native only (`local-clock`); exported over UniFFI to the native apps beside
+/// [`crate::typed_address_display`] (same `client-display` gate, so the Go
+/// mail-bridge's FFI build drops it). The web leg has no OS timezone database
+/// in wasm, so it calls [`warmup_deferred_text_at`] with the release time it
+/// formatted itself.
+#[cfg(feature = "local-clock")]
+#[cfg_attr(all(feature = "uniffi", feature = "client-display"), uniffi::export)]
+pub fn warmup_deferred_text(
+    hold: &crate::backend::MailWarmupHold,
+    now_secs: i64,
+) -> Option<String> {
+    warmup_deferred_text_at(
+        hold,
+        now_secs,
+        &fauna_core::format::format_unix_local(hold.release_at_secs),
+    )
+}
+
+/// [`warmup_deferred_text`] with the release time already formatted
+/// (`release_label`) — everything but the clock, so the wasm leg shares the
+/// wording, the count and the release-has-come rule while the web app formats
+/// only the date.
+pub fn warmup_deferred_text_at(
+    hold: &crate::backend::MailWarmupHold,
+    now_secs: i64,
+    release_label: &str,
+) -> Option<String> {
+    use fauna_i18n::strings::conversations::unified;
+    if now_secs >= hold.release_at_secs {
+        return None;
+    }
+    let until = unified::dm_message_warmup_deferred(release_label);
+    let queue = match hold.messages_ahead {
+        0 => unified::DM_MESSAGE_WARMUP_QUEUE_NEXT.to_string(),
+        1 => unified::DM_MESSAGE_WARMUP_QUEUE_ONE.to_string(),
+        n => unified::dm_message_warmup_queue(&n.to_string()),
+    };
+    Some(format!("{until} {queue}"))
+}
+
+#[cfg(all(test, feature = "local-clock"))]
+mod warmup_deferred_text_tests {
+    use super::warmup_deferred_text;
+    use crate::backend::MailWarmupHold;
+    use fauna_i18n::strings::conversations::unified;
+
+    const RELEASE: i64 = 1_700_006_400;
+
+    fn text(messages_ahead: u32, now: i64) -> Option<String> {
+        warmup_deferred_text(
+            &MailWarmupHold {
+                release_at_secs: RELEASE,
+                messages_ahead,
+            },
+            now,
+        )
+    }
+
+    #[test]
+    fn says_the_release_time_then_the_queue_position() {
+        let until =
+            unified::dm_message_warmup_deferred(&fauna_core::format::format_unix_local(RELEASE));
+        assert_eq!(
+            text(0, RELEASE - 1),
+            Some(format!("{until} {}", unified::DM_MESSAGE_WARMUP_QUEUE_NEXT))
+        );
+        assert_eq!(
+            text(1, RELEASE - 1),
+            Some(format!("{until} {}", unified::DM_MESSAGE_WARMUP_QUEUE_ONE))
+        );
+        assert_eq!(
+            text(7, RELEASE - 1),
+            Some(format!("{until} {}", unified::dm_message_warmup_queue("7")))
+        );
+    }
+
+    #[test]
+    fn says_nothing_once_the_release_has_come() {
+        assert_eq!(text(2, RELEASE), None);
+        assert_eq!(text(2, RELEASE + 60), None);
+    }
+}
+
+#[cfg(test)]
+mod warmup_deferred_text_at_tests {
+    use super::warmup_deferred_text_at;
+    use crate::backend::MailWarmupHold;
+    use fauna_i18n::strings::conversations::unified;
+
+    const RELEASE: i64 = 1_700_006_400;
+
+    /// The web leg's door: the caller's own release label, the shared count
+    /// and the shared release-has-come rule.
+    #[test]
+    fn words_the_callers_release_label_and_falls_silent_at_the_release() {
+        let hold = MailWarmupHold {
+            release_at_secs: RELEASE,
+            messages_ahead: 3,
+        };
+        assert_eq!(
+            warmup_deferred_text_at(&hold, RELEASE - 1, "15 Nov, 01:00"),
+            Some(format!(
+                "{} {}",
+                unified::dm_message_warmup_deferred("15 Nov, 01:00"),
+                unified::dm_message_warmup_queue("3")
+            ))
+        );
+        assert_eq!(warmup_deferred_text_at(&hold, RELEASE, "x"), None);
+    }
 }
 
 /// One inbound cooperative-delete claim, as the rail folded it
@@ -428,5 +807,76 @@ mod tests {
                 }]
             }]
         );
+    }
+}
+
+#[cfg(test)]
+mod withheld_tests {
+    use super::*;
+
+    fn row(content_type: &str, action: u8, issuer: Option<&str>) -> Option<WithheldRecord> {
+        WithheldRecord::from_queue_row(
+            content_type,
+            "ABCD01",
+            action,
+            issuer.map(str::to_string),
+            42,
+        )
+    }
+
+    #[test]
+    fn only_a_conversation_records_withholding_is_kept() {
+        let taken = row("conversation", 7, None).expect("a takedown row");
+        assert_eq!(taken.ground, WithheldGround::TakenDown);
+        assert_eq!(
+            taken.content_id, "abcd01",
+            "matched against the lowercase digest"
+        );
+        assert_eq!(
+            row("conversation", 10, None).map(|r| r.ground),
+            Some(WithheldGround::Blocked)
+        );
+        assert_eq!(row("post", 7, None), None, "a post row is not a message's");
+        assert_eq!(
+            row("conversation", 6, None),
+            None,
+            "a label withholds nothing"
+        );
+        assert_eq!(
+            row("conversation", 7, Some("")).and_then(|r| r.issuer_nest),
+            None,
+            "an empty domain names no nest"
+        );
+    }
+
+    #[test]
+    fn the_badge_names_the_ground_the_issuer_and_the_appeal() {
+        let record = row("conversation", 7, Some("issuer.example")).unwrap();
+        let badge = WithheldOwnMessage::new(&record, None);
+        let keys: Vec<&str> = badge.lines.iter().map(|l| l.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "moderation.action.taken_down",
+                fauna_client_moderation::ISSUED_BY_KEY,
+                WITHHELD_APPEAL_KEY
+            ]
+        );
+        assert_eq!(badge.lines[1].args["nest"], "issuer.example");
+        assert!(!badge.carries_block_notice());
+    }
+
+    #[test]
+    fn a_blocked_copy_carrying_its_notice_gets_one_notice_with_the_reason() {
+        let record = row("conversation", 10, None).unwrap();
+        let synced_before = WithheldOwnMessage::new(&record, None);
+        assert_eq!(synced_before.lines[0].key, "moderation.action.blocked");
+        let beside = WithheldOwnMessage::new(&record, Some("harassment"));
+        assert_eq!(
+            beside.lines[0],
+            fauna_core::obligation::admin_block_notice("harassment")
+        );
+        assert_eq!(beside.lines.len(), 2, "the notice, then the appeal entry");
+        assert!(beside.carries_block_notice());
     }
 }

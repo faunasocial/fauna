@@ -25,12 +25,12 @@ pub use compaction::{CompactionPlan, SegmentStats, compact, pick_compaction_inpu
 pub use kind_manifest::KindManifest;
 pub use manager::{
     ActorScopedStore, AppendOutcome, MAX_COUNTER_FLOOR, ManagerError, ScopeRenameOutcome,
-    SegmentBackupMeta, SegmentManager, SegmentPairBytes, bucket_for, check_counter_floor,
-    raise_counter, rename_scope_dir,
+    SegmentBackupMeta, SegmentManager, SegmentPairFiles, TailReconcile, bucket_for,
+    check_counter_floor, raise_counter, rename_scope_dir,
 };
 pub use manifest::{Manifest, ManifestError};
 pub use pin::PinSet;
-pub use segment::{FramedSegment, RecordEntry, SegmentHeader};
+pub use segment::{FramedSegment, RecordEntry, SegmentHeader, TailRecovery};
 pub use store::FramedSegmentStore;
 pub use versioned::VersionedManifest;
 

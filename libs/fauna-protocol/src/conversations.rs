@@ -159,7 +159,7 @@ pub struct ChannelSendReply {
 /// channel's log lives on another nest (learned from the Welcome's `nest_url`),
 /// so the member's own nest relays this envelope there via
 /// `fauna.federation.channel.append` (`direct-messages.md` § step 3b;
-/// `federation.md` § Cross-nest shared folders + channel append).
+/// `federation-shared-folders.md` § Cross-nest shared folders + channel append).
 ///
 /// A **distinct kind** — deliberately NOT an additive `nest_url` on
 /// `channel.send` — per the ratified client-kind wire rule: an old,
@@ -311,6 +311,15 @@ pub struct ChannelFetchEntry {
     /// § Implementation status today).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legal_takedown: Option<crate::posts::LegalTakedownMarker>,
+    /// Present iff this nest's admin blocked this message after a report (the
+    /// conversation twin of `PostGetReply.admin_block`; `moderation.md` § Admin
+    /// block of a reported item). The sealed `envelope` is withheld (empty)
+    /// from every fetch — today the author's other devices included, though
+    /// decision 4 rules the attested author's own local fetch exempt, as for a
+    /// post — and the client renders the shared
+    /// `adminBlockNotice(reason)` in its place. Additive, like `legal_takedown`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_block: Option<crate::posts::AdminBlockMarker>,
     /// A **community room's** category verdicts for this message — what the
     /// labelers the room names produced when its home nest opened the message
     /// to index it (`community-rooms.md` § The three classes → *What the home
@@ -425,7 +434,7 @@ pub struct ChannelActorsReply {
 /// `fauna.conversations.channel.actors_remote` — a **foreign member's** roster
 /// read: the channel's authoritative roster lives on its home nest (learned
 /// from the Welcome's `nest_url`), so the member's own nest relays the read
-/// there via `fauna.federation.channel.actors` (`federation.md` § Cross-nest).
+/// there via `fauna.federation.channel.actors` (`federation-shared-folders.md` § Cross-nest).
 ///
 /// A **distinct kind** — deliberately NOT an additive `nest_url` on
 /// `channel.actors` — for a sharper reason than `send_remote`'s: an old
@@ -434,7 +443,7 @@ pub struct ChannelActorsReply {
 /// read a healthy member homed elsewhere as a phantom and **evict** them under
 /// supported version skew. An unknown kind fails loud, and the client's
 /// error→"roster unreadable" mapping lands in the heal's refuse arm — the
-/// correct degradation on every skew pairing (`federation.md` § Cross-nest,
+/// correct degradation on every skew pairing (`federation-shared-folders.md` § Cross-nest,
 /// the fetch-vs-actors dividing line: fetch's old-nest degrade is a benign
 /// stale read; the actors read feeds a membership-mutating heal).
 ///
@@ -851,7 +860,7 @@ pub struct RoomRosterMemberWire {
     /// principal's is the `handle@domain` its home nest — the authority for
     /// handles at its domain — volunteered on the member's own relayed drain,
     /// which this nest recorded only after binding that domain to the
-    /// announcing nest's key through discovery (`federation.md` § Cross-nest
+    /// announcing nest's key through discovery (`federation-shared-folders.md` § Cross-nest
     /// shared folders + channel append, the id→handle bullet). No nest ever
     /// *asks* another what handle an actor wears. For an end-to-end room the
     /// floor roster is a *member-reported mirror* (`conversation-rooms.md`
@@ -1062,7 +1071,7 @@ pub struct RoomListRosterReply {
 /// no room record and answers `permission_denied`, and every co-member this
 /// device has not met renders as an elided actor id — including the members
 /// the id→handle announce names for everyone on the room's home nest
-/// (`../architecture/federation.md` § Cross-nest shared folders + channel
+/// (`../architecture/federation-shared-folders.md` § Cross-nest shared folders + channel
 /// append, the id→handle bullet).
 ///
 /// A **distinct kind** rather than an additive `nest_url` on
@@ -2045,6 +2054,38 @@ pub struct RoomSearchReply {
     pub extra: BTreeMap<String, Value>,
 }
 
+// ── fauna.conversations.room.search_remote ─────────────────────────────
+
+/// The same search as [`RoomSearchRequest`], for a room homed on **another
+/// nest**: the searcher's own nest originates
+/// `fauna.federation.conversation.room.search.fetch` to `nest_url` and hands
+/// back the room home's [`RoomSearchReply`], unchanged and unstored
+/// (`conversation-rooms.md` § The home nest — "a member on a foreign nest
+/// reaches the room only through their own home nest").
+///
+/// A **distinct kind** rather than an additive `nest_url` on `room.search`,
+/// for the [`RoomListRosterRemoteRequest`] reason: an old own-nest that
+/// ignored the field would answer from its own room plane, where the caller
+/// holds no seat, with a clean `permission_denied` indistinguishable from
+/// "you were removed from this room". An unknown kind fails loud.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RoomSearchRemoteRequest {
+    /// Hex-encoded room id (32 bytes). A room id *is* its channel id.
+    pub room_id: String,
+    /// [`RoomSearchRequest::query`], forwarded unchanged.
+    pub query: String,
+    /// [`RoomSearchRequest::limit`], forwarded unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// [`RoomSearchRequest::include_posts`], forwarded unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_posts: bool,
+    /// The room's home nest — where the room's derived corpus lives.
+    pub nest_url: String,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
 /// Page size when the caller names none.
 pub const ROOM_SEARCH_DEFAULT_LIMIT: u32 = 20;
 
@@ -2428,6 +2469,30 @@ mod tests {
     }
 
     #[test]
+    fn channel_fetch_entry_admin_block_is_additive_and_round_trips() {
+        let normal = ChannelFetchEntry {
+            seq: 3,
+            envelope: vec![1, 2, 3],
+            ..Default::default()
+        };
+        let decoded: ChannelFetchEntry = decode(&encode_canonical(&normal).unwrap()).unwrap();
+        assert!(decoded.admin_block.is_none());
+        let blocked = ChannelFetchEntry {
+            seq: 4,
+            envelope: vec![],
+            admin_block: crate::posts::AdminBlockMarker::from_reason(Some("spam")),
+            ..Default::default()
+        };
+        let bytes = encode_canonical(&blocked).unwrap();
+        let decoded: ChannelFetchEntry = decode(&bytes).unwrap();
+        assert_eq!(decoded, blocked);
+        assert_eq!(
+            decoded.admin_block.unwrap().reason,
+            crate::moderation::AbuseReportReason::Spam
+        );
+    }
+
+    #[test]
     fn channel_fetch_entry_legal_takedown_is_additive_and_round_trips() {
         use crate::posts::LegalTakedownMarker;
         // A normal entry omits `legal_takedown` entirely: adding the field
@@ -2446,6 +2511,7 @@ mod tests {
                 envelope: vec![1, 2, 3],
                 extra: BTreeMap::new(),
                 legal_takedown: None,
+                admin_block: None,
                 labels: Vec::new(),
                 scores: Vec::new(),
                 author: None,

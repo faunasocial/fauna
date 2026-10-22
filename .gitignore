@@ -129,6 +129,11 @@ apps/fauna-android/app/src/release/java/uniffi/
 apps/fauna-android/app/src/storeSafe/jniLibs/
 apps/fauna-android/app/src/storeSafe/java/com/fauna/ffi/
 apps/fauna-android/app/src/storeSafe/java/uniffi/
+# The storeNoPayments build type (the second store flavor, 2026-10-17) stages
+# the same way via `just android-ffi-store-no-payments`.
+apps/fauna-android/app/src/storeNoPayments/jniLibs/
+apps/fauna-android/app/src/storeNoPayments/java/com/fauna/ffi/
+apps/fauna-android/app/src/storeNoPayments/java/uniffi/
 # The foss build type (F-Droid / direct-download — installers/android.md
 # § Goal) stages the same way via `just android-ffi-foss`.
 apps/fauna-android/app/src/foss/jniLibs/

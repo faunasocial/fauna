@@ -54,6 +54,10 @@ pub const CREATE_TABLES_SQL: &str = "
         state            TEXT NOT NULL DEFAULT 'pending',
         follow_activity_id TEXT,
         created_at       INTEGER NOT NULL,
+        -- The user's own nickname for an outbound follow (`bridges.md`
+        -- § Follows: an external ID plus an optional nickname). NULL when none
+        -- was given, and always NULL on an inbound row.
+        petname          TEXT,
         UNIQUE(local_actor_id, remote_actor_uri, direction)
     );
     CREATE INDEX IF NOT EXISTS idx_ap_follows_local ON ap_follows(local_actor_id);

@@ -13,6 +13,10 @@
 //!    ⇒ suppress (`:125-133`). A peer's *different* `actor=` does not suppress
 //!    (we forward through, accreting the chain until the Received: floor wins).
 //!
+//! A third floor sits beside them: the spoof floor
+//! ([`unauthenticated_local_from`]), which keeps a forward from vouching for an
+//! unauthenticated local `From:` (`mail-forwarding.md` § Spoof floor).
+//!
 //! This module is **pure** (std only): no tokio, no DNS, no parser. The header
 //! format is shared so nest (the suppress decision) and a client (rule preview)
 //! agree on exactly one spelling (priority #2). The header is **never stripped**
@@ -62,9 +66,230 @@ pub fn self_already_forwarded<'a>(
         .any(|actor| actor == our_actor_id)
 }
 
+/// The spoof floor (`mail-forwarding.md` § Spoof floor — a local `From:` must
+/// have authenticated): true when forwarding this message would hand a
+/// downstream MX a `From:` our SRS envelope aligns with, for mail whose
+/// `From:` never authenticated at our perimeter — suppress the forward (local
+/// delivery still completes).
+///
+/// A forward is never DKIM-signed and its envelope is SRS-rewritten onto the
+/// deployment's primary mail domain (`primary_domain`), so a `From:` under the
+/// primary's organizational domain SPF-aligns relaxed through that envelope and
+/// passes DMARC downstream. A message whose inbound DMARC verdict was `pass`
+/// (`dmarc_pass`) authenticated as that domain on arrival and forwards as
+/// before. Any other verdict — none, a fail the perimeter admitted (log-only,
+/// DMARC enforcement off, or the domain's own `p=quarantine` / `p=none`), a
+/// temp/perm error — is suppressed for a `From:` host that is:
+///
+/// - a served domain, beneath one, or above one — the
+///   same-domain-or-one-beneath-the-other test; an ancestor is counted only
+///   while it keeps two labels, so a bare TLD never matches. Conservative for
+///   served domains the envelope does not sit on; or
+/// - at or beneath the primary's last two labels — the shortest name a
+///   public-suffix list could make the primary's organizational domain (every
+///   organizational domain keeps two labels), so a sibling of the primary
+///   (`hr.example.com` beside `mail.example.com`) is caught without one. Under
+///   a multi-label public suffix (`example.co.uk`) it reaches the whole suffix:
+///   that over-refuses forwards, never admits a spoof.
+///
+/// `primary_domain` empty (none configured) turns the second arm off.
+/// `from_hosts` are the domains of the `From:` mailboxes; none parsed ⇒
+/// nothing aligns ⇒ false.
+pub fn unauthenticated_local_from<'a>(
+    from_hosts: impl IntoIterator<Item = &'a str>,
+    local_domains: &[&str],
+    primary_domain: &str,
+    dmarc_pass: bool,
+) -> bool {
+    if dmarc_pass {
+        return false;
+    }
+    let primary_floor = two_label_suffix(primary_domain);
+    from_hosts.into_iter().any(|host| {
+        local_domains
+            .iter()
+            .any(|local| domains_related(host, local))
+            || primary_floor
+                .as_deref()
+                .is_some_and(|floor| domains_related(host, floor))
+    })
+}
+
+/// The last two labels of `domain` (lower-cased, a trailing root dot ignored),
+/// or `None` when it has fewer than two.
+fn two_label_suffix(domain: &str) -> Option<String> {
+    let domain = domain.trim().trim_end_matches('.').to_ascii_lowercase();
+    let labels: Vec<&str> = domain.split('.').filter(|l| !l.is_empty()).collect();
+    (labels.len() >= 2).then(|| labels[labels.len() - 2..].join("."))
+}
+
+/// Same domain, or one a subdomain of the other — case-insensitively, a
+/// trailing root dot ignored, and the ancestor holding at least two labels.
+fn domains_related(a: &str, b: &str) -> bool {
+    let a = a.trim().trim_end_matches('.').to_ascii_lowercase();
+    let b = b.trim().trim_end_matches('.').to_ascii_lowercase();
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    if a == b {
+        return true;
+    }
+    let beneath = |child: &str, parent: &str| {
+        parent.split('.').filter(|l| !l.is_empty()).count() >= 2
+            && child
+                .strip_suffix(parent)
+                .is_some_and(|head| head.ends_with('.'))
+    };
+    beneath(&a, &b) || beneath(&b, &a)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spoof_floor_suppresses_an_unauthenticated_local_from() {
+        let local = ["test.example", "other.example"];
+        // A served domain, a subdomain of one, a parent of one: all align.
+        assert!(unauthenticated_local_from(
+            ["test.example"],
+            &local,
+            "",
+            false
+        ));
+        assert!(unauthenticated_local_from(
+            ["TEST.Example."],
+            &local,
+            "",
+            false
+        ));
+        assert!(unauthenticated_local_from(
+            ["hr.test.example"],
+            &local,
+            "",
+            false
+        ));
+        let sub = ["mail.corp.example"];
+        assert!(unauthenticated_local_from(
+            ["corp.example"],
+            &sub,
+            "",
+            false
+        ));
+        // Any one local mailbox among several trips it.
+        assert!(unauthenticated_local_from(
+            ["far.example", "other.example"],
+            &local,
+            "",
+            false
+        ));
+    }
+
+    #[test]
+    fn spoof_floor_suppresses_a_sibling_of_the_primary() {
+        // The envelope is on the primary; when the primary sits below its
+        // organizational domain, a sibling under that domain aligns relaxed.
+        let local = ["mail.example.com", "other.example"];
+        let primary = "mail.example.com";
+        assert!(unauthenticated_local_from(
+            ["hr.example.com"],
+            &local,
+            primary,
+            false
+        ));
+        // A deeper primary: its organizational domain may be any ancestor
+        // keeping two labels, so the floor reaches up to the last two.
+        let deep = ["a.b.example.com"];
+        assert!(unauthenticated_local_from(
+            ["hr.example.com"],
+            &deep,
+            "a.b.example.com",
+            false
+        ));
+        assert!(unauthenticated_local_from(
+            ["x.y.example.com"],
+            &deep,
+            "A.B.Example.COM.",
+            false
+        ));
+        // DMARC pass still forwards.
+        assert!(!unauthenticated_local_from(
+            ["hr.example.com"],
+            &local,
+            primary,
+            true
+        ));
+        // A look-alike outside the primary's two-label suffix forwards.
+        assert!(!unauthenticated_local_from(
+            ["hr.example.net"],
+            &local,
+            primary,
+            false
+        ));
+        assert!(!unauthenticated_local_from(
+            ["evilexample.com"],
+            &local,
+            primary,
+            false
+        ));
+        // A sibling of a served domain that is not the primary is not under
+        // our envelope's organizational domain.
+        assert!(!unauthenticated_local_from(
+            ["hr.other.example"],
+            &["mail.other.example", "example.com"],
+            "example.com",
+            false
+        ));
+        // A single-label primary has no two-label suffix to reach up to.
+        assert!(!unauthenticated_local_from(
+            ["hr.localhost"],
+            &["localhost"],
+            "localhost",
+            false
+        ));
+        // No primary known: the arm is off.
+        assert!(!unauthenticated_local_from(
+            ["hr.example.com"],
+            &local,
+            "",
+            false
+        ));
+    }
+
+    #[test]
+    fn spoof_floor_forwards_authenticated_or_foreign_mail() {
+        let local = ["test.example"];
+        // DMARC passed on arrival: the domain vouched for it.
+        assert!(!unauthenticated_local_from(
+            ["test.example"],
+            &local,
+            "",
+            true
+        ));
+        // A foreign From cannot align with our envelope.
+        assert!(!unauthenticated_local_from(
+            ["example.org"],
+            &local,
+            "",
+            false
+        ));
+        // A suffix that is not a label boundary is not a subdomain.
+        assert!(!unauthenticated_local_from(
+            ["attest.example"],
+            &local,
+            "",
+            false
+        ));
+        // A bare TLD is never an ancestor.
+        assert!(!unauthenticated_local_from(["example"], &local, "", false));
+        // No parseable From mailbox: nothing aligns.
+        assert!(!unauthenticated_local_from(
+            std::iter::empty::<&str>(),
+            &local,
+            "",
+            false
+        ));
+    }
 
     #[test]
     fn received_floor_is_strictly_greater_than_ten() {

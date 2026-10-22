@@ -1,4 +1,4 @@
-// Package logplane is the mail bridge's source-side half of the **sidecar log
+// Package logplane is the Go bridges' source-side half of the **sidecar log
 // plane** — the queue, the flush loop, and the disable-on-refusal rule (a futile-retry stop), in one
 // audited copy.
 //
@@ -8,7 +8,8 @@
 // mirrors its semantics (bounded drop-oldest queue with a counted `dropped`,
 // batch drain at the wire cap, disable on an error reply) so the two sources
 // behave identically from nest's side. The catalogue of events this binary may
-// report lives beside it in catalogue.go.
+// report lives beside it: the shared set in catalogue.go, each binary's own in
+// catalogue_mail.go and catalogue_atproto.go.
 //
 // # Why a plane at all
 //
@@ -133,14 +134,28 @@ func IsDisabled() bool { return disabled.Load() }
 
 // Emit queues one catalogued event. Never blocks, never fails.
 //
-// Application code should call the named catalogue functions in catalogue.go
-// rather than this directly — that is what keeps the full set of reportable
-// events auditable in one read.
+// Application code should call the named catalogue functions (catalogue.go and
+// the per-binary catalogue_*.go files) rather than this directly — that is what
+// keeps the full set of reportable events auditable in one read per binary.
 func Emit(level Level, event string, message string) {
 	if IsDisabled() {
 		return
 	}
 	mu.Lock()
+	appendLocked(level, event, message)
+	n := len(events)
+	mu.Unlock()
+
+	if n >= FlushThreshold {
+		select {
+		case nudge <- struct{}{}:
+		default: // a flush is already pending; nothing to add
+		}
+	}
+}
+
+// appendLocked queues one event, evicting oldest-first at capacity. mu held.
+func appendLocked(level Level, event string, message string) {
 	for len(events) >= QueueCapacity {
 		events = events[1:]
 		dropped++
@@ -151,13 +166,47 @@ func Emit(level Level, event string, message string) {
 		Event:       event,
 		Message:     message,
 	})
-	n := len(events)
-	mu.Unlock()
+}
 
-	if n >= FlushThreshold {
-		select {
-		case nudge <- struct{}{}:
-		default: // a flush is already pending; nothing to add
+// tally is a **coalesced** catalogue event: a failure that can recur per item
+// of work (a video remux, a repo self-check) is counted, and the flush turns a
+// nonzero count into ONE event carrying how many happened since the last
+// flush. An event per occurrence would let one bad batch of work flood the
+// ring and spend the source's rate-limit budget on repeats; a count is the
+// admin-meaningful payload anyway, and a count is a permitted bounded class.
+//
+// Tallies are declared by the catalogue files (newTally at package init), so
+// the full reportable set stays auditable there.
+type tally struct {
+	n      atomic.Uint64
+	level  Level
+	event  string
+	render func(count uint64) string
+}
+
+var tallies []*tally
+
+func newTally(level Level, event string, render func(count uint64) string) *tally {
+	t := &tally{level: level, event: event, render: render}
+	tallies = append(tallies, t)
+	return t
+}
+
+// add counts one occurrence. Never blocks, never fails, allocates nothing.
+func (t *tally) add() {
+	if IsDisabled() {
+		return
+	}
+	t.n.Add(1)
+}
+
+// materializeTalliesLocked turns every nonzero tally into one queued event and
+// zeroes it. mu held; called by takeBatch so a tally rides the very flush that
+// follows it.
+func materializeTalliesLocked() {
+	for _, t := range tallies {
+		if c := t.n.Swap(0); c > 0 {
+			appendLocked(t.level, t.event, t.render(c))
 		}
 	}
 }
@@ -292,6 +341,7 @@ func isUnknownKind(err error) bool {
 func takeBatch() ([]wsrpc.LogEvent, uint64, bool) {
 	mu.Lock()
 	defer mu.Unlock()
+	materializeTalliesLocked()
 	if len(events) == 0 && dropped == 0 {
 		return nil, 0, false
 	}

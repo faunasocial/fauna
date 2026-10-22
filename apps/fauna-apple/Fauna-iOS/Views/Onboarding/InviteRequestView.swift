@@ -47,6 +47,8 @@ struct InviteRequestView: View {
                     ErrorBanner(message: error)
                 }
 
+                TermsNotice()
+
                 Button(L.common.continue) { vm.submitInviteContinue() }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)

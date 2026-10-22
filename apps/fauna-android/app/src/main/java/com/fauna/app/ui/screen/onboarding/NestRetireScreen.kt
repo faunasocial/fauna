@@ -700,6 +700,7 @@ private fun RunningState(vm: NestRetireVM, m: NestRetireMachine, snap: RetireSna
         Spacer(Modifier.height(8.dp))
         Text(
             stringResource(R.string.onboarding_retire_force_server_warning),
+            modifier = Modifier.testTag(Ids.RETIRE_FORCE_SERVER_WARNING),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.error,
         )

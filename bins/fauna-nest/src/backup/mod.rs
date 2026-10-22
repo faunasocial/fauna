@@ -4,6 +4,8 @@ pub mod diff;
 pub mod gc;
 pub mod gc_scheduler;
 pub(crate) mod materialize;
+pub mod message_kind;
+mod pair_stage;
 pub mod prune;
 pub mod recover;
 pub mod retention;

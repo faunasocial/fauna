@@ -5,7 +5,7 @@
 //! membership-designation section (monetization.md § Pillar 4): a link editor
 //! over the admin's own subscription tiers, never a third tier list.
 //!
-//! Drives directly off the shared `AdminClient` (`fauna.admin.tiers.{list,update}`,
+//! Drives directly off the shared `AdminClient` (`fauna.admin.tiers.{list,update,create,delete}`,
 //! `fauna.admin.membership_tiers.{list,set,clear}`) + `SubscriptionsClient`
 //! (`fauna.subscriptions.tiers.list`, the membership row set) — there is no tier
 //! *machine* (`fauna-client-admin` is a thin one-method-per-kind client), so the
@@ -71,6 +71,18 @@ pub(super) fn settings_elements(state: &AdminState) -> Vec<Element> {
                 t::settings_page::SAVE_TIER,
                 true,
                 Gesture::Admin(Action::SaveTier { row: i }),
+            )
+            .within(TIER_ITEM, i),
+        );
+        // admin.md § 3 — *Removing a tier* (ID user-approved 2026-10-19): on
+        // every row, `free` included — which tier is removable is the nest's
+        // call, and its refusal reads on `error-message`. No confirm dialog.
+        els.push(
+            Element::gesture_button(
+                ids::ADMIN_SETTINGS_TIER_DELETE_BUTTON,
+                t::settings_page::DELETE_TIER,
+                true,
+                Gesture::Admin(Action::DeleteTier { row: i }),
             )
             .within(TIER_ITEM, i),
         );
@@ -401,6 +413,7 @@ mod tests {
                 "admin-settings-tier-cap-blob-size",
                 "admin-settings-tier-cap-feeds",
                 "admin-settings-tier-save-button",
+                "admin-settings-tier-delete-button",
                 // Row 1
                 "admin-settings-tier-item",
                 "admin-settings-tier-cap-inbox",
@@ -409,6 +422,7 @@ mod tests {
                 "admin-settings-tier-cap-blob-size",
                 "admin-settings-tier-cap-feeds",
                 "admin-settings-tier-save-button",
+                "admin-settings-tier-delete-button",
                 // The add-a-tier form: anchor, name, the five caps, add button.
                 "admin-settings-tier-add-section",
                 "admin-settings-tier-add-name-input",
@@ -447,6 +461,39 @@ mod tests {
             .map(|e| e.text.as_str())
             .collect();
         assert_eq!(names, vec!["free", "personal"]);
+    }
+
+    /// The delete button (admin.md § 3 — *Removing a tier*, ID user-approved
+    /// 2026-10-19) sits on every row, `free` included — the nest owns which tier
+    /// is never removable and its refusal reads on `error-message` — scoped under
+    /// that row, and resolves to the row's tier name; a row past the list (a
+    /// stale gesture after a refetch shrank it) deletes nothing.
+    #[test]
+    fn the_delete_button_is_scoped_per_row_and_names_its_tier() {
+        let mut app = crate::app::tests::test_app();
+        super::super::apply_outcome(
+            &mut app,
+            tiers_loaded(vec![
+                tier("free", 1000, 2000, 2, 500, 3),
+                tier("personal", 4000, 8000, 5, 900, 10),
+            ]),
+        );
+
+        let els = settings_elements(&app.admin);
+        let deletes: Vec<&Element> = els
+            .iter()
+            .filter(|e| e.id == "admin-settings-tier-delete-button")
+            .collect();
+        assert_eq!(deletes.len(), 2, "one delete button per tier row");
+        for d in &deletes {
+            assert_eq!(d.path.len(), 1, "scoped under one tier-item");
+        }
+
+        assert_eq!(
+            super::super::tier_delete_name(&app.admin, 1).as_deref(),
+            Some("personal")
+        );
+        assert_eq!(super::super::tier_delete_name(&app.admin, 2), None);
     }
 
     /// A `tiers.list` fold seeds every row's cap drafts from persisted state and

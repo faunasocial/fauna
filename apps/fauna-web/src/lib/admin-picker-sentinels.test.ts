@@ -10,7 +10,7 @@
 // tui's twin pin is `apps/fauna-tui/src/admin/mod.rs`'s
 // `admin_picker_sentinels_can_never_be_valid_handles`.
 //
-// This does NOT import `$lib/wasm.ts` — its top-level `$app/paths` import
+// This does NOT import `#lib/wasm.ts` — its top-level `$app/paths` import
 // only resolves under the SvelteKit/Vite build (see `offline-gate.test.ts`'s
 // own note, and `wasm-loader-guard.test.ts`'s). Instead it loads the static
 // wasm-pack bundle directly, the same file `wasm.ts` wraps, and calls the

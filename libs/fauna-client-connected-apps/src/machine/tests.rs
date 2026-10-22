@@ -408,6 +408,72 @@ async fn every_handoff_miss_reads_the_same_and_the_tray_is_what_the_nest_says() 
     );
 }
 
+/// *Connect* on a plugin's settings card opens its bind card into this tray
+/// — answered there, through the one approve path every card takes
+/// (`third-party.md` § The principal model → *Hosted principals*).
+#[tokio::test]
+async fn binding_a_plugin_shows_its_card_in_the_tray() {
+    let (m, api, obs) = machine();
+    api.add_plugin(&[3; 16], consent(6, "https://plugin.example/c.json"));
+    m.bind_plugin(vec![3; 16]).await;
+    let snap = m.snapshot();
+    assert_eq!(snap.error, None);
+    assert_eq!(
+        snap.requests,
+        vec![consent_card_row(
+            consent(6, "https://plugin.example/c.json"),
+            &Default::default()
+        )]
+    );
+    assert!(api.calls().contains(&FakeCall::BindPlugin(vec![3; 16])));
+    assert_eq!(obs.count(), 1, "one gesture, one notification");
+}
+
+#[tokio::test]
+async fn a_refused_bind_says_so_and_opens_nothing() {
+    let (m, api, _) = machine();
+    api.add_plugin(&[3; 16], consent(6, "https://plugin.example/c.json"));
+    api.fail_bind();
+    m.bind_plugin(vec![3; 16]).await;
+    let snap = m.snapshot();
+    assert_eq!(snap.error.as_ref().unwrap().key, BIND_ERROR_KEY);
+    assert!(snap.requests.is_empty());
+}
+
+/// Only a hosted plugin's row links to a settings card — the card is the
+/// whole of a plugin's surface (`third-party.md` TP2).
+#[tokio::test]
+async fn only_a_hosted_row_opens_a_settings_card() {
+    let (m, api, _) = machine();
+    let mut wasm = principal(1, "https://plugin.example/c.json", Some("Hello"), 1);
+    wasm.execution_form = class::WASM.into();
+    let mut container = principal(2, "https://bridge.example/c.json", None, 2);
+    container.execution_form = class::CONTAINER.into();
+    api.set_principals(vec![
+        wasm,
+        container,
+        principal(3, "https://a.example/c.json", None, 3),
+    ]);
+    api.set_sessions(vec![session(4, "app_credential", 4)]);
+    m.refresh().await;
+    let mut opens: Vec<_> = m
+        .snapshot()
+        .principals
+        .iter()
+        .map(|r| (r.class.clone(), opens_settings_card(r)))
+        .collect();
+    opens.sort();
+    assert_eq!(
+        opens,
+        [
+            ("app_password".to_string(), false),
+            ("container".to_string(), true),
+            ("device".to_string(), false),
+            ("wasm".to_string(), true),
+        ]
+    );
+}
+
 #[tokio::test]
 async fn approving_a_request_resolves_it_and_it_leaves_the_tray() {
     let (m, api, _) = machine();
@@ -604,6 +670,32 @@ async fn revoking_a_principal_records_the_revoke_of_its_capability_grants() {
             .grants
             .is_empty()
     );
+}
+
+/// A plugin card's *Disconnect* names its binding by id, from a page that may
+/// never have read this roster: the machine reads it first, so the revoke
+/// still records the `Revoke`s of the grants the nest ended with it.
+#[tokio::test]
+async fn revoking_a_principal_by_id_reads_the_roster_and_records_its_revokes() {
+    let (m, api, ledger) = machine_with_grant_log(4_000_000_000).await;
+    api.set_principals(vec![keyed_principal(1, "https://app.example.com/c.json")]);
+    m.revoke_principal(vec![1; 16]).await;
+
+    let calls = api.calls();
+    let read = calls.iter().position(|c| *c == FakeCall::ListPrincipals);
+    let revoke = calls
+        .iter()
+        .position(|c| *c == FakeCall::RevokePrincipal(vec![1; 16]));
+    assert!(read.is_some() && read < revoke, "{calls:?}");
+    let log = ledger.current();
+    let history = fauna_client_capabilities::view_model::principal_history(&log, &[9; 32]);
+    assert_eq!(
+        history[0].kind,
+        fauna_core::grant_event::GrantEventKind::Revoke
+    );
+    let snap = m.snapshot();
+    assert!(snap.principals.is_empty());
+    assert_eq!(snap.error, None);
 }
 
 /// A failed principal revoke records nothing: the grants still stand.
@@ -1204,6 +1296,70 @@ async fn a_failed_switch_read_keeps_the_paused_state_on_screen() {
         "an unknown flag never reads as working"
     );
     assert_eq!(snap.error.unwrap().key, REFRESH_ERROR_KEY);
+}
+
+// ── the switch's own write, from this page (`connected-apps.md` § User actions)
+
+#[tokio::test]
+async fn the_snapshot_carries_the_switch_for_the_page_toggle() {
+    let (m, api, _) = machine();
+    m.refresh().await;
+    assert!(
+        !m.snapshot().external_apps_off,
+        "the flag's own default is ON, before and after a read"
+    );
+    api.set_external_apps_enabled(false);
+    m.refresh().await;
+    assert!(m.snapshot().external_apps_off);
+}
+
+#[tokio::test]
+async fn flipping_the_switch_writes_it_then_rereads_so_the_rows_pause() {
+    let (m, api, obs) = machine();
+    api.set_principals(vec![principal(1, "https://a.example/c.json", Some("A"), 1)]);
+    m.refresh().await;
+    assert!(!m.snapshot().principals[0].paused);
+    let before = obs.count();
+
+    m.set_external_apps_enabled(false).await;
+    let snap = m.snapshot();
+    assert!(
+        snap.external_apps_off,
+        "the nest's answer, not an assumption"
+    );
+    assert!(
+        snap.principals[0].paused,
+        "the roster re-read pauses the row"
+    );
+    assert_eq!(snap.principals.len(), 1, "non-destructive: the row stays");
+    assert!(
+        api.calls()
+            .contains(&FakeCall::SetExternalAppsEnabled(false))
+    );
+    assert_eq!(snap.error, None);
+    assert!(obs.count() > before, "the page is told");
+
+    m.set_external_apps_enabled(true).await;
+    let snap = m.snapshot();
+    assert!(!snap.external_apps_off);
+    assert!(!snap.principals[0].paused);
+    assert!(snap.principals[0].connected, "nothing to redo");
+}
+
+#[tokio::test]
+async fn a_failed_switch_write_leaves_the_flag_and_sets_the_page_error() {
+    let (m, api, _) = machine();
+    api.set_principals(vec![principal(1, "https://a.example/c.json", Some("A"), 1)]);
+    m.refresh().await;
+    api.fail_set_external_apps();
+    m.set_external_apps_enabled(false).await;
+    let snap = m.snapshot();
+    assert!(
+        !snap.external_apps_off,
+        "the flag is what the nest still says"
+    );
+    assert!(!snap.principals[0].paused);
+    assert_eq!(snap.error.unwrap().key, EXTERNAL_APPS_ERROR_KEY);
 }
 
 // ── the oracle record (`connected-apps.md` § Layout & flow, region 3) ──

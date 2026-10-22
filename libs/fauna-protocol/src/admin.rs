@@ -407,6 +407,18 @@ pub struct AdminTierUpdateRequest {
     pub extra: BTreeMap<String, Value>,
 }
 
+/// fauna.admin.tiers.delete — remove a tier nobody is on (no HTTP twin;
+/// `docs/goal/behavior/admin.md` § 3. Settings → *Removing a tier*). A missing
+/// tier is `fauna.admin.not_found`; a tier a member, an invite code or a
+/// membership link still names — or the nest's own default `free` — is
+/// `fauna.admin.conflict`. Replies `AdminOkReply`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct AdminTierDeleteRequest {
+    pub name: String,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
 // ── Membership tiers (monetization.md § Pillar 4) ────────────────────────────
 //
 // The membership *designation*: the link that makes one of the admin's own
@@ -1677,6 +1689,10 @@ mod tests {
             max_devices: 7,
             max_blob_size: 6,
             max_feeds: 5,
+            extra: BTreeMap::new(),
+        });
+        assert_round_trips(&AdminTierDeleteRequest {
+            name: "mistake".into(),
             extra: BTreeMap::new(),
         });
     }

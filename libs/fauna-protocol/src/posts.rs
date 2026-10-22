@@ -106,7 +106,46 @@ impl LegalTakedownMarker {
     }
 }
 
+/// The visible **admin-block notice** carried on `PostGetReply` (and its
+/// conversation and federation twins) when this nest's admin blocked the item
+/// after a report (`moderation.md` § Admin block of a reported item). For every
+/// viewer but the author its presence means the body is **withheld** (empty);
+/// the author's own read carries the body AND the marker, so their app shows
+/// the notice beside their content. The client renders the shared
+/// `adminBlockNotice(reason)` (`fauna_core::obligation::admin_block_notice`,
+/// fed `reason.token()`) — no client hand-rolls the string. Additive `Option`,
+/// like [`LegalTakedownMarker`]: an older client still receives an empty body
+/// for a non-author and simply renders no notice.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AdminBlockMarker {
+    /// The report's reason — the stated explanation the notice names.
+    pub reason: crate::moderation::AbuseReportReason,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl Default for AdminBlockMarker {
+    fn default() -> Self {
+        Self {
+            reason: crate::moderation::AbuseReportReason::Other,
+            extra: BTreeMap::new(),
+        }
+    }
+}
+
+impl AdminBlockMarker {
+    /// Lift the stored reason token of the report a block cites (`None` = not
+    /// blocked) into the wire marker — the mapping every serve path uses to
+    /// turn the second withhold flag into `Option<AdminBlockMarker>`.
+    pub fn from_reason(reason_token: Option<&str>) -> Option<Self> {
+        reason_token.map(|t| Self {
+            reason: crate::moderation::AbuseReportReason::from_token(t),
+            extra: BTreeMap::new(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct PostGetReply {
     /// Raw resolved post bytes (the HTTP twin's
     /// `application/octet-stream` body). A missing/quarantine-gated post
@@ -121,6 +160,12 @@ pub struct PostGetReply {
     /// normal reply is byte-identical to before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legal_takedown: Option<LegalTakedownMarker>,
+    /// Present iff this nest's admin blocked the post after a report. For a
+    /// non-author `body` is then **empty**; the author's own read keeps the
+    /// body and carries the marker beside it. Absent (and omitted from the
+    /// wire) for every post not blocked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_block: Option<AdminBlockMarker>,
     /// The bridged author's display face — the single-post read's twin of
     /// `FeedPostItem.author_display` (`bridges.md` § Unified feed ingestion →
     /// *Bridged authors*), so a post opened through the deep-link door names
@@ -130,6 +175,17 @@ pub struct PostGetReply {
     /// before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author_display: Option<crate::feed::AuthorDisplay>,
+    /// The post's **home** nest's identity (hex 32-byte `nest_actor_id`),
+    /// stamped by the reader's own nest on a `fauna.posts.get_remote` relay:
+    /// the `peer_nest_id` it dialed the federation channel to the home as —
+    /// its own verified knowledge, never the home's claim relayed. The
+    /// reader's foreign byte plane graduates a pin against it before fetching
+    /// the post's own bytes from the home (`transport-trust.md` § Mechanism
+    /// for the federation-granted row → *The post arm*). Absent (and omitted
+    /// from the wire) on a same-nest `fauna.posts.get`, so that reply is
+    /// byte-identical to before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_nest_actor_id: Option<String>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -465,6 +521,38 @@ pub struct PostRoomLabelsRemoteRequest {
     pub extra: BTreeMap<String, Value>,
 }
 
+// ── fauna.posts.get_remote ─────────────────────────────────────────────
+
+/// The same read as [`PostGetRequest`], for a post homed on **another nest**:
+/// the caller's own nest originates `fauna.federation.post.get` to `nest_url`
+/// and hands back the home's envelope, unchanged and unstored — the deep-link
+/// door's relay for a post the timeline never loaded and this nest does not
+/// hold (`feed.md` § The read model → *Opening a post the timeline never
+/// loaded* → *A post homed on another nest*).
+///
+/// A **distinct kind** rather than an additive `nest_url` on `posts.get`, for
+/// the [`PostRoomLabelsRemoteRequest`] reason: an old own-nest that ignored
+/// the field would answer `fauna.posts.not_found` from its own store — the
+/// very answer that sent the client to the relay — so the door would stay
+/// silently shut with no signal that a newer nest could have opened it. An
+/// unknown kind fails loud.
+///
+/// The reply is [`PostGetReply`]: `body` is the home's stored bytes (a room
+/// post's sealed envelope, byte-identical to the home's own `posts.get`),
+/// `legal_takedown` the home's marker with an empty body, and
+/// `author_display` always absent — the home's bridged-author projection is
+/// not relayed. A post the home does not hold (or hides from a peer) is the
+/// same `fauna.posts.not_found` the same-nest read answers.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PostGetRemoteRequest {
+    /// Hex-encoded post id (32 bytes).
+    pub post_id: String,
+    /// The post's home nest — the nest that stores it.
+    pub nest_url: String,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,6 +638,21 @@ mod tests {
     }
 
     #[test]
+    fn post_get_remote_round_trips_and_names_the_home() {
+        let req = PostGetRemoteRequest {
+            post_id: "ab".repeat(32),
+            nest_url: "https://home.example".into(),
+            extra: BTreeMap::new(),
+        };
+        let bytes = encode_canonical(&req).unwrap();
+        let decoded: PostGetRemoteRequest = decode(&bytes).unwrap();
+        assert_eq!(req, decoded);
+        let as_map: BTreeMap<String, Value> = decode(&bytes).unwrap();
+        assert_eq!(as_map.len(), 2, "{as_map:?}");
+        assert!(as_map.contains_key("nest_url"));
+    }
+
+    #[test]
     fn post_create_request_canonical_re_encodes_identically() {
         let req = sample_create_request();
         let bytes1 = encode_canonical(&req).unwrap();
@@ -583,9 +686,7 @@ mod tests {
     fn sample_get_reply() -> PostGetReply {
         PostGetReply {
             body: ByteBuf::from(vec![0x01, 0x02, 0x03, 0x04, 0x05]),
-            legal_takedown: None,
-            author_display: None,
-            extra: BTreeMap::new(),
+            ..Default::default()
         }
     }
 
@@ -614,6 +715,24 @@ mod tests {
     }
 
     #[test]
+    fn post_get_reply_home_nest_actor_id_round_trips_and_is_additive() {
+        // A same-nest reply omits the stamp: its wire is byte-identical to a
+        // reply built before `home_nest_actor_id` existed, and decodes to None.
+        let same_nest = sample_get_reply();
+        let same_nest_bytes = encode_canonical(&same_nest).unwrap();
+        let decoded: PostGetReply = decode(&same_nest_bytes).unwrap();
+        assert!(decoded.home_nest_actor_id.is_none());
+        let relayed = PostGetReply {
+            home_nest_actor_id: Some("ab".repeat(32)),
+            ..sample_get_reply()
+        };
+        let relayed_bytes = encode_canonical(&relayed).unwrap();
+        assert_ne!(same_nest_bytes, relayed_bytes, "Some adds the field");
+        let decoded: PostGetReply = decode(&relayed_bytes).unwrap();
+        assert_eq!(relayed, decoded);
+    }
+
+    #[test]
     fn post_get_reply_round_trips() {
         let reply = sample_get_reply();
         let bytes = encode_canonical(&reply).unwrap();
@@ -638,9 +757,7 @@ mod tests {
         let normal_bytes = encode_canonical(&normal).unwrap();
         let bare = encode_canonical(&PostGetReply {
             body: ByteBuf::from(vec![0x01, 0x02, 0x03, 0x04, 0x05]),
-            legal_takedown: None,
-            author_display: None,
-            extra: BTreeMap::new(),
+            ..Default::default()
         })
         .unwrap();
         assert_eq!(normal_bytes, bare, "None omits the field from the wire");
@@ -652,8 +769,7 @@ mod tests {
                 reference: "EU-DSA-2024/12345".into(),
                 extra: BTreeMap::new(),
             }),
-            author_display: None,
-            extra: BTreeMap::new(),
+            ..Default::default()
         };
         let bytes = encode_canonical(&taken).unwrap();
         let decoded: PostGetReply = decode(&bytes).unwrap();
@@ -665,6 +781,37 @@ mod tests {
         );
         // Canonical re-encode is byte-stable.
         assert_eq!(encode_canonical(&decoded).unwrap(), bytes);
+    }
+
+    #[test]
+    fn post_get_reply_admin_block_round_trips_and_is_additive() {
+        // A normal reply omits the field: its wire is byte-identical to a reply
+        // built before `admin_block` existed.
+        let normal_bytes = encode_canonical(&sample_get_reply()).unwrap();
+        let decoded: PostGetReply = decode(&normal_bytes).unwrap();
+        assert!(decoded.admin_block.is_none());
+
+        // A non-author's read of a blocked post: body withheld + the marker.
+        let blocked = PostGetReply {
+            body: ByteBuf::new(),
+            admin_block: AdminBlockMarker::from_reason(Some("harassment")),
+            ..Default::default()
+        };
+        let bytes = encode_canonical(&blocked).unwrap();
+        let decoded: PostGetReply = decode(&bytes).unwrap();
+        assert_eq!(decoded, blocked);
+        assert_eq!(
+            decoded.admin_block.unwrap().reason,
+            crate::moderation::AbuseReportReason::Harassment
+        );
+        assert_eq!(encode_canonical(&blocked).unwrap(), bytes);
+        // A reason token a newer nest added reads as `other`, never fails.
+        assert_eq!(
+            AdminBlockMarker::from_reason(Some("some-new-reason"))
+                .unwrap()
+                .reason,
+            crate::moderation::AbuseReportReason::Other
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { t } from '$lib/i18n/strings';
-  import { IDS } from '$lib/generated/uiIds';
+  import { t } from '#lib/i18n/strings';
+  import { IDS } from '#lib/generated/uiIds';
 
   /** The feed interaction bar — like / reply / repost / quote, rendered
    *  **icon + count** with the count hidden at 0 (ratified 2026-06-27,

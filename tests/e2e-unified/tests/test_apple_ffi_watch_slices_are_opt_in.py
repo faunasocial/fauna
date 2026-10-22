@@ -106,24 +106,27 @@ def test_the_watch_slices_have_exactly_one_opt_in_door():
     )
 
 
-def test_only_the_watch_guarded_branch_compiles_a_watch_triple():
-    """A cargo BUILD of a watch triple may appear only inside the `$WATCH` branch.
+def test_only_the_watch_arm_names_a_watch_triple():
+    """A watch triple may appear only in the `watch)` arm's SLICE_TRIPLES.
 
     A `cargo check` elsewhere is fine and expected — that is the merge gate's
-    compensating coverage below. What must not exist is a second unconditional
-    place that pays the release compile again.
+    compensating coverage below. What must not exist is a second place that
+    pays the release compile again: the slice builds loop over SLICE_TRIPLES,
+    so a watch triple listed in any other arm, or a cargo line naming one
+    directly, would put it back into the default shape.
     """
     body = _recipe_body("_apple-ffi-flavor")
     lines = body.splitlines()
     for i, line in enumerate(lines):
-        if not any(t in line for t in _WATCH_TRIPLES):
+        if line.strip().startswith("#") or not any(t in line for t in _WATCH_TRIPLES):
             continue
-        if "cargo build" not in line and "cargo rustc" not in line:
-            continue
-        prelude = "\n".join(lines[max(0, i - 6) : i])
-        assert 'if [ -n "$WATCH" ]' in prelude, (
-            "a watch-triple cargo line sits outside the `$WATCH` guard — the "
-            f"default shape would pay for it: {line.strip()!r}"
+        assert "SLICE_TRIPLES=(" in line, (
+            f"a watch triple is named outside a SLICE_TRIPLES list: {line.strip()!r}"
+        )
+        prelude = "\n".join(lines[max(0, i - 2) : i])
+        assert re.search(r"^\s*watch\)\s*$", prelude, re.MULTILINE), (
+            "a SLICE_TRIPLES list naming a watch triple sits outside the `watch)` "
+            f"arm — the default shape would pay for it: {line.strip()!r}"
         )
 
 
@@ -194,3 +197,77 @@ def test_the_mac_merge_gate_still_compiles_the_watch_triple():
         "`_apple-ffi-flavor` actually builds those slices with — checking a "
         f"different graph gates nothing: {watch_checks}"
     )
+
+
+# --- The two-slice e2e shape (2026-10-21) -----------------------------------
+#
+# The iOS e2e links the simulator slice only (conftest's `xcodebuild` names an
+# iOS Simulator destination), so the device slice — about a third of the
+# three-slice build and 4.1 G per checkout — was a release compile per iOS e2e
+# session for nothing. `apple-ffi-test-sim` builds `ios-sim` + `darwin` (darwin
+# because the macOS app shares the staging slot and a run selecting both apple
+# apps restores this artifact last). `apple-ffi-test` itself keeps all three:
+# a Debug `Fauna-iOS` build for a real device takes it (apps/fauna-apple/README.md).
+
+_E2E_SIM_TRIPLES = ("aarch64-apple-ios-sim", "aarch64-apple-darwin")
+
+
+def test_the_ios_e2e_ffi_recipe_is_the_two_slice_test_flavor():
+    body = _recipe_body("apple-ffi-test-sim")
+    assert re.search(r'_apple-ffi-flavor\s+"test-helpers"\s+sim\b', body), (
+        "`apple-ffi-test-sim` must delegate with the test-helpers features and the "
+        f"`sim` slice set; got: {body.strip()!r}"
+    )
+
+
+def test_the_device_test_flavor_keeps_the_three_slice_set():
+    body = _recipe_body("apple-ffi-test")
+    assert '_apple-ffi-flavor "test-helpers" ""' in body, (
+        "`apple-ffi-test` must keep the default (three-slice) set — a Debug "
+        "Fauna-iOS DEVICE build links the aarch64-apple-ios slice"
+    )
+
+
+def test_the_sim_shape_names_exactly_the_simulator_and_host_triples():
+    body = _recipe_body("_apple-ffi-build-impl")
+    m = re.search(r"sim\)\s*\n\s*SHAPE=2slice\s*\n\s*SLICE_TRIPLES=\(([^)]*)\)", body)
+    assert m, "the impl's slice-set switch has no `sim) SHAPE=2slice SLICE_TRIPLES=(…)` arm"
+    assert tuple(m.group(1).split()) == _E2E_SIM_TRIPLES
+    flavor = _JUSTFILE.read_text(encoding="utf-8")
+    flavor_body = flavor.split("\n_apple-ffi-flavor ", 1)[1].split("\n_apple-ffi-build-impl:", 1)[0]
+    assert re.search(r"sim\)\s*SHAPE=2slice", flavor_body), (
+        "`_apple-ffi-flavor` must derive the same 2slice SHAPE for the cache key "
+        "and the marker"
+    )
+
+
+def test_every_slice_build_and_the_bindgen_library_derive_from_slice_triples():
+    """No triple is compiled, nor read by the bindgen, outside SLICE_TRIPLES —
+    the hard-coded device-slice bindgen argument would name a file a two-slice
+    build never produces."""
+    body = _recipe_body("_apple-ffi-build-impl")
+    for line in _code_lines(body):
+        if ("cargo build" in line or "cargo rustc" in line) and "-p fauna-ffi" in line:
+            assert re.search(r"--target\s+\"?\$triple\"?", line), (
+                f"a slice build names its triple directly: {line.strip()!r}"
+            )
+    assert "target/aarch64-apple-ios/$PROFILE/libfauna_ffi.a" not in body, (
+        "the bindgen library argument is still hard-coded to the device slice"
+    )
+    assert '"${SLICE_LIBS[0]}"' in body, (
+        "the bindgen must read UniFFI metadata from a slice this shape built"
+    )
+
+
+def test_the_ios_e2e_build_and_the_restore_take_the_two_slice_recipe(monkeypatch):
+    """Both doors stage the iOS e2e artifact: the app build routes `ios` to it,
+    and a run selecting both apple apps restores it after the macOS build. Two
+    recipes here would make the restore rebuild a different shape each run."""
+    import conftest
+
+    calls = []
+    monkeypatch.setattr(conftest, "_build_via_just", lambda recipe, why: calls.append(recipe))
+    monkeypatch.setattr(conftest, "_MACOS_ARTIFACT_MODE", False)
+    conftest._build_app_via_just("ios")
+    conftest._restore_full_apple_ffi()
+    assert calls == ["apple-ffi-test-sim", "apple-ffi-test-sim"]

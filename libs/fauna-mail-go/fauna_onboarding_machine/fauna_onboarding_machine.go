@@ -389,7 +389,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_onboarding_machine_checksum_func_handle_tld()
 		})
-		if checksum != 37584 {
+		if checksum != 51256 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_func_handle_tld: UniFFI API checksum mismatch")
 		}
@@ -425,7 +425,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_onboarding_machine_checksum_func_update_channel_description_key()
 		})
-		if checksum != 9127 {
+		if checksum != 49464 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_func_update_channel_description_key: UniFFI API checksum mismatch")
 		}
@@ -686,7 +686,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_caldav_enable_requested()
 		})
-		if checksum != 46553 {
+		if checksum != 26182 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_caldav_enable_requested: UniFFI API checksum mismatch")
 		}
@@ -833,6 +833,15 @@ func uniffiCheckChecksums() {
 		if checksum != 12358 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_complete_probe_error: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_complete_with_first_sign_in()
+		})
+		if checksum != 27824 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_complete_with_first_sign_in: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1019,7 +1028,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_email_enable_requested()
 		})
-		if checksum != 21585 {
+		if checksum != 7884 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_email_enable_requested: UniFFI API checksum mismatch")
 		}
@@ -1121,6 +1130,15 @@ func uniffiCheckChecksums() {
 		if checksum != 15621 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_hosted_auth_wait: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_identity_commit_failed()
+		})
+		if checksum != 37372 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_identity_commit_failed: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1278,9 +1296,18 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provision_ssh_door_enabled()
+		})
+		if checksum != 13464 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provision_ssh_door_enabled: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provision_update_channel()
 		})
-		if checksum != 47483 {
+		if checksum != 29911 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_provision_update_channel: UniFFI API checksum mismatch")
 		}
@@ -1586,7 +1613,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_select_vps_location()
 		})
-		if checksum != 15755 {
+		if checksum != 58576 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_select_vps_location: UniFFI API checksum mismatch")
 		}
@@ -1703,16 +1730,25 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_set_provision_mail_mode()
 		})
-		if checksum != 2276 {
+		if checksum != 11589 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_set_provision_mail_mode: UniFFI API checksum mismatch")
 		}
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_set_provision_ssh_door()
+		})
+		if checksum != 44270 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_set_provision_ssh_door: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_set_provision_update_channel()
 		})
-		if checksum != 39230 {
+		if checksum != 58218 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_set_provision_update_channel: UniFFI API checksum mismatch")
 		}
@@ -1742,6 +1778,15 @@ func uniffiCheckChecksums() {
 		if checksum != 18399 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_set_renders_trust_prompt: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_set_ssh_door_key_dir()
+		})
+		if checksum != 36447 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_set_ssh_door_key_dir: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1805,6 +1850,15 @@ func uniffiCheckChecksums() {
 		if checksum != 20794 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_skip_trust_prompt: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_ssh_door_readout()
+		})
+		if checksum != 61101 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_ssh_door_readout: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1881,6 +1935,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_take_ssh_door_private_key()
+		})
+		if checksum != 61329 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_take_ssh_door_private_key: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_take_trust_prompt_granted()
 		})
 		if checksum != 6041 {
@@ -1904,6 +1967,15 @@ func uniffiCheckChecksums() {
 		if checksum != 20038 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_toggle_same_provider_for_vps: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_update_channel_description_key_for_row()
+		})
+		if checksum != 53241 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_update_channel_description_key_for_row: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -3757,10 +3829,11 @@ type OnboardingMachineInterface interface {
 	BomVpsLine() *fauna_core.LocalizedText
 	// Whether the deployment's **calendar (CalDAV)** subsystem should be
 	// enabled at claim. Machine-derived sibling of
-	// [`Self::email_enable_requested`] — same two-axis derivation
+	// [`Self::email_enable_requested`] — its first two axes only
 	// (handle locality AND NAT axis), no checkbox (`onboarding.md` § 3b; the
-	// DAV enables also mint the shared MSEK when first, so the home-relay
-	// divergence argument covers them too).
+	// DAV enables also mint the shared MSEK when first, so the NAT-axis
+	// divergence argument covers them too; the box's content-scanner report is
+	// mail's alone — CalDAV rides the HTTPS surface every box has).
 	//
 	// The per-app launch glue calls `MailAdminClient::set_caldav_enabled(true)`
 	// on it at `LoggedIn`. The subsystems stay **separately gated** (CalDAV needs
@@ -3828,6 +3901,10 @@ type OnboardingMachineInterface interface {
 	ClearError()
 	Complete(outcome HandleCheckOutcome, msgKey string, args map[string]string)
 	CompleteProbeError(phase HandleCheckPhase, transient bool, cause string)
+	// [`Self::complete`], carrying the registered-probe's `first_sign_in` —
+	// written under the snapshot's lock, so the outcome and the fact are never
+	// observed apart.
+	CompleteWithFirstSignIn(outcome HandleCheckOutcome, msgKey string, args map[string]string, firstSignIn bool)
 	ConfirmGeneratedIdentity() (string, error)
 	ConfirmImportedIdentity(secret string) (string, error)
 	// Records the user's explicit acceptance of the displayed registration
@@ -3965,23 +4042,27 @@ type OnboardingMachineInterface interface {
 	// § 3b-bis, which stays confirm-only by design). The admin's change surface
 	// after onboarding is the admin-mail page.
 	//
-	// The value is the conjunction of two axes (ratified 2026-07-13): the
+	// Having claimed, the value is the conjunction of three axes: the
 	// handle-locality predicate ([`Self::handle_targets_real_domain`] — OFF
-	// for `user@localhost` / `user@IP`, which cannot hold MX/DKIM/TLS) AND
-	// the NAT axis ([`Self::effective_node_mode`]` != Private`). The NAT
-	// conjunct is how the two-box home-relay deployment
-	// (`deployment-home-with-public-relay.md`) says "this box runs no mail"
-	// with no checkbox: both boxes share one real-domain handle, but the home
-	// box is the one on the private axis — a claim-time enable there would
-	// mint a fresh MSEK, diverging from the fleet MSEK `LinkBoth` re-seals
-	// onto it. Still the onboarding→launch **hand-off channel**: the
-	// per-app launch glue reads this once `wizard_outcome() == LoggedIn` and,
-	// with its now-authenticated Admin client, calls
+	// for `user@localhost` / `user@IP`, which cannot hold MX/DKIM/TLS); the
+	// NAT axis ([`Self::effective_node_mode`]` != Private` — a box claimed
+	// with a real-domain handle but on the private axis would mint a fresh
+	// MSEK diverging from the fleet MSEK `LinkBoth` re-seals onto it); and the
+	// box's own build — the box's `content_scanners` report from
+	// `fauna.setup.status` (`absent` on a social-only box, which has no mail
+	// ports and no clamd/rspamd; `unknown` passes). The last two are read
+	// together through the shared `fauna_core::mail_availability::mta_can_run`
+	// predicate, never re-derived here. Only this intent carries the third
+	// axis: the DAV siblings ride the HTTPS surface every box has.
+	//
+	// Still the onboarding→launch **hand-off channel**: the per-app launch
+	// glue reads this once `wizard_outcome() == LoggedIn` and, with its
+	// now-authenticated Admin client, calls
 	// `MailAdminClient::set_mail_enabled(true)` — keeping the Admin-class gate
 	// intact rather than opening a pre-identity admin surface. Idempotent with
 	// the mail-settings enable path; only meaningful on the admin-claim path.
-	// Per `docs/goal/behavior/mail-bridge-lifecycle.md` § Default-off on first
-	// claim.
+	// Per `docs/goal/behavior/onboarding.md` § 3b (the gating rule, the
+	// default rule and *Third axis — the box's own build*).
 	EmailEnableRequested() bool
 	ErrorMessage() *string
 	// Log a refused lock and hand the outcome back unchanged. Never logs the
@@ -4034,6 +4115,23 @@ type OnboardingMachineInterface interface {
 	// true) or the attempt ends (`Failed`). Resolves only then — the app
 	// awaits it the way it awaits `verify_dns`.
 	HostedAuthWait(form CredentialForm, fieldId string) error
+	// The app's moment-1 write of the identity just confirmed failed
+	// (`onboarding.md` § Long-term store contract; `apps/common.md`
+	// § Credential storage: a keyring failure "is a loud error, not a silent
+	// fallback"). Puts the wizard back on the screen the person confirmed on
+	// — `identity_created`, `identity_import` or `recovery_entry` — and paints
+	// `message` on the shared `error-message` channel, so nobody reaches
+	// handle entry holding a key that is stored nowhere. Confirming again is
+	// the retry; the created screen re-shows the same key (it mints once per
+	// run).
+	//
+	// The confirm transitions advance before the app writes because this
+	// machine holds no store, and some apps' writes are asynchronous; undoing
+	// the advance here, rather than having each app guess the step it came
+	// from, keeps the UI and the wizard in step on all of them. A report with
+	// no confirm behind it, or arriving after the wizard has moved past the
+	// confirm's landing, paints the message and moves nothing.
+	IdentityCommitFailed(message string)
 	IdentityOrigin() *IdentityOrigin
 	InviteError(ctx ErrorContext, transient bool, cause string) OnboardingStep
 	InviteRequestSnapshot() InviteRequestSnapshot
@@ -4140,9 +4238,15 @@ type OnboardingMachineInterface interface {
 	// (§ 6 *Reaching the box*). Survives a `reset()` no more and no less than
 	// the rest of the run state does — see [`Self::reset`].
 	ProvisionReachIpv4() *string
+	// Whether the `vps-config-ssh-door-toggle` is on; while it is, the page
+	// shows `vps-config-ssh-door-warning`.
+	ProvisionSshDoorEnabled() bool
 	// The selected update channel — the user's explicit choice if set, else
-	// the default (`stable`). Clients read this to mark the selected
-	// `vps-config-update-channel-row`.
+	// the default: the first channel that has a build this app can use, or
+	// Stable while the registry has not been read
+	// (`UpdateChannel::default_for`; `onboarding-provisioning.md` § 5 →
+	// *What exists decides the default*). Clients read this to mark the
+	// selected `vps-config-update-channel-row`.
 	ProvisionUpdateChannel() fauna_provisioning.UpdateChannel
 	// Why the wizard-exit Continue button is dead — `ui/README.md` rule 5:
 	// the four `○` step glyphs are a symbol, not a reason. One message per
@@ -4423,6 +4527,9 @@ type OnboardingMachineInterface interface {
 	// box is selected. The raw seed is resolved in Rust at re-provision time
 	// (`deployment_seed_for`), never surfaced here.
 	SelectRecoveryBox(nestActorId string)
+	// Choose the box's location. A change re-lists the offers for it in the
+	// background ([`Self::refresh_vps_offers`]); the same location again is a
+	// no-op beyond the notify.
 	SelectVpsLocation(id string)
 	SelectVpsProvider(id string)
 	SelectVpsServerType(id string)
@@ -4499,6 +4606,13 @@ type OnboardingMachineInterface interface {
 	// [`Self::provision_mail_mode_enabled`] (the handle's real-domain default)
 	// until the user toggles it. Per `docs/goal/behavior/onboarding.md` §5.
 	SetProvisionMailMode(enabled bool)
+	// Set the `vps-config-ssh-door-toggle` (default off): whether the box is
+	// provisioned with a key-only sshd that admits the admin's own address.
+	// Decided here for the mail mode's reason — it is written into the box's
+	// cloud-init. On, the run mints a key for this box alone
+	// (`installers/vps.md` § The SSH door). Per
+	// `docs/goal/behavior/onboarding-provisioning.md` § 5.
+	SetProvisionSshDoor(enabled bool)
 	// Select a `vps-config-update-channel-row`: which builds the box's
 	// automatic updater follows. Decided at `vps_config`, like the mail mode,
 	// because the channel's image tag is written into the box's cloud-init.
@@ -4529,6 +4643,13 @@ type OnboardingMachineInterface interface {
 	// batched-trickle-down parity gap, exactly as
 	// [`Self::set_renders_recovery_kit`] works.
 	SetRendersTrustPrompt(renders bool)
+	// Where a desktop app keeps SSH keys — the app passes its `~/.ssh` at
+	// start, and a door run writes its private key there with a `Host` entry
+	// (`installers/vps.md` § The SSH door → *The key*). Unset — a phone, web
+	// — the key is held in memory for the one hand-over
+	// ([`Self::take_ssh_door_private_key`]). Bucket-1 IPC: the app's own
+	// platform path, never a human choice.
+	SetSshDoorKeyDir(dir *string)
 	// Re-root the re-provision drive's custody read at a sandboxed phone
 	// shell's account-store container — the same container the shell hands the
 	// account runtime (`fauna_client_account_runtime::SandboxedStoreContainer`),
@@ -4576,6 +4697,10 @@ type OnboardingMachineInterface interface {
 	// today" (§ 3b-ter) — nothing is latched, nothing is minted, and the
 	// wizard concludes identically.
 	SkipTrustPrompt() OnboardingStep
+	// What the provisioning page shows for a door box once its key exists:
+	// the command, the key's path where this device wrote one, and the key's
+	// fingerprint. `None` for a door-less run. Carries no secret.
+	SshDoorReadout() *SshDoorReadout
 	StartHandleCheck(handle string)
 	// Spawns the four-step provisioning orchestrator on the appropriate
 	// runtime (`tokio::spawn` on native, `wasm_bindgen_futures::spawn_local`
@@ -4649,6 +4774,11 @@ type OnboardingMachineInterface interface {
 	// persisted, so it cannot survive to a later session). Returns `None` if
 	// the kit was skipped, already taken, or never offered.
 	TakePendingRecoverySecret() *fauna_core.SecretString
+	// The door's private key, handed over **once** on an app with no
+	// `~/.ssh` (the `provisioning-ssh-door-save-key-button`: a share sheet, a
+	// download). The machine drops its copy as it returns it; a desktop app
+	// never gets one here — its key is already in `~/.ssh`.
+	TakeSshDoorPrivateKey() *string
 	// Consume the `trust_prompt` answer at the wizard's signed-in handoff —
 	// the one point the client holds an authenticated session and the nest's
 	// content-processor roster, i.e. the only place
@@ -4659,6 +4789,11 @@ type OnboardingMachineInterface interface {
 	TakeTrustPromptGranted() bool
 	ToggleBuyDomain(on bool)
 	ToggleSameProviderForVps(on bool)
+	// The i18n key of `channel`'s row description: the no-build wording when
+	// the registry has no build on it, else the compat line's wording at the
+	// running product major (`UpdateChannel::description_key_for`). Apps look
+	// the string up by this key rather than choosing per row themselves.
+	UpdateChannelDescriptionKeyForRow(channel fauna_provisioning.UpdateChannel) string
 	VerifyDns() error
 	VerifyOobInviteCode(code string)
 	VerifyVps() error
@@ -5152,10 +5287,11 @@ func (_self *OnboardingMachine) BomVpsLine() *fauna_core.LocalizedText {
 
 // Whether the deployment's **calendar (CalDAV)** subsystem should be
 // enabled at claim. Machine-derived sibling of
-// [`Self::email_enable_requested`] — same two-axis derivation
+// [`Self::email_enable_requested`] — its first two axes only
 // (handle locality AND NAT axis), no checkbox (`onboarding.md` § 3b; the
-// DAV enables also mint the shared MSEK when first, so the home-relay
-// divergence argument covers them too).
+// DAV enables also mint the shared MSEK when first, so the NAT-axis
+// divergence argument covers them too; the box's content-scanner report is
+// mail's alone — CalDAV rides the HTTPS surface every box has).
 //
 // The per-app launch glue calls `MailAdminClient::set_caldav_enabled(true)`
 // on it at `LoggedIn`. The subsystems stay **separately gated** (CalDAV needs
@@ -5367,6 +5503,19 @@ func (_self *OnboardingMachine) CompleteProbeError(phase HandleCheckPhase, trans
 	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_complete_probe_error(
 			_pointer, FfiConverterHandleCheckPhaseINSTANCE.Lower(phase), FfiConverterBoolINSTANCE.Lower(transient), FfiConverterStringINSTANCE.Lower(cause), _uniffiStatus)
+		return false
+	})
+}
+
+// [`Self::complete`], carrying the registered-probe's `first_sign_in` —
+// written under the snapshot's lock, so the outcome and the fact are never
+// observed apart.
+func (_self *OnboardingMachine) CompleteWithFirstSignIn(outcome HandleCheckOutcome, msgKey string, args map[string]string, firstSignIn bool) {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_complete_with_first_sign_in(
+			_pointer, FfiConverterHandleCheckOutcomeINSTANCE.Lower(outcome), FfiConverterStringINSTANCE.Lower(msgKey), FfiConverterMapStringStringINSTANCE.Lower(args), FfiConverterBoolINSTANCE.Lower(firstSignIn), _uniffiStatus)
 		return false
 	})
 }
@@ -5735,23 +5884,27 @@ func (_self *OnboardingMachine) EffectiveSecret() *string {
 // § 3b-bis, which stays confirm-only by design). The admin's change surface
 // after onboarding is the admin-mail page.
 //
-// The value is the conjunction of two axes (ratified 2026-07-13): the
+// Having claimed, the value is the conjunction of three axes: the
 // handle-locality predicate ([`Self::handle_targets_real_domain`] — OFF
-// for `user@localhost` / `user@IP`, which cannot hold MX/DKIM/TLS) AND
-// the NAT axis ([`Self::effective_node_mode`]` != Private`). The NAT
-// conjunct is how the two-box home-relay deployment
-// (`deployment-home-with-public-relay.md`) says "this box runs no mail"
-// with no checkbox: both boxes share one real-domain handle, but the home
-// box is the one on the private axis — a claim-time enable there would
-// mint a fresh MSEK, diverging from the fleet MSEK `LinkBoth` re-seals
-// onto it. Still the onboarding→launch **hand-off channel**: the
-// per-app launch glue reads this once `wizard_outcome() == LoggedIn` and,
-// with its now-authenticated Admin client, calls
+// for `user@localhost` / `user@IP`, which cannot hold MX/DKIM/TLS); the
+// NAT axis ([`Self::effective_node_mode`]` != Private` — a box claimed
+// with a real-domain handle but on the private axis would mint a fresh
+// MSEK diverging from the fleet MSEK `LinkBoth` re-seals onto it); and the
+// box's own build — the box's `content_scanners` report from
+// `fauna.setup.status` (`absent` on a social-only box, which has no mail
+// ports and no clamd/rspamd; `unknown` passes). The last two are read
+// together through the shared `fauna_core::mail_availability::mta_can_run`
+// predicate, never re-derived here. Only this intent carries the third
+// axis: the DAV siblings ride the HTTPS surface every box has.
+//
+// Still the onboarding→launch **hand-off channel**: the per-app launch
+// glue reads this once `wizard_outcome() == LoggedIn` and, with its
+// now-authenticated Admin client, calls
 // `MailAdminClient::set_mail_enabled(true)` — keeping the Admin-class gate
 // intact rather than opening a pre-identity admin surface. Idempotent with
 // the mail-settings enable path; only meaningful on the admin-claim path.
-// Per `docs/goal/behavior/mail-bridge-lifecycle.md` § Default-off on first
-// claim.
+// Per `docs/goal/behavior/onboarding.md` § 3b (the gating rule, the
+// default rule and *Third axis — the box's own build*).
 func (_self *OnboardingMachine) EmailEnableRequested() bool {
 	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
 	defer _self.ffiObject.decrementPointer()
@@ -5962,6 +6115,32 @@ func (_self *OnboardingMachine) HostedAuthWait(form CredentialForm, fieldId stri
 	}
 
 	return err
+}
+
+// The app's moment-1 write of the identity just confirmed failed
+// (`onboarding.md` § Long-term store contract; `apps/common.md`
+// § Credential storage: a keyring failure "is a loud error, not a silent
+// fallback"). Puts the wizard back on the screen the person confirmed on
+// — `identity_created`, `identity_import` or `recovery_entry` — and paints
+// `message` on the shared `error-message` channel, so nobody reaches
+// handle entry holding a key that is stored nowhere. Confirming again is
+// the retry; the created screen re-shows the same key (it mints once per
+// run).
+//
+// The confirm transitions advance before the app writes because this
+// machine holds no store, and some apps' writes are asynchronous; undoing
+// the advance here, rather than having each app guess the step it came
+// from, keeps the UI and the wizard in step on all of them. A report with
+// no confirm behind it, or arriving after the wizard has moved past the
+// confirm's landing, paints the message and moves nothing.
+func (_self *OnboardingMachine) IdentityCommitFailed(message string) {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_identity_commit_failed(
+			_pointer, FfiConverterStringINSTANCE.Lower(message), _uniffiStatus)
+		return false
+	})
 }
 
 func (_self *OnboardingMachine) IdentityOrigin() *IdentityOrigin {
@@ -6253,9 +6432,23 @@ func (_self *OnboardingMachine) ProvisionReachIpv4() *string {
 	}))
 }
 
+// Whether the `vps-config-ssh-door-toggle` is on; while it is, the page
+// shows `vps-config-ssh-door-warning`.
+func (_self *OnboardingMachine) ProvisionSshDoorEnabled() bool {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterBoolINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.int8_t {
+		return C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_provision_ssh_door_enabled(
+			_pointer, _uniffiStatus)
+	}))
+}
+
 // The selected update channel — the user's explicit choice if set, else
-// the default (`stable`). Clients read this to mark the selected
-// `vps-config-update-channel-row`.
+// the default: the first channel that has a build this app can use, or
+// Stable while the registry has not been read
+// (`UpdateChannel::default_for`; `onboarding-provisioning.md` § 5 →
+// *What exists decides the default*). Clients read this to mark the
+// selected `vps-config-update-channel-row`.
 func (_self *OnboardingMachine) ProvisionUpdateChannel() fauna_provisioning.UpdateChannel {
 	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
 	defer _self.ffiObject.decrementPointer()
@@ -7016,6 +7209,9 @@ func (_self *OnboardingMachine) SelectRecoveryBox(nestActorId string) {
 	})
 }
 
+// Choose the box's location. A change re-lists the offers for it in the
+// background ([`Self::refresh_vps_offers`]); the same location again is a
+// no-op beyond the notify.
 func (_self *OnboardingMachine) SelectVpsLocation(id string) {
 	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
 	defer _self.ffiObject.decrementPointer()
@@ -7217,6 +7413,22 @@ func (_self *OnboardingMachine) SetProvisionMailMode(enabled bool) {
 	})
 }
 
+// Set the `vps-config-ssh-door-toggle` (default off): whether the box is
+// provisioned with a key-only sshd that admits the admin's own address.
+// Decided here for the mail mode's reason — it is written into the box's
+// cloud-init. On, the run mints a key for this box alone
+// (`installers/vps.md` § The SSH door). Per
+// `docs/goal/behavior/onboarding-provisioning.md` § 5.
+func (_self *OnboardingMachine) SetProvisionSshDoor(enabled bool) {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_set_provision_ssh_door(
+			_pointer, FfiConverterBoolINSTANCE.Lower(enabled), _uniffiStatus)
+		return false
+	})
+}
+
 // Select a `vps-config-update-channel-row`: which builds the box's
 // automatic updater follows. Decided at `vps_config`, like the mail mode,
 // because the channel's image tag is written into the box's cloud-init.
@@ -7280,6 +7492,22 @@ func (_self *OnboardingMachine) SetRendersTrustPrompt(renders bool) {
 	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_set_renders_trust_prompt(
 			_pointer, FfiConverterBoolINSTANCE.Lower(renders), _uniffiStatus)
+		return false
+	})
+}
+
+// Where a desktop app keeps SSH keys — the app passes its `~/.ssh` at
+// start, and a door run writes its private key there with a `Host` entry
+// (`installers/vps.md` § The SSH door → *The key*). Unset — a phone, web
+// — the key is held in memory for the one hand-over
+// ([`Self::take_ssh_door_private_key`]). Bucket-1 IPC: the app's own
+// platform path, never a human choice.
+func (_self *OnboardingMachine) SetSshDoorKeyDir(dir *string) {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_set_ssh_door_key_dir(
+			_pointer, FfiConverterOptionalStringINSTANCE.Lower(dir), _uniffiStatus)
 		return false
 	})
 }
@@ -7387,6 +7615,20 @@ func (_self *OnboardingMachine) SkipTrustPrompt() OnboardingStep {
 	return FfiConverterOnboardingStepINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
 		return GoRustBuffer{
 			inner: C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_skip_trust_prompt(
+				_pointer, _uniffiStatus),
+		}
+	}))
+}
+
+// What the provisioning page shows for a door box once its key exists:
+// the command, the key's path where this device wrote one, and the key's
+// fingerprint. `None` for a door-less run. Carries no secret.
+func (_self *OnboardingMachine) SshDoorReadout() *SshDoorReadout {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterOptionalSshDoorReadoutINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_ssh_door_readout(
 				_pointer, _uniffiStatus),
 		}
 	}))
@@ -7639,6 +7881,21 @@ func (_self *OnboardingMachine) TakePendingRecoverySecret() *fauna_core.SecretSt
 	}))
 }
 
+// The door's private key, handed over **once** on an app with no
+// `~/.ssh` (the `provisioning-ssh-door-save-key-button`: a share sheet, a
+// download). The machine drops its copy as it returns it; a desktop app
+// never gets one here — its key is already in `~/.ssh`.
+func (_self *OnboardingMachine) TakeSshDoorPrivateKey() *string {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterOptionalStringINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_take_ssh_door_private_key(
+				_pointer, _uniffiStatus),
+		}
+	}))
+}
+
 // Consume the `trust_prompt` answer at the wizard's signed-in handoff —
 // the one point the client holds an authenticated session and the nest's
 // content-processor roster, i.e. the only place
@@ -7673,6 +7930,22 @@ func (_self *OnboardingMachine) ToggleSameProviderForVps(on bool) {
 			_pointer, FfiConverterBoolINSTANCE.Lower(on), _uniffiStatus)
 		return false
 	})
+}
+
+// The i18n key of `channel`'s row description: the no-build wording when
+// the registry has no build on it, else the compat line's wording at the
+// running product major (`UpdateChannel::description_key_for`). Apps look
+// the string up by this key rather than choosing per row themselves.
+func (_self *OnboardingMachine) UpdateChannelDescriptionKeyForRow(channel fauna_provisioning.UpdateChannel) string {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterStringINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_update_channel_description_key_for_row(
+				_pointer,
+				CFromRustBuffer(fauna_provisioning.FfiConverterUpdateChannelINSTANCE.LowerExternal(channel)), _uniffiStatus),
+		}
+	}))
 }
 
 func (_self *OnboardingMachine) VerifyDns() error {
@@ -8896,6 +9169,14 @@ type HandleCheckSnapshot struct {
 	ContinueEnabled        bool
 	ControlCheckboxVisible bool
 	ControlCheckboxChecked bool
+	// Paint the by-continuing terms notice (`onboarding-terms-notice` +
+	// `onboarding-terms-link`) above the bottom row — true iff `outcome` is
+	// `AlreadyOnNest`, the one outcome whose Continue signs in rather than
+	// leading to a page with its own notice (`terms-and-content-guidelines.md`
+	// § The decisions, item 3 (iv)). Derived from `outcome` on every read
+	// ([`terms_notice_visible_for`]), so the apps never compare the outcome.
+	// Additive: absent in older JSON reads as hidden.
+	TermsNoticeVisible bool
 }
 
 func (r *HandleCheckSnapshot) Destroy() {
@@ -8905,6 +9186,7 @@ func (r *HandleCheckSnapshot) Destroy() {
 	FfiDestroyerBool{}.Destroy(r.ContinueEnabled)
 	FfiDestroyerBool{}.Destroy(r.ControlCheckboxVisible)
 	FfiDestroyerBool{}.Destroy(r.ControlCheckboxChecked)
+	FfiDestroyerBool{}.Destroy(r.TermsNoticeVisible)
 }
 
 type FfiConverterHandleCheckSnapshot struct{}
@@ -8920,6 +9202,7 @@ func (c FfiConverterHandleCheckSnapshot) Read(reader io.Reader) HandleCheckSnaps
 		FfiConverterHandleCheckPhaseINSTANCE.Read(reader),
 		FfiConverterHandleCheckOutcomeINSTANCE.Read(reader),
 		fauna_core.FfiConverterLocalizedTextINSTANCE.Read(reader),
+		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
@@ -8941,6 +9224,7 @@ func (c FfiConverterHandleCheckSnapshot) Write(writer io.Writer, value HandleChe
 	FfiConverterBoolINSTANCE.Write(writer, value.ContinueEnabled)
 	FfiConverterBoolINSTANCE.Write(writer, value.ControlCheckboxVisible)
 	FfiConverterBoolINSTANCE.Write(writer, value.ControlCheckboxChecked)
+	FfiConverterBoolINSTANCE.Write(writer, value.TermsNoticeVisible)
 }
 
 type FfiDestroyerHandleCheckSnapshot struct{}
@@ -9608,11 +9892,18 @@ type SetupStatus struct {
 	// the setup-status probe has resolved. Seeds the `nat_mode_choice` pre-selection
 	// (`docs/goal/behavior/onboarding.md` § 3b-bis).
 	NodeMode *fauna_core.NodeMode
+	// The box's own content-scanner declaration (`wired` / `absent` /
+	// `unknown`) — whether its compose wires the clamd/rspamd the MTA's scan
+	// gate needs. `Unknown` for a nest outside the image or one predating the
+	// field. The third axis of the claim-time mail intent
+	// (`docs/goal/behavior/onboarding.md` § 3b → *Third axis*).
+	ContentScanners fauna_core.ContentScanners
 }
 
 func (r *SetupStatus) Destroy() {
 	FfiDestroyerBool{}.Destroy(r.Claimed)
 	FfiDestroyerOptionalNodeMode{}.Destroy(r.NodeMode)
+	fauna_core.FfiDestroyerContentScanners{}.Destroy(r.ContentScanners)
 }
 
 type FfiConverterSetupStatus struct{}
@@ -9627,6 +9918,7 @@ func (c FfiConverterSetupStatus) Read(reader io.Reader) SetupStatus {
 	return SetupStatus{
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterOptionalNodeModeINSTANCE.Read(reader),
+		fauna_core.FfiConverterContentScannersINSTANCE.Read(reader),
 	}
 }
 
@@ -9641,11 +9933,81 @@ func (c FfiConverterSetupStatus) LowerExternal(value SetupStatus) ExternalCRustB
 func (c FfiConverterSetupStatus) Write(writer io.Writer, value SetupStatus) {
 	FfiConverterBoolINSTANCE.Write(writer, value.Claimed)
 	FfiConverterOptionalNodeModeINSTANCE.Write(writer, value.NodeMode)
+	fauna_core.FfiConverterContentScannersINSTANCE.Write(writer, value.ContentScanners)
 }
 
 type FfiDestroyerSetupStatus struct{}
 
 func (_ FfiDestroyerSetupStatus) Destroy(value SetupStatus) {
+	value.Destroy()
+}
+
+// What the provisioning page shows of a door box's key
+// (`provisioning-ssh-door-command`; `installers/vps.md` § The SSH door →
+// *The key*). Carries no secret: the private key is in this device's
+// `~/.ssh` (`key_path`) or waits in the machine for its one hand-over.
+type SshDoorReadout struct {
+	Domain string
+	// `ssh <domain>` where this device wrote the key and its `Host` entry,
+	// else `ssh -i fauna-<domain> root@<domain>` for the handed-over file.
+	Command string
+	// The private key's absolute path on a desktop app; `None` where the key
+	// is handed over instead.
+	KeyPath *string
+	// `SHA256:…`, as `ssh-keygen -l` prints it.
+	Fingerprint string
+	// The one address the door admits, as the nest echoed it in the claim
+	// reply (`installers/vps.md` § The SSH door → *One address*); the host's
+	// door pass applies it within a minute of the claim. `None` until the
+	// claim, or when the nest wrote none.
+	AdmittedFrom *string
+}
+
+func (r *SshDoorReadout) Destroy() {
+	FfiDestroyerString{}.Destroy(r.Domain)
+	FfiDestroyerString{}.Destroy(r.Command)
+	FfiDestroyerOptionalString{}.Destroy(r.KeyPath)
+	FfiDestroyerString{}.Destroy(r.Fingerprint)
+	FfiDestroyerOptionalString{}.Destroy(r.AdmittedFrom)
+}
+
+type FfiConverterSshDoorReadout struct{}
+
+var FfiConverterSshDoorReadoutINSTANCE = FfiConverterSshDoorReadout{}
+
+func (c FfiConverterSshDoorReadout) Lift(rb RustBufferI) SshDoorReadout {
+	return LiftFromRustBuffer[SshDoorReadout](c, rb)
+}
+
+func (c FfiConverterSshDoorReadout) Read(reader io.Reader) SshDoorReadout {
+	return SshDoorReadout{
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterOptionalStringINSTANCE.Read(reader),
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterOptionalStringINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterSshDoorReadout) Lower(value SshDoorReadout) C.RustBuffer {
+	return LowerIntoRustBuffer[SshDoorReadout](c, value)
+}
+
+func (c FfiConverterSshDoorReadout) LowerExternal(value SshDoorReadout) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[SshDoorReadout](c, value))
+}
+
+func (c FfiConverterSshDoorReadout) Write(writer io.Writer, value SshDoorReadout) {
+	FfiConverterStringINSTANCE.Write(writer, value.Domain)
+	FfiConverterStringINSTANCE.Write(writer, value.Command)
+	FfiConverterOptionalStringINSTANCE.Write(writer, value.KeyPath)
+	FfiConverterStringINSTANCE.Write(writer, value.Fingerprint)
+	FfiConverterOptionalStringINSTANCE.Write(writer, value.AdmittedFrom)
+}
+
+type FfiDestroyerSshDoorReadout struct{}
+
+func (_ FfiDestroyerSshDoorReadout) Destroy(value SshDoorReadout) {
 	value.Destroy()
 }
 
@@ -9667,12 +10029,27 @@ type VpsConfigState struct {
 	// `CloudInitParams::enable_mail` via `run_provisioning_inner`.
 	// `docs/goal/behavior/onboarding.md` §5.
 	EnableMail *bool
+	// The `vps-config-ssh-door-toggle`: whether the box is provisioned with a
+	// key-only sshd admitting the admin's own address. **Default off** for
+	// every box. Feeds `CloudInitParams::ssh_door` via
+	// `run_provisioning_inner`. The key itself never lives here
+	// (`OnboardingMachine::ssh_door_readout`).
+	// `docs/goal/behavior/onboarding-provisioning.md` § 5.
+	SshDoor bool
 	// Which builds the box's updater follows, set by the
 	// `vps-config-update-channel-row` radios. `None` = "not chosen — the
 	// default channel" (`OnboardingMachine::provision_update_channel`). Feeds
 	// `CloudInitParams::image_tag` via `run_provisioning_inner`.
 	// `docs/goal/behavior/onboarding-provisioning.md` §5.
 	UpdateChannel *fauna_provisioning.UpdateChannel
+	// What the registry said of each update channel when the page was entered
+	// (`OnboardingMachine::probe_channel_availability`) — the input of the
+	// default channel and of each row's description. Empty until the probe
+	// lands, which keeps Stable. Not serialized: it is a reading of the
+	// registry now, not a choice, so a resumed wizard reads it afresh.
+	// `docs/goal/behavior/onboarding-provisioning.md` §5 → *What exists
+	// decides the default*.
+	ChannelAvailability []fauna_provisioning.ChannelAvailability
 	// True while `verify_vps()` is in flight. See the matching field on
 	// `DnsConfigState` for rationale. Not serialized.
 	Verifying bool
@@ -9691,7 +10068,9 @@ func (r *VpsConfigState) Destroy() {
 	FfiDestroyerSequenceVpsLocation{}.Destroy(r.Locations)
 	FfiDestroyerOptionalString{}.Destroy(r.SelectedLocationId)
 	FfiDestroyerOptionalBool{}.Destroy(r.EnableMail)
+	FfiDestroyerBool{}.Destroy(r.SshDoor)
 	FfiDestroyerOptionalUpdateChannel{}.Destroy(r.UpdateChannel)
+	FfiDestroyerSequenceChannelAvailability{}.Destroy(r.ChannelAvailability)
 	FfiDestroyerBool{}.Destroy(r.Verifying)
 	FfiDestroyerMapStringHostedAuthState{}.Destroy(r.HostedAuth)
 }
@@ -9714,7 +10093,9 @@ func (c FfiConverterVpsConfigState) Read(reader io.Reader) VpsConfigState {
 		FfiConverterSequenceVpsLocationINSTANCE.Read(reader),
 		FfiConverterOptionalStringINSTANCE.Read(reader),
 		FfiConverterOptionalBoolINSTANCE.Read(reader),
+		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterOptionalUpdateChannelINSTANCE.Read(reader),
+		FfiConverterSequenceChannelAvailabilityINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterMapStringHostedAuthStateINSTANCE.Read(reader),
 	}
@@ -9737,7 +10118,9 @@ func (c FfiConverterVpsConfigState) Write(writer io.Writer, value VpsConfigState
 	FfiConverterSequenceVpsLocationINSTANCE.Write(writer, value.Locations)
 	FfiConverterOptionalStringINSTANCE.Write(writer, value.SelectedLocationId)
 	FfiConverterOptionalBoolINSTANCE.Write(writer, value.EnableMail)
+	FfiConverterBoolINSTANCE.Write(writer, value.SshDoor)
 	FfiConverterOptionalUpdateChannelINSTANCE.Write(writer, value.UpdateChannel)
+	FfiConverterSequenceChannelAvailabilityINSTANCE.Write(writer, value.ChannelAvailability)
 	FfiConverterBoolINSTANCE.Write(writer, value.Verifying)
 	FfiConverterMapStringHostedAuthStateINSTANCE.Write(writer, value.HostedAuth)
 }
@@ -13101,6 +13484,47 @@ func (_ FfiDestroyerOptionalPendingInviteSlot) Destroy(value *PendingInviteSlot)
 	}
 }
 
+type FfiConverterOptionalSshDoorReadout struct{}
+
+var FfiConverterOptionalSshDoorReadoutINSTANCE = FfiConverterOptionalSshDoorReadout{}
+
+func (c FfiConverterOptionalSshDoorReadout) Lift(rb RustBufferI) *SshDoorReadout {
+	return LiftFromRustBuffer[*SshDoorReadout](c, rb)
+}
+
+func (_ FfiConverterOptionalSshDoorReadout) Read(reader io.Reader) *SshDoorReadout {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterSshDoorReadoutINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalSshDoorReadout) Lower(value *SshDoorReadout) C.RustBuffer {
+	return LowerIntoRustBuffer[*SshDoorReadout](c, value)
+}
+
+func (c FfiConverterOptionalSshDoorReadout) LowerExternal(value *SshDoorReadout) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*SshDoorReadout](c, value))
+}
+
+func (_ FfiConverterOptionalSshDoorReadout) Write(writer io.Writer, value *SshDoorReadout) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterSshDoorReadoutINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalSshDoorReadout struct{}
+
+func (_ FfiDestroyerOptionalSshDoorReadout) Destroy(value *SshDoorReadout) {
+	if value != nil {
+		FfiDestroyerSshDoorReadout{}.Destroy(*value)
+	}
+}
+
 type FfiConverterOptionalContactInfo struct{}
 
 var FfiConverterOptionalContactInfoINSTANCE = FfiConverterOptionalContactInfo{}
@@ -13981,6 +14405,53 @@ func (FfiDestroyerSequenceRetireStepRow) Destroy(sequence []RetireStepRow) {
 	}
 }
 
+type FfiConverterSequenceChannelAvailability struct{}
+
+var FfiConverterSequenceChannelAvailabilityINSTANCE = FfiConverterSequenceChannelAvailability{}
+
+func (c FfiConverterSequenceChannelAvailability) Lift(rb RustBufferI) []fauna_provisioning.ChannelAvailability {
+	return LiftFromRustBuffer[[]fauna_provisioning.ChannelAvailability](c, rb)
+}
+
+func (c FfiConverterSequenceChannelAvailability) Read(reader io.Reader) []fauna_provisioning.ChannelAvailability {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]fauna_provisioning.ChannelAvailability, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, fauna_provisioning.FfiConverterChannelAvailabilityINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceChannelAvailability) Lower(value []fauna_provisioning.ChannelAvailability) C.RustBuffer {
+	return LowerIntoRustBuffer[[]fauna_provisioning.ChannelAvailability](c, value)
+}
+
+func (c FfiConverterSequenceChannelAvailability) LowerExternal(value []fauna_provisioning.ChannelAvailability) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]fauna_provisioning.ChannelAvailability](c, value))
+}
+
+func (c FfiConverterSequenceChannelAvailability) Write(writer io.Writer, value []fauna_provisioning.ChannelAvailability) {
+	if len(value) > math.MaxInt32 {
+		panic("[]fauna_provisioning.ChannelAvailability is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		fauna_provisioning.FfiConverterChannelAvailabilityINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceChannelAvailability struct{}
+
+func (FfiDestroyerSequenceChannelAvailability) Destroy(sequence []fauna_provisioning.ChannelAvailability) {
+	for _, value := range sequence {
+		fauna_provisioning.FfiDestroyerChannelAvailability{}.Destroy(value)
+	}
+}
+
 type FfiConverterSequenceDnsZone struct{}
 
 var FfiConverterSequenceDnsZoneINSTANCE = FfiConverterSequenceDnsZone{}
@@ -14394,8 +14865,9 @@ func FormatPrice(cents uint64, currency string) string {
 //
 // Returns `None` (— i.e. "no TLD, hide the `.{tld}` message") when the handle
 // has no `@`, an empty local part or empty domain (`@x` / `x@`), or a domain
-// with no `.` (still being typed, or a bare hostname). The domain extraction
-// mirrors `machine::parse_handle_domain`; the TLD is the substring after the
+// with no `.` (still being typed, or a bare hostname), or a second `@` (no
+// domain at all). The domain comes from `machine::parse_handle_domain`, the
+// one canonical handle parser the dialled `nest_url` uses too; the TLD is the substring after the
 // domain's last `.`. This is the canonical shape: web + iOS already matched it,
 // and macOS (previously returned the whole domain on a dot-less domain) is now
 // migrated onto this helper via the UniFFI export below. The web (already

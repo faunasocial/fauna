@@ -32,6 +32,7 @@ import (
 
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/auth"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/dagcbor"
+	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mailfauna"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/wsrpc"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/wsrpc/wsrpctest"
 )
@@ -961,3 +962,99 @@ type wsrpcCaller interface {
 }
 
 var _ wsrpcCaller = (*submissionAuthCaller)(nil)
+
+// F3 parity on submission (network-exposure.md § Rulings F3): the unknown-user
+// and no-blob paths must run the dummy Argon2id, so they cost what a known
+// user's wrong-password attempt costs. Asserted through the KDF run counter —
+// a wall-clock tolerance would be flaky on a loaded box.
+func TestSubmissionAuthUnknownUserRunsDummyKDF(t *testing.T) {
+	mailfauna.PrewarmDummyKDF()
+	caller := &submissionAuthCaller{} // no validate reply ⇒ nest rejects the recipient
+	sess := newTestSubmissionSession(caller)
+
+	before := mailfauna.KDFRunCount()
+	err := sess.authenticate(sasl.Plain, auth.BuildPlainPayload("", "nobody@example.com", "any"))
+	if err != errSubmissionAuthFailed {
+		t.Fatalf("unknown user: got %v, want errSubmissionAuthFailed", err)
+	}
+	if got := mailfauna.KDFRunCount() - before; got != 1 {
+		t.Fatalf("unknown-user AUTH ran %d Argon2id, want 1 (timing oracle open)", got)
+	}
+}
+
+func TestSubmissionAuthNoBlobRunsDummyKDF(t *testing.T) {
+	mailfauna.PrewarmDummyKDF()
+	caller := &submissionAuthCaller{
+		validateRecipientReplyHex: hex.EncodeToString(fixtureActorID()),
+		submissionBlob:            nil,
+	}
+	sess := newTestSubmissionSession(caller)
+
+	before := mailfauna.KDFRunCount()
+	if err := sess.authenticate(sasl.Plain, auth.BuildPlainPayload("", "alice@example.com", "any")); err == nil {
+		t.Fatal("missing blob must produce an AUTH error")
+	}
+	if got := mailfauna.KDFRunCount() - before; got != 1 {
+		t.Fatalf("no-blob AUTH ran %d Argon2id, want 1 (timing oracle open)", got)
+	}
+}
+
+// OAUTHBEARER (HKDF) has no meaningful timing gap: no dummy KDF there.
+func TestSubmissionAuthUnknownUserOAuthRunsNoKDF(t *testing.T) {
+	mailfauna.PrewarmDummyKDF()
+	sess := newTestSubmissionSession(&submissionAuthCaller{})
+	before := mailfauna.KDFRunCount()
+	_ = sess.authenticate(sasl.OAuthBearer, auth.BuildOAuthBearerPayload("nobody@example.com", "tok"))
+	if got := mailfauna.KDFRunCount() - before; got != 0 {
+		t.Fatalf("HKDF unknown-user AUTH ran %d Argon2id, want 0", got)
+	}
+}
+
+// A busy credential-KDF gate checked no password, so it is a
+// temporary failure (454 4.7.0), never the user's wrong password: no lockout
+// failure on their buckets and no result=fail audit row. A limit-1 lockout
+// makes "no failure recorded" observable — one booked failure would lock the
+// correct-password retry. Not t.Parallel: it holds the process-wide gate.
+func TestSubmissionAuthBusyKDFIsTemporaryNotAFailure(t *testing.T) {
+	blob := mustReadFixture(t, "wrapped_submission_token.bin")
+	caller := &submissionAuthCaller{
+		validateRecipientReplyHex: hex.EncodeToString(fixtureActorID()),
+		submissionBlob:            blob,
+	}
+	sess := newTestSubmissionSession(caller)
+	lc := *sess.backend.cfg.current()
+	lc.authLockout = NewAuthLockout(1, time.Minute, newFakeLockoutClock())
+	sess.backend.cfg = staticMTAConfig(&lc)
+	good := auth.BuildPlainPayload("", "alice@example.com", string(fixturePlainPassword))
+
+	restore := mailfauna.SaturateKDFGateForTest(20 * time.Millisecond)
+	err := sess.authenticate(sasl.Plain, good)
+	restore()
+	if err != errSubmissionAuthInternal {
+		t.Fatalf("busy gate: wire = %v, want errSubmissionAuthInternal (454 4.7.0)", err)
+	}
+	if got := caller.callsOf(wsrpc.MethodReportAuthEvent); len(got) != 0 {
+		t.Fatalf("busy gate fired %d report_auth_event rows, want 0", len(got))
+	}
+	if err := sess.authenticate(sasl.Plain, good); err != nil {
+		t.Fatalf("correct password after a busy gate: %v (the busy attempt was booked as a failure)", err)
+	}
+}
+
+// The unknown-user dummy KDF answers a busy gate the same 454, so a saturated
+// gate cannot tell a prober which accounts exist (F3 under load).
+func TestSubmissionAuthBusyKDFUnknownUserIsTemporaryToo(t *testing.T) {
+	mailfauna.PrewarmDummyKDF()
+	caller := &submissionAuthCaller{} // nest rejects the recipient
+	sess := newTestSubmissionSession(caller)
+
+	restore := mailfauna.SaturateKDFGateForTest(20 * time.Millisecond)
+	err := sess.authenticate(sasl.Plain, auth.BuildPlainPayload("", "nobody@example.com", "any"))
+	restore()
+	if err != errSubmissionAuthInternal {
+		t.Fatalf("busy gate, unknown user: wire = %v, want errSubmissionAuthInternal", err)
+	}
+	if got := caller.callsOf(wsrpc.MethodReportAuthEvent); len(got) != 0 {
+		t.Fatalf("busy gate fired %d report_auth_event rows, want 0", len(got))
+	}
+}

@@ -22,19 +22,19 @@
   //     never touches, so a repaint cannot disarm a Cancel just armed.
   //  3. Download dispatches `MailExportAction::Download` — never a link to the
   //     nest's URL, which would hand the user the still-sealed blob. The save
-  //     itself is `$lib/mail-export-save` (§ Download flow step 5), and the
+  //     itself is `#lib/mail-export-save` (§ Download flow step 5), and the
   //     Done summary then names the saved file, so the press is visible.
-  import { identity, reconnectTick } from '$lib/store';
-  import { mailExportMachine, onPushEvent, staleSurfacesForPushKind } from '$lib/rpc';
-  import { isFailedExport } from '$lib/mail-export-failed';
-  import { sweepStaleExportArchives } from '$lib/mail-export-save';
-  import { ensureWasm, exportConfirmEstimate, exportFormatLabel, transferTiming, type ExportConfirmEstimate, type TransferTiming } from '$lib/wasm';
-  import { byteSize, durationSecs } from '$lib/value-format';
-  import { resolveLocalized } from '$lib/i18n/localized';
+  import { identity, reconnectTick } from '#lib/store';
+  import { mailExportMachine, onPushEvent, staleSurfacesForPushKind } from '#lib/rpc';
+  import { isFailedExport } from '#lib/mail-export-failed';
+  import { sweepStaleExportArchives } from '#lib/mail-export-save';
+  import { ensureWasm, exportConfirmEstimate, exportFormatLabel, transferTiming, type ExportConfirmEstimate, type TransferTiming } from '#lib/wasm';
+  import { byteSize, durationSecs } from '#lib/value-format';
+  import { resolveLocalized } from '#lib/i18n/localized';
   import { onDestroy, onMount } from 'svelte';
-  import { t } from '$lib/i18n/strings';
+  import { t } from '#lib/i18n/strings';
   import type { WasmMailExportMachine } from '../../../static/fauna_wasm.js';
-  import { IDS } from '$lib/generated/uiIds';
+  import { IDS } from '#lib/generated/uiIds';
 
   // The parent settings page owns the single error surface; export dispatch
   // errors flow into it (the same surface the other mail-settings sections use).

@@ -57,7 +57,7 @@ pytestmark = pytest.mark.tier_1
 
 _ROOT = Path(__file__).resolve().parent.parent
 _SEED_VAR = "FAUNA_LIVE_SECRET_HEX"
-_BOX = "dev.example.com"
+_BOX = "dev.fauna.build"
 _BOX_URL = f"https://{_BOX}"
 _BOX_SEED = "44" * 32
 _BOX_HANDLE = f"admin@{_BOX}"

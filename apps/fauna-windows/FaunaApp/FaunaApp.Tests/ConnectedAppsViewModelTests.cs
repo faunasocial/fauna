@@ -136,6 +136,7 @@ public class ConnectedAppsViewModelTests
             @requests: requests ?? Array.Empty<ConsentCardRow>(),
             @principals: principals ?? Array.Empty<ConnectedAppRow>(),
             @blocked: blocked ?? Array.Empty<BlockedAppRow>(),
+            @externalAppsOff: false,
             @error: null);
 
     private static ConnectedAppRow Row(

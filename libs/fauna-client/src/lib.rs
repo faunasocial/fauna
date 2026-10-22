@@ -8,6 +8,7 @@ pub mod chunk_download;
 pub mod client;
 pub mod error;
 pub mod media_upload;
+pub mod post_blob;
 pub mod push;
 pub mod ranged_nest_reader;
 mod reconnect;
@@ -30,7 +31,7 @@ pub mod ws_device_handshake_bearer;
 pub use auth_client::HeldBearerForTest;
 pub use auth_client::{AuthClient, BearerIdentityMismatch, pinned_http_client};
 pub use chunk_download::{
-    ForeignPublicChunkFetcher, NestAuthedByteStream, NestPublicChunkFetcher,
+    ForeignPublicChunkFetcher, GraduatedHome, NestAuthedByteStream, NestPublicChunkFetcher,
     graduate_home_nest_pin, open_authed_stream,
 };
 pub use client::{NestClient, SelfConnecting};
@@ -53,6 +54,7 @@ pub use media_upload::{
     UploadedBlob, upload_gated_post_blob, upload_prepared_blob, upload_public_post_blob,
     upload_sealed_post_blob,
 };
+pub use post_blob::{ForeignHome, PostBlobHosts};
 pub use push::PushBroker;
 pub use ranged_nest_reader::{RangedNestReader, RangedReadError};
 pub use types::ConnectionState;

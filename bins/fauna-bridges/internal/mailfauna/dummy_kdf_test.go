@@ -18,7 +18,7 @@ func TestDummyCredentialKDFRunsArgon2id(t *testing.T) {
 	}
 
 	start := time.Now()
-	DummyCredentialKDF([]byte("any-password"), KdfKindArgon2id)
+	DummyCredentialKDF([]byte("any-password"), KdfKindArgon2id, "198.51.100.3")
 	elapsed := time.Since(start)
 
 	const floor = 5 * time.Millisecond
@@ -34,7 +34,7 @@ func TestDummyCredentialKDFRunsArgon2id(t *testing.T) {
 func TestDummyCredentialKDFHkdfIsNoop(t *testing.T) {
 	PrewarmDummyKDF()
 	start := time.Now()
-	DummyCredentialKDF([]byte("token"), KdfKindHkdf)
+	DummyCredentialKDF([]byte("token"), KdfKindHkdf, "198.51.100.3")
 	elapsed := time.Since(start)
 	if elapsed > 2*time.Millisecond {
 		t.Fatalf("HKDF dummy should be a no-op, took %v", elapsed)

@@ -23,6 +23,11 @@ pub trait Engine {
     async fn start(&self, id: &str) -> Result<()>;
     async fn remove_container(&self, id: &str) -> Result<()>;
     async fn remove_image(&self, id: &str) -> Result<()>;
+    /// Extract the tar `archive` into directory `dir` of container `id` —
+    /// `PUT /containers/{id}/archive`, the API behind `docker cp`.
+    async fn put_archive(&self, id: &str, dir: &str, archive: Vec<u8>) -> Result<()>;
+    /// The tar archive of `path` in container `id`.
+    async fn get_archive(&self, id: &str, path: &str) -> Result<Vec<u8>>;
 }
 
 /// The engine on the local socket.
@@ -146,6 +151,29 @@ impl Engine for Bollard {
             .await?;
         Ok(())
     }
+
+    async fn put_archive(&self, id: &str, dir: &str, archive: Vec<u8>) -> Result<()> {
+        let opts = bollard::query_parameters::UploadToContainerOptionsBuilder::default()
+            .path(dir)
+            .build();
+        self.0
+            .upload_to_container(id, Some(opts), bollard::body_full(archive.into()))
+            .await?;
+        Ok(())
+    }
+
+    async fn get_archive(&self, id: &str, path: &str) -> Result<Vec<u8>> {
+        use futures_util::TryStreamExt;
+        let opts = bollard::query_parameters::DownloadFromContainerOptionsBuilder::default()
+            .path(path)
+            .build();
+        let chunks: Vec<_> = self
+            .0
+            .download_from_container(id, Some(opts))
+            .try_collect()
+            .await?;
+        Ok(chunks.concat())
+    }
 }
 
 /// A recording engine for the unit tests: answers inspects from fixtures (by
@@ -164,6 +192,8 @@ pub mod fake {
         pub calls: Mutex<Vec<String>>,
         pub bodies: Mutex<Vec<Value>>,
         pub fail: Option<&'static str>,
+        /// Each container's report archive, as last written.
+        pub archives: Mutex<std::collections::HashMap<String, Vec<u8>>>,
     }
 
     impl Fake {
@@ -182,6 +212,21 @@ pub mod fake {
         /// The last create body.
         pub fn created(&self) -> Value {
             self.bodies.lock().unwrap().last().cloned().unwrap()
+        }
+        /// The report container `id` holds.
+        pub fn report(
+            &self,
+            id: &str,
+        ) -> Option<fauna_provisioning::update_channel::report::Report> {
+            let archives = self.archives.lock().unwrap();
+            crate::report::first_file(archives.get(id)?)
+                .and_then(fauna_provisioning::update_channel::report::Report::parse)
+        }
+        /// Every report event id container `id` holds, oldest first.
+        pub fn reported(&self, id: &str) -> Vec<String> {
+            self.report(id)
+                .map(|r| r.events.into_iter().map(|e| e.event).collect())
+                .unwrap_or_default()
         }
     }
 
@@ -228,6 +273,22 @@ pub mod fake {
         }
         async fn remove_image(&self, id: &str) -> Result<()> {
             self.log(format!("rmi {id}"))
+        }
+        async fn put_archive(&self, id: &str, dir: &str, archive: Vec<u8>) -> Result<()> {
+            self.log(format!("put {dir} on {id}"))?;
+            self.archives
+                .lock()
+                .unwrap()
+                .insert(id.to_string(), archive);
+            Ok(())
+        }
+        async fn get_archive(&self, id: &str, _: &str) -> Result<Vec<u8>> {
+            self.archives
+                .lock()
+                .unwrap()
+                .get(id)
+                .cloned()
+                .context("no such file")
         }
     }
 }

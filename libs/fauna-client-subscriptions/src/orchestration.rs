@@ -2422,6 +2422,7 @@ mod tests {
                         subhandles: false,
                         registration: None,
                         moderation: ModerationInfo {
+                            content_policy: None,
                             extra: Default::default(),
                         },
                         ..Default::default()
@@ -3893,6 +3894,7 @@ mod tests {
         nest.set_roster(&[actor(1), actor(2)]);
 
         let req = PendingRequest {
+            home: None,
             extra: Default::default(),
             request_id: 42,
             subscriber_id: actor(3),
@@ -3927,6 +3929,7 @@ mod tests {
         *nest.approve_script.lock().unwrap() = vec![Some(ROSTER_MISMATCH)];
 
         let req = PendingRequest {
+            home: None,
             extra: Default::default(),
             request_id: 7,
             subscriber_id: actor(2),
@@ -3959,6 +3962,7 @@ mod tests {
         nest.set_roster(&[]); // fresh followers tier, empty roster
 
         let req = PendingRequest {
+            home: None,
             extra: Default::default(),
             request_id: 1,
             subscriber_id: actor(5),
@@ -3990,6 +3994,7 @@ mod tests {
         let nest = Arc::new(FakeNest::default());
         let a = author(nest.clone());
         let req = PendingRequest {
+            home: None,
             extra: Default::default(),
             request_id: 2,
             subscriber_id: actor(6),
@@ -4031,6 +4036,7 @@ mod tests {
         );
 
         let req = PendingRequest {
+            home: None,
             extra: Default::default(),
             request_id: 99,
             subscriber_id: newcomer.actor_id(),
@@ -4227,6 +4233,7 @@ mod tests {
     /// A pending `requests.list` row (`drain_auto_approvals` iterates these).
     fn pending(request_id: i64, subscriber: ActorId, tier: &str, kind: &str) -> PendingRequest {
         PendingRequest {
+            home: None,
             extra: Default::default(),
             request_id,
             subscriber_id: subscriber,

@@ -16,18 +16,20 @@
   // The section therefore owns its own read: the page bumps `reloadTick`
   // wherever it used to call `loadSelf()`, which is what preserves the existing
   // refresh triggers (mount, actor change, and the Tiers-tab re-click).
-  import { t } from '$lib/i18n/strings';
-  import { storedNestUrl } from '$lib/api';
+  import { t } from '#lib/i18n/strings';
+  import { storedNestUrl } from '#lib/api';
   import {
     paymentsProvidersSet,
     paymentsProvidersList,
     paymentsProvidersRemove,
     paymentsKnownKinds,
     paymentsWebhookUrl,
+    paymentsReturnUrl,
     providerStatusLabel,
     type PaymentProvider,
-  } from '$lib/payments';
-  import { PAYMENTS_IDS } from '$lib/components/payments/generatedIds';
+  } from '#lib/payments';
+  import { PAYMENTS_IDS } from '#lib/components/payments/generatedIds';
+  import { siteLink, ensureWebPageHydrated } from '#lib/web-publish';
 
   interface Props {
     /** The logged-in actor's secret, or null before identity resolves. */
@@ -81,7 +83,21 @@
     formVisible && providerKind ? paymentsWebhookUrl(storedNestUrl(), actorIdHex, providerKind) : '',
   );
 
+  // The post-checkout redirect to register at the provider — the shared
+  // `return_url` face over the creator's WEB-SITE origin (active custom domain >
+  // enabled subdomain, the origin Settings → Web shows), never the nest URL the
+  // webhook display uses. Empty while the creator has no public web address (the
+  // field then shows `return_url_unavailable` and the copy button is inert).
+  const returnUrlPreview = $derived.by(() => {
+    const origin = $siteLink?.origin;
+    return formVisible && providerKind && origin ? paymentsReturnUrl(origin, providerKind) : '';
+  });
+
   function openForm(): void {
+    // Hydrate the web origin once on open (a no-op once populated); the display
+    // re-renders when the read lands. Best-effort: a failure leaves the
+    // "unavailable" line, not a page error.
+    void ensureWebPageHydrated().catch(() => {});
     // The secret is never pre-filled (the nest doesn't echo it back).
     providerSecret = '';
     providerKind = paymentsKnownKinds()[0] ?? '';
@@ -115,6 +131,15 @@
       await load(s);
     } catch (e) {
       onerror(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function copyReturnUrl(): Promise<void> {
+    if (!returnUrlPreview) return;
+    try {
+      await navigator.clipboard?.writeText(returnUrlPreview);
+    } catch {
+      /* ignore — the field still shows the URL */
     }
   }
 
@@ -180,6 +205,21 @@
         <button
           class="btn" data-testid={PAYMENTS_IDS.SUBSCRIPTION_PROVIDER_FORM_WEBHOOK_URL_COPY_BUTTON}
           onclick={copyWebhookUrl}
+        >{t.common.copy}</button>
+      </div>
+      <!-- The sibling display for the paywall return door: the redirect to set
+           in the provider's checkout settings. Built on the web-site origin;
+           names the missing public address when there is none. -->
+      <div class="select-row">
+        <label for="provider-return-url">{t.subscriptions.return_url_label}</label>
+        <input
+          id="provider-return-url" class="input mono" type="text" readonly
+          data-testid={PAYMENTS_IDS.SUBSCRIPTION_PROVIDER_FORM_RETURN_URL}
+          value={returnUrlPreview || t.subscriptions.return_url_unavailable}
+        />
+        <button
+          class="btn" data-testid={PAYMENTS_IDS.SUBSCRIPTION_PROVIDER_FORM_RETURN_URL_COPY_BUTTON}
+          disabled={!returnUrlPreview} onclick={copyReturnUrl}
         >{t.common.copy}</button>
       </div>
       <div class="form-buttons">

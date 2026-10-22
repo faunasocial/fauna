@@ -20,6 +20,11 @@ WHAT IT DOES (talks only to api.hetzner.cloud; no SSH):
   4. Creates ONE new firewall holding a copy of those rules, applied to the
      target server only, and waits until the provider reports it applied.
 
+  `--ssh-door-from <ip>` adds the one rule a copy never carries: inbound tcp
+     22 from that single address, on the dev nest alone — the address its SSH
+     door admitted at the claim (installers/vps.md § The SSH door), so the
+     cloud firewall lets through what the box's own ufw admits.
+
 It only ever CREATES. It refuses when a firewall of the chosen name already
 exists (rerunning never overwrites rules someone has since edited), and it
 never modifies or deletes any firewall, the reference's least of all.
@@ -35,10 +40,13 @@ Usage:
     scripts/staging-box-firewall.py test.fauna.build --copy-from dev.fauna.build --dry-run
     scripts/staging-box-firewall.py test.fauna.build --copy-from dev.fauna.build
     scripts/staging-box-firewall.py test.fauna.build --copy-from dev.fauna.build --name test-uat
+    scripts/staging-box-firewall.py dev.fauna.build --copy-from test.fauna.build --ssh-door-from 192.0.2.7
 
 Exit codes:
     0  created and applied (or --dry-run printed the plan)
-    1  refused — a firewall of that name exists, or the target already has one
+    1  refused — a firewall of that name exists, the target already has one, or
+       a rule to copy admits the target's or a sibling box's address (also
+       under --dry-run)
     2  cannot proceed — API/DNS error, a host is not among the token's servers,
        the reference has no firewall to copy, or the apply did not confirm
     3  no token
@@ -51,6 +59,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import ipaddress
 import json
 import sys
 import time
@@ -62,6 +71,14 @@ _GATE_PATH = Path(__file__).resolve().parent / "deploy-verify-cloud-firewall.py"
 _spec = importlib.util.spec_from_file_location("deploy_verify_cloud_firewall", _GATE_PATH)
 gate = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(gate)
+
+# The one box whose :22 may answer is the binaries gate's to name; the door
+# rule below is fenced to that host and no other.
+_BINARIES_PATH = Path(__file__).resolve().parent / "deploy-verify-binaries.py"
+_bspec = importlib.util.spec_from_file_location("deploy_verify_binaries", _BINARIES_PATH)
+_binaries = importlib.util.module_from_spec(_bspec)
+_bspec.loader.exec_module(_binaries)
+ADMITTED_22_HOST = _binaries.ADMITTED_22_HOST
 
 # The keys a rule may carry on create. Anything else the API returns on a read
 # is dropped rather than echoed back.
@@ -76,14 +93,41 @@ def copy_rules(firewalls: list[dict]) -> list[dict]:
     takes: known keys only, and no null/empty ``port`` / ``description`` /
     address list (the API rejects a null port on a portless protocol and an
     empty address list on the wrong direction). Exact duplicates — the same
-    rule on two of the reference's firewalls — are emitted once."""
+    rule on two of the reference's firewalls — are emitted once. An inbound
+    tcp 22 rule is never copied: a deployed box takes nothing on 22, and the
+    dev nest's one admission is its SSH door's own address (`door_rule`,
+    docs/goal/architecture/deployment-threat-model.md § Concern 1a), never a
+    template."""
     out: list[dict] = []
     for fw in firewalls:
         for rule in fw.get("rules", []):
+            if rule.get("direction") == "in" and rule.get("protocol") == "tcp" \
+                    and str(rule.get("port")) == "22":
+                continue
             copied = {k: rule[k] for k in _RULE_KEYS if rule.get(k) not in (None, "", [])}
             if copied not in out:
                 out.append(copied)
     return out
+
+
+def door_rule(host: str, address: str) -> dict:
+    """The one inbound tcp 22 rule an SSH-door box's cloud firewall carries:
+    exactly the address the box's own door pass admits — the one the admin's
+    app claimed it from (docs/goal/architecture/installers/vps.md § The SSH
+    door) — and only on ``ADMITTED_22_HOST``, the one organisation nest whose
+    admin opens the door. Raises ValueError for any other host, and for
+    anything but a single IPv4/IPv6 literal (a range would widen the door)."""
+    if host != ADMITTED_22_HOST:
+        raise ValueError(f"the SSH door rule is for {ADMITTED_22_HOST} only, not {host}")
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        raise ValueError(f"the SSH door admits one address literal, not {address!r}") from None
+    return {
+        "direction": "in", "protocol": "tcp", "port": "22",
+        "source_ips": [f"{ip}/{ip.max_prefixlen}"],
+        "description": "SSH door: the admin's claim address",
+    }
 
 
 def default_name(server: dict) -> str:
@@ -106,6 +150,19 @@ def describe(rules: list[dict]) -> list[str]:
 def internal_ports_opened(rules: list[dict]) -> list[int]:
     """Internal-only ports the copy would open — the set the gate reds on."""
     return [p for p in gate.FORBIDDEN_PORTS if any(gate._rule_covers_port(r, p) for r in rules)]
+
+
+def sibling_admissions(rules: list[dict], networks: list) -> list[tuple[str, list[str]]]:
+    """(rule line, offending sources) for each rule that names one of
+    ``networks`` — the target's or a sibling box's address. The copy refuses
+    these (deployment-threat-model.md § Concern 2, path 6: no organisation box
+    admits another's address)."""
+    out = []
+    for rule in rules:
+        hits = gate._sources_naming(rule, networks)
+        if hits:
+            out.append((describe([rule])[0], hits))
+    return out
 
 
 # ── API plumbing ─────────────────────────────────────────────────────────────
@@ -138,6 +195,9 @@ def main() -> int:
     ap.add_argument("--copy-from", required=True, metavar="HOST",
                     help="the box whose applied firewall rules are copied")
     ap.add_argument("--name", help="name of the new firewall (default: the target server's name)")
+    ap.add_argument("--ssh-door-from", metavar="IP",
+                    help=f"add the SSH door's one inbound tcp 22 rule for this address "
+                    f"({ADMITTED_22_HOST} only; the address the box's door admitted)")
     ap.add_argument("--dry-run", action="store_true", help="print the plan; write nothing")
     ap.add_argument("--token-file", default=None,
                     help="one token file for both hosts (default: $HETZNER_API_TOKEN, else "
@@ -190,6 +250,12 @@ def main() -> int:
     if not rules:
         print("ERROR: the reference server has no cloud-firewall rule to copy.", file=sys.stderr)
         return 2
+    if args.ssh_door_from is not None:
+        try:
+            rules.append(door_rule(host, args.ssh_door_from))
+        except ValueError as e:
+            print(f"REFUSED: {e}.", file=sys.stderr)
+            return 1
     name = args.name or default_name(target)
     print(f"  new firewall {name!r}, {len(rules)} rule(s):")
     for line in describe(rules):
@@ -198,6 +264,20 @@ def main() -> int:
     if opened:
         print(f"  ⚠ the copy opens internal-only port(s) {opened} — the reference does too; "
               "deploy-verify-cloud-firewall.py reds on this.", file=sys.stderr)
+
+    # The target's own and every sibling's address: every server either token
+    # lists, plus the organisation hostnames (the other project's boxes too).
+    box_networks = [n for s in servers + ref_servers for n in gate._server_networks(s)]
+    box_networks += gate._ips_networks(
+        gate._resolve_siblings("") | gate._resolve_ips(host) | gate._resolve_ips(ref_host)
+    )
+    admitted = sibling_admissions(rules, box_networks)
+    if admitted:
+        for line, hits in admitted:
+            print(f"REFUSED: rule [{line}] admits a box of the organisation: {hits} — no box "
+                  "may name another's address (deployment-threat-model.md § Concern 2, "
+                  "path 6). Remove it from the reference's firewall first.", file=sys.stderr)
+        return 1
 
     if any(fw.get("name") == name for fw in firewalls):
         print(f"REFUSED: a firewall named {name!r} already exists — this script only "

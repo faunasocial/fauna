@@ -43,11 +43,11 @@ use fauna_protocol::conversations::{
     RoomListRosterRemoteRequest, RoomListRosterReply, RoomListRosterRequest,
     RoomPublishGenerationReply, RoomPublishGenerationRequest, RoomRemoveReply, RoomRemoveRequest,
     RoomRevokeInviteReply, RoomRevokeInviteRequest, RoomRosterEntryWire,
-    RoomRosterReportRemoteRequest, RoomRosterReportReply, RoomRosterReportRequest, RoomSearchReply,
-    RoomSearchRequest, RoomSetLabelersReply, RoomSetLabelersRequest, RoomSetPolicyReply,
-    RoomSetPolicyRequest, RoomSetReceptionKeyReply, RoomSetReceptionKeyRequest,
-    RoomTransferOwnershipReply, RoomTransferOwnershipRequest, WelcomeDeliverReply,
-    WelcomeDeliverRequest, WelcomeKind,
+    RoomRosterReportRemoteRequest, RoomRosterReportReply, RoomRosterReportRequest,
+    RoomSearchRemoteRequest, RoomSearchReply, RoomSearchRequest, RoomSetLabelersReply,
+    RoomSetLabelersRequest, RoomSetPolicyReply, RoomSetPolicyRequest, RoomSetReceptionKeyReply,
+    RoomSetReceptionKeyRequest, RoomTransferOwnershipReply, RoomTransferOwnershipRequest,
+    WelcomeDeliverReply, WelcomeDeliverRequest, WelcomeKind,
 };
 use fauna_protocol::discovery::{ActorByHandleReply, ActorByHandleRequest};
 use fauna_protocol::{RpcErrorAction, RpcErrorClass, RpcRequester};
@@ -131,7 +131,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 #[cfg(not(target_arch = "wasm32"))]
 use fauna_client_bridges::MailAccountClient;
 #[cfg(not(target_arch = "wasm32"))]
-use fauna_client_mail_settings::InboxSpamScorer;
+use fauna_client_mail_settings::{InboxSpamScorer, judge_inbox_copy};
 #[cfg(not(target_arch = "wasm32"))]
 use fauna_mail::spam::BayesianKnobs;
 #[cfg(not(target_arch = "wasm32"))]
@@ -214,8 +214,9 @@ fn conv_rpc_error<E: RpcErrorClass + std::fmt::Display>(e: E) -> ConvRpcError {
 
 /// A `fauna.conversations.channel.fetch` reply across the protocol-agnostic
 /// seam, once for the native and wasm arms alike: the legal-takedown reference
-/// (the sealed `envelope` is empty when it is `Some` — the driver renders the
-/// tombstone in place of the withheld body) and a community room's verdicts
+/// and the admin block's reason (the sealed `envelope` is empty when either is
+/// `Some` — the driver renders the tombstone or the notice in place of the
+/// withheld body) and a community room's verdicts
 /// from its home nest (`conversation-rooms.md` § The three classes → *What the
 /// home nest does with its read*, purpose 2). The reply's factor rows stay on
 /// the wire: no conversation surface composes them yet.
@@ -227,6 +228,7 @@ fn fetched_records(reply: ChannelFetchReply) -> Vec<fauna_conversations::backend
             seq: e.seq,
             envelope: e.envelope,
             legal_takedown_ref: e.legal_takedown.map(|m| m.reference),
+            admin_block_reason: e.admin_block.map(|m| m.reason.token().to_string()),
             labels: e.labels,
             author: e.author,
         })
@@ -464,6 +466,21 @@ where
         Self { nest }
     }
 
+    /// `fauna.moderation.actions` — the connection actor's own queue rows,
+    /// read here for the withheld-message badge on the author's own copies
+    /// (`moderation.md` § Legal takedown → *App render*); the moderation
+    /// page reads the same kind through `fauna_client_moderation`.
+    pub async fn moderation_actions(
+        &self,
+    ) -> Result<fauna_protocol::moderation::ModerationActionsReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.moderation.actions",
+                fauna_protocol::moderation::ModerationActionsRequest::default(),
+            )
+            .await
+    }
+
     /// `fauna.conversations.channel.send` — post an MLS ciphertext to
     /// a channel. The nest assigns the per-channel sequence number
     /// (`MAX(seq)+1`) and fans the ciphertext out to subscribers as
@@ -626,7 +643,7 @@ where
     /// channel's home nest via `fauna.federation.channel.actors` and answers
     /// the home's authoritative union. A distinct kind — an old nest fails
     /// loud (`unknown_kind`) instead of answering its partial roster as a
-    /// clean success (`federation.md` § Cross-nest).
+    /// clean success (`federation-shared-folders.md` § Cross-nest).
     pub async fn channel_actors_remote(
         &self,
         channel_id_hex: impl Into<String>,
@@ -1456,9 +1473,44 @@ where
             )
             .await
     }
+
+    /// `fauna.conversations.room.search_remote` — [`Self::room_search`] for a
+    /// room homed on **another nest**: this account's own nest relays the
+    /// search to `nest_url`, the room's home, and forwards its hits unstored
+    /// (`federation.md` § Federation residue surface, the *room search* row).
+    /// A distinct kind, never an additive field on `room.search`, so an old
+    /// own nest fails loud instead of answering from a room plane it does not
+    /// home.
+    pub async fn room_search_remote(
+        &self,
+        room_id: impl Into<String>,
+        query: impl Into<String>,
+        limit: Option<u32>,
+        include_posts: bool,
+        nest_url: impl Into<String>,
+    ) -> Result<RoomSearchReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.conversations.room.search_remote",
+                RoomSearchRemoteRequest {
+                    room_id: room_id.into(),
+                    query: query.into(),
+                    limit,
+                    include_posts,
+                    nest_url: nest_url.into(),
+                    extra: std::collections::BTreeMap::new(),
+                },
+            )
+            .await
+    }
 }
 
 // ── Outbound-mail send sink (`NestOutboundMailSink`) ───────────────────────────
+
+/// The code `fauna.bridges.get_message_scan_result` answers for a message the
+/// caller may not read — not theirs, a forensic reject row, or one no scanner
+/// touched (`bins/fauna-nest/src/bridge_routing_handlers.rs`).
+const SCAN_RESULT_NOT_FOUND_CODE: &str = "fauna.bridges.not_found";
 
 /// The canonical outbound-mail send sink — the **send** twin of
 /// [`NestMailInboundSource`], shared by every app that drives the conversations
@@ -1560,6 +1612,64 @@ impl<R: RpcRequester> NestOutboundMailSink<R> {
             }))
     }
 
+    /// `fauna.bridges.get_message_scan_result`, projected to the lines the
+    /// bubble paints. The nest's `not_found` — not this account's message, or
+    /// none the scanner touched — is the structural `Ok(None)`; every other
+    /// failure is an `Err` the manager asks again on the next open.
+    async fn message_scan_result_inner(
+        &self,
+        nest_message_id: Vec<u8>,
+    ) -> Result<Option<Vec<fauna_core::localized::LocalizedText>>, String>
+    where
+        R::Error: RpcErrorClass,
+    {
+        match self.lists.get_message_scan_result(nest_message_id).await {
+            Ok(reply) => Ok(Some(fauna_core::mail_scan::scan_result_lines(
+                &reply.clamav_verdict,
+                reply.rspamd_score.as_ref(),
+                reply.action_taken,
+            ))),
+            Err(e)
+                if e.as_rpc_error()
+                    .is_some_and(|rpc| rpc.code == SCAN_RESULT_NOT_FOUND_CODE) =>
+            {
+                Ok(None)
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// The account's `mail.account.scan_result_visible` switch, off the
+    /// `fauna.bridges.get_mail_switches` read.
+    async fn scan_result_visible_inner(&self) -> Result<bool, String> {
+        self.lists
+            .get_mail_switches()
+            .await
+            .map(|reply| reply.scan_result_visible)
+            .map_err(|e| e.to_string())
+    }
+
+    /// `fauna.bridges.list_account_aliases`, cut to what the "Delivered to"
+    /// tag reads (`mail-aliases.md` § Label).
+    async fn account_alias_labels_inner(
+        &self,
+    ) -> Result<Vec<fauna_conversations::backend::AliasLabelRow>, String> {
+        let rows = self
+            .lists
+            .list_account_aliases()
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(rows
+            .into_iter()
+            .map(|r| fauna_conversations::backend::AliasLabelRow {
+                kind: r.kind,
+                local_domain: r.local_domain,
+                pattern: r.pattern,
+                label: r.label,
+            })
+            .collect())
+    }
+
     /// Submit a composed RFC 5322 message over `fauna.email.send`: map a transport
     /// error to its `Display`, then surface any per-recipient relay error the nest
     /// reported (the local delivery, if any, may still have succeeded). The single
@@ -1604,6 +1714,23 @@ impl OutboundMailSink for NestOutboundMailSink<Arc<NestClient>> {
     ) -> Result<Option<fauna_conversations::list_send::ListSendProgress>, String> {
         self.latest_list_send_inner(list_id_hex).await
     }
+
+    async fn message_scan_result(
+        &self,
+        nest_message_id: Vec<u8>,
+    ) -> Result<Option<Vec<fauna_core::localized::LocalizedText>>, String> {
+        self.message_scan_result_inner(nest_message_id).await
+    }
+
+    async fn scan_result_visible(&self) -> Result<bool, String> {
+        self.scan_result_visible_inner().await
+    }
+
+    async fn account_alias_labels(
+        &self,
+    ) -> Result<Vec<fauna_conversations::backend::AliasLabelRow>, String> {
+        self.account_alias_labels_inner().await
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1626,6 +1753,23 @@ impl OutboundMailSink for NestOutboundMailSink<fauna_rpc_wasm::WsRpcClient> {
         list_id_hex: &str,
     ) -> Result<Option<fauna_conversations::list_send::ListSendProgress>, String> {
         self.latest_list_send_inner(list_id_hex).await
+    }
+
+    async fn message_scan_result(
+        &self,
+        nest_message_id: Vec<u8>,
+    ) -> Result<Option<Vec<fauna_core::localized::LocalizedText>>, String> {
+        self.message_scan_result_inner(nest_message_id).await
+    }
+
+    async fn scan_result_visible(&self) -> Result<bool, String> {
+        self.scan_result_visible_inner().await
+    }
+
+    async fn account_alias_labels(
+        &self,
+    ) -> Result<Vec<fauna_conversations::backend::AliasLabelRow>, String> {
+        self.account_alias_labels_inner().await
     }
 }
 
@@ -1652,15 +1796,18 @@ pub struct NestConversationsRpc {
     /// not WS-RPC, so they need the `NestClient`'s authed `reqwest` channel
     /// directly (`ConversationsClient` only exposes the typed WS-RPC kinds).
     nest: Arc<NestClient>,
-    /// The HTTP client for a **foreign** home nest's byte plane — a room homed
+    /// The HTTP clients for **foreign** home nests' byte plane — a room homed
     /// elsewhere keeps its attachment bytes there (`conversation-rooms.md` § The
-    /// home nest → *Attachment bytes*), and this member holds no session and no
-    /// SPKI pin for that nest. Plain WebPKI, exactly the posture of
-    /// [`fauna_client::ForeignPublicChunkFetcher`] for a cross-nest shared
-    /// folder: the bytes are sealed and integrity rests on the content address.
-    /// Injectable ([`Self::with_foreign_http`]) for tests whose in-process
-    /// "foreign nest" serves a self-signed floor cert.
-    foreign_http: reqwest::Client,
+    /// home nest → *Attachment bytes*), and this member holds no session there.
+    /// Production's is the shared graduated plane
+    /// ([`fauna_client::post_blob::PinnedHomes`]): pin-or-WebPKI, and the read
+    /// of a home whose identity the room's Welcome carried graduates its pin
+    /// against it once before the first byte — the post arm's plane
+    /// (`transport-trust.md` § The post arm), so a self-signed home is reached.
+    /// The upload names no identity and keeps the WebPKI floor. Injectable
+    /// ([`Self::with_foreign_http`]) for tests whose in-process "foreign nest"
+    /// serves a self-signed floor cert, or that record the home a read names.
+    foreign_http: Arc<dyn fauna_client::post_blob::ForeignHomeHttp>,
     /// One cached write-token bearer per `(home_nest_url, channel)` — minted via
     /// `fauna.conversations.blob.write_token.get` on this member's OWN nest
     /// (relayed to the home nest behind its foreign-member gate), refreshed
@@ -1784,14 +1931,21 @@ fn classify_blob_upload_error(foreign: bool, e: impl std::fmt::Display) -> ConvR
 #[cfg(not(target_arch = "wasm32"))]
 impl NestConversationsRpc {
     pub fn new(nest: Arc<NestClient>) -> Self {
-        Self::with_foreign_http(nest, reqwest::Client::new())
+        Self::with_foreign_http(nest, fauna_client::post_blob::PinnedHomes::default())
     }
 
-    /// [`Self::new`] with a caller-supplied HTTP client for **foreign** home
-    /// nests' byte plane — for tests whose in-process foreign nest serves a
-    /// self-signed floor cert (production keeps the default WebPKI client: a
-    /// room's home nest is a real reachable deployment with a valid cert).
-    pub fn with_foreign_http(nest: Arc<NestClient>, foreign_http: reqwest::Client) -> Self {
+    /// [`Self::new`] with a caller-supplied [`ForeignHomeHttp`] for **foreign**
+    /// home nests' byte plane — a fixed [`reqwest::Client`] for tests whose
+    /// in-process foreign nest serves a self-signed floor cert, or a fake that
+    /// records the home each read names (production's is the graduated
+    /// [`fauna_client::post_blob::PinnedHomes`]).
+    ///
+    /// [`ForeignHomeHttp`]: fauna_client::post_blob::ForeignHomeHttp
+    pub fn with_foreign_http(
+        nest: Arc<NestClient>,
+        foreign_http: impl fauna_client::post_blob::ForeignHomeHttp + 'static,
+    ) -> Self {
+        let foreign_http = Arc::new(foreign_http);
         Self {
             client: ConversationsClient::new(nest.clone()),
             nest,
@@ -2501,6 +2655,102 @@ where
     left.map(|reply| reply.members).map_err(conv_rpc_error)
 }
 
+/// The room search behind [`fauna_conversations::backend::RoomCeremonyRpc`],
+/// shared by both targets' glue objects: the same-nest door for a room this
+/// nest homes, the relay for one homed elsewhere, always asking for the room's
+/// posts too and for one default page (`room-search.md` § The surface).
+/// A hit of a kind this build does not know, or one missing the field its kind
+/// names, is skipped.
+async fn search_room<R>(
+    client: &ConversationsClient<R>,
+    room_id_hex: String,
+    query: String,
+    home_nest_url: Option<String>,
+) -> Result<Vec<fauna_conversations::backend::RoomSearchHitRef>, ConvRpcError>
+where
+    R: RpcRequester,
+    R::Error: RpcErrorClass,
+{
+    use fauna_conversations::backend::RoomSearchHitRef;
+    use fauna_protocol::conversations::RoomSearchHitKind;
+    let reply = match home_nest_url {
+        Some(url) => {
+            client
+                .room_search_remote(room_id_hex, query, None, true, url)
+                .await
+        }
+        None => client.room_search(room_id_hex, query, None, true).await,
+    }
+    .map_err(conv_rpc_error)?;
+    Ok(reply
+        .hits
+        .into_iter()
+        .filter_map(|hit| match hit.kind {
+            RoomSearchHitKind::Message => hit.seq.map(|seq| RoomSearchHitRef::Message { seq }),
+            RoomSearchHitKind::Post => hit
+                .post_id
+                .map(|post_id_hex| RoomSearchHitRef::Post { post_id_hex }),
+            RoomSearchHitKind::Unknown => None,
+        })
+        .collect())
+}
+
+/// The post read behind [`fauna_conversations::backend::RoomSearchPostReader`],
+/// shared by both targets' glue objects — the feed's deep-link resolve in its
+/// read-only shape (`room-search.md` § The surface → *What a hit row paints*):
+/// `fauna.posts.get` at this nest first, and on its `not_found` the
+/// `fauna.posts.get_remote` relay to the room's home when there is one. The
+/// envelope is the plaintext floor the post carries for every reader — its
+/// `body` is a room post's teaser; the sealed body is never opened here. A
+/// taken-down post (body withheld) or bytes that decode to no post is an error,
+/// like a miss: the row stays word-less.
+async fn read_room_search_post<R>(
+    nest: R,
+    post_id_hex: String,
+    home_nest_url: Option<String>,
+) -> Result<fauna_conversations::backend::RoomSearchPostEnvelope, ConvRpcError>
+where
+    R: RpcRequester,
+    R::Error: RpcErrorClass + std::fmt::Display,
+{
+    let posts = fauna_client_posts::PostsClient::new(nest);
+    let reply = match posts.posts_get(post_id_hex.clone()).await {
+        Ok(reply) => reply,
+        Err(e)
+            if home_nest_url.is_some()
+                && e.as_rpc_error()
+                    .is_some_and(|r| r.code == fauna_protocol::RpcError::CODE_POST_NOT_FOUND) =>
+        {
+            let home = home_nest_url.expect("checked above");
+            posts
+                .posts_get_remote(post_id_hex, home)
+                .await
+                .map_err(conv_rpc_error)?
+        }
+        Err(e) => return Err(conv_rpc_error(e)),
+    };
+    if reply.legal_takedown.is_some() {
+        return Err(ConvRpcError::Rejected {
+            message: "the post's body is withheld".to_string(),
+        });
+    }
+    let post = fauna_core::data::Post::decode_resolved_bytes(&reply.body).ok_or_else(|| {
+        ConvRpcError::Rejected {
+            message: "the post's bytes decode to no post".to_string(),
+        }
+    })?;
+    Ok(fauna_conversations::backend::RoomSearchPostEnvelope {
+        author_actor_hex: hex::encode(post.author.0),
+        author_display: reply.author_display.and_then(|face| {
+            face.display_name
+                .filter(|n| !n.trim().is_empty())
+                .or(face.handle.filter(|h| !h.trim().is_empty()))
+        }),
+        created_at_ms: post.created_at.0 as i64,
+        teaser: post.body_text(),
+    })
+}
+
 /// The policy replacement behind
 /// [`fauna_conversations::backend::RoomCeremonyRpc`], shared by both targets'
 /// glue objects.
@@ -2581,6 +2831,32 @@ where
 /// [`fauna_conversations::backend::RoomCeremonyRpc`], shared by both targets'
 /// glue objects. Same-nest for [`publish_room_generation`]'s reason: the
 /// seat it binds is a row of the floor, which lives on the room's home alone.
+/// The author's own withheld conversation records, for both the native and
+/// wasm arms: the queue rows, kept by the shared filter
+/// ([`fauna_conversations::message::WithheldRecord::from_queue_row`]).
+async fn own_withheld_records<R>(
+    client: &ConversationsClient<R>,
+) -> Result<Vec<fauna_conversations::message::WithheldRecord>, ConvRpcError>
+where
+    R: RpcRequester,
+    R::Error: RpcErrorClass,
+{
+    let reply = client.moderation_actions().await.map_err(conv_rpc_error)?;
+    Ok(reply
+        .actions
+        .into_iter()
+        .filter_map(|row| {
+            fauna_conversations::message::WithheldRecord::from_queue_row(
+                &row.content_type,
+                &row.content_id,
+                row.action,
+                row.issuer_nest,
+                row.timestamp,
+            )
+        })
+        .collect())
+}
+
 async fn set_room_reception_key<R>(
     client: &ConversationsClient<R>,
     room_id_hex: String,
@@ -2689,6 +2965,19 @@ impl fauna_conversations::backend::RoomRosterReader for NestConversationsRpc {
 
 // The community class's generation read, on the same object for the same
 // reason (`conversation-rooms.md` § The three classes → *Community*).
+// The post read behind the room's search (`room-search.md` § The surface).
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
+impl fauna_conversations::backend::RoomSearchPostReader for NestConversationsRpc {
+    async fn read_room_search_post(
+        &self,
+        post_id_hex: String,
+        home_nest_url: Option<String>,
+    ) -> Result<fauna_conversations::backend::RoomSearchPostEnvelope, ConvRpcError> {
+        read_room_search_post(Arc::clone(&self.nest), post_id_hex, home_nest_url).await
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[async_trait::async_trait]
 impl fauna_conversations::backend::RoomGenerationReader for NestConversationsRpc {
@@ -2790,6 +3079,15 @@ impl fauna_conversations::backend::RoomCeremonyRpc for NestConversationsRpc {
         leave_room(&self.client, room_id_hex, home_nest_url).await
     }
 
+    async fn room_search(
+        &self,
+        room_id_hex: String,
+        query: String,
+        home_nest_url: Option<String>,
+    ) -> Result<Vec<fauna_conversations::backend::RoomSearchHitRef>, ConvRpcError> {
+        search_room(&self.client, room_id_hex, query, home_nest_url).await
+    }
+
     async fn room_set_policy(
         &self,
         room_id_hex: String,
@@ -2826,6 +3124,12 @@ impl fauna_conversations::backend::RoomCeremonyRpc for NestConversationsRpc {
 #[cfg(not(target_arch = "wasm32"))]
 #[async_trait::async_trait]
 impl fauna_conversations::backend::ConversationsRpc for NestConversationsRpc {
+    async fn own_withheld_records(
+        &self,
+    ) -> Result<Vec<fauna_conversations::message::WithheldRecord>, ConvRpcError> {
+        own_withheld_records(&self.client).await
+    }
+
     async fn channel_send(
         &self,
         channel_id_hex: String,
@@ -3003,6 +3307,7 @@ impl fauna_conversations::backend::ConversationsRpc for NestConversationsRpc {
         &self,
         channel_id_hex: String,
         home_nest_url: Option<String>,
+        home_nest_actor_id: Option<String>,
         sealed_cid_hex: String,
         bytes: Vec<u8>,
     ) -> Result<(), ConvRpcError> {
@@ -3053,9 +3358,28 @@ impl fauna_conversations::backend::ConversationsRpc for NestConversationsRpc {
             Some(home) => {
                 let bearer: Arc<dyn fauna_nest_http::BearerSource> =
                     self.foreign_write_bearer(home, &channel_id_hex);
-                fauna_nest_http::ReqwestNestContentApi::new(home, self.foreign_http.clone(), bearer)
-                    .post_multipart_blob(fauna_nest_http::paths::blob::UPLOAD, sidecar, bytes)
+                // The home's identity rides the room's record exactly as the
+                // read's does, so the plane graduates its pin before the token
+                // and the bytes leave (`transport-trust.md` § The post arm).
+                match self
+                    .foreign_http
+                    .client(&fauna_client::ForeignHome::new(
+                        home,
+                        home_nest_actor_id.as_deref(),
+                    ))
                     .await
+                {
+                    Ok(http) => {
+                        fauna_nest_http::ReqwestNestContentApi::new(home, http, bearer)
+                            .post_multipart_blob(
+                                fauna_nest_http::paths::blob::UPLOAD,
+                                sidecar,
+                                bytes,
+                            )
+                            .await
+                    }
+                    Err(e) => Err(e),
+                }
             }
         };
         result.map_err(|e| {
@@ -3091,22 +3415,36 @@ impl fauna_conversations::backend::ConversationsRpc for NestConversationsRpc {
         &self,
         _channel_id_hex: String,
         home_nest_url: Option<String>,
+        home_nest_actor_id: Option<String>,
         sealed_cid_hex: String,
     ) -> Result<Option<Vec<u8>>, ConvRpcError> {
         // Public content-addressed download (`GET /api/v1/blob/{hash}` — no
         // bearer; `fauna-nest-http` `paths::blob::by_hash`) from the nest the
         // bytes rest on: this member's own nest for a same-nest channel, the
-        // room's home nest — reached direct, plain WebPKI, integrity by content
-        // address — for a foreign-homed one. A 404 is "blob not present"
-        // (`Ok(None)` → the receive path skips that attachment).
+        // room's home nest — reached direct over the graduated plane, its pin
+        // graduated against the identity the room's Welcome carried before the
+        // first byte, integrity by content address — for a foreign-homed one.
+        // A 404 is "blob not present" (`Ok(None)` → the receive path skips
+        // that attachment).
         let auth = self.nest.auth();
         let (http, base) = match home_nest_url
             .as_deref()
             .map(str::trim)
             .filter(|u| !u.is_empty())
         {
-            None => (auth.http(), auth.nest_url()),
-            Some(home) => (&self.foreign_http, home.trim_end_matches('/').to_string()),
+            None => (auth.http().clone(), auth.nest_url()),
+            Some(home) => {
+                let home = home.trim_end_matches('/');
+                let http = self
+                    .foreign_http
+                    .client(&fauna_client::ForeignHome::new(
+                        home,
+                        home_nest_actor_id.as_deref(),
+                    ))
+                    .await
+                    .map_err(|e| ConvRpcError::transient(format!("blob_get plane: {e}")))?;
+                (http, home.to_string())
+            }
         };
         let mut resp = http
             .get(format!("{base}/api/v1/blob/{sealed_cid_hex}"))
@@ -4072,32 +4410,32 @@ impl NestMailInboundSource {
             // INBOX-only post-decrypt work (Sent is never REPLY-merged nor scored),
             // and only on a delivery — a re-read must not merge a REPLY twice or
             // score outside the pass `begin_pass` built its scorer for.
-            let suppress_from_view = if delivery && self.mailbox == MailFeed::Inbox {
-                // Score-at-ingest FIRST: feed the just-decrypted body to this
-                // pass's scorer (built in `begin_pass`; `None` = cold start / mail
-                // off). `observe` skips an already-`$FaunaSpamScored`
-                // message and returns the junk verdict; a junk verdict is kept OUT
-                // of the thread view (moving INBOX→Junk this pass — the accumulated
-                // (scored, junk) UIDs flush once in `end_pass`). No `.await` here, so
-                // the scorer lock is never held across one (mail-spam.md § Re-file
-                // timing; the native twin of `WasmConversationsManager`).
-                let junk = match self.spam_scorer.lock().unwrap().as_mut() {
-                    Some(scorer) => {
-                        let text = String::from_utf8_lossy(&rfc5322);
-                        scorer.observe(m.uid, &m.flags, &text)
-                    }
-                    None => false,
-                };
-                // Then route an inbound iTIP REPLY to the calendar layer — never
-                // from a copy the scorer just filed Junk (caldav-server.md
-                // § Server-side auto-schedule, invitation rule 3).
-                if !junk {
-                    self.spawn_reply_merge(&rfc5322, &keys);
-                }
-                junk
-            } else {
-                false
+            // Score-at-ingest FIRST, then route an inbound iTIP REPLY to the
+            // calendar layer — one shared decision (`judge_inbox_copy`) for both
+            // steps, so a copy the scorer just filed Junk is never merged
+            // (caldav-server.md § Server-side auto-schedule, invitation rule 3).
+            // The scorer is built in `begin_pass` (`None` = cold start / mail
+            // off); `observe` skips an already-`$FaunaSpamScored` message. A junk
+            // verdict is kept OUT of the thread view (moving INBOX→Junk this pass —
+            // the accumulated (scored, junk) UIDs flush once in `end_pass`). No
+            // `.await` here, so the scorer lock is never held across one
+            // (mail-spam.md § Re-file timing; the native twin of
+            // `WasmConversationsManager`).
+            let verdict = {
+                let text = String::from_utf8_lossy(&rfc5322);
+                judge_inbox_copy(
+                    self.spam_scorer.lock().unwrap().as_mut(),
+                    self.mailbox == MailFeed::Inbox,
+                    delivery,
+                    m.uid,
+                    &m.flags,
+                    &text,
+                )
             };
+            if verdict.merge_reply {
+                self.spawn_reply_merge(&rfc5322, &keys);
+            }
+            let suppress_from_view = verdict.junk;
             records.push(InboundMailRecord {
                 uid: m.uid,
                 message_id: m.message_id,
@@ -4106,6 +4444,15 @@ impl NestMailInboundSource {
                 rfc5322,
                 suppress_from_view,
                 has_seen_flag: fauna_conversations::carries_seen_flag(&m.flags),
+                // Only a `Sent` record can carry one; the nest leaves it off
+                // every INBOX message (`mail-deliverability.md` § Enforcement
+                // at submission time).
+                warmup_hold: m
+                    .warmup_hold
+                    .map(|h| fauna_conversations::backend::MailWarmupHold {
+                        release_at_secs: h.release_at,
+                        messages_ahead: h.messages_ahead,
+                    }),
                 mailbox: self.mailbox,
             });
         }
@@ -7075,6 +7422,19 @@ impl fauna_conversations::backend::RoomRosterReader for WsConversationsRpc {
 // The community class's generation read, browser side — the same shared helper
 // as the native arm, so the two targets cannot drift on which kind a
 // foreign-homed room uses.
+// The post read behind the room's search (`room-search.md` § The surface).
+#[cfg(target_arch = "wasm32")]
+#[async_trait::async_trait(?Send)]
+impl fauna_conversations::backend::RoomSearchPostReader for WsConversationsRpc {
+    async fn read_room_search_post(
+        &self,
+        post_id_hex: String,
+        home_nest_url: Option<String>,
+    ) -> Result<fauna_conversations::backend::RoomSearchPostEnvelope, ConvRpcError> {
+        read_room_search_post(self.nest.clone(), post_id_hex, home_nest_url).await
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 #[async_trait::async_trait(?Send)]
 impl fauna_conversations::backend::RoomGenerationReader for WsConversationsRpc {
@@ -7180,6 +7540,15 @@ impl fauna_conversations::backend::RoomCeremonyRpc for WsConversationsRpc {
         leave_room(&self.client, room_id_hex, home_nest_url).await
     }
 
+    async fn room_search(
+        &self,
+        room_id_hex: String,
+        query: String,
+        home_nest_url: Option<String>,
+    ) -> Result<Vec<fauna_conversations::backend::RoomSearchHitRef>, ConvRpcError> {
+        search_room(&self.client, room_id_hex, query, home_nest_url).await
+    }
+
     async fn room_set_policy(
         &self,
         room_id_hex: String,
@@ -7216,6 +7585,12 @@ impl fauna_conversations::backend::RoomCeremonyRpc for WsConversationsRpc {
 #[cfg(target_arch = "wasm32")]
 #[async_trait::async_trait(?Send)]
 impl fauna_conversations::backend::ConversationsRpc for WsConversationsRpc {
+    async fn own_withheld_records(
+        &self,
+    ) -> Result<Vec<fauna_conversations::message::WithheldRecord>, ConvRpcError> {
+        own_withheld_records(&self.client).await
+    }
+
     async fn channel_send(
         &self,
         channel_id_hex: String,
@@ -7397,6 +7772,7 @@ impl fauna_conversations::backend::ConversationsRpc for WsConversationsRpc {
         &self,
         channel_id_hex: String,
         home_nest_url: Option<String>,
+        _home_nest_actor_id: Option<String>,
         sealed_cid_hex: String,
         bytes: Vec<u8>,
     ) -> Result<(), ConvRpcError> {
@@ -7493,15 +7869,18 @@ impl fauna_conversations::backend::ConversationsRpc for WsConversationsRpc {
         &self,
         _channel_id_hex: String,
         home_nest_url: Option<String>,
+        _home_nest_actor_id: Option<String>,
         sealed_cid_hex: String,
     ) -> Result<Option<Vec<u8>>, ConvRpcError> {
         // Public content-addressed download (`GET /api/v1/blob/{hash}` — no
         // bearer; mirrors native `NestConversationsRpc::blob_get`) from the nest
         // the bytes rest on: the SPA's own nest for a same-nest channel, the
         // room's home nest — reached direct, under the S6 CORS a cross-nest
-        // shared-folder fetch already rides — for a foreign-homed one. A 404 is
-        // "blob not present" (`Ok(None)` → the receive path skips that
-        // attachment).
+        // shared-folder fetch already rides — for a foreign-homed one. The
+        // home's identity is unused: a browser has no pin plane, so a foreign
+        // home is reached on WebPKI alone (`transport-trust.md` § Implementation
+        // status today, the post-arm bullet's web gap). A 404 is "blob not
+        // present" (`Ok(None)` → the receive path skips that attachment).
         let base = match home_nest_url
             .as_deref()
             .map(str::trim)
@@ -7549,6 +7928,48 @@ mod tests {
     use super::*;
     use fauna_client_testkit::{RecordingRequester, block_on};
     use fauna_core::identity::ActorKeypair;
+
+    /// Wiring pin: both INBOX loops reach `spawn_reply_merge` ONLY through
+    /// the shared `judge_inbox_copy` verdict. `NestMailInboundSource::fetch_page`
+    /// needs a live `NestClient`, so the loops themselves cannot be driven
+    /// in-process; the verdict function is pinned behaviourally in
+    /// `fauna-client-mail-settings` (`inbox_scorer`), and this pins that each
+    /// call site consults it and merges only on `merge_reply`. An always-merge
+    /// mutant at either site (a bare call, an `if true`, a re-inlined `!junk`)
+    /// reddens it.
+    #[test]
+    fn both_inbox_loops_merge_a_reply_only_on_the_shared_verdict() {
+        fn merge_call_guard(src: &str, call: &str) -> String {
+            let hits: Vec<_> = src.match_indices(call).collect();
+            assert_eq!(hits.len(), 1, "exactly one `{call}` call site");
+            let before = &src[..hits[0].0];
+            // The line carrying the guarding `if`, immediately above the call.
+            before
+                .trim_end()
+                .rsplit('\n')
+                .next()
+                .unwrap()
+                .trim()
+                .to_string()
+        }
+        let native = include_str!("lib.rs");
+        let (prod, _) = native.split_once("#[cfg(test)]\nmod tests {").unwrap();
+        assert_eq!(
+            merge_call_guard(prod, "self.spawn_reply_merge(&rfc5322, &keys)"),
+            "if verdict.merge_reply {"
+        );
+        assert!(prod.contains("let verdict = {"));
+        assert!(prod.contains("judge_inbox_copy("));
+        let web = include_str!("../../fauna-wasm/src/conversations.rs");
+        assert_eq!(
+            merge_call_guard(
+                web,
+                "self.spawn_reply_merge(&rfc5322, secret_hex, now_secs)"
+            ),
+            "if verdict.merge_reply {"
+        );
+        assert!(web.contains("judge_inbox_copy("));
+    }
 
     #[test]
     fn the_mark_seen_chunk_size_equals_the_nests_request_cap() {
@@ -9689,6 +10110,7 @@ mod tests {
             &self,
             _c: String,
             _h: Option<String>,
+            _i: Option<String>,
             _s: String,
             _b: Vec<u8>,
         ) -> Result<(), ConvRpcError> {
@@ -9700,6 +10122,7 @@ mod tests {
             &self,
             _c: String,
             _h: Option<String>,
+            _i: Option<String>,
             _s: String,
         ) -> Result<Option<Vec<u8>>, ConvRpcError> {
             Err(ConvRpcError::Rejected {
@@ -10014,8 +10437,57 @@ mod blob_get_limit_tests {
     async fn blob_get_from(home: String) -> Result<Option<Vec<u8>>, ConvRpcError> {
         let nest = NestClient::new("ws://127.0.0.1:0/ws".into(), ActorKeypair::generate());
         NestConversationsRpc::with_foreign_http(nest, reqwest::Client::new())
-            .blob_get("00".repeat(32), Some(home), "ab".repeat(32))
+            .blob_get("00".repeat(32), Some(home), None, "ab".repeat(32))
             .await
+    }
+
+    /// Hands out a plain client and records every home a read names.
+    #[derive(Clone, Default)]
+    pub(super) struct RecordingPlane(
+        pub(super) Arc<std::sync::Mutex<Vec<fauna_client::ForeignHome>>>,
+    );
+
+    #[async_trait::async_trait]
+    impl fauna_client::post_blob::ForeignHomeHttp for RecordingPlane {
+        async fn client(
+            &self,
+            home: &fauna_client::ForeignHome,
+        ) -> Result<reqwest::Client, fauna_nest_http::ApiError> {
+            self.0.lock().unwrap().push(home.clone());
+            Ok(reqwest::Client::new())
+        }
+    }
+
+    /// A foreign home's read asks the plane for that home WITH the identity the
+    /// room's record carries — the root the production plane graduates its pin
+    /// against before the first byte (`transport-trust.md` § The post arm) —
+    /// and a same-nest read never reaches the foreign plane at all.
+    #[tokio::test]
+    async fn blob_get_hands_the_foreign_plane_the_homes_identity() {
+        let home = serve_once(
+            "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close".into(),
+            3,
+        );
+        let plane = RecordingPlane::default();
+        let nest = NestClient::new("ws://127.0.0.1:0/ws".into(), ActorKeypair::generate());
+        let rpc = NestConversationsRpc::with_foreign_http(nest, plane.clone());
+        let identity = "b0".repeat(32);
+        let body = rpc
+            .blob_get(
+                "00".repeat(32),
+                Some(format!("{home}/")),
+                Some(identity.clone()),
+                "ab".repeat(32),
+            )
+            .await
+            .expect("the read succeeds")
+            .expect("and the blob is present");
+        assert_eq!(body.len(), 3);
+        assert_eq!(
+            *plane.0.lock().unwrap(),
+            vec![fauna_client::ForeignHome::new(&home, Some(&identity))],
+            "the plane is handed the home, trimmed, with its identity"
+        );
     }
 
     /// The bound is inclusive: a body exactly at the limit is an attachment.
@@ -10178,6 +10650,7 @@ mod blob_put_foreign_upload_tests {
         let (result, lines) = test_tracing::capture_tracing_at_info_async(rpc.blob_put(
             channel_id_hex,
             Some(home),
+            None,
             "cd".repeat(32),
             b"sealed bytes".to_vec(),
         ))
@@ -10198,6 +10671,49 @@ mod blob_put_foreign_upload_tests {
             shown,
             fauna_i18n::strings::error::send::ATTACHMENT_UPLOAD_FOREIGN_FAILED,
             "the one product sentence, not the responder's own words"
+        );
+    }
+
+    /// A foreign home's upload asks the plane for that home WITH the identity
+    /// the room's record carries, as the read does — the root the production
+    /// plane graduates its pin against before the write token and the sealed
+    /// bytes leave (`transport-trust.md` § The post arm).
+    #[tokio::test]
+    async fn blob_put_hands_the_foreign_plane_the_homes_identity() {
+        let home = serve_once_post(
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close".into(),
+            "",
+        );
+        let channel_id_hex = "ab".repeat(32);
+        let plane = super::blob_get_limit_tests::RecordingPlane::default();
+        let nest = NestClient::new("ws://127.0.0.1:0/ws".into(), ActorKeypair::generate());
+        let rpc = NestConversationsRpc::with_foreign_http(nest, plane.clone());
+        // Skip the mint, as the pin above does.
+        rpc.foreign_bearers.lock().unwrap().insert(
+            (home.clone(), channel_id_hex.clone()),
+            Arc::new(
+                fauna_client::write_token_bearer::WriteTokenBearer::from_minter(|| async {
+                    Ok::<(String, u64), fauna_nest_http::ApiError>((
+                        "static-write-token".to_string(),
+                        u64::MAX,
+                    ))
+                }),
+            ),
+        );
+        let identity = "b0".repeat(32);
+        rpc.blob_put(
+            channel_id_hex,
+            Some(home.clone()),
+            Some(identity.clone()),
+            "cd".repeat(32),
+            b"sealed bytes".to_vec(),
+        )
+        .await
+        .expect("the upload succeeds");
+        assert_eq!(
+            *plane.0.lock().unwrap(),
+            vec![fauna_client::ForeignHome::new(&home, Some(&identity))],
+            "the plane is handed the home with its identity"
         );
     }
 }

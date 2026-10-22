@@ -342,7 +342,7 @@ use fauna_protocol::account_state::{ACCOUNT_STATE_FLEET_SCOPE, ACCOUNT_STATE_SCO
 #[cfg(feature = "account-runtime")]
 use fauna_protocol::merge_policy::KIND_CUSTODIES_HELD;
 #[cfg(feature = "account-runtime")]
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 #[cfg(feature = "account-runtime")]
 use std::sync::Arc;
 
@@ -643,27 +643,11 @@ impl CustodyLegState {
         store: &AccountStore<B>,
         revoked: &crate::peer_leg::WithdrawalSnapshot<Vec<u8>>,
     ) -> Result<usize> {
-        let ledger = fauna_account_plane::succession_ledger_rows::read_succession_ledger(
-            store,
-            self.actor_id,
-        )
-        .await
-        .context("the account's grant log")?;
-        let current: HashSet<Vec<u8>> = fauna_core::grant_event::current_grants(&ledger)
-            .into_iter()
-            .filter(|g| fauna_client_capabilities::custody_grants::is_custody_grant(&g.scope))
-            .map(|g| g.grant_id.clone())
-            .collect();
-        let seen: HashSet<Vec<u8>> = ledger
-            .grant_events
-            .iter()
-            .filter(|e| {
-                fauna_client_capabilities::custody_grants::is_custody_grant(&e.scope)
-                    || e.scope.is_empty() // a Revoke event is keyless/scope-empty
-            })
-            .map(|e| e.grant_id.clone())
-            .collect();
-        let next: HashSet<Vec<u8>> = seen.difference(&current).cloned().collect();
+        // The one fold, shared with web's gesture
+        // (`fauna_account_plane::custodian_restore::custody_revoked_grant_ids`).
+        let next =
+            fauna_account_plane::custodian_restore::custody_revoked_grant_ids(store, self.actor_id)
+                .await?;
         let n = next.len();
         revoked.replace(next);
         Ok(n)

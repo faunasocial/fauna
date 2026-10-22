@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { t } from '$lib/i18n/strings';
-  import { IDS } from '$lib/generated/uiIds';
+  import { t } from '#lib/i18n/strings';
+  import { IDS } from '#lib/generated/uiIds';
 
   // The muted "unverified source" badge (`unverified-source-badge`), rendered
   // **iff** THIS client's signature verification of the post's signed envelope

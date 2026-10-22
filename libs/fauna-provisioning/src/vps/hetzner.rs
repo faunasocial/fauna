@@ -141,7 +141,6 @@ struct HetznerServerType {
 
 #[derive(Deserialize)]
 struct HetznerPriceEntry {
-    #[allow(dead_code)]
     location: String,
     price_monthly: HetznerPrice,
 }
@@ -189,7 +188,7 @@ impl VpsProvider for Hetzner {
             "name": name,
             "server_type": server_type,
             "location": location,
-            "image": "ubuntu-24.04",
+            "image": "ubuntu-26.04",
             "user_data": user_data,
         });
         // Hetzner accepts a native `labels` string→string map on create.
@@ -234,6 +233,7 @@ impl VpsProvider for Hetzner {
         &self,
         client: &Client,
         curated_ids: &[&str],
+        location: &str,
     ) -> Result<Vec<ServerTypeInfo>, ProvisionError> {
         let resp = crate::vps::get_bearer(
             client,
@@ -247,11 +247,17 @@ impl VpsProvider for Hetzner {
         let mut out = Vec::with_capacity(curated_ids.len());
         for curated in curated_ids {
             if let Some(t) = data.server_types.iter().find(|t| t.name == *curated) {
-                let first = t
+                // A type is priced per location. An array with no entry for
+                // the chosen location (a location the type list does not
+                // price yet) falls back to the first entry rather than
+                // hiding the offer — `create_server` decides availability.
+                let price = t
                     .prices
-                    .first()
+                    .iter()
+                    .find(|p| p.location == location)
+                    .or_else(|| t.prices.first())
                     .ok_or_else(|| ProvisionError::provider(0, "no price entries"))?;
-                let cents = parse_eur_to_cents(&first.price_monthly.gross)?;
+                let cents = parse_eur_to_cents(&price.price_monthly.gross)?;
                 out.push(ServerTypeInfo {
                     id: t.name.clone(),
                     vcpu: t.cores,

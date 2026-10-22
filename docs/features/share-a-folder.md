@@ -15,7 +15,7 @@ served to standard file apps over WebDAV.
 
 ## Coverage contract
 
-Stamped 2026-09-19 at 25eff180d4.
+Stamped 2026-10-21 at 77c610862e.
 
 1. [app] The owner shares with a person, sees the roster, changes their role, and can un-share — `docs/goal/ui/folders.md` § Sharing a folder (cross-user)
    - `tests/e2e-unified/tests/test_folders.py::test_folder_owner_side_sharing_affordances`
@@ -57,6 +57,12 @@ Stamped 2026-09-19 at 25eff180d4.
 16. [app] A folder shared with you shows in your Media folder filter with its owner's name, apart from a folder of your own with the same name; you can upload into it when you may write, and are told why not when you may only read — `docs/goal/ui/media.md` § Encryption at rest
     - `tests/e2e-unified/tests/test_media_shared_set_identity.py::test_a_same_named_shared_set_is_its_own_option_and_upload_target`
     - `tests/e2e-unified/tests/test_media_shared_set_identity.py::test_a_namesake_made_before_the_accept_does_not_hide_the_shared_set`
+17. [app] A file added to a shared folder while the nest cannot be reached reaches the other people in it straight from the device it was added on — `docs/goal/behavior/p2p.md` § Cross-user shared-set transfer
+    - `tests/e2e-unified/tests/test_share_pump_two_actor.py::test_member_pulls_offline_authored_file_from_owner_peer`
+18. [app] A person the folder was never shared with gets nothing readable from your device, even on the same network — `docs/goal/behavior/p2p.md` § Cross-user shared-set transfer
+    - `tests/e2e-unified/tests/test_share_pump_two_actor.py::test_a_person_the_folder_was_never_shared_with_gets_nothing_readable`
+19. [app] A transfer between two members' devices, interrupted part-way, picks up where it stopped, without sending again what already arrived — `docs/goal/behavior/p2p.md` § Cross-user shared-set transfer
+    - `tests/e2e-unified/tests/test_share_pump_two_actor.py::test_an_interrupted_peer_transfer_resumes_without_resending_what_arrived`
 
 ## Status
 
@@ -73,8 +79,8 @@ Stamped 2026-09-19 at 25eff180d4.
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_folders.py::test_folder_owner_side_sharing_affordances` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_folders.py::test_folder_full_share_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_folders.py::test_folder_owner_side_sharing_affordances` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_folders.py::test_folder_full_share_round_trip` | web (linux): error, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/test_folders.py::test_folder_member_role_and_cap_editing` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): failed, ios (macos): failed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_folders.py::test_folder_pending_share_accept_decline` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_folder_member_media_decrypt.py::test_member_decrypts_shared_set_content_through_their_own_media_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
@@ -97,4 +103,7 @@ Stamped 2026-09-19 at 25eff180d4.
 | 15 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_owner_between_a_member_removals_stage_and_publish_relaunch_finishes_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 16 | app | `tests/e2e-unified/tests/test_media_shared_set_identity.py::test_a_same_named_shared_set_is_its_own_option_and_upload_target` | web (linux): skipped, linux (linux): passed, tui (linux): passed |
 | 16 | app | `tests/e2e-unified/tests/test_media_shared_set_identity.py::test_a_namesake_made_before_the_accept_does_not_hide_the_shared_set` | tui (linux): passed |
+| 17 | app | `tests/e2e-unified/tests/test_share_pump_two_actor.py::test_member_pulls_offline_authored_file_from_owner_peer` | — |
+| 18 | app | `tests/e2e-unified/tests/test_share_pump_two_actor.py::test_a_person_the_folder_was_never_shared_with_gets_nothing_readable` | — |
+| 19 | app | `tests/e2e-unified/tests/test_share_pump_two_actor.py::test_an_interrupted_peer_transfer_resumes_without_resending_what_arrived` | — |
 <!-- features-render:end -->

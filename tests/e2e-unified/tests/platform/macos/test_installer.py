@@ -68,6 +68,9 @@ BINARIES = [
     # same binary the per-OS release archive carries (installers/tui.md § The
     # ratified channel). Beside fauna-sync-agent, which it resolves as a sibling.
     "fauna-tui",
+    # The cli app's device shell — the archive's third member (installers/tui.md
+    # § Decisions, decision 4), riding the same component for the same signature.
+    "fauna-cli",
     "fauna-uninstall",
 ]
 
@@ -120,12 +123,13 @@ COMPONENT_BINARIES = {
         "libfauna_ffi.dylib",
         "fauna-uninstall",
     ],
-    "fauna-tui.pkg": ["fauna-tui", "fauna-uninstall"],
+    "fauna-tui.pkg": ["fauna-tui", "fauna-cli", "fauna-uninstall"],
 }
 
 # Components that ship NO Scripts archive by design: the terminal app only drops
-# `fauna-tui` into /usr/local/bin — no service to bootstrap, no user to create — so
-# `pkgbuild` runs without `--scripts` (installers/tui.md § The ratified channel).
+# `fauna-tui` and `fauna-cli` into /usr/local/bin — no service to bootstrap, no
+# user to create — so `pkgbuild` runs without `--scripts` (installers/tui.md
+# § The ratified channel).
 SCRIPTLESS_COMPONENTS = {"fauna-tui.pkg"}
 
 SOURCE_PATTERNS = [

@@ -22,11 +22,13 @@ id-constant module. A generator emitting from the registry cannot emit a constan
 page-list id the registry never got, so every one of those ids would keep its
 hand-written literal — defeating the point at exactly the sites that most need it.
 
-Three reports
--------------
+Four reports
+------------
 ``referenced-not-registered``  page/component lists → missing registry row  (direction 1)
 ``registered-not-referenced``  registry row no page list uses               (direction 1, orphan side)
 ``rendered-not-declared``      app render site → id absent from ui.yaml     (direction 2)
+``indexed-id-suffixed``        an ``indexed: true`` id painted with a row index baked in
+                               (``<id>-{i}``), against e2e-conventions.md convention 1
 
 Advisory by default (like ``just i18n-lint`` / ``i18n-coverage``): it prints
 candidates to triage and exits 0. ``--strict`` makes any finding exit 1 — for a future
@@ -56,6 +58,9 @@ import sys
 from pathlib import Path
 
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ui_id_names  # noqa: E402  (sibling module — the id/constant-name owner)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -127,7 +132,149 @@ NON_ID_LIST_KEYS = {
     "navbar": "navigation.layouts.*.navbar — page names",
 }
 
-REPORTS = ("referenced-not-registered", "registered-not-referenced", "rendered-not-declared")
+REPORTS = (
+    "referenced-not-registered",
+    "registered-not-referenced",
+    "rendered-not-declared",
+    "indexed-id-suffixed",
+)
+
+# ── indexed-id-suffixed ───────────────────────────────────────────────────────
+#
+# Convention 1 (`docs/goal/architecture/e2e-conventions.md`): an `indexed: true`
+# element keeps ONE id, and a driver addresses row n by `index=` or a `[n]` scope —
+# never by an index baked into the id. Three families were specified and painted
+# `<id>-{n}` until the owner ruled (2026-10-16) that every app moves to the bare
+# id; the custody-hosting rows had the same drift and it was a live red (a journey
+# found no rows because the pages suffixed the ids). This report flags the paint
+# shapes that re-introduce it, in every app's own idiom: a literal `"<id>-{i}"` /
+# `` `<id>-${i}` `` / `"<id>-$i"` / `"<id>-\(i)"`, and the same built from the
+# generated constant (`format!("{}-{i}", ids::X)`, `${IDS.X}-${i}`,
+# `"\(Ids.x)-\(i)"`, `$"{Ids.X}-{i}"`). Comments are blanked first — a doc comment
+# naming the old form is not a paint.
+#
+# Exempt by the SPEC, never by a hand list: an element whose own ui.yaml description
+# declares a VALUE-keyed template — `events-day-cell-{YYYY-MM-DD}`,
+# `events-time-slot-{HH-MM}` — is a ratified id shape, not a row index. Only a
+# positional placeholder (`{n}`, `{i}`, `{index}`) is the banned one, and an
+# indexed element whose description spells THAT is itself a finding (the spec half).
+_POSITIONAL_PLACEHOLDERS = frozenset({"n", "i", "index", "N"})
+
+# Apps not yet moved off the suffixed form, per (app, id) — the ratchet. A pair here
+# is reported only once it is FIXED (the entry is then stale and must go), so the
+# list can only shrink. Each pair is captured as work in its app's queue; never add
+# one to make a new suffixed paint pass.
+INDEXED_SUFFIX_PENDING: dict[str, frozenset[str]] = {
+    "windows": frozenset({
+        "admin-nest-oauth-key-item",
+        "admin-nest-seed-rotate-roster-item",
+        "recover-box-item",
+    }),
+    "apple": frozenset({
+        "admin-nest-oauth-key-item",
+        "admin-nest-seed-rotate-roster-item",
+        "recover-box-item",
+    }),
+}
+
+_INTERP_OPEN = r"(?:\{|\$\{|\$[A-Za-z_]|\\\()"
+_SUFFIX_OPEN = re.compile(rf"-{_INTERP_OPEN}")
+_KEBAB_TAIL = re.compile(rf"(?<![A-Za-z0-9_-])({KEBAB})$")
+_SUFFIXED_CONSTANT = (
+    # TS / C# / Kotlin: `${IDS.X}-${i}`, `{Ids.X}-{i}`, `${Ids.X}-$i`
+    re.compile(rf"(?:IDS|Ids)\.(\w+)\s*\}}-{_INTERP_OPEN}"),
+    # Swift: `"\(Ids.x)-\(i)"`
+    re.compile(r"Ids\.(\w+)\)-\\\("),
+    # Rust: `format!("{}-{i}", ids::X)` / `format!("{}-{}", ids::X, i)`
+    re.compile(r'format!\(\s*"\{\}-\{[^"]*\}"\s*,\s*(?:ids|fauna_ui_ids)::(\w+)\b'),
+)
+_HTML_ID_ATTR = re.compile(r'\b(?:id|for)="$')
+_LINE_COMMENT = re.compile(r"(?<![:\w])//[^\n]*")
+_BLOCK_COMMENT = re.compile(r"/\*.*?\*/|<!--.*?-->", re.DOTALL)
+
+
+def _blank_comments(text: str) -> str:
+    """Comments replaced by same-length blanks (newlines kept), so a match offset
+    still gives the right line number."""
+    def blank(m: re.Match) -> str:
+        return "\n".join(" " * len(part) for part in m.group(0).split("\n"))
+    return _LINE_COMMENT.sub(blank, _BLOCK_COMMENT.sub(blank, text))
+
+
+def indexed_subject(registry: dict) -> tuple[set[str], dict[str, str]]:
+    """(indexed ids the rule covers, spec findings). An indexed id whose description
+    declares a value-keyed template is exempt; one declaring a positional template
+    is covered AND a spec finding."""
+    subject: set[str] = set()
+    spec: dict[str, str] = {}
+    for element_id, body in registry.items():
+        if not isinstance(body, dict) or body.get("indexed") is not True:
+            continue
+        description = str(body.get("description") or "")
+        keys = re.findall(
+            rf"(?<![A-Za-z0-9_-]){re.escape(element_id)}-\{{([^}}]*)\}}", description
+        )
+        if any(k not in _POSITIONAL_PLACEHOLDERS for k in keys):
+            continue
+        if keys:
+            spec[element_id] = "ui.yaml description spells the positional suffixed form"
+        subject.add(element_id)
+    return subject, spec
+
+
+def collect_suffixed(app: str, root: Path, subject: set[str]) -> dict[str, str]:
+    """Every covered id this app paints with a baked-in suffix → first file:line."""
+    names: dict[str, str] = {}
+    for element_id in subject:
+        for name in (
+            ui_id_names.scream(element_id),
+            ui_id_names.camel(element_id),
+            ui_id_names.pascal(element_id),
+        ):
+            names[name] = element_id
+
+    def hits_in(text: str) -> list[tuple[int, str]]:
+        hits = []
+        # Anchored on the (rare) suffix opener and read backwards: a kebab regex
+        # tried at every offset costs over a second across the app trees.
+        for opener in _SUFFIX_OPEN.finditer(text):
+            tail = _KEBAB_TAIL.search(text, max(0, opener.start() - 120), opener.start())
+            if not tail or tail.group(1) not in subject:
+                continue
+            # An HTML `id=` / `for=` pair (a label's target) is not an element id.
+            if _HTML_ID_ATTR.search(text, max(0, tail.start() - 5), tail.start()):
+                continue
+            hits.append((tail.start(), tail.group(1)))
+        for pattern in _SUFFIXED_CONSTANT:
+            hits += [
+                (m.start(), names[m.group(1)])
+                for m in pattern.finditer(text)
+                if m.group(1) in names
+            ]
+        return hits
+
+    spec = APPS[app]
+    base = root / spec["dir"]
+    found: dict[str, str] = {}
+    if not base.exists():
+        return found
+    for path in _source_files(base):
+        if not path.is_file() or path.suffix not in spec["exts"]:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        # Blanking comments costs more than the scan, and almost no file has a
+        # raw hit — so blank only the files that do, then re-scan them.
+        if not hits_in(text):
+            continue
+        text = _blank_comments(text)
+        for offset, element_id in sorted(hits_in(text)):
+            if element_id not in found:
+                line = text[:offset].count("\n") + 1
+                found[element_id] = f"{path.relative_to(root)}:{line}"
+    return found
 
 
 def load_ui(root: Path) -> tuple[dict, str]:
@@ -384,6 +531,30 @@ def build_findings(reports: tuple[str, ...], root: Path = REPO_ROOT) -> dict:
             }
         result["rendered-not-declared"] = per_app
 
+    if "indexed-id-suffixed" in reports:
+        subject, spec_findings = indexed_subject(registry)
+        per_app = {}
+        for app in APPS:
+            pending = INDEXED_SUFFIX_PENDING.get(app, frozenset())
+            painted = collect_suffixed(app, root, subject)
+            items = {
+                element_id: where
+                for element_id, where in sorted(painted.items())
+                if element_id not in pending
+            }
+            # A pending pair no longer painted is FIXED: the entry must go. Only an
+            # app tree that exists can witness that (a synthetic test tree has none).
+            if (root / APPS[app]["dir"]).exists():
+                for element_id in sorted(pending - set(painted)):
+                    items[element_id] = (
+                        "stale INDEXED_SUFFIX_PENDING entry — no longer suffixed; "
+                        "remove it from scripts/lint-ui-registry.py"
+                    )
+            per_app[app] = items
+        if spec_findings:
+            per_app["ui.yaml"] = spec_findings
+        result["indexed-id-suffixed"] = per_app
+
     return result
 
 
@@ -402,6 +573,17 @@ def print_human(findings: dict) -> None:
         for element_id in items:
             print(f"  {element_id}")
 
+    if "indexed-id-suffixed" in findings:
+        per_app = findings["indexed-id-suffixed"]
+        total = sum(len(v) for v in per_app.values())
+        print(f"\n=== indexed-id-suffixed: {total} ===")
+        print("indexed ids painted with a baked-in row index (convention 1: one id, read by index).")
+        for app, items in per_app.items():
+            if items:
+                print(f"  {app} ({len(items)}):")
+            for element_id, where in items.items():
+                print(f"    {element_id:48s} {where}")
+
     if "rendered-not-declared" in findings:
         per_app = findings["rendered-not-declared"]
         total = sum(len(v) for v in per_app.values())
@@ -416,7 +598,7 @@ def print_human(findings: dict) -> None:
 def count(findings: dict) -> int:
     total = 0
     for key, value in findings.items():
-        if key == "rendered-not-declared":
+        if key in ("rendered-not-declared", "indexed-id-suffixed"):
             total += sum(len(v) for v in value.values())
         else:
             total += len(value)
@@ -429,7 +611,7 @@ def main(argv: list[str] | None = None) -> int:
         "--report",
         action="append",
         choices=REPORTS,
-        help="restrict to one report (repeatable); default is all three",
+        help="restrict to one report (repeatable); default is all four",
     )
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     parser.add_argument(

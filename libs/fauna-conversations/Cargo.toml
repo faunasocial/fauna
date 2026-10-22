@@ -17,6 +17,9 @@ test-helpers = []
 # surface, and the added export would otherwise force a Go-binding regen the
 # Windows dev machine can't run (no Go). Mirrors `fauna-ffi`'s `markdown-authoring`.
 client-display = []
+# Native-only: `message::warmup_deferred_text` renders the warm-up's release
+# time in the viewer's local clock (`fauna_core::format::format_unix_local`).
+local-clock = ["fauna-core/local-clock"]
 
 # `fauna-core` provides `identity::ActorId` and the shared
 # `render::RenderDocument` body model (embedded in `MessageSnapshot`,
@@ -102,7 +105,7 @@ getrandom = { workspace = true }
 # behind `rfc5322::new_message_id` — one construction with the Go submission
 # stamp, so the guardian mail gate's provenance verify holds for both paths.
 # `msgid` only (sha2, pure, wasm-safe); the RNG stays in this crate (above).
-fauna-mail = { path = "../fauna-mail", default-features = false, features = ["msgid"] }
+fauna-mail = { path = "../fauna-mail", default-features = false, features = ["msgid", "aliases"] }
 # Localized error text for the SMTP backend's inline-ceiling pre-check
 # (`docs/goal/behavior/smtp-server.md` § Message size limits) — a pure,
 # dependency-free generated-constants crate (the `fauna-client`/`fauna-protocol`

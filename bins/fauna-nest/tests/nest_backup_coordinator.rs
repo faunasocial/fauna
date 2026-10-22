@@ -32,6 +32,7 @@
 //! `DiskBlobStore`, real custody rows.
 
 mod common;
+use common::backup_nests::*;
 use common::register_user;
 
 use std::sync::Arc;
@@ -39,15 +40,10 @@ use std::sync::Arc;
 use ed25519_dalek::SigningKey;
 use fauna_core::crypto::NestBackupKey;
 use fauna_core::data::ContentHash;
-use fauna_nest::backup::service::BackupService;
-use fauna_nest::blob_store::BlobStoreBackend;
 use fauna_nest::db::CacheDb;
-use fauna_nest::nest_identity::NestIdentity;
 use fauna_nest::routes::AppState;
-use fauna_nest::rpc_router::RpcRouter;
 use fauna_nest::segment_backup::{Backpressure, NestBackupCoordinator, NestBackupWorker};
 use fauna_nest::segments::backup_source::NestLocalSegmentSource;
-use fauna_nest::{backup_handlers, federation_handlers};
 use fauna_protocol::backup::{
     BackupStatusReply, BackupStatusRequest, CustodyMaterializeReply, CustodyMaterializeRequest,
     DestinationRegisterReply, DestinationRegisterRequest, NestKeyGrantReply, NestKeyGrantRequest,
@@ -59,197 +55,11 @@ use fauna_sync_engine::segment_backup::{SegmentSource, segment_meta_rel_path, se
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-/// The owner's identity secret: the owner is a real ed25519 key, because the
-/// covered-folder re-home is owner-signed (`writer-signed-change-records.md`
-/// ruling (7)(a)).
-const OWNER_SECRET: [u8; 32] = [0x11; 32];
-/// `OWNER_SECRET`'s public key — the owner's actor id
-/// ([`the_owner_constant_is_the_owner_keys_public_key`] pins the pair).
-const OWNER: [u8; 32] = [
-    208, 74, 178, 50, 116, 43, 180, 171, 58, 19, 104, 189, 70, 21, 228, 230, 208, 34, 74, 183, 26,
-    1, 107, 175, 133, 32, 163, 50, 201, 119, 135, 55,
-];
-
-fn owner_key() -> fauna_core::identity::ActorKeypair {
-    fauna_core::identity::ActorKeypair::from_secret(OWNER_SECRET)
-}
-
 #[test]
 fn the_owner_constant_is_the_owner_keys_public_key() {
     assert_eq!(owner_key().actor_id().0, OWNER);
 }
-/// The 32 bytes the owner's client granted. Deliberately *not* derived from
-/// `OWNER` here — the nest receives raw granted bytes and must never be able to
-/// derive them itself.
-const GRANTED_KEY: [u8; 32] = [0x5A; 32];
 const KIND: &str = "mail";
-const DEST_ID: &str = "dest-1";
-
-// ═════════════════════════════════════════════════════════════════════════════
-// Harness — two real nests
-// ═════════════════════════════════════════════════════════════════════════════
-
-/// A real in-process nest on loopback: own identity, federation router (so a
-/// peer can dial it), anonymous discovery (so the pool can resolve its
-/// `nest_id`), the client-facing backup kinds, and a real blob store + chunk
-/// HTTP routes so the byte plane is not a mock.
-///
-/// `db_path` points into a fresh tempdir, which is both the coordinator's
-/// per-owner state root and the segment store's parent — the same single data
-/// dir a deployed nest has.
-async fn start_nest() -> (String, Arc<AppState>, Arc<dyn BlobStoreBackend>) {
-    let db = Arc::new(CacheDb::open_in_memory().unwrap());
-
-    let data_dir = tempfile::tempdir().unwrap();
-    let data_path = data_dir.path().to_path_buf();
-    std::mem::forget(data_dir); // outlives the test; the OS reaps it
-
-    let mut secret = [0u8; 32];
-    getrandom::fill(&mut secret).unwrap();
-    start_nest_on(data_path, db, secret).await
-}
-
-/// [`start_nest`] over a given data directory, database and identity seed —
-/// what restarting a nest from a copy of its data directory needs: the same
-/// identity (the destination's writer grant names it), the copy's database and
-/// the copy's segment areas.
-async fn start_nest_on(
-    data_path: std::path::PathBuf,
-    db: Arc<CacheDb>,
-    secret: [u8; 32],
-) -> (String, Arc<AppState>, Arc<dyn BlobStoreBackend>) {
-    // A test drives many coordinator passes within a second, which a
-    // deployment spaces minutes apart; the channel default (30 a minute per
-    // kind) would refuse the mints. The custody-record kinds keep their own
-    // writer budget whatever this says (`federation_router::max_events`); the
-    // throttle's own tests below start a nest on the production limiter.
-    let generous = fauna_nest::bridge_rate_limit::Limiter::with_config(
-        fauna_nest::bridge_rate_limit::LimiterConfig {
-            window: std::time::Duration::from_secs(60),
-            max_events: 10_000,
-        },
-    );
-    start_nest_throttled_on(data_path, db, secret, Arc::new(generous)).await
-}
-
-/// [`start_nest`] with the federation channel throttle `limiter` — the
-/// production one, or one a test pre-fills to stand for a busy destination.
-async fn start_nest_throttled(
-    limiter: Arc<fauna_nest::bridge_rate_limit::Limiter>,
-) -> (String, Arc<AppState>, Arc<dyn BlobStoreBackend>) {
-    let db = Arc::new(CacheDb::open_in_memory().unwrap());
-    let data_dir = tempfile::tempdir().unwrap();
-    let data_path = data_dir.path().to_path_buf();
-    std::mem::forget(data_dir); // outlives the test; the OS reaps it
-    let mut secret = [0u8; 32];
-    getrandom::fill(&mut secret).unwrap();
-    start_nest_throttled_on(data_path, db, secret, limiter).await
-}
-
-async fn start_nest_throttled_on(
-    data_path: std::path::PathBuf,
-    db: Arc<CacheDb>,
-    secret: [u8; 32],
-    federation_rate_limit: Arc<fauna_nest::bridge_rate_limit::Limiter>,
-) -> (String, Arc<AppState>, Arc<dyn BlobStoreBackend>) {
-    let backup_svc = Arc::new(
-        BackupService::new(db.clone(), None, false, data_path.join("blobs"), None).unwrap(),
-    );
-    let blob_store = backup_svc.local_blob_store();
-
-    let signing_key = SigningKey::from_bytes(&secret);
-    let verifying_key = signing_key.verifying_key();
-
-    let base = AppState::for_test(db.clone());
-    let state = Arc::new(AppState {
-        nest_identity: Arc::new(NestIdentity {
-            signing_key,
-            verifying_key,
-        }),
-        backup_service: Some(backup_svc),
-        config: Arc::new(fauna_nest::config::NestConfig {
-            nest: fauna_nest::config::NestSection {
-                db_path: data_path.join("nest.db").to_string_lossy().into_owned(),
-                ..Default::default()
-            },
-            ..(*base.config).clone()
-        }),
-        // The nest's own segment store, under the same data dir.
-        mail_segments: Arc::new(fauna_segment_store::SegmentManager::new(
-            data_path.clone(),
-            KIND,
-        )),
-        federation_rate_limit,
-        // The placement journal under the same data dir, so a copy of the
-        // data directory carries the journal with the content.
-        mail_placement: Arc::new(fauna_nest::segments::MailPlacementSegmentManager::new(
-            data_path.clone(),
-        )),
-        // The calendar and contacts stores and journals likewise, so the
-        // lived-in recovery's DAV proofs can regress a nest by its data dir.
-        cal_segments: Arc::new(fauna_segment_store::SegmentManager::new(
-            data_path.clone(),
-            "calendar",
-        )),
-        card_segments: Arc::new(fauna_segment_store::SegmentManager::new(
-            data_path.clone(),
-            "card",
-        )),
-        cal_placement: Arc::new(fauna_nest::segments::CalPlacementSegmentManager::new(
-            data_path.clone(),
-        )),
-        card_placement: Arc::new(fauna_nest::segments::CardPlacementSegmentManager::new(
-            data_path.clone(),
-        )),
-        federation_router: Arc::new({
-            let mut b = fauna_nest::federation_router::FederationRouter::builder();
-            federation_handlers::register_federation_handlers(&mut b);
-            b.build()
-        }),
-        rpc_router: Arc::new({
-            let mut b = RpcRouter::builder();
-            fauna_nest::discovery_handlers::register_discovery_handlers(&mut b);
-            backup_handlers::register_backup_handlers(&mut b);
-            // The owner-authed custody door (`fauna.sync.changes.record`'s
-            // reserved-set arm) — what the tests drive to stage custody on the
-            // destination directly.
-            fauna_nest::sync_handlers::register_sync_handlers(&mut b);
-            // The calendar and contacts doors a DAV client reaches — how the
-            // every-kind tests write the corpora they back up.
-            fauna_nest::bridge_caldav_handlers::register_bridge_caldav_handlers(&mut b);
-            fauna_nest::bridge_carddav_handlers::register_bridge_carddav_handlers(&mut b);
-            // `fauna.segments.list` — the recovery leg's skip reads it.
-            fauna_nest::segments::register_segments_handlers(&mut b);
-            // `fauna.auth.rotation_chain` — what an owner's device reads
-            // before it carries a rotated box's writer seat.
-            fauna_nest::auth_handlers::register_auth_handlers(&mut b);
-            b.build()
-        }),
-        ..base
-    });
-
-    let app = fauna_nest::build_router(state.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.ok();
-    });
-    (format!("http://{addr}"), state, blob_store)
-}
-
-/// Dispatch a USER-class kind as `actor` — i.e. what the owner's own client
-/// does over its own authenticated connection.
-async fn client_call<Req: Serialize, Rep: DeserializeOwned>(
-    state: &Arc<AppState>,
-    actor: [u8; 32],
-    kind: &str,
-    req: &Req,
-) -> Result<Rep, RpcError> {
-    let meta = state.rpc_router.kind_meta(kind).expect("kind registered");
-    let payload = bytes::Bytes::from(encode_canonical(req).unwrap().to_vec());
-    let out = (meta.handler)(state.clone(), actor, payload).await?;
-    Ok(decode(&out).unwrap())
-}
 
 /// Append mail records for `actor` to this nest's own segment store — the very
 /// bytes the coordinator will later back up.
@@ -410,68 +220,6 @@ fn expected_store_keys(bytes: &[u8], root: &[u8; 32]) -> Vec<ContentHash> {
                 .0
         })
         .collect()
-}
-
-/// Wire the enroll end-state: the owner grants its key + registers the
-/// destination on the SOURCE, and registers the source as a writer at the
-/// DESTINATION. This is the last moment a client is involved.
-async fn enroll(source: &Arc<AppState>, dest_state: &Arc<AppState>, dest_url: &str) {
-    enroll_source(source, dest_state, dest_url).await;
-    let wg = grant_writer(source, dest_state)
-        .await
-        .expect("owner authorizes its source nest to write custody at the destination");
-    assert!(wg.ok);
-}
-
-/// [`enroll`]'s source half: the seal grant and the destination registration,
-/// both on the SOURCE. Without [`grant_writer`] the box knows where to back up
-/// and holds no authority to write there.
-async fn enroll_source(source: &Arc<AppState>, dest_state: &Arc<AppState>, dest_url: &str) {
-    let grant: NestKeyGrantReply = client_call(
-        source,
-        OWNER,
-        "fauna.backup.nest_key.grant",
-        &NestKeyGrantRequest {
-            nest_backup_key: serde_bytes::ByteBuf::from(GRANTED_KEY.to_vec()),
-            extra: Default::default(),
-        },
-    )
-    .await
-    .expect("owner grants its NestBackupKey to its source nest");
-    assert!(grant.ok);
-
-    let reg: DestinationRegisterReply = client_call(
-        source,
-        OWNER,
-        "fauna.backup.destination.register",
-        &DestinationRegisterRequest {
-            destination_id: DEST_ID.to_string(),
-            destination_nest_url: dest_url.to_string(),
-            destination_nest_id: hex::encode(dest_state.nest_identity.public_key_bytes()),
-            ..Default::default()
-        },
-    )
-    .await
-    .expect("owner tells its source nest where to back up");
-    assert!(reg.ok);
-}
-
-/// [`enroll`]'s destination half: the owner registers `source` as its writer at
-/// the DESTINATION, over its own connection there.
-async fn grant_writer(
-    source: &Arc<AppState>,
-    dest_state: &Arc<AppState>,
-) -> Result<WriterGrantRegisterReply, RpcError> {
-    client_call(
-        dest_state,
-        OWNER,
-        "fauna.backup.writer_grant.register",
-        &WriterGrantRegisterRequest {
-            writer_nest_id: hex::encode(source.nest_identity.public_key_bytes()),
-            ..Default::default()
-        },
-    )
-    .await
 }
 
 async fn status(state: &Arc<AppState>, actor: [u8; 32]) -> BackupStatusReply {
@@ -2337,6 +2085,55 @@ async fn delivered_filed() -> (Arc<AppState>, Arc<AppState>, String) {
     (source, dest, d_url)
 }
 
+/// The first run of a flip that [`uncommit`] or [`uncommit_kind`] will tear:
+/// [`materialize`], with the landing set the whole run reclaimed put back.
+///
+/// The reclaim runs after the one transaction commits, so every half-state an
+/// interruption before that commit leaves still holds the landing set (the
+/// retry's input) — the staging restores its folder row and custody rows,
+/// whose chunks no GC has run to sweep.
+async fn first_flip(dest: &Arc<AppState>, set_name: &str) -> CustodyMaterializeReply {
+    const STASHED: [&str; 4] = [
+        "folders",
+        "backup_custody",
+        "backup_custody_generations",
+        "sync_changes",
+    ];
+    let landing = land(dest, set_name).await;
+    {
+        let conn = dest.db.conn().await;
+        let id: i64 = conn
+            .query_row(
+                "SELECT id FROM folders WHERE name = ?1 AND actor_id = ?2",
+                rusqlite::params![landing, OWNER.as_slice()],
+                |r| r.get(0),
+            )
+            .expect("the landing set stands before the flip");
+        for table in STASHED {
+            let key = if table == "folders" {
+                "id"
+            } else {
+                "folder_id"
+            };
+            conn.execute(
+                &format!("CREATE TABLE stash_{table} AS SELECT * FROM {table} WHERE {key} = {id}"),
+                [],
+            )
+            .expect("stash the landing rows");
+        }
+    }
+    let reply = materialize(dest, set_name).await.expect("the first flip");
+    assert!(reply.landing_reclaimed, "the whole first run reclaimed it");
+    let conn = dest.db.conn().await;
+    for table in STASHED {
+        conn.execute_batch(&format!(
+            "INSERT INTO {table} SELECT * FROM stash_{table}; DROP TABLE stash_{table};"
+        ))
+        .expect("restore the landing rows the crash never reclaimed");
+    }
+    reply
+}
+
 /// **Un-commit** a finished `__mail` flip: revert exactly the effects of its
 /// one transaction, leaving the real half-state an interruption after the
 /// journal adopt leaves — both families on disk and adopted, the mailbox tree
@@ -2387,7 +2184,7 @@ async fn uncommit_kind(dest: &Arc<AppState>, kind: &str, ids: &[u32], placed: &[
             &OWNER,
             kind,
             &MaterializeInFlight {
-                set_name: format!("__{kind}"),
+                set_name: format!("__landing/{kind}"),
                 segment_ids: ids.to_vec(),
                 journal: if placed.is_empty() {
                     InFlightJournal::None
@@ -2701,7 +2498,7 @@ async fn materialize_supersedes_a_never_used_targets_mailbox_scaffolding() {
 #[tokio::test]
 async fn a_crash_between_the_journal_adopt_and_the_commit_resumes_on_retry() {
     let (source, dest, _d_url) = delivered_filed().await;
-    let first = materialize(&dest, "__mail").await.expect("the first flip");
+    let first = first_flip(&dest, "__mail").await;
     let journal_on_disk = journal_area_contents(&dest);
     let content_on_disk = segment_area_contents(&dest);
 
@@ -2752,7 +2549,7 @@ async fn a_crash_between_the_journal_adopt_and_the_commit_resumes_on_retry() {
 #[tokio::test]
 async fn an_interrupted_flip_completes_over_an_arrival_that_landed_since() {
     let (source, dest, _d_url) = delivered_filed().await;
-    let first = materialize(&dest, "__mail").await.expect("the first flip");
+    let first = first_flip(&dest, "__mail").await;
     uncommit(&dest, &first.segments, true).await;
 
     let source_inbox = serve_mailbox(&source, &OWNER, "INBOX").await;
@@ -2871,6 +2668,14 @@ async fn an_arrival_into_a_flip_torn_before_its_halves_is_filed_above_the_corpus
             .unwrap()
             .is_some(),
         "the refusal came after the gesture was recorded"
+    );
+    assert!(
+        dest.db
+            .get_folder_for_actor("__landing/mail", &OWNER)
+            .await
+            .unwrap()
+            .is_some(),
+        "a torn landing keeps its set — the retry's input"
     );
 
     let source_inbox = serve_mailbox(&source, &OWNER, "INBOX").await;
@@ -3046,29 +2851,20 @@ async fn materialize_refuses_a_journal_segment_its_mirror_does_not_anchor() {
 // this file already owns a real, green delivery leg to prove it over.
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// The owner grants the same `NestBackupKey` to the nest they are seeding — the
-/// enrollment-time grant phase 3 materializes under. Same 32 bytes as the source
-/// holds, because it is one seed-derived root of the owner's, not a per-nest
-/// secret.
-async fn grant_key_to(nest: &Arc<AppState>) {
-    let grant: NestKeyGrantReply = client_call(
-        nest,
-        OWNER,
-        "fauna.backup.nest_key.grant",
-        &NestKeyGrantRequest {
-            nest_backup_key: serde_bytes::ByteBuf::from(GRANTED_KEY.to_vec()),
-            extra: Default::default(),
-        },
-    )
-    .await
-    .expect("the owner grants its NestBackupKey to the nest it is seeding");
-    assert!(grant.ok);
-}
-
+/// `fauna.backup.custody.materialize` of `set_name` on `nest`, as the owner.
+///
+/// The verb flips only a landing set (`reserved-folders.md` § __mail Sync →
+/// *The landing set*) — every client leg delivers into `__landing/<kind>` —
+/// while this file's delivery is a nest destination's, which lands under
+/// `__<kind>`. Delivered custody is byte-identical whichever leg wrote it, so
+/// a reserved-segment name is first `land`ed (`common::backup_nests::land`): the copy is relabelled to its
+/// landing name, as a client leg would have named it, and the verb is named
+/// under that. Any other name reaches the verb as written.
 async fn materialize(
     nest: &Arc<AppState>,
     set_name: &str,
 ) -> Result<CustodyMaterializeReply, RpcError> {
+    let set_name = land(nest, set_name).await;
     client_call(
         nest,
         OWNER,
@@ -3173,6 +2969,17 @@ async fn delivered() -> (Arc<AppState>, Arc<AppState>, String) {
 #[tokio::test]
 async fn materialize_turns_a_destination_into_a_live_source_for_the_corpus() {
     let (source, dest, _d_url) = delivered().await;
+    // The mail copy's own manifests — the destination holds the source's
+    // other kinds' sets too, which the mail landing leaves alone.
+    let delivered_manifests: Vec<Vec<u8>> = dest
+        .db
+        .list_backup_custody_in_set(&OWNER, "__mail")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.manifest_hash)
+        .collect();
+    assert!(!delivered_manifests.is_empty(), "the copy arrived");
 
     let on_source = serve_mail(&source).await;
     assert_eq!(on_source.len(), 2, "the source holds the corpus");
@@ -3191,8 +2998,8 @@ async fn materialize_turns_a_destination_into_a_live_source_for_the_corpus() {
     );
     assert_eq!(reply.records, on_source.len() as u64);
     assert!(
-        reply.custody_redundant,
-        "the custody copy is now redundant — reclaiming it stays the owner's own gesture"
+        reply.landing_reclaimed,
+        "a whole landing reclaims its landing set in the same call"
     );
 
     // The corpus reads back through the ORDINARY path, not a restore reader.
@@ -3202,17 +3009,126 @@ async fn materialize_turns_a_destination_into_a_live_source_for_the_corpus() {
         "the seeded nest serves the owner's mail as if it had always hosted it"
     );
 
-    // Nothing was consumed: the custody the target reconstituted from is still
-    // there, exactly as many rows as before.
-    let custody = dest
+    // The landing set was scaffolding derived twice over: the verb reclaimed
+    // it, row and custody, leaving the chunks to the GC
+    // (`reserved-folders.md` § __mail Sync → *The landing set* → *Lifecycle*).
+    let landing = fauna_sync_engine::segment_backup::landing_set_name("mail", &OWNER).unwrap();
+    assert!(
+        dest.db
+            .get_folder_for_actor(&landing, &OWNER)
+            .await
+            .unwrap()
+            .is_none(),
+        "the whole landing's set is reclaimed"
+    );
+    assert!(
+        dest.db
+            .list_backup_custody_in_set(&OWNER, &landing)
+            .await
+            .unwrap()
+            .is_empty(),
+        "its custody goes with it"
+    );
+
+    // The verb touched no blob; the chunks reclaim through the ordinary GC
+    // walk, once past its grace window.
+    let svc = dest.backup_service.as_ref().expect("a blob store");
+    let store = svc.local_blob_store();
+    let gc = |grace_secs: i64| {
+        let (db, store) = (Arc::clone(&dest.db), Arc::clone(&store));
+        let dest = Arc::clone(&dest);
+        async move {
+            fauna_nest::backup::gc::garbage_collect(
+                &db,
+                &store,
+                fauna_nest::backup::gc::PostBodySource {
+                    segments: &dest.post_segments,
+                },
+                grace_secs,
+                dest.backup_service.as_ref().unwrap().encryption_key(),
+                false,
+            )
+            .await
+            .expect("a GC pass")
+        }
+    };
+    let held = |hash: &Vec<u8>| {
+        let store = Arc::clone(&store);
+        let hash = ContentHash::from_digest_raw(hash.as_slice().try_into().unwrap());
+        async move { store.get(&hash).await.unwrap().is_some() }
+    };
+    for hash in &delivered_manifests {
+        assert!(held(hash).await, "the reclaim itself deletes no blob");
+    }
+    gc(3_600).await;
+    for hash in &delivered_manifests {
+        assert!(held(hash).await, "inside the grace window the chunks stand");
+    }
+    let swept = gc(0).await;
+    assert!(swept.deleted_blobs > 0, "{swept:?}");
+    // A manifest byte-identical to one another live set holds (an empty
+    // ledger, say) is that set's too, and stays pinned by it.
+    let pinned_elsewhere = dest.db.backup_custody_manifest_hashes().await.unwrap();
+    let landing_only: Vec<&Vec<u8>> = delivered_manifests
+        .iter()
+        .filter(|h| !pinned_elsewhere.contains(h))
+        .collect();
+    assert!(
+        !landing_only.is_empty(),
+        "the landing held bytes of its own"
+    );
+    for hash in landing_only {
+        assert!(
+            !held(hash).await,
+            "past the grace window the GC reclaims the landing's bytes: {}",
+            hex::encode(hash)
+        );
+    }
+
+    // A second materialize meets the live account the first one made.
+    let err = materialize(&dest, "__mail")
+        .await
+        .unwrap_err_or_panic("a completed flip is a live account");
+    assert_eq!(err.code, "fauna.backup.target_not_empty");
+}
+
+/// **A re-seeded nest captures its mail like any other.** The delivered corpus
+/// rests under the landing name (`reserved-folders.md` § __mail Sync → *The
+/// landing set*), so the scheduler's first pass after the flip mints the
+/// owner's `__mail` rail beside it and cuts a capture — where a copy under the
+/// rail's own name refused the mint on every tick.
+#[tokio::test]
+async fn a_materialized_nest_mints_its_rail_beside_the_landing_set_and_captures() {
+    let (_source, dest, _d_url) = delivered().await;
+    materialize(&dest, "__mail").await.expect("the flip");
+
+    assert!(
+        capture_message_kinds(&dest).await >= 1,
+        "the re-seeded nest captures its mail"
+    );
+    let rail = dest
         .db
-        .list_backup_custody(&OWNER, None, 0)
+        .get_folder_for_actor("__mail", &OWNER)
         .await
         .unwrap()
-        .len();
+        .expect("the capture minted the owner's mail rail");
+    assert!(!rail.custody_copy, "the rail is the nest's own");
+    let landing = fauna_sync_engine::segment_backup::landing_set_name("mail", &OWNER).unwrap();
     assert!(
-        custody > 0,
-        "the ceremony deletes nothing — the custody set survives its own materialize"
+        dest.db
+            .get_folder_for_actor(&landing, &OWNER)
+            .await
+            .unwrap()
+            .is_none(),
+        "the whole landing reclaimed its set; the rail stands alone"
+    );
+    assert!(
+        !dest
+            .db
+            .is_pure_backup_destination("mail", &OWNER)
+            .await
+            .unwrap(),
+        "the re-seeded nest is the owner's live account"
     );
 }
 
@@ -3495,7 +3411,11 @@ async fn materialize_refuses_a_genuinely_open_segment_for_the_same_id() {
     );
     assert_eq!(
         segment_area_files(&dest),
-        vec![format!("seg-{collision_id:08}.dat")],
+        vec![
+            format!("seg-{collision_id:08}.dat"),
+            // The open segment's own append journal, written by `create`.
+            format!("seg-{collision_id:08}.tail"),
+        ],
         "a refusal writes nothing else — no `.meta` orphan for the halves \
          whose own paths were free"
     );
@@ -3568,9 +3488,8 @@ async fn a_crash_between_adopting_and_the_mirror_rebuild_resumes_on_retry() {
     let (source, dest, _d_url) = delivered().await;
     let corpus = serve_mail(&source).await;
 
-    let first = materialize(&dest, "__mail")
-        .await
-        .expect("the first flip lands the halves and adopts their ids");
+    // The first flip lands the halves and adopts their ids.
+    let first = first_flip(&dest, "__mail").await;
     let on_disk = segment_area_contents(&dest);
     assert!(!on_disk.is_empty(), "the flip left segment files behind");
 
@@ -3968,7 +3887,7 @@ async fn materialize_refuses_a_set_name_it_cannot_reconstitute() {
     // then be materialized into the MAIL segment area.
     for name in [
         "__folder/aa/7".to_string(),
-        format!("__conv/{}", "cd".repeat(32)),
+        format!("__landing/conv/{}", "cd".repeat(32)),
         "not-a-reserved-set".to_string(),
         "__mail-ish".to_string(),
     ] {
@@ -3980,6 +3899,20 @@ async fn materialize_refuses_a_set_name_it_cannot_reconstitute() {
             "`{name}` refused, but for the wrong reason: {err:?}"
         );
     }
+    // A destination's own `__mail` copy is never flipped in place on the nest
+    // that holds it — named raw, past `land`, it refuses the same way.
+    let err = client_call::<_, CustodyMaterializeReply>(
+        &dest,
+        OWNER,
+        "fauna.backup.custody.materialize",
+        &CustodyMaterializeRequest {
+            set_name: "__mail".to_string(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err_or_panic("`__mail` must refuse");
+    assert_eq!(err.code, "fauna.backup.invalid_params", "{err:?}");
     assert!(
         serve_mail(&dest).await.is_empty(),
         "no refused name wrote anything into the scope"
@@ -4653,7 +4586,7 @@ async fn assert_flip_kept_the_arrival(
 /// it was served, makes the corpus live beside it, and retires the marker.
 async fn an_interrupted_dav_flip_completes_over_an_arrival(dav: Dav) {
     let (source, dest) = delivered_dav(dav).await;
-    let first = materialize(&dest, dav.set()).await.expect("the first flip");
+    let first = first_flip(&dest, dav.set()).await;
     uncommit_kind(&dest, dav.kind(), &first.segments, dav.placed_tables()).await;
 
     let (was, was_counter) = dav.served_items(&source).await;
@@ -5294,9 +5227,16 @@ async fn a_delivered_covered_folder_materializes_into_a_live_folder() {
     assert_eq!(reply.records, 1, "one custody row, one re-homed live row");
     assert_eq!(reply.remaining, Some(0), "nothing is owed");
     assert!(
-        reply.custody_redundant,
-        "the custody copy is redundant now, and survives: reclaiming it is the \
-         owner's own separate set-delete gesture"
+        !reply.landing_reclaimed,
+        "a `__folder/<nest>/<id>` set is no landing set: it is kept"
+    );
+    assert!(
+        dest.db
+            .get_folder_for_actor(&folder_set, &OWNER)
+            .await
+            .unwrap()
+            .is_some(),
+        "the folder axis's custody set survives its own materialize"
     );
 
     let live = dest
@@ -5839,12 +5779,13 @@ fn filed_digest(ts: i64, mailbox: &str) -> [u8; 32] {
         .digest()
 }
 
-/// A tempdir that outlives the test, as [`start_nest`]'s does; the OS reaps it.
-fn kept_tempdir() -> std::path::PathBuf {
+/// A scratch dir for a nest's data directory or a data-dir copy. The caller
+/// binds the guard (`_tmp`) for as long as the nest on it is used; the dir is
+/// removed when the guard drops.
+fn scratch_tempdir() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().to_path_buf();
-    std::mem::forget(dir);
-    path
+    (dir, path)
 }
 
 /// Copy a data directory tree — everything but the live database, which
@@ -5975,6 +5916,19 @@ impl fauna_protocol::RpcRequester for OwnerLink {
             )
             .await?;
             assert_eq!(cut.recovered, 2, "the torn verb landed exactly two records");
+            assert!(
+                !cut.landing_reclaimed,
+                "a torn landing keeps its set — the retry's input"
+            );
+            assert!(
+                self.nest
+                    .db
+                    .get_folder_for_actor(&req.set_name, &OWNER)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "the torn run's landing set stands"
+            );
             return Err("torn: the nest stopped two records in".into());
         }
         let meta = self
@@ -6143,7 +6097,7 @@ async fn served_digests(nest: &Arc<AppState>) -> Vec<[u8; 32]> {
 #[tokio::test]
 async fn a_regressed_source_recovers_its_lost_records_by_record() {
     // ── A on disk, B ordinary, both enrolled ─────────────────────────────
-    let a_dir = kept_tempdir();
+    let (_a_tmp, a_dir) = scratch_tempdir();
     let mut a_secret = [0u8; 32];
     getrandom::fill(&mut a_secret).unwrap();
     let a_db = Arc::new(CacheDb::open(a_dir.join("nest.db")).unwrap());
@@ -6173,7 +6127,7 @@ async fn a_regressed_source_recovers_its_lost_records_by_record() {
     push(&a).await;
 
     // ── The copy at M = 2 segments, then A lives on to N = 4 ─────────────
-    let copy_dir = kept_tempdir();
+    let (_copy_tmp, copy_dir) = scratch_tempdir();
     copy_data_dir(&a, &a_dir, &copy_dir).await;
     for lost in LOST {
         file_mail(&a, &OWNER, std::slice::from_ref(lost)).await;
@@ -6241,6 +6195,22 @@ async fn a_regressed_source_recovers_its_lost_records_by_record() {
     // floor landed: exactly the case the verb's closing floor guards, which is
     // what the "next append lands above the pin" check below proves.
 
+    // The scheduler has run on the lived-in A, as it does within a minute of
+    // mail landing on any nest: the owner's `__mail` rail exists, so the
+    // recovery can land only under the landing name (`reserved-folders.md` §
+    // __mail Sync → *The landing set*) — under the rail's it is refused at the
+    // record door.
+    assert!(capture_message_kinds(&a).await >= 1, "A captures its mail");
+    let rail =
+        a.db.get_folder_for_actor("__mail", &OWNER)
+            .await
+            .unwrap()
+            .expect("the capture minted A's mail rail");
+    assert!(
+        !rail.custody_copy,
+        "the rail is A's own, not a custody copy"
+    );
+
     register_device(&a, SOURCE_DEVICE).await;
     // The driving device holds no row at the destination — the app's case:
     // nothing else of its own lives there. Its first post-recovery tombstone
@@ -6269,6 +6239,17 @@ async fn a_regressed_source_recovers_its_lost_records_by_record() {
     // Read before anything else appends: the recovered appends alone reach
     // id 5, so only the verb's own floor puts A's counter at the lost copy's.
     assert_eq!(report.recovered.floor, Some(pin));
+    assert!(
+        report.recovered.landing_reclaimed,
+        "every candidate landed: the verb reclaimed the landing set"
+    );
+    assert!(
+        a.db.get_folder_for_actor("__landing/mail", &OWNER)
+            .await
+            .unwrap()
+            .is_none(),
+        "the whole landing's set is gone from A"
+    );
     let floored = counter(&a).await;
     assert!(
         floored >= pin,
@@ -6312,12 +6293,13 @@ async fn a_regressed_source_recovers_its_lost_records_by_record() {
         "the owner's deletion stands"
     );
 
-    // A second recover recovers nothing.
-    let again =
-        fauna_nest::backup::recover::recover_segment_set_for_test(&a, &OWNER, "__mail", None)
-            .await
-            .unwrap();
-    assert_eq!(again.recovered, 0);
+    // A second run recovers nothing: the landing set is gone, so the leg
+    // delivers it afresh, and every record it names A already holds.
+    let again = run_recovery_leg(&a, &dest, &d_url, KIND, Tear::None)
+        .await
+        .expect("a repeat run completes");
+    assert_eq!(again.recovered.recovered, 0);
+    assert!(again.recovered.landing_reclaimed);
 
     // The floor held: A's next append lands above the pin — every id the lost
     // copy numbered is spent on A too.
@@ -6674,7 +6656,7 @@ impl Dav {
 async fn a_regressed_source_recovers_its_lost_dav_resources(dav: Dav) {
     let kind = dav.kind();
     let home = dav.home();
-    let a_dir = kept_tempdir();
+    let (_a_tmp, a_dir) = scratch_tempdir();
     let mut a_secret = [0u8; 32];
     getrandom::fill(&mut a_secret).unwrap();
     let a_db = Arc::new(CacheDb::open(a_dir.join("nest.db")).unwrap());
@@ -6691,7 +6673,7 @@ async fn a_regressed_source_recovers_its_lost_dav_resources(dav: Dav) {
         copy_era.insert(uid, dav.put(&a, home, uid, "v1").await);
     }
     back_up_kind(&a, kind).await;
-    let copy_dir = kept_tempdir();
+    let (_copy_tmp, copy_dir) = scratch_tempdir();
     copy_data_dir(&a, &a_dir, &copy_dir).await;
     let copy_era_item1 = dav
         .served(&a)
@@ -6819,16 +6801,20 @@ async fn a_regressed_source_recovers_its_lost_dav_resources(dav: Dav) {
         );
     }
 
-    // ── A second recover recovers nothing ────────────────────────────────
-    let again = fauna_nest::backup::recover::recover_segment_set_for_test(
-        &a,
-        &OWNER,
-        &format!("__{kind}"),
-        None,
-    )
-    .await
-    .unwrap();
-    assert_eq!(again.recovered, 0, "{again:?}");
+    // ── A second run recovers nothing ────────────────────────────────────
+    // The whole landing reclaimed its set, so the leg delivers it afresh.
+    assert!(r.landing_reclaimed, "{r:?}");
+    assert!(
+        a.db.get_folder_for_actor(&format!("__landing/{kind}"), &OWNER)
+            .await
+            .unwrap()
+            .is_none(),
+        "the whole landing's set is gone from A"
+    );
+    let again = run_recovery_leg(&a, &dest, &d_url, kind, Tear::None)
+        .await
+        .expect("a repeat run completes");
+    assert_eq!(again.recovered.recovered, 0, "{:?}", again.recovered);
     assert_eq!(dav.served(&a).await.len(), served.len());
 }
 
@@ -7073,7 +7059,7 @@ async fn a_second_source_box_of_one_owner_is_refused_at_one_destination() {
 async fn a_rotated_source_box_is_refused_until_its_owner_carries_the_seat() {
     // ── A source box on disk under a known seed, with the keypair row the
     //    rotation swaps ───────────────────────────────────────────────────
-    let dir = kept_tempdir();
+    let (_tmp, dir) = scratch_tempdir();
     let (old_seed, new_seed) = ([0xA1u8; 32], [0xA2u8; 32]);
     let old_id = SigningKey::from_bytes(&old_seed).verifying_key().to_bytes();
     let new_id = SigningKey::from_bytes(&new_seed).verifying_key().to_bytes();
@@ -7572,14 +7558,24 @@ impl fauna_client_backup::reseed::ReseedDeliveryLeg for PullLeg<'_> {
 
 /// Every live custody row a nest holds for `OWNER` as `(set, path, manifest
 /// hash)`, sorted — the byte-identity comparison's key.
+///
+/// A landing set is read under the copy's own name: the pull-back lands a
+/// destination's `__<kind>` copy under `__landing/<kind>` (`reserved-folders.md`
+/// § __mail Sync → *The landing set*), so the two compare row for row.
 async fn custody_identity(nest: &Arc<AppState>) -> Vec<(String, Option<String>, Vec<u8>)> {
+    use fauna_sync_engine::segment_backup::{parse_landing_set_name, reserved_backup_set_name};
     let mut rows: Vec<_> = nest
         .db
         .list_backup_custody(&OWNER, None, 0)
         .await
         .unwrap()
         .into_iter()
-        .map(|r| (r.folder_name, r.path, r.manifest_hash))
+        .map(|r| {
+            let set = parse_landing_set_name(&r.folder_name)
+                .and_then(|(kind, scope)| reserved_backup_set_name(kind, &scope))
+                .unwrap_or(r.folder_name);
+            (set, r.path, r.manifest_hash)
+        })
         .collect();
     rows.sort();
     rows
@@ -7611,13 +7607,14 @@ async fn a_nest_held_backup_is_pulled_back(same_identity: bool) {
     // ── A backs its mail and a covered folder up to B ────────────────────
     let mut a_secret = [0u8; 32];
     getrandom::fill(&mut a_secret).unwrap();
+    let (_a_tmp, a_dir) = scratch_tempdir();
     let (_a_url, a, _a_blobs) = start_nest_on(
-        kept_tempdir(),
+        a_dir,
         Arc::new(CacheDb::open_in_memory().unwrap()),
         a_secret,
     )
     .await;
-    let b_dir = kept_tempdir();
+    let (_b_tmp, b_dir) = scratch_tempdir();
     let mut b_secret = [0u8; 32];
     getrandom::fill(&mut b_secret).unwrap();
     let b_db = Arc::new(CacheDb::open(b_dir.join("nest.db")).unwrap());
@@ -7736,8 +7733,9 @@ async fn a_nest_held_backup_is_pulled_back(same_identity: bool) {
         getrandom::fill(&mut s).unwrap();
         s
     };
+    let (_a2_tmp, a2_dir) = scratch_tempdir();
     let (_a2_url, a2, _a2_blobs) = start_nest_on(
-        kept_tempdir(),
+        a2_dir,
         Arc::new(CacheDb::open_in_memory().unwrap()),
         a2_secret,
     )
@@ -7838,8 +7836,18 @@ async fn a_nest_held_backup_is_pulled_back(same_identity: bool) {
     ];
     expected.sort();
     assert_eq!(rows, expected);
-    // What A′ holds as custody is what B holds, row for row.
-    assert_eq!(custody_identity(&a2).await, custody_identity(&b).await);
+    // What A′ still holds as custody is B's folder copy, row for row: each
+    // segment-axis landing was whole, so the verb reclaimed it
+    // (`reserved-folders.md` § __mail Sync → *The landing set* → *Lifecycle*).
+    let folder_copy_on_b: Vec<_> = custody_identity(&b)
+        .await
+        .into_iter()
+        .filter(|(set, ..)| {
+            fauna_sync_engine::segment_backup::parse_reserved_backup_set_name(set).is_none()
+        })
+        .collect();
+    assert!(!folder_copy_on_b.is_empty(), "B holds the folder copy");
+    assert_eq!(custody_identity(&a2).await, folder_copy_on_b);
 
     // ── The post-ceremony duty: B becomes A′'s destination ──────────────
     let restored_box = a2.nest_identity.public_key_bytes();

@@ -300,7 +300,7 @@ over a process's general log stream.
   verdict/traffic telemetry is `mail-observability.md`'s (unbuilt, draft)
   surface, not this one.
 
-### Wire — two legs, both additive
+### Wire — two legs, both additive (and one file)
 
 Matching the two authenticated channels co-resident services already hold
 (`version-compatibility.md` additive discipline: an old nest answers
@@ -315,6 +315,14 @@ new nest with an old source simply sees no events):
   `fauna.sidecar.log_events` up its existing internal duplex (`transport.md`
   § internal sidecar channel; kind constant beside `fauna.sidecar.hello` in
   `fauna-protocol`).
+- **The updater** (ruled 2026-10-14): no wire leg by posture — it holds the
+  Docker socket and nothing else, so it has no credential to present — but
+  the socket is itself the credential: it writes the batch payload below (plus
+  a per-event `seq`) as a bounded report file into the nest container's own
+  writable layer through the engine's archive API, and the nest lands it
+  through the same admission gate as source `updater`. The mechanism, the file,
+  the catalogue and the nest's own `update overdue` complement are
+  `architecture/nest/update-channel.md` § What the updater reports.
 
 Batch payload: `{ events: [{timestamp_ms, level, event, message}], dropped }`
 — `dropped` is the source-side loss count since the last accepted batch: both
@@ -336,7 +344,7 @@ real work.
 
 - **Attribution:** the ring entry's `target` is `<source>:<event>` (e.g.
   `mta:tls.handshake_failed`, `relay:cert_fetch_failed`) with `<source>` from
-  the fixed nest-side id set (`mta`, `mda`, `atproto`, `relay`,
+  the fixed nest-side id set (`mta`, `mda`, `atproto`, `relay`, `updater`,
   …). It rides the **existing** target column of the existing `log-entry`
   shape — so the plane needs **no new ui.yaml ID and no app change**; all
   7 apps render plane entries via the shared `fauna_log::format` as-is. (A
@@ -365,16 +373,58 @@ real work.
 - **App Settings → Logs is untouched** — the plane feeds the *nest* admin
   ring; client-local rings and their page keep their existing shape.
 
-### Coverage (which of the nine, and why the rest are out)
+### Coverage (every service of the deployed bundle, and why the rest are out)
 
 | Service | Leg | Status |
 |---|---|---|
 | fauna-nest | its own `RingLayer` | shipped |
 | mail-bridge MTA / MDA (Go) | `fauna.bridges.report_log_events` | shipped (`internal/logplane`) |
 | iroh-relay (Rust) | `fauna.sidecar.log_events` | shipped 2026-07-22 (`log_catalogue.rs`); a later Rust sidecar follows nearly-free (same `fauna-sidecar-client` seam) |
-| atproto-bridge | `fauna.bridges.report_log_events` | follow-on (same kind, its own catalogue) |
-| sni-router | none yet | deferred; the design when wanted: a boot-minted token (`sidecar_tokens.rs`) + `/internal/router/ws`, same handshake — never a docker-log read. ⚠ The router now emits rate-limited `warn` lines when either connection cap sheds (`transport-connection.md` § Abuse posture) — the first signal it produces that an admin would actually want, and today reachable only by reading container logs off-box. That is the concrete motivation whenever this row is picked up. |
+| atproto-bridge | `fauna.bridges.report_log_events` | shipped 2026-10-14 (`internal/logplane/catalogue_atproto.go` on the shared `catalogue.go`): same kind as the mail bridge, the shared events (`ready`, `nest_reconnected`, the PDS listener's `listener_bind_failed` and `tls_cert_fetch_failed`, `shutdown_forced`) plus its own — `pds_listener_failed`, and the coalesced counts `repo_self_check_failed` and `video_remux_failed` (one event per flush naming how many, never a DID, handle or file name). It reports no firehose event, because the bridge *serves* `subscribeRepos` and subscribes to nothing; and no `confinement_degraded` while it runs unsandboxed by design, which would fire on every boot about a state no admin can change |
+| sni-router | `fauna.sidecar.log_events` | shipped 2026-10-14 (`bins/fauna-sni-router/src/log_catalogue.rs`): a boot-minted `router` token (`sidecar_tokens.rs`) and its own route, `/internal/router/ws`, on the relay's handshake minus the key (its hello attests nothing — it fetches nothing); events `serving`, `backend_unreachable` (the backend named by its route — `nest`, `mail`, `relay`, `pds` — never its address), `connection_cap_shed` and `per_ip_cap_shed` (the batch count of the rate-limited stderr warn the caps already emit, `transport-connection.md` § Abuse posture — one event per minute per cap, however hard the flood), and `nest_unreachable`, queued while the channel is down; flushed on a 10 s timer of its own, since the channel carries nothing else. No `listener_bind_failed`: a failed `:443` bind ends the process before a channel could exist, and with `:443` down the admin's app cannot reach the Logs page anyway. Its credential rule is the channel's (`../transport.md`), which for the router means one restart — every live `:443` splice dropped — per in-container nest restart, accepted there |
+| ClamAV / rspamd (third-party images) | **never a source** — relayed by the MTA | **shipped** — the MTA catalogues `scanner_unavailable` (warn) and `scanner_recovered` (info): their free-form logs are exactly what § Never the docker logs excludes, but their *effect* is the MTA's fail-closed circuit breaker (`internal/mta/scan_gate.go`), so the MTA emits once per real closed↔open breaker transition (never per tempfail, never on a failed half-open trial), interpolating only the scanner's name from the fixed pair (`clamd` \| `rspamd`, `logplane.ScannerName`) |
+| fauna-updater | the engine-written report file (built 2026-10-17; the tier_4 witness pending) | ruled 2026-10-14, owed by the shell's sunset: no wire channel **by posture** — it holds the Docker socket and nothing else (`../nest/update-channel.md` § The updater) — so the socket is the credential: it writes its outcomes into the nest container through the engine's archive API and the nest lands them as `updater:<event>` through this plane's gate; the nest's own `update overdue` line covers an absent updater (`../nest/update-channel.md` § What the updater reports) |
 | fauna-supervisor | none **by design** | the root control sidekick stays deliberately minimal (narrow socket, no outbound client); nest logs the up/down commands it sends it, which is the admin-meaningful signal |
+
+### What retires the `dev.fauna.build` shell (ruled 2026-10-14)
+
+[`../deployment-threat-model.md`](../deployment-threat-model.md) § Concern 1a
+admits one key-only sshd on `dev.fauna.build` alone (its admin's SSH
+door since the box's 2026-10-20 re-creation) and owns
+that exception; **this section owns the coverage condition that retires
+it**, because the shell's one purpose is reading the box's service logs and
+this plane is where those logs become an app affordance. The condition is
+not "the log view exists" — `fauna.admin.logs` and the `admin-logs` page
+shipped on all seven apps (§ 3 Surfaces, the ledger below) — but **that
+every signal the organisation would otherwise read on that box through a
+shell, and that a working nest can relay, reaches `admin-logs` through this
+plane's allowlisted channel.** Per service of the deployed compose bundle:
+
+- **Already relayed:** the nest's own ring; the mail bridge's MTA and MDA
+  catalogues; the atproto bridge's; the relay's; the sni-router's.
+- **Owed before the shell goes — none.** All three legs the ruling named
+  have shipped: the atproto-bridge catalogue, the mail scanners'
+  availability as the MTA's breaker transitions, and the sni-router leg.
+- **Accepted residuals — not blockers.** A **dead or crash-looping nest**
+  relays nothing, plane or no plane; that case is the provider's out-of-band
+  console or a re-creation, as the threat model already rules, and a shell
+  adds nothing the console lacks. The **updater's outcomes** (a pull,
+  verification, re-create or hand-off that failed, and why) are the one live
+  signal a working nest cannot relay today — the updater holds the socket and
+  nothing else; its channel is ruled as the engine-written report
+  file (`../nest/update-channel.md` § What the updater reports), built
+  2026-10-17 with the nest's own `update overdue` line beside it; it stays a
+  residual, not a blocker, until a box runs an image carrying it and the
+  tier_4 witness reads it back (that doc's § Implementation status today,
+  slice (7)). The supervisor stays out by design.
+
+**Ruled 2026-10-20: the sunset is retired.** The shell became the **SSH door** —
+a default-off admin option in the provisioning wizard, a declared setting of
+the box rather than an exception ([`../deployment-threat-model.md`](../deployment-threat-model.md)
+§ Concern 1a owns the posture, [`../installers/vps.md`](../installers/vps.md)
+§ The SSH door the mechanism) — so this condition no longer retires anything.
+The section stays as the record of why the organisation's dev nest has a
+shell and what the log plane was built to replace.
 
 ### Trust posture
 
@@ -505,7 +555,11 @@ it reads via the admin RPC, not the SPA, so the already-pulled production image
 sufficed; the client side needs no change at any point, since entries arrive in
 the existing reply shape and render through `fauna_log::format` as-is.
 
-**Not yet built:** the **atproto-bridge** catalogue.
+**Shipped — the MTA's scanner-breaker events** (`scanner_unavailable` / `scanner_recovered`, `bins/fauna-bridges/internal/logplane/catalogue_mail.go`, emitted from `internal/mta/scan_gate.go` on real breaker transitions only).
+
+**Shipped 2026-10-14 — the atproto-bridge catalogue.** The Go catalogue is split: `internal/logplane/catalogue.go` holds the events every bridge role shares (its `Ready` names the bridge kind from the role, and `atproto.pds` is a known role), `catalogue_mail.go` the MTA/MDA's own, `catalogue_atproto.go` the PDS's own; `cmd/fauna-atproto-bridge/main.go` runs `logplane.Run` over its reconnector with the same defer ordering as the mail bridge, so the shutdown-path events reach the final flush. A failure that recurs per item of work is a *tally* (`logplane.go`): counted, and turned into one event per flush naming the count. Pinned by the Go catalogue tests, `atprotorepo`'s remux-hook test, and the nest conformance test `an_atproto_bridge_batch_lands_under_the_atproto_target` (`conformance_admin.rs`: an approved `atproto.pds` bridge's batch reads back as `atproto:ready`). The tier_4 leg, `test_sidecar_log_plane_docker.py::test_atproto_bridge_ready_event_reaches_admin_logs`, is written; unlike the mail assert below it needs a nest image carrying this bridge code, so it goes green on the first image built after this change.
+
+**Shipped 2026-10-14 — the sni-router leg**, the last the shell's sunset owed (§ What retires the `dev.fauna.build` shell). The nest serves `/internal/relay/ws` and `/internal/router/ws` from one lean loop parameterised by the channel class (`sidecar_channel.rs::serve_sidecar_channel`): the log plane on both, the relay's kinds and its attested-X25519 requirement on the relay's class only. The router (`bins/fauna-sni-router`) holds the channel through `fauna_sidecar_client::serve_while_reaching_nest` when its run-script passes `--nest-url` and the token. Pinned by the nest unit tests `router_channel_serves_the_log_plane_with_a_keyless_hello`, `each_route_refuses_the_other_sidecars_token` and `router_channel_refuses_the_relay_kinds`, by the router's catalogue and backend-naming tests, and by the tier_4 `test_sidecar_log_plane_docker.py::test_router_events_reach_admin_logs` (`router:serving`, then `router:per_ip_cap_shed` from connections held past the per-IP cap), which, like the atproto one, needs a nest image carrying this code and goes green on the first image built after it. The updater's outcomes are still to build, a residual rather than a blocker.
 
 | Surface | nest | linux | web | windows | macos | ios | android | tui |
 |---|---|---|---|---|---|---|---|---|

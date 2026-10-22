@@ -19,13 +19,13 @@
   // post-dispatch snapshot. Errors surface via the snapshot's `error` →
   // `error-message` (MessageBanner), never faked green.
   // UX/IDs: tests/e2e-unified/ui.yaml `admin-calendar` page.
-  import { identity } from '$lib/store';
-  import { caldavPolicyMachine } from '$lib/rpc';
-  import { ensureWasm, parsePort } from '$lib/wasm';
+  import { identity } from '#lib/store';
+  import { caldavPolicyMachine } from '#lib/rpc';
+  import { ensureWasm, parsePort } from '#lib/wasm';
   import { onMount } from 'svelte';
-  import MessageBanner from '$lib/components/MessageBanner.svelte';
-  import { t } from '$lib/i18n/strings';
-  import { IDS } from '$lib/generated/uiIds';
+  import MessageBanner from '#lib/components/MessageBanner.svelte';
+  import { t } from '#lib/i18n/strings';
+  import { IDS } from '#lib/generated/uiIds';
 
   // Mirrors the shared serde JSON (snake_case across serde_wasm_bindgen; the status
   // enum serializes as its variant-name string).
@@ -129,7 +129,7 @@
   <div class="field-row">
     <span>
       <span class="label-text">{t.admin.calendar_page.caldav_port_label}</span>
-      <span class="muted small">{t.admin.calendar_page.caldav_port_desc}</span>
+      <span class="muted small" data-testid={IDS.ADMIN_CALENDAR_CALDAV_PORT_HELP_TEXT}>{t.admin.calendar_page.caldav_port_desc}</span>
     </span>
     <span class="field-controls">
       <input

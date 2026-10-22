@@ -16,6 +16,10 @@ public class StatusVM {
     /// hydrate-gates-paint contract (the Status views render nothing for the
     /// section until this is non-nil).
     public var featureRows: [FfiFeatureRow]?
+    /// The self host of the shared `feature-policy-editor` (the user's own
+    /// authored limits, `dynamic-features.md` § Authoring surfaces) — built at
+    /// `configure(api:)`, nil before it.
+    public private(set) var selfAuthoring: FeatureAuthoringHost?
     /// The Status snapshot's node / sync / MLS legs as loaded so far
     /// (`docs/goal/ui/status.md` § State & data shape) — a `nil` leg is not
     /// loaded or not applicable here (iOS has no local sync agent), and its
@@ -87,6 +91,7 @@ public class StatusVM {
         api = nil
         quota = nil
         featureRows = nil
+        selfAuthoring = nil
         statusLegs = FfiStatusLegs(node: nil, sync: nil, mls: nil)
         isLoading = false
         errorMessage = nil
@@ -95,6 +100,15 @@ public class StatusVM {
     public func configure(api: APIClient) {
         if let current = self.api, current !== api { reset() }
         self.api = api
+        if selfAuthoring == nil {
+            // The self host of the shared `feature-policy-editor`: a write
+            // re-reads the transparency rows so the row above the editor shows
+            // the new binding without a re-navigation.
+            selfAuthoring = FeatureAuthoringHost(
+                readRows: { try await api.featuresClient().authoredRows(tier: "self") },
+                openEditor: { try await api.featuresClient().openEditor(tier: "self", feature: $0) },
+                onWritten: { [weak self] in await self?.fetchFeatureLimits() })
+        }
     }
 
     public func fetchQuota() async {
@@ -135,6 +149,7 @@ public class StatusVM {
     public func refreshQuotaAndLimits() async {
         await fetchQuota()
         await fetchFeatureLimits()
+        await selfAuthoring?.refresh()
     }
 
     /// Sign out = erase the **whole credential namespace**, every account of it — not the
@@ -168,8 +183,9 @@ public class StatusVM {
     /// lifecycle*), so erasing the store out from under a live runtime lets the
     /// next pass re-create it — and the credential wipe on the line above has
     /// already taken its Ed25519 writer key with it, so the resurrected store
-    /// refuses every later sign-in ("account store belongs to a different
-    /// writer") and the app runs with no account runtime, silently, for good.
+    /// outlives the sign-out — the signed-out user's data left on disk for the
+    /// next sign-in to adopt (the lost-slot self-heal, since 2026-08-27; before
+    /// it, that store refused every later sign-in, silently, for good).
     /// `stopAccountRuntimeForSignOut` awaits the in-flight pass, so by the time
     /// the erase runs nothing is still writing — and, first, retires this
     /// machine's enrollment nest-side while the runtime still holds the writer

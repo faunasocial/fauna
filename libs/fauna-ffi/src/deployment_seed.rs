@@ -90,9 +90,11 @@ pub struct FfiSeedRotationResult {
     pub verdict: LocalizedText,
 }
 
-/// Drive the deployment-seed rotation ceremony on the account plane
-/// (`fauna_client_config::rotate_deployment_seed_on_plane`) — the native
-/// twin of tui/linux's `deployment_seeds::rotate_deployment_seed`
+/// Drive the deployment-seed rotation ceremony on the account plane through
+/// the shared native seam
+/// (`fauna_client_account_runtime::deployment_seeds::rotate_deployment_seed_outcome`
+/// — the same composition tui/linux's `rotate_deployment_seed` runs, and
+/// web's, over `fauna_client_pair::deployment_seed`)
 /// (`box-recovery.md` § Deployment-seed rotation; § The plane-era recovery
 /// floor, *(c) The writes*). Custody before dispatch, literally: the
 /// successor's entry is merged and published to the bound nest before the
@@ -132,12 +134,12 @@ pub async fn rotate_deployment_seed(
     owner_secret: Vec<u8>,
 ) -> Result<FfiSeedRotationResult, FfiError> {
     crate::keypair_from_bytes(&owner_secret)?;
-    let current = bound_nest_id(&nest).await?;
-    let store = ResolvingLedgerStore::new(crate::account_runtime::handle);
-    let outcome =
-        fauna_client_config::rotate_deployment_seed_on_plane(&*nest.nest_arc(), current, &store)
-            .await
-            .map_err(general_err)?;
+    let outcome = fauna_client_account_runtime::deployment_seeds::rotate_deployment_seed_outcome(
+        &nest.nest_arc(),
+        crate::account_runtime::handle,
+    )
+    .await
+    .map_err(general_err)?;
     let rotated = matches!(outcome, fauna_client_config::SeedRotation::Rotated { .. });
     let verdict = fauna_client_config::seed_rotation_verdict(&outcome);
     Ok(FfiSeedRotationResult { rotated, verdict })

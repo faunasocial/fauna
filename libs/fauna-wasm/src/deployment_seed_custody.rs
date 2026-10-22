@@ -25,9 +25,8 @@ use std::cell::RefCell;
 use fauna_account_plane::account_driver::AccountStoreHandle;
 use fauna_client_config::{
     DeploymentSeedCustody, SupersessionMarks, custody_leg_unattempted_warning, custody_leg_warning,
-    run_deployment_seed_custody_leg,
 };
-use fauna_core::identity::ActorId;
+use fauna_client_pair::deployment_seed::run_custody_leg_bound;
 use fauna_core::localized::LocalizedText;
 use fauna_rpc_wasm::WsRpcClient as InnerClient;
 
@@ -90,21 +89,22 @@ pub(crate) fn emit_warning(sink: &js_sys::Function, warning: &LocalizedText) {
 }
 
 /// One run of the custody leg over `client` (authenticated as the account)
-/// and `handle` (that account's store). The bound id is the one this
-/// connection is bound to (`crate::rpc::bound_nest_id` — the origin's pin or
-/// a possession proof, never the box's own `nest.info` claim).
+/// and `handle` (that account's store), through the shared
+/// `fauna_client_pair::deployment_seed::run_custody_leg_bound`: the bound id
+/// is the one this connection is bound to (the origin's pin or a possession
+/// proof, never the box's own `nest.info` claim).
 pub(crate) async fn run_leg(client: &InnerClient, handle: &AccountStoreHandle) -> LegRun {
-    let bound: ActorId = match crate::rpc::bound_nest_id(client).await {
-        Ok(id) => id,
+    let identity = fauna_client_pair::build_linked_nests_machine(client.clone());
+    let report = match run_custody_leg_bound(client, &identity, handle).await {
+        Ok(report) => report,
         Err(e) => {
-            tracing::warn!("[wasm/seed-custody] bound nest id unresolved: {e:?}");
+            tracing::warn!("[wasm/seed-custody] bound nest id unresolved: {e}");
             return LegRun {
                 token: "bound_unresolved",
                 warning: Some(custody_leg_unattempted_warning()),
             };
         }
     };
-    let report = run_deployment_seed_custody_leg(client, bound, handle).await;
     match &report.marks {
         SupersessionMarks::Checked(marked) if !marked.is_empty() => tracing::info!(
             marked = marked.len(),

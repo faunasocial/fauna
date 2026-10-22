@@ -7,6 +7,7 @@ import com.fauna.app.payments.ClaimItem
 import com.fauna.app.payments.ProviderItem
 import com.fauna.app.payments.paymentsClaimsList
 import com.fauna.app.payments.paymentsClaimsMint
+import com.fauna.app.payments.paymentsClaimsVoid
 import com.fauna.app.payments.paymentsKnownKinds
 import com.fauna.app.payments.paymentsProvidersList
 import com.fauna.app.payments.paymentsProvidersRemove
@@ -50,7 +51,21 @@ import javax.inject.Inject
 @HiltViewModel
 class ProfileTiersVM @Inject constructor(
     private val api: ApiClient,
+    private val siteOriginSource: com.fauna.app.payments.PaymentsSiteOrigin,
 ) : ViewModel() {
+
+    /** The creator's web-site origin (the base of the §4 return-URL display), `null` while
+     *  un-hydrated or when they have no public web address. */
+    val siteOrigin: StateFlow<String?> = siteOriginSource.origin
+
+    /** Hydrate [siteOrigin] — called as the §4 form opens. */
+    fun ensureSiteOrigin() = siteOriginSource.ensure()
+
+    /** §4 — the live return-URL display for the form's current kind: the shared
+     *  `return_url` over the web-site [origin], or `null` with no public web address. */
+    fun returnUrl(origin: String?, kind: String): String? =
+        origin?.let { com.fauna.app.payments.paymentsReturnUrl(it, kind) }
+
 
     private val _tiers = MutableStateFlow<List<FfiTierItem>>(emptyList())
     val tiers: StateFlow<List<FfiTierItem>> = _tiers.asStateFlow()
@@ -136,6 +151,17 @@ class ProfileTiersVM @Inject constructor(
 
     /** §5 mint — a manual claim code for [tier]. */
     fun mintClaim(tier: String) = mutate { api.paymentsClaimsMint(tier) }
+
+    /** §5 void — withdraw one of the author's own claim codes. A `claim_not_found`
+     *  reply means the list is what is stale (the row is gone or was never theirs),
+     *  so the re-read that follows repaints it rather than surfacing an error. */
+    fun voidClaim(code: String) = mutate {
+        try {
+            api.paymentsClaimsVoid(code)
+        } catch (e: Exception) {
+            if (e.message?.contains("claim_not_found") != true) throw e
+        }
+    }
 
     /** §2 approve — special-cased: shows [approving] for the mint's duration. */
     fun approve(request: FfiPendingRequest) {

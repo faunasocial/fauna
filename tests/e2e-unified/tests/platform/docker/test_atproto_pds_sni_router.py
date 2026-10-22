@@ -100,11 +100,11 @@ def serving_atproto(docker_image):
     Module-scoped so the two acceptance tests share one (expensive) bring-up; they
     don't interfere — test A never floods, and test B keys the per-IP ClassAuth
     window on the single docker-gateway IP both share (idempotent to re-drive)."""
-    http_port, router_port = find_free_ports(2)
+    (http_port,) = find_free_ports(1)
     name = f"fauna-atproto-router-{http_port}"
     start_container_with_ports(
         name,
-        {3000: http_port, 443: router_port},
+        {443: http_port},
         env={"FAUNA_CLAIM_CODE": CLAIM_CODE, "FAUNA_PORT": "3000"},
     )
     try:
@@ -113,7 +113,7 @@ def serving_atproto(docker_image):
         nest = {
             "name": name,
             "port": http_port,
-            "router_port": router_port,
+            "router_port": http_port,
             "url": f"https://127.0.0.1:{http_port}",
             "admin": admin,
         }
@@ -131,7 +131,7 @@ def serving_atproto(docker_image):
         while time.monotonic() < deadline:
             try:
                 status, _h, _b = sni_https_request(
-                    router_port, f"pds.{DOMAIN}", "GET",
+                    nest["router_port"], f"pds.{DOMAIN}", "GET",
                     "/xrpc/com.atproto.server.describeServer", timeout=8)
                 if status == 200:
                     break

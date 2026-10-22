@@ -824,7 +824,11 @@ class TestActivityPubFollowerDelivery:
             f"GET, so this passed for the wrong reason. GETs seen: "
             f"{ua_demanding_follower.actor_gets}"
         )
-        assert any(a and a.startswith("fauna-nest/") for a in agents), (
+        # Ours is the static, version-less product string (`activitypub.md`
+        # § Architecture, the User-Agent bullet: a version would tell any
+        # stranger which release this nest runs); its exact text is pinned
+        # headlessly, this only asks that the header attributes us.
+        assert any(a and a.startswith("fauna-nest") for a in agents), (
             f"the actor GET carried a User-Agent, but not ours: {agents!r}"
         )
 
@@ -1825,7 +1829,10 @@ class TestActivityPubInboundIngest:
         decorates the page after its query: the ingested note comes back with
         `author_display` = `{handle: @user@host, display_name, avatar_url}`, the
         avatar rewritten through the shared media proxy rather than the remote
-        origin, while the user's own native post carries no face at all.
+        origin, while the user's own native post carries the nest's own
+        projection of their handle — never a bridge-shaped one (the field's
+        third filler, bridges.md § Unified feed ingestion → *Bridged authors*
+        → *The local native author*).
         """
         nest_a = ap_nests["a"]
         user = create_actor_and_register(
@@ -1876,9 +1883,17 @@ class TestActivityPubInboundIngest:
 
         native = [p for p in posts if p["author"] == user["actor_id_hex"]]
         assert native, "the user's own post is on the page"
-        assert all(p.get("author_display") is None for p in native), (
-            "a native author has no projection row and must read faceless"
-        )
+        # A local native author is named from their `users` handle and the
+        # display name of their latest signed profile, projected by the nest in
+        # the same decoration pass (`feed_routes::NativeAuthorRows::faces`).
+        # This user stored no profile, so the face is the handle alone; a
+        # native avatar is a content address, never a URL.
+        for p in native:
+            face = p.get("author_display")
+            assert face, "a local native author is named from their users row"
+            assert face["handle"] == user["handle"], face
+            assert not face.get("display_name"), face
+            assert not face.get("avatar_url"), face
 
     # ── what comes in ──────────────────────────────────────────────────────
     #

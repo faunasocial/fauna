@@ -959,4 +959,63 @@ mod tests {
             dir.join("creds"),
         ))
     }
+
+    /// **On a headless box the agent reads back the writer key the app
+    /// minted.** No `FAUNA_E2E_CREDENTIAL_DIR` is set and a test build's
+    /// keyring probe never answers usable, so each side's
+    /// `CredentialStore::account_store_over` resolves as on a box with no
+    /// Secret Service. The app mints through the runtime's serialized
+    /// mint-or-load, and the agent then reads load-only through a resolution
+    /// of its own, as its account host does. Before the shared unattended
+    /// arm both resolved a keyring that was not there: the mint's write
+    /// vanished, its read-back refused, and the agent found no key to host.
+    #[test]
+    fn a_headless_box_hands_the_apps_writer_key_to_the_agent() {
+        use fauna_credential_store::HeadlessArmCause;
+        assert!(
+            std::env::var_os("FAUNA_E2E_CREDENTIAL_DIR").is_none(),
+            "this test pins the production resolution: the e2e dir must be unset"
+        );
+        let base = tempfile::tempdir().expect("tempdir");
+        let actor = fauna_core::hex32::encode(&ActorKeypair::generate().actor_id().0);
+
+        let app = CredentialStore::account_store_over(base.path().to_path_buf());
+        assert!(
+            app.unattended_arm_cause().is_some(),
+            "no usable OS store → the unattended file arm"
+        );
+        let minted = crate::account_runtime::resolve_writer_key_serialized(
+            &fauna_account_store::root::StoreRoot::at(base.path()),
+            &actor,
+            &app,
+        )
+        .expect("the app's mint reads its own write back");
+
+        let agent = CredentialStore::account_store_over(base.path().to_path_buf());
+        assert_eq!(
+            agent.unattended_arm_cause(),
+            Some(HeadlessArmCause::ExistingFile),
+            "the agent finds the app's file and keeps it, without probing"
+        );
+        let loaded = load_writer_key(&agent, &actor).expect("the agent loads the app's key");
+        assert_eq!(loaded.to_bytes(), minted.to_bytes());
+        assert!(
+            crate::account_runtime::replica_posture(&agent)
+                == fauna_account_store::sqlite::ReplicaPosture::Plaintext,
+            "items resting in a file beside the store: the replica's posture is plaintext"
+        );
+
+        let file = fauna_credential_store::cred_file_path(
+            base.path(),
+            fauna_credential_store::ACCOUNT_STORE_NAMESPACE,
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "the file is this account's alone");
+        }
+        #[cfg(not(unix))]
+        assert!(file.exists());
+    }
 }

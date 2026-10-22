@@ -51,7 +51,7 @@ use fauna_segment_store::{CompactionPlan, ManagerError, SegmentManager};
 use tokio::sync::Mutex;
 
 use super::mail::BucketCompactionOutcome;
-use super::records_db::{self, NewConvSegmentRecord};
+use super::records_db::{self, ConvWithhold, NewConvSegmentRecord};
 use crate::db::CacheDb;
 
 /// Per-channel seq-allocation locks. See the module doc for the WHY: seq is a
@@ -333,17 +333,29 @@ async fn append_locked(
 }
 
 /// Read live conv records for one channel with `seq > after_seq`, oldest first,
-/// up to `limit`. Returns `(seq, body, legal_takedown_ref)` where `body` is the
-/// inner sealed payload (the envelope's `sealed_payload`).
+/// up to `limit`. Returns `(seq, body, withhold)` where `body` is the inner
+/// sealed payload (the envelope's `sealed_payload`).
 ///
-/// **Legal-obligation relay-withhold gate.** When a record's
-/// `legal_takedown_ref` is `Some`, its sealed body is **withheld**: this returns
-/// an empty `body` + the reference and **never reads the sealed bytes** from the
-/// segment file. Every conv serve surface (local `channel.fetch`, cross-nest
-/// `federation.channel.fetch`, paired-nest `mls.pull`) flows through here, so the
-/// withhold is enforced once, at the read primitive — no serve path can bypass
-/// it (`moderation.md` § Categories & enforcement item 1). The record keeps its
-/// `seq` slot so the caller renders a tombstone in place.
+/// **Relay-withhold gate, both grounds.** When a record is under a legal
+/// takedown or the admin's block of a reported item
+/// ([`ConvWithhold::is_withheld`](super::records_db::ConvWithhold::is_withheld)),
+/// its sealed body is **withheld**: this returns an empty `body` + the flags and
+/// **never reads the sealed bytes** from the segment file. Every conv serve
+/// surface (local `channel.fetch`, cross-nest `federation.channel.fetch`,
+/// paired-nest `mls.pull`) flows through here, so the withhold is enforced
+/// once, at the read primitive — no serve path can bypass it (`moderation.md`
+/// § Categories & enforcement item 1). The record keeps its `seq` slot so the
+/// caller renders a tombstone in place.
+///
+/// **The author's exemption — the block's ground only.** `viewer` is the actor
+/// the caller authenticated for whom the page is read: the local
+/// `channel.fetch` passes its caller, every relayed serve `None` (its caller is
+/// a nest, which can name no author). A record under the block alone whose
+/// attested author (`conv_record_authors`) is `viewer` is served with its body
+/// AND its flags, so the author's own devices paint the message with the
+/// notice beside it, as `get_post_core` serves a blocked post to its author
+/// (`moderation.md` § Admin block of a reported item, decision 4). A takedown
+/// never exempts ([`ConvWithhold::author_exempt`]).
 ///
 /// A `segment_records` row whose record is absent from the segment file
 /// (mirror divergence) is warned-and-skipped, mirroring
@@ -354,42 +366,90 @@ pub async fn read_after_seq(
     channel_id: &[u8; 32],
     after_seq: i64,
     limit: i64,
-) -> Result<Vec<(i64, Vec<u8>, Option<String>)>> {
+    viewer: Option<&[u8; 32]>,
+) -> Result<Vec<(i64, Vec<u8>, ConvWithhold)>> {
     let rows = cache_db
         .segment_records_list_conv_after_seq(channel_id, after_seq, limit)
         .await?;
+    let exempt = authored_by_viewer(
+        cache_db,
+        channel_id,
+        viewer,
+        rows.iter().map(|(seq, _, _, w)| (*seq, w)),
+    )
+    .await?;
     let mut out = Vec::with_capacity(rows.len());
-    for (seq, segment_id, cid, legal_ref) in rows {
-        if legal_ref.is_some() {
-            // Withheld: never load the sealed bytes; the tombstone stands in.
-            out.push((seq, Vec::new(), legal_ref));
+    for (seq, segment_id, cid, withhold) in rows {
+        if withhold.is_withheld() && !exempt.contains(&seq) {
+            // Withheld: never load the sealed bytes; the marker stands in.
+            out.push((seq, Vec::new(), withhold));
         } else if let Some(body) = read_one(mgr, channel_id, segment_id, &cid).await? {
-            out.push((seq, body, None));
+            out.push((seq, body, withhold));
         }
     }
     Ok(out)
 }
 
+/// The seqs among one channel's `rows` that `viewer` reads despite the block:
+/// those under the block's ground alone whose attested author is `viewer`.
+/// Empty — and no author read at all — for a `None` viewer or a page with no
+/// such record, so the ordinary page pays nothing.
+async fn authored_by_viewer<'a>(
+    cache_db: &CacheDb,
+    channel_id: &[u8; 32],
+    viewer: Option<&[u8; 32]>,
+    rows: impl Iterator<Item = (i64, &'a ConvWithhold)>,
+) -> Result<std::collections::HashSet<i64>> {
+    let Some(viewer) = viewer else {
+        return Ok(Default::default());
+    };
+    let candidates: Vec<i64> = rows
+        .filter(|(_, w)| w.author_exempt())
+        .map(|(seq, _)| seq)
+        .collect();
+    let (Some(lo), Some(hi)) = (candidates.iter().min(), candidates.iter().max()) else {
+        return Ok(Default::default());
+    };
+    let authors = cache_db
+        .conv_record_authors_in_range(channel_id, lo - 1, *hi)
+        .await?;
+    Ok(candidates
+        .into_iter()
+        .filter(|seq| authors.get(seq) == Some(viewer))
+        .collect())
+}
+
 /// Read live conv records across many channels with `seq > after_seq`, oldest
-/// first, up to `limit` total. Returns `(seq, channel_id, body,
-/// legal_takedown_ref)`. Withholds taken-down bodies exactly like
-/// [`read_after_seq`].
+/// first, up to `limit` total. Returns `(seq, channel_id, body, withhold)`.
+/// Withholds bodies on either ground, and exempts `viewer`'s own blocked
+/// records, exactly like [`read_after_seq`].
 pub async fn read_for_scopes_after_seq(
     mgr: &SegmentManager,
     cache_db: &CacheDb,
     channel_ids: &[[u8; 32]],
     after_seq: i64,
     limit: i64,
-) -> Result<Vec<(i64, [u8; 32], Vec<u8>, Option<String>)>> {
+    viewer: Option<&[u8; 32]>,
+) -> Result<Vec<(i64, [u8; 32], Vec<u8>, ConvWithhold)>> {
     let rows = cache_db
         .segment_records_list_conv_for_scopes_after_seq(channel_ids, after_seq, limit)
         .await?;
+    let mut exempt = std::collections::HashSet::new();
+    for channel_id in channel_ids {
+        let in_channel = rows
+            .iter()
+            .filter(|(_, ch, _, _, _)| ch == channel_id)
+            .map(|(seq, _, _, _, w)| (*seq, w));
+        for seq in authored_by_viewer(cache_db, channel_id, viewer, in_channel).await? {
+            exempt.insert((*channel_id, seq));
+        }
+    }
     let mut out = Vec::with_capacity(rows.len());
-    for (seq, channel_id, segment_id, cid, legal_ref) in rows {
-        if legal_ref.is_some() {
-            out.push((seq, channel_id, Vec::new(), legal_ref));
+    for (seq, channel_id, segment_id, cid, withhold) in rows {
+        if withhold.is_withheld() && !exempt.contains(&(channel_id, seq)) {
+            out.push((seq, channel_id, Vec::new(), withhold));
         } else if let Some(body) = read_one(mgr, &channel_id, segment_id, &cid).await? {
-            out.push((seq, channel_id, body, None));
+            out.push((seq, channel_id, body, withhold));
         }
     }
     Ok(out)
@@ -527,10 +587,10 @@ mod tests {
         assert_eq!(outcome.seg_id, 1);
         assert!(outcome.finalized.is_none());
 
-        let rows = read_after_seq(&mgr, &cache_db, &channel, 0, 100)
+        let rows = read_after_seq(&mgr, &cache_db, &channel, 0, 100, None)
             .await
             .expect("read");
-        assert_eq!(rows, vec![(1i64, body, None)]);
+        assert_eq!(rows, vec![(1i64, body, ConvWithhold::default())]);
     }
 
     /// The nest-attested author (`conv_record_authors`): the actor authenticated
@@ -715,6 +775,178 @@ mod tests {
         );
     }
 
+    /// The admin block's relay-withhold (`moderation.md` § Admin block of a
+    /// reported item): a record blocked under a report is served with its
+    /// sealed body withheld and the report's reason surfaced — joined from the
+    /// report row — through the same read primitive as the takedown, and
+    /// unblocking re-serves the same bytes.
+    #[tokio::test]
+    async fn admin_block_withholds_body_with_the_reason_and_unblock_re_serves() {
+        let (_tmp, mgr, cache_db) = setup();
+        let channel = [0x2cu8; 32];
+        let body = b"sealed-reported-payload".to_vec();
+        let outcome = append(&mgr, &cache_db, &channel, &body, 1_715_000_000_000)
+            .await
+            .expect("append");
+        let record_cid = record_cid_of(&body);
+        let report = match cache_db
+            .insert_abuse_report(
+                crate::db::moderation::NewAbuseReport {
+                    reporter_actor: [0x31; 32],
+                    subject_kind: "message".into(),
+                    subject_id: "ab".repeat(32),
+                    subject_channel: Some(hex::encode(channel)),
+                    subject_actor: None,
+                    reason: "harassment".into(),
+                    note: None,
+                    excerpt: None,
+                    block_author: false,
+                },
+                10,
+                1,
+            )
+            .await
+            .expect("report")
+        {
+            crate::db::moderation::AbuseReportInsert::Inserted(row) => row,
+            other => panic!("unexpected {other:?}"),
+        };
+        assert_eq!(
+            cache_db
+                .set_conv_admin_block(&record_cid, Some(&report.id))
+                .await
+                .expect("block"),
+            1
+        );
+        let rows = read_after_seq(&mgr, &cache_db, &channel, 0, 100, None)
+            .await
+            .expect("read withheld");
+        assert_eq!(rows.len(), 1, "the record keeps its seq slot");
+        assert_eq!(rows[0].0, outcome.seq);
+        assert!(rows[0].1.is_empty(), "sealed body is withheld");
+        assert_eq!(rows[0].2.admin_block.as_deref(), Some("harassment"));
+        assert!(rows[0].2.legal_takedown.is_none());
+        let scoped = read_for_scopes_after_seq(&mgr, &cache_db, &[channel], 0, 100, None)
+            .await
+            .expect("scoped read withheld");
+        assert!(scoped[0].2.is_empty(), "cross-scope body withheld too");
+        assert_eq!(scoped[0].3.admin_block.as_deref(), Some("harassment"));
+
+        cache_db
+            .set_conv_admin_block(&record_cid, None)
+            .await
+            .expect("unblock");
+        let rows = read_after_seq(&mgr, &cache_db, &channel, 0, 100, None)
+            .await
+            .expect("read restored");
+        assert_eq!(rows, vec![(outcome.seq, body, ConvWithhold::default())]);
+    }
+
+    /// Decision 4's author arm (`moderation.md` § Admin block of a reported
+    /// item): a blocked record's attested author reads its body with the flag
+    /// still set, on both primitives; another viewer and a relayed read (`None`)
+    /// get the withheld entry; and a takedown on top withholds from the author
+    /// too.
+    #[tokio::test]
+    async fn admin_block_serves_the_attested_author_and_withholds_everyone_else() {
+        let (_tmp, mgr, cache_db) = setup();
+        let channel = [0x2du8; 32];
+        let author = [0x41u8; 32];
+        let other = [0x42u8; 32];
+        let body = b"sealed-blocked-own-payload".to_vec();
+        let bystander = b"sealed-unflagged-payload".to_vec();
+        append_with_refs(
+            &mgr,
+            &cache_db,
+            &channel,
+            &body,
+            1_715_000_000_000,
+            &[],
+            Some(&author),
+        )
+        .await
+        .expect("append");
+        append_with_refs(
+            &mgr,
+            &cache_db,
+            &channel,
+            &bystander,
+            1_715_000_000_001,
+            &[],
+            Some(&other),
+        )
+        .await
+        .expect("append");
+        let record_cid = record_cid_of(&body);
+        let report = match cache_db
+            .insert_abuse_report(
+                crate::db::moderation::NewAbuseReport {
+                    reporter_actor: [0x31; 32],
+                    subject_kind: "message".into(),
+                    subject_id: "cd".repeat(32),
+                    subject_channel: Some(hex::encode(channel)),
+                    subject_actor: None,
+                    reason: "harassment".into(),
+                    note: None,
+                    excerpt: None,
+                    block_author: false,
+                },
+                10,
+                1,
+            )
+            .await
+            .expect("report")
+        {
+            crate::db::moderation::AbuseReportInsert::Inserted(row) => row,
+            other => panic!("unexpected {other:?}"),
+        };
+        cache_db
+            .set_conv_admin_block(&record_cid, Some(&report.id))
+            .await
+            .expect("block");
+
+        let rows = read_after_seq(&mgr, &cache_db, &channel, 0, 100, Some(&author))
+            .await
+            .expect("author read");
+        assert_eq!(rows[0].1, body, "the author's own read keeps the body");
+        assert_eq!(rows[0].2.admin_block.as_deref(), Some("harassment"));
+        assert_eq!(rows[1].1, bystander);
+        let scoped = read_for_scopes_after_seq(&mgr, &cache_db, &[channel], 0, 100, Some(&author))
+            .await
+            .expect("author scoped read");
+        assert_eq!(scoped[0].2, body);
+        assert_eq!(scoped[0].3.admin_block.as_deref(), Some("harassment"));
+
+        for viewer in [Some(&other), None] {
+            let rows = read_after_seq(&mgr, &cache_db, &channel, 0, 100, viewer)
+                .await
+                .expect("read");
+            assert!(rows[0].1.is_empty(), "withheld from {viewer:?}");
+            assert_eq!(rows[0].2.admin_block.as_deref(), Some("harassment"));
+            assert_eq!(rows[1].1, bystander, "the unflagged record serves");
+            let scoped = read_for_scopes_after_seq(&mgr, &cache_db, &[channel], 0, 100, viewer)
+                .await
+                .expect("scoped read");
+            assert!(scoped[0].2.is_empty(), "scoped withheld from {viewer:?}");
+        }
+
+        cache_db
+            .set_conv_legal_takedown(&record_cid, Some("EU-DSA-2024/1"))
+            .await
+            .expect("take down");
+        let rows = read_after_seq(&mgr, &cache_db, &channel, 0, 100, Some(&author))
+            .await
+            .expect("author read under takedown");
+        assert!(
+            rows[0].1.is_empty(),
+            "a takedown withholds from the author too"
+        );
+        let scoped = read_for_scopes_after_seq(&mgr, &cache_db, &[channel], 0, 100, Some(&author))
+            .await
+            .expect("author scoped read under takedown");
+        assert!(scoped[0].2.is_empty());
+    }
+
     /// Legal-obligation relay-withhold: a conv record flagged with a
     /// `legal_takedown_ref` is served with its sealed body **withheld** (empty)
     /// and the reference surfaced, and the sealed bytes are never read from the
@@ -739,21 +971,24 @@ mod tests {
             .expect("set");
         assert_eq!(n, 1, "one conv record flagged");
 
-        let rows = read_after_seq(&mgr, &cache_db, &channel, 0, 100)
+        let rows = read_after_seq(&mgr, &cache_db, &channel, 0, 100, None)
             .await
             .expect("read withheld");
         assert_eq!(rows.len(), 1, "the record keeps its seq slot (tombstone)");
         assert_eq!(rows[0].0, outcome.seq);
         assert!(rows[0].1.is_empty(), "sealed body is withheld");
-        assert_eq!(rows[0].2.as_deref(), Some("EU-DSA-2024/999"));
+        assert_eq!(rows[0].2.legal_takedown.as_deref(), Some("EU-DSA-2024/999"));
 
         // The cross-scope read withholds identically.
-        let scoped = read_for_scopes_after_seq(&mgr, &cache_db, &[channel], 0, 100)
+        let scoped = read_for_scopes_after_seq(&mgr, &cache_db, &[channel], 0, 100, None)
             .await
             .expect("scoped read withheld");
         assert_eq!(scoped.len(), 1);
         assert!(scoped[0].2.is_empty(), "cross-scope body withheld too");
-        assert_eq!(scoped[0].3.as_deref(), Some("EU-DSA-2024/999"));
+        assert_eq!(
+            scoped[0].3.legal_takedown.as_deref(),
+            Some("EU-DSA-2024/999")
+        );
 
         // Restore (tombstone-not-delete): the original body re-serves.
         let n = cache_db
@@ -761,10 +996,10 @@ mod tests {
             .await
             .expect("clear");
         assert_eq!(n, 1);
-        let rows = read_after_seq(&mgr, &cache_db, &channel, 0, 100)
+        let rows = read_after_seq(&mgr, &cache_db, &channel, 0, 100, None)
             .await
             .expect("read restored");
-        assert_eq!(rows, vec![(outcome.seq, body, None)]);
+        assert_eq!(rows, vec![(outcome.seq, body, ConvWithhold::default())]);
     }
 
     /// `conv_record_scope_and_takedown` yields the channel + current flag, and
@@ -859,10 +1094,14 @@ mod tests {
         assert_eq!(replay.seg_id, first.seg_id);
         assert!(replay.finalized.is_none());
 
-        let rows = read_after_seq(&mgr, &cache_db, &channel, 0, 100)
+        let rows = read_after_seq(&mgr, &cache_db, &channel, 0, 100, None)
             .await
             .expect("read");
-        assert_eq!(rows, vec![(first.seq, body.clone(), None)], "one record");
+        assert_eq!(
+            rows,
+            vec![(first.seq, body.clone(), ConvWithhold::default())],
+            "one record"
+        );
 
         // The next distinct body still takes the next seq — the dedup consumed
         // no coordinate.
@@ -898,14 +1137,18 @@ mod tests {
         assert_eq!(a.seq, 1);
         assert_eq!(b.seq, 1, "channel b allocates its own first seq");
 
-        let rows_a = read_after_seq(&mgr, &cache_db, &ch_a, 0, 100)
+        let rows_a = read_after_seq(&mgr, &cache_db, &ch_a, 0, 100, None)
             .await
             .expect("read a");
-        let rows_b = read_after_seq(&mgr, &cache_db, &ch_b, 0, 100)
+        let rows_b = read_after_seq(&mgr, &cache_db, &ch_b, 0, 100, None)
             .await
             .expect("read b");
-        assert_eq!(rows_a, vec![(1i64, body.clone(), None)]);
-        assert_eq!(rows_b, vec![(1i64, body, None)], "b kept its own copy");
+        assert_eq!(rows_a, vec![(1i64, body.clone(), ConvWithhold::default())]);
+        assert_eq!(
+            rows_b,
+            vec![(1i64, body, ConvWithhold::default())],
+            "b kept its own copy"
+        );
     }
 
     #[tokio::test]
@@ -942,7 +1185,7 @@ mod tests {
             .await
             .expect("c2-1");
 
-        let rows = read_for_scopes_after_seq(&mgr, &cache_db, &[ch1, ch2], 0, 100)
+        let rows = read_for_scopes_after_seq(&mgr, &cache_db, &[ch1, ch2], 0, 100, None)
             .await
             .expect("read");
         // Ordered by seq ASC: 1, 1, 2.
@@ -970,7 +1213,7 @@ mod tests {
             .expect("tombstone");
         assert_eq!(n, 1);
 
-        let rows = read_after_seq(&mgr, &cache_db, &channel, 0, 100)
+        let rows = read_after_seq(&mgr, &cache_db, &channel, 0, 100, None)
             .await
             .expect("read");
         assert_eq!(rows.len(), 1);
@@ -1028,7 +1271,7 @@ mod tests {
 
         // The survivors (seq 2, 3) are readable with their original seq values;
         // the tombstoned seq 1 is gone.
-        let rows = read_after_seq(&mgr, &cache_db, &channel, 0, 100)
+        let rows = read_after_seq(&mgr, &cache_db, &channel, 0, 100, None)
             .await
             .expect("read");
         assert_eq!(

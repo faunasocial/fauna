@@ -16,7 +16,8 @@
 //!   the rail's most-restrictive answer; `encryption` is never declared, it is
 //!   the room's derived class;
 //! - **the room** — [`crate::room::transport_room`]: the bridge principal sits
-//!   on the floor, so the class is transport-only by construction;
+//!   on the floor, so the class is transport-only by construction — and a room
+//!   no live bridge serves says so ([`crate::room::RoomSnapshot::bridge_disconnected`]);
 //! - **addresses** — resolved by the nest against each bridge's grammar
 //!   ([`BridgedSink::resolve`]); no app compiles a third party's pattern.
 //!
@@ -86,6 +87,16 @@ pub struct BridgedRoomRecord {
     pub self_address: Option<String>,
     /// The family gate's marker for the room's peer, as the nest computed it.
     pub guardian_state: Option<GuardianState>,
+    /// The nest's `disconnected`: no live principal serves the room — what
+    /// paints `thread-room-notice`'s `bridge-disconnected` state. `identity`
+    /// is `None` for such a room too; this is the fact, that the consequence.
+    pub disconnected: bool,
+    /// The row ids of this room's Sent copies the nest stamped undelivered —
+    /// what the glue found re-reading a room it saw disconnected. The inbox
+    /// is read by cursor, so a stamp that lands on a row this device has
+    /// already read is never served again on the incremental read; this is
+    /// how it reaches the thread anyway. Empty for a connected room.
+    pub undelivered_rows: Vec<i64>,
 }
 
 /// The key a room's guardian marker is kept under: its bridge and its far
@@ -98,6 +109,12 @@ pub struct BridgedBackend {
     registry: RwLock<HashMap<String, BridgeIdentity>>,
     /// The family gate's marker per room, from the newest `rooms.list` read.
     guardian: RwLock<HashMap<RoomKey, GuardianState>>,
+    /// The rooms no live principal serves, from the newest `rooms.list` read.
+    disconnected: RwLock<HashSet<RoomKey>>,
+    /// The Sent copies the nest stamped undelivered, by message id — only
+    /// ever grows: a stamp is final, and a later adoption reconnects the
+    /// room without delivering what was dropped.
+    undelivered: RwLock<HashSet<MessageId>>,
     /// The account's own address on each bridge's far network, as the bridge
     /// reports it — learned from a send ([`crate::backend::BridgedSent`]) and
     /// from the inbox's own Sent rows; what tells the user's own message from a
@@ -111,33 +128,54 @@ impl BridgedBackend {
             sink,
             registry: RwLock::new(HashMap::new()),
             guardian: RwLock::new(HashMap::new()),
+            disconnected: RwLock::new(HashSet::new()),
+            undelivered: RwLock::new(HashSet::new()),
             self_addresses: RwLock::new(HashMap::new()),
         }
     }
 
     /// Load one `rooms.list` read: the registry becomes the identities of the
     /// rooms a live principal serves ([`Self::set_identities`]), each room's
-    /// guardian marker replaces the last read's — so a marker the nest no
-    /// longer computes (the knob relaxed, the guardian decided) leaves with
-    /// the next read — and the account's own far addresses are learned.
+    /// guardian marker and disconnected flag replace the last read's — so a
+    /// marker the nest no longer computes (the knob relaxed, the guardian
+    /// decided) or a room a bridge adopted again leaves with the next read —
+    /// the undelivered stamps the glue found are kept, and the account's own
+    /// far addresses are learned.
     pub fn set_rooms(&self, rooms: Vec<BridgedRoomRecord>) {
         let mut guardian = HashMap::new();
+        let mut disconnected = HashSet::new();
         let mut identities: HashMap<String, BridgeIdentity> = HashMap::new();
         for room in rooms {
             if let Some(me) = &room.self_address {
                 self.note_self_address(&room.bridge_id, me);
             }
+            for row in &room.undelivered_rows {
+                self.note_undelivered(*row);
+            }
+            let mut far = room.participants;
+            far.sort();
+            let key = (room.bridge_id.clone(), far);
+            if room.disconnected {
+                disconnected.insert(key.clone());
+            }
             if let Some(state) = room.guardian_state {
-                let mut far = room.participants;
-                far.sort();
-                guardian.insert((room.bridge_id.clone(), far), state);
+                guardian.insert(key, state);
             }
             if let Some(identity) = room.identity {
                 identities.insert(identity.id.clone(), identity);
             }
         }
         *self.guardian.write().unwrap() = guardian;
+        *self.disconnected.write().unwrap() = disconnected;
         self.set_identities(identities.into_values().collect());
+    }
+
+    /// Record that the Sent row `row_id` was stamped undelivered.
+    pub fn note_undelivered(&self, row_id: i64) {
+        self.undelivered
+            .write()
+            .unwrap()
+            .insert(bridged_message_id(row_id));
     }
 
     /// Replace the registry with `identities` — the bridges the glue read off
@@ -164,6 +202,22 @@ impl BridgedBackend {
 
     fn identity(&self, bridge_id: &str) -> Option<BridgeIdentity> {
         self.registry.read().unwrap().get(bridge_id).cloned()
+    }
+
+    /// The key the room these `participants` make is kept under — its
+    /// bridge and its far participants, the account's own address dropped.
+    fn room_key(&self, participants: &[TypedAddress]) -> Option<RoomKey> {
+        let bridge_id = bridge_id_of(participants)?;
+        let mut far: Vec<String> = participants
+            .iter()
+            .filter(|p| !self.is_self(p))
+            .filter_map(|p| match p {
+                TypedAddress::Bridged { address, .. } => Some(address.clone()),
+                _ => None,
+            })
+            .collect();
+        far.sort();
+        Some((bridge_id.to_string(), far))
     }
 
     fn is_self(&self, address: &TypedAddress) -> bool {
@@ -223,14 +277,24 @@ impl RailBackend for BridgedBackend {
         match bridge_id_of(&thread.participants).and_then(|id| self.identity(id)) {
             Some(identity) => ThreadCapabilities {
                 encryption: base.encryption,
+                can_send: base.can_send,
                 ..identity.capabilities
             },
-            None => base,
+            // No identity is the send's own refusal (`NotSupported`, below):
+            // the bar is withheld rather than offered to fail.
+            None => ThreadCapabilities {
+                can_send: false,
+                ..base
+            },
         }
     }
 
     fn room_state(&self, thread: &ThreadDetail) -> Option<crate::room::RoomSnapshot> {
-        Some(crate::room::transport_room(thread.participants.len()))
+        let mut room = crate::room::transport_room(thread.participants.len());
+        room.bridge_disconnected = self
+            .room_key(&thread.participants)
+            .is_some_and(|key| self.disconnected.read().unwrap().contains(&key));
+        Some(room)
     }
 
     fn bridge_identity(&self, bridge_id: &str) -> Option<BridgeIdentitySnapshot> {
@@ -250,21 +314,12 @@ impl RailBackend for BridgedBackend {
     }
 
     fn guardian_state(&self, participants: &[TypedAddress]) -> Option<GuardianState> {
-        let bridge_id = bridge_id_of(participants)?;
-        let mut far: Vec<String> = participants
-            .iter()
-            .filter(|p| !self.is_self(p))
-            .filter_map(|p| match p {
-                TypedAddress::Bridged { address, .. } => Some(address.clone()),
-                _ => None,
-            })
-            .collect();
-        far.sort();
-        self.guardian
-            .read()
-            .unwrap()
-            .get(&(bridge_id.to_string(), far))
-            .copied()
+        let key = self.room_key(participants)?;
+        self.guardian.read().unwrap().get(&key).copied()
+    }
+
+    fn message_undelivered(&self, id: &MessageId) -> bool {
+        self.undelivered.read().unwrap().contains(id)
     }
 
     /// Asks the nest, which matches `raw` against every bridge grammar serving
@@ -420,6 +475,10 @@ pub async fn poll_inbound_bridged(
             if rec.id > *after_id {
                 *after_id = rec.id;
             }
+            // Before the dedup: a stamp is news about a row already held.
+            if rec.undelivered {
+                backend.note_undelivered(rec.id);
+            }
             if !seen.insert(rec.id) {
                 continue;
             }
@@ -454,6 +513,7 @@ pub fn bridged_record_to_message(rec: &BridgedRecord) -> RailInboundMessage {
         badges: MessageBadges::default(),
         plane_ref: None,
         legal_takedown_ref: None,
+        admin_block_reason: None,
     }
 }
 
@@ -514,6 +574,9 @@ mod tests {
             can_appoint_admins: true,
             can_transfer_ownership: true,
             can_leave_room: true,
+            can_search_room: false,
+            // Never declared: the registry and the room decide it.
+            can_send: false,
         }
     }
 
@@ -559,6 +622,7 @@ mod tests {
             caps,
             ThreadCapabilities {
                 encryption: ThreadEncryption::TransportOnly,
+                can_send: true,
                 ..declared()
             }
         );
@@ -570,7 +634,10 @@ mod tests {
         let t = thread(vec![TypedAddress::unresolved_bridged("unknown", "x")]);
         assert_eq!(
             backend.capabilities(&t),
-            derive_capabilities(Rail::Bridged, ThreadFlavor::OneToOne)
+            ThreadCapabilities {
+                can_send: false,
+                ..derive_capabilities(Rail::Bridged, ThreadFlavor::OneToOne)
+            }
         );
         assert_eq!(backend.bridge_identity("unknown"), None);
     }
@@ -651,6 +718,7 @@ mod tests {
             body: "hi".into(),
             outbound: true,
             timestamp_ms: 1,
+            undelivered: false,
         });
         assert_eq!(echo.message_id, outcome.message_id);
         assert!(backend.bucket_inbound(echo, None).unwrap().message.is_own);
@@ -663,6 +731,7 @@ mod tests {
             body: "hello".into(),
             outbound: false,
             timestamp_ms: 2,
+            undelivered: false,
         });
         assert!(
             !backend
@@ -719,6 +788,8 @@ mod tests {
             participants: vec![peer.into()],
             self_address: Some("@me:example.org".into()),
             guardian_state,
+            disconnected: false,
+            undelivered_rows: Vec::new(),
         }
     }
 
@@ -731,6 +802,7 @@ mod tests {
             body: "hello".into(),
             outbound: false,
             timestamp_ms: id,
+            undelivered: false,
         }
     }
 
@@ -818,6 +890,7 @@ mod tests {
             body: format!("row {id}"),
             outbound,
             timestamp_ms: id,
+            undelivered: false,
         };
         let peer = "@alice:example.org";
         let me = "@me:example.org";
@@ -846,8 +919,9 @@ mod tests {
     }
 
     /// A room no live principal serves registers no identity, so its thread
-    /// falls to the rail's most-restrictive vector and the generic glyph
-    /// (ruling 2 (b)) — while the bridge's other, served rooms keep theirs.
+    /// falls to the rail's most-restrictive vector, its send withheld, and the
+    /// generic glyph (ruling 2 (b)) — while the bridge's other, served rooms
+    /// keep theirs.
     #[test]
     fn a_disconnected_room_registers_no_identity() {
         let backend = BridgedBackend::new(Arc::new(FakeSink::default()));
@@ -857,16 +931,110 @@ mod tests {
             participants: vec!["@alice:example.org".into()],
             self_address: None,
             guardian_state: Some(GuardianState::Blocked),
+            disconnected: true,
+            undelivered_rows: Vec::new(),
         }]);
         assert_eq!(backend.bridge_identity("matrix"), None);
         assert_eq!(
             backend.capabilities(&thread(vec![alice()])),
-            derive_capabilities(Rail::Bridged, ThreadFlavor::OneToOne)
+            ThreadCapabilities {
+                can_send: false,
+                ..derive_capabilities(Rail::Bridged, ThreadFlavor::OneToOne)
+            }
         );
         // The marker is the nest's answer about the peer, not the bridge's.
         assert_eq!(
             backend.guardian_state(&[alice()]),
             Some(GuardianState::Blocked)
         );
+    }
+
+    /// The bridge stops serving (`apps/bridges.md` § Phase G → *When the
+    /// bridge stops serving*): the room says so on its notice, and the user's
+    /// own message the bridge never took says so too — whether the stamp
+    /// reaches the app on the row itself (a row first read after the stamp)
+    /// or on the glue's re-read of the room (a row this device read before
+    /// it). A peer's deposit is never marked, and the room reconnects with
+    /// the next read once a bridge adopts it, the stamps kept.
+    #[tokio::test]
+    async fn a_disconnected_room_says_so_and_its_undelivered_sent_copies_too() {
+        let backend = Arc::new(BridgedBackend::new(Arc::new(FakeSink::default())));
+        let manager = ConversationsManager::new();
+        manager.register_backend(backend.clone());
+        let peer = "@alice:example.org";
+        let me = "@me:example.org";
+        let sent = |id, undelivered| BridgedRecord {
+            id,
+            bridge_id: "matrix".into(),
+            sender: me.into(),
+            recipients: vec![peer.into()],
+            body: format!("sent {id}"),
+            outbound: true,
+            timestamp_ms: id,
+            undelivered,
+        };
+        let source = FakeSource {
+            rooms: Mutex::new(vec![room(peer, None)]),
+            rows: vec![deposit(1, peer), sent(2, false)],
+        };
+        let (mut after, mut seen) = (0i64, HashSet::new());
+        poll_inbound_bridged(&source, &backend, &manager, &mut after, &mut seen, 0)
+            .await
+            .unwrap();
+        let thread_id = manager.snapshot().threads[0].thread_id.clone();
+        let detail = manager.thread_detail(thread_id.clone()).unwrap();
+        assert!(!detail.room.as_ref().unwrap().bridge_disconnected);
+        assert_eq!(detail.room.as_ref().unwrap().notice(), None);
+        assert!(detail.capabilities.can_send, "a served room is writable");
+        assert!(detail.messages.iter().all(|m| !m.undelivered));
+
+        // Revoked: the room is disconnected, and the glue's re-read found
+        // row 2 stamped — a row the cursor has already passed.
+        *source.rooms.lock().unwrap() = vec![BridgedRoomRecord {
+            identity: None,
+            disconnected: true,
+            undelivered_rows: vec![2],
+            ..room(peer, None)
+        }];
+        poll_inbound_bridged(&source, &backend, &manager, &mut after, &mut seen, 0)
+            .await
+            .unwrap();
+        let detail = manager.thread_detail(thread_id.clone()).unwrap();
+        let room_now = detail.room.as_ref().unwrap();
+        assert!(room_now.bridge_disconnected);
+        assert_eq!(
+            room_now.notice(),
+            Some(crate::room::RoomNotice::BridgeDisconnected)
+        );
+        // Readable, never writable: the bar the notice explains is withheld.
+        assert!(!detail.capabilities.can_send);
+        let marks: Vec<(bool, bool)> = detail
+            .messages
+            .iter()
+            .map(|m| (m.is_own, m.undelivered))
+            .collect();
+        assert_eq!(marks, vec![(false, false), (true, true)]);
+        // The body stays: the user needs it to send again.
+        assert!(!detail.messages[1].body.is_empty());
+
+        // A row first read after its stamp carries it itself.
+        let late = FakeSource {
+            rooms: Mutex::new(source.rooms.lock().unwrap().clone()),
+            rows: vec![sent(3, true)],
+        };
+        poll_inbound_bridged(&late, &backend, &manager, &mut after, &mut seen, 0)
+            .await
+            .unwrap();
+        let detail = manager.thread_detail(thread_id.clone()).unwrap();
+        assert_eq!(detail.messages.iter().filter(|m| m.undelivered).count(), 2);
+
+        // Adopted again: the notice goes, the stamps stay.
+        *late.rooms.lock().unwrap() = vec![room(peer, None)];
+        poll_inbound_bridged(&late, &backend, &manager, &mut after, &mut seen, 0)
+            .await
+            .unwrap();
+        let detail = manager.thread_detail(thread_id).unwrap();
+        assert_eq!(detail.room.as_ref().unwrap().notice(), None);
+        assert_eq!(detail.messages.iter().filter(|m| m.undelivered).count(), 2);
     }
 }

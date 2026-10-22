@@ -170,6 +170,34 @@ public sealed partial class ProfilePage : Page
             row.Children.Add(remove);
             PrivateLabelList.Children.Add(row);
         }
+        // The staged set moved, so the offered set did too.
+        PaintPrivateSuggestions();
+    }
+
+    /// <summary>Repaint the completion rows under the add field: none until something is
+    /// typed; a pick stages the label exactly as if typed and added.</summary>
+    private void PaintPrivateSuggestions()
+    {
+        PrivateLabelSuggestions.Children.Clear();
+        foreach (var suggestion in _private.LabelSuggestions(PrivateLabelBox.Text))
+        {
+            var row = new Button { Content = suggestion, Tag = suggestion };
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(row, Ids.ProfileLabelSuggestion);
+            row.Click += PrivateLabelSuggestion_Click;
+            PrivateLabelSuggestions.Children.Add(row);
+        }
+    }
+
+    private void PrivateLabel_TextChanged(object sender, TextChangedEventArgs e) => PaintPrivateSuggestions();
+
+    private void PrivateLabelSuggestion_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: string label })
+        {
+            if (_private.AddLabel(label)) PrivateLabelBox.Text = "";
+            RenderError(_private.ErrorMessage);
+            PaintPrivate();
+        }
     }
 
     private void PrivateNickname_TextChanged(object sender, TextChangedEventArgs e)
@@ -246,7 +274,7 @@ public sealed partial class ProfilePage : Page
         // one seam further out (dynamic-features.md § Platform-family surface excision).
         _payments = new Views.Payments.PaymentsAuthorSections();
         PaymentsSectionsHost.Content = _payments;
-        _payments.Attach(_vm);
+        _payments.Attach(_vm, _clients?.Account.Handle);
 
         _tierMoneyFields = new Views.Payments.SubscriptionTierMoneyFields();
         TierMoneyFieldsHost.Content = _tierMoneyFields;

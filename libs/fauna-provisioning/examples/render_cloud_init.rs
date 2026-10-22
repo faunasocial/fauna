@@ -21,6 +21,7 @@ fn main() {
         claim_code: "witness-claim-code".into(),
         enable_mail: false,
         deployment_seed: None,
+        ssh_door: None,
     };
     print!("{}", build_cloud_init(&params));
 }

@@ -11,9 +11,10 @@
 import {
   registryLoadAwaitingDns,
   registryLoadAwaitingDnsJson,
-  registrySaveAwaitingDns,
+  registryPersistAwaitingDns,
   registryClearAwaitingDns,
 } from '../wasm-launch';
+import { accountsPinTab } from '../accounts';
 
 export interface AwaitingDnsRecord {
   nestUrl: string;
@@ -52,19 +53,36 @@ export async function loadAwaitingDnsJson(): Promise<string | null> {
   return registryLoadAwaitingDnsJson();
 }
 
-export async function saveAwaitingDns(rec: AwaitingDnsRecord): Promise<void> {
-  const ok = await registrySaveAwaitingDns({
+/**
+ * The deferred-DNS exit's registry write — a wizard TERMINAL, through the
+ * shared `persist_awaiting_dns` tui and linux call at the same exit: registers
+ * the identity the wizard provisioned with (`secretHex`, read from the machine)
+ * and makes it active, then completes its slot, keeping the reach address and
+ * built-with identity the pending-provision write stored. In append mode this
+ * is the moment the appended identity becomes the account (`onboarding.md`
+ * § Multi-account → *Append-mode deferred/incomplete states + abandonment*), so
+ * this tab is re-pinned to it, as every activating terminal re-pins. Resolves
+ * to the actor id, or `null` when the write was refused.
+ */
+export async function persistAwaitingDns(
+  secretHex: string,
+  rec: AwaitingDnsRecord,
+): Promise<string | null> {
+  const actorId = await registryPersistAwaitingDns(secretHex, {
     nest_url: rec.nestUrl,
     handle: rec.handle,
     dns_records_json: rec.recordsJson,
     claim_code: rec.claimCode,
   });
-  if (!ok) {
+  if (!actorId) {
     // Non-fatal for the in-session surface — it renders off the machine's
     // snapshot, not off this slot. It does cost the user the *relaunch*
     // resume, so warn loudly. Mirrors savePendingInvite().
     console.warn('[onboarding] awaiting-dns save refused');
+    return null;
   }
+  await accountsPinTab(actorId);
+  return actorId;
 }
 
 /**

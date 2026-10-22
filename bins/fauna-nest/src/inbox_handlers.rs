@@ -44,7 +44,7 @@ use fauna_protocol::{
 
 use crate::federation_pool::originate_inbox_deliver;
 use crate::routes::{
-    ArrivalOrigin, InboxDeliveryOutcome, InboxRejection, InboxRejectionDisposition,
+    InboxArrival, InboxDeliveryOutcome, InboxRejection, InboxRejectionDisposition,
     deliver_inbox_payload_core, inbox_payload_sender, parse_actor_id,
 };
 use crate::rpc_router::{RpcHandler, RpcKindMeta, RpcRouterBuilder};
@@ -228,13 +228,8 @@ fn send_handler() -> RpcHandler {
                 // Same nest: deliver locally — full signature verification +
                 // `InboxMode` routing, identical to the retiring HTTP twin.
                 None => {
-                    match deliver_inbox_payload_core(
-                        &state,
-                        &recipient,
-                        &body,
-                        ArrivalOrigin::Local,
-                    )
-                    .await
+                    match deliver_inbox_payload_core(&state, &recipient, &body, InboxArrival::Local)
+                        .await
                     {
                         InboxDeliveryOutcome::Delivered(row_id) => Some(row_id),
                         InboxDeliveryOutcome::KnockStored => None,

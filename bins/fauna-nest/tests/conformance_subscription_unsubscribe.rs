@@ -70,6 +70,8 @@ async fn subscribe(
     tier: &str,
 ) -> SubscribeReply {
     let req = SubscribeRequest {
+        home_nest_url: None,
+        intent: None,
         author_id: ActorId(author),
         tier: tier.into(),
         mlkem_encaps_key: None,
@@ -95,6 +97,8 @@ async fn unsubscribe(
     author: [u8; 32],
 ) -> UnsubscribeReply {
     let req = UnsubscribeRequest {
+        home_nest_url: None,
+        intent: None,
         author_id: ActorId(author),
         extra: Default::default(),
     };

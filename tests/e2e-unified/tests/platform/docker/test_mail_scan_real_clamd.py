@@ -54,6 +54,8 @@ import re
 import subprocess
 import time
 
+import sys
+
 import pytest
 
 from .helpers import (
@@ -80,6 +82,18 @@ from .helpers import (
     start_fake_dns_sidecar,
     start_fake_scanner_sidecars,
     wait_for_health,
+)
+from .test_sidecar_lateral_reach_docker import (
+    MUST_CONNECT,
+    MUST_REFUSE,
+    imap_greets_on_loopback,
+    probe_from,
+)
+
+sys.path.insert(0, str(get_repo_root() / "scripts"))
+from vetted_images import (  # noqa: E402  -- the table the floor is recorded in
+    _VETTED_THIRD_PARTY_IMAGES,
+    meets_floor,
 )
 
 try:
@@ -224,7 +238,7 @@ def real_clamd_nest(docker_image):
         _wait_healthy(clamd_name, CLAMD_READY_DEADLINE_S)
         start_container_with_ports(
             name,
-            {3000: http_port, **mail_ports},
+            {443: http_port, **mail_ports},
             env={
                 "FAUNA_CLAIM_CODE": CLAIM_CODE,
                 "FAUNA_PORT": "3000",
@@ -244,6 +258,7 @@ def real_clamd_nest(docker_image):
                 "admin": admin,
                 "mail_ports": mail_ports,
                 "clamd_image": clamd_image,
+                "clamd": clamd_name,
             }
         finally:
             remove_container(name)
@@ -255,6 +270,7 @@ def real_clamd_nest(docker_image):
                        capture_output=True, text=True, timeout=120)
 
 
+@pytest.mark.feature("mail-abuse-refused")
 def test_real_clamd_stamps_clean_and_refuses_eicar(real_clamd_nest, run_seal_helper):
     nest = real_clamd_nest
     name = nest["name"]
@@ -311,3 +327,46 @@ def test_real_clamd_stamps_clean_and_refuses_eicar(real_clamd_nest, run_seal_hel
     assert re.search(r"\b5\d\d\b", output), (
         f"EICAR must be refused permanently (5xx, clamav policy `reject`), not "
         f"tempfailed; got {output!r}{diag()}")
+
+
+#: Asks clamd for its version over the clamd wire from the clamd container's own
+#: network namespace. The reply is box-sourced text: only the version is parsed.
+_VERSION_PROBE = (
+    "import re, socket\n"
+    "s = socket.create_connection(('127.0.0.1', 3310), timeout=30)\n"
+    "s.sendall(b'zVERSION\\0'); reply = s.recv(512)\n"
+    "m = re.match(rb'ClamAV (\\d+\\.\\d+\\.\\d+)', reply)\n"
+    "print(m.group(1).decode() if m else 'UNPARSED')\n"
+)
+
+
+def test_real_clamd_meets_the_vetted_floor_and_reaches_no_internal_listener(
+    real_clamd_nest,
+):
+    """The shipped clamd pin's version meets the vetted table's floor, and the
+    real clamd container's network position reaches none of the nest
+    container's internal listeners (deployment-threat-model.md § Concern 1a:
+    the sidecar-version finding, and the container-hardening paragraph)."""
+    nest = real_clamd_nest
+    [vetted] = [v for v in _VETTED_THIRD_PARTY_IMAGES.values() if v.mirror == "clamav"]
+    r = subprocess.run(
+        ["docker", "run", "--rm", "--network", f"container:{nest['clamd']}",
+         "python:3.14-slim", "python", "-c", _VERSION_PROBE],
+        capture_output=True, text=True, timeout=120,
+    )
+    version = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else ""
+    assert re.fullmatch(r"\d+\.\d+\.\d+", version), (
+        f"clamd's VERSION reply did not parse (rc={r.returncode})")
+    print(f"[real-clamd] {nest['clamd_image']} answers ClamAV {version} "
+          f"(floor {vetted.version_floor}) — record it in scripts/vetted_images.py")
+    assert meets_floor(version, vetted.version_floor), (
+        f"the shipped clamd pin carries ClamAV {version}, below the vetted floor "
+        f"{vetted.version_floor} — re-vet the pin through the bump queue")
+
+    register_primary_domain(nest, DOMAIN)
+    bring_bridges_to_serving(nest["name"], nest, nest["mail_ports"], DOMAIN)
+    seen = probe_from(nest["clamd"], container_ip(nest["name"]), MUST_REFUSE + MUST_CONNECT)
+    assert all(seen[p] == "open" for p in MUST_CONNECT), f"controls: {seen}"
+    assert imap_greets_on_loopback(nest["name"])
+    assert all(seen[p] == "refused" for p in MUST_REFUSE), (
+        f"the real clamd's position reached an internal listener: {seen}")

@@ -274,6 +274,13 @@ jobs:
       # fauna-nest half's margin first -- that run cleared the ~10 GB target
       # by 1 GB.
       #
+      # That run's runner had a 72 GB root. Every run since 2026-10-07
+      # (37658346727, 37826616360) has had a 145 GB root: the same ~32 GB
+      # fauna-nest peak, but 116 GB free after this step and 84 GB free at
+      # that peak. On those runners disk is not the binding resource; the
+      # assertion below guards a fall back to the smaller disk, and the
+      # build budget above is still what any widening must be priced by.
+      #
       # The additions below are the rest of the image's large unused trees
       # (Swift, GHCup, miniconda, PowerShell, global npm, the Azure CLI) plus an
       # apt cache clean, worth roughly another 10-14 GB on the standard image.
@@ -303,8 +310,9 @@ jobs:
           # half (the binding peak), plus the 2 GiB the nest blob store must
           # STILL see free at that peak, plus 8 GB of margin for a tree that
           # grows -- the ~10 GB free each half should end with. Run 37492792207
-          # had 43 GB here, so this is expected to fire at the next growth
-          # increment of the fauna-nest tests. That is its job: when it fires on
+          # had 43 GB here on a 72 GB runner, where this is expected to fire at
+          # the next growth increment of the fauna-nest tests; the 145 GB
+          # runners since have had 116 GB. That is its job: when it fires on
           # a healthy run, split the fauna-nest half further (or reclaim more
           # image) and re-measure. Raise the number only together with a fresh
           # `df` that justifies it; never lower it to make a red go away -- below
@@ -710,6 +718,12 @@ jobs:
           command -v bwrap || { sudo apt-get update && sudo apt-get install -y bubblewrap; }
           bwrap --unshare-all --ro-bind / / true
           ldconfig -p | grep -q 'libseccomp\.so\.2 ' || { echo "libseccomp.so.2 missing (libseccomp2)"; exit 1; }
+      # The pinned wasm32 C compiler (supply-chain/wasm32-cc.toml): every wasm
+      # chunk build runs `_wasm32-cc-check`, which refuses without it. The pin's
+      # own script prints the checksum-verified download and unpack for this
+      # runner's arch, the same tarball and SHA-256 the Dockerfile's stages ADD.
+      - name: Install the pinned wasm32 C compiler
+        run: uv run --no-project python scripts/wasm32-cc.py install-steps | bash -e -o pipefail
       # `just web` builds all wasm chunks, copies pkg/* into apps/fauna-web/static/,
       # then runs deno install + deno task build.
       - name: Build WASM chunks + Svelte SPA

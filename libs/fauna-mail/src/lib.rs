@@ -34,8 +34,10 @@ pub mod dns;
 pub mod dmarc_publish;
 // DMARC aggregate-report receive (docs/goal/behavior/dmarc-reporting.md
 // § Aggregate-report receive): bounded unpack + a strict, DOCTYPE-refusing XML
-// reader for the RFC 7489 §A.1 fields + the per-report summary.
-#[cfg(feature = "dmarc-report")]
+// reader for the RFC 7489 §A.1 fields + the per-report summary (`dmarc-report`);
+// and the admin-read half — the window fold and the archive gunzip — which the
+// apps take alone (`dmarc-report-view`).
+#[cfg(feature = "dmarc-report-view")]
 pub mod dmarc_report;
 // DMARC forensic-report receive (dmarc-reporting.md § Forensic-report receive):
 // classify a `dmarc-report@` message, check its RFC 5965 wrapper strictly and
@@ -267,7 +269,7 @@ pub use forward_config::{
 #[cfg(feature = "forward-loop")]
 pub use forward_loop::{
     HEADER_FORWARDED_BY, MAX_RECEIVED_HOPS, forwarded_by_value, parse_forwarded_by_actor,
-    received_chain_exceeded, self_already_forwarded,
+    received_chain_exceeded, self_already_forwarded, unauthenticated_local_from,
 };
 #[cfg(feature = "icalendar")]
 pub use icalendar::{
@@ -317,3 +319,6 @@ pub use srs::{
 };
 #[cfg(feature = "tokenizer")]
 pub use tokenizer::{CanonicalTokenSet, PositionalToken, tokenize, tokenize_positional};
+
+#[cfg(test)]
+mod proptests;

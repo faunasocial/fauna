@@ -257,3 +257,20 @@ func TestLoadFromReaderNil(t *testing.T) {
 		t.Errorf("LoadFromReader(nil): expected nil hatch, got %+v", hatch)
 	}
 }
+
+// TestLoadAcceptsContentScannersDeclaration pins that the entrypoint's
+// `content_scanners` declaration (read by the nest, not the bridge) does not
+// trip the allow-list — the hatch the image writes on every start must load.
+func TestLoadAcceptsContentScannersDeclaration(t *testing.T) {
+	const doc = `
+caldav_listen_https = "127.0.0.1:8444"
+content_scanners = "absent"
+`
+	hatch, err := LoadFromReader(strings.NewReader(doc))
+	if err != nil {
+		t.Fatalf("LoadFromReader: %v", err)
+	}
+	if got, want := hatch.ContentScanners, "absent"; got != want {
+		t.Errorf("ContentScanners = %q, want %q", got, want)
+	}
+}

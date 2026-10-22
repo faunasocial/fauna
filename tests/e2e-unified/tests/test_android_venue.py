@@ -314,3 +314,162 @@ def test_the_directory_port_is_read_back_from_the_seed():
         {"FAUNA_E2E_ACME_DIRECTORY_URL": "https://127.0.0.1:18601/dir"}
     ) == 18601
     assert acme_pebble.directory_port({}) is None
+
+
+# ── the standing venue: the launchd agents ──────────────────────────────────
+#
+# The agents are generated, not hand-written, so the tunnel the agent dials and
+# the ports the harness leases keep one home. What is pinned: the tunnel agent
+# runs exactly the tunnel this file pins above (plus the unattended options),
+# the adb server listens on loopback only, and every agent is restarted and
+# started at login -- the property that makes the venue standing.
+
+
+def _agent_plists(script: str) -> dict[str, dict]:
+    import plistlib
+
+    plists = {}
+    for chunk in script.split("<<EOF\n")[1:]:
+        body = chunk.split("\nEOF", 1)[0].replace("$HOME", "/Users/u")
+        parsed = plistlib.loads(body.encode())
+        plists[parsed["Label"]] = parsed
+    return plists
+
+
+def test_the_script_writes_and_loads_one_plist_per_agent():
+    script = android_venue.launch_agents("user", "10.0.0.2")
+    plists = _agent_plists(script)
+    assert list(plists) == list(android_venue.AGENT_LABELS)
+    for label, plist in plists.items():
+        assert plist["RunAtLoad"] is True and plist["KeepAlive"] is True, label
+        # launchd hands an agent no login PATH: every program is named by path.
+        assert plist["ProgramArguments"][0].startswith("/"), label
+    assert "launchctl bootstrap gui/$(id -u)" in script
+    assert "set -e" not in script  # pasted into an interactive shell
+
+
+def test_the_tunnel_agent_dials_the_pinned_tunnel_unattended():
+    plists = _agent_plists(android_venue.launch_agents("user", "10.0.0.2"))
+    argv = plists["social.fauna.android-tunnel"]["ProgramArguments"]
+    by_hand = android_venue.tunnel_command("user", "10.0.0.2")
+    assert _forwards(argv) == _forwards(by_hand)
+    assert argv[-1] == by_hand[-1] == "user@10.0.0.2"
+    # launchd expands no `~`, and nobody is at a terminal to answer a prompt.
+    assert argv[argv.index("-i") + 1] == "/Users/u/.ssh/fauna_android_e2e_tunnel"
+    assert "BatchMode=yes" in argv and "BatchMode=yes" not in by_hand
+
+
+def test_the_adb_server_agent_listens_on_loopback_only():
+    # Constraint 2: adb's server protocol is an unauthenticated device shell.
+    plists = _agent_plists(android_venue.launch_agents("user", "10.0.0.2"))
+    argv = plists["social.fauna.android-adb"]["ProgramArguments"]
+    assert argv[1:] == ["-L", "tcp:127.0.0.1:5037", "server", "nodaemon"]
+    assert "-a" not in argv
+
+
+def test_the_emulator_agent_runs_the_venue_avd_headless():
+    plists = _agent_plists(android_venue.launch_agents("user", "10.0.0.2"))
+    argv = plists["social.fauna.android-emulator"]["ProgramArguments"]
+    assert argv[argv.index("-avd") + 1] == android_venue.AVD_NAME
+    assert "-no-window" in argv
+
+
+def test_agent_arguments_that_are_not_plain_words_are_refused():
+    with pytest.raises(android_venue.AndroidVenueError):
+        android_venue.launch_agents("user", "$(id)")
+
+
+# ── the probe: is the venue up, from the dev VM ─────────────────────────────
+
+_PROBE_FAKE_ADB = """#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$FAKE_ADB_LOG"
+cat "$FAKE_ADB_OUT"
+exit "$FAKE_ADB_RC"
+"""
+
+_PROBE_FAKE_ADB_CMD = """@echo off
+>>"%FAKE_ADB_LOG%" echo %*
+type "%FAKE_ADB_OUT%"
+exit /b %FAKE_ADB_RC%
+"""
+
+
+@pytest.fixture
+def probe_adb(tmp_path, monkeypatch):
+    """A fake `adb` first on PATH answering `(stdout, exit code)`; returns a
+    setter for the answer and a reader for the recorded argv lines."""
+    import stat
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    if sys.platform == "win32":
+        adb = bin_dir / "adb.cmd"
+        adb.write_text(_PROBE_FAKE_ADB_CMD, encoding="utf-8", newline="\r\n")
+    else:
+        adb = bin_dir / "adb"
+        adb.write_text(_PROBE_FAKE_ADB, encoding="utf-8")
+    adb.chmod(adb.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    log, out = tmp_path / "adb.log", tmp_path / "adb.out"
+    monkeypatch.setenv("FAKE_ADB_LOG", str(log))
+    monkeypatch.setenv("FAKE_ADB_OUT", str(out))
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+    def answer(stdout: str, rc: int = 0):
+        out.write_text(stdout, encoding="utf-8")
+        monkeypatch.setenv("FAKE_ADB_RC", str(rc))
+
+    def issued():
+        return log.read_text(encoding="utf-8").split() if log.exists() else []
+
+    answer("")
+    return answer, issued
+
+
+def test_the_probe_asks_the_tunnelled_server_through_the_harness_prefix(probe_adb):
+    # Never a hand-written `-H 127.0.0.1 -P 18509`, whose client may start a
+    # LOCAL server on a dead port -- which would then hold 18509 and keep the
+    # tunnel from binding it. `-L tcp:127.0.0.1:<port>` exits instead.
+    answer, issued = probe_adb
+    answer("List of devices attached\nemulator-5554\tdevice\n")
+    android_venue.probe_venue()
+    assert issued() == ["-L", android_venue.ADB_SERVER_SPEC, "devices"]
+
+
+def test_a_dead_tunnel_reads_down_and_names_the_tunnel(probe_adb):
+    answer, _ = probe_adb
+    answer("", rc=1)
+    up, line = android_venue.probe_venue()
+    assert not up and line.startswith("venue DOWN") and "tunnel" in line
+
+
+def test_a_live_tunnel_with_no_ready_device_reads_down_and_names_the_emulator(probe_adb):
+    answer, _ = probe_adb
+    answer("List of devices attached\nemulator-5554\toffline\n")
+    up, line = android_venue.probe_venue()
+    assert not up and "emulator-5554 offline" in line and "emulator" in line
+
+
+def test_a_ready_device_reads_up_and_names_it(probe_adb):
+    answer, _ = probe_adb
+    answer("List of devices attached\nemulator-5554\tdevice\n")
+    assert android_venue.probe_venue() == (
+        True, f"venue UP: {android_venue.ADB_SERVER_SPEC} serves emulator-5554",
+    )
+
+
+def test_no_adb_at_all_reads_unknown_never_raises(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", str(tmp_path))
+    up, line = android_venue.probe_venue()
+    assert not up and line.startswith("venue UNKNOWN")
+
+
+@pytest.mark.parametrize("recipe, argument", [
+    ("android-venue-agents", "--agents"), ("android-venue-probe", "--probe"),
+])
+def test_the_venue_recipes_run_this_module(recipe, argument):
+    with open(os.path.join(_REPO_ROOT, "justfile"), encoding="utf-8") as fh:
+        justfile = fh.read()
+    body = justfile.split(f"\n{recipe}", 1)
+    assert len(body) == 2, f"the justfile has no `{recipe}` recipe"
+    head = body[1].split("\n\n", 1)[0]
+    assert f"tests/e2e-unified/helpers/android_venue.py {argument}" in head

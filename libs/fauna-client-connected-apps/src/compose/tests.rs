@@ -104,6 +104,18 @@ fn a_publisher_row_reads_head_publisher_scopes_then_facts() {
     );
 }
 
+/// The settings link rides the composed row, so a shell that calls only
+/// `roster_row_text` paints it for a hosted plugin's row and no other.
+#[test]
+fn only_a_hosted_plugins_row_opens_its_settings_card() {
+    let mut r = row();
+    assert!(!roster_row_text(&r).opens_settings_card);
+    for hosted in [class::WASM, class::CONTAINER] {
+        r.class = hosted.into();
+        assert!(roster_row_text(&r).opens_settings_card, "{hosted}");
+    }
+}
+
 #[test]
 fn an_unknown_class_paints_no_badge() {
     let mut r = row();
@@ -253,4 +265,99 @@ fn a_key_replacing_request_says_what_the_approve_ends_last() {
         lookup("connected_apps.consent_ends_holder")
     );
     assert_eq!(card_text(&card()).len(), lines.len() - 1);
+}
+
+fn install_card(development: bool) -> ConsentCardRow {
+    let mut c = card();
+    c.install = Some(fauna_atproto_settings_machine::ConsentInstallRow {
+        execution_form: "wasm".into(),
+        requested_kinds: vec!["ext.plugins.example.notes".into()],
+        settings: vec![fauna_atproto_settings_machine::ConsentInstallSettingRow {
+            key: "greeting".into(),
+            label: "Greeting".into(),
+            setting_type: "string".into(),
+        }],
+        publisher_domain: if development {
+            "localhost"
+        } else {
+            "plugins.example"
+        }
+        .into(),
+        publisher_key: (!development).then(|| "did:key:z6MkExample".into()),
+        module_digest: "sha256:abcd".into(),
+        hosts: vec![],
+        ingress_paths: vec!["/plugins/hello/".into()],
+        development,
+        bind: false,
+    });
+    c
+}
+
+/// A user's bind card carries the same section, rebuilt from the installed
+/// rows, but its heading says the plugin is already on the nest and the
+/// approve connects it — never "install".
+#[test]
+fn a_bind_card_heads_its_section_as_connecting_the_plugin() {
+    let mut c = install_card(false);
+    c.install.as_mut().unwrap().bind = true;
+    let s = request_install_text(&c).expect("the bind card's section");
+    assert_eq!(s.framing, None, "the plugin is already installed");
+    assert_eq!(
+        s.heading.resolve(lookup),
+        "Connect this plugin on your nest to your account"
+    );
+    assert_eq!(s.form.resolve(lookup), "Runs as: wasm");
+}
+
+fn resolve_all(lines: &[ComposedText]) -> Vec<String> {
+    lines.iter().map(|l| l.resolve(lookup)).collect()
+}
+
+/// Only an install card has a section; each leaf reads its own fact, a
+/// declared-nothing list says "none" rather than painting an empty heading,
+/// and the ingress paths ride under the hosts as the plugin's network reach.
+#[test]
+fn an_install_card_composes_one_text_per_leaf() {
+    assert_eq!(request_install_text(&card()), None);
+    let s = request_install_text(&install_card(false)).expect("an install section");
+    assert_eq!(
+        s.heading.resolve(lookup),
+        "Install this plugin on your nest"
+    );
+    assert_eq!(
+        s.framing.as_ref().map(|f| f.resolve(lookup)).as_deref(),
+        Some(
+            "Installing runs this code on your nest. It gets no access to anyone's private data until that person connects it from their own app."
+        )
+    );
+    assert_eq!(s.form.resolve(lookup), "Runs as: wasm");
+    assert_eq!(
+        s.publisher.resolve(lookup),
+        "Publisher: plugins.example — did:key:z6MkExample"
+    );
+    assert_eq!(s.digest.resolve(lookup), "Module: sha256:abcd");
+    assert_eq!(
+        resolve_all(&s.kinds),
+        ["Kinds of data it defines:", "  • ext.plugins.example.notes"]
+    );
+    assert_eq!(
+        resolve_all(&s.hosts),
+        [
+            "Sites it may reach: none",
+            "Addresses it answers on your nest:",
+            "  • /plugins/hello/"
+        ]
+    );
+    assert_eq!(
+        resolve_all(&s.settings),
+        ["Settings:", "  • Greeting (string)"]
+    );
+}
+
+/// A development plugin has no `did:key`: the card names it, never an empty
+/// key row.
+#[test]
+fn a_development_install_card_names_the_plugin_not_an_empty_key() {
+    let s = request_install_text(&install_card(true)).unwrap();
+    assert_eq!(s.publisher.resolve(lookup), "Publisher: Development plugin");
 }

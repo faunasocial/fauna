@@ -1057,7 +1057,7 @@ pub(super) async fn leave_share(
     session: std::sync::Arc<fauna_conversations::ConversationsSession>,
     group_id: String,
 ) -> Result<(), String> {
-    fauna_client_folders::leave_share(nest, &session, group_id).await
+    fauna_client_folders::leave_share(nest, &session.backend(), group_id).await
 }
 
 /// The ordered ui.yaml `folders` element list. While a creation wizard is
@@ -1859,6 +1859,16 @@ fn folder_row_elements(
                         t::PAYWALL_TIER
                     }),
                 );
+                // As the website hint above: a select's `label` is
+                // driver-visible only, so the create-a-tier-first hint ALSO
+                // paints as the adjacent line `folder-paywall-hint` names —
+                // present exactly while the select is disabled for want of a tier.
+                if ui.own_tiers.is_empty() {
+                    body.push(Element::label(
+                        ids::FOLDER_PAYWALL_HINT,
+                        t::PAYWALL_TIER_NEEDS_TIER,
+                    ));
+                }
             }
             // Per-set device activity — the ordinary sync "who has
             // recorded a change" signal (`fauna.folders.devices`), OWNER
@@ -2654,6 +2664,36 @@ fn location_elements(
                 els.push(Element::chrome(line));
             }
         }
+        // *Free up space* (`on-demand-files.md` § The free-up-space gesture
+        // where the OS offers none) — on the row the shared rule says carries
+        // it (`free_space_verb`, projected by `sync_agent::rendered_locations`):
+        // the switch above is on and the row's root stands. The `state` attr
+        // is the agent's `running` reading; both lines are its reading too, so
+        // a press repaints nothing until the agent says what the sweep did.
+        if let Some(verb) = &binding.free_space {
+            els.push(
+                Element::gesture_button(
+                    ids::FOLDER_LOCATION_FREE_SPACE_BUTTON,
+                    verb.button.clone(),
+                    true,
+                    Gesture::Settings(Action::FreeLocationSpace {
+                        path: binding.path.clone(),
+                    }),
+                )
+                .attr("state", if verb.running { "running" } else { "idle" })
+                .within(ids::FOLDER_LOCATION_ROW, k),
+            );
+            els.push(
+                Element::label(ids::FOLDER_LOCATION_ON_DEVICE, verb.on_device.clone())
+                    .within(ids::FOLDER_LOCATION_ROW, k),
+            );
+            if let Some(result) = &verb.result {
+                els.push(
+                    Element::label(ids::FOLDER_LOCATION_FREE_SPACE_RESULT, result.clone())
+                        .within(ids::FOLDER_LOCATION_ROW, k),
+                );
+            }
+        }
         // The mass-delete floor's confirm affordance, on the rows whose set is
         // holding (`delete-propagation.md` § A wholesale-vanished folder is
         // infrastructure failure). Every tracked file vanished at once, so the
@@ -2991,7 +3031,7 @@ pub(super) fn release_nest_place(ui: &mut FoldersUiState) {
 mod tests {
     use super::*;
     use crate::element::Role;
-    use crate::sync_agent::RenderedModeToggle;
+    use crate::sync_agent::{RenderedFreeSpace, RenderedModeToggle};
     use fauna_folders_machine::{
         DevicePlacesSnapshot, NEST_SNAPSHOTS_DEFAULT, NameSnapshot, RetentionPolicy,
         ReviewSnapshot, SubmitPhase, WizardDevice, retention_from_inputs,
@@ -3760,6 +3800,10 @@ mod tests {
         let sel = el(&els, "folder-paywall-tier-select").expect("website row paints the select");
         assert!(sel.enabled);
         assert_eq!(sel.path, vec![("folder-row".to_string(), 0)]);
+        assert!(
+            el(&els, "folder-paywall-hint").is_none(),
+            "the create-a-tier-first line is present only while the select is disabled"
+        );
         // Still public ⇒ the "Not paywalled" placeholder is offered first.
         assert_eq!(
             options(sel),
@@ -3783,6 +3827,11 @@ mod tests {
         let sel = el(&els, "folder-paywall-tier-select").expect("still painted");
         assert!(!sel.enabled);
         assert_eq!(sel.label.as_deref(), Some(t::PAYWALL_TIER_NEEDS_TIER));
+        // A select's `label` is driver-visible only, so the hint ALSO paints as
+        // the adjacent line `folder-paywall-hint` names.
+        let hint = el(&els, "folder-paywall-hint").expect("the hint paints by id");
+        assert_eq!(hint.text, t::PAYWALL_TIER_NEEDS_TIER);
+        assert_eq!(hint.path, vec![("folder-row".to_string(), 0)]);
     }
 
     /// v1 is SET-ONLY: once paywalled, the "Not paywalled" placeholder is gone, so
@@ -3947,6 +3996,26 @@ mod tests {
             deletes_held: 0,
             deletes_skipped_unreadable: 0,
             mode: None,
+            free_space: None,
+        }
+    }
+
+    /// An on-demand row whose root stands — the only shape that carries the
+    /// *Free up space* verb (`LocationBindingsModel::free_space_verb`).
+    fn freeable_binding(
+        path: &str,
+        folder: &str,
+        running: bool,
+        result: Option<&str>,
+    ) -> RenderedLocationBinding {
+        RenderedLocationBinding {
+            free_space: Some(RenderedFreeSpace {
+                running,
+                button: "Free up space".to_string(),
+                on_device: "0 B of 46 B on this device".to_string(),
+                result: result.map(str::to_string),
+            }),
+            ..moded_binding(path, folder, "on-demand")
         }
     }
 
@@ -4232,6 +4301,97 @@ mod tests {
     /// binding row — and **no** action, not even the hold's apply verb: there is
     /// nothing to confirm (`delete-propagation.md` § Unreadable is not absent).
     /// A healthy sibling row stays silent, and a zero paints nothing.
+    /// `folder-location-free-space-button` and its two lines paint on the row
+    /// that carries the verb, scoped within it, from the rendered row alone:
+    /// the button's `state` attr is the agent's `running` reading, its gesture
+    /// names this row's path, and the result line is absent until a sweep ran.
+    #[test]
+    fn a_freeable_row_paints_the_free_space_verb_scoped_within_it() {
+        let mut state = empty_state();
+        state.devices.snapshot = Some(snapshot_with_folders(vec![folder("photos")]));
+        state.folders.expanded = Some(0);
+        let folders = [
+            moded_binding("/home/u/Camera", "photos", "always"),
+            freeable_binding(
+                "/tmp/photos",
+                "photos",
+                false,
+                Some("Freed 1 files (46 B)."),
+            ),
+        ];
+        let els = folders_elements(&state, &folders);
+        let scope = vec![
+            ("folder-row".to_string(), 0),
+            ("folder-location-row".to_string(), 1),
+        ];
+
+        let buttons = ids_of(&els, "folder-location-free-space-button");
+        assert_eq!(buttons.len(), 1, "only the freeable row carries the verb");
+        let button = buttons[0];
+        assert_eq!(button.path, scope);
+        assert_eq!(
+            button.attrs,
+            vec![("state".to_string(), "idle".to_string())]
+        );
+        match &button.role {
+            Role::Button(Gesture::Settings(Action::FreeLocationSpace { path })) => {
+                assert_eq!(path, "/tmp/photos")
+            }
+            other => panic!("expected a FreeLocationSpace button, got {other:?}"),
+        }
+
+        let on_device = ids_of(&els, "folder-location-on-device");
+        assert_eq!(on_device.len(), 1);
+        assert_eq!(on_device[0].path, scope);
+        assert_eq!(on_device[0].text, "0 B of 46 B on this device");
+
+        let result = ids_of(&els, "folder-location-free-space-result");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].path, scope);
+        assert_eq!(result[0].text, "Freed 1 files (46 B).");
+    }
+
+    #[test]
+    fn a_running_sweep_paints_running_and_no_result_before_the_first() {
+        let mut state = empty_state();
+        state.devices.snapshot = Some(snapshot_with_folders(vec![folder("photos")]));
+        state.folders.expanded = Some(0);
+        let folders = [freeable_binding("/tmp/photos", "photos", true, None)];
+        let els = folders_elements(&state, &folders);
+        let button = el(&els, "folder-location-free-space-button").expect("the verb renders");
+        assert_eq!(
+            button.attrs,
+            vec![("state".to_string(), "running".to_string())]
+        );
+        assert!(el(&els, "folder-location-on-device").is_some());
+        assert!(
+            el(&els, "folder-location-free-space-result").is_none(),
+            "no sweep has run, so there is no outcome to state"
+        );
+    }
+
+    #[test]
+    fn an_unfreeable_row_paints_none_of_the_free_space_verb() {
+        let mut state = empty_state();
+        state.devices.snapshot = Some(snapshot_with_folders(vec![folder("photos")]));
+        state.folders.expanded = Some(0);
+        let folders = [
+            moded_binding("/home/u/Camera", "photos", "on-demand"),
+            binding("/home/u/Pictures", "photos"),
+        ];
+        let els = folders_elements(&state, &folders);
+        for id in [
+            "folder-location-free-space-button",
+            "folder-location-on-device",
+            "folder-location-free-space-result",
+        ] {
+            assert!(
+                el(&els, id).is_none(),
+                "{id} renders only where the rule says"
+            );
+        }
+    }
+
     #[test]
     fn an_unreadable_row_paints_the_count_and_no_action() {
         let mut state = empty_state();

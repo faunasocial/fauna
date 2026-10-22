@@ -136,7 +136,7 @@ def serving_nest(docker_image):
     name = f"fauna-mail-security-{http_port}"
     start_container_with_ports(
         name,
-        {3000: http_port, **mail_ports},
+        {443: http_port, **mail_ports},
         env={
             "FAUNA_CLAIM_CODE": CLAIM_CODE,
             "FAUNA_PORT": "3000",
@@ -257,7 +257,7 @@ def spoofing_nest(docker_image):
         )
         start_container_with_ports(
             name,
-            {3000: http_port, **mail_ports},
+            {443: http_port, **mail_ports},
             env={
                 "FAUNA_CLAIM_CODE": SPOOF_CLAIM_CODE,
                 "FAUNA_PORT": "3000",

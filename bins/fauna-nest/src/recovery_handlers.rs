@@ -68,6 +68,7 @@ use fauna_protocol::recovery::{
 use serde_bytes::ByteBuf;
 
 use crate::bridge_routing_handlers::{encode_reply, internal, malformed, require_class};
+use crate::challenge_auth::{IssueSource, store_full};
 use crate::db::recovery_escrow::RECOVERY_ESCROW_MAX_LEN;
 use crate::rpc_router::{RpcHandler, RpcKindMeta, RpcRouterBuilder};
 
@@ -260,7 +261,7 @@ fn escrow_put_handler() -> RpcHandler {
 }
 
 fn escrow_challenge_handler() -> RpcHandler {
-    Box::new(|state, _actor_id, payload| {
+    Box::new(|state, caller, payload| {
         Box::pin(async move {
             let req: EscrowChallengeRequest = decode(&payload).map_err(malformed)?;
             let actor = actor_id_from(&req.actor_id)?;
@@ -271,7 +272,12 @@ fn escrow_challenge_handler() -> RpcHandler {
             // that costs no signature; as it stands the reply carries no
             // information about the account, and every refusal happens at
             // `fetch`, behind the RecoveryKey signature.
-            let (nonce, expires_at) = state.auth.escrow_challenge_store.issue(actor).await;
+            let (nonce, expires_at) = state
+                .auth
+                .escrow_challenge_store
+                .issue(actor, IssueSource::of_current_caller(&caller))
+                .await
+                .map_err(store_full)?;
 
             encode_reply(&EscrowChallengeReply {
                 nonce: ByteBuf::from(nonce.to_vec()),
@@ -689,7 +695,7 @@ fn replacement_request_handler() -> RpcHandler {
 }
 
 fn replacement_challenge_handler() -> RpcHandler {
-    Box::new(|state, _actor_id, payload| {
+    Box::new(|state, caller, payload| {
         Box::pin(async move {
             let req: ReplacementChallengeRequest = decode(&payload).map_err(malformed)?;
             let actor = actor_id_from(&req.actor_id)?;
@@ -697,7 +703,12 @@ fn replacement_challenge_handler() -> RpcHandler {
             // Unconditional for the same no-probe reason as the escrow
             // challenge: whether anything is pending is not disclosed to an
             // unauthenticated caller.
-            let (nonce, expires_at) = state.auth.veto_challenge_store.issue(actor).await;
+            let (nonce, expires_at) = state
+                .auth
+                .veto_challenge_store
+                .issue(actor, IssueSource::of_current_caller(&caller))
+                .await
+                .map_err(store_full)?;
 
             encode_reply(&ReplacementChallengeReply {
                 nonce: ByteBuf::from(nonce.to_vec()),
@@ -1030,7 +1041,8 @@ fn succession_submit_handler() -> RpcHandler {
             // `revoke_actor_authority` does both halves plus the bridge-registry
             // purge; the `auth_core` supersession consult remains the backstop
             // for anything that re-authenticates later.
-            // ⚠ The *sparing* form, and this is the only call site of it. The
+            // ⚠ The *sparing* form (shared since 2026-10-04 with the signed-in lock,
+            // `session_handlers.rs`, for the same reason). The
             // unsparing one closed the socket this very request arrived on
             // before its Reply could be written, so the ceremony could never
             // tell its own client that it had committed: `succeed_with_held_kit`

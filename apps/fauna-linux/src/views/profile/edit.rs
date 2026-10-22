@@ -32,11 +32,11 @@ use adw::prelude::*;
 use gtk::prelude::FileExt;
 
 use fauna_client_profile::{
-    ProfileClient, ProfileDisplay, ProfileImageEdit, build_edited_profile_with_images,
-    decode_profile_display,
+    EditBase, ProfileClient, ProfileDisplay, ProfileImageEdit, build_edited_profile_with_images,
+    decode_own_profile_display,
 };
 use fauna_core::data::ProfileLink;
-use fauna_core::identity::ActorKeypair;
+use fauna_core::identity::{ActorId, ActorKeypair};
 
 use crate::async_helper::spawn_with_snapshot;
 use crate::client::FaunaClient;
@@ -70,6 +70,19 @@ struct EditWidgets {
     banner_btn: gtk::Button,
     /// `profile-edit-banner-remove-button` was tapped.
     banner_clear: Rc<Cell<bool>>,
+    /// `profile-edit-audience-toggle` — whether people on other nests may read
+    /// the profile (`profile.md` § Where logic lives → *The remote read*).
+    audience_toggle: gtk::CheckButton,
+    /// The stored profile's audience — what the toggle starts from; `false`
+    /// until the read-modify-write base lands.
+    audience_base: Cell<bool>,
+    /// The viewer has moved the toggle off the base: only then does Save carry
+    /// a value, so a save that never touched it leaves the stored audience
+    /// alone (one this build does not name included).
+    audience_staged: Cell<bool>,
+    /// A programmatic paint of the toggle is in flight: its `toggled` is not a
+    /// press.
+    audience_painting: Cell<bool>,
     /// The page-level `error-message` label, shared from the profile view.
     error_label: gtk::Label,
 }
@@ -78,11 +91,12 @@ struct EditCtx {
     client: Rc<FaunaClient>,
     rt: tokio::runtime::Handle,
     w: EditWidgets,
-    /// The current profile's raw signed bytes (read-modify-write base) — `None`
-    /// until `open` fetches it, or when the actor has never published (first
-    /// edit). Kept as raw bytes (not a decoded `Profile`) so `submit` can hand
-    /// it straight to `build_edited_profile_with_images`'s read-modify-write.
-    base: RefCell<Option<Vec<u8>>>,
+    /// The current profile's raw signed bytes (read-modify-write base) and the
+    /// owner's last identity-signed row served beside them — `None` until
+    /// `open` fetches it, or when the actor has never published (first edit).
+    /// Kept as raw bytes (not a decoded `Profile`) so `submit` can hand both
+    /// straight to `build_edited_profile_with_images`'s read-modify-write.
+    base: RefCell<Option<EditBase>>,
     /// Called after a successful publish so the caller refreshes the header.
     on_saved: Rc<dyn Fn()>,
 }
@@ -214,6 +228,10 @@ pub fn build_edit_form(
     set_test_id(&add_link, ids::PROFILE_EDIT_LINK_ADD_BUTTON);
     form.append(&add_link);
 
+    let audience_toggle = gtk::CheckButton::with_label(p::EDIT_AUDIENCE_TOGGLE);
+    set_test_id(&audience_toggle, ids::PROFILE_EDIT_AUDIENCE_TOGGLE);
+    form.append(&audience_toggle);
+
     // Avatar / banner (`profile.md` § Field ownership — the same shared
     // `build_edited_profile_with_images` path every app rides). Each is a
     // single button: its label is the placeholder until a file is picked, then
@@ -276,11 +294,29 @@ pub fn build_edit_form(
             avatar_clear,
             banner_btn,
             banner_clear,
+            audience_toggle: audience_toggle.clone(),
+            audience_base: Cell::new(false),
+            audience_staged: Cell::new(false),
+            audience_painting: Cell::new(false),
             error_label,
         },
         base: RefCell::new(None),
         on_saved,
     });
+
+    {
+        // A press stages the toggle's value, or un-stages it when it lands back
+        // on the base (tui's `toggle_audience`).
+        let ctx = Rc::clone(&ctx);
+        audience_toggle.connect_toggled(move |toggle| {
+            if ctx.w.audience_painting.get() {
+                return;
+            }
+            ctx.w
+                .audience_staged
+                .set(toggle.is_active() != ctx.w.audience_base.get());
+        });
+    }
 
     {
         let ctx = Rc::clone(&ctx);
@@ -363,6 +399,11 @@ fn add_link_row(ctx: &Rc<EditCtx>, label_val: &str, url_val: &str) {
 /// reads `predecessors_of` — a linkless successor's first edit never waits on
 /// the spawned per-sign-in hop (`profile.md` § After an identity succession).
 fn open_form(ctx: &Rc<EditCtx>) {
+    // A fresh form: the toggle starts unstaged on the not-yet-known base; a
+    // press made before the base lands survives it ([`populate`]).
+    ctx.w.audience_base.set(false);
+    ctx.w.audience_staged.set(false);
+    paint_audience(ctx, false);
     let nest = ctx.client.nest_rpc().clone();
     let kp = ActorKeypair::from_secret(ctx.client.secret_bytes());
     let ctx_render = Rc::clone(ctx);
@@ -376,7 +417,7 @@ fn open_form(ctx: &Rc<EditCtx>) {
             )
             .await
             {
-                Ok(Some(body)) => decode_profile_display(&body).ok().map(|d| (body, d)),
+                Ok(Some(base)) => edit_projection(&kp.actor_id(), base),
                 Ok(None) | Err(_) => None,
             }
         },
@@ -387,16 +428,45 @@ fn open_form(ctx: &Rc<EditCtx>) {
     );
 }
 
-fn populate(ctx: &Rc<EditCtx>, result: Option<(Vec<u8>, ProfileDisplay)>) {
-    let (base_body, dn, bio, links) = match result {
-        Some((body, d)) => (
-            Some(body),
+/// The own form's view of its base: [`decode_own_profile_display`], so the
+/// toggle opens on the audience the save will sign — the owner's last
+/// identity-signed word over an external app's edit (`profile.md` § Where
+/// logic lives → *Profile publish/edit* → *Edit surface*). A stored profile
+/// that won't decode starts a first publish rather than block editing.
+fn edit_projection(own: &ActorId, base: EditBase) -> Option<(EditBase, ProfileDisplay)> {
+    decode_own_profile_display(own, &base.body, base.last_direct_body.as_deref())
+        .ok()
+        .map(|d| (base, d))
+}
+
+/// Paint the audience toggle without it counting as a press.
+fn paint_audience(ctx: &Rc<EditCtx>, everyone: bool) {
+    ctx.w.audience_painting.set(true);
+    ctx.w.audience_toggle.set_active(everyone);
+    ctx.w.audience_painting.set(false);
+}
+
+fn populate(ctx: &Rc<EditCtx>, result: Option<(EditBase, ProfileDisplay)>) {
+    let (base, dn, bio, links, audience_everyone) = match result {
+        Some((base, d)) => (
+            Some(base),
             d.display_name.unwrap_or_default(),
             d.bio.unwrap_or_default(),
             d.links,
+            d.audience.is_everyone(),
         ),
-        None => (None, String::new(), String::new(), Vec::new()),
+        None => (None, String::new(), String::new(), Vec::new(), false),
     };
+    // The form opens before its base lands, so a press may already be staged:
+    // it stands, unless it now matches the base (tui's `EditBase` fold).
+    ctx.w.audience_base.set(audience_everyone);
+    if ctx.w.audience_staged.get() {
+        if ctx.w.audience_toggle.is_active() == audience_everyone {
+            ctx.w.audience_staged.set(false);
+        }
+    } else {
+        paint_audience(ctx, audience_everyone);
+    }
     ctx.w.display_name.set_text(&dn);
     ctx.w.bio.set_text(&bio);
     for row in ctx.w.link_rows.borrow_mut().drain(..) {
@@ -405,7 +475,7 @@ fn populate(ctx: &Rc<EditCtx>, result: Option<(Vec<u8>, ProfileDisplay)>) {
     for link in &links {
         add_link_row(ctx, &link.label, &link.uri);
     }
-    *ctx.base.borrow_mut() = base_body;
+    *ctx.base.borrow_mut() = base;
     reset_image_field(&ctx.w.avatar_btn, &ctx.w.avatar_clear, p::EDIT_AVATAR);
     reset_image_field(&ctx.w.banner_btn, &ctx.w.banner_clear, p::EDIT_BANNER);
     clear_error(&ctx.w);
@@ -453,7 +523,17 @@ fn submit(ctx: &Rc<EditCtx>) {
     let links = collect_links(ctx);
     let avatar_pending = pending_image(&ctx.w.avatar_btn, p::EDIT_AVATAR, &ctx.w.avatar_clear);
     let banner_pending = pending_image(&ctx.w.banner_btn, p::EDIT_BANNER, &ctx.w.banner_clear);
-    let base_body = ctx.base.borrow().clone();
+    let base = ctx.base.borrow().clone();
+    let (base_body, last_direct_body) = match base {
+        Some(b) => (Some(b.body), b.last_direct_body),
+        None => (None, None),
+    };
+    // `None` while the toggle is untouched: the stored audience is left alone.
+    let audience_everyone = ctx
+        .w
+        .audience_staged
+        .get()
+        .then(|| fauna_client_profile::audience_from_toggle(ctx.w.audience_toggle.is_active()));
 
     let content = ctx.client.content_api().clone();
     let nest = ctx.client.nest_rpc().clone();
@@ -473,12 +553,14 @@ fn submit(ctx: &Rc<EditCtx>) {
             let body = build_edited_profile_with_images(
                 &kp,
                 base_body.as_deref(),
+                last_direct_body.as_deref(),
                 &predecessors,
                 display_name,
                 bio,
                 links,
                 avatar,
                 banner,
+                audience_everyone,
             )
             .map_err(|e| e.to_string())?;
             let pc = ProfileClient::new(nest);
@@ -523,6 +605,97 @@ async fn resolve_pending_image(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The owner's last identity-signed word on linux's edit form (`profile.md`
+    /// § Where logic lives → *Profile publish/edit* → *Edit surface*): over an
+    /// external app's edit, the form opens the toggle on the audience the
+    /// owner's own row signed and keeps that row for the save, so an untouched
+    /// save signs `Everyone` again; with the row withheld the toggle opens off —
+    /// what that save signs (tui's
+    /// `the_owners_own_word_opens_the_toggle_and_rides_the_save`).
+    #[test]
+    fn the_owners_own_word_opens_the_toggle_and_rides_the_save() {
+        use fauna_core::data::{Capability, DeviceAuthorization, Profile, ProfileAudience};
+        use fauna_core::encoding::{EmbedAsBytes, canonical_encode, sign_and_pack, sign_envelope};
+
+        let owner = ActorKeypair::from_secret([3u8; 32]);
+        let profile = |bio: &str, audience: ProfileAudience, at: u64| Profile {
+            actor_id: owner.actor_id(),
+            display_name: Some("Ada".into()),
+            bio: Some(bio.into()),
+            avatar: None,
+            banner: None,
+            links: vec![],
+            nests: vec![],
+            admin_nests: vec![],
+            load_hint: None,
+            inbox_mode: fauna_core::data::InboxMode::Open,
+            recovery_head: None,
+            audience,
+            updated_at: fauna_core::data::Timestamp(at),
+        };
+        let direct = sign_and_pack(&owner, &profile("mine", ProfileAudience::Everyone, 10))
+            .expect("the owner's own publish");
+        // The external edit, signed by a nest-held sub-key.
+        let sub = ActorKeypair::from_secret([4u8; 32]);
+        let cert = DeviceAuthorization {
+            actor_id: owner.actor_id(),
+            device_key: sub.actor_id().0,
+            capabilities: vec![Capability::UpdateProfile],
+            created_at: fauna_core::data::Timestamp(0),
+            expires_at: None,
+        };
+        let (cert_bytes, cert_env) = sign_envelope(&owner, &cert).expect("the cert signs");
+        let (bytes, env) = sign_envelope(
+            &sub,
+            &profile("edited elsewhere", ProfileAudience::Everyone, 20),
+        )
+        .expect("the sub-key signs");
+        let delegated = canonical_encode(
+            &EmbedAsBytes::from_signed(bytes, env)
+                .with_signer_auth(EmbedAsBytes::from_signed(cert_bytes, cert_env)),
+        )
+        .expect("the delegated wire encodes");
+
+        for (served, opens) in [(Some(direct.clone()), true), (None, false)] {
+            let (base, display) = edit_projection(
+                &owner.actor_id(),
+                EditBase {
+                    body: delegated.clone(),
+                    last_direct_body: served.clone(),
+                },
+            )
+            .expect("the delegated base decodes");
+            assert_eq!(
+                display.audience.is_everyone(),
+                opens,
+                "the toggle opens on what the save will sign"
+            );
+            assert_eq!(display.bio.as_deref(), Some("edited elsewhere"));
+            assert_eq!(
+                base.last_direct_body, served,
+                "the row is kept for the save"
+            );
+
+            // The untouched save `submit` builds from that base.
+            let saved = build_edited_profile_with_images(
+                &owner,
+                Some(&base.body),
+                base.last_direct_body.as_deref(),
+                &[],
+                display.display_name,
+                display.bio,
+                display.links,
+                ProfileImageEdit::Keep,
+                ProfileImageEdit::Keep,
+                None,
+            )
+            .expect("the save signs");
+            let (signed, _) =
+                fauna_client_profile::decode_profile(&saved).expect("the save decodes");
+            assert_eq!(signed.audience.is_everyone(), opens, "the save signs it");
+        }
+    }
 
     /// The Save-time resolution priority: an untouched field is `Keep`, an
     /// explicit remove tap is `Clear`, and a freshly picked file always wins

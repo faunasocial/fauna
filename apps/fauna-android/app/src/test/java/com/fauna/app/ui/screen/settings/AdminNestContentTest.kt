@@ -50,6 +50,7 @@ class AdminNestContentTest {
         pairing: Boolean = true,
         servingPort: Int = 443,
         frontedByRouter: Boolean = false,
+        osHostStatusPresent: Boolean = false,
         osSecurityUpdates: Int = 0,
         osRebootPending: Boolean = false,
         restartingNow: Boolean = false,
@@ -142,12 +143,18 @@ class AdminNestContentTest {
         onResolveReport: (com.fauna.ffi.FfiReportQueueRow, Boolean) -> Unit = { _, _ -> },
         onOpenReportTakedown: (com.fauna.ffi.FfiReportQueueRow) -> Unit = {},
         onConsumeTakedownPrefill: () -> Unit = {},
+        blocked: AdminNestVM.BlockedState = AdminNestVM.BlockedState(),
+        onBlockReport: (com.fauna.ffi.FfiReportQueueRow) -> Unit = {},
+        onUnblock: (com.fauna.ffi.FfiBlockedRow) -> Unit = {},
+        onCancelBlock: () -> Unit = {},
+        onConfirmBlock: () -> Unit = {},
     ) {
         composeTestRule.setContent {
             AdminNestContent(
                 pairing = pairing,
                 servingPort = servingPort,
                 frontedByRouter = frontedByRouter,
+                osHostStatusPresent = osHostStatusPresent,
                 osSecurityUpdates = osSecurityUpdates,
                 osRebootPending = osRebootPending,
                 restartingNow = restartingNow,
@@ -208,6 +215,11 @@ class AdminNestContentTest {
                 onResolveReport = onResolveReport,
                 onOpenReportTakedown = onOpenReportTakedown,
                 onConsumeTakedownPrefill = onConsumeTakedownPrefill,
+                blocked = blocked,
+                onBlockReport = onBlockReport,
+                onUnblock = onUnblock,
+                onCancelBlock = onCancelBlock,
+                onConfirmBlock = onConfirmBlock,
             )
         }
     }
@@ -530,6 +542,22 @@ class AdminNestContentTest {
     }
 
     @Test
+    fun osStatusSaysNotReportedWithoutHostData() {
+        // A nest that read no host-status file (a hand-built box) never claims
+        // "OS up to date"; one that read the file with nothing pending does.
+        render(osHostStatusPresent = false)
+        composeTestRule.onNodeWithTag("nest-os-maintenance-status").performScrollTo()
+            .assertTextEquals(ctx().getString(R.string.admin_nest_page_os_no_host_data))
+    }
+
+    @Test
+    fun osStatusSaysUpToDateWhenHostReportsNothingPending() {
+        render(osHostStatusPresent = true)
+        composeTestRule.onNodeWithTag("nest-os-maintenance-status").performScrollTo()
+            .assertTextEquals(ctx().getString(R.string.admin_nest_page_os_up_to_date))
+    }
+
+    @Test
     fun osUpdatesCountShowsRawCountWhenPending() {
         // The badge is a focused integer split off the categorical status line.
         render(osSecurityUpdates = 3)
@@ -574,7 +602,7 @@ class AdminNestContentTest {
         composeTestRule.onNodeWithTag("admin-nest-seed-rotate-button").assertExists()
         composeTestRule.onNodeWithTag("admin-nest-seed-rotate-cancel-button").assertDoesNotExist()
         composeTestRule.onNodeWithTag("admin-nest-seed-rotate-confirm-button").assertDoesNotExist()
-        composeTestRule.onNodeWithTag("admin-nest-seed-rotate-roster-item-0").assertDoesNotExist()
+        composeTestRule.onAllNodesWithTag("admin-nest-seed-rotate-roster-item").assertCountEquals(0)
         composeTestRule.onNodeWithTag("admin-nest-seed-rotate-roster-reason").assertDoesNotExist()
     }
 
@@ -596,7 +624,7 @@ class AdminNestContentTest {
         composeTestRule.onNodeWithTag("admin-nest-seed-rotate-confirm-button")
             .performScrollTo().assertExists().assertIsNotEnabled()
         composeTestRule.onNodeWithTag("admin-nest-seed-rotate-cancel-button").assertExists()
-        composeTestRule.onNodeWithTag("admin-nest-seed-rotate-roster-item-0").assertDoesNotExist()
+        composeTestRule.onAllNodesWithTag("admin-nest-seed-rotate-roster-item").assertCountEquals(0)
         composeTestRule.onNodeWithTag("admin-nest-seed-rotate-roster-reason")
             .assertTextEquals("Checking who currently administers this nest…")
     }
@@ -619,9 +647,9 @@ class AdminNestContentTest {
             blockedReason = null,
         )
         render(seedRotateConfirm = AdminNestVM.SeedRotateConfirmState.Ready(view))
-        composeTestRule.onNodeWithTag("admin-nest-seed-rotate-roster-item-0")
+        composeTestRule.onAllNodesWithTag("admin-nest-seed-rotate-roster-item")[0]
             .performScrollTo().assertTextEquals("alice@nest.test")
-        composeTestRule.onNodeWithTag("admin-nest-seed-rotate-roster-item-1").assertDoesNotExist()
+        composeTestRule.onAllNodesWithTag("admin-nest-seed-rotate-roster-item").assertCountEquals(1)
         composeTestRule.onNodeWithTag("admin-nest-seed-rotate-roster-reason").assertDoesNotExist()
         composeTestRule.onNodeWithTag("admin-nest-seed-rotate-confirm-button").assertIsEnabled()
     }
@@ -925,7 +953,7 @@ class AdminNestContentTest {
         render(oauthKeys = AdminNestVM.OauthKeysRead.Unread)
         composeTestRule.onNodeWithTag("admin-nest-oauth-key-reason").performScrollTo()
             .assertTextEquals(ctx().getString(R.string.admin_nest_page_oauth_keys_loading))
-        composeTestRule.onNodeWithTag("admin-nest-oauth-key-item-0").assertDoesNotExist()
+        composeTestRule.onAllNodesWithTag("admin-nest-oauth-key-item").assertCountEquals(0)
         oauthButtons.forEach { tag ->
             composeTestRule.onNodeWithTag(tag).performScrollTo().assertExists().assertIsNotEnabled()
         }
@@ -940,7 +968,7 @@ class AdminNestContentTest {
         composeTestRule.onNodeWithTag("admin-nest-oauth-key-reason").performScrollTo()
             .assertTextEquals(reason)
         assertTrue("the worded reason carries its cause", reason.contains("unknown kind"))
-        composeTestRule.onNodeWithTag("admin-nest-oauth-key-item-0").assertDoesNotExist()
+        composeTestRule.onAllNodesWithTag("admin-nest-oauth-key-item").assertCountEquals(0)
         oauthButtons.forEach { tag ->
             composeTestRule.onNodeWithTag(tag).performScrollTo().assertIsNotEnabled()
         }
@@ -980,11 +1008,11 @@ class AdminNestContentTest {
                 }
             },
         )
-        composeTestRule.onNodeWithTag("admin-nest-oauth-key-item-0").performScrollTo()
+        composeTestRule.onAllNodesWithTag("admin-nest-oauth-key-item")[0].performScrollTo()
             .assertTextEquals("kid-new — signing now")
-        composeTestRule.onNodeWithTag("admin-nest-oauth-key-item-1").performScrollTo()
+        composeTestRule.onAllNodesWithTag("admin-nest-oauth-key-item")[1].performScrollTo()
             .assertTextEquals("kid-old — replaced; still accepted for 10 min")
-        composeTestRule.onNodeWithTag("admin-nest-oauth-key-item-2").assertDoesNotExist()
+        composeTestRule.onAllNodesWithTag("admin-nest-oauth-key-item").assertCountEquals(2)
         composeTestRule.onNodeWithTag("admin-nest-oauth-key-reason").assertDoesNotExist()
         // The fold is handed the wall clock at paint, in epoch SECONDS.
         assertTrue("row labels were folded at paint", seen.isNotEmpty())
@@ -1131,6 +1159,7 @@ class AdminNestContentTest {
         canOpenTakedown: Boolean,
         note: String? = null,
         excerpt: String? = null,
+        canBlock: Boolean = false,
     ) = com.fauna.ffi.FfiReportQueueRow(
         reportId = id,
         subject = subject,
@@ -1141,6 +1170,7 @@ class AdminNestContentTest {
         origin = LocalizedText("admin.nest_page.reports_origin_local", mapOf("handle" to "alice")),
         createdAt = 0L,
         canOpenTakedown = canOpenTakedown,
+        canBlock = canBlock,
     )
 
     @Test
@@ -1223,5 +1253,100 @@ class AdminNestContentTest {
             .getOrNull(androidx.compose.ui.semantics.SemanticsProperties.EditableText)?.text.orEmpty()
         assertEquals("", typed)
         assertEquals(1, consumed)
+    }
+
+    // ── Admin block of a reported item (moderation.md § Admin block of a reported item) ──
+
+    private fun blockedRow(id: String, cid: String) = com.fauna.ffi.FfiBlockedRow(
+        reportId = id,
+        subject = com.fauna.ffi.FfiReportSubject.Post(cid),
+        reasonToken = "harassment",
+        reason = LocalizedText("moderation.report.reason_harassment", emptyMap()),
+        blockedAt = 0L,
+        unblock = com.fauna.ffi.FfiBlockFormView(
+            canSubmit = true,
+            blockedReason = null,
+            armLabel = LocalizedText("admin.nest_page.block_arm_unblock", emptyMap()),
+            confirmLabel = LocalizedText("admin.nest_page.block_confirm_button_unblock", emptyMap()),
+        ),
+    )
+
+    @Test
+    fun theBlockVerbPaintsOnItemRowsOnlyAndForwardsTheRow() {
+        val post = queueRow("r1", com.fauna.ffi.FfiReportSubject.Post("cid1"), canOpenTakedown = true, canBlock = true)
+        val account = queueRow("r2", com.fauna.ffi.FfiReportSubject.Actor("ab"), canOpenTakedown = false)
+        val armed = mutableListOf<String>()
+        render(
+            reports = AdminNestVM.ReportsState(rows = listOf(post, account), loaded = true),
+            onBlockReport = { armed += it.reportId },
+        )
+
+        composeTestRule.onNodeWithTag("admin-nest-reports-section").performScrollTo()
+        composeTestRule.onAllNodesWithTag("admin-nest-report-block-button").assertCountEquals(1)
+        composeTestRule.onNodeWithTag("admin-nest-report-block-button").performScrollTo().performClick()
+        assertEquals(listOf("r1"), armed)
+    }
+
+    @Test
+    fun theBlockedListSaysLoadingUntilReadAndEmptyOnlyOffTheLoadedBit() {
+        render(blocked = AdminNestVM.BlockedState(rows = emptyList(), loaded = false))
+        composeTestRule.onNodeWithTag("admin-nest-blocked-section").performScrollTo()
+        composeTestRule.onNodeWithText("Loading blocked items…").assertExists()
+        composeTestRule.onNodeWithText("Nothing is blocked.").assertDoesNotExist()
+    }
+
+    @Test
+    fun theBlockedListPaintsOneItemAndOneUnblockPerRowAndForwardsTheRow() {
+        val row = blockedRow("r1", "cid1")
+        val unblocked = mutableListOf<String>()
+        render(
+            blocked = AdminNestVM.BlockedState(rows = listOf(row), loaded = true),
+            onUnblock = { unblocked += it.reportId },
+        )
+
+        composeTestRule.onNodeWithTag("admin-nest-blocked-section").performScrollTo()
+        composeTestRule.onAllNodesWithTag("admin-nest-blocked-item").assertCountEquals(1)
+        assertTrue(
+            AdminNestVM.blockedLine(row) { it.key }
+                .startsWith("moderation.report.reason_harassment · post cid1 · "),
+        )
+        composeTestRule.onNodeWithTag("admin-nest-blocked-unblock-button").performScrollTo().performClick()
+        assertEquals(listOf("r1"), unblocked)
+    }
+
+    @Test
+    fun theArmedConfirmNamesTheActAndItsButtonsForwardConfirmAndCancel() {
+        var confirmed = 0
+        var cancelled = 0
+        render(
+            blocked = AdminNestVM.BlockedState(
+                rows = emptyList(),
+                loaded = true,
+                armed = AdminNestVM.ArmedBlock(
+                    reportId = "r1",
+                    restore = false,
+                    summary = "Block post cid1 for everyone this nest serves except its author? Reason: Harassment.",
+                    confirmLabel = "Confirm block",
+                ),
+            ),
+            onConfirmBlock = { confirmed++ },
+            onCancelBlock = { cancelled++ },
+        )
+
+        composeTestRule.onNodeWithTag("admin-nest-report-block-confirm-summary").performScrollTo()
+            .assertTextContains("Block post cid1", substring = true)
+        composeTestRule.onNodeWithTag("admin-nest-report-block-confirm-button")
+            .performScrollTo().assertTextEquals("Confirm block").performClick()
+        composeTestRule.onNodeWithTag("admin-nest-report-block-cancel-button")
+            .performScrollTo().performClick()
+        assertEquals(1, confirmed)
+        assertEquals(1, cancelled)
+    }
+
+    @Test
+    fun noConfirmPaintsWhileNothingIsArmed() {
+        render(blocked = AdminNestVM.BlockedState(rows = emptyList(), loaded = true))
+        composeTestRule.onAllNodesWithTag("admin-nest-report-block-confirm-button").assertCountEquals(0)
+        composeTestRule.onAllNodesWithTag("admin-nest-report-block-confirm-summary").assertCountEquals(0)
     }
 }

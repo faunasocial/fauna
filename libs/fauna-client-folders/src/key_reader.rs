@@ -30,6 +30,19 @@ pub trait FolderKeyReader: fauna_core::MaybeSendSync {
     /// to plaintext.
     async fn load(&self) -> anyhow::Result<FoldersConfig>;
 
+    /// [`Self::load`] for a read a DECISION is derived from — the succession
+    /// cut's "which owned sets are un-cut", the sync agent's "which bound sets
+    /// can be named and keyed" (`account-client-lifecycle.md` § The
+    /// client-side lifecycle → *The first listing*, clause (3)). A source over
+    /// a replica that has not yet listed custody's scope from its bound nest,
+    /// or that holds custody rows under a generation it may still be keyed
+    /// for, refuses as not ready ([`custody_not_ready`]) instead of answering
+    /// what it holds: an empty custody reads as "this account owns no set".
+    /// Defaults to `load`, for a source that is always complete.
+    async fn load_listed(&self) -> anyhow::Result<FoldersConfig> {
+        self.load().await
+    }
+
     /// This device's **adoption markers** (`writer-signed-change-records.md`
     /// ruling (11)(d)): the nonces this device's re-mints replaced, each a
     /// standing licence for this device's engine to adopt the nest's history
@@ -102,6 +115,13 @@ pub fn encode_refetch_request(now_micros: u64) -> Vec<u8> {
 /// request.
 pub fn decode_refetch_request(bytes: Option<&[u8]>) -> Option<u64> {
     Some(u64::from_be_bytes(bytes?.try_into().ok()?))
+}
+
+/// Was `e` a [`FolderKeyStore::load_listed`] refusal as not ready — the
+/// transient class (`fauna_client_config::StoreError::is_not_ready`) that a
+/// later listing ends — rather than a store that answered and failed?
+pub fn custody_not_ready(e: &anyhow::Error) -> bool {
+    fauna_client_config::StoreError::Load(e.to_string()).is_not_ready()
 }
 
 /// A level of "custody may have changed" notices

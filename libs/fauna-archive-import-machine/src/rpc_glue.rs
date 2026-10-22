@@ -47,7 +47,10 @@ use fauna_client_subscriptions::orchestration::{
     AuthorError, SubscriptionsAuthor, TierGateMaterial,
 };
 use fauna_client_sync::SyncClient as SyncRpc;
+use fauna_client_sync::licensed_read::{LicensedManifestReader, SetAddress};
+use fauna_client_sync::row_judge::ReaderSeat;
 use fauna_client_sync::sync::SyncFile;
+use fauna_core::apply_failure::{PermanentApplyFailure, permanent_reason};
 use fauna_core::crypto::BackupKey;
 use fauna_core::data::{ContentHash, Timestamp};
 use fauna_core::file_download::{
@@ -55,8 +58,8 @@ use fauna_core::file_download::{
     download_file_range_by_manifest, file_len_by_manifest,
 };
 use fauna_core::identity::ActorKeypair;
-use fauna_protocol::RpcErrorClass as _;
 use fauna_protocol::discovery::capability::HIDDEN_TIERS;
+use fauna_protocol::{RpcErrorClass, RpcRequester};
 use fauna_sync_engine::nest_client::SyncClient as ChunkStore;
 
 use crate::machine::ArchiveImportMachine;
@@ -80,11 +83,17 @@ const READ_AHEAD_BLOCK: u64 = 1 << 20;
 
 // ── error mapping ──────────────────────────────────────────────────────────
 
+/// The code an archive-folder read no judged change row licenses is refused
+/// with (`backup-restore.md` § Security Properties → Integrity): permanent —
+/// re-reading reproduces it — so a `Rejected`, never a `Transport`, and loud
+/// wherever a read's error propagates.
+pub const ENTRY_UNLICENSED_CODE: &str = "fauna.archive_import.entry_unlicensed";
+
 /// The one transport→seam mapping. A wire rejection keeps its **code** — the
 /// run's folder-name loop matches on `fauna.folders.conflict` verbatim
 /// (`run.rs::create_named_folder`) — while every transport fault (disconnect,
 /// timeout, auth, framing) becomes `Transport`.
-fn nest_err(e: NestClientError) -> ArchiveNestError {
+fn nest_err<E: RpcErrorClass + core::fmt::Display>(e: E) -> ArchiveNestError {
     match e.as_rpc_error() {
         Some(rpc) => ArchiveNestError::Rejected {
             code: rpc.code.clone(),
@@ -100,6 +109,20 @@ fn nest_err(e: NestClientError) -> ArchiveNestError {
 /// where the walk records *which* chunk failed.
 fn walk_err(e: anyhow::Error) -> ArchiveNestError {
     ArchiveNestError::Transport(format!("{e:#}"))
+}
+
+/// A licence gate's failure ([`LicensedManifestReader::require_licence`]):
+/// the typed `ENTRY_UNLICENSED` refusal becomes [`ENTRY_UNLICENSED_CODE`],
+/// and a history the nest withheld stays `Transport` — a re-run retries it.
+fn licence_err(e: anyhow::Error) -> ArchiveNestError {
+    if permanent_reason(&e) == Some(PermanentApplyFailure::ENTRY_UNLICENSED.reason) {
+        ArchiveNestError::Rejected {
+            code: ENTRY_UNLICENSED_CODE.to_string(),
+            detail: format!("{e:#}"),
+        }
+    } else {
+        walk_err(e)
+    }
 }
 
 /// A `SubscriptionsAuthor` failure. The two arms that wrap a transport error
@@ -275,8 +298,7 @@ impl ArchiveSource for FolderArchiveSource {
 /// hash by the walk itself (§ Storage — a range has no whole-file address).
 struct ManifestRangeReader {
     fetcher: ChunkStoreFetcher,
-    keys: FileDownloadKeys,
-    manifest_hash: ContentHash,
+    file: LicensedFile,
     path: String,
 }
 
@@ -285,10 +307,9 @@ impl RangeReader for ManifestRangeReader {
     async fn read_range(&self, offset: u64, len: u64) -> Result<Vec<u8>, ArchiveNestError> {
         download_file_range_by_manifest(
             &self.fetcher,
-            &self.keys,
-            self.manifest_hash,
-            // Owner-only (private) folder: no M2 content-key generation.
-            None,
+            &self.file.keys,
+            self.file.manifest,
+            self.file.content_key_version,
             &self.path,
             offset,
             len,
@@ -347,10 +368,11 @@ pub struct RpcArchiveNest {
     /// Resolved once (two RPCs) and shared by every `put_event` in a run.
     self_email: tokio::sync::OnceCell<String>,
     /// Each archive folder's set nonce — the binding every change record the
-    /// run writes into it is signed under — resolved once per folder (two
-    /// RPCs) rather than per file. A folder whose nonce did not resolve is
-    /// cached as `None` and records unsigned.
-    set_nonces: tokio::sync::Mutex<std::collections::HashMap<String, Option<[u8; 32]>>>,
+    /// run writes into it is signed under, and every read of it is judged
+    /// under — resolved once per folder (two RPCs) rather than per file. A
+    /// folder whose nonce did not resolve is not cached: the next write or
+    /// read asks again, and until then refuses.
+    set_nonces: tokio::sync::Mutex<std::collections::HashMap<String, [u8; 32]>>,
     /// The owner's period-key custody (`fauna.state.subscriptions`) the
     /// reserved tiers' gate material is read from and recorded into.
     period_keys: fauna_client_subscriptions::SharedPeriodKeyStore,
@@ -384,46 +406,80 @@ impl RpcArchiveNest {
         Ok(ActorKeypair::from_secret(*self.keypair()?.secret_bytes()))
     }
 
+    /// `folder`'s set nonce, resolved once per folder from the roster plus
+    /// the owner's custody.
+    ///
+    /// An unresolved nonce is a typed TRANSIENT refusal, never an unsigned
+    /// record: the archive folder's nonce is minted into custody before the
+    /// nest sees the set ([`ArchiveNest::create_folder`]), so its absence is
+    /// a fault (a custody read that failed, a roster that has not caught up)
+    /// — and an unsigned record could never be read back, since every read
+    /// of the folder is licensed by a judged, writer-signed row
+    /// ([`licensed_file`]). The run stops and a resume retries.
+    async fn set_nonce(&self, folder: &str) -> Result<[u8; 32], ArchiveNestError> {
+        let mut cache = self.set_nonces.lock().await;
+        if let Some(nonce) = cache.get(folder) {
+            return Ok(*nonce);
+        }
+        let files = FoldersClient::new(Arc::clone(&self.nest));
+        let nonce = fauna_client_folders::record_nonce(&files, &*self.folder_keys, folder)
+            .await
+            .map_err(|e| {
+                ArchiveNestError::Transport(format!(
+                    "archive folder's set nonce unresolved, refusing an unsigned record: {e}"
+                ))
+            })?
+            .ok_or_else(|| {
+                ArchiveNestError::Transport(
+                    "archive folder's set nonce is not in custody, refusing an unsigned record"
+                        .to_string(),
+                )
+            })?;
+        cache.insert(folder.to_string(), nonce);
+        Ok(nonce)
+    }
+
     /// The record client for `folder`: signed with the connection's identity
-    /// under the folder's nonce (resolved once per folder), or unsigned when
-    /// custody holds none.
+    /// under the folder's nonce ([`Self::set_nonce`]) — never unsigned.
     async fn record_client(
         &self,
         folder: &str,
     ) -> Result<SyncRpc<Arc<NestClient>>, ArchiveNestError> {
         let identity = self.identity()?;
-        let mut cache = self.set_nonces.lock().await;
-        let nonce = match cache.get(folder) {
-            Some(n) => *n,
-            None => {
-                let files = FoldersClient::new(Arc::clone(&self.nest));
-                let n = fauna_client_folders::record_nonce(&files, &*self.folder_keys, folder)
-                    .await
-                    .unwrap_or_else(|e| {
-                        tracing::warn!("archive import records unsigned: nonce unresolved ({e})");
-                        None
-                    });
-                cache.insert(folder.to_string(), n);
-                n
-            }
-        };
-        let client = SyncRpc::new(Arc::clone(&self.nest));
-        Ok(match nonce {
-            Some(nonce) => client.with_record_signing(fauna_client_sync::RecordSigning {
+        let nonce = self.set_nonce(folder).await?;
+        Ok(SyncRpc::new(Arc::clone(&self.nest)).with_record_signing(
+            fauna_client_sync::RecordSigning {
                 signer: Arc::new(fauna_protocol::sync_writer_sig::ChangeSigner::direct(
                     &identity,
                 )),
                 set_nonce: fauna_client_sync::SetNonceSource::Fixed(nonce),
-            }),
-            None => client,
+            },
+        ))
+    }
+
+    /// The seat every read of `folder` is judged from: this identity, under
+    /// the folder's nonce ([`Self::set_nonce`]) — the binding the run's own
+    /// records were signed under.
+    async fn reader_seat(&self, folder: &str) -> Result<ReaderSeat, ArchiveNestError> {
+        Ok(ReaderSeat {
+            own: Some(self.keypair()?.actor_id().0),
+            nonces: Some(fauna_client_sync::SetNonceSource::Fixed(
+                self.set_nonce(folder).await?,
+            )),
+            ..Default::default()
         })
     }
 
-    /// The owner-audience reader for the archive folder's files.
+    /// The owner-audience reader for the archive folder's files —
+    /// [`FileDownloadKeys::sealed_only`]: every file in the folder is written
+    /// through `seal_blob` under the owner's root (§ Storage), so the folder
+    /// is never plaintext and a plaintext manifest is refused before any
+    /// chunk is fetched.
     fn owner_keys(&self) -> Result<FileDownloadKeys, ArchiveNestError> {
-        Ok(FileDownloadKeys::owner(BackupKey::derive(
-            self.keypair()?.secret_bytes(),
-        )))
+        Ok(
+            FileDownloadKeys::owner(BackupKey::derive(self.keypair()?.secret_bytes()))
+                .sealed_only(),
+        )
     }
 
     /// The convergent chunk root every file in the folder seals under.
@@ -445,20 +501,21 @@ impl RpcArchiveNest {
         ))
     }
 
-    /// The live record for `path` in `folder`, or `None` when no live record
-    /// names it. `fauna.sync.files` is the head projection over the change log
-    /// and carries the `manifest_hash` the walk needs, so the raw
-    /// `changes.list` history is never walked here.
-    async fn head_entry(
+    /// The licensed head of `path` in `folder` ([`licensed_head`]), or `None`
+    /// when no live record names it.
+    async fn head_file(
         &self,
         folder: &str,
         path: &str,
-    ) -> Result<Option<SyncFile>, ArchiveNestError> {
-        let reply = SyncRpc::new(Arc::clone(&self.nest))
-            .files(folder, None)
-            .await
-            .map_err(nest_err)?;
-        Ok(find_head(reply.files, path))
+    ) -> Result<Option<LicensedFile>, ArchiveNestError> {
+        licensed_head(
+            &SyncRpc::new(Arc::clone(&self.nest)),
+            &self.owner_keys()?,
+            folder,
+            path,
+            async || self.reader_seat(folder).await,
+        )
+        .await
     }
 
     /// The whole file at `path`, or `None` when no live record names it. The
@@ -469,22 +526,10 @@ impl RpcArchiveNest {
         folder: &str,
         path: &str,
     ) -> Result<Option<Vec<u8>>, ArchiveNestError> {
-        let Some(entry) = self.head_entry(folder, path).await? else {
+        let Some(file) = self.head_file(folder, path).await? else {
             return Ok(None);
         };
-        let digest = fauna_core::hex32::decode(&entry.manifest_hash)
-            .map_err(|e| ArchiveNestError::Transport(format!("manifest hash for {path}: {e}")))?;
-        let bytes = download_file_bytes_by_manifest(
-            &self.fetcher(),
-            &self.owner_keys()?,
-            ContentHash::from_digest_raw(digest),
-            // Owner-only (private) folder: no M2 content-key generation.
-            None,
-            path,
-        )
-        .await
-        .map_err(walk_err)?;
-        Ok(Some(bytes))
+        read_licensed(&self.fetcher(), &file, path).await.map(Some)
     }
 
     /// The actor's own email (`<handle>@<domain>`) — the CAL-ADDRESS an imported
@@ -585,8 +630,22 @@ impl ArchiveNest for RpcArchiveNest {
         // folder has no type, so no field of the row narrows the walk.
         for summary in fauna_client_folders::custody::named_from_custody(listing.folders, &custody)
         {
-            let Some(bytes) = self.read_path(&summary.name, MARKER_PATH).await? else {
-                continue;
+            let bytes = match self.read_path(&summary.name, MARKER_PATH).await {
+                Ok(Some(bytes)) => bytes,
+                Ok(None) => continue,
+                // A marker no judged row of the folder names was never
+                // written by this owner's import — the folder is not one of
+                // ours, exactly like an undecodable marker below. A history
+                // the nest withheld stays an error: that is not an answer.
+                Err(ArchiveNestError::Rejected { code, .. }) if code == ENTRY_UNLICENSED_CODE => {
+                    tracing::warn!(
+                        target: "fauna_archive_import",
+                        "folder {} lists an archive marker no judged row licenses; skipping",
+                        summary.name
+                    );
+                    continue;
+                }
+                Err(e) => return Err(e),
             };
             // A folder carrying an unreadable marker is simply not one of ours
             // — never a hard failure of the listing every hydrate runs.
@@ -713,20 +772,20 @@ impl ArchiveNest for RpcArchiveNest {
         folder: &str,
         path: &str,
     ) -> Result<Option<SharedSource>, ArchiveNestError> {
-        let Some(entry) = self.head_entry(folder, path).await? else {
+        let Some(file) = self.head_file(folder, path).await? else {
             return Ok(None);
         };
-        let digest = fauna_core::hex32::decode(&entry.manifest_hash)
-            .map_err(|e| ArchiveNestError::Transport(format!("manifest hash for {path}: {e}")))?;
-        let manifest_hash = ContentHash::from_digest_raw(digest);
-        let keys = self.owner_keys()?;
-        let len = file_len_by_manifest(&self.fetcher(), &keys, manifest_hash, None)
-            .await
-            .map_err(walk_err)?;
+        let len = file_len_by_manifest(
+            &self.fetcher(),
+            &file.keys,
+            file.manifest,
+            file.content_key_version,
+        )
+        .await
+        .map_err(walk_err)?;
         let reader = Arc::new(ManifestRangeReader {
             fetcher: self.fetcher(),
-            keys,
-            manifest_hash,
+            file,
             path: path.to_string(),
         });
         Ok(Some(Arc::new(FolderArchiveSource::new(reader, len))))
@@ -869,6 +928,102 @@ impl ArchiveNest for RpcArchiveNest {
             .map_err(put_event_err)?;
         Ok(())
     }
+}
+
+// ── the licensed read ──────────────────────────────────────────────────────
+
+/// One archive-folder file a judged change row licenses: the manifest the
+/// head listed, and the keys and stamp the licensed open runs under.
+struct LicensedFile {
+    manifest: ContentHash,
+    /// The owner reader bound to the licensing row's signer, sealed-only.
+    keys: FileDownloadKeys,
+    /// The licensing row's signed stamp (`None` for this owner-only folder,
+    /// which carries no M2 generation — read off the row, never assumed).
+    content_key_version: Option<u64>,
+}
+
+/// The live record for `path` in `folder`, or `None` when no live record
+/// names it. `fauna.sync.files` is the head projection over the change log
+/// and carries the `manifest_hash` the walk needs — the home nest's unsigned
+/// word, which [`licensed_head`] licenses before any byte is read.
+async fn head_entry<R>(
+    sync: &SyncRpc<R>,
+    folder: &str,
+    path: &str,
+) -> Result<Option<SyncFile>, ArchiveNestError>
+where
+    R: RpcRequester,
+    R::Error: RpcErrorClass + core::fmt::Display,
+{
+    let reply = sync.files(folder, None).await.map_err(nest_err)?;
+    Ok(find_head(reply.files, path))
+}
+
+/// The head of `path` in `folder`, licensed by the judged change row of the
+/// folder naming exactly the listed manifest under the hash of `path`
+/// (`backup-restore.md` § Security Properties → Integrity;
+/// `archive-import.md` § Storage) — the shared licensed read
+/// ([`LicensedManifestReader`]), the snapshot entry reader's own, never a
+/// copy. `None` when nothing is listed at the path.
+///
+/// The listing names an address and nothing more: the licence is read BEFORE
+/// any byte, from the signed version history judged under `seat` (resolved
+/// only once something is listed — the marker scan asks every custody-named
+/// folder, and most hold no marker). No such row → [`ENTRY_UNLICENSED_CODE`],
+/// the manifest never fetched; a history the nest withholds → `Transport`.
+/// Never a fallback to the listing. The licensed open keeps
+/// [`FileDownloadKeys::sealed_only`] even where the row would lift it: the
+/// archive folder is never plaintext.
+async fn licensed_head<R>(
+    sync: &SyncRpc<R>,
+    owner_keys: &FileDownloadKeys,
+    folder: &str,
+    path: &str,
+    seat: impl AsyncFnOnce() -> Result<ReaderSeat, ArchiveNestError>,
+) -> Result<Option<LicensedFile>, ArchiveNestError>
+where
+    R: RpcRequester,
+    R::Error: RpcErrorClass + core::fmt::Display,
+{
+    let Some(head) = head_entry(sync, folder, path).await? else {
+        return Ok(None);
+    };
+    let digest = fauna_core::hex32::decode(&head.manifest_hash)
+        .map_err(|e| ArchiveNestError::Transport(format!("manifest hash for {path}: {e}")))?;
+    let manifest = ContentHash::from_digest_raw(digest);
+    let seat = seat().await?;
+    let set = SetAddress {
+        folder: folder.to_string(),
+        folder_hash: None,
+    };
+    let reader = LicensedManifestReader::new(sync, &seat, &set);
+    let licence = reader
+        .require_licence(path, &manifest)
+        .await
+        .map_err(licence_err)?;
+    Ok(Some(LicensedFile {
+        manifest,
+        keys: reader.licensed_keys(owner_keys, &licence).sealed_only(),
+        content_key_version: licence.content_key_version,
+    }))
+}
+
+/// The whole of one licensed file, over the shared download walk.
+async fn read_licensed(
+    fetcher: &dyn BlobFetcher,
+    file: &LicensedFile,
+    path: &str,
+) -> Result<Vec<u8>, ArchiveNestError> {
+    download_file_bytes_by_manifest(
+        fetcher,
+        &file.keys,
+        file.manifest,
+        file.content_key_version,
+        path,
+    )
+    .await
+    .map_err(walk_err)
 }
 
 // ── the head lookup ────────────────────────────────────────────────────────
@@ -1161,5 +1316,356 @@ mod tests {
             rfc3339_utc(Timestamp(1_800_000_000_999_999)),
             "2027-01-15T08:00:00Z"
         );
+    }
+}
+
+/// The archive folder's reads are licensed by the judged change row naming
+/// exactly the listed manifest under the path (`backup-restore.md` § Security
+/// Properties → Integrity). Each refusal is red when the
+/// reader opens the head projection's address without the licence.
+#[cfg(test)]
+mod licence_tests {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    use super::*;
+    use fauna_client_sync::SetNonceSource;
+    use fauna_client_testkit::{RejectingRequester, block_on};
+    use fauna_core::blob_seal::SealedBlob;
+    use fauna_protocol::files::{FileVersionInfo, FilesVersionsListReply};
+    use fauna_protocol::folders::{FolderSummary, FoldersListReply, KIND_FOLDERS_LIST};
+    use fauna_protocol::sync::{SyncChange, SyncFilesReply};
+    use fauna_protocol::sync_writer_sig::ChangeSigner;
+
+    const KIND_SYNC_FILES: &str = "fauna.sync.files";
+    const KIND_VERSIONS_LIST: &str = "fauna.files.versions.list";
+    const FOLDER: &str = "facebook-archive";
+    const NONCE: [u8; 32] = [7; 32];
+    const MODEL: &str = "model/posts.cbor";
+    const STATE: &str = "state/import.cbor";
+    const SECRET: [u8; 32] = [0x51; 32];
+
+    fn owner() -> ActorKeypair {
+        ActorKeypair::from_secret(SECRET)
+    }
+
+    /// The reader `RpcArchiveNest::owner_keys` builds, exactly.
+    fn owner_keys() -> FileDownloadKeys {
+        FileDownloadKeys::owner(BackupKey::derive(&SECRET)).sealed_only()
+    }
+
+    /// A blob store in a `HashMap`, counting manifest and chunk fetches so a
+    /// test can pin that a refused read cost no byte.
+    #[derive(Default)]
+    struct MapFetcher {
+        blobs: Mutex<HashMap<[u8; 32], Vec<u8>>>,
+        manifests: Mutex<usize>,
+        chunks: Mutex<usize>,
+    }
+
+    impl MapFetcher {
+        fn stock(&self, blob: &SealedBlob) {
+            let mut blobs = self.blobs.lock().unwrap();
+            blobs.insert(blob.manifest_hash.digest(), blob.manifest_bytes.clone());
+            for (key, body) in &blob.chunks {
+                blobs.insert(key.digest(), body.clone());
+            }
+        }
+
+        fn get(&self, hash: &ContentHash) -> anyhow::Result<Vec<u8>> {
+            self.blobs
+                .lock()
+                .unwrap()
+                .get(&hash.digest())
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("404"))
+        }
+
+        /// `(manifests, chunks)` fetched so far.
+        fn fetches(&self) -> (usize, usize) {
+            (
+                *self.manifests.lock().unwrap(),
+                *self.chunks.lock().unwrap(),
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BlobFetcher for MapFetcher {
+        async fn fetch_manifest(&self, hash: &ContentHash) -> anyhow::Result<Vec<u8>> {
+            *self.manifests.lock().unwrap() += 1;
+            self.get(hash)
+        }
+
+        async fn fetch_chunks(
+            &self,
+            store_keys: &[ContentHash],
+            _path: &str,
+        ) -> anyhow::Result<Vec<Vec<u8>>> {
+            *self.chunks.lock().unwrap() += store_keys.len();
+            store_keys.iter().map(|k| self.get(k)).collect()
+        }
+    }
+
+    /// `bytes` as the run writes them (`write_file`): sealed under the
+    /// owner's convergent root.
+    fn sealed(bytes: &[u8]) -> SealedBlob {
+        let root = BackupKey::derive(&SECRET).convergent_chunk_root();
+        fauna_core::blob_seal::seal_blob(bytes, Some((root, None))).unwrap()
+    }
+
+    /// `bytes` as a home nest builds them for itself: plaintext, at a valid
+    /// address.
+    fn plaintext(bytes: &[u8]) -> SealedBlob {
+        fauna_core::blob_seal::seal_blob(bytes, None).unwrap()
+    }
+
+    /// The head projection's row for `path`, scrubbed as a private folder's
+    /// rests, listing `manifest`.
+    fn head(path: &str, manifest: &ContentHash) -> SyncFile {
+        SyncFile {
+            path: String::new(),
+            path_hash: Some(fauna_protocol::ByteBuf::from(
+                fauna_core::sync::path_hash(path).to_vec(),
+            )),
+            manifest_hash: fauna_core::hex32::encode(&manifest.digest()),
+            size_bytes: 1,
+            ..Default::default()
+        }
+    }
+
+    /// The owner's signed row naming `manifest` under `path` — what the run's
+    /// own `write_file` records.
+    fn version(path: &str, manifest: &ContentHash) -> FileVersionInfo {
+        version_under(path, manifest, NONCE)
+    }
+
+    /// [`version`], signed under `nonce` — another set's, for a row that
+    /// does not verify here.
+    fn version_under(path: &str, manifest: &ContentHash, nonce: [u8; 32]) -> FileVersionInfo {
+        let author = owner();
+        let mut row = SyncChange {
+            seq: 3,
+            path_hash: fauna_core::hex32::encode(&fauna_core::sync::path_hash(path)),
+            manifest_hash: Some(fauna_core::hex32::encode(&manifest.digest())),
+            size_bytes: 10,
+            change_type: "create".into(),
+            created_at: 1_000,
+            device_id: Some(fauna_core::hex32::encode(&[4; 32])),
+            author_actor_id: Some(author.actor_id().to_hex()),
+            ..Default::default()
+        };
+        ChangeSigner::direct(&author)
+            .sign_row(&mut row, nonce)
+            .unwrap();
+        FileVersionInfo {
+            path_hash: fauna_core::sync::path_hash(path).to_vec().into(),
+            version_num: row.seq,
+            manifest_hash: manifest.digest().to_vec().into(),
+            size_bytes: row.size_bytes,
+            created_at: row.created_at,
+            folder: Some(FOLDER.into()),
+            author_actor_id: author.actor_id().to_hex(),
+            device_id: Some([4; 32].to_vec().into()),
+            change_type: Some("create".into()),
+            signature: row.signature.clone(),
+            signer_key: row.signer_key.clone(),
+            ..Default::default()
+        }
+    }
+
+    fn folders_list() -> FoldersListReply {
+        FoldersListReply {
+            folders: vec![FolderSummary {
+                name: FOLDER.into(),
+                role: Some("owner".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// A home nest listing `files` at the head and serving `versions` as the
+    /// folder's history (`None`: the history is withheld).
+    fn nest(files: Vec<SyncFile>, versions: Option<Vec<FileVersionInfo>>) -> RejectingRequester {
+        let nest = RejectingRequester::new()
+            .reply(
+                KIND_SYNC_FILES,
+                &SyncFilesReply {
+                    files,
+                    extra: Default::default(),
+                },
+            )
+            .reply(KIND_FOLDERS_LIST, &folders_list());
+        match versions {
+            Some(versions) => nest.reply(
+                KIND_VERSIONS_LIST,
+                &FilesVersionsListReply {
+                    versions,
+                    ..Default::default()
+                },
+            ),
+            None => nest,
+        }
+    }
+
+    fn seat() -> ReaderSeat {
+        ReaderSeat {
+            own: Some(owner().actor_id().0),
+            nonces: Some(SetNonceSource::Fixed(NONCE)),
+            ..Default::default()
+        }
+    }
+
+    /// `RpcArchiveNest::read_path`'s composition over a scripted nest.
+    fn read(
+        nest: &RejectingRequester,
+        fetcher: &MapFetcher,
+        path: &str,
+    ) -> Result<Option<Vec<u8>>, ArchiveNestError> {
+        let sync = SyncRpc::new(nest);
+        block_on(async {
+            let Some(file) =
+                licensed_head(&sync, &owner_keys(), FOLDER, path, async || Ok(seat())).await?
+            else {
+                return Ok(None);
+            };
+            read_licensed(fetcher, &file, path).await.map(Some)
+        })
+    }
+
+    fn is_unlicensed(e: &ArchiveNestError) -> bool {
+        matches!(e, ArchiveNestError::Rejected { code, .. } if code == ENTRY_UNLICENSED_CODE)
+    }
+
+    /// The positive case: a sealed file the run wrote and signed reads —
+    /// whole, and by the range open's length walk.
+    #[test]
+    fn a_sealed_file_the_run_wrote_and_signed_reads() {
+        let blob = sealed(b"the model the run wrote");
+        let fetcher = MapFetcher::default();
+        fetcher.stock(&blob);
+        let nest = nest(
+            vec![head(MODEL, &blob.manifest_hash)],
+            Some(vec![version(MODEL, &blob.manifest_hash)]),
+        );
+
+        let bytes = read(&nest, &fetcher, MODEL).expect("licensed");
+        assert_eq!(bytes.as_deref(), Some(&b"the model the run wrote"[..]));
+
+        let sync = SyncRpc::new(&nest);
+        let len = block_on(async {
+            let file = licensed_head(&sync, &owner_keys(), FOLDER, MODEL, async || Ok(seat()))
+                .await
+                .expect("licensed")
+                .expect("listed");
+            assert!(
+                file.keys.sealed_only,
+                "the archive folder is never plaintext"
+            );
+            file_len_by_manifest(
+                &fetcher,
+                &file.keys,
+                file.manifest,
+                file.content_key_version,
+            )
+            .await
+        })
+        .expect("length");
+        assert_eq!(len, b"the model the run wrote".len() as u64);
+    }
+
+    /// Nothing listed at the path is `None`, with no history read.
+    #[test]
+    fn an_unlisted_path_reads_none_without_a_history_read() {
+        let nest = nest(vec![], Some(vec![]));
+        assert_eq!(read(&nest, &MapFetcher::default(), MODEL).unwrap(), None);
+        assert_eq!(nest.kinds(), [KIND_SYNC_FILES]);
+    }
+
+    /// A home nest serving a self-built plaintext model file at a listed
+    /// address: no judged row names it, so it is refused before any byte.
+    #[test]
+    fn a_self_built_plaintext_model_file_is_refused_before_any_fetch() {
+        let forged = plaintext(b"posts the nest wrote for the owner");
+        let fetcher = MapFetcher::default();
+        fetcher.stock(&forged);
+        let nest = nest(vec![head(MODEL, &forged.manifest_hash)], Some(vec![]));
+
+        let err = read(&nest, &fetcher, MODEL).expect_err("refused");
+        assert!(is_unlicensed(&err), "{err}");
+        assert_eq!(fetcher.fetches(), (0, 0), "no byte for an unlicensed read");
+    }
+
+    /// Even a row naming a plaintext manifest does not open it: the archive
+    /// folder is never plaintext, so the licensed open stays sealed-only and
+    /// refuses before any chunk.
+    #[test]
+    fn a_licensed_plaintext_manifest_is_still_refused_before_any_chunk() {
+        let plain = plaintext(b"plaintext in a folder that never holds any");
+        let fetcher = MapFetcher::default();
+        fetcher.stock(&plain);
+        let nest = nest(
+            vec![head(STATE, &plain.manifest_hash)],
+            Some(vec![version(STATE, &plain.manifest_hash)]),
+        );
+
+        let err = read(&nest, &fetcher, STATE).expect_err("refused");
+        assert!(
+            err.to_string()
+                .contains(PermanentApplyFailure::PLAINTEXT_REFUSED.reason),
+            "{err}"
+        );
+        assert_eq!(fetcher.fetches().1, 0, "no chunk of a plaintext manifest");
+    }
+
+    /// Another path's owner-sealed manifest listed at `model/posts.cbor`: the
+    /// seal is the owner's, but the only row naming it names another path, so
+    /// it is refused unfetched.
+    #[test]
+    fn another_paths_sealed_manifest_is_refused_unfetched() {
+        let other = sealed(b"the owner's checkpoint, not their posts");
+        let fetcher = MapFetcher::default();
+        fetcher.stock(&other);
+        let nest = nest(
+            vec![head(MODEL, &other.manifest_hash)],
+            Some(vec![version(STATE, &other.manifest_hash)]),
+        );
+
+        let err = read(&nest, &fetcher, MODEL).expect_err("refused");
+        assert!(is_unlicensed(&err), "{err}");
+        assert_eq!(fetcher.fetches(), (0, 0));
+    }
+
+    /// A row that does not verify is not a row (ruling (3)): the owner's own
+    /// sealed file, under a row signed under another set's nonce, licenses
+    /// nothing in this folder and is refused unfetched.
+    #[test]
+    fn a_row_that_does_not_verify_licenses_nothing() {
+        let blob = sealed(b"the owner's model, recorded in another set");
+        let fetcher = MapFetcher::default();
+        fetcher.stock(&blob);
+        let nest = nest(
+            vec![head(MODEL, &blob.manifest_hash)],
+            Some(vec![version_under(MODEL, &blob.manifest_hash, [8; 32])]),
+        );
+
+        let err = read(&nest, &fetcher, MODEL).expect_err("refused");
+        assert!(is_unlicensed(&err), "{err}");
+        assert_eq!(fetcher.fetches(), (0, 0));
+    }
+
+    /// A history the nest withholds refuses the read — transiently, so a
+    /// resume retries it — and never opens the listed manifest.
+    #[test]
+    fn a_withheld_history_refuses_the_read_unopened() {
+        let blob = sealed(b"sealed, and the nest serves no history");
+        let fetcher = MapFetcher::default();
+        fetcher.stock(&blob);
+        let nest = nest(vec![head(MODEL, &blob.manifest_hash)], None);
+
+        let err = read(&nest, &fetcher, MODEL).expect_err("refused");
+        assert!(matches!(err, ArchiveNestError::Transport(_)), "{err}");
+        assert_eq!(fetcher.fetches(), (0, 0));
     }
 }

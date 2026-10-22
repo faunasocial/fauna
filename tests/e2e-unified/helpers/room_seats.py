@@ -27,6 +27,7 @@ from conftest import (
     _apply_r14_trust_env,
     _apply_real_conversations_env,
     _get_ios_seat_udid,
+    _serve_spa_proxy,
     get_available_apps,
 )
 from drivers import create_driver
@@ -148,7 +149,7 @@ def launch_seat(nest: dict, app_path, app_name: str, request, *, actor: dict | N
     # the `app` fixture's single seat.
     node_url = nest["url"]
     if app_name == "web":
-        spa = request.getfixturevalue("spa_url")
+        spa = _seat_spa_url(nest, request)
         config["url"] = spa + "/app/"
         node_url = spa
     if app_name == "ios":
@@ -258,6 +259,21 @@ def launch_seat(nest: dict, app_path, app_name: str, request, *, actor: dict | N
         MESSAGE_BUDGET_S,
     )
     return Seat(app=app, actor=actor)
+
+
+def _seat_spa_url(nest: dict, request) -> str:
+    """The SPA proxy a web seat on ``nest`` dials. The session ``spa_url``
+    proxies only ``nest_instance``, so a seat on any other nest — a
+    cross-nest journey's second home (`test_moderation_appeal_cross_nest.py`)
+    — gets a proxy of its own to that nest, shut down with the requesting
+    fixture. Pointed at the session proxy instead, the seat signs in against a
+    nest with no account for it (``fauna.auth.not_registered``) and its
+    transport never comes online (measured 2026-10-19)."""
+    if nest["url"] == request.getfixturevalue("nest_instance")["url"]:
+        return request.getfixturevalue("spa_url")
+    url, server = _serve_spa_proxy(request.getfixturevalue("static_dir"), nest["url"])
+    request.addfinalizer(server.shutdown)
+    return url
 
 
 def teardown_seats(seats: list[Seat]) -> None:
@@ -373,7 +389,9 @@ def bootstrap_room(owner: Seat, second: Seat, third: Seat) -> tuple[str, str]:
     return group_id, bound.channel_id_hex
 
 
-def found_community_room(founder: Seat, member: Seat, first_text: str) -> tuple[str, str, str]:
+def found_community_room(
+    founder: Seat, member: Seat, first_text: str, *, address: str | None = None
+) -> tuple[str, str, str]:
     """Found a COMMUNITY room from the app and seat ``member`` in it — every
     step a user gesture (convention 8): the composer's home-nest toggle, the
     first send (which founds it through the room ceremony), the invitation
@@ -385,11 +403,15 @@ def found_community_room(founder: Seat, member: Seat, first_text: str) -> tuple[
     Asserts the founding's own invariants on the way — the class statement
     follows the toggle before the first message, the header states the
     class, an accepted invitation stops standing — so a journey built on it
-    fails AT the step that broke, never later on a symptom."""
+    fails AT the step that broke, never later on a symptom.
+
+    ``address`` is what the founder types into the picker — the member's
+    actor id by default, ``handle@authority`` for a member homed on another
+    nest."""
     conv = founder.app.conversations
     conv.navigate()
     founder.app.driver.click("new-conversation-button")
-    conv.add_recipient(member.actor_hex)
+    conv.add_recipient(address or member.actor_hex)
     assert conv.prospective_room_class() == "end-to-end", (
         "with the home nest out, a Fauna chip makes an end-to-end room"
     )

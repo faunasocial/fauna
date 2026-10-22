@@ -650,7 +650,8 @@ pub struct DecodedFacetShape {
 }
 
 /// A fully-shaped decoded post — the platform-neutral half of
-/// `fauna-ffi::decode_post_full`/`fauna-wasm::decode_post_inner`, which
+/// `fauna-ffi::decode_post_full`/`fauna-wasm::decode_post_fetched_as_inner` (born
+/// `decode_post_inner`), which
 /// independently re-derived this exact shaping until `decode_post_full`'s own
 /// doc comment ("Mirrors the WASM `decode_post_inner`") became the only thing
 /// keeping the two in sync. Each binding crate keeps its own last-mile
@@ -675,9 +676,28 @@ pub struct DecodedPostShape {
 /// + tags + facets + items + references extraction both binding crates need.
 pub fn decode_post_shaped(data: &[u8]) -> Result<DecodedPostShape, ClientError> {
     let (post, origin) = decode_post(data)?;
+    Ok(shape_post(&post, origin))
+}
+
+/// [`decode_post_shaped`] for a body fetched **by id** — the shaped face of
+/// [`decode_post_fetched_as`]: `valid` (and the authoring origin) additionally
+/// require `wire_post_id(data) == requested_post_id`. An app that paints a by-id
+/// fetched body beside the feed manager's badge reads it through this face and
+/// paints it only when `valid`, so a nest answering a second `posts.get(X)` with
+/// another signed post `Y` never renders `Y`'s words under `X`'s `Verified`
+/// badge (`security.md` § App display of unverified content).
+pub fn decode_post_shaped_fetched_as(
+    requested_post_id: &str,
+    data: &[u8],
+) -> Result<DecodedPostShape, ClientError> {
+    let (post, origin) = decode_post_fetched_as(requested_post_id, data)?;
+    Ok(shape_post(&post, origin))
+}
+
+fn shape_post(post: &Post, origin: Option<AuthoringOrigin>) -> DecodedPostShape {
     let valid = origin.is_some();
     let authoring_origin = fauna_core::render::AuthoringOriginStatus::from_origin(origin.as_ref());
-    let post_id = post_id_hex(&post);
+    let post_id = post_id_hex(post);
 
     let (body_text, tags, facets) = match &post.body {
         PostBody::Text { content, facets }
@@ -771,7 +791,7 @@ pub fn decode_post_shaped(data: &[u8]) -> Result<DecodedPostShape, ClientError> 
         })
         .collect();
 
-    Ok(DecodedPostShape {
+    DecodedPostShape {
         post_id,
         author: hex::encode(post.author.0),
         body: body_text,
@@ -783,7 +803,7 @@ pub fn decode_post_shaped(data: &[u8]) -> Result<DecodedPostShape, ClientError> 
         references,
         facets,
         content_warning: post.content_warning.clone(),
-    })
+    }
 }
 
 // ── Private helpers ───────────────────────────────────────────
@@ -1216,8 +1236,8 @@ mod tests {
         }
     }
 
-    /// Pins the shared shaping `decode_post_full` (fauna-ffi) and
-    /// `decode_post_inner` (fauna-wasm) both delegate to — one round-trip
+    /// Pins the shared shaping (`shape_post`) `decode_post_full` (fauna-ffi) and
+    /// `decode_post_fetched_as_inner` (fauna-wasm) both reach — one round-trip
     /// through tags/facets/media/references exercises every field both
     /// binding crates marshal, so a regression here catches both at once.
     #[test]
@@ -1298,6 +1318,40 @@ mod tests {
         let (post, origin) = decode_post_fetched_as(&x_id, &y).expect("y still decodes");
         assert_eq!(text(&post), "post y");
         assert_eq!(origin, None, "a substituted body must not verify");
+    }
+
+    /// The shaped by-id decode (web's rich-render fetch) carries the same binding:
+    /// a genuinely signed post served under another post's id still shapes, but
+    /// is never `valid` and claims no authoring origin — so no app paints it as
+    /// the requested post under that post's `Verified` badge.
+    #[test]
+    fn decode_post_shaped_fetched_as_binds_the_body_to_the_requested_id() {
+        use fauna_core::render::AuthoringOriginStatus;
+        let kp = ActorKeypair::from_secret([7u8; 32]);
+        let x = build_post(&kp, "post x", &[], None).unwrap();
+        let y = build_post(&kp, "post y", &[], None).unwrap();
+        let x_id = wire_post_id(&x);
+
+        let shaped = decode_post_shaped_fetched_as(&x_id, &x).expect("decode x");
+        assert_eq!(shaped.body, "post x");
+        assert!(shaped.valid);
+        assert_eq!(
+            shaped.authoring_origin,
+            AuthoringOriginStatus::from_origin(Some(&AuthoringOrigin::Direct))
+        );
+        assert!(
+            decode_post_shaped_fetched_as(&x_id.to_uppercase(), &x)
+                .unwrap()
+                .valid
+        );
+
+        let shaped = decode_post_shaped_fetched_as(&x_id, &y).expect("y still decodes");
+        assert_eq!(shaped.body, "post y");
+        assert!(!shaped.valid, "a substituted body must not verify");
+        assert_eq!(
+            shaped.authoring_origin,
+            AuthoringOriginStatus::from_origin(None)
+        );
     }
 
     /// A bridge-translated post rests as a bare canonical `Post` (no envelope):

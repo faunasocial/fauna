@@ -98,7 +98,9 @@ data class Contact(
     val domain: String? = null,
     val nodeUrl: String? = null,
     val acceptedAt: Long? = null,
-    val createdAt: Long? = null
+    val createdAt: Long? = null,
+    /** The peer's home nest URL (`ContactItem.home_nest_url`) — the Profile's carried home on the row's tap. */
+    val homeNestUrl: String? = null
 )
 
 @Entity(tableName = "knocks")

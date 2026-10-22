@@ -169,7 +169,7 @@ def test_singleton_build_stall_survives_the_tail_window():
     """The SPA's own settle-deadline report is rescued, and it names the builder.
 
     `[pageerror]` above is the witness for a build that died WITHOUT the app
-    noticing. This is the complement: the app noticed. `$lib/singleton-build.ts`
+    noticing. This is the complement: the app noticed. `#lib/singleton-build.ts`
     wraps every memoized actor-scoped build in an external settle deadline —
     external because a deadline living inside a dead wasm task dies with it —
     and on expiry it rejects, clears the memo, and writes one `[singleton]` line

@@ -19,9 +19,9 @@
   // publish-path-gated (profile.md § Implementation status) — the header renders
   // the published display_name, falling back to handle (SELF) / actor_id (OTHER).
   // UX/IDs: tests/e2e-unified/ui.yaml `profile` page.
-  import { identity } from '$lib/store';
-  import { accountDisplayHandle } from '$lib/accounts';
-  import { page } from '$app/stores';
+  import { identity } from '#lib/store';
+  import { accountDisplayHandle } from '#lib/accounts';
+  import { page } from '$app/state';
   import { goto } from '$app/navigation';
   import {
     contactOverlays,
@@ -30,13 +30,14 @@
     engineRoleDenied,
     getConversationsManager,
     refreshConversations,
-  } from '$lib/conversations';
+    syncFeedRoomPosts,
+  } from '#lib/conversations';
   import {
     savePrivateSection,
     type OverlayEditorFace,
     type OverlayFace,
     type OverlayForm,
-  } from '$lib/contact-overlay';
+  } from '#lib/contact-overlay';
   import {
     knocksBlock,
     knocksUnblock,
@@ -53,7 +54,7 @@
     subscriptionsOffersList,
     subscriptionsSubscribePublishingEk,
     subscriptionsStatusGet,
-    profileGet,
+    profileHeaderRead,
     loadProfileEditBase,
     profileSet,
     sendKnock,
@@ -61,7 +62,7 @@
     type SubscriptionTier,
     type SubscriptionRequest,
     type SubscriptionSubscriber,
-  } from '$lib/rpc';
+  } from '#lib/rpc';
   import {
     ensureWasm,
     decodeProfileDisplay,
@@ -77,32 +78,39 @@
     parseCount,
     wardAskRules,
     type ProfileLinkInput,
-  } from '$lib/wasm';
-  import { readProvenanceFromBytes } from '$lib/c2pa';
-  import { nodeUrl, uploadBlobMultipart } from '$lib/api';
-  import { resolveLocalized } from '$lib/i18n/localized';
-  import { onMount } from 'svelte';
-  import MessageBanner from '$lib/components/MessageBanner.svelte';
-  import ReportHost from '$lib/components/ReportHost.svelte';
-  import { reportActorTarget, type ReportTarget } from '$lib/wasm';
-  import ProviderSection from '$lib/components/payments/ProviderSection.svelte';
-  import ClaimSection from '$lib/components/payments/ClaimSection.svelte';
-  import TierMoneyFields from '$lib/components/payments/TierMoneyFields.svelte';
-  import TierPrice from '$lib/components/payments/TierPrice.svelte';
-  import OfferPaymentLink from '$lib/components/payments/OfferPaymentLink.svelte';
-  import { t } from '$lib/i18n/strings';
-  import { isSafeNavUrl } from '$lib/safe-url';
-  import { bestEffortCopyToClipboard } from '$lib/web-publish';
-  import { IDS } from '$lib/generated/uiIds';
-  import { hexToBytes } from '$lib/hex';
-  import { refusalText } from '$lib/guardian-refusal';
+  } from '#lib/wasm';
+  import { readProvenanceFromBytes } from '#lib/c2pa';
+  import { nodeUrl, uploadBlobMultipart } from '#lib/api';
+  import { resolveLocalized } from '#lib/i18n/localized';
+  import { onMount, onDestroy, untrack } from 'svelte';
+  import FeedPostCard from '#lib/components/FeedPostCard.svelte';
+  import FeedReplyDialog from '#lib/components/FeedReplyDialog.svelte';
+  import FeedTrainSheet from '#lib/components/FeedTrainSheet.svelte';
+  import { blobUrl, createFeedPostHost } from '#lib/feed-post-host.svelte';
+  import { getFeedManager } from '#lib/feed';
+  import { setPendingSearchNav } from '#lib/search';
+  import type { WasmFeedManager } from '../../../../static/fauna_wasm.js';
+  import MessageBanner from '#lib/components/MessageBanner.svelte';
+  import ReportHost from '#lib/components/ReportHost.svelte';
+  import { reportActorTarget, type ReportTarget } from '#lib/wasm';
+  import ProviderSection from '#lib/components/payments/ProviderSection.svelte';
+  import ClaimSection from '#lib/components/payments/ClaimSection.svelte';
+  import TierMoneyFields from '#lib/components/payments/TierMoneyFields.svelte';
+  import TierPrice from '#lib/components/payments/TierPrice.svelte';
+  import OfferPaymentLink from '#lib/components/payments/OfferPaymentLink.svelte';
+  import { t } from '#lib/i18n/strings';
+  import { isSafeNavUrl } from '#lib/safe-url';
+  import { bestEffortCopyToClipboard } from '#lib/web-publish';
+  import { IDS } from '#lib/generated/uiIds';
+  import { hexToBytes } from '#lib/hex';
+  import { refusalText } from '#lib/guardian-refusal';
   import {
     blockEdgeBlocked,
     blockToggleEnabled,
     foldBlockPress,
     foldBlockRead,
     unknownBlockEdge,
-  } from '$lib/block-edge';
+  } from '#lib/block-edge';
   import {
     classifyKnockFailure,
     contactAskRender,
@@ -112,8 +120,8 @@
     knockStateFor,
     type KnockAskState,
     type KnockSendResult,
-  } from '$lib/ward-asks';
-  import { wardAsks, refreshWardAsks, rereadAfterAsk } from '$lib/wardAsks.svelte';
+  } from '#lib/ward-asks';
+  import { wardAsks, refreshWardAsks, rereadAfterAsk } from '#lib/wardAsks.svelte';
   // The price-and-route class — the tier editor's three money fields, the
   // tier list's and offer row's price text, the offer's payment link — is
   // inside the `payments` plane (dynamic-features.md § Platform-family surface
@@ -134,7 +142,7 @@
 
   // The viewed actor: the route param when present (OTHER), else the viewer's own
   // id (SELF). `is_self` drives edit-vs-follow + which Tiers-tab branch renders.
-  const targetActorId = $derived($page.params.actorId);
+  const targetActorId = $derived(page.params.actorId);
   const viewedActorId = $derived(targetActorId ?? $identity?.actorId ?? '');
   const isSelf = $derived(!targetActorId || targetActorId === $identity?.actorId);
 
@@ -173,7 +181,7 @@
 
   // §4 payment providers and §5 manual claim codes (SELF; monetization.md
   // § Pillar 3) moved WHOLE — state, reads and markup — into
-  // `$lib/components/payments/{ProviderSection,ClaimSection}.svelte` for the web
+  // `#lib/components/payments/{ProviderSection,ClaimSection}.svelte` for the web
   // `payments` excision leg: this route's chunk ships in every flavor, so a
   // payments face named here would survive into the store-safe bundle even with
   // the render folded away (`dynamic-features.md` § Platform-family surface
@@ -207,7 +215,7 @@
   // is `blocked`, else "Block"; a tap toggles over `fauna.knocks.{block,unblock}`
   // and re-derives. Mirrors linux `refresh_block_state`/`toggle_block`.
   // The edge is not-yet-known until the open-time read (or the viewer's own press)
-  // sets it, and the toggle is disabled until then — see `$lib/block-edge`.
+  // sets it, and the toggle is disabled until then — see `#lib/block-edge`.
   let blockEdge = $state(unknownBlockEdge());
   let blockBusy = $state(false);
   const isBlocked = $derived(blockEdgeBlocked(blockEdge));
@@ -247,6 +255,19 @@
   // mail-primary-domain-rename.md § Display-handle interaction) → actor_id
   // when no profile is published yet.
   let publishedDisplayName = $state<string | null>(null);
+  // The pictures the header read found named (hex blob hashes), and whether
+  // this nest served the profile — so its blob route holds them.
+  let headerPictures = $state<{ avatar: string | null; banner: string | null; local: boolean }>({
+    avatar: null,
+    banner: null,
+    local: true,
+  });
+  // The hashes whose `<img>` has decoded — `data-state="painted"`; anything
+  // else (loading, a failed fetch) is `placeholder`, never `error-message`.
+  let paintedPictures = $state<Record<string, boolean>>({});
+  function pictureSrc(hash: string | null): string | undefined {
+    return hash && headerPictures.local ? blobUrl(hash) : undefined;
+  }
   // On another's profile both names come from the private overlay's one
   // resolver: the viewer's nickname heads the page and the public name it
   // replaced is the secondary line (`profile-public-name`, absent with no
@@ -279,6 +300,13 @@
     null;
   let privateForm = $state<OverlayForm>({ nickname: '', notes: '', labels: [] });
   let labelDraft = $state('');
+  // The completion rows under the add field: nothing until something is typed;
+  // the matching and the staged-label exclusion are shared Rust (wasm).
+  const labelSuggestions = $derived.by(() => {
+    void $contactsRevision;
+    if (!privateEditor || labelDraft.trim() === '') return [];
+    return contactOverlays().labelSuggestions(labelDraft, privateForm.labels);
+  });
   let privateSaving = $state(false);
 
   $effect(() => {
@@ -385,19 +413,35 @@
   // one whose home nest a knock from this page goes to. Written only while the
   // page still shows the actor it was read for, so a slow read for a profile
   // the user has since left cannot route the next actor's knock.
+  //
+  // The same read names the header's stored pictures (`profile-avatar` /
+  // `profile-banner`, profile.md § Layout & flow): rendered only while the
+  // profile names one, painted from the blob route of the nest that served
+  // it. web reads this nest only (no `home` yet — the header relay is web's
+  // remote-read trickle-down), so a picture painted here is always this nest's
+  // `blobUrl`; a profile relayed from a home renders its pictures empty.
   async function refreshHeaderName(): Promise<void> {
     const s = secret();
     const actor = viewedActorId;
     const other = !isSelf;
     if (!s || !actor) return;
     try {
-      const body = await profileGet(s, actor);
-      publishedDisplayName = decodeProfileDisplay(body).display_name;
-      if (other && viewedActorId === actor) {
-        knockRoute = knockRecipientNestUrl(actor, body, nodeUrl());
+      const read = await profileHeaderRead(s, actor, null);
+      if (viewedActorId !== actor) return;
+      const display = decodeProfileDisplay(read.body);
+      publishedDisplayName = display.display_name;
+      headerPictures = {
+        avatar: display.avatar_hash_hex,
+        banner: display.banner_hash_hex,
+        local: read.relayedFrom === null,
+      };
+      if (other) {
+        knockRoute = knockRecipientNestUrl(actor, read.body, nodeUrl());
       }
     } catch {
+      if (viewedActorId !== actor) return;
       publishedDisplayName = null;
+      headerPictures = { avatar: null, banner: null, local: true };
     }
   }
 
@@ -583,6 +627,166 @@
     else void loadOffers();
   }
 
+  // ── The Posts tab (profile.md § Layout & flow → *The Posts tab*) ──
+  //
+  // The viewed actor's posts, newest first, as the feed paints them. The tab
+  // adds no post logic of its own: its rows are an AUTHOR WINDOW of the feed
+  // manager — `authorWindow(actorId)`, minted from the timeline's manager on
+  // every open of the tab (no client cache — profile.md § Persistence),
+  // reading `fauna.feed.author.posts` (feed.md § State & data shape → *The
+  // author window*) — painted by the feed's own card over the card host the
+  // Feed page uses (`#lib/feed-post-host`), so every verb (like / repost /
+  // quote, the ⋯ menu's delete and web verbs, the reply dialog, the tip list,
+  // the training sheet) opens HERE and acts on the window. Loading, empty and
+  // error come off the window's `FeedSnapshot` exactly as on the feed. The tui
+  // twin is `apps/fauna-tui/src/profile/posts.rs`.
+  //
+  // The wasm window object is deliberately not `$state` (a proxy over a wasm
+  // handle is meaningless); `windowSnap` is the reactive read of it.
+  let postsWindow: WasmFeedManager | null = null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let windowSnap = $state<any>(null);
+  let windowGen = 0;
+  let windowLoadingMore = $state(false);
+  let windowRefreshQueued = false;
+  let pageDestroyed = false;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const windowPosts = $derived<any[]>(windowSnap?.posts ?? []);
+  // The `feed-empty-state` rule through the same shared decision
+  // (`FeedSnapshot::empty_state`); the window carries no search, so its one
+  // empty arm is "no posts". Absent while the first read is in flight.
+  const windowEmpty = $derived(windowSnap?.empty_state != null);
+  const windowError = $derived(resolveLocalized(windowSnap?.error));
+
+  /** Re-read the window's snapshot — web has no observer-driven page loop, so
+   *  every awaited window call re-reads (the feed page's `refreshFeed`). */
+  function refreshWindow(): void {
+    if (!postsWindow) return;
+    try {
+      windowSnap = postsWindow.snapshot();
+    } catch (e) {
+      logMessage('warn', 'fauna_web::profile', `author window snapshot failed: ${e}`);
+    }
+  }
+
+  /** The window's observer: one coalesced re-read per burst of notifications,
+   *  never re-entering the manager from inside the mutation that notified. */
+  function scheduleWindowRefresh(): void {
+    if (windowRefreshQueued) return;
+    windowRefreshQueued = true;
+    queueMicrotask(() => {
+      windowRefreshQueued = false;
+      refreshWindow();
+    });
+  }
+
+  const postsHost = createFeedPostHost({
+    manager: () => postsWindow,
+    posts: () => windowPosts,
+    latestPosts: () => windowSnap?.posts ?? [],
+    refreshFeed: refreshWindow,
+    setError: (message) => { error = message; },
+    destroyed: () => pageDestroyed,
+  });
+
+  /** The window's in-context trained topic, re-read off its snapshot. */
+  const windowTrainTarget = $derived.by<string | null>(() => {
+    void windowSnap;
+    return postsHost.trainTargetFactor();
+  });
+
+  // The cards' render-time resolves (media hash, quoted embed, link preview,
+  // unlock price, tips, the rich-render decode), as on the feed.
+  $effect(() => {
+    for (const p of windowPosts) postsHost.augmentPost(p);
+  });
+
+  // A failed read lands on the page's `error-message` while the tab shows.
+  $effect(() => {
+    const e = windowError;
+    if (e && untrack(() => activeTab) === 'posts') error = e;
+  });
+
+  /** Activate `profile-posts-tab` — and the page's open, where it is the
+   *  default tab: mint the author window afresh and read its first page. */
+  async function openPostsTab(): Promise<void> {
+    activeTab = 'posts';
+    const actor = viewedActorId;
+    if (!wasmReady || !actor) return;
+    const gen = ++windowGen;
+    let timeline: WasmFeedManager;
+    try {
+      timeline = await getFeedManager();
+    } catch (e) {
+      if (gen === windowGen) error = t.feed.error_load({ message: String(e) });
+      return;
+    }
+    if (gen !== windowGen || pageDestroyed) return;
+    // The room-post seam rides into the window at mint time (the window copies
+    // the timeline's installed seams), so install it first: a room post then
+    // names its room for a reader seated on it.
+    syncFeedRoomPosts();
+    const win = timeline.authorWindow(actor);
+    win.subscribe({ onChanged: () => { if (postsWindow === win) scheduleWindowRefresh(); } });
+    postsWindow = win;
+    windowSnap = null;
+    postsHost.resetAugmentation();
+    refreshWindow();
+    try {
+      await win.refreshCurrentFeed();
+    } catch (e) {
+      if (postsWindow === win) error = t.feed.error_load({ message: String(e) });
+    } finally {
+      if (postsWindow === win) refreshWindow();
+    }
+  }
+
+  /** The next page — the feed's own load-more gesture: the list's end
+   *  scrolling into view (no load-more element; the feed has none). */
+  function loadMorePosts(): void {
+    const win = postsWindow;
+    if (!win || windowLoadingMore || !windowSnap?.has_more || windowSnap?.status === 'Loading') return;
+    windowLoadingMore = true;
+    win
+      .loadMore()
+      .catch((e: unknown) => logMessage('warn', 'fauna_web::profile', `author window load more failed: ${e}`))
+      .finally(() => {
+        windowLoadingMore = false;
+        if (postsWindow === win) refreshWindow();
+      });
+  }
+
+  /** The list end's sentinel: entering the viewport loads the next page. */
+  function loadMoreSentinel(node: HTMLElement): { destroy: () => void } {
+    const io = new IntersectionObserver(
+      (entries) => { if (entries.some((e) => e.isIntersecting)) loadMorePosts(); },
+      { rootMargin: '200px' },
+    );
+    io.observe(node);
+    return { destroy: () => io.disconnect() };
+  }
+
+  /** A card's activation: the door a search result uses — the feed page's
+   *  `post_detail`, the post resolved through the TIMELINE manager's
+   *  `resolvePost` (`profile.md` § The Posts tab → *What a row is*). A repost
+   *  row opens its original, as on the feed. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function openPostDetail(post: any): void {
+    setPendingSearchNav({ kind: 'post', postId: post.reposted_post_id ?? post.post_id });
+    void goto('/app/feed');
+  }
+
+  /** `feed-post-report-button` on a card here opens the page's report sheet. */
+  function reportPost(postId: string): void {
+    const target = postsHost.reportTargetFor(postId);
+    if (target) reportTarget = target;
+  }
+
+  onDestroy(() => {
+    pageDestroyed = true;
+    postsHost.destroy();
+  });
+
   let wasmReady = $state(false);
 
   onMount(async () => {
@@ -612,6 +816,7 @@
     knockAsk = knockStateFor(self ? null : id);
     knockBusy = false;
     askingGuardian = false;
+    headerPictures = { avatar: null, banner: null, local: true };
     void refreshHeaderName();
     if (self) {
       void loadSelf();
@@ -623,6 +828,16 @@
       const s = secret();
       if (s) void refreshWardAsks(s);
     }
+  });
+
+  // The Posts tab is the default: the page's open — and an open of another
+  // actor in the same component — reads the window afresh.
+  $effect(() => {
+    void viewedActorId;
+    if (!wasmReady) return;
+    untrack(() => {
+      if (activeTab === 'posts') void openPostsTab();
+    });
   });
 
   // ── §1 create/edit form (SELF) ──
@@ -968,8 +1183,33 @@
 
 <div class="profile" data-testid={IDS.PROFILE_VIEW}>
   <!-- ── user-header (rich identity is publish-path-gated; render the handle) ── -->
+  {#if headerPictures.banner}
+    {@const hash = headerPictures.banner}
+    <img
+      class="banner"
+      data-testid={IDS.PROFILE_BANNER}
+      data-state={paintedPictures[hash] ? 'painted' : 'placeholder'}
+      src={pictureSrc(hash)}
+      alt=""
+      onload={() => (paintedPictures[hash] = true)}
+      onerror={() => (paintedPictures[hash] = false)}
+    />
+  {/if}
   <header class="user-header">
-    <div class="avatar" aria-hidden="true">🙂</div>
+    {#if headerPictures.avatar}
+      {@const hash = headerPictures.avatar}
+      <img
+        class="avatar"
+        data-testid={IDS.PROFILE_AVATAR}
+        data-state={paintedPictures[hash] ? 'painted' : 'placeholder'}
+        src={pictureSrc(hash)}
+        alt=""
+        onload={() => (paintedPictures[hash] = true)}
+        onerror={() => (paintedPictures[hash] = false)}
+      />
+    {:else}
+      <div class="avatar" aria-hidden="true">🙂</div>
+    {/if}
     <span class="handle" data-testid={IDS.PROFILE_HANDLE}>{handleLabel}</span>
     {#if otherNames?.public}
       <span class="muted" data-testid={IDS.PROFILE_PUBLIC_NAME}>{otherNames.public}</span>
@@ -1077,6 +1317,12 @@
           {t.profile.private_label_add}
         </button>
       </div>
+      {#each labelSuggestions as suggestion, i (suggestion)}
+        <button
+          class="btn small" data-testid={IDS.PROFILE_LABEL_SUGGESTION} data-index={i}
+          onclick={() => { labelDraft = suggestion; addPrivateLabel(); }}
+        >{suggestion}</button>
+      {/each}
       <div class="form-buttons">
         <button
           class="btn primary" data-testid={IDS.PROFILE_PRIVATE_SAVE_BUTTON}
@@ -1194,7 +1440,7 @@
       class="tab"
       class:active={activeTab === 'posts'}
       data-testid={IDS.PROFILE_POSTS_TAB}
-      onclick={() => (activeTab = 'posts')}
+      onclick={openPostsTab}
     >{t.profile.posts}</button>
     <button
       class="tab"
@@ -1211,10 +1457,37 @@
     onblocked={(actor) => { if (actor === viewedActorId) blockEdge = foldBlockPress(true); }}
   />
 
-  <!-- ── Posts tab (content TBD — landmark only) ── -->
-  <section hidden={activeTab !== 'posts'}>
-    <p class="muted">{t.profile.no_posts}</p>
-  </section>
+  <!-- ── Posts tab — the viewed actor's posts as the feed's own cards, over the
+       author window (profile.md § Layout & flow → *The Posts tab*). ── -->
+  {#if activeTab === 'posts'}
+    <section class="posts-section" data-testid={IDS.PROFILE_POSTS_SECTION}>
+      {#if windowEmpty}
+        <p class="muted" data-testid={IDS.PROFILE_POSTS_EMPTY}>{t.profile.no_posts}</p>
+      {/if}
+      {#each windowPosts as post (post.post_id)}
+        <FeedPostCard
+          {post}
+          host={postsHost}
+          bridgeRoster={windowSnap?.bridge_roster ?? []}
+          trainTarget={windowTrainTarget}
+          onreport={reportPost}
+          onselect={() => openPostDetail(post)}
+        />
+      {/each}
+      {#if windowSnap?.has_more}
+        {#key windowPosts.length}
+          <div class="posts-more" use:loadMoreSentinel></div>
+        {/key}
+      {/if}
+      {#if windowLoadingMore}
+        <p class="muted">{t.common.loading}</p>
+      {/if}
+    </section>
+  {/if}
+  <!-- The card's reply dialog and training sheet open here, in place, over the
+       window — the same two the Feed page paints over the timeline. -->
+  <FeedReplyDialog host={postsHost} />
+  <FeedTrainSheet host={postsHost} />
 
   <!-- ── Tiers tab — SELF author management vs OTHER subscriber browse ── -->
   <div hidden={activeTab !== 'tiers'}>
@@ -1427,6 +1700,16 @@
     background: var(--bg-surface, #161b22);
     border: 1px solid var(--border, #30363d);
   }
+  img.avatar { object-fit: cover; padding: 0; }
+  .banner {
+    display: block;
+    width: 100%;
+    height: 120px;
+    object-fit: cover;
+    border-radius: 6px;
+    margin-bottom: 0.5rem;
+    background: var(--bg-surface, #161b22);
+  }
   .handle { font-weight: 600; font-size: 1.1rem; flex: 1; }
   .secondary-actions { display: flex; gap: 0.5rem; margin-bottom: 0.5rem; }
   .page-heading { font-size: 1.5rem; margin: 0.5rem 0; }
@@ -1439,6 +1722,7 @@
     color: var(--text, #e6edf3);
     cursor: pointer;
   }
+  .posts-more { height: 1px; }
   .tab.active { border-color: var(--accent, #58a6ff); color: var(--accent, #58a6ff); }
   .section {
     margin: 1.25rem 0;

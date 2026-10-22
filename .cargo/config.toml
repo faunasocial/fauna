@@ -96,8 +96,8 @@ rustflags = ["-C", "target-feature=+crt-static"]
 # toolchain IS llvm-mingw — the Rust cdylib then emits a GNU import lib
 # (libfauna_ffi.dll.a) that cgo links natively, sidestepping the MSVC↔MinGW
 # import-lib seam entirely. The C# app keeps its own crt-static MSVC fauna_ffi.dll
-# (above). Only Windows/CI build the gnullvm slice, so these keys are inert on other
-# machines. Only the Windows toolchain builds this gnullvm slice; the linker
+# (above). Windows machines, CI and a Linux machine cross-building with llvm-mingw
+# build the gnullvm slice; the keys are inert on a machine without llvm-mingw. The linker
 # names below are the llvm-mingw cross-linkers cgo needs to link the Rust cdylib.
 [target.aarch64-pc-windows-gnullvm]
 linker = "aarch64-w64-mingw32-clang"

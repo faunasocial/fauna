@@ -102,16 +102,16 @@ use crate::principal_succession::WriterKeyProvenance;
 /// The driver — every public name it had here, at its old path
 /// (`fauna_account_plane::account_driver` owns them since the pump split).
 pub use fauna_account_plane::account_driver::{
-    ACCOUNT_HANDLE_WAIT, AccountDriver, AccountHandleSource, AccountMailStore, AccountStoreAccess,
-    AccountStoreHandle, Assembly, CapabilitySweep, DEFAULT_BACKSTOP_INTERVAL, DriverConfig,
-    ENROLLMENT_RETIRE_BUDGET, ElectionOutcome, EngineElection, EngineRole, EnrollmentPass,
-    EnrollmentRefusal, EnrollmentRetirement, FleetBootstrapRows, GroupCeremonyAuthority,
-    HolderWalk, HolderWalkSeat, HostLegs, LegsCtx, LegsOutput, LinkedNestConnector,
-    MembershipSource, NoLegs, OwedDeliveries, OwedNestDeliverer, PassTimings, Presence,
-    PrincipalCustody, PumpCycles, PumpCyclesView, PumpReport, RUNTIME_ABSENT, RuntimePrincipal,
-    SIGN_OUT_PASS_GRACE, SeatAccountStore, ServeEnd, TrustedHolderSource, elect_at_start,
-    fixed_holders, fleet_bootstrap, fleet_bootstrap_rows, nudge_scope_for_push, push_step_error,
-    r14_trust,
+    ACCOUNT_HANDLE_WAIT, AccountDriver, AccountHandleSource, AccountMailImportSourceStore,
+    AccountMailStore, AccountStoreAccess, AccountStoreHandle, Assembly, CapabilitySweep,
+    DEFAULT_BACKSTOP_INTERVAL, DriverConfig, ENROLLMENT_RETIRE_BUDGET, ElectionOutcome,
+    EngineElection, EngineRole, EnrollmentPass, EnrollmentRefusal, EnrollmentRetirement,
+    FleetBootstrapRows, GroupCeremonyAuthority, HolderWalk, HolderWalkSeat, HostLegs, LegsCtx,
+    LegsOutput, LinkedNestConnector, MembershipSource, NoLegs, OwedDeliveries, OwedNestDeliverer,
+    PassTimings, Presence, PrincipalCustody, PumpCycles, PumpCyclesView, PumpReport,
+    RUNTIME_ABSENT, RuntimePrincipal, SIGN_OUT_PASS_GRACE, SeatAccountStore, ServeEnd,
+    TrustedHolderSource, elect_at_start, fixed_holders, fleet_bootstrap, fleet_bootstrap_rows,
+    nudge_scope_for_push, push_step_error, r14_trust,
 };
 /// The refused-change door's write, for a host that drives the door itself
 /// (the conformance suites' background-write proof).
@@ -219,8 +219,13 @@ pub const STORE_THREAD_STACK_BUDGET: usize = STORE_THREAD_STACK_BYTES / 2;
 
 /// Production credential slot for the writer key, honoring the shared env
 /// contract (`FAUNA_KEYRING_APP` override, `FAUNA_E2E_CREDENTIAL_DIR` file
-/// backend) so e2e runs never touch a developer's real keyring — the sync
-/// agent's `production_store` shape.
+/// backend) so e2e runs never touch a developer's real keyring — resolved by
+/// [`CredentialStore::account_store`], whose unattended `0600`-file arm under
+/// the sync state base is what a box with no usable OS store keeps the slot
+/// in, for the app and the sync agent alike (the agent's capability store
+/// takes the same arm — `fauna_client_sync::agent::agent_credential_store`).
+/// Anywhere else a dropped write is still refused loudly by
+/// [`writer_key_from_slot`]'s read-back.
 ///
 /// **On the phones this is the app's own secure store.** iOS and android have
 /// no `fauna-credential-store` arm of their own; the slot there is the
@@ -248,7 +253,7 @@ pub fn replica_posture(credentials: &CredentialStore) -> ReplicaPosture {
 }
 
 pub fn production_credential_store() -> CredentialStore {
-    CredentialStore::new(CRED_NAMESPACE)
+    CredentialStore::account_store()
 }
 
 /// One reconnect watch out of two: the returned receiver changes whenever
@@ -913,6 +918,28 @@ where
     async fn stand_down(&mut self) {
         crate::peer_leg::stand_down(&mut self.peer).await;
         self.custody.stand_down();
+    }
+
+    /// The restore gesture: the custody-revocation snapshot refreshed first
+    /// (a gesture between passes reads the view as it stands now), then the
+    /// peer leg's gesture entry, beside the pump's arm.
+    async fn restore_from_custodian(
+        &mut self,
+        ctx: fauna_account_plane::account_driver::RestoreCtx<'_, B>,
+        url: &str,
+        content_scopes: &mut dyn FnMut() -> Vec<fauna_protocol::scope::ContentScope>,
+    ) -> Result<crate::custodian_nest_restore::CustodianRestoreOutcome> {
+        if let Err(e) = self
+            .custody
+            .refresh_revoked(ctx.store, &self.peer.revoked)
+            .await
+        {
+            tracing::warn!(
+                "custodian nest restore: custody-revocation snapshot not refreshed ({e:#}) — \
+                 the last derived view stands"
+            );
+        }
+        crate::peer_leg::custodian_restore_gesture(&self.peer, ctx, url, content_scopes).await
     }
 }
 
@@ -5554,6 +5581,55 @@ mod tests {
         first.shutdown().await;
     }
 
+    /// **A never-listed replica's custody read for a decision is refused as
+    /// not ready, never answered empty** (`account-client-lifecycle.md`
+    /// § The client-side lifecycle → *The first listing*, clause (3);
+    /// `succession-cut.md` ruling (11)(a)). A successor's first launch is such
+    /// a replica: its fresh store holds no folder-key row until it lists the
+    /// fleet scope, and the succession cut read that empty custody as "this
+    /// account owns no set" and never ran (tui, a bound set whose store the
+    /// sync agent hosts, measured 2026-10-21).
+    ///
+    /// The nest is unreachable through the device's first pass, so the pass
+    /// ends without its listing and the read is refused; once the device has
+    /// listed, the same read answers the custody as it stands.
+    ///
+    /// Red-verified against the ungated read: it answered `Ok` with no set.
+    #[tokio::test]
+    async fn a_never_listed_replicas_custody_read_for_a_decision_is_refused_not_empty() {
+        use fauna_account_seams::folder_keys::PlaneFolderKeys;
+        use fauna_client_folders::FolderKeyReader;
+
+        let fx = fixture();
+        fx.fake.nest_unreachable.store(true, Ordering::SeqCst);
+        let a = AccountStoreRuntime::start(fx.params("a"))
+            .await
+            .expect("start a");
+        eventually(|| a.pump_cycles().1 > 0, "a's first pass ended").await;
+        let h = a.clone();
+        let custody = PlaneFolderKeys::new(move || Some(h.clone()));
+
+        let unlisted = tokio::time::timeout(Duration::from_secs(5), custody.load_listed())
+            .await
+            .expect("the gate answers at once when no pass is in flight");
+        assert!(
+            refused_as_not_listed(&unlisted),
+            "the custody read was refused as not ready, got {unlisted:?}"
+        );
+        assert!(
+            fauna_client_folders::custody_not_ready(unlisted.as_ref().unwrap_err()),
+            "the folders crate reads the refusal as the transient class"
+        );
+
+        fx.fake.nest_unreachable.store(false, Ordering::SeqCst);
+        a.reconcile_now().await.expect("a lists");
+        custody
+            .load_listed()
+            .await
+            .expect("a listed replica answers its custody");
+        a.shutdown().await;
+    }
+
     /// **The store principal's connect gate** (`transport-connection.md` § The
     /// dial budget) — the signal the principal's first
     /// `fauna.auth.device_handshake` waits on, so a first sign-in never mints
@@ -9463,21 +9539,34 @@ mod tests {
         // derived content scope), so a bare list-call total would fold the
         // barrier's content walks into the number under test.
         let before = fx.fake.list_calls_for(ACCOUNT_STATE_SCOPE);
+        // The driver runs on its own thread, so a burst sent while it idles
+        // can be split by its own wake (nudge 1 drained alone, 2–5 a second
+        // walk) — the 0.1.4 replay's red. Land the burst while the driver is
+        // provably busy instead: a priming nudge's walk is held inside its
+        // list call, the five queue behind it, and the release lets the
+        // driver drain the whole pending batch at once. Red-verified: with a
+        // 20 ms sleep between the sends the hold keeps the count at 1, and
+        // removing the hold walks every nudge on its own (4 here, 5 for the
+        // pre-hold test).
+        fx.fake.stall_next_list.store(true, Ordering::SeqCst);
+        handle.nudge_scope(ACCOUNT_STATE_SCOPE);
+        fx.fake.list_stalled.notified().await;
         for _ in 0..5 {
             handle.nudge_scope(ACCOUNT_STATE_SCOPE);
         }
-        // The burst lands as one drained batch → one walk (one list call,
-        // empty feed = single page). Eventually-assert, then a barrier, then
-        // the exact count.
+        fx.fake.release_list.notify_one();
+        // The held walk answers (one list call), then the burst lands as one
+        // drained batch → one walk (one list call, empty feed = single page).
+        // Eventually-assert, then a barrier, then the exact count.
         eventually(
-            || fx.fake.list_calls_for(ACCOUNT_STATE_SCOPE) > before,
+            || fx.fake.list_calls_for(ACCOUNT_STATE_SCOPE) > before + 1,
             "nudge walk ran",
         )
         .await;
         let report = handle.reconcile_now().await.expect("barrier");
         assert!(report.errors.is_empty());
-        // Minus the barrier's own state walk.
-        let nudge_walks = fx.fake.list_calls_for(ACCOUNT_STATE_SCOPE) - before - 1;
+        // Minus the priming walk and the barrier's own state walk.
+        let nudge_walks = fx.fake.list_calls_for(ACCOUNT_STATE_SCOPE) - before - 2;
         assert_eq!(nudge_walks, 1, "five nudges coalesced into one walk");
         handle.shutdown().await;
     }

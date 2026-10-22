@@ -36,8 +36,10 @@ use crate::{FfiError, stringify};
 /// `action` is the raw obligation-action discriminant (rendered via the shared
 /// `obligationActionLabel` map, never raw); `timestamp` is a **microsecond**
 /// epoch. The wire's `extra` forward-compat catch-all is dropped (a decode
-/// escape hatch, never a value the UI reads). Built-in fields only, so this
-/// stays in the Go mail-bridge `--no-default-features` build.
+/// escape hatch, never a value the UI reads). `issuer_nest` names the deciding
+/// nest on a row another nest delivered, and `moderation_queue` carries it into
+/// the merged row's issuer suffix. Built-in fields only, so this stays in the
+/// Go mail-bridge `--no-default-features` build.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct FfiObligationAction {
     pub id: i64,
@@ -47,6 +49,10 @@ pub struct FfiObligationAction {
     pub confidence_per_mille: u16,
     pub action: u8,
     pub timestamp: i64,
+    /// The handle domain of the nest whose admin decided, on a row another
+    /// nest delivered; `None` for this nest's own decision.
+    #[uniffi(default = None)]
+    pub issuer_nest: Option<String>,
 }
 
 impl From<ObligationAction> for FfiObligationAction {
@@ -59,6 +65,7 @@ impl From<ObligationAction> for FfiObligationAction {
             confidence_per_mille: a.confidence_per_mille,
             action: a.action,
             timestamp: a.timestamp,
+            issuer_nest: a.issuer_nest,
         }
     }
 }
@@ -277,6 +284,19 @@ pub fn legal_takedown_tombstone(reference: &str) -> fauna_core::localized::Local
     fauna_core::obligation::legal_takedown_tombstone(reference)
 }
 
+/// UniFFI face of [`fauna_core::obligation::admin_block_notice`] — the shared
+/// notice ("blocked by this nest's admin after a report: harassment",
+/// `moderation.md` § Admin block of a reported item) a client renders in the
+/// body position of a post or message once its reply carries `admin_block`.
+/// `reason` is the marker's reason wire token; the returned `{reason}` value is
+/// itself a key, resolved through the app's nested lookup. Same
+/// `moderation-badge` gate / Go-drop rationale as `legal_takedown_tombstone`.
+#[cfg(feature = "moderation-badge")]
+#[uniffi::export]
+pub fn admin_block_notice(reason: &str) -> fauna_core::localized::LocalizedText {
+    fauna_core::obligation::admin_block_notice(reason)
+}
+
 // ── Moderation-queue union ────────────────────────────────────────────────
 
 /// UniFFI face of [`fauna_client_moderation::merge_queue`] — the one shared
@@ -312,7 +332,8 @@ pub fn moderation_queue(
             confidence_per_mille: a.confidence_per_mille,
             action: a.action,
             timestamp: a.timestamp,
-            extra: Default::default(),
+            issuer_nest: a.issuer_nest,
+            ..Default::default()
         })
         .collect();
     merge_queue(&server, &local)
@@ -543,6 +564,7 @@ mod tests {
             confidence_per_mille: 880,
             action: 2,
             timestamp: 1_700_000_000_000_000,
+            issuer_nest: Some("issuer.example".into()),
             ..Default::default()
         };
         let ffi: FfiObligationAction = proto.into();
@@ -553,5 +575,6 @@ mod tests {
         assert_eq!(ffi.confidence_per_mille, 880);
         assert_eq!(ffi.action, 2);
         assert_eq!(ffi.timestamp, 1_700_000_000_000_000);
+        assert_eq!(ffi.issuer_nest.as_deref(), Some("issuer.example"));
     }
 }

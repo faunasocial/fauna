@@ -23,6 +23,6 @@
 # own. The publish gate's `secret_scan` entry for the new 40-hex run is landed by
 # `just release-verified` in the same act, so a pin advance never reds the merge.
 
-commit = "cb2b5bcd44a975c1a5c8067bbab51be90daed014"
-nest_image = "ghcr.io/faunasocial/nest:sha-cb2b5bcd44a975c1a5c8067bbab51be90daed014"
-released = "2026-10-10"
+commit = "5f525618c1dd972aa45653c59aaa08b18dfd30e7"
+nest_image = "ghcr.io/faunasocial/nest:sha-5f525618c1dd972aa45653c59aaa08b18dfd30e7"
+released = "2026-10-21"

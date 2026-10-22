@@ -177,6 +177,41 @@ def test_a_nickname_notes_and_label_paint_on_the_roster_and_profile_and_survive_
     )
 
 
+def test_a_label_used_on_another_person_is_offered_and_a_pick_stages_it(
+    logged_in_app, nest_instance, test_user
+):
+    """`profile.md` § The private section → *Fields*: typing a prefix in the
+    add field offers the labels already used on other people (the derived
+    vocabulary, `fauna_core::contact_overlay::label_suggestions`), and picking
+    a row stages it exactly as typing it and pressing add does."""
+    app = logged_in_app
+    first = seed_accepted_contact(nest_instance, test_user)
+    second = seed_accepted_contact(nest_instance, test_user)
+    label = f"Book club {_nonce()}"
+
+    # Another person carries the label, saved — so it joins the vocabulary.
+    open_other_profile(app, first)
+    app.profile.set_private_nickname("First")
+    app.profile.add_private_label(label)
+    _save_and_await_header(app, "First", where="labelling the first person")
+
+    open_other_profile(app, second)
+    app.profile.type_private_label(label[:6].lower())
+    wait_until(
+        lambda: app.profile.label_suggestions() == [label], PAINT_S,
+        diagnose=lambda: (
+            f"typing a prefix offered {app.profile.label_suggestions()}, wanted {[label]} "
+            f"(error-message {app.profile.error_text()!r})"
+        ),
+    )
+    app.profile.pick_label_suggestion(0)
+    wait_until(
+        lambda: app.profile.private_labels() == [label], PAINT_S,
+        diagnose=lambda: f"picking the row staged {app.profile.private_labels()}",
+    )
+    assert app.profile.label_suggestions() == [], "a staged label is no longer offered"
+
+
 @pytest.fixture
 def sibling_seats(request, nest_instance):
     """Second enrolled seats on the session nest (`helpers.fleet.SiblingSeats`)."""

@@ -453,34 +453,50 @@ fn parse_mta_sts_txt_id(record: &str) -> Option<String> {
     None
 }
 
-/// Live `MtaStsFetcher` over `hickory-resolver` (DNS) + `reqwest` (HTTPS).
-/// The production outbound path holds an `Arc<dyn MtaStsFetcher>` (usually
-/// wrapped in [`CachingMtaStsFetcher`]); this is the network-touching impl.
+/// The largest MTA-STS policy body [`LiveMtaStsFetcher`] accepts. RFC 8461
+/// sets no limit; a real policy is a few hundred bytes, so 64 KiB is ample and
+/// bounds what a recipient domain's `mta-sts.` host can make the nest read.
+pub const MTA_STS_POLICY_MAX_BYTES: usize = 64 * 1024;
+
+/// The deadline for the policy GET — matches the per-MX-host connect budget in
+/// the goal doc § MX resolution.
+pub const MTA_STS_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The HTTPS half of the MTA-STS lookup: GET the policy at `url` and return its
+/// body. `url` is always `https://mta-sts.<recipient domain>/.well-known/mta-sts.txt`,
+/// and the recipient domain controls where that name resolves — so the
+/// implementation is the deployment's SSRF-guarded fetch (the nest's
+/// `outbound_mta_sts::GuardedMtaStsPolicyHttp`: https only, every resolved
+/// address global and pinned, no redirect followed — RFC 8461 §3.3 serves the
+/// policy at the canonical URL — [`MTA_STS_FETCH_TIMEOUT`], the body read
+/// through a [`MTA_STS_POLICY_MAX_BYTES`] cap). `fauna-mail` cannot reach that
+/// guard, hence the seam. Any `Err` — a refused target, a network failure, a
+/// non-2xx answer, an over-cap body — is a fetch error.
+#[async_trait::async_trait]
+pub trait MtaStsPolicyHttp: Send + Sync {
+    async fn get_policy(&self, url: &str) -> anyhow::Result<String>;
+}
+
+/// Live `MtaStsFetcher` over `hickory-resolver` (DNS) + an injected
+/// [`MtaStsPolicyHttp`] (HTTPS). The production outbound path holds an
+/// `Arc<dyn MtaStsFetcher>` (usually wrapped in [`CachingMtaStsFetcher`]);
+/// this is the network-touching impl.
 ///
-/// Native-only (`outbound-net` feature): `reqwest` + `hickory-resolver` do
-/// not cross-compile to wasm32 and must not enter the client FFI surface.
+/// Native-only (`outbound-net` feature): `hickory-resolver` does not
+/// cross-compile to wasm32 and must not enter the client FFI surface.
 /// Lifted from the retired `fauna-bridge-smtp::outbound::LiveResolver`
 /// so the permanent Go-bridge → nest outbound path doesn't couple to that
 /// retired crate.
 #[cfg(feature = "outbound-net")]
 pub struct LiveMtaStsFetcher {
     inner: hickory_resolver::TokioResolver,
-    http: reqwest::Client,
+    http: Arc<dyn MtaStsPolicyHttp>,
 }
 
 #[cfg(feature = "outbound-net")]
 impl LiveMtaStsFetcher {
-    pub fn new() -> anyhow::Result<Self> {
-        use anyhow::Context;
+    pub fn new(http: Arc<dyn MtaStsPolicyHttp>) -> anyhow::Result<Self> {
         let inner = crate::outbound::build_hickory_resolver()?;
-        // 10 s timeout matches the per-MX-host connect budget in the
-        // goal doc § MX resolution. No redirect-following: RFC 8461
-        // §3.2 says the policy MUST be served at the canonical URL.
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .context("failed to build reqwest client for MTA-STS")?;
         Ok(Self { inner, http })
     }
 }
@@ -511,29 +527,31 @@ impl MtaStsFetcher for LiveMtaStsFetcher {
                 break;
             }
         }
-        let id = match id {
-            Some(id) => id,
-            None => return Ok(MtaStsLookup::NotPublished),
-        };
-
-        let url = format!("https://mta-sts.{domain}/.well-known/mta-sts.txt");
-        let response = match self.http.get(&url).send().await {
-            Ok(r) if r.status().is_success() => r,
-            // TXT advertises STS but the body fetch failed (non-2xx /
-            // network) — TLSRPT records `sts-policy-fetch-error`; per
-            // RFC 8461 §5 delivery proceeds as if no policy.
-            Ok(_) | Err(_) => return Ok(MtaStsLookup::FetchError),
-        };
-        let body = match response.text().await {
-            Ok(b) => b,
-            Err(_) => return Ok(MtaStsLookup::FetchError),
-        };
-        match parse_policy(&body) {
-            Ok(policy) => Ok(MtaStsLookup::Found(FetchedPolicy { id, policy })),
-            // Body fetched but unparseable — TLSRPT records
-            // `sts-policy-invalid`.
-            Err(_) => Ok(MtaStsLookup::Invalid),
+        match id {
+            Some(id) => Ok(fetch_policy(&*self.http, domain, id).await),
+            None => Ok(MtaStsLookup::NotPublished),
         }
+    }
+}
+
+/// The policy half of [`LiveMtaStsFetcher::lookup`], once the TXT record has
+/// advertised STS with `id`: GET the canonical policy URL through `http` and
+/// classify the answer.
+pub async fn fetch_policy(http: &dyn MtaStsPolicyHttp, domain: &str, id: String) -> MtaStsLookup {
+    let url = format!("https://mta-sts.{domain}/.well-known/mta-sts.txt");
+    let body = match http.get_policy(&url).await {
+        Ok(b) => b,
+        // TXT advertises STS but the body fetch failed (refused target,
+        // non-2xx, network, over-cap) — TLSRPT records
+        // `sts-policy-fetch-error`; per RFC 8461 §5 delivery proceeds as if
+        // no policy.
+        Err(_) => return MtaStsLookup::FetchError,
+    };
+    match parse_policy(&body) {
+        Ok(policy) => MtaStsLookup::Found(FetchedPolicy { id, policy }),
+        // Body fetched but unparseable — TLSRPT records
+        // `sts-policy-invalid`.
+        Err(_) => MtaStsLookup::Invalid,
     }
 }
 

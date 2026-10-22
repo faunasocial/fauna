@@ -152,8 +152,8 @@ Stamped 2026-10-11 at 29b0959751.
 | 2 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_mx_round_trip` | nest (linux): passed |
 | 3 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_deploy_greylist_retry.py::test_mail_deploy_greylist_then_retry_delivered` | nest (linux): passed |
 | 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_greylist_defers_first_then_passes_on_retry` | nest (linux): passed |
-| 4 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_deploy_dkim_auto_enable.py::test_nest_auto_provisions_dkim_signed_outbound` | nest (linux): failed |
-| 4 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_deploy_dkim_auto_enable.py::test_nest_dkim_signature_verifies_against_published_record` | nest (linux): failed |
+| 4 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_deploy_dkim_auto_enable.py::test_nest_auto_provisions_dkim_signed_outbound` | nest (linux): passed |
+| 4 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_deploy_dkim_auto_enable.py::test_nest_dkim_signature_verifies_against_published_record` | nest (linux): passed |
 | 4 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_scheduled_rotation_mints_new_selector_nestside` | nest (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_outbound_bounce_on_bad_external_recipient` | nest (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_outbound_delay_warning_emitted_once` | nest (linux): passed |

@@ -1,7 +1,7 @@
 //! **The reader's cross-nest roster arm** — `mls-group-key-material.md` § M2 →
 //! *Writer-signed change records*, ruling (3) as amended 2026-09-29: a
 //! cross-nest member's engine reads the set's writer roster relayed to the
-//! set's home nest (`fauna.folders.members.list_actors_remote`, `federation.md`
+//! set's home nest (`fauna.folders.members.list_actors_remote`, `federation-shared-folders.md`
 //! § Cross-nest…, *The cross-nest writer roster read*), under the same writer
 //! filter as the same-nest read, with the same fail-closed posture.
 //!

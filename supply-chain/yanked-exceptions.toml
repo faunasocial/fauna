@@ -16,13 +16,3 @@
 # version = "x.y.z"
 # reason = "..."      # our own words
 # approved = "YYYY-MM-DD"
-
-# Bump round 12 (C). crates.io withdrew every zip release but 9.0.3 (published
-# 2026-10-13) with no advisory and no stated reason. Later on 2026-10-16 it restored
-# the newest release of each major line, so 8.6.0's entry went; 2.4.2 stays withdrawn.
-# Moving it to the restored 2.6.1 is a bump, queued for a round.
-[[exception]]
-package = "zip"
-version = "2.4.2"
-reason = "Our own archive-import and mail code depends on it directly, and the version we run has shipped since 0.1.3. At the decision the only release left was 9.0.3, a 2.5-day-old major; the in-range 2.6.1, restored later that day, waits for a round."
-approved = "2026-10-16"

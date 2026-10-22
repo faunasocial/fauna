@@ -52,8 +52,9 @@ use fauna_ui_ids as ids;
 use std::sync::Arc;
 
 use fauna_client_mail_settings::{
-    AliasKind, AliasView, ImportAliasStatusView, MailAliasesAction, MailAliasesMachine,
-    MailAliasesSnapshot, alias_hits_label, alias_kind_badge,
+    AliasAuditView, AliasKind, AliasView, ImportAliasStatusView, MailAliasesAction,
+    MailAliasesMachine, MailAliasesSnapshot, alias_expiry_label, alias_hits_label,
+    alias_is_extendable, alias_kind_badge,
 };
 use fauna_i18n::strings::mail_aliases as t;
 
@@ -341,6 +342,17 @@ fn hits_text(view: &AliasView) -> String {
     crate::wizard::localized(&alias_hits_label(view.hit_count, last))
 }
 
+/// `mail-aliases-list-item-expires-at` — the shared `alias_expiry_label` with
+/// the expiry date formatted natively (the [`hits_text`] split); `None` for an
+/// alias with no expiry.
+fn expiry_text(view: &AliasView, now_ms: i64) -> Option<String> {
+    let date = view
+        .expires_at_ms
+        .map(|ms| crate::format::epoch_secs_date((ms / 1000).max(0) as u64))
+        .unwrap_or_default();
+    alias_expiry_label(view.expires_at_ms, now_ms, date).map(|text| crate::wizard::localized(&text))
+}
+
 /// `mail-aliases-import-result` — the shared `ImportResultView` counts through
 /// the `mail_aliases.import_result` template, plus one
 /// `mail_aliases.import_invalid_line` row per invalid outcome.
@@ -605,6 +617,25 @@ fn alias_row_elements(a: &MailAliasesState, i: usize, view: &AliasView) -> Vec<E
         Element::label(ids::MAIL_ALIASES_LIST_ITEM_HITS, hits_text(view)).within(ITEM, i),
     ];
 
+    // A disposable's expiry and its extend (`mail-aliases.md` § Don't do
+    // these — never auto-expire without telling the user, who can extend
+    // before it lapses). Both decided by the shared helpers at paint time.
+    let now_ms = fauna_core::data::Timestamp::now_millis() as i64;
+    if let Some(expiry) = expiry_text(view, now_ms) {
+        els.push(Element::label(ids::MAIL_ALIASES_LIST_ITEM_EXPIRES_AT, expiry).within(ITEM, i));
+    }
+    if alias_is_extendable(view.kind, view.expires_at_ms, view.uses_remaining, now_ms) {
+        els.push(
+            Element::gesture_button(
+                ids::MAIL_ALIASES_LIST_ITEM_EXTEND_BUTTON,
+                t::EXTEND,
+                true,
+                Gesture::Settings(Action::MailAliasesExtend(id.clone())),
+            )
+            .within(ITEM, i),
+        );
+    }
+
     if view.is_canonical {
         // Read-only: the primary-address marker instead of the four mutating
         // controls. An untagged label — ui.yaml mints no id for it, and
@@ -667,11 +698,66 @@ fn alias_row_elements(a: &MailAliasesState, i: usize, view: &AliasView) -> Vec<E
         );
     }
 
-    // The audit disclosure is inert on every app: `list_account_alias_hits`
-    // landed nest-side but has no consumer in the shared `MailAliasesMachine`
-    // yet (`mail-aliases.md` § Still deferred). Rendered for parity — wiring it
-    // is a fleet-wide slice through the shared machine, not a tui one.
-    els.push(Element::label(ids::MAIL_ALIASES_LIST_ITEM_SHOW_AUDIT, t::SHOW_AUDIT).within(ITEM, i));
+    // The history disclosure (`mail-aliases.md` § Per-alias-hit audit list):
+    // the shared machine holds the one open address's newest hits; this row
+    // paints them when they are its own. Which way the click goes is read off
+    // the snapshot at paint time, the toggle-active shape.
+    let audit = a
+        .snapshot
+        .as_ref()
+        .and_then(|s| s.audit.as_ref())
+        .filter(|audit| &audit.alias_id_hex == id);
+    els.push(
+        Element::gesture_button(
+            ids::MAIL_ALIASES_LIST_ITEM_SHOW_AUDIT,
+            if audit.is_some() {
+                t::HIDE_AUDIT
+            } else {
+                t::SHOW_AUDIT
+            },
+            true,
+            Gesture::Settings(Action::MailAliasesToggleAudit {
+                alias_id_hex: id.clone(),
+                opening: audit.is_none(),
+            }),
+        )
+        .within(ITEM, i),
+    );
+    if let Some(audit) = audit {
+        els.extend(audit_elements(i, audit));
+    }
+    els
+}
+
+/// The open history under row `i`: one `mail-aliases-audit-item` per hit,
+/// newest first, its three leaves scoped in it — or the
+/// `mail-aliases-audit-empty` line when nothing has arrived yet. The time is
+/// the viewer's own (the relative "2h ago" the tui paints for every past
+/// event, a plain local date past its window).
+fn audit_elements(i: usize, audit: &AliasAuditView) -> Vec<Element> {
+    const ITEM: &str = ids::MAIL_ALIASES_LIST_ITEM;
+    const HIT: &str = ids::MAIL_ALIASES_AUDIT_ITEM;
+    if audit.hits.is_empty() {
+        return vec![Element::label(ids::MAIL_ALIASES_AUDIT_EMPTY, t::AUDIT_EMPTY).within(ITEM, i)];
+    }
+    let mut els = Vec::with_capacity(audit.hits.len() * 4);
+    for (j, hit) in audit.hits.iter().enumerate() {
+        let received_at = crate::format::format_epoch_us(hit.received_at_ms.saturating_mul(1_000));
+        els.push(Element::label(HIT, String::new()).within(ITEM, i));
+        for (leaf, text) in [
+            (
+                ids::MAIL_ALIASES_AUDIT_ITEM_MATCHED_ADDRESS,
+                hit.matched_address.clone(),
+            ),
+            (
+                ids::MAIL_ALIASES_AUDIT_ITEM_SENDER_DOMAIN,
+                hit.sender_domain.clone(),
+            ),
+            (ids::MAIL_ALIASES_AUDIT_ITEM_RECEIVED_AT, received_at),
+        ] {
+            els.push(Element::label(leaf, text).within(HIT, j).within(ITEM, i));
+        }
+    }
     els
 }
 
@@ -714,6 +800,7 @@ mod tests {
             last_import_result: None,
             status: AliasesStatus::Idle,
             error: None,
+            audit: None,
         }
     }
 
@@ -728,6 +815,60 @@ mod tests {
 
     fn ids(els: &[Element]) -> Vec<String> {
         els.iter().map(|e| e.id.clone()).collect()
+    }
+
+    /// The open history paints under its own row only — one scoped item per
+    /// hit with its three leaves, the empty line when there are none — and the
+    /// row's button flips to close it (`mail-aliases.md` § Per-alias-hit audit
+    /// list).
+    #[test]
+    fn the_open_history_paints_under_its_own_row() {
+        use fauna_client_mail_settings::{AliasAuditView, AliasHitView};
+        let mut state = state_with(
+            vec![
+                alias("01", "one", AliasKind::Exact),
+                alias("02", "two", AliasKind::Exact),
+            ],
+            Some("mail.test"),
+        );
+        let hit = AliasHitView {
+            hit_id_hex: "33".into(),
+            matched_address: format!("two@{}", "mail.test"),
+            sender_domain: "sender.test".into(),
+            received_at_ms: 1_700_000_000_000,
+        };
+        state.mail_aliases.snapshot.as_mut().unwrap().audit = Some(AliasAuditView {
+            alias_id_hex: "02".into(),
+            hits: vec![hit],
+        });
+        let els = mail_aliases_elements(&state);
+        assert_eq!(count(&els, ids::MAIL_ALIASES_AUDIT_ITEM), 1);
+        let domain = find(&els, ids::MAIL_ALIASES_AUDIT_ITEM_SENDER_DOMAIN);
+        assert_eq!(domain.text, "sender.test");
+        assert_eq!(
+            domain.path,
+            vec![
+                (ids::MAIL_ALIASES_LIST_ITEM.to_string(), 1),
+                (ids::MAIL_ALIASES_AUDIT_ITEM.to_string(), 0)
+            ]
+        );
+        let buttons: Vec<&Element> = els
+            .iter()
+            .filter(|e| e.id == ids::MAIL_ALIASES_LIST_ITEM_SHOW_AUDIT)
+            .collect();
+        assert_eq!(buttons[0].text, t::SHOW_AUDIT);
+        assert_eq!(buttons[1].text, t::HIDE_AUDIT);
+
+        state.mail_aliases.snapshot.as_mut().unwrap().audit = Some(AliasAuditView {
+            alias_id_hex: "01".into(),
+            hits: vec![],
+        });
+        let els = mail_aliases_elements(&state);
+        assert_eq!(count(&els, ids::MAIL_ALIASES_AUDIT_ITEM), 0);
+        assert_eq!(
+            find(&els, ids::MAIL_ALIASES_AUDIT_EMPTY).path,
+            vec![(ids::MAIL_ALIASES_LIST_ITEM.to_string(), 0)]
+        );
     }
 
     fn count(els: &[Element], id: &str) -> usize {

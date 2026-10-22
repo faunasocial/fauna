@@ -29,12 +29,15 @@ import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.viewmodel.MailAliasesVM
+import uniffi.fauna_client_mail_settings.AliasAuditView
 import uniffi.fauna_client_mail_settings.AliasKind
 import uniffi.fauna_client_mail_settings.AliasView
 import uniffi.fauna_client_mail_settings.AliasesStatus
 import uniffi.fauna_client_mail_settings.ImportAliasStatusView
 import uniffi.fauna_client_mail_settings.ImportResultView
+import uniffi.fauna_client_mail_settings.aliasExpiryLabel
 import uniffi.fauna_client_mail_settings.aliasHitsLabel
+import uniffi.fauna_client_mail_settings.aliasIsExtendable
 import uniffi.fauna_client_mail_settings.aliasKindBadge
 import social.fauna.generated.Ids
 
@@ -71,6 +74,9 @@ fun MailAliasesScreen(
         working = snapshot.status == AliasesStatus.WORKING,
         lastImportResult = snapshot.lastImportResult,
         lastMintedAddress = snapshot.lastMintedAddress,
+        audit = snapshot.audit,
+        onShowAudit = vm::showAudit,
+        onHideAudit = vm::hideAudit,
         // Kind badge via shared `alias_kind_badge` (mail-aliases.md § Shared
         // alias_kind_badge formatter); FFI lives here, off the testable Content.
         kindLabel = { kind -> resolveLocalized(context, aliasKindBadge(kind)).orEmpty() },
@@ -82,6 +88,21 @@ fun MailAliasesScreen(
             val lastHit = alias.lastHitAtMs?.let { formatLastHitDate(it) }
             resolveLocalized(context, aliasHitsLabel(alias.hitCount, lastHit)).orEmpty()
         },
+        // A disposable's expiry text and its extend (mail-aliases.md § Don't do
+        // these) via shared `alias_expiry_label` / `alias_is_extendable`; FFI lives
+        // here, off the testable Content. The expiry date is formatted natively
+        // (the hits-label split) and "now" is read at paint time.
+        expiresAtLabel = { alias ->
+            val date = alias.expiresAtMs?.let { formatLastHitDate(it) }.orEmpty()
+            resolveLocalized(
+                context,
+                aliasExpiryLabel(alias.expiresAtMs, System.currentTimeMillis(), date),
+            )
+        },
+        isExtendable = { alias ->
+            aliasIsExtendable(alias.kind, alias.expiresAtMs, alias.usesRemaining, System.currentTimeMillis())
+        },
+        onExtend = vm::extend,
         onBack = { navController.popBackStack() },
         onCreate = vm::create,
         onGenerateDisposable = { vm.generateDisposable(null, null, "") },
@@ -125,8 +146,20 @@ fun MailAliasesContent(
     // published as the generate button's `copied` attr (the copy-button contract
     // `account-actor-id-copy-btn` set) so a test asserts what was copied.
     lastMintedAddress: String? = null,
+    // The one address whose history is open, with its hits
+    // (`MailAliasesSnapshot.audit`, `mail-aliases.md` § Per-alias-hit audit
+    // list), and the two dispatches that open and close it.
+    audit: AliasAuditView? = null,
+    onShowAudit: (String) -> Unit = {},
+    onHideAudit: () -> Unit = {},
     kindLabel: (AliasKind) -> String,
     hitsLabel: (AliasView) -> String,
+    // `mail-aliases-list-item-expires-at` text (null = no expiry, so no id) and
+    // the extend predicate, both decided by shared Rust and injected so the
+    // Content stays JVM-testable. Defaults keep other call sites compiling.
+    expiresAtLabel: (AliasView) -> String? = { null },
+    isExtendable: (AliasView) -> Boolean = { false },
+    onExtend: (String) -> Unit = {},
     // Add-sheet numeric-field validators via shared fauna_core::format — parse_count
     // (u32: spam-threshold override + disposable ttl/uses) and parse_count_i64 (i64:
     // rate-limit override) — value-formatting.md § Mail-knob validation, mail-aliases.md
@@ -301,10 +334,17 @@ fun MailAliasesContent(
                         working = working,
                         kindLabel = kindLabel,
                         hitsLabel = hitsLabel,
+                        expiresAtLabel = expiresAtLabel,
+                        isExtendable = isExtendable,
+                        onExtend = { onExtend(alias.aliasIdHex) },
                         onEdit = { sheet = SheetMode.Edit(alias) },
                         onRevoke = { onRevoke(alias.aliasIdHex) },
                         onEnable = { onEnable(alias.aliasIdHex) },
                         onDelete = { onDelete(alias.aliasIdHex) },
+                        audit = audit?.takeIf { it.aliasIdHex == alias.aliasIdHex },
+                        onToggleAudit = {
+                            if (audit?.aliasIdHex == alias.aliasIdHex) onHideAudit() else onShowAudit(alias.aliasIdHex)
+                        },
                     )
                 }
             }
@@ -584,12 +624,16 @@ private fun AliasRow(
     working: Boolean,
     kindLabel: (AliasKind) -> String,
     hitsLabel: (AliasView) -> String,
+    expiresAtLabel: (AliasView) -> String?,
+    isExtendable: (AliasView) -> Boolean,
+    onExtend: () -> Unit,
     onEdit: () -> Unit,
     onRevoke: () -> Unit,
     onEnable: () -> Unit,
     onDelete: () -> Unit,
+    audit: AliasAuditView? = null,
+    onToggleAudit: () -> Unit = {},
 ) {
-    var auditOpen by remember { mutableStateOf(false) }
     val deleteArm = rememberTwoClickArm()
     val revokeArm = rememberTwoClickArm()
     val deleteGate = faunaGate("fauna.bridges.delete_account_alias")
@@ -643,6 +687,28 @@ private fun AliasRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.testTag(Ids.MAIL_ALIASES_LIST_ITEM_HITS),
             )
+            // A disposable's expiry and its extend (`mail-aliases.md` § Don't do
+            // these — never auto-expire without telling the user, who can extend
+            // before it lapses): present only for an alias that has an expiry.
+            expiresAtLabel(alias)?.let { expiry ->
+                Text(
+                    expiry,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag(Ids.MAIL_ALIASES_LIST_ITEM_EXPIRES_AT),
+                )
+            }
+            if (isExtendable(alias)) {
+                // Extend pushes the expiry out (a full-overwrite `update_account_alias`
+                // the shared machine builds from the row), so it declares that kind.
+                val extendGate = faunaGate("fauna.bridges.update_account_alias", enabled = !working)
+                OutlinedButton(
+                    onClick = onExtend,
+                    enabled = extendGate.enabled,
+                    modifier = Modifier.testTag(Ids.MAIL_ALIASES_LIST_ITEM_EXTEND_BUTTON),
+                ) { Text(stringResource(R.string.mail_aliases_extend)) }
+                DisabledControlReasonText(extendGate.reason)
+            }
             // ⚠ A DISCRIMINANT on the Active toggle: its two directions are two
             // distinct registered kinds. Which one the next click will issue is
             // read at PAINT time from the row's own state — `alias.disabled`
@@ -709,16 +775,62 @@ private fun AliasRow(
                         )
                     }
                 }
+                // The history disclosure: the machine holds the one open
+                // address's newest hits; this row paints them when they are its own.
                 TextButton(
-                    onClick = { auditOpen = !auditOpen },
+                    onClick = onToggleAudit,
                     modifier = Modifier.testTag(Ids.MAIL_ALIASES_LIST_ITEM_SHOW_AUDIT),
-                ) { Text(stringResource(R.string.mail_aliases_show_audit)) }
+                ) {
+                    Text(
+                        stringResource(
+                            if (audit != null) R.string.mail_aliases_hide_audit else R.string.mail_aliases_show_audit,
+                        ),
+                    )
+                }
             }
+            if (audit != null) AuditHistory(audit)
             if (!alias.isCanonical) {
                 // One reason for the row's mutating controls — they are disabled
                 // by the same verdict, and identical lines under one row would be noise.
                 DisabledControlReasonText(activeGate.reason ?: revokeGate.reason ?: deleteGate.reason)
             }
+        }
+    }
+}
+
+/** The open history under a row: one `mail-aliases-audit-item` per hit (the
+ *  address it came to, the sending domain, when), or the empty line — tui's
+ *  `audit_elements` shape. */
+@Composable
+private fun AuditHistory(audit: AliasAuditView) {
+    if (audit.hits.isEmpty()) {
+        Text(
+            stringResource(R.string.mail_aliases_audit_empty),
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.testTag(Ids.MAIL_ALIASES_AUDIT_EMPTY),
+        )
+        return
+    }
+    audit.hits.forEach { hit ->
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.testTag(Ids.MAIL_ALIASES_AUDIT_ITEM),
+        ) {
+            Text(
+                hit.matchedAddress,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.testTag(Ids.MAIL_ALIASES_AUDIT_ITEM_MATCHED_ADDRESS),
+            )
+            Text(
+                hit.senderDomain,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.testTag(Ids.MAIL_ALIASES_AUDIT_ITEM_SENDER_DOMAIN),
+            )
+            Text(
+                formatLastHitDate(hit.receivedAtMs),
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.testTag(Ids.MAIL_ALIASES_AUDIT_ITEM_RECEIVED_AT),
+            )
         }
     }
 }

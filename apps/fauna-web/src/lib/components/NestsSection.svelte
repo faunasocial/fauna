@@ -24,8 +24,8 @@
   //
   // Behavior + IDs: docs/goal/ui/nests.md; linking half owned by
   // docs/goal/behavior/linked-nests.md; ui.yaml § nests.
-  import { connectionStatus, identity } from '$lib/store';
-  import { linkedNestsMachineWithTrust } from '$lib/rpc';
+  import { connectionStatus, identity } from '#lib/store';
+  import { linkedNestsMachineWithTrust } from '#lib/rpc';
   import {
     ensureWasm,
     classifyLinkInput,
@@ -42,31 +42,35 @@
     type TrustGrantDuration,
     hexFull,
     shortId,
-  } from '$lib/wasm';
-  import { sessionDevicesMachine } from '$lib/devices-session';
-  import { custodyDegradedBadgeKey, custodyFacetLoad, custodyRevoke } from '$lib/wasm-folders';
-  import { custodyHeldBytesText, custodyReceiptStatusText } from '$lib/custody';
-  import type { CustodyHolderRowView } from '$lib/devices-machine';
-  import { makeOfflineGate } from '$lib/offline-gate';
-  import { resolveLocalized, type LocalizedText } from '$lib/i18n/localized';
-  import { byteSize } from '$lib/value-format';
+    accountRestoreFromCustodian,
+  } from '#lib/wasm';
+  import { readRestoreAnswer, restoreRunningText, type RestoreReading } from '#lib/nests-custody-restore';
+  import { sessionDevicesMachine } from '#lib/devices-session';
+  import { custodyDegradedBadgeKey, custodyFacetLoad, custodyRevoke } from '#lib/wasm-folders';
+  import { custodyHeldBytesText, custodyReceiptStatusText } from '#lib/custody';
+  import type { CustodyHolderRowView } from '#lib/devices-machine';
+  import { makeOfflineGate } from '#lib/offline-gate';
+  import { resolveLocalized, type LocalizedText } from '#lib/i18n/localized';
+  import { byteSize } from '#lib/value-format';
   import {
     generationPathText,
     generationShowsRestore,
     generationNoticeText,
+    holdersStatusText,
+    showsTrustEmpty,
     type TrustGenerationRow,
     type TrustRestoreOutcome,
-  } from '$lib/nests-generation';
+  } from '#lib/nests-generation';
   import { onDestroy, onMount } from 'svelte';
   import { afterNavigate } from '$app/navigation';
-  import { onStoreChange } from '$lib/store-change';
-  import { t } from '$lib/i18n/strings';
-  import { IDS } from '$lib/generated/uiIds';
-  import { forwardQueueView, type ForwardQueueStatus, type ForwardQueueView } from '$lib/nests-forward-queue';
+  import { onStoreChange } from '#lib/store-change';
+  import { t } from '#lib/i18n/strings';
+  import { IDS } from '#lib/generated/uiIds';
+  import { forwardQueueView, type ForwardQueueStatus, type ForwardQueueView } from '#lib/nests-forward-queue';
 
   // W4 (account-data-plane.md § Workstreams) phase 4's UI desensitizing (`account-data-plane.md` § The
   // offline-mutation contract). The verdict is the shared rule's, never a class
-  // test written here; `$lib/offline-gate` owns how a reactive tree obeys it.
+  // test written here; `#lib/offline-gate` owns how a reactive tree obeys it.
   const offlineGate = makeOfflineGate(offlineAffordance, connectionStatus.subscribe);
 
   // The parent settings page owns the single error surface (its MessageBanner /
@@ -150,7 +154,7 @@
     holder_candidates: string[];
   }
   // TrustGenerationRow / TrustRestoreOutcome (nests.md § Trust facet —
-  // generation recovery) live in `$lib/nests-generation` — the pure render
+  // generation recovery) live in `#lib/nests-generation` — the pure render
   // logic there needs them unit-testable without a live Svelte context.
   interface NestRow {
     nest_id: string;
@@ -314,6 +318,51 @@
     if (facet) custodyNestRows = facet.rows.filter((r) => r.custodian_nest_url !== null);
   }
 
+  // Restore from a custodian nest (`nests.md` § Trust facet — restore from a
+  // custodian nest): the page-level form and the per-row gesture dispatch the
+  // one shared runtime command; the shell holds no dial, handshake or walk
+  // logic, and the notice's copy and the form decision are the outcome's own
+  // (`#lib/nests-custody-restore`). The restore dials the custodian, never
+  // this session's own nest, so no own-nest wire kind gates it.
+  let restoreFormOpen = $state(false);
+  let restoreInput = $state('');
+  let restoreRunning = $state(false);
+  let restoreNotice = $state<string | null>(null);
+
+  function openRestoreForm(): void {
+    restoreFormOpen = true;
+  }
+  function cancelRestore(): void {
+    restoreInput = '';
+    restoreFormOpen = false;
+  }
+
+  async function restoreFromCustodian(url: string): Promise<void> {
+    const address = url.trim();
+    if (address === '' || restoreRunning) return;
+    restoreRunning = true;
+    restoreNotice = restoreRunningText();
+    let reading: RestoreReading;
+    try {
+      reading = readRestoreAnswer(await accountRestoreFromCustodian(address));
+    } catch (e) {
+      reading = { kind: 'failed', reason: e instanceof Error ? e.message : String(e) };
+    }
+    // The re-read first, so a restored custody row paints beside the notice
+    // and the page's own fold settles `error-message` before a gesture that
+    // could not run states why on it (tui's order).
+    await rehydrate().catch(() => {});
+    await loadCustodyNests().catch(() => {});
+    restoreRunning = false;
+    if (reading.kind === 'failed') {
+      restoreNotice = null;
+      error = reading.reason;
+    } else {
+      if (reading.closesForm) cancelRestore();
+      restoreNotice = reading.text;
+    }
+  }
+
   async function revokeCustodyNest(row: CustodyHolderRowView): Promise<void> {
     const id = $identity;
     if (!id?.secretHex) return;
@@ -340,11 +389,11 @@
     try {
       await ensureWasm();
       machine = await linkedNestsMachineWithTrust(id.secretHex);
-      // The `trust_facet_advance_clock` command's repaint (`$lib/trust-clock-e2e`):
+      // The `trust_facet_advance_clock` command's repaint (`#lib/trust-clock-e2e`):
       // installed before the first hydrate, so "the page is mounted" implies
       // "the hook is there". Test builds only (convention 15).
       if (__FAUNA_E2E_AUTOMATION__) {
-        const { setTrustClockRehydrateHook } = await import('$lib/trust-clock-e2e');
+        const { setTrustClockRehydrateHook } = await import('#lib/trust-clock-e2e');
         setTrustClockRehydrateHook(async () => {
           await machine?.hydrate();
           applySnapshot();
@@ -400,7 +449,7 @@
     });
   });
 
-  // The store-change notice (`$lib/store-change`): the custody facet folds
+  // The store-change notice (`#lib/store-change`): the custody facet folds
   // from the account store's records, so the open page re-folds it — a fold
   // only (a null fold keeps the rows). The linked rows re-run the visit's own
   // hydrate (the trust facet, the blessings and the backup rows are
@@ -422,7 +471,7 @@
     // Drop the hook with the page, so the command never pokes a torn-down
     // closure whose `machine` is stale.
     if (__FAUNA_E2E_AUTOMATION__) {
-      void import('$lib/trust-clock-e2e').then((m) => m.setTrustClockRehydrateHook(null));
+      void import('#lib/trust-clock-e2e').then((m) => m.setTrustClockRehydrateHook(null));
     }
   });
 
@@ -644,6 +693,42 @@
     </div>
   {/if}
 
+  <!-- Restore from a custodian nest (page-level, after the forward queue and
+       before the nest rows — nests.md § Trust facet — restore from a custodian
+       nest). The opener renders on every signed-in visit, custody rows or
+       none: the cold device has none, and it is who the form is for. The
+       notice is absent until a restore ran this session. -->
+  <div class="add-nest">
+    <button class="btn" data-testid={IDS.NESTS_CUSTODY_RESTORE_BUTTON} onclick={openRestoreForm}>
+      {t.nests.custody_restore_button}
+    </button>
+    {#if restoreFormOpen}
+      <p class="caption">{t.nests.custody_restore_input_label}</p>
+      <div class="add-form">
+        <input
+          class="add-input"
+          data-testid={IDS.NESTS_CUSTODY_RESTORE_INPUT}
+          bind:value={restoreInput}
+          onkeydown={(e) => { if (e.key === 'Enter') void restoreFromCustodian(restoreInput); }}
+        />
+        <button
+          class="btn primary"
+          data-testid={IDS.NESTS_CUSTODY_RESTORE_SUBMIT_BUTTON}
+          disabled={restoreInput.trim() === '' || restoreRunning}
+          onclick={() => restoreFromCustodian(restoreInput)}
+        >
+          {t.nests.custody_restore_submit}
+        </button>
+        <button class="btn" data-testid={IDS.NESTS_CUSTODY_RESTORE_CANCEL_BUTTON} onclick={cancelRestore}>
+          {t.nests.custody_restore_cancel}
+        </button>
+      </div>
+    {/if}
+    {#if restoreNotice !== null}
+      <p class="muted" data-testid={IDS.NESTS_CUSTODY_RESTORE_NOTICE}>{restoreNotice}</p>
+    {/if}
+  </div>
+
   {#if loading}
     <p class="muted">{t.nests.empty}</p>
   {:else if rows.length === 0 && custodyNestRows.length === 0}
@@ -699,7 +784,13 @@
                    plainly trusted, and "not trusted to read anything" directly
                    above "Backs up your messages for you" contradicts the row
                    beneath it. -->
-              {#if p.trust_grants.length === 0 && p.trust_backups.length === 0}
+              {#if p.is_home}
+                <!-- A roster that could not be read is not an empty one
+                     (nests.md:125): this status says so and takes
+                     `nest-trust-empty`'s place below; empty text otherwise. -->
+                <p class="muted trust-holders-status" data-testid={IDS.NEST_TRUST_HOLDERS_STATUS}>{holdersStatusText(p.trust_holders_unreachable)}</p>
+              {/if}
+              {#if showsTrustEmpty(p.trust_grants.length, p.trust_backups.length, p.trust_holders_unreachable)}
                 <p class="muted trust-empty" data-testid={IDS.NEST_TRUST_EMPTY}>{t.nests.not_trusted}</p>
               {:else if p.trust_grants.length === 0}
                 <!-- Backup rows only: the grant list is genuinely empty, and the
@@ -956,6 +1047,16 @@
                 disabled={c.pending}
                 onclick={() => revokeCustodyNest(c)}
               >{t.devices.custody_revoke}</button>
+              <!-- The warm explicit gesture: the row's own address, the
+                   same command as the page-level form. -->
+              {#if c.custodian_nest_url}
+                <button
+                  class="btn"
+                  data-testid={IDS.NEST_TRUST_CUSTODY_RESTORE_BUTTON}
+                  disabled={restoreRunning}
+                  onclick={() => restoreFromCustodian(c.custodian_nest_url ?? '')}
+                >{t.nests.custody_restore_row_button}</button>
+              {/if}
             </div>
           </div>
         </div>

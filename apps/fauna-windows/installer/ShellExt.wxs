@@ -29,7 +29,7 @@
     The build-machine SOURCE stays the bare fauna_shell.dll ($(var.ShellDll)); only the
     INSTALLED @Name is versioned, so staging + the -d ShellDll= path are unchanged.
   -->
-  <?define ShellDllName = "fauna_shell_0.1.4.dll" ?>
+  <?define ShellDllName = "fauna_shell_0.1.5.dll" ?>
 
   <Fragment>
     <ComponentGroup Id="ShellExtComponents" Directory="INSTALLFOLDER">
@@ -92,13 +92,20 @@
            after DeregisterSparsePackage) is correct. Built by the dedicated sparse-package
            build script BEFORE `wix build` and supplied via -d SparsePackage. Rides the ShellExt feature
            (this ComponentGroup), so it installs with — and only with — Explorer Integration.
-           See docs/goal/architecture/installers/windows.md § Menu placement. -->
+           See docs/goal/architecture/installers/windows.md § Menu placement.
+
+           -d NoSparsePackage=1 leaves it out, explicitly (a build that merely forgets
+           -d SparsePackage still fails): the public release MSI has no signer yet, and an
+           unsigned package never registers on a user's machine (RegisterSparsePackage
+           passes no -AllowUnsigned and is Return="ignore"), so it would ship inert. -->
+      <?ifndef NoSparsePackage?>
       <Component Id="FaunaSparsePackage" Guid="4a7b8c00-0013-4d3a-b5c6-d7e8f9a0b1c2">
         <File Id="FaunaSparsePackage"
               Source="$(var.SparsePackage)"
               Name="Fauna-Sparse.msix"
               KeyPath="yes" />
       </Component>
+      <?endif?>
 
       <!-- Overlay icon files -->
       <Component Id="OverlayIcons" Guid="4a7b8c00-0011-4d3a-b5c6-d7e8f9a0b1c2">

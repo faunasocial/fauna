@@ -50,6 +50,23 @@ _ROOTS = (_ROOT, _ROOT.parent / "common")
 #: unit test that classifies an item the whole vocabulary it classifies by.
 _VOCABULARY_MODULES = frozenset({"nest_surface.py", "kind_reach.py"})
 
+#: Functions whose reach is NOT handed to their callers: the STANDALONE-ONLY
+#: bodies behind the mail-venue seam. Every reach this graph computes is asked
+#: by a non-standalone classification (`classify` returns before any of it in
+#: standalone), and these two run only in standalone — the standalone
+#: provider's `start_mail_venue` dispatches to them, the docker one starts the
+#: image's own bridges instead. Through the bare-name merge of every provider's
+#: `start_mail_venue`, a test that CALLS a venue factory by name
+#: (`dav_toggle_venue(mail=…)`) was credited with their host-bridge spawn
+#: (`fauna.bridges.request_enrollment`, class (5)) and graded `loopback_kind` in
+#: docker for an enrollment docker never makes. What a venue sets running in
+#: docker is still reached — through the docker method, the admin kinds that
+#: keep every venue fixture on `GLOBAL_ADMIN_FIXTURES` included. The bodies
+#: keep their own reach, and a test body naming a kind directly still reaches
+#: it. Keyed by bare name (a private function's node is `<module>::<name>`).
+#: Pinned by `test_nest_mode_axis.py::test_kind_reach_stops_at_the_mail_venue_seam`.
+_REACH_BARRIERS = frozenset({"_dedicated_mail_nest_impl", "_dav_toggle_venue_impl"})
+
 #: Directories with no bearing on what a test reaches at runtime.
 _SKIP_DIRS = {".pytest_cache", "__pycache__", ".venv", "node_modules"}
 
@@ -361,7 +378,8 @@ def build_reach(
         for key, callees in calls.items():
             before = len(reach[key])
             for callee in callees:
-                if callee in reach and callee != key:
+                if (callee in reach and callee != key
+                        and callee.rsplit("::", 1)[-1] not in _REACH_BARRIERS):
                     reach[key] |= reach[callee]
             if len(reach[key]) != before:
                 grew = True

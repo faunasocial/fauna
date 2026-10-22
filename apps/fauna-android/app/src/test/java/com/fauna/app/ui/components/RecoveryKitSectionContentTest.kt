@@ -314,6 +314,7 @@ class RecoveryKitSectionContentTest {
         Ids.RECOVERY_KIT_BACKUP_REGRANT_STATUS,
         Ids.RECOVERY_KIT_MLS_RESEAL_STATUS,
         Ids.RECOVERY_KIT_GRANT_REMINT_STATUS,
+        Ids.RECOVERY_KIT_PERIOD_ROTATION_STATUS,
         Ids.RECOVERY_KIT_DRAFTS_RESEAL_STATUS,
         Ids.RECOVERY_KIT_MAIL_BURN_STATUS,
     )
@@ -333,7 +334,7 @@ class RecoveryKitSectionContentTest {
             RecoveryKitUiState(status = status("registered")),
             aftermath = AftermathProgress(
                 backupRegrant = line, mlsReseal = line, grantRemint = line,
-                draftsReseal = line, mailBurn = line,
+                periodRotation = line, draftsReseal = line, mailBurn = line,
             ),
         )
 

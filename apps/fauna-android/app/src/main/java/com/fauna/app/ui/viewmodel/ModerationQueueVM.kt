@@ -3,12 +3,14 @@ package com.fauna.app.ui.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.fauna.app.core.ApiClient
+import com.fauna.app.core.PendingAppealStore
 import com.fauna.app.core.ReportSheetStore
 import com.fauna.ffi.FfiReportLedgerRow
 import com.fauna.ffi.appealFormView
 import com.fauna.ffi.appealVerdict
 import com.fauna.ffi.moderationQueue
 import com.fauna.ffi.reportWithdrawVerdict
+import com.fauna.ffi.rowIsAppealable
 import com.fauna.ffi.shortId
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -79,6 +81,15 @@ class ModerationQueueVM @Inject constructor(
     fun openAppeal(contentId: String) {
         appealDraft.value = AppealDraft(contentId)
         appealStatus.value = null
+    }
+
+    /** Open the appeal a `dm-message-withheld-badge` tap asked for ([PendingAppealStore]), on
+     *  the loaded row it names — behind the same [rowIsAppealable] gate as the row's own
+     *  `appeal-button`. A row the queue no longer carries opens nothing. */
+    private fun openPendingAppeal() {
+        val contentId = PendingAppealStore.consume() ?: return
+        val row = queue.value.firstOrNull { it.contentId == contentId } ?: return
+        if (rowIsAppealable(row)) openAppeal(contentId)
     }
 
     fun cancelAppeal() {
@@ -156,6 +167,7 @@ class ModerationQueueVM @Inject constructor(
                 // has not landed yet (NestClient::request_inner).
             }
             isLoading.value = false
+            openPendingAppeal()
             // The reporter's ledger rides every Moderation entry beside the queue —
             // its own failure never hides the queue rows above.
             loadReports()

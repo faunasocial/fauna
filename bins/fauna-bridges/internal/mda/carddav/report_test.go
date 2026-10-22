@@ -204,6 +204,7 @@ func openSealedMetadata(t *testing.T, sealed []byte, fx reportFixture) ([]byte, 
 	cap, err := mailfauna.UnwrapMLSBlob(
 		blob, fixturePlainPassword,
 		fixtureActorID, fixtureCredentialID, mailfauna.KdfKindArgon2id,
+		"",
 	)
 	if err != nil {
 		return nil, err

@@ -923,7 +923,7 @@ def test_ios_setup_routes_through_skip_unbuilt(monkeypatch):
     with pytest.raises(pytest.skip.Exception) as excinfo:
         conftest.ios_setup.__wrapped__()
     assert "ios has not built the iOS simulator/app" in str(excinfo.value)
-    assert "just apple-ffi-test" in str(excinfo.value)
+    assert "just apple-ffi-test-sim" in str(excinfo.value)
 
 
 def test_app_path_fixture_fails_under_strict_app(monkeypatch):

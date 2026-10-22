@@ -948,6 +948,218 @@ async fn an_owner_device_restores_through_a_custodian_nest_only_when_its_own_nes
     host_client.disconnect().await;
 }
 
+/// **The restore gesture at a typed address** (`account-replica-posture.md`
+/// § *Corollary — the cold device*, bounds (a)–(e)): a device holding NO
+/// registry row — the cold device — restores from the custodian nest's
+/// address alone, through the arm's own per-target path, and every answer is
+/// its own outcome: a policy-refused address never dials; an address nothing
+/// answers is *not admitted*; the first restore is *restored* with the rows
+/// it could not key counted as sealed; a second is *nothing new*; a custody
+/// row on record under a revoked grant withholds the dial; and a row naming
+/// another nest than the one that answered is an *identity mismatch*.
+#[tokio::test]
+async fn a_cold_device_restores_at_a_typed_address_and_every_outcome_is_distinct() {
+    use fauna_sync_engine::custodian_nest_restore::{
+        CustodianRestoreOutcome, FleetDialIdentity, restore_at_address,
+    };
+    use fauna_sync_engine::peer_leg::WithdrawalSnapshot;
+
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .try_init();
+    let HeldRow {
+        host_base,
+        host_client,
+        schedule,
+        trust,
+        held,
+        _tmps: _keep_tmps,
+        _owner_state: _keep_owner_nest,
+        ..
+    } = hold_an_owner_row().await;
+
+    let fresh_store = |seed: u8| async move {
+        let device = SigningKey::from_bytes(&[seed; 32]);
+        let dir = tempfile::tempdir().unwrap();
+        let store = AccountStore::open(
+            SqliteBackend::open(dir.path()).unwrap(),
+            &owner().actor_id_hex(),
+            WriterId(device.verifying_key().to_bytes()),
+        )
+        .await
+        .unwrap();
+        (device, dir, store)
+    };
+    async fn stage_row(
+        store: &AccountStore<SqliteBackend>,
+        grant_id: [u8; CUSTODY_GRANT_ID_LEN],
+        url: String,
+        custodian_key: [u8; 32],
+    ) -> anyhow::Result<(u64, u64)> {
+        let kind = fauna_protocol::merge_policy::KIND_CUSTODIAN_ENDPOINTS;
+        store
+            .put_state(fauna_account_store::types::StateEntry {
+                kind: kind.into(),
+                key: fauna_core::custody_grant::custody_entry_key(&grant_id),
+                scope: fauna_protocol::merge_policy::home_scope_for_kind(kind)
+                    .unwrap()
+                    .into(),
+                value: fauna_core::encoding::canonical_encode(
+                    &fauna_core::custodian_endpoints::CustodianEndpoints {
+                        grant_id: grant_id.to_vec(),
+                        endpoints: fauna_core::device_endpoints::DeviceEndpoints {
+                            node_id: custodian_key,
+                            ..Default::default()
+                        },
+                        custodian_nest_url: Some(url),
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+                .to_vec(),
+                merge_meta: None,
+                entry_version: 0,
+                tombstone: false,
+            })
+            .await
+    }
+    let revoked = WithdrawalSnapshot::<Vec<u8>>::underived();
+    revoked.replace(Default::default());
+
+    // ── The cold device: no registry row, only the address ────────────────
+    let (device_b, _b_dir, b_store) = fresh_store(0xB4).await;
+    let b_cert = device_cert(&owner(), device_b.verifying_key().to_bytes());
+    let b_id = FleetDialIdentity {
+        owner: owner().actor_id().0,
+        schedule: &schedule,
+        trust: &trust,
+        writer_key: &device_b,
+        authorization: &b_cert,
+        generation_custody: None,
+        seed: None,
+    };
+    let restore = |store, url: String| {
+        let revoked = &revoked;
+        async move { restore_at_address(store, &url, b_id, revoked, &mut Vec::new).await }
+    };
+
+    // (a) A plaintext address off loopback is refused before any dial.
+    assert!(
+        matches!(
+            restore(&b_store, "http://custodian.example".into())
+                .await
+                .unwrap(),
+            CustodianRestoreOutcome::AddressRefused { .. }
+        ),
+        "a policy-refused address is its own outcome"
+    );
+    // An address nothing answers at: one opaque refusal.
+    let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let closed_url = format!("http://127.0.0.1:{}", closed.local_addr().unwrap().port());
+    drop(closed);
+    assert_eq!(
+        restore(&b_store, closed_url).await.unwrap(),
+        CustodianRestoreOutcome::NotAdmitted
+    );
+    assert!(
+        b_state_rows(&b_store).await.is_empty(),
+        "B learned nothing yet"
+    );
+
+    // The first restore lands the custodian's copy. A's row is sealed under
+    // the account's key schedule (gen 0), which the seed derives, so it opens
+    // and nothing counts as sealed — the tip-sealed case is the escrow-wrap
+    // test's above.
+    let first = restore(&b_store, format!("{host_base}/")).await.unwrap();
+    let CustodianRestoreOutcome::Restored {
+        applied,
+        sealed_rows,
+    } = first
+    else {
+        panic!("the first restore is restored, got {first:?}");
+    };
+    assert!(applied >= 1, "rows applied: {first:?}");
+    assert_eq!(
+        sealed_rows, 0,
+        "a gen-0 row opens under the seed's schedule: {first:?}"
+    );
+    assert_eq!(
+        b_state_rows(&b_store)
+            .await
+            .iter()
+            .map(|r| r.entry.clone())
+            .collect::<Vec<_>>(),
+        held.iter().map(|r| r.entry.clone()).collect::<Vec<_>>(),
+        "B holds exactly what the custodian nest holds"
+    );
+    // Nothing new the second time.
+    assert_eq!(
+        restore(&b_store, host_base.clone()).await.unwrap(),
+        CustodianRestoreOutcome::NothingNew
+    );
+
+    // (b) A custody row on record names this origin under a revoked grant:
+    // the dial is withheld.
+    const REVOKED: [u8; CUSTODY_GRANT_ID_LEN] = [0x4E; CUSTODY_GRANT_ID_LEN];
+    let (device_c, _c_dir, c_store) = fresh_store(0xC4).await;
+    stage_row(&c_store, REVOKED, host_base.clone(), custodian_nest_pub())
+        .await
+        .unwrap();
+    let c_revoked = WithdrawalSnapshot::<Vec<u8>>::underived();
+    c_revoked.replace([REVOKED.to_vec()].into_iter().collect());
+    let c_cert = device_cert(&owner(), device_c.verifying_key().to_bytes());
+    let c_id = FleetDialIdentity {
+        owner: owner().actor_id().0,
+        schedule: &schedule,
+        trust: &trust,
+        writer_key: &device_c,
+        authorization: &c_cert,
+        generation_custody: None,
+        seed: None,
+    };
+    assert_eq!(
+        restore_at_address(&c_store, &host_base, c_id, &c_revoked, &mut Vec::new)
+            .await
+            .unwrap(),
+        CustodianRestoreOutcome::Revoked
+    );
+    assert!(
+        b_state_rows(&c_store).await.is_empty(),
+        "nothing was dialed"
+    );
+
+    // (c) A custody row on record names another nest than the one that
+    // answers: the rows stand, the mismatch is told.
+    let (device_d, _d_dir, d_store) = fresh_store(0xD4).await;
+    stage_row(&d_store, GRANT_ID, host_base.clone(), [0xEE; 32])
+        .await
+        .unwrap();
+    let d_cert = device_cert(&owner(), device_d.verifying_key().to_bytes());
+    let d_id = FleetDialIdentity {
+        owner: owner().actor_id().0,
+        schedule: &schedule,
+        trust: &trust,
+        writer_key: &device_d,
+        authorization: &d_cert,
+        generation_custody: None,
+        seed: None,
+    };
+    assert_eq!(
+        restore_at_address(&d_store, &host_base, d_id, &revoked, &mut Vec::new)
+            .await
+            .unwrap(),
+        CustodianRestoreOutcome::IdentityMismatch {
+            expected: [0xEE; 32],
+            got: custodian_nest_pub(),
+        }
+    );
+    assert!(
+        !b_state_rows(&d_store).await.is_empty(),
+        "the rows the walk verified stand"
+    );
+    host_client.disconnect().await;
+}
+
 /// The account-state relay rows `store` holds.
 async fn b_state_rows(
     store: &AccountStore<SqliteBackend>,
@@ -994,7 +1206,10 @@ fn enrollment_value(device: &SigningKey, account: &ActorKeypair) -> Vec<u8> {
 /// custodian — restores through the custodied-fleet door, keys the generation
 /// from the restored `fauna.state.escrow-wrap` row and opens the content row
 /// the lost fleet sealed: no fleet relay row stays sealed under a generation
-/// it cannot key.
+/// it cannot key. A second fresh device then runs the restore GESTURE at the
+/// custodian's address with the seed in hand, which keys plane-first inside
+/// its own walk (ruling (6)): its sealed count reads `0` and the content row
+/// opens with no recovery pass behind it.
 #[tokio::test]
 async fn a_seed_only_device_keys_a_custodian_restore_from_the_wrap_row_and_opens_the_content() {
     use fauna_protocol::account_state::ACCOUNT_STATE_FLEET_SCOPE;
@@ -1003,7 +1218,10 @@ async fn a_seed_only_device_keys_a_custodian_restore_from_the_wrap_row_and_opens
         KIND_ESCROW_WRAP, LwwStamp, home_scope_for_kind,
     };
     use fauna_sync_engine::cold_replica::MemoryRetainedKeys;
-    use fauna_sync_engine::custodian_nest_restore::{NestArmTrigger, nest_custodian_arm};
+    use fauna_sync_engine::custodian_nest_restore::{
+        CustodianRestoreOutcome, FleetDialIdentity, NestArmTrigger, nest_custodian_arm,
+        restore_at_address,
+    };
     use fauna_sync_engine::generation_escrow_recover::{
         EscrowRecoveryMemo, EscrowRecoveryPass, ensure_recovered,
     };
@@ -1103,6 +1321,40 @@ async fn a_seed_only_device_keys_a_custodian_restore_from_the_wrap_row_and_opens
         .expect("the content row mints, seals and publishes");
     let wraps_on_a = owner_store.states_of_kind(KIND_ESCROW_WRAP).await.unwrap();
     assert_eq!(wraps_on_a.len(), 1, "the mint wrote the wrap row");
+    // One row of A's on the DELEGABLE plane too, so the fresh nest below
+    // lists both planes: the scope whose puts name the rows they cover.
+    let moderation = fauna_core::encoding::canonical_encode(&ModerationConfig {
+        muted_keywords: vec!["restored-through-the-custodian-nest".into()],
+        ..Default::default()
+    })
+    .unwrap()
+    .to_vec();
+    AccountStatePlane::new(
+        &owner_store,
+        &owner_nest,
+        &schedule,
+        &device_a,
+        &owner_trust,
+        ACCOUNT_STATE_SCOPE,
+    )
+    .unwrap()
+    .put(
+        &ItemId {
+            kind: KIND_MODERATION.into(),
+            key: MODERATION_KEY.into(),
+        },
+        moderation.clone(),
+        Some(
+            LwwStamp {
+                at_ms: 1_000,
+                writer: a_pub,
+            }
+            .encode()
+            .unwrap(),
+        ),
+    )
+    .await
+    .expect("A's delegable row seals and publishes");
     mint_custody_row(&owner_nest).await;
 
     // ── The custodian nest's pump pulls both account-state planes ─────────
@@ -1265,7 +1517,251 @@ async fn a_seed_only_device_keys_a_custodian_restore_from_the_wrap_row_and_opens
         "no fleet row stays sealed under an unkeyed generation"
     );
 
+    // ── C: the restore GESTURE keys plane-first inside its own walk ───────
+    // (ruling (6): the gesture's sealed count reads `0` and the content row
+    // the lost fleet sealed opens — no recovery pass behind it.)
+    let device_c = SigningKey::from_bytes(&[0xC3; 32]);
+    let c_cert = device_cert(&owner(), device_c.verifying_key().to_bytes());
+    let c_dir = tempfile::tempdir().unwrap();
+    let c_store = AccountStore::open(
+        SqliteBackend::open(c_dir.path()).unwrap(),
+        &owner().actor_id_hex(),
+        WriterId(device_c.verifying_key().to_bytes()),
+    )
+    .await
+    .unwrap();
+    let c_keys = MemoryRetainedKeys::default();
+    let restored = restore_at_address(
+        &c_store,
+        &host_base,
+        FleetDialIdentity {
+            owner: owner().actor_id().0,
+            schedule: &schedule,
+            trust: &b_trust,
+            writer_key: &device_c,
+            authorization: &c_cert,
+            generation_custody: Some(&c_keys),
+            seed: Some((&OWNER_SEED, &[])),
+        },
+        &revoked,
+        &mut Vec::new,
+    )
+    .await
+    .expect("the restore gesture");
+    assert!(
+        matches!(
+            restored,
+            CustodianRestoreOutcome::Restored { sealed_rows: 0, .. }
+        ),
+        "the gesture keys every restored generation before it counts: {restored:?}"
+    );
+    assert_eq!(
+        c_store
+            .state(KIND_DEVICE_ENDPOINTS, &hex::encode(a_pub))
+            .await
+            .unwrap()
+            .expect("the gesture opens the content row the lost fleet sealed")
+            .value,
+        endpoints
+    );
+    assert_eq!(
+        c_store
+            .state(KIND_MODERATION, MODERATION_KEY)
+            .await
+            .unwrap()
+            .expect("the gesture restores A's delegable row")
+            .value,
+        moderation
+    );
+
+    // ── D: a fresh home nest; C's first bound pass carries what it restored
+    // (`account-sync-plane.md` § The bind leg). Convergence is per ITEM, never
+    // per row's bytes: a restored row C opened and merged is covered by C's
+    // own row where it re-authored one, and the bind leg never carries a
+    // covered row verbatim (`delegable-scope-reclamation.md` § Delegable-scope
+    // reclamation, part (2)). So D must list a live row of every item A
+    // listed — the floor of a cold restore is the whole account (bound (e)) —
+    // and a fresh device walking D must read A's values.
+    let (d_base, d_state, d_tmp) = start_owner_nest_signing(Some(owner_deployment_key())).await;
+    d_state
+        .db
+        .create_user_with_handle(&owner().actor_id().0, "free", "owner", None)
+        .await
+        .unwrap();
+    let d_nest = connected_client(&d_base, owner()).await;
+    let mut c_planes = Vec::with_capacity(2);
+    for scope in [ACCOUNT_STATE_SCOPE, ACCOUNT_STATE_FLEET_SCOPE] {
+        c_planes.push(
+            AccountStatePlane::new(&c_store, &d_nest, &schedule, &device_c, &b_trust, scope)
+                .unwrap()
+                .with_generation_custody(&c_keys),
+        );
+    }
+    // C writes over A's delegable row before its pass: a restored row C opens
+    // and merges is below the row C sends, so the put names it (part (2)) and
+    // the bind leg never carries A's row — D lists C's cover of the item, and
+    // A's bytes are nowhere on D. The item-level assertion below is what such
+    // a restore converges to; a byte-level one would read the cover as loss.
+    let moderation_on_c = fauna_core::encoding::canonical_encode(&ModerationConfig {
+        muted_keywords: vec![
+            "restored-through-the-custodian-nest".into(),
+            "and-written-over-on-the-cold-device".into(),
+        ],
+        ..Default::default()
+    })
+    .unwrap()
+    .to_vec();
+    c_planes[0]
+        .put(
+            &ItemId {
+                kind: KIND_MODERATION.into(),
+                key: MODERATION_KEY.into(),
+            },
+            moderation_on_c.clone(),
+            Some(
+                LwwStamp {
+                    at_ms: 2_000,
+                    writer: device_c.verifying_key().to_bytes(),
+                }
+                .encode()
+                .unwrap(),
+            ),
+        )
+        .await
+        .expect("C writes over the restored row at D");
+    // The pass order (`account_driver/pass.rs`): publish, then each plane's
+    // reconcile and the diff behind it.
+    for plane in &c_planes {
+        plane
+            .publish_pending()
+            .await
+            .expect("C publishes its own rows at D");
+    }
+    for plane in &c_planes {
+        plane.reconcile().await.expect("C reconciles at D");
+        fauna_sync_engine::publish_diff::publish_diff(&c_store, plane, &b_trust, &device_c)
+            .await
+            .expect("C's diff at D");
+    }
+    for scope in [ACCOUNT_STATE_SCOPE, ACCOUNT_STATE_FLEET_SCOPE] {
+        let on_a = live_rows_at(&owner_state, scope).await;
+        let on_d = live_rows_at(&d_state, scope).await;
+        assert!(!on_a.is_empty(), "{scope}: A listed rows before the loss");
+        let mut verbatim = 0usize;
+        let mut covered = 0usize;
+        for (item, writer, entry) in &on_a {
+            let holders: Vec<&(Vec<u8>, Vec<u8>, Vec<u8>)> =
+                on_d.iter().filter(|(i, ..)| i == item).collect();
+            assert!(
+                !holders.is_empty(),
+                "{scope}: D lists no row of an item A listed under writer {} — {} rows on A, {} on D",
+                hex::encode(&writer[..4]),
+                on_a.len(),
+                on_d.len()
+            );
+            if holders.iter().any(|(_, _, e)| e == entry) {
+                verbatim += 1;
+            } else {
+                covered += 1;
+            }
+        }
+        println!(
+            "{scope}: {} rows on A, {} on D — {verbatim} carried verbatim, {covered} covered",
+            on_a.len(),
+            on_d.len()
+        );
+        if scope == ACCOUNT_STATE_SCOPE {
+            assert_eq!(
+                (verbatim, covered),
+                (0, 1),
+                "{scope}: A's one row is covered by C's put, never carried verbatim"
+            );
+        } else {
+            assert_eq!(covered, 0, "{scope}: the fleet scope takes no cover");
+        }
+    }
+    // A fresh device walking D, keyed as C is, reads what A wrote.
+    let device_e = SigningKey::from_bytes(&[0xE3; 32]);
+    let e_dir = tempfile::tempdir().unwrap();
+    let e_store = AccountStore::open(
+        SqliteBackend::open(e_dir.path()).unwrap(),
+        &owner().actor_id_hex(),
+        WriterId(device_e.verifying_key().to_bytes()),
+    )
+    .await
+    .unwrap();
+    for scope in [ACCOUNT_STATE_FLEET_SCOPE, ACCOUNT_STATE_SCOPE] {
+        AccountStatePlane::new_pull_only(&e_store, &d_nest, &schedule, &device_e, &b_trust, scope)
+            .unwrap()
+            .with_generation_custody(&c_keys)
+            .walk()
+            .await
+            .expect("E walks D");
+    }
+    assert_eq!(
+        e_store
+            .state(KIND_DEVICE_ENDPOINTS, &hex::encode(a_pub))
+            .await
+            .unwrap()
+            .expect("E reads A's content row from D")
+            .value,
+        endpoints
+    );
+    assert_eq!(
+        e_store
+            .state(KIND_MODERATION, MODERATION_KEY)
+            .await
+            .unwrap()
+            .expect("E reads the delegable item from D")
+            .value,
+        moderation_on_c,
+        "the item's one row on D is C's cover, the merge's winner"
+    );
+    assert!(
+        e_store
+            .state(KIND_DEVICE_SET, &hex::encode(a_pub))
+            .await
+            .unwrap()
+            .is_some(),
+        "E reads A's enrollment from D"
+    );
+    assert_eq!(
+        e_store.states_of_kind(KIND_ESCROW_WRAP).await.unwrap(),
+        wraps_on_a,
+        "E reads the wrap row from D, verbatim"
+    );
+
+    d_nest.disconnect().await;
     b_fleet_client.disconnect().await;
     host_client.disconnect().await;
-    drop((owner_tmp, host_tmp, owner_state));
+    drop((owner_tmp, host_tmp, d_tmp, owner_state, d_state));
+}
+
+/// A nest's live account-state rows of `scope` for the owner, as
+/// `(item key, writer, sealed entry)` — the listing a reconcile is answered
+/// with, bytes included.
+async fn live_rows_at(state: &AppState, scope: &str) -> Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    let Some(folder) = state
+        .db
+        .find_state_scope(&owner().actor_id().0, scope)
+        .await
+        .unwrap()
+    else {
+        return Vec::new();
+    };
+    state
+        .db
+        .get_account_state_changes(folder, 0, &Default::default(), None, None)
+        .await
+        .unwrap()
+        .rows
+        .into_iter()
+        .map(|r| {
+            (
+                r.path_hash,
+                r.origin_writer.unwrap_or_default(),
+                r.entry_sealed.unwrap_or_default(),
+            )
+        })
+        .collect()
 }

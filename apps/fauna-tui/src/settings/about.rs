@@ -22,6 +22,8 @@
 //! `settings-check-updates-button` (its label carries the check's state — the
 //! linux General page's button flips its label the same way), and
 //! `update-available-notice`, painted ONLY once a check found a newer release.
+//! Beside the version, `settings-terms-link` (user-approved 2026-10-20) shows
+//! and copies the organisation's terms URL (`fauna_core::TERMS_URL`).
 //!
 //! **The e2e seam.** A walk cannot depend on the real GitHub feed (network,
 //! rate limits, and whatever release happens to be newest that day), so under
@@ -63,6 +65,16 @@ pub(crate) enum UpdateCheck {
 pub(super) fn elements(state: &SettingsState) -> Vec<Element> {
     let mut els = vec![
         Element::label(ids::SETTINGS_APP_VERSION, CURRENT_VERSION),
+        // The terms link beside the version (`terms-and-content-guidelines.md`
+        // § The decisions, item 4 (b)): shown and copied, like
+        // `admin-mail-health-delist-link` — a terminal opens no browser.
+        Element::gesture_button(
+            ids::SETTINGS_TERMS_LINK,
+            crate::wizard::terms_link_label(),
+            true,
+            Gesture::Settings(Action::CopyTermsUrl),
+        )
+        .attr("href", fauna_core::TERMS_URL),
         Element::gesture_button(
             ids::SETTINGS_CHECK_UPDATES_BUTTON,
             button_label(&state.update_check),
@@ -166,6 +178,7 @@ mod tests {
             ids_of(&els),
             vec![
                 ids::SETTINGS_APP_VERSION,
+                ids::SETTINGS_TERMS_LINK,
                 ids::SETTINGS_CHECK_UPDATES_BUTTON
             ]
         );
@@ -174,7 +187,25 @@ mod tests {
             text_of(&els, ids::SETTINGS_CHECK_UPDATES_BUTTON),
             t::CHECK_FOR_UPDATES
         );
-        assert!(els[1].enabled);
+        assert!(els[2].enabled);
+    }
+
+    /// The link shows the URL it copies: a terminal that ignores OSC 52 still
+    /// leaves the address on screen.
+    #[test]
+    fn the_terms_link_shows_and_copies_the_terms_url() {
+        let els = elements(&SettingsState::default());
+        let link = els
+            .iter()
+            .find(|e| e.id == ids::SETTINGS_TERMS_LINK)
+            .expect("settings-terms-link is always painted");
+        assert!(link.enabled);
+        assert!(link.text.contains(t::TERMS_LINK), "{}", link.text);
+        assert!(link.text.contains(fauna_core::TERMS_URL), "{}", link.text);
+        assert!(matches!(
+            &link.role,
+            crate::element::Role::Button(Gesture::Settings(Action::CopyTermsUrl))
+        ));
     }
 
     #[test]
@@ -184,7 +215,7 @@ mod tests {
             ..Default::default()
         };
         let els = elements(&state);
-        assert!(!els[1].enabled);
+        assert!(!els[2].enabled);
         assert_eq!(
             text_of(&els, ids::SETTINGS_CHECK_UPDATES_BUTTON),
             common::CHECKING
@@ -204,6 +235,7 @@ mod tests {
             ids_of(&els),
             vec![
                 ids::SETTINGS_APP_VERSION,
+                ids::SETTINGS_TERMS_LINK,
                 ids::SETTINGS_CHECK_UPDATES_BUTTON,
                 ids::UPDATE_AVAILABLE_NOTICE
             ]

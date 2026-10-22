@@ -27,6 +27,17 @@ fauna-core = { path = "../fauna-core", default-features = false }
 # it), and fauna-log is wasm-clean, so the web face inherits this unchanged.
 fauna-log = { path = "../fauna-log" }
 
+# The admin pages' shared refusal sentences (`tier_delete_refusal`).
+fauna-i18n = { path = "../fauna-i18n" }
+
+# fauna-provisioning: the update channel (`UpdateChannel` — its ids, the
+# wizard's label/description keys, the per-channel check interval) and the
+# never-downgrade `decide` the update-channel fold runs on the `get` reply
+# (`nest/update-channel.md` § The UI). Already in every consumer's tree (tui,
+# fauna-ffi, fauna-wasm); `default-features = false` drops `native` (reqwest's
+# TLS + tokio) so this crate stays wasm-safe.
+fauna-provisioning = { path = "../fauna-provisioning", default-features = false }
+
 # `AdminUserRowControls` derives `Serialize` so the web wasm face
 # (`adminUserRowControls`) can hand the shared row decision across the boundary
 # without a duplicate mirror struct. No build cost — fauna-protocol already
@@ -45,6 +56,7 @@ hex = { workspace = true }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
 fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+fauna-provisioning = { path = "../fauna-provisioning", default-features = false, features = ["js"] }
 
 [dev-dependencies]
 # The shared `RecordingRequester` / `block_on` test double the wire-contract

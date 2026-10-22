@@ -21,20 +21,20 @@
   // whose challenge meets the lock and paints the locked surface (leg 2,
   // `escalateAccountLocked`).
   import { onMount, onDestroy } from 'svelte';
-  import { identity } from '$lib/store';
-  import { ensureWasm, accountEnrolledDeviceRow, sessionsLockoutConfirmWord } from '$lib/wasm';
-  import type { SessionRow, SessionsInput, SessionsPage, SessionsSnapshot } from '$lib/wasm';
-  import { sessionsLoad, sessionsRevoke, sessionsRevokeOthers, sessionsLockout } from '$lib/rpc';
-  import { ownTokenIds, currentTokenId } from '$lib/api';
-  import { sessionDevicesMachine } from '$lib/devices-session';
-  import type { DevicesSnapshot } from '$lib/devices-machine';
-  import { getDeviceId } from '$lib/device-id';
-  import { localTimestamp } from '$lib/value-format';
-  import { escalateAccountLocked } from '$lib/post-auth-escalation';
-  import { setPaintedSessionTokenIds } from '$lib/sessions-painted';
-  import { resolveLocalized } from '$lib/i18n/localized';
-  import { t } from '$lib/i18n/strings';
-  import { IDS } from '$lib/generated/uiIds';
+  import { identity } from '#lib/store';
+  import { ensureWasm, accountEnrolledDeviceRow, sessionsLockoutConfirmWord } from '#lib/wasm';
+  import type { SessionRow, SessionsInput, SessionsPage, SessionsSnapshot } from '#lib/wasm';
+  import { sessionsLoad, sessionsRevoke, sessionsRevokeOthers, sessionsLockout } from '#lib/rpc';
+  import { ownTokenIds, currentTokenId } from '#lib/api';
+  import { sessionDevicesMachine } from '#lib/devices-session';
+  import type { DevicesSnapshot } from '#lib/devices-machine';
+  import { getDeviceId } from '#lib/device-id';
+  import { localTimestamp } from '#lib/value-format';
+  import { escalateAccountLocked } from '#lib/post-auth-escalation';
+  import { setPaintedSessionTokenIds } from '#lib/sessions-painted';
+  import { resolveLocalized } from '#lib/i18n/localized';
+  import { t } from '#lib/i18n/strings';
+  import { IDS } from '#lib/generated/uiIds';
 
   // The Settings shell's shared `error-message` banner, as every sub-page.
   let { error = $bindable('') } = $props();
@@ -56,7 +56,7 @@
   const idle = $derived(!busy && !locked);
 
   /** `fauna_core::format::format_unix_local`'s shape, through the shared
-   *  `localTimestamp` (`$lib/value-format`). */
+   *  `localTimestamp` (`#lib/value-format`). */
   function when(secs: number): string {
     return localTimestamp(secs * 1000);
   }

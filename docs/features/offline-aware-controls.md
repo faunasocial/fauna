@@ -40,21 +40,21 @@ W4 in `docs/goal/architecture/account-data-plane.md` § Workstreams; that table'
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.2-dev+72d6a508 standalone |
+| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
 | linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
-| windows | ✅ full | |
+| windows | ✅ full | 0.1.4-dev+874eb894.dirty standalone |
 | macos | ✅ full | |
 | ios | ✅ full | |
 | android |  no run recorded | |
-| tui | ❌ failing | 0.1.2-dev+f872d502 live |
+| tui | ⚠ partial | 0.1.2-dev+f872d502 live |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_offline_gate.py::test_online_only_control_desensitizes_with_no_nest_and_says_why` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): failed, tui (windows): passed |
+| 1 | app | `tests/e2e-unified/tests/test_offline_gate.py::test_online_only_control_desensitizes_with_no_nest_and_says_why` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): failed, tui (windows): passed |
 | 1 | app | `tests/e2e-unified/tests/test_offline_gate.py::test_a_user_facing_page_desensitizes_with_no_nest` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): failed, tui (windows): passed |
 | 1 | app | `tests/e2e-unified/tests/test_offline_gate.py::test_the_admin_plane_desensitizes_with_no_nest` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed |
 | 2 | app | `tests/e2e-unified/tests/test_offline_gate.py::test_an_offline_capable_sibling_stays_live_beside_the_gated_one` | web (linux): passed, linux (linux): failed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): failed, tui (windows): passed |
-| 3 | app | `tests/e2e-unified/tests/test_nest_flip_resilience.py::test_connection_status_flips_while_nest_down` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): failed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_nest_flip_resilience.py::test_connection_status_flips_while_nest_down` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 4 | app | `tests/e2e-unified/tests/test_connection_gap_rules.py::test_a_failing_connection_reads_cannot_connect_until_one_succeeds` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): failed, tui (macos): passed |
 | 5 | app | `tests/e2e-unified/tests/test_connection_gap_rules.py::test_a_passing_gap_raises_no_error_anywhere` | web (linux): passed, linux (linux): failed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): failed, tui (macos): passed |
 <!-- features-render:end -->

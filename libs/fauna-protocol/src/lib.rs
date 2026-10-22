@@ -24,6 +24,7 @@ pub mod client_clock;
 pub mod codec;
 pub mod contacts;
 pub mod content_index;
+pub mod content_policy;
 pub mod conversations;
 pub mod custody;
 pub mod dav_identity;
@@ -64,6 +65,7 @@ pub mod member_rows;
 /// a class-2 kind merges under, and the reader-side application of one incoming
 /// entry (`account-data-plane.md` § Merge-policy seam).
 pub mod merge_policy;
+pub mod microsoft_registration;
 pub mod mls_replica;
 pub mod moderation;
 pub mod nat_mode;
@@ -113,6 +115,7 @@ pub mod post_author;
 pub mod posts;
 pub mod principals;
 pub mod profile;
+pub mod profile_author;
 pub mod protocol_kinds;
 pub mod push;
 pub mod push_events;
@@ -183,3 +186,6 @@ pub use requester::{
 /// `serde_bytes` dependency.
 pub use serde_bytes::ByteBuf;
 pub use unknown::Unknown;
+
+#[cfg(test)]
+mod proptests;

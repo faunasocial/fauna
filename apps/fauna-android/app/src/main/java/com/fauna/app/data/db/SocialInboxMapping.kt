@@ -44,4 +44,5 @@ fun FfiContactItem.toContactEntity(
     nodeUrl = nodeUrl,
     acceptedAt = acceptedAt,
     createdAt = createdAt,
+    homeNestUrl = homeNestUrl,
 )

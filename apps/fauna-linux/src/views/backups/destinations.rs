@@ -153,7 +153,11 @@ struct Widgets {
     /// and this device's own status row's — so a run in flight disarms them all.
     reseed_buttons: RefCell<Vec<gtk::Button>>,
     /// `backup-destination-reseed-confirm-modal` (inline reveal) + its pair.
+    /// The title and body are re-set at each open: a nest-kind source's
+    /// confirm names the nest whose copy it pulls back.
     reseed_modal: gtk::Box,
+    reseed_title: gtk::Label,
+    reseed_body: gtk::Label,
     reseed_confirm_button: gtk::Button,
     reseed_cancel_button: gtk::Button,
     /// `backup-destination-reseed-result` — the running line, then the shared
@@ -225,6 +229,10 @@ struct Ctx {
     /// A re-seed is running: every `backup-destination-reseed-button` is
     /// disarmed and a second confirm is a no-op.
     reseed_running: std::cell::Cell<bool>,
+    /// The row whose `backup-destination-reseed-button` armed the confirm:
+    /// `None` for the orphaned store's, `Some(destination_id)` for a
+    /// destination row's. The confirm runs the leg that row's source names.
+    reseed_source: RefCell<Option<String>>,
     /// `Some(destination_id)` while the recovery confirm is armed for it.
     recovering: RefCell<Option<String>>,
     /// A recovery is running: every `backup-audit-recover-button` is disarmed
@@ -345,7 +353,8 @@ pub fn build_destinations_section(
     let (reclaim_modal, reclaim_confirm_button, reclaim_cancel_button) = build_reclaim_modal();
     outer.append(&reclaim_modal);
     // -- Re-seed (`backups.md` § Restore after losing the nest) -------------
-    let (reseed_modal, reseed_confirm_button, reseed_cancel_button) = build_reseed_modal();
+    let (reseed_modal, reseed_title, reseed_body, reseed_confirm_button, reseed_cancel_button) =
+        build_reseed_modal();
     outer.append(&reseed_modal);
     let reseed_result = build_reseed_result();
     outer.append(&reseed_result);
@@ -392,6 +401,8 @@ pub fn build_destinations_section(
         orphaned_reseed_button,
         reseed_buttons: RefCell::new(Vec::new()),
         reseed_modal,
+        reseed_title,
+        reseed_body,
         reseed_confirm_button,
         reseed_cancel_button,
         reseed_result,
@@ -696,8 +707,9 @@ fn build_reseed_button() -> gtk::Button {
 
 /// `backup-destination-reseed-confirm-modal` (inline reveal) — the plain
 /// confirm pair, the reclaim modal's idiom. The body states the consequence
-/// where the decision is made; ui.yaml scopes no id to it.
-fn build_reseed_modal() -> (gtk::Box, gtk::Button, gtk::Button) {
+/// where the decision is made; ui.yaml scopes no id to it. Returns the modal,
+/// its title and body (re-set per source at open), confirm and cancel.
+fn build_reseed_modal() -> (gtk::Box, gtk::Label, gtk::Label, gtk::Button, gtk::Button) {
     let modal = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(6)
@@ -726,13 +738,14 @@ fn build_reseed_modal() -> (gtk::Box, gtk::Button, gtk::Button) {
     let confirm = gtk::Button::with_label(s::BACKUP_RESEED_CONFIRM_BUTTON);
     confirm.add_css_class("suggested-action");
     set_test_id(&confirm, ids::BACKUP_DESTINATION_RESEED_CONFIRM_BUTTON);
-    // No wire kind, as for the reclaim: the confirm reaches the sync agent over
-    // local IPC, and the agent's own connections carry the ceremony.
+    // No wire kind, as for the reclaim: the custodian confirm reaches the sync
+    // agent over local IPC, and the pull-back runs the shared host whose own
+    // connections carry the ceremony.
     buttons.append(&cancel);
     buttons.append(&confirm);
     modal.append(&buttons);
 
-    (modal, confirm, cancel)
+    (modal, title, body, confirm, cancel)
 }
 
 /// `backup-destination-reseed-result` — hidden until a run starts.
@@ -857,6 +870,7 @@ fn wire(client: &Rc<FaunaClient>, widgets: Widgets) -> Rc<Ctx> {
         read_error_shown: std::cell::Cell::new(false),
         orphaned_store: RefCell::new(None),
         reseed_running: std::cell::Cell::new(false),
+        reseed_source: RefCell::new(None),
         recovering: RefCell::new(None),
         recover_running: std::cell::Cell::new(false),
         w: widgets,
@@ -1085,7 +1099,7 @@ fn wire(client: &Rc<FaunaClient>, widgets: Widgets) -> Rc<Ctx> {
         ctx.w
             .orphaned_reseed_button
             .clone()
-            .connect_clicked(move |_| open_reseed_confirm(&ctx));
+            .connect_clicked(move |_| open_reseed_confirm(&ctx, None));
     }
     // Re-seed cancel → hide, nothing changed.
     {
@@ -1095,7 +1109,7 @@ fn wire(client: &Rc<FaunaClient>, widgets: Widgets) -> Rc<Ctx> {
             .clone()
             .connect_clicked(move |_| ctx.w.reseed_modal.set_visible(false));
     }
-    // Re-seed confirm → run the ceremony.
+    // Re-seed confirm → run the leg the pressed row's source names.
     {
         let ctx = Rc::clone(&ctx);
         ctx.w
@@ -1103,9 +1117,28 @@ fn wire(client: &Rc<FaunaClient>, widgets: Widgets) -> Rc<Ctx> {
             .clone()
             .connect_clicked(move |_| {
                 ctx.w.reseed_modal.set_visible(false);
+                if ctx.reseed_running.get() {
+                    return;
+                }
                 // Re-checked at press time, not trusted from the paint.
-                if !ctx.reseed_running.get() && !reseed_rows(&ctx).is_empty() {
-                    dispatch_reseed(&ctx);
+                let source = ctx.reseed_source.borrow().clone();
+                match reseed_leg(&ctx, &source) {
+                    Some(fauna_client_backup::reseed::ReseedLeg::NestHeldPullBack) => {
+                        let destination = source.and_then(|id| {
+                            ctx.last_destinations
+                                .borrow()
+                                .iter()
+                                .find(|d| d.destination_id == id)
+                                .cloned()
+                        });
+                        if let Some(destination) = destination {
+                            dispatch_pull_back(&ctx, destination);
+                        }
+                    }
+                    Some(fauna_client_backup::reseed::ReseedLeg::ThisDeviceStore) => {
+                        dispatch_reseed(&ctx);
+                    }
+                    None => {}
                 }
             });
     }
@@ -1492,29 +1525,77 @@ fn this_device_hex() -> String {
 }
 
 /// Where `backup-destination-reseed-button` paints: `None` for the orphaned
-/// store's row, `Some(id)` for a destination row. The shared
-/// `fauna_client_backup::reseed::reseed_sources` decides which rows are
-/// sources at all; this keeps the ones whose delivery leg this build can run,
-/// so a nest-kind row joins by its leg becoming built, never by a change here.
-/// The same rule tui's `reseed_rows` applies.
+/// store's row, `Some(id)` for a destination row — the shared
+/// `fauna_client_backup::reseed::reseed_rows`, the rule every app paints by,
+/// over the legs linux hosts.
 fn reseed_rows(ctx: &Ctx) -> Vec<Option<String>> {
+    fauna_client_backup::reseed::reseed_rows(
+        &ctx.last_destinations.borrow(),
+        &this_device_hex(),
+        ctx.orphaned_store.borrow().is_some(),
+        HOSTED_LEGS,
+    )
+}
+
+/// The delivery legs linux hosts: the custodian ceremony through the sync
+/// agent, and the nest-held pull-back in the app.
+const HOSTED_LEGS: fauna_client_backup::reseed::HostedLegs =
+    fauna_client_backup::reseed::HostedLegs::WITH_PULL_BACK;
+
+/// The leg the button on `source`'s row runs, read off the shared source list
+/// at press time — `None` when that row offers no restore linux hosts.
+fn reseed_leg(
+    ctx: &Ctx,
+    source: &Option<String>,
+) -> Option<fauna_client_backup::reseed::ReseedLeg> {
     fauna_client_backup::reseed::reseed_sources(
         &ctx.last_destinations.borrow(),
         &this_device_hex(),
         ctx.orphaned_store.borrow().is_some(),
     )
     .into_iter()
-    .filter(|s| s.leg.is_built())
-    .map(|s| s.destination_id)
-    .collect()
+    .find(|s| &s.destination_id == source && s.leg.is_hosted(HOSTED_LEGS))
+    .map(|s| s.leg)
 }
 
-/// Arm the re-seed confirm — a no-op while a run is in flight or when no row
-/// offers the gesture (the keyboard-actuation backstop behind the paint).
-fn open_reseed_confirm(ctx: &Rc<Ctx>) {
-    if ctx.reseed_running.get() || reseed_rows(ctx).is_empty() {
+/// Arm the re-seed confirm for the pressed row's source — a no-op while a run
+/// is in flight or when that row offers no restore (the keyboard-actuation
+/// backstop behind the paint). A nest-kind source's confirm names the nest
+/// whose copy it pulls back; the custodian's keeps the device wording.
+fn open_reseed_confirm(ctx: &Rc<Ctx>, source: Option<String>) {
+    if ctx.reseed_running.get() {
         return;
     }
+    let Some(leg) = reseed_leg(ctx, &source) else {
+        return;
+    };
+    let pulled_from = match leg {
+        fauna_client_backup::reseed::ReseedLeg::NestHeldPullBack => {
+            source.as_ref().and_then(|id| {
+                ctx.last_destinations
+                    .borrow()
+                    .iter()
+                    .find(|d| &d.destination_id == id)
+                    .map(destination_label)
+            })
+        }
+        fauna_client_backup::reseed::ReseedLeg::ThisDeviceStore => None,
+    };
+    match pulled_from {
+        Some(name) => {
+            ctx.w
+                .reseed_title
+                .set_text(&s::backup_reseed_pull_back_confirm_title(&name));
+            ctx.w
+                .reseed_body
+                .set_text(&s::backup_reseed_pull_back_confirm_body(&name));
+        }
+        None => {
+            ctx.w.reseed_title.set_text(s::BACKUP_RESEED_CONFIRM_TITLE);
+            ctx.w.reseed_body.set_text(s::BACKUP_RESEED_CONFIRM_BODY);
+        }
+    }
+    *ctx.reseed_source.borrow_mut() = source;
     ctx.w.reclaim_modal.set_visible(false);
     ctx.w.reseed_modal.set_visible(true);
 }
@@ -2331,12 +2412,14 @@ fn build_status_row(
         row.append(&keep);
     }
 
-    // Re-seed — on this device's own custodian row only (`reseed_rows`).
+    // Re-seed — on this device's own custodian row, and on a surviving nest
+    // destination's row (`reseed_rows`).
     if reseed_here {
         let reseed = build_reseed_button();
         reseed.set_sensitive(!ctx.reseed_running.get());
         let ctx_click = Rc::clone(ctx);
-        reseed.connect_clicked(move |_| open_reseed_confirm(&ctx_click));
+        let id = dest.destination_id.clone();
+        reseed.connect_clicked(move |_| open_reseed_confirm(&ctx_click, Some(id.clone())));
         ctx.w.reseed_buttons.borrow_mut().push(reseed.clone());
         row.append(&reseed);
     }
@@ -2681,7 +2764,76 @@ enum ReseedDone {
     Finished {
         result: fauna_client_backup::reseed::ReseedOutcome,
         reenroll_error: Option<String>,
+        /// The pulled-back nest's label for a pull-back (its re-enrollment
+        /// failure names it); `None` for the custodian ceremony.
+        pulled_from: Option<String>,
     },
+}
+
+/// The confirmed pull-back from a surviving nest destination (`backups.md`
+/// § Restore after losing the nest): the shared host
+/// `fauna_sync_engine::reseed_pull::pull_back_from_destination` — the order,
+/// the folder names, the post-ceremony re-enrollment and the verdict are all
+/// its; tui calls the same one. No sync agent is involved.
+fn dispatch_pull_back(ctx: &Rc<Ctx>, destination: BackupDestination) {
+    let secret = match secret_from_hex(ctx.client.secret_hex()) {
+        Ok(secret) => secret,
+        Err(e) => {
+            ctx.w.error_label.add_css_class("error");
+            crate::settings::render_error_label(
+                &ctx.w.error_label,
+                Some(&s::BACKUP_RESEED_FAILED.replace("{reason}", &e)),
+            );
+            return;
+        }
+    };
+    let device_id = match crate::sync::device_id() {
+        Ok(id) => id,
+        Err(e) => {
+            ctx.w.error_label.add_css_class("error");
+            crate::settings::render_error_label(
+                &ctx.w.error_label,
+                Some(&s::BACKUP_RESEED_FAILED.replace("{reason}", &e.to_string())),
+            );
+            return;
+        }
+    };
+    let nest = ctx.client.nest_rpc().clone();
+    let label = destination_label(&destination);
+
+    ctx.reseed_running.set(true);
+    paint_reseed_buttons(ctx);
+    crate::settings::render_error_label(&ctx.w.error_label, None);
+    ctx.w.reseed_result.set_text(s::BACKUP_RESEED_RUNNING);
+    ctx.w.reseed_result.set_visible(true);
+
+    let ctx_render = Rc::clone(ctx);
+    spawn_with_snapshot(
+        &ctx.rt,
+        move || async move {
+            let store = backup_seam();
+            let ran = fauna_sync_engine::reseed_pull::pull_back_from_destination(
+                fauna_sync_engine::reseed_pull::NativePullBack {
+                    target: nest,
+                    owner_secret: secret,
+                    device_id,
+                    destination: &destination,
+                    store: store.as_ref(),
+                    folder_keys: crate::account_runtime::folder_key_store(),
+                },
+            )
+            .await;
+            match ran {
+                Err(stop) => ReseedDone::Stopped(stop),
+                Ok(ran) => ReseedDone::Finished {
+                    result: ran.outcome,
+                    reenroll_error: ran.reenroll_error,
+                    pulled_from: Some(label),
+                },
+            }
+        },
+        move |done| render_reseed(&ctx_render, done),
+    );
 }
 
 /// The confirmed re-seed (`backups.md` § Restore after losing the nest): the
@@ -2766,6 +2918,7 @@ fn dispatch_reseed(ctx: &Rc<Ctx>) {
             ReseedDone::Finished {
                 result,
                 reenroll_error,
+                pulled_from: None,
             }
         },
         move |done| render_reseed(&ctx_render, done),
@@ -2788,6 +2941,7 @@ fn render_reseed(ctx: &Rc<Ctx>, done: ReseedDone) {
         ReseedDone::Finished {
             result,
             reenroll_error,
+            pulled_from,
         } => {
             let text = fauna_client_backup::reseed::result_lines(&result)
                 .iter()
@@ -2803,7 +2957,10 @@ fn render_reseed(ctx: &Rc<Ctx>, done: ReseedDone) {
                     ctx.w.error_label.add_css_class("error");
                     crate::settings::render_error_label(
                         &ctx.w.error_label,
-                        Some(&s::BACKUP_RESEED_REENROLL_FAILED.replace("{reason}", &reason)),
+                        Some(&match &pulled_from {
+                            Some(name) => s::backup_reseed_pull_back_reenroll_failed(name, &reason),
+                            None => s::BACKUP_RESEED_REENROLL_FAILED.replace("{reason}", &reason),
+                        }),
                     );
                 }
                 // Re-list: the re-enrolled row appears and the orphaned-store
@@ -2880,7 +3037,7 @@ mod tests {
                 .expect("the orphaned row carries the reclaim button");
             assert!(reseed < reclaim, "restore first, reclaim second: {names:?}");
 
-            let (modal, _, _) = build_reseed_modal();
+            let (modal, _, _, _, _) = build_reseed_modal();
             let names = crate::testid::widget_names(&modal);
             for id in [
                 "backup-destination-reseed-confirm-modal",

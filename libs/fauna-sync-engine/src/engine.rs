@@ -683,6 +683,55 @@ struct UploadedManifest {
     content_key_version: Option<u64>,
 }
 
+/// A blob sealed to disk for upload ([`SyncEngine::seal_staged`]): its sealed
+/// chunk bodies in a directory of their own, removed when this is dropped. A
+/// crash leaves the directory for its owner's stale-staging sweep.
+pub struct StagedUpload {
+    seal: crate::custodian_store::StagedSeal,
+    _dir: tempfile::TempDir,
+}
+
+impl StagedUpload {
+    /// The plaintext's length — what the sealed reader yielded.
+    pub fn plain_len(&self) -> u64 {
+        self.seal.plain_len()
+    }
+
+    /// BLAKE3 of the plaintext, hex — taken as it was sealed, so a caller
+    /// checks what it sealed against an advertised hash without reading it
+    /// again.
+    pub fn plain_blake3_hex(&self) -> String {
+        self.seal.plain_blake3_hex()
+    }
+}
+
+/// How many chunks an upload off disk — [`SyncEngine::upload_staged`] and the
+/// streaming folder upload (files over `STREAMING_THRESHOLD`) — reads back and
+/// hands the transfer pool at once: its memory bound, a few chunks of at most
+/// `MAX_CHUNK` each, whatever the file's size.
+pub const STAGED_UPLOAD_WINDOW: usize = 4;
+
+/// Fail a non-resumable upload whose destination rejected any chunk: it has no
+/// `transfer_queue` resume (the backup coordinator re-drives its next pass), so
+/// returning `Ok` would let the caller record a backup that stored nothing (the
+/// FS-BIND FOLLOW-ON A silent swallow — a no-user-data-loss landmine). Called
+/// before the manifest upload, so nothing downstream records the pass as done.
+fn refuse_rejected_chunks(
+    results: &[crate::transfer::UploadResult],
+    relative_path: &str,
+) -> Result<()> {
+    let failed = results.iter().filter(|ur| !ur.success).count();
+    if failed > 0 {
+        anyhow::bail!(
+            "upload: destination rejected {failed}/{} chunk upload(s) for {} — refusing to \
+             report the upload as complete",
+            results.len(),
+            fauna_core::log_redact::log_path(relative_path)
+        );
+    }
+    Ok(())
+}
+
 // The streamed file hash lives in `fauna_core::chunker_stream`
 // (`content_hash_streaming`) — this module already called it directly at four
 // sites while a local `streaming_file_hash` served three more, same digest but
@@ -783,11 +832,21 @@ pub(crate) struct EngineBlobFetcher<'a> {
     /// asked for chunk bodies before the nest (the same-account peer data
     /// plane). `None` fetches from the nest alone.
     siblings: Option<(&'a dyn crate::sibling_source::SiblingChunkSource, String)>,
+    /// Ask the siblings for MANIFESTS first too — the sibling pull's fetcher
+    /// ([`SyncEngine::pull_sibling_changes`]): a row a sibling served names a
+    /// manifest, and with the nest down that sibling is its only source.
+    manifests_from_siblings: bool,
 }
 
 #[async_trait::async_trait]
 impl fauna_core::file_download::BlobFetcher for EngineBlobFetcher<'_> {
     async fn fetch_manifest(&self, hash: &ContentHash) -> Result<Vec<u8>> {
+        if self.manifests_from_siblings
+            && let Some((source, folder)) = &self.siblings
+            && let Some(bytes) = source.fetch_manifest(folder, hash).await
+        {
+            return Ok(bytes);
+        }
         self.client.download_manifest(hash).await
     }
 
@@ -819,6 +878,24 @@ impl fauna_core::file_download::BlobFetcher for EngineBlobFetcher<'_> {
         )
         .await
     }
+}
+
+/// What one [`SyncEngine::pull_sibling_changes`] pass did — the loop's log
+/// line and the tests' assertion surface.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SiblingPullReport {
+    /// Siblings paged (dropped ones included).
+    pub siblings: usize,
+    /// Siblings dropped for a failed page.
+    pub dropped: usize,
+    /// Rows the pages carried.
+    pub rows: usize,
+    /// Overlay rows landed or refreshed.
+    pub overlaid: usize,
+    /// Provisional rows whose bytes landed.
+    pub materialized: usize,
+    /// Rows the ingest refused.
+    pub refused: usize,
 }
 
 /// The engine's binding of the shared re-seal's write seam
@@ -1189,7 +1266,7 @@ pub struct SyncEngine {
     /// [`Self::set_control_api`] to drive either arm.
     control: std::sync::RwLock<Arc<dyn crate::nest_api::SyncControlApi>>,
     /// Cross-nest control-plane routing (
-    /// `federation.md` § Cross-nest shared folders).
+    /// `federation-shared-folders.md` § Cross-nest shared folders).
     /// `Some((home_nest_url, channel_id_hex))` ⇒ this engine is bound to a set
     /// homed on **another** nest: both control-plane kinds carry
     /// `nest_url`+`channel_id` so this (the member's own) nest relays them to the
@@ -1395,6 +1472,11 @@ pub struct SyncEngine {
     /// a set the account owns ([`Self::set_deposit_inbox`]); `None` adopts
     /// nothing (`deposit_adoption`).
     deposit_inbox: std::sync::RwLock<Option<Arc<deposit_adoption::DepositInbox>>>,
+    /// The KEY-PENDING bound's wall clock, as unix seconds; `0` (every real
+    /// engine) reads the system clock. A test moves it
+    /// ([`Self::set_key_pending_clock`]) rather than sleeping out
+    /// [`fauna_core::apply_failure::KEY_PENDING_HOLD`].
+    key_pending_clock: std::sync::atomic::AtomicI64,
 }
 
 /// An engine's signer bound to its one set's nonce.
@@ -1641,6 +1723,53 @@ impl SyncEngine {
             learned_predecessors: Default::default(),
             snapshot_nonces: None,
             deposit_inbox: std::sync::RwLock::new(None),
+            key_pending_clock: std::sync::atomic::AtomicI64::new(0),
+        }
+    }
+
+    /// Pin the KEY-PENDING bound's clock at `unix_secs` (test seam; a real
+    /// engine never sets it).
+    #[cfg(test)]
+    pub(crate) fn set_key_pending_clock(&self, unix_secs: i64) {
+        self.key_pending_clock
+            .store(unix_secs, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Now, for the KEY-PENDING bound.
+    fn key_pending_now(&self) -> i64 {
+        match self
+            .key_pending_clock
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            0 => now_unix_secs(),
+            pinned => pinned,
+        }
+    }
+
+    /// The seq whose KEY-PENDING hold has run
+    /// [`fauna_core::apply_failure::KEY_PENDING_HOLD`] of wall time — the one
+    /// row a pull may now pass as
+    /// [`PermanentApplyFailure::KEY_PENDING`](fauna_core::apply_failure::PermanentApplyFailure::KEY_PENDING),
+    /// if it fails key-pending once more. Wall time, not a pull count, so a
+    /// tight retry loop cannot shorten it.
+    fn key_pending_due_seq(&self) -> Option<i64> {
+        let (seq, first_held_at) = self.db.key_pending_hold().ok().flatten()?;
+        let hold = fauna_core::apply_failure::KEY_PENDING_HOLD.as_secs() as i64;
+        (self.key_pending_now().saturating_sub(first_held_at) >= hold).then_some(seq)
+    }
+
+    /// Start the KEY-PENDING clock at `seq` — unless it is already running
+    /// there: a different lowest held seq restarts it.
+    fn note_key_pending_hold(&self, seq: i64) {
+        if matches!(self.db.key_pending_hold(), Ok(Some((held, _))) if held == seq) {
+            return;
+        }
+        if let Err(e) = self.db.set_key_pending_hold(seq, self.key_pending_now()) {
+            tracing::warn!(
+                seq,
+                error = %format!("{e:#}"),
+                "starting the key-pending clock failed; the row stays held and the next pull retries"
+            );
         }
     }
 
@@ -1969,7 +2098,7 @@ impl SyncEngine {
             )
             .missing();
             tracing::warn!(
-                folder = self.folder().unwrap_or("?"),
+                folder = %fauna_core::log_redact::log_folder_name(self.folder().unwrap_or("?")),
                 missing,
                 "this engine has no change signer or set nonce: its records go out \
                  unsigned, which a nest enforcing writer signatures refuses"
@@ -1988,7 +2117,7 @@ impl SyncEngine {
         match signing {
             Some(s) => {
                 if let Err(e) = s.signer.sign_record(req, s.set_nonce) {
-                    tracing::warn!(folder = %req.folder, "change record left unsigned: {e}");
+                    tracing::warn!(folder = %fauna_core::log_redact::log_folder_name(&req.folder), "change record left unsigned: {e}");
                 }
             }
             None => self.warn_unsigned_once(),
@@ -2043,7 +2172,7 @@ impl SyncEngine {
         match signing {
             Some(s) => {
                 if let Err(e) = s.signer.sign_report(req, s.set_nonce) {
-                    tracing::warn!(folder = %req.folder, "conflict report left unsigned: {e}");
+                    tracing::warn!(folder = %fauna_core::log_redact::log_folder_name(&req.folder), "conflict report left unsigned: {e}");
                 }
             }
             None => self.warn_unsigned_once(),
@@ -3708,13 +3837,12 @@ impl SyncEngine {
     /// `_folder` is reserved for future per-path metadata — today
     /// the destination derives the folder from the bearer + manifest.
     ///
-    /// Caller obligation: only feed buffers <= the segment-store
-    /// size cap (Plan 5: 64 MB), so the in-memory path is fine — there
-    /// is intentionally no streaming variant of this helper (Plan 5
-    /// § Gotcha #2).
-    ///
-    /// Plan 5 T7: used by the nest's `NestBackupCoordinator` for both
-    /// segment uploads and the kind-manifest mirror upload.
+    /// Caller obligation: only feed a buffer small enough to hold. A segment
+    /// half is not one — a segment has no size ceiling
+    /// (`message-segment-store.md` § Segment size) — so the nest's
+    /// `NestBackupCoordinator` uploads segment halves through
+    /// [`Self::seal_staged`] + [`Self::upload_staged`], and this helper only
+    /// for its kind-manifest mirror.
     ///
     /// Returns the uploaded path's **manifest content hash** — the value the
     /// segment-backup coordinator records on the destination via
@@ -3741,6 +3869,94 @@ impl SyncEngine {
             "bytes uploaded"
         );
         Ok(uploaded.manifest_hash)
+    }
+
+    /// The LOCAL half of [`Self::upload_staged`]: seal `plain` under this
+    /// engine's upload root ([`Self::upload_seal_root`]) one chunk at a time,
+    /// staging each sealed body in a fresh directory under `staging`
+    /// ([`StagedUpload`] removes it when dropped).
+    ///
+    /// The form for a blob too large to hold — a source nest's segment half,
+    /// which has no size ceiling (`message-segment-store.md` § Segment size).
+    /// What it holds at once is one chunk; the result is byte-identical to
+    /// [`Self::upload_bytes`]'s seal of the same bytes. The read and the seal
+    /// run on a blocking thread.
+    pub async fn seal_staged(
+        &self,
+        plain: impl std::io::Read + Send + 'static,
+        staging: &std::path::Path,
+    ) -> Result<StagedUpload> {
+        let seal_root = self.upload_seal_root()?;
+        let dir = tempfile::Builder::new()
+            .prefix("seal-")
+            .tempdir_in(staging)
+            .with_context(|| format!("create seal staging under {}", staging.display()))?;
+        let bodies = dir.path().to_path_buf();
+        let seal = tokio::task::spawn_blocking(move || {
+            crate::custodian_store::StagedSeal::seal_reader(plain, &bodies, seal_root)
+        })
+        .await
+        .context("seal_staged: seal task")??;
+        Ok(StagedUpload { seal, _dir: dir })
+    }
+
+    /// The NETWORK half of a staged upload — [`Self::upload_bytes`] for a blob
+    /// [`Self::seal_staged`] sealed to disk: dedup-check every chunk, upload
+    /// the missing ones [`STAGED_UPLOAD_WINDOW`] at a time off their staged
+    /// files, then the manifest. Memory is one window of sealed chunks, never
+    /// the blob. Fails loud on any rejected chunk, as `upload_bytes` does, and
+    /// skips `record_change` as it does; returns the manifest content hash.
+    pub async fn upload_staged(
+        &self,
+        staged: &StagedUpload,
+        relative_path: &str,
+        _folder: &str,
+    ) -> Result<ContentHash> {
+        let staged = &staged.seal;
+        let sealed = crate::custodian_store::Sealed::Staged(staged);
+        let manifest_hash = *staged.manifest_hash();
+        if !self.is_metadata_only_residency() {
+            let keys = sealed.store_keys();
+            let missing: std::collections::HashSet<ContentHash> = self
+                .client
+                .check_chunks(&keys)
+                .await
+                .context("upload_staged: checking chunks with destination")?
+                .into_iter()
+                .collect();
+            // Each missing key once, at its first index (a repeated chunk is
+            // one body under one key).
+            let mut seen = std::collections::HashSet::new();
+            let todo: Vec<(usize, ContentHash)> = keys
+                .iter()
+                .enumerate()
+                .filter(|(_, key)| missing.contains(*key) && seen.insert(**key))
+                .map(|(index, key)| (index, *key))
+                .collect();
+            for window in todo.chunks(STAGED_UPLOAD_WINDOW) {
+                let mut bodies = Vec::with_capacity(window.len());
+                for (index, key) in window {
+                    bodies.push((*key, sealed.body(*index, key).await?.into_owned()));
+                }
+                let results = self
+                    .transfer_pool
+                    .upload_chunks(&self.client, &bodies, relative_path)
+                    .await;
+                refuse_rejected_chunks(&results, relative_path)?;
+            }
+        }
+        self.client
+            .upload_manifest(sealed.manifest_bytes())
+            .await
+            .context("upload_staged: uploading manifest")?;
+        tracing::info!(
+            path = %fauna_core::log_redact::log_path(relative_path),
+            chunks = staged.manifest().chunk_hashes.len(),
+            size = staged.plain_len(),
+            content_key_version = ?staged.content_key_version(),
+            "staged bytes uploaded"
+        );
+        Ok(manifest_hash)
     }
 
     // There is deliberately NO `publish_reserved_bytes` here — no "upload the
@@ -3957,15 +4173,7 @@ impl SyncEngine {
                 // that stored nothing (the FS-BIND FOLLOW-ON A silent swallow — a
                 // no-user-data-loss landmine). Bail *before* the manifest upload so
                 // nothing downstream records the pass as done.
-                let failed = results.iter().filter(|ur| !ur.success).count();
-                if failed > 0 {
-                    anyhow::bail!(
-                        "upload_sealed: destination rejected {failed}/{} chunk upload(s) \
-                         for {} — refusing to report the upload as complete",
-                        results.len(),
-                        fauna_core::log_redact::log_path(relative_path)
-                    );
-                }
+                refuse_rejected_chunks(&results, relative_path)?;
             }
         }
 
@@ -4089,6 +4297,25 @@ impl SyncEngine {
                     fauna_core::log_redact::log_path(relative_path)
                 );
             }
+        }
+
+        // ⛔ THE THIRD CHOKE POINT — a peer's provisional body (`p2p.md`
+        // § Same-account nest-down folder transfer: a provisional row never
+        // enters the nest-sequenced log). Bytes the share plane landed from a
+        // sibling or a share peer, still hashing to what landed, are another
+        // writer's change the nest has not sequenced yet — not an edit of this
+        // replica's. Recording them would mint and sequence the writer's file a
+        // second time as this device's own. The landing's own write reaches
+        // here as a watcher event, and a scan or re-seal could too, so the
+        // refusal lives at the door they share, as the owned tree's ingest
+        // already refuses it. Once the user writes over the body the hash moves
+        // and it is an ordinary edit again.
+        if self.holds_provisional_peer_body(relative_path)? {
+            tracing::debug!(
+                path = %fauna_core::log_redact::log_path(relative_path),
+                "a peer's provisional body, not an edit — nothing to upload"
+            );
+            return Ok(None);
         }
 
         let file_size = meta.len();
@@ -4460,7 +4687,9 @@ impl SyncEngine {
     /// Streaming upload path for files >= [`fauna_core::chunker_stream::STREAMING_THRESHOLD`].
     ///
     /// Chunks the file to a temporary directory (O(MAX_CHUNK) memory), reads
-    /// each chunk file individually for upload, then cleans up.  The upload
+    /// the missing chunks back [`STAGED_UPLOAD_WINDOW`] at a time for upload
+    /// (memory is one window, never the file —
+    /// `tests/streaming_upload_memory.rs`), then cleans up.  The upload
     /// logic (dedup check, batched parallel upload, manifest, DB update) is
     /// identical to the in-memory path.
     ///
@@ -4702,64 +4931,71 @@ impl SyncEngine {
             },
         );
 
-        // Enqueue missing chunks (by store key) for resume support.
-        let mut queue_ids: Vec<(i64, ContentHash)> = Vec::new();
-        for store_key in &store_keys {
-            if missing.contains(store_key) {
-                let id = self
-                    .db
-                    .enqueue_transfer(relative_path, "upload", *store_key, 0)?;
-                queue_ids.push((id, *store_key));
-            }
-        }
-
-        // Pass 2: read, process, and upload each missing chunk individually
-        // through the transfer pool. We read only one chunk at a time from the
-        // temp dir, keeping memory at O(MAX_CHUNK) per in-flight transfer. A
-        // sealed chunk (content key or owner backup root) was already sealed into
-        // the temp dir under its store key (above), so it is just read back; a
-        // plaintext chunk is read by its (== store) key and compressed. Each pair
-        // is keyed by the store key the destination addresses it by.
-        let missing_data: Vec<(ContentHash, Vec<u8>)> = manifest
+        // Each missing chunk once (a repeated chunk is one body under one store
+        // key), with its plaintext hash: the plaintext arm reads its temp file
+        // by that hash, the sealed arm by the store key.
+        let mut seen = std::collections::HashSet::new();
+        let todo: Vec<(ContentHash, ContentHash)> = manifest
             .chunk_hashes
             .iter()
             .zip(store_keys.iter())
-            .filter(|(_, store_key)| missing.contains(*store_key))
-            .map(|(plain_hash, store_key)| {
-                if content_key_seal {
+            .filter(|(_, store_key)| missing.contains(*store_key) && seen.insert(**store_key))
+            .map(|(plain_hash, store_key)| (*plain_hash, *store_key))
+            .collect();
+
+        // Enqueue every missing chunk (by store key) for resume support before
+        // the first byte goes out, so an interrupted upload knows what is left.
+        let mut queue_ids: Vec<(i64, ContentHash)> = Vec::with_capacity(todo.len());
+        for (_, store_key) in &todo {
+            let id = self
+                .db
+                .enqueue_transfer(relative_path, "upload", *store_key, 0)?;
+            queue_ids.push((id, *store_key));
+        }
+
+        // Pass 2: read the missing chunks back off the temp dir and upload them
+        // through the transfer pool [`STAGED_UPLOAD_WINDOW`] at a time — the
+        // `upload_staged` shape — so memory is one window of chunks, never the
+        // file. A sealed chunk (content key or owner backup root) was already
+        // sealed into the temp dir under its store key (above), so it is just
+        // read back; a plaintext chunk is read by its (== store) key and
+        // framed. Each pair is keyed by the store key the destination
+        // addresses it by. A window's successes are marked done in the
+        // transfer queue before the next window is read.
+        for window in todo.chunks(STAGED_UPLOAD_WINDOW) {
+            let mut bodies = Vec::with_capacity(window.len());
+            for (plain_hash, store_key) in window {
+                let data = if content_key_seal {
                     // Sealed ciphertext already on disk under its store key.
                     let path = temp_dir.path().join(hex::encode(store_key.digest()));
-                    let data = std::fs::read(&path).with_context(|| {
+                    std::fs::read(&path).with_context(|| {
                         format!("reading sealed chunk {}", hex::encode(store_key.digest()))
+                    })?
+                } else {
+                    let chunk_path = temp_dir.path().join(hex::encode(plain_hash.digest()));
+                    let data = std::fs::read(&chunk_path).with_context(|| {
+                        format!("reading chunk {}", hex::encode(plain_hash.digest()))
                     })?;
-                    return Ok((*store_key, data));
+                    // Frame through the one door (`fauna_core::chunk_seal`):
+                    // the plaintext arm stores the framed plaintext under its
+                    // hash.
+                    fauna_core::chunk_seal::FramedChunk::frame(plain_hash, &data)?.into_body()
+                };
+                bodies.push((*store_key, data));
+            }
+
+            let results = self
+                .transfer_pool
+                .upload_chunks(&self.client, &bodies, relative_path)
+                .await;
+
+            for ur in &results {
+                if ur.success
+                    && let Some((qid, _)) = queue_ids.iter().find(|(_, h)| *h == ur.hash)
+                    && let Err(e) = self.db.complete_transfer(*qid)
+                {
+                    tracing::warn!(error = ?e, qid = *qid, "failed to mark transfer complete in queue (may re-upload)");
                 }
-                let chunk_path = temp_dir.path().join(hex::encode(plain_hash.digest()));
-                let data = std::fs::read(&chunk_path).with_context(|| {
-                    format!("reading chunk {}", hex::encode(plain_hash.digest()))
-                })?;
-
-                // Frame through the one door (`fauna_core::chunk_seal`): the
-                // plaintext arm stores the framed plaintext under its hash.
-                let data =
-                    fauna_core::chunk_seal::FramedChunk::frame(plain_hash, &data)?.into_body();
-
-                Ok((*store_key, data))
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        let results = self
-            .transfer_pool
-            .upload_chunks(&self.client, &missing_data, relative_path)
-            .await;
-
-        // Mark successful uploads in transfer queue
-        for ur in &results {
-            if ur.success
-                && let Some((qid, _)) = queue_ids.iter().find(|(_, h)| *h == ur.hash)
-                && let Err(e) = self.db.complete_transfer(*qid)
-            {
-                tracing::warn!(error = ?e, qid = *qid, "failed to mark transfer complete in queue (may re-upload)");
             }
         }
 
@@ -9681,7 +9917,7 @@ impl SyncEngine {
     /// stored tokens are only ever added to: a restart must not read the
     /// roster's writers as lost and then, one read later, as gained. Returns
     /// whether a pass is owed.
-    fn note_reader_gain(&self) -> Result<bool> {
+    pub(crate) fn note_reader_gain(&self) -> Result<bool> {
         let (signers, nonces, roster_read) = {
             let reader = self.row_reader.read().unwrap_or_else(|e| e.into_inner());
             let binding = reader.binding();
@@ -9708,6 +9944,18 @@ impl SyncEngine {
                     .iter()
                     .filter_map(|k| k.actor_id)
                     .map(|a| format!("root:{}", hex::encode(a.0))),
+            )
+            // One per content-key generation held, current and retired
+            // (ruling (8)(f), "a content-key generation arriving"): a custody
+            // merge bringing a second same-version key, or a generation this
+            // reader lacked, re-reads the heads a KEY-PENDING row was passed
+            // under. A one-way fingerprint, never the key.
+            .chain(
+                self.content_keys
+                    .iter()
+                    .chain(self.retired_content_keys.iter())
+                    .flat_map(|keys| keys.generations())
+                    .map(|g| format!("gen:{}:{}", g.version, hex::encode(g.fingerprint()))),
             )
             .collect();
         let stored = self.db.reader_admitted_by()?;
@@ -9888,7 +10136,12 @@ impl SyncEngine {
     ///   spoken for a noted one, the note is released, so it is never folded
     ///   twice.
     /// - A head whose label has no root *yet* leaves the pass owed; one that
-    ///   can never open here notes its skip, like the pull.
+    ///   can never open here notes its skip, like the pull. A head the pull
+    ///   already passed KEY-PENDING (its skip noted) that still does not open
+    ///   — label or bytes — counts as judged: the next key gain re-owes the
+    ///   pass, and until then a hostile row must not make every pull re-read
+    ///   the whole log (`file-sync.md` § *A failed change must not strand the
+    ///   device*).
     pub(crate) async fn fold_passed_heads(
         &self,
         rows: Vec<fauna_protocol::sync::SyncChange>,
@@ -9939,6 +10192,8 @@ impl SyncEngine {
         for head in heads {
             let Some(path) = head.path.clone().filter(|p| !p.is_empty()) else {
                 match self.sealed_path_verdict(&head) {
+                    ChangePathOpen::NoRoot
+                        if self.causal().skip_noted(&head.path_hash, head.seq) => {}
                     ChangePathOpen::NoRoot => complete = false,
                     ChangePathOpen::Refused(_) => self
                         .causal()
@@ -9982,7 +10237,7 @@ impl SyncEngine {
         // Through the ordinary fold — one head per path, so nothing in it is
         // a replay — but never its anchor write: a fold that defers would
         // otherwise rewind the cursor and replay the log after all.
-        let (batch, _) = self.fold_remote_changes(&to_fold, cursor).await?;
+        let (batch, _) = self.fold_remote_changes(&to_fold, cursor, false).await?;
         if !batch.deferred {
             // The delete arm has spoken for each noted delete (applied, or
             // declined by its own rules, exactly as on first service): it is
@@ -10192,10 +10447,9 @@ impl SyncEngine {
             // outcome 15). Keep the target and the message's leading words.
             tracing::debug!(
                 target: "fauna_sync_engine::place_accepts",
-                folder = %self
-                    .folder()
-                    .map(fauna_core::log_redact::log_folder_name)
-                    .unwrap_or_default(),
+                folder = %fauna_core::log_redact::log_folder_name(
+                    self.folder().unwrap_or_default()
+                ),
                 "place does not accept remote changes; holding the anchor and skipping the pull"
             );
             return Ok(0);
@@ -10281,7 +10535,7 @@ impl SyncEngine {
         changes: &[fauna_protocol::sync::SyncChange],
         anchor: i64,
     ) -> Result<AppliedBatch> {
-        let (batch, max_seq) = self.fold_remote_changes(changes, anchor).await?;
+        let (batch, max_seq) = self.fold_remote_changes(changes, anchor, true).await?;
         self.db.set_anchor(max_seq)?;
         tracing::info!(
             changes = batch.applied,
@@ -10296,13 +10550,27 @@ impl SyncEngine {
     /// anchor would advance to. The pull writes it; the head re-judge
     /// ([`Self::fold_passed_heads`]) folds rows the cursor already passed and
     /// must leave the cursor where it is.
+    ///
+    /// `bounds_key_pending` runs the KEY-PENDING bound's clock (`file-sync.md`
+    /// § *A failed change must not strand the device*): the pull's fold does,
+    /// the re-judge's never — a re-folded head is no lower held seq, and its
+    /// clock would fight the pull's. Both folds pass a row whose skip is
+    /// already noted and which still fails key-pending: it was judged when it
+    /// passed, and the next key gain re-owes the re-judge.
     async fn fold_remote_changes(
         &self,
         changes: &[fauna_protocol::sync::SyncChange],
         anchor: i64,
+        bounds_key_pending: bool,
     ) -> Result<(AppliedBatch, i64)> {
         let mut count = 0;
         let mut max_seq = anchor;
+        // The one seq whose KEY-PENDING hold has run its bound.
+        let key_pending_due = if bounds_key_pending {
+            self.key_pending_due_seq()
+        } else {
+            None
+        };
 
         // Seam B: paths whose batch-latest change is a live create/modify still
         // lacking a thumbnail — the download-backfill candidates. Computed over
@@ -10522,12 +10790,16 @@ impl SyncEngine {
         // (`fetch_changes` filled `path` for every seal that opened AND bound)
         // splits in two, and the two do OPPOSITE things to the anchor.
         //
-        // - **`NoRoot` — transient.** No root this holder offers opens the
-        //   envelope; an M2 generation can lag its changes. Advancing past it
-        //   would silently lose the file on this device forever, so cap the
-        //   batch at the first such change: everything below applies now, the
-        //   anchor stays below the cap, and the next cadence/nudge pull
-        //   re-fetches from there.
+        // - **`NoRoot` — transient, for a bounded time (KEY-PENDING).** No
+        //   root this holder offers opens the envelope; an M2 generation can
+        //   lag its changes. Cap the batch at the first such change:
+        //   everything below applies now, the anchor stays below the cap, and
+        //   the next cadence/nudge pull re-fetches from there. Not for ever:
+        //   a writer co-member's envelope that no root will ever open would
+        //   hold every member below it, so once the same lowest held seq has
+        //   held for `KEY_PENDING_HOLD` it passes, recorded and noted like a
+        //   refusal — losslessly, because a content-key gain re-folds it
+        //   (`file-sync.md` § *A failed change must not strand the device*).
         // - **`Refused` — permanent for that change.** A malformed envelope, a
         //   `path_hash` that is not 32 hex bytes, non-UTF-8 plaintext, or a
         //   path that does not hash to its own row: no key and no later pull
@@ -10551,11 +10823,25 @@ impl SyncEngine {
             Option<&[u8]>,
             fauna_core::label_custody::ChangePathRefusal,
         )> = Vec::new();
+        let mut key_pending_seal: Option<(i64, &str, Option<&[u8]>)> = None;
         for change in changes
             .iter()
             .filter(|c| !c.path.as_deref().is_some_and(|p| !p.is_empty()))
         {
             match self.sealed_path_verdict(change) {
+                // Already passed key-pending (re-listed below a lower cap):
+                // it stays passed, and falls out at the missing-path guard.
+                fauna_core::label_custody::ChangePathOpen::NoRoot
+                    if self.causal().skip_noted(&change.path_hash, change.seq) => {}
+                fauna_core::label_custody::ChangePathOpen::NoRoot
+                    if key_pending_due == Some(change.seq) =>
+                {
+                    key_pending_seal = Some((
+                        change.seq,
+                        change.path_hash.as_str(),
+                        change.path_sealed.as_ref().map(|b| &b[..]),
+                    ));
+                }
                 fauna_core::label_custody::ChangePathOpen::NoRoot => {
                     seal_cap = Some(seal_cap.map_or(change.seq, |c: i64| c.min(change.seq)));
                 }
@@ -10616,6 +10902,29 @@ impl SyncEngine {
             // first) takes the set-wide floor.
             self.causal().note_permanent_skip(Some(path_hash), *seq);
         }
+        // The label whose KEY-PENDING hold ran its bound: recorded and noted
+        // like a refusal, below any cap (above it, it re-lists unrecorded).
+        if let Some((seq, path_hash, path_sealed)) = key_pending_seal
+            && !seal_cap.is_some_and(|cap| seq >= cap)
+        {
+            tracing::warn!(
+                seq,
+                "a sealed path no held root opens has held the anchor for the \
+                 key-pending bound; recording it and advancing past it (a key \
+                 gain re-folds it)"
+            );
+            self.record_and_report_skip(
+                path_hash,
+                true,
+                path_sealed,
+                fauna_core::apply_failure::PermanentApplyFailure::KEY_PENDING.reason,
+            )
+            .await;
+            self.causal().note_permanent_skip(Some(path_hash), seq);
+        }
+        // The lowest seq this pass holds for a KEY-PENDING reason — the
+        // bound's clock restarts whenever it changes.
+        let mut key_pending_held = seal_cap;
 
         // The UNRESOLVED-mode hold (`file-sync.md` § 4, direction ratified
         // 2026-08-02) — the same transient-class shape as the seal cap above:
@@ -10916,8 +11225,38 @@ impl SyncEngine {
                                     // not strand the device* rules
                                     // (classification: `apply_failure`, the
                                     // default transient).
-                                    match fauna_core::apply_failure::permanent_reason(&e) {
+                                    //
+                                    // A KEY-PENDING open (every fetch
+                                    // succeeded, no held root opens it) is
+                                    // the transient arm too — until the same
+                                    // lowest held seq has held for
+                                    // `KEY_PENDING_HOLD`; then it passes as
+                                    // permanent. One already passed (its skip
+                                    // noted) that still does not open is
+                                    // judged: passed again, recorded nothing.
+                                    let key_pending = fauna_core::apply_failure::is_key_pending(&e);
+                                    let reason = fauna_core::apply_failure::permanent_reason(&e)
+                                        .or_else(|| {
+                                            (key_pending && key_pending_due == Some(change.seq))
+                                                .then_some(
+                                                    fauna_core::apply_failure::PermanentApplyFailure::KEY_PENDING
+                                                        .reason,
+                                                )
+                                        });
+                                    if reason.is_none()
+                                        && key_pending
+                                        && self.causal().skip_noted(&change.path_hash, change.seq)
+                                    {
+                                        continue;
+                                    }
+                                    match reason {
                                         None => {
+                                            if key_pending {
+                                                key_pending_held = Some(
+                                                    key_pending_held
+                                                        .map_or(change.seq, |c| c.min(change.seq)),
+                                                );
+                                            }
                                             tracing::error!(
                                                 path = %fauna_core::log_redact::log_path(&path),
                                                 seq = change.seq,
@@ -11101,6 +11440,9 @@ impl SyncEngine {
         // and blocked dehydration forever.
         self.reconcile_share_overlay(&peer_changes, &self_echoes, cap, dyn_cap)?;
         self.persist_head_signers(changes);
+        if bounds_key_pending && let Some(seq) = key_pending_held {
+            self.note_key_pending_hold(seq);
+        }
 
         Ok((
             AppliedBatch {
@@ -12327,9 +12669,11 @@ impl SyncEngine {
             // retired identity's row.
             record_signer: fauna_core::file_download::RecordSigner::Current,
             // A sync read's addresses come from writer-signed rows, which is
-            // what licenses a public-audience folder's plaintext; only a read
-            // that names no signed row — the snapshot restore — sets it
-            // ([`Self::restore_snapshot_files_to_dir`]).
+            // what licenses a public-audience folder's plaintext. The snapshot
+            // doors, whose addresses are the home nest's word, do not set it
+            // either: their guard is the judged-row licence the snapshot entry
+            // reader reads first, which refuses an unlicensed entry before any
+            // byte (`fauna_client_snapshots::entry_reader`).
             sealed_only: false,
             epoch_secret: self.epoch_secret,
             // No `..Default::default()`: every field is now named, so a future
@@ -12351,7 +12695,98 @@ impl SyncEngine {
                 .as_deref()
                 .zip(self.binding_edge.as_ref())
                 .map(|(source, edge)| (source, edge.folder_ref.to_wire())),
+            manifests_from_siblings: false,
         }
+    }
+
+    /// [`Self::blob_fetcher`] that asks the siblings for manifests before the
+    /// nest as well as chunks — what a sibling-served row is fetched through.
+    pub(crate) fn sibling_blob_fetcher(&self) -> EngineBlobFetcher<'_> {
+        EngineBlobFetcher {
+            manifests_from_siblings: true,
+            ..self.blob_fetcher()
+        }
+    }
+
+    /// The sibling registry's admission signal, when this engine was handed
+    /// one ([`Self::with_sibling_chunks`]) — the watch loop's fourth pull
+    /// trigger ([`crate::always_resident::run_watch_loop`]).
+    pub fn sibling_admissions(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        self.sibling_chunks.as_ref()?.admissions()
+    }
+
+    /// The same-account leg's nest-down folder pull (`p2p.md` § Same-account
+    /// nest-down folder transfer; `p2p-shared-set-build.md` § Build design —
+    /// the same-account row leg, decision 4): page this folder's rows from
+    /// every sibling the registry holds, and land them through the ONE peer
+    /// ingest ([`crate::always_resident::ingest_peer_page_landing`], origin
+    /// [`crate::peer_share_store::PeerPageOrigin::Sibling`]) — provisional
+    /// overlay rows, bodies sibling first, the nest for the rest. Nothing a
+    /// sibling served enters the sequenced log; the nest's return confirms or
+    /// supersedes it (retire-on-arrival).
+    ///
+    /// Each sibling's first pull starts at the greater of its stored cursor
+    /// and this engine's anchor — rows at or below the anchor are in this
+    /// replica's sequenced log already. A sibling whose page fails is dropped
+    /// and the next one asked; a page that claims `more` without advancing the
+    /// cursor stops that sibling, as the share pump stops. An engine with no
+    /// registry, or no folder binding to name the folder by, pulls nothing.
+    ///
+    /// **Gated on the place's `accepts` flag**, as [`Self::pull_remote_changes`]
+    /// is: a source-only seat asks no sibling, so the hold covers this rail
+    /// too and no cursor moves (a later flip catches the seat up).
+    pub async fn pull_sibling_changes(&self) -> Result<SiblingPullReport> {
+        use crate::peer_share_store::PeerPageOrigin;
+        let mut report = SiblingPullReport::default();
+        if !self.accepts_remote_changes() {
+            tracing::debug!(
+                target: "fauna_sync_engine::place_accepts",
+                "place does not accept remote changes; holding the anchor and skipping the sibling pull"
+            );
+            return Ok(report);
+        }
+        let (Some(source), Some(edge)) = (self.sibling_chunks.as_deref(), &self.binding_edge)
+        else {
+            return Ok(report);
+        };
+        let folder = edge.folder_ref.to_wire();
+        let anchor = self.db.get_anchor()?;
+        let fetcher = self.sibling_blob_fetcher();
+        for sibling in source.siblings() {
+            let origin = PeerPageOrigin::Sibling {
+                device_hex: hex::encode(sibling),
+            };
+            let mut since = self.advance_share_pull_cursor(&origin.cursor_key(), anchor)?;
+            loop {
+                let page = match source.pull_folder_changes(&sibling, &folder, since).await {
+                    Ok(page) => page,
+                    Err(e) => {
+                        tracing::debug!(
+                            node = %fauna_core::hex32::encode(&sibling),
+                            "sibling row pull failed; dropped until the next pass: {e:#}"
+                        );
+                        source.drop_sibling(&sibling);
+                        report.dropped += 1;
+                        break;
+                    }
+                };
+                let more = page.more;
+                report.rows += page.rows.len();
+                let (ingest, cursor) = crate::always_resident::ingest_peer_page_landing(
+                    self, &origin, page.rows, &fetcher, None,
+                )
+                .await?;
+                report.overlaid += ingest.overlaid;
+                report.materialized += ingest.materialized;
+                report.refused += ingest.refused;
+                if !more || cursor <= since {
+                    break;
+                }
+                since = cursor;
+            }
+            report.siblings += 1;
+        }
+        Ok(report)
     }
 
     /// Download one file's plaintext bytes by manifest hash.
@@ -13239,6 +13674,21 @@ impl SyncEngine {
         // reassembles into a same-directory temp file promoted by rename.
         let mut streaming_temp: Option<tempfile::NamedTempFile> = None;
         let (file_data, actual_hash) = if use_streaming {
+            // PERMANENT, as on the in-memory arm below: decided from the
+            // verified chunks themselves, never the temp file's read-back, so
+            // a local write fault stays transient. `reassemble_streaming`'s
+            // own check remains the guard on what reaches disk.
+            let assembled = fauna_core::chunker_stream::content_hash_of_chunks(&chunk_data);
+            if assembled != manifest.file_hash {
+                return Err(fauna_core::apply_failure::permanent(
+                    fauna_core::apply_failure::PermanentApplyFailure::CONTENT_UNADDRESSED,
+                    format!(
+                        "file hash mismatch: expected {}, got {}",
+                        hex::encode(manifest.file_hash.digest()),
+                        hex::encode(assembled.digest())
+                    ),
+                ));
+            }
             // Write each chunk to a temp dir then reassemble in O(MAX_CHUNK) memory.
             let temp_dir =
                 tempfile::tempdir().context("creating temp dir for streaming reassembly")?;

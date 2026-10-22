@@ -1,0 +1,35 @@
+---
+interface Props { size?: number; delay?: string; }
+const { size = 110, delay = '0s' } = Astro.props;
+---
+{/* The greens are the meadow-hill palette from global.css, so the frog reads
+    as part of the same landscape the front page paints. */}
+<svg viewBox="0 0 120 140" width={size} height={Math.round((size * 140) / 120)}
+  class="critter" style={`--wave-delay:${delay}`} aria-hidden="true">
+  <ellipse cx="60" cy="134" rx="30" ry="5" class="critter-shadow" />
+  <!-- waving webbed hand (behind body) -->
+  <g class="wave" style="transform-origin: 84px 100px;">
+    <ellipse cx="90" cy="90" rx="5.5" ry="14" transform="rotate(-30 90 90)" fill="#5d9152" />
+    <circle cx="95" cy="78" r="5" fill="#7fb069" />
+  </g>
+  <!-- eye bumps (behind the body blob) -->
+  <circle cx="44" cy="62" r="10" fill="#7fb069" />
+  <circle cx="76" cy="62" r="10" fill="#7fb069" />
+  <!-- body -->
+  <ellipse cx="60" cy="97" rx="29" ry="30" fill="#7fb069" />
+  <ellipse cx="60" cy="110" rx="16" ry="13" fill="#dcead9" />
+  <ellipse cx="36" cy="104" rx="6" ry="13" transform="rotate(15 36 104)" fill="#5d9152" />
+  <!-- haunches + feet -->
+  <ellipse cx="42" cy="122" rx="13" ry="9" fill="#5d9152" />
+  <ellipse cx="78" cy="122" rx="13" ry="9" fill="#5d9152" />
+  <ellipse cx="38" cy="131" rx="9" ry="4" fill="#7fb069" />
+  <ellipse cx="82" cy="131" rx="9" ry="4" fill="#7fb069" />
+  <!-- face -->
+  <circle cx="44" cy="60" r="6.5" fill="#ffffff" />
+  <circle cx="76" cy="60" r="6.5" fill="#ffffff" />
+  <circle cx="44" cy="61" r="3" fill="#2b2a24" />
+  <circle cx="76" cy="61" r="3" fill="#2b2a24" />
+  <circle cx="56" cy="74" r="1.3" fill="#2b2a24" />
+  <circle cx="64" cy="74" r="1.3" fill="#2b2a24" />
+  <path d="M40 82 Q60 94 80 82" stroke="#2b2a24" stroke-width="2.5" fill="none" stroke-linecap="round" />
+</svg>

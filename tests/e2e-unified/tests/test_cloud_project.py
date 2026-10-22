@@ -1,12 +1,16 @@
 """tier_1 unit tests for `scripts/_cloud_project.py` — which cloud project a box
 lives in, and where its token comes from.
 
-The provider scopes a token to a whole project, so the organisation's boxes are
-split into a uat project and a production project
-(`deployment-threat-model.md` § Concern 2, path 5). What is pinned here is
-that a uat box can never resolve the production token: the map, the resolution
-order (the env first, then the project's own file, then the legacy file for
-production only) and the refusal of a token file other users can read.
+The provider scopes a token to a whole project, so the organisation's boxes and
+zones are cut into four projects by who holds each token — zone, uat,
+acceptance, production (`deployment-threat-model.md` § Concern 2, path 5) —
+and a host resolves one project per purpose: its *cloud* project (the server
+and firewall) and its *dns* project (the zone its records live in). What is
+pinned here is that no token reaches past its project: a uat box never resolves
+the acceptance or production token, a DNS lookup never resolves a token that
+reaches a server, the resolution order (the env first, then the project's own
+file, then the legacy file for production only) and the refusal of a token
+file other users can read.
 
 Throwaway strings under a throwaway home; no token is ever read or printed.
 """
@@ -56,18 +60,32 @@ def _write(home, rel: str, text: str, mode: int = 0o600) -> None:
 @pytest.mark.parametrize("host", [
     "dev.fauna.build",
     "test.fauna.build",
-    "fauna.build",
     "e2e-1a2b.fauna.build",
     "https://Dev.FAUNA.build:443/api/v1/health",
-    "fauna.build.",
+    "dev.fauna.build.",
 ])
-def test_the_uat_zone_and_everything_under_it_is_the_uat_project(host):
+def test_the_dev_test_and_throwaway_boxes_are_the_uat_project(host):
     assert cp.project_for(host) == "uat"
+    assert cp.project_for(host, purpose="cloud") == "uat"
+
+
+@pytest.mark.parametrize("host", ["fauna.build", "https://FAUNA.build/", "fauna.build."])
+def test_the_acceptance_box_at_the_apex_is_the_acceptance_project(host):
+    assert cp.project_for(host, purpose="cloud") == "acceptance"
+
+
+@pytest.mark.parametrize("host", [
+    "fauna.build", "dev.fauna.build", "test.fauna.build", "e2e-1a2b.fauna.build",
+    "mta-sts.fauna.build",
+])
+def test_every_name_in_the_org_zone_resolves_dns_to_the_zone_project(host):
+    assert cp.project_for(host, purpose="dns") == "zone"
 
 
 @pytest.mark.parametrize("host", ["fauna.social", "www.fauna.social", "https://fauna.social/"])
-def test_the_apex_and_its_vhosts_are_the_production_project(host):
+def test_the_apex_and_its_vhosts_are_the_production_project_for_both_purposes(host):
     assert cp.project_for(host) == "production"
+    assert cp.project_for(host, purpose="dns") == "production"
 
 
 def test_the_legacy_dev_box_is_in_todays_project_which_becomes_production():
@@ -75,18 +93,25 @@ def test_the_legacy_dev_box_is_in_todays_project_which_becomes_production():
 
 
 @pytest.mark.parametrize("host", ["nest.example.org", "notfauna.build.example", "xfauna.social"])
-def test_a_host_outside_the_map_has_no_project(host):
-    assert cp.project_for(host) is None
+@pytest.mark.parametrize("purpose", ["cloud", "dns"])
+def test_a_host_outside_the_map_has_no_project(host, purpose):
+    assert cp.project_for(host, purpose=purpose) is None
 
 
 @pytest.mark.parametrize("host", [None, "", "  "])
-def test_no_host_is_the_uac_project(host):
+def test_no_host_is_where_the_throwaway_boxes_live(host):
     assert cp.project_for(host) == "uat"
+    assert cp.project_for(host, purpose="dns") == "zone"
+
+
+def test_an_unknown_purpose_is_refused():
+    with pytest.raises(ValueError):
+        cp.project_for("dev.fauna.build", purpose="firewall")
 
 
 def test_token_files_are_one_per_project():
-    assert cp.token_file("uat") == "~/.config/fauna/cloud/uat.token"
-    assert cp.token_file("production") == "~/.config/fauna/cloud/production.token"
+    for project in ("zone", "uat", "acceptance", "production"):
+        assert cp.token_file(project) == f"~/.config/fauna/cloud/{project}.token"
     with pytest.raises(ValueError):
         cp.token_file("staging")
 
@@ -112,6 +137,26 @@ def test_each_box_reads_its_own_projects_file(home):
     assert cp.token_for("test.fauna.build") == "tok-uat"
     assert cp.token_for(None) == "tok-uat"
     assert cp.token_for("fauna.social") == "tok-prod"
+
+
+def test_each_purpose_reads_its_own_projects_file(home):
+    for project in ("zone", "uat", "acceptance", "production"):
+        _write(home, cp.token_file(project), f"tok-{project}\n")
+    assert cp.token_for("dev.fauna.build", purpose="cloud") == "tok-uat"
+    assert cp.token_for("dev.fauna.build", purpose="dns") == "tok-zone"
+    assert cp.token_for("fauna.build", purpose="cloud") == "tok-acceptance"
+    assert cp.token_for("fauna.build", purpose="dns") == "tok-zone"
+    assert cp.token_for(None, purpose="dns") == "tok-zone"
+    assert cp.token_for("fauna.social", purpose="dns") == "tok-production"
+
+
+def test_no_purpose_falls_back_to_another_projects_token(home):
+    _write(home, cp.token_file("uat"), "tok-uat\n")
+    _write(home, cp.token_file("production"), "tok-prod\n")
+    assert cp.token_for("fauna.build", purpose="cloud") == ""
+    assert cp.token_for("dev.fauna.build", purpose="dns") == ""
+    _write(home, cp.token_file("zone"), "tok-zone\n")
+    assert cp.token_for("fauna.build", purpose="cloud") == ""
 
 
 def test_a_uac_box_never_falls_back_to_a_production_token(home):
@@ -148,5 +193,7 @@ def test_a_token_file_others_can_read_is_refused(home):
 
 def test_where_to_put_names_the_projects_file():
     assert "~/.config/fauna/cloud/uat.token" in cp.where_to_put("dev.fauna.build")
+    assert "~/.config/fauna/cloud/zone.token" in cp.where_to_put("dev.fauna.build", purpose="dns")
+    assert "~/.config/fauna/cloud/acceptance.token" in cp.where_to_put("fauna.build")
     assert "~/.hetzner-token" in cp.where_to_put("fauna.social")
     assert "not one of the organisation's boxes" in cp.where_to_put("nest.example.org")

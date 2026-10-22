@@ -46,7 +46,12 @@ import pytest
 
 from common.nest import start_nest_in_place, stop_nest
 from conftest import get_available_apps
-from helpers.waiting import share_ingest_reading, wait_until
+from helpers.waiting import (
+    await_devices_refresh_after,
+    devices_refresh_baseline,
+    share_ingest_reading,
+    wait_until,
+)
 from helpers.folder_content import (
     agent_diagnosis as _agent_diagnosis,
 )
@@ -149,6 +154,12 @@ _PEER_BARRIER_S = 240.0
 # Peer-side arrival while the nest is down: pump tick + one dial + a paged
 # pull + spool + ingest of a small file.
 _PEER_TRANSFER_S = 240.0
+# One Folders refresh committing (each read in it carries its own deadline);
+# the outer post-restart poll re-visits until one reaches the restarted nest.
+_FOLDERS_REFRESH_S = 60.0
+# Leaving Folders for the feed and coming back is the nav edge that refreshes
+# the page on every app (linux spawns it off the page's map hook).
+_FEED_NAV = {"nav": {"stack": [{"view": "feed"}]}}
 
 
 def _read_or_none(path):
@@ -170,6 +181,19 @@ def _transfer_surface_readout(driver) -> str:
         parts.append(f"serve-status text={driver.get_text('share-serve-status')!r}")
     except Exception as exc:
         parts.append(f"serve-status text unreadable ({type(exc).__name__})")
+    # Where the driver can dump its element tree (the apple bridge), say WHY a row
+    # reads absent — hidden slot vs. never registered — in the same failure.
+    try:
+        dump = driver.tree()
+        keep, on = [], False
+        for line in dump.splitlines():
+            if not line.startswith(" "):
+                on = line.startswith("share-")
+            if on:
+                keep.append(line)
+        parts.append("tree: " + " | ".join(keep or ["<no share-* entries>"]))
+    except Exception:  # no tree on this driver; the counts above stand
+        pass
     return "; ".join(parts)
 
 
@@ -449,7 +473,7 @@ def _share_and_reach_peer_barrier(
 # a real MLS share + one nest-mediated hydration + a nest stop + a peer pull.
 # A ceiling, not an expectation.
 @pytest.mark.timeout(1800)
-@pytest.mark.feature("offline-sharing")
+@pytest.mark.feature("share-a-folder")
 def test_member_pulls_offline_authored_file_from_owner_peer(
     request, folder_share_owner_app, folder_share_recipient_app, tmp_path
 ):
@@ -497,8 +521,30 @@ def test_member_pulls_offline_authored_file_from_owner_peer(
         # same data dir, no factory reset.
         start_nest_in_place(nest)
 
-    assert not member_app.has_error(), (
-        f"[member] the peer pull surfaced an error: {member_app.error_text()!r}"
+    # The Folders visit above ran with the nest DOWN, so its own refresh
+    # honestly committed "Failed to load devices: …connection…lost" — a page
+    # error that is the nest's absence, not the peer pull's, and that clears
+    # only on the next refresh to reach the restarted nest (whose reconnect
+    # backs off up to a minute). So the no-error verdict is read off a refresh
+    # that BEGAN after the restart and committed (convention 14), revisiting
+    # until one reaches the nest; an error the pull left behind still stands.
+    def _member_page_clean() -> bool:
+        baseline = devices_refresh_baseline(md)
+        md.set_state(_FEED_NAV)
+        mb.navigate_folders()
+        await_devices_refresh_after(
+            md, baseline, budget_s=_FOLDERS_REFRESH_S, what="the post-restart Folders revisit"
+        )
+        return not member_app.has_error()
+
+    wait_until(
+        _member_page_clean,
+        _PEER_BARRIER_S,
+        interval=2.0,
+        diagnose=lambda: (
+            "[member] the peer pull surfaced an error that outlived the nest's "
+            f"restart: {member_app.error_text()!r}"
+        ),
     )
 
 
@@ -521,7 +567,7 @@ _SERVE_HOLD_APPS = ("tui", "linux", "windows")
 @pytest.mark.real_conversations
 # Documented-long (point 9): the step 1–3 ground above plus three peer pulls.
 @pytest.mark.timeout(1800)
-@pytest.mark.feature("offline-sharing")
+@pytest.mark.feature("share-a-folder")
 def test_an_interrupted_peer_transfer_resumes_without_resending_what_arrived(
     request, folder_share_owner_app, folder_share_recipient_app, tmp_path
 ):
@@ -697,7 +743,7 @@ def _files_holding(root, needle: bytes) -> list[str]:
 @pytest.mark.real_conversations
 # Documented-long (point 9): the step 1–3 ground above, a third app, two probes.
 @pytest.mark.timeout(1800)
-@pytest.mark.feature("offline-sharing")
+@pytest.mark.feature("share-a-folder")
 def test_a_person_the_folder_was_never_shared_with_gets_nothing_readable(
     request,
     folder_share_owner_app,

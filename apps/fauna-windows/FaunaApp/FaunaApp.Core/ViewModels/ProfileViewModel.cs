@@ -108,6 +108,14 @@ public partial class ProfileViewModel : ViewModelBase
     [ObservableProperty] private string _providerFormSecret = "";
     [ObservableProperty] private string _providerFormTier = "";
     [ObservableProperty] private string _providerWebhookUrl = "";
+    /// <summary>The §4 form's return-URL display (<c>subscription-provider-form-return-url</c>):
+    /// the shared <c>fauna_payments::return_url</c> over the creator's web-site origin,
+    /// or <c>""</c> while they have no public web address (the control then shows
+    /// <c>subscriptions/return_url_unavailable</c> and the copy button is inert).</summary>
+    [ObservableProperty] private string _providerReturnUrl = "";
+    /// <summary>The creator's web-site origin (active custom domain &gt; enabled subdomain),
+    /// resolved by <see cref="HydrateSiteOriginAsync"/>; <c>null</c> until then.</summary>
+    private string? _siteOrigin;
 
     // §5 Manual claim codes (monetization.md § Pillar 3)
     public ObservableCollection<PaymentClaimRow> Claims { get; } = new();
@@ -456,7 +464,41 @@ public partial class ProfileViewModel : ViewModelBase
     /// no round trip).</summary>
     public IReadOnlyList<string> KnownProviderKinds => FaunaFfiMethods.PaymentsKnownKinds();
 
-    partial void OnProviderFormKindChanged(string value) => UpdateWebhookUrlPreview();
+    partial void OnProviderFormKindChanged(string value)
+    {
+        UpdateWebhookUrlPreview();
+        UpdateReturnUrlPreview();
+    }
+
+    /// <summary>Recompute the §4 form's return-URL display from the current kind
+    /// selection — the post-checkout redirect the creator sets at their provider so
+    /// the buyer lands on the nest's paywall return door
+    /// (<c>fauna_payments::return_url</c>, FFI <c>PaymentsReturnUrl</c>). Built on the
+    /// creator's <b>web-site</b> origin, never <c>HomeUrl</c> (what the webhook display
+    /// uses): the door resolves the site owner from the request <c>Host</c>.</summary>
+    private void UpdateReturnUrlPreview() =>
+        ProviderReturnUrl = string.IsNullOrEmpty(_siteOrigin) || ProviderFormKind.Length == 0
+            ? ""
+            : FaunaFfiMethods.PaymentsReturnUrl(_siteOrigin, ProviderFormKind);
+
+    /// <summary>Resolve the creator's web-site origin through the shared
+    /// <c>site_link_view</c> (the one answer <c>web-settings</c> renders off) and
+    /// repaint the return-URL display. A failed resolve reads as "no public web
+    /// address" — dead, not silently live.</summary>
+    public async Task HydrateSiteOriginAsync(string? handle)
+    {
+        try
+        {
+            var web = await _nest.BuildWebClientAsync();
+            var resolved = await WebOrigin.ResolveAsync(web, handle);
+            _siteOrigin = resolved.SiteLink.@origin;
+        }
+        catch (Exception)
+        {
+            _siteOrigin = null;
+        }
+        UpdateReturnUrlPreview();
+    }
 
     /// <summary>Recompute the §4 form's live webhook-URL preview from the
     /// current kind selection — the exact URL to register at the provider's
@@ -474,6 +516,7 @@ public partial class ProfileViewModel : ViewModelBase
         ProviderFormKind = KnownProviderKinds.FirstOrDefault() ?? "";
         ProviderFormTier = TierNames.FirstOrDefault() ?? "";
         UpdateWebhookUrlPreview();
+        UpdateReturnUrlPreview();
         ErrorMessage = null;
         ShowProviderForm = true;
     }

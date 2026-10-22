@@ -646,8 +646,11 @@ func Run(ctx context.Context, deps Deps) error {
 		// tls.NewListener so go-imap still sees a *tls.Conn; 143 (STARTTLS) wraps
 		// the raw listener directly. 993/143 are published directly (no PROXY-v2
 		// front), so the per-IP RemoteAddr() is already the real client IP.
-		tlsIMAPS := tls.NewListener(capListener(perIPMDA(rawIMAPS, perIPLimiter, "imap-993"), "imap-993"), tlsConfig)
-		cappedIMAP143 := capListener(perIPMDA(rawIMAPStartTLS, perIPLimiter, "imap-143"), "imap-143")
+		// The pre-auth deadline sits outermost below TLS (smtp-server.md §
+		// Connection-time limits → Pre-auth connection deadline): the 993
+		// handshake and the 143 STARTTLS both run under the bound.
+		tlsIMAPS := tls.NewListener(preAuthMDA(capListener(perIPMDA(rawIMAPS, perIPLimiter, "imap-993"), "imap-993"), logger, "imap-993"), tlsConfig)
+		cappedIMAP143 := preAuthMDA(capListener(perIPMDA(rawIMAPStartTLS, perIPLimiter, "imap-143"), "imap-143"), logger, "imap-143")
 
 		imapBackend := imap.NewBackend(
 			deps.Client,
@@ -807,6 +810,19 @@ func capListener(ln net.Listener, name string) net.Listener {
 		func() { metrics.MDAConnectionsTotal.WithLabelValues(name, "accepted").Inc() },
 		func() { metrics.MDAConnectionsTotal.WithLabelValues(name, "capped").Inc() },
 	)
+}
+
+// preAuthMDA wraps a capped IMAP listener in the pre-auth connection deadline
+// (connlimit.NewPreAuthListener), counting a connection closed on it as
+// MDAConnectionsTotal{listener=name,"preauth_deadline"}. The session's
+// auth-success point lifts it (imap.Session.authenticate). Wrap it outermost
+// below tls.NewListener, above capListener, so a Close still releases the slot.
+func preAuthMDA(ln net.Listener, logger *slog.Logger, name string) net.Listener {
+	return connlimit.NewPreAuthListener(ln, func() {
+		metrics.MDAConnectionsTotal.WithLabelValues(name, "preauth_deadline").Inc()
+		// Debug, not info: a stranger's scan must not flood the log.
+		logger.Debug("mda: pre-auth connection deadline reached", "listener", name)
+	})
 }
 
 // perIPMDA wraps a listener in the shared per-IP concurrent-connection limiter

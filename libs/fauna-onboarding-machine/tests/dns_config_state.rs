@@ -144,7 +144,7 @@ fn machine_with_provider_urls(server: &MockServer) -> Arc<OnboardingMachine> {
         token: Some("tok".into()),
         expires_at: Some(0),
         domain: Some("example.com".into()),
-        deployment_seed: None,
+        ..Default::default()
     }));
     let observer: Arc<dyn OnboardingObserver> = CountingObserver::new();
     let m = OnboardingMachine::with_nest_api_and_provider_base_urls(observer, fake, Some(urls));

@@ -124,12 +124,25 @@ struct MockNest {
     /// member's own (`conversation-rooms.md` § The home nest → *Attachment
     /// bytes*).
     blob_homes: Mutex<Vec<Option<String>>>,
+    /// The `home_nest_actor_id` of every `blob_put` seam call, in order — the
+    /// identity a native plane graduates the upload's pin against
+    /// (`transport-trust.md` § The post arm).
+    blob_put_identities: Mutex<Vec<Option<String>>>,
     /// `channel_hex → {seq → legal_reference}` — models the nest's per-record
     /// legal-takedown flag (`segment_records.legal_takedown_ref`): a `channel_fetch`
     /// for a flagged seq serves the sealed envelope **withheld** (empty) and carries
     /// the reference, exactly as `read_after_seq` does (`moderation.md`
     /// § Implementation status today — conversation legal-takedown).
     takedowns: Mutex<HashMap<String, HashMap<i64, String>>>,
+    /// `channel_hex → {seq → reason token}` — models the second withhold flag
+    /// (`segment_records.admin_block_report_id`): a flagged seq serves the
+    /// envelope withheld and carries the report's reason (`moderation.md`
+    /// § Admin block of a reported item).
+    blocks: Mutex<HashMap<String, HashMap<i64, String>>>,
+    /// Whether the fetching caller is a blocked record's attested author — the
+    /// nest then serves that record's envelope WITH the reason beside it
+    /// (`moderation.md` § Admin block of a reported item, decision 4).
+    blocked_author_view: Mutex<bool>,
     /// `channel_hex → {seq → verdicts}` — what a community room's home nest
     /// serves a live floor member beside a record: the category verdicts of the
     /// labelers the room names (`conversation-rooms.md` § The three classes →
@@ -269,6 +282,18 @@ impl MockNest {
             .entry(channel_hex.to_string())
             .or_default()
             .insert(seq, reference.to_string());
+    }
+
+    /// Block a channel record (1-based `seq`) as this nest's admin after a
+    /// report: a subsequent `channel_fetch` withholds its envelope and carries
+    /// the report's `reason`, modeling `fauna.moderation.admin_block`.
+    fn admin_block(&self, channel_hex: &str, seq: i64, reason: &str) {
+        self.blocks
+            .lock()
+            .unwrap()
+            .entry(channel_hex.to_string())
+            .or_default()
+            .insert(seq, reason.to_string());
     }
 
     /// Serve `labels` beside the record at `seq` (1-based) — the verdicts a
@@ -423,6 +448,8 @@ impl ConversationsRpc for MockNest {
         let chans = self.channels.lock().unwrap();
         let takedowns = self.takedowns.lock().unwrap();
         let taken = takedowns.get(&channel_id_hex);
+        let blocks = self.blocks.lock().unwrap();
+        let blocked = blocks.get(&channel_id_hex);
         let served_labels = self.served_labels.lock().unwrap();
         let labelled = served_labels.get(&channel_id_hex);
         let Some(log) = chans.get(&channel_id_hex) else {
@@ -442,6 +469,23 @@ impl ConversationsRpc for MockNest {
             if seq > after {
                 // A taken-down record: withhold the sealed envelope (empty) and carry
                 // the legal reference, exactly as the nest's `read_after_seq` gate does.
+                if let Some(reason) = blocked.and_then(|b| b.get(&seq)) {
+                    let envelope = if *self.blocked_author_view.lock().unwrap() {
+                        env.clone()
+                    } else {
+                        Vec::new()
+                    };
+                    out.push(FetchedRecord {
+                        seq,
+                        envelope,
+                        admin_block_reason: Some(reason.clone()),
+                        ..Default::default()
+                    });
+                    if effective_limit > 0 && out.len() as i64 >= effective_limit {
+                        break;
+                    }
+                    continue;
+                }
                 match taken.and_then(|t| t.get(&seq)) {
                     Some(reference) => out.push(FetchedRecord {
                         seq,
@@ -626,6 +670,7 @@ impl ConversationsRpc for MockNest {
         &self,
         _channel_id_hex: String,
         home_nest_url: Option<String>,
+        home_nest_actor_id: Option<String>,
         sealed_cid_hex: String,
         bytes: Vec<u8>,
     ) -> Result<(), ConvRpcError> {
@@ -637,6 +682,10 @@ impl ConversationsRpc for MockNest {
             "blob_put sealed_cid must be the BLAKE3 of the bytes"
         );
         self.blob_homes.lock().unwrap().push(home_nest_url);
+        self.blob_put_identities
+            .lock()
+            .unwrap()
+            .push(home_nest_actor_id);
         self.blobs.lock().unwrap().insert(sealed_cid_hex, bytes);
         Ok(())
     }
@@ -645,6 +694,7 @@ impl ConversationsRpc for MockNest {
         &self,
         _channel_id_hex: String,
         home_nest_url: Option<String>,
+        _home_nest_actor_id: Option<String>,
         sealed_cid_hex: String,
     ) -> Result<Option<Vec<u8>>, ConvRpcError> {
         self.blob_homes.lock().unwrap().push(home_nest_url);
@@ -751,6 +801,7 @@ impl ConversationsRpc for OutdatedNest {
         &self,
         _c: String,
         _h: Option<String>,
+        _i: Option<String>,
         _s: String,
         _b: Vec<u8>,
     ) -> Result<(), ConvRpcError> {
@@ -760,6 +811,7 @@ impl ConversationsRpc for OutdatedNest {
         &self,
         _c: String,
         _h: Option<String>,
+        _i: Option<String>,
         _s: String,
     ) -> Result<Option<Vec<u8>>, ConvRpcError> {
         Err(outdated_seam_error())
@@ -928,6 +980,7 @@ async fn an_engine_failure_reaches_the_send_slot_as_the_generic_sentence() {
             attachments: vec![],
             badges: MessageBadges::default(),
             legal_takedown_ref: None,
+            admin_block_reason: None,
             plane_ref: None,
         })
         .expect("setup ingest");
@@ -1572,6 +1625,7 @@ async fn inbound_driver_routes_decrypted_message_to_bound_thread() {
             attachments: vec![],
             badges: MessageBadges::default(),
             legal_takedown_ref: None,
+            admin_block_reason: None,
             plane_ref: None,
         })
         .expect("setup ingest");
@@ -1700,6 +1754,7 @@ async fn an_unknown_top_level_body_skips_only_its_record_in_the_inbound_walk() {
             attachments: vec![],
             badges: MessageBadges::default(),
             legal_takedown_ref: None,
+            admin_block_reason: None,
             plane_ref: None,
         })
         .expect("setup ingest");
@@ -1729,6 +1784,191 @@ async fn an_unknown_top_level_body_skips_only_its_record_in_the_inbound_walk() {
     assert!(
         !bodies.iter().any(|b| b.contains("Hologram")),
         "the unknown body never becomes a bubble; got {bodies:?}"
+    );
+}
+
+// ── Admin block: a withheld record surfaces the shared notice ───────────
+
+/// The conversation half of `moderation.md` § Admin block of a reported item:
+/// the relay serves a blocked record with its envelope withheld and the
+/// report's reason on `ChannelFetchEntry.admin_block`. The drain must ingest a
+/// notice carrying the reason in the record's slot — never skip the empty
+/// envelope as undecodable, which would make a blocked message vanish
+/// without the notice the transparency triple owes.
+#[tokio::test]
+async fn inbound_driver_surfaces_the_admin_block_notice_for_a_withheld_record() {
+    let alice = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let bob = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let bob_kps = bob.generate_key_packages(1).unwrap();
+    let (channel_id, welcome) = alice.create_group(&bob_kps).unwrap();
+    let bob_channel = bob.join_from_welcome(welcome).unwrap();
+    assert_eq!(channel_id, bob_channel);
+
+    let nest = Arc::new(MockNest::default());
+    let alice_actor = alice.identity_actor_id();
+    let alice_backend = FaunaMlsBackend::new(alice.clone(), nest.clone(), "alice", alice_actor);
+    alice_backend.bind_channel(ThreadId("a-1".into()), channel_id);
+    alice_backend
+        .send(
+            &fauna_mls_thread(ThreadId("a-1".into()), vec![]),
+            &ComposeState {
+                body_draft: "reported words".into(),
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .expect("alice send ok");
+    nest.admin_block(&channel_id.to_string(), 1, "harassment");
+
+    let bob_manager = ConversationsManager::new();
+    let bob_actor = bob.identity_actor_id();
+    let bob_backend = Arc::new(FaunaMlsBackend::new(
+        bob.clone(),
+        nest.clone(),
+        "bob",
+        bob_actor,
+    ));
+    bob_manager.register_backend(bob_backend.clone());
+    bob_manager
+        .ingest_inbound(RailInboundMessage {
+            rail: Rail::FaunaMls,
+            sender: fauna_addr("alice", alice_actor),
+            recipients: vec![fauna_addr("bob", bob_actor)],
+            subject: None,
+            body: "<<setup>>".into(),
+            body_format: BodyFormat::PlainText,
+            timestamp_ms: 1,
+            message_id: MessageId("setup".into()),
+            in_reply_to: None,
+            attachments: vec![],
+            badges: MessageBadges::default(),
+            legal_takedown_ref: None,
+            admin_block_reason: None,
+            plane_ref: None,
+        })
+        .expect("setup ingest");
+    let bob_thread_id = bob_manager.snapshot().threads[0].thread_id.clone();
+    bob_backend.bind_channel(bob_thread_id.clone(), channel_id);
+
+    let mut after_seq = 0i64;
+    let ingested = poll_inbound_conv(&bob_backend, &bob_manager, &channel_id, &mut after_seq, 0)
+        .await
+        .expect("poll ok")
+        .ingested;
+    assert_eq!(
+        ingested, 1,
+        "the withheld record ingests exactly one notice"
+    );
+
+    let detail = bob_manager.thread_detail(bob_thread_id).expect("thread");
+    let notice = detail
+        .messages
+        .iter()
+        .find(|m| m.message_id.0 == format!("conv:{}:1", channel_id))
+        .expect("the blocked record is present in-thread at its seq slot");
+    assert_eq!(notice.admin_block_reason.as_deref(), Some("harassment"));
+    assert_eq!(notice.legal_takedown_ref, None, "a block is not a takedown");
+    assert!(notice.body.is_empty());
+    assert!(
+        notice.admin_block_in_place(),
+        "the notice stands in the bubble"
+    );
+    assert!(!notice.is_own);
+    assert!(
+        detail
+            .messages
+            .iter()
+            .all(|m| !m.body.contains("reported words")),
+        "the withheld plaintext must never surface"
+    );
+}
+
+/// Decision 4's author arm (`moderation.md` § Admin block of a reported item):
+/// the nest serves a blocked record's attested author the sealed envelope with
+/// the reason beside it. The drain decrypts it as any message and keeps the
+/// reason on it, so the app paints the notice beside the bubble — never the
+/// body-less notice a withheld envelope gets.
+#[tokio::test]
+async fn inbound_driver_keeps_the_authors_blocked_message_with_the_reason_beside_it() {
+    let alice = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let bob = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let bob_kps = bob.generate_key_packages(1).unwrap();
+    let (channel_id, welcome) = alice.create_group(&bob_kps).unwrap();
+    let bob_channel = bob.join_from_welcome(welcome).unwrap();
+    assert_eq!(channel_id, bob_channel);
+
+    let nest = Arc::new(MockNest::default());
+    let alice_actor = alice.identity_actor_id();
+    let alice_backend = FaunaMlsBackend::new(alice.clone(), nest.clone(), "alice", alice_actor);
+    alice_backend.bind_channel(ThreadId("a-1".into()), channel_id);
+    alice_backend
+        .send(
+            &fauna_mls_thread(ThreadId("a-1".into()), vec![]),
+            &ComposeState {
+                body_draft: "reported words".into(),
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .expect("alice send ok");
+    nest.admin_block(&channel_id.to_string(), 1, "harassment");
+    *nest.blocked_author_view.lock().unwrap() = true;
+
+    let bob_manager = ConversationsManager::new();
+    let bob_actor = bob.identity_actor_id();
+    let bob_backend = Arc::new(FaunaMlsBackend::new(
+        bob.clone(),
+        nest.clone(),
+        "bob",
+        bob_actor,
+    ));
+    bob_manager.register_backend(bob_backend.clone());
+    bob_manager
+        .ingest_inbound(RailInboundMessage {
+            rail: Rail::FaunaMls,
+            sender: fauna_addr("alice", alice_actor),
+            recipients: vec![fauna_addr("bob", bob_actor)],
+            subject: None,
+            body: "<<setup>>".into(),
+            body_format: BodyFormat::PlainText,
+            timestamp_ms: 1,
+            message_id: MessageId("setup".into()),
+            in_reply_to: None,
+            attachments: vec![],
+            badges: MessageBadges::default(),
+            legal_takedown_ref: None,
+            admin_block_reason: None,
+            plane_ref: None,
+        })
+        .expect("setup ingest");
+    let bob_thread_id = bob_manager.snapshot().threads[0].thread_id.clone();
+    bob_backend.bind_channel(bob_thread_id.clone(), channel_id);
+
+    let mut after_seq = 0i64;
+    let ingested = poll_inbound_conv(&bob_backend, &bob_manager, &channel_id, &mut after_seq, 0)
+        .await
+        .expect("poll ok")
+        .ingested;
+    assert_eq!(ingested, 1, "the author's blocked record ingests once");
+
+    let detail = bob_manager.thread_detail(bob_thread_id).expect("thread");
+    let message = detail
+        .messages
+        .iter()
+        .find(|m| m.message_id.0 == format!("conv:{}:1", channel_id))
+        .expect("the blocked record is present in-thread at its seq slot");
+    assert_eq!(message.body, "reported words", "the body is kept");
+    assert_eq!(
+        message.admin_block_reason.as_deref(),
+        Some("harassment"),
+        "the reason rides beside the body"
+    );
+    assert_eq!(message.legal_takedown_ref, None);
+    assert!(
+        !message.admin_block_in_place(),
+        "the notice paints beside the kept body"
     );
 }
 
@@ -1799,6 +2039,7 @@ async fn inbound_driver_surfaces_a_legal_takedown_tombstone_for_a_withheld_recor
             attachments: vec![],
             badges: MessageBadges::default(),
             legal_takedown_ref: None,
+            admin_block_reason: None,
             plane_ref: None,
         })
         .expect("setup ingest");
@@ -1914,6 +2155,7 @@ async fn inbound_driver_retains_post_decrypt_spam_local_detection() {
             attachments: vec![],
             badges: MessageBadges::default(),
             legal_takedown_ref: None,
+            admin_block_reason: None,
             plane_ref: None,
         })
         .expect("setup ingest");
@@ -2024,6 +2266,7 @@ async fn a_welcomes_member_is_seated_by_a_handle_this_device_already_knows() {
         &welcome.channel_hex,
         &welcome.welcome_bytes,
         "",
+        None,
     )
     .await
     .expect("welcome ingest");
@@ -2089,6 +2332,7 @@ async fn a_welcomes_unknown_member_renders_as_an_elided_id_not_a_blank_row() {
         &welcome.channel_hex,
         &welcome.welcome_bytes,
         "",
+        None,
     )
     .await
     .expect("welcome ingest");
@@ -2156,6 +2400,7 @@ async fn welcome_then_inbound_end_to_end() {
         &welcome.channel_hex,
         &welcome.welcome_bytes,
         "",
+        None,
     )
     .await
     .expect("welcome ingest");
@@ -2181,6 +2426,7 @@ async fn welcome_then_inbound_end_to_end() {
         &welcome.channel_hex,
         &welcome.welcome_bytes,
         "",
+        None,
     )
     .await
     .expect("idempotent welcome");
@@ -2322,6 +2568,7 @@ async fn attachment_round_trips_outbound_to_inbound_faunamls() {
         &welcome.channel_hex,
         &welcome.welcome_bytes,
         "",
+        None,
     )
     .await
     .expect("welcome ingest");
@@ -2423,7 +2670,12 @@ async fn attachment_blob_put_and_get_route_to_the_channels_home_nest() {
     // `send_on_channel` picks `send_remote` — and this mock has no federation
     // relay, so the send itself is refused; the routing under test has already
     // happened by then.)
-    alice_backend.record_channel_home(channel, "https://home.example");
+    let home_identity = "c3".repeat(32);
+    alice_backend.record_channel_home_with_identity(
+        channel,
+        "https://home.example",
+        Some(&home_identity),
+    );
     let refused = alice_backend
         .send(&thread, &compose, std::slice::from_ref(&attachment))
         .await
@@ -2443,6 +2695,12 @@ async fn attachment_blob_put_and_get_route_to_the_channels_home_nest() {
         Some("https://home.example"),
         "a foreign-homed channel's upload is routed to the channel's HOME nest"
     );
+    assert_eq!(
+        nest.blob_put_identities.lock().unwrap().as_slice(),
+        &[None, Some(home_identity.clone())],
+        "the foreign upload carries the home's recorded identity, as the read does \
+         (`transport-trust.md` § The post arm); the same-nest one carries none"
+    );
 
     // And the receive side reads from the same home: Bob ingests the Welcome
     // with the home url and his attachment fetch carries it.
@@ -2461,6 +2719,7 @@ async fn attachment_blob_put_and_get_route_to_the_channels_home_nest() {
         &welcome.channel_hex,
         &welcome.welcome_bytes,
         "https://home.example",
+        None,
     )
     .await
     .expect("welcome ingest");
@@ -2546,6 +2805,7 @@ async fn attachment_c2pa_detected_on_inbound_for_signed_image() {
         &welcome.channel_hex,
         &welcome.welcome_bytes,
         "",
+        None,
     )
     .await
     .expect("welcome ingest");
@@ -2942,7 +3202,7 @@ async fn add_participant_refuses_to_guess_when_the_roster_is_unreadable() {
 /// no-op as on the home nest: `roster_holds` passes the recorded home URL
 /// through the seam, which rides the **distinct relay kind**
 /// `channel.actors_remote` → `fauna.federation.channel.actors` to the home's
-/// authoritative union (`federation.md` § Cross-nest). **Inverted from the
+/// authoritative union (`federation-shared-folders.md` § Cross-nest). **Inverted from the
 /// slice-1 pin** that expected the refuse arm here — slice 2 upgraded the
 /// refuse to the relay, and an added-only test would have left two green
 /// tests asserting opposites. The skew sibling below keeps the refuse arm
@@ -3012,7 +3272,7 @@ async fn add_participant_on_a_foreign_homed_channel_heals_via_the_home_roster_re
 /// exactly what the real seam degrades to when the kind is unknown on either
 /// side of the relay — the reason the client leg is a **distinct kind**, not
 /// an additive field a stale nest would answer with a clean partial roster
-/// (`federation.md` § Cross-nest, the fetch-vs-actors dividing line).
+/// (`federation-shared-folders.md` § Cross-nest, the fetch-vs-actors dividing line).
 #[tokio::test]
 async fn add_participant_on_a_foreign_homed_channel_refuses_under_version_skew() {
     let alice = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
@@ -3781,6 +4041,7 @@ async fn inbound_driver_applies_namechanged_as_rename() {
             attachments: vec![],
             badges: MessageBadges::default(),
             legal_takedown_ref: None,
+            admin_block_reason: None,
             plane_ref: None,
         })
         .expect("setup ingest");
@@ -4004,6 +4265,7 @@ fn succession_receive_setup() -> SuccessionSetup {
             attachments: vec![],
             badges: MessageBadges::default(),
             legal_takedown_ref: None,
+            admin_block_reason: None,
             plane_ref: None,
         })
         .expect("setup ingest");
@@ -8323,6 +8585,7 @@ async fn session_poll_mail_ingests_inbox_and_sent_feeds() {
             mailbox: fauna_conversations::backend::MailFeed::Inbox,
             suppress_from_view: false,
             has_seen_flag: false,
+            warmup_hold: None,
         }
     }
 
@@ -8458,7 +8721,7 @@ async fn session_receive_loop_reacts_to_mail_push() {
             message_id: b"in-1".to_vec(),
             internal_date_ms: 1000,
             rfc5322: b"From: bob@example.com\r\nTo: alice@fauna.test\r\nSubject: ping\r\n\r\nping body\r\n".to_vec(),
-            mailbox: fauna_conversations::backend::MailFeed::Inbox, suppress_from_view: false, has_seen_flag: false,
+            mailbox: fauna_conversations::backend::MailFeed::Inbox, suppress_from_view: false, has_seen_flag: false, warmup_hold: None,
         },
     });
     session.register_mail_receive(inbox.clone(), Arc::new(EmptyMail));
@@ -8599,7 +8862,7 @@ async fn session_receive_loop_sweeps_every_rail_on_reconnect() {
             message_id: b"reconnect-1".to_vec(),
             internal_date_ms: 1000,
             rfc5322: b"From: bob@example.com\r\nTo: alice@fauna.test\r\nSubject: while-you-were-out\r\n\r\nbody\r\n".to_vec(),
-            mailbox: fauna_conversations::backend::MailFeed::Inbox, suppress_from_view: false, has_seen_flag: false,
+            mailbox: fauna_conversations::backend::MailFeed::Inbox, suppress_from_view: false, has_seen_flag: false, warmup_hold: None,
         },
     });
     session.register_mail_receive(inbox.clone(), Arc::new(EmptyMail));
@@ -8963,6 +9226,7 @@ async fn forged_cross_sender_delete_does_not_tombstone_victim_message() {
             attachments: vec![],
             badges: MessageBadges::default(),
             legal_takedown_ref: None,
+            admin_block_reason: None,
             plane_ref: None,
         })
         .expect("setup ingest");
@@ -9075,6 +9339,7 @@ async fn mls2_forged_welcome_rejected_at_ingest_materializes_no_thread() {
         &channel_id.to_string(),
         &welcome_bytes,
         "",
+        None,
     )
     .await;
 
@@ -9325,7 +9590,7 @@ async fn folder_and_scheduling_welcome_joins_persist_the_provider() {
 /// MLS-authenticated sender (the sharer — the owner, by the owner-only-Adds
 /// invariant the policy preserves) is stamped as the channel's durable folder
 /// owner, so `MlsEngine::process_commit` refuses non-owner roster changes on
-/// this member's seat from the moment of the join (`federation.md` § Cross-nest
+/// this member's seat from the moment of the join (`federation-shared-folders.md` § Cross-nest
 /// shared folders + channel append, re-ratified 2026-08-24).
 #[tokio::test]
 async fn join_folder_welcome_stamps_the_welcome_sender_as_folder_owner() {
@@ -9353,7 +9618,7 @@ async fn join_folder_welcome_stamps_the_welcome_sender_as_folder_owner() {
 }
 
 // ── the folder-owner marker follows the owner's verified succession
-//    (`federation.md` § Cross-nest shared folders + channel append) ──
+//    (`federation-shared-folders.md` § Cross-nest shared folders + channel append) ──
 
 /// A folder channel alice owns with bob as its member — bob's seat stamped as
 /// the folder-Welcome join stamps it — plus alice's successor and a genuine
@@ -9585,7 +9850,7 @@ fn forged_statement(
 }
 
 /// The refused-then-memoized fork, closed — the folder commit walk inherits
-/// the harvest wait (`federation.md` § Cross-nest shared folders + channel
+/// the harvest wait (`federation-shared-folders.md` § Cross-nest shared folders + channel
 /// append → *The marker follows the owner's verified succession*, the
 /// 2026-09-28 amendment). A member seat whose witness refuses the statement
 /// at first (no anchor for alice yet) and verifies it after the harvest seeds
@@ -9661,7 +9926,7 @@ async fn a_witness_refused_statement_holds_the_remove_old_until_the_harvest_sett
 }
 
 /// The session boundary no longer ends the hold — the at-rest folder park
-/// (`federation.md` § Cross-nest shared folders + channel append → *The folder
+/// (`federation-shared-folders.md` § Cross-nest shared folders + channel append → *The folder
 /// commit walk inherits the harvest wait*). Bob's seat parks the refused
 /// statement and holds the successor's remove-old, and its session ends before
 /// the sweep has spoken for alice. The relaunch walks the log from 0 again and
@@ -10327,7 +10592,7 @@ impl FolderCustodySink for MockFolderCustodySink {
 /// A cross-nest folder accept seeds the member's foreign-set record with the
 /// residency the Welcome relay carried — before any federated read
 /// (`file-sync.md` § Relay serving → *A member on another nest*, step (1);
-/// `federation.md` § … *The `residency` stamp*: absent means *not stated*,
+/// `federation-shared-folders.md` § … *The `residency` stamp*: absent means *not stated*,
 /// never *full*). The sink here serves no envelope, so no content-key read
 /// can stamp the record: whatever residency it holds came from the Welcome.
 #[tokio::test]
@@ -11588,6 +11853,7 @@ async fn poll_drains_the_whole_tail_against_a_nest_that_clamps_limit_zero_to_one
             attachments: vec![],
             badges: MessageBadges::default(),
             legal_takedown_ref: None,
+            admin_block_reason: None,
             plane_ref: None,
         })
         .expect("setup ingest");
@@ -12067,6 +12333,7 @@ async fn a_custody_payload_reaches_the_sink_and_never_a_bubble() {
             attachments: vec![],
             badges: MessageBadges::default(),
             legal_takedown_ref: None,
+            admin_block_reason: None,
             plane_ref: None,
         })
         .expect("setup ingest");
@@ -12237,6 +12504,7 @@ async fn a_share_endpoint_advertisement_binds_to_its_authenticated_sender_and_ne
             attachments: vec![],
             badges: MessageBadges::default(),
             legal_takedown_ref: None,
+            admin_block_reason: None,
             plane_ref: None,
         })
         .expect("setup ingest");
@@ -13238,7 +13506,7 @@ async fn a_member_named_then_removed_and_readmitted_is_named_again() {
 ///
 /// A member the roster DID list without a handle — one homed on another nest
 /// whose own home nest has not announced it yet — is answered *for now*: its
-/// name rides that member's own next drain (`federation.md` § Cross-nest
+/// name rides that member's own next drain (`federation-shared-folders.md` § Cross-nest
 /// shared folders + channel append, the id→handle bullet), so the read asks
 /// again after a gap of polls rather than at poll-tick rate (the gap is the
 /// subject of the next test). A read that FAILS records nothing.
@@ -15459,6 +15727,7 @@ fn room_seat_as(
             attachments: vec![],
             badges: MessageBadges::default(),
             legal_takedown_ref: None,
+            admin_block_reason: None,
             plane_ref: None,
         })
         .expect("setup ingest");
@@ -15565,6 +15834,13 @@ struct ScriptedCeremony {
     /// the attempt first) — the shape an end-to-end leaver meets when the home nest's
     /// door does not admit that class.
     refuse_leave: Mutex<Option<String>>,
+    /// Every `room.search`: `(room id hex, query, the channel's recorded
+    /// home)` — the home being what picks the relayed kind.
+    searches: Mutex<Vec<(String, String, Option<String>)>>,
+    /// What `room.search` answers, best first.
+    search_hits: Mutex<Vec<fauna_conversations::backend::RoomSearchHitRef>>,
+    /// When set, the nest refuses `room.search` with this message.
+    refuse_search: Mutex<Option<String>>,
     /// When set, the nest refuses `room.remove` with this message — the shape
     /// a caller without the rank meets.
     refuse_remove: Mutex<Option<String>>,
@@ -15630,6 +15906,9 @@ impl ScriptedCeremony {
             removes: Mutex::new(Vec::new()),
             leaves: Mutex::new(Vec::new()),
             refuse_leave: Mutex::new(None),
+            searches: Mutex::new(Vec::new()),
+            search_hits: Mutex::new(Vec::new()),
+            refuse_search: Mutex::new(None),
             refuse_remove: Mutex::new(None),
             lapse_on_accept: Mutex::new(None),
             on_remove: Mutex::new(None),
@@ -15666,6 +15945,9 @@ impl ScriptedCeremony {
             removes: Mutex::new(Vec::new()),
             leaves: Mutex::new(Vec::new()),
             refuse_leave: Mutex::new(None),
+            searches: Mutex::new(Vec::new()),
+            search_hits: Mutex::new(Vec::new()),
+            refuse_search: Mutex::new(None),
             refuse_remove: Mutex::new(None),
             lapse_on_accept: Mutex::new(None),
             on_remove: Mutex::new(None),
@@ -15915,6 +16197,22 @@ impl RoomCeremonyRpc for ScriptedCeremony {
             return Err(ConvRpcError::Rejected { message });
         }
         Ok(1)
+    }
+
+    async fn room_search(
+        &self,
+        room_id_hex: String,
+        query: String,
+        home_nest_url: Option<String>,
+    ) -> Result<Vec<fauna_conversations::backend::RoomSearchHitRef>, ConvRpcError> {
+        self.searches
+            .lock()
+            .unwrap()
+            .push((room_id_hex, query, home_nest_url));
+        if let Some(message) = self.refuse_search.lock().unwrap().clone() {
+            return Err(ConvRpcError::Rejected { message });
+        }
+        Ok(self.search_hits.lock().unwrap().clone())
     }
 
     async fn room_set_policy(
@@ -16323,6 +16621,7 @@ async fn the_room_seam_bundle_alone_wires_a_founding() {
         reader: roster.clone(),
         generations: Arc::new(ScriptedGenerations::new(vec![])),
         ceremony: ceremony.clone(),
+        posts: ScriptedPostReader::new(),
     });
     founder
         .backend
@@ -17771,6 +18070,358 @@ async fn a_community_rooms_pending_invitations_reach_its_snapshot_and_a_withdraw
         room_snapshot_of(&seat).pending_invites.map(|p| p.len()),
         Some(1),
         "a refused withdrawal removes nothing from the screen"
+    );
+}
+
+/// **The room's search runs through the manager, by the channel's home, and
+/// paints rows from what this device holds** (`room-search.md` § Where logic
+/// lives). One verb: the manager picks the leg — the same-nest door for a room
+/// this nest homes, the relay for one homed elsewhere — always asks for the
+/// room's posts, and resolves each hit into a row at read time, so a message
+/// hit this device has not received yet reads *not on this device yet* and
+/// still opens. A blank query never leaves the device; a refusal is the page's.
+#[tokio::test]
+async fn a_community_rooms_search_picks_its_leg_by_the_home_and_paints_what_the_device_holds() {
+    use fauna_conversations::backend::RoomSearchHitRef;
+    use fauna_conversations::room::{RoomSearchNav, RoomSearchResultKind, RoomSearchStatus};
+    let nest = Arc::new(MockNest::default());
+    let (seat, ceremony, floor) = policy_seat(&nest, "owner");
+    let channel = ChannelId([0x5B; 32]);
+    seat.backend.bind_channel(seat.thread.clone(), channel);
+    seat_home_nest(&floor);
+    let search_of = |seat: &RoomSeat| {
+        seat.manager
+            .thread_detail(seat.thread.clone())
+            .and_then(|d| d.room)
+            .and_then(|r| r.search)
+    };
+
+    // A community room whose floor seats this account offers the search, once
+    // this device has read that floor.
+    seat.backend
+        .tend_community_room(&seat.manager, &channel)
+        .await;
+    let room = room_snapshot_of(&seat);
+    assert!(
+        room.gate(fauna_conversations::capabilities::derive_capabilities(
+            Rail::FaunaMls,
+            fauna_conversations::thread::ThreadFlavor::MlsGroup,
+        ))
+        .can_search_room,
+        "a seated member of a community room may search it: {:?} as {:?}",
+        room.class,
+        room.my_role
+    );
+
+    // Opening the strip is view state on the detail, nothing submitted.
+    seat.manager.open_room_search(seat.thread.clone());
+    let open = search_of(&seat).expect("the strip is open");
+    assert_eq!(open.status, RoomSearchStatus::Idle);
+    assert!(open.results.is_empty());
+
+    // A blank query is dropped without a round-trip.
+    seat.manager
+        .room_search(seat.thread.clone(), "   ".to_string())
+        .await;
+    assert!(ceremony.searches.lock().unwrap().is_empty());
+
+    // Same-nest room: the plain door, posts always asked for (the seam's
+    // contract), one held message hit, one not yet received, one post hit.
+    let held = seat
+        .manager
+        .thread_detail(seat.thread.clone())
+        .and_then(|d| d.messages.first().cloned());
+    let held_seq = held
+        .as_ref()
+        .and_then(|m| m.message_id.channel_position())
+        .map(|(_, seq)| seq);
+    let mut hits = Vec::new();
+    if let Some(seq) = held_seq {
+        hits.push(RoomSearchHitRef::Message { seq: seq as i64 });
+    }
+    hits.push(RoomSearchHitRef::Message { seq: 9_999 });
+    hits.push(RoomSearchHitRef::Post {
+        post_id_hex: "ab".repeat(32),
+    });
+    *ceremony.search_hits.lock().unwrap() = hits;
+    seat.manager
+        .room_search(seat.thread.clone(), " hedgehog ".to_string())
+        .await;
+    assert_eq!(
+        ceremony.searches.lock().unwrap().as_slice(),
+        &[(channel.to_string(), "hedgehog".to_string(), None)],
+        "a room this nest homes is searched at its own door, the query trimmed"
+    );
+    let done = search_of(&seat).expect("the strip shows the answer");
+    assert_eq!(done.status, RoomSearchStatus::Done);
+    assert_eq!(done.query, "hedgehog");
+    let rows = &done.results;
+    assert_eq!(rows.len(), if held_seq.is_some() { 3 } else { 2 });
+    let pending = rows
+        .iter()
+        .find(|r| r.pending)
+        .expect("the position this device has not received");
+    assert_eq!(pending.kind, RoomSearchResultKind::Message);
+    assert_eq!(pending.sent_at_ms, None);
+    assert_eq!(
+        pending.text,
+        fauna_i18n::strings::conversations::unified::ROOM_SEARCH_HIT_PENDING
+    );
+    assert_eq!(
+        pending.navigation,
+        RoomSearchNav::Message {
+            thread_id: seat.thread.clone(),
+            message_id: fauna_conversations::message::MessageId(format!("conv:{channel}:9999")),
+        },
+        "it still opens, at its log position"
+    );
+    if let (Some(held), Some(_)) = (&held, held_seq) {
+        let row = rows
+            .iter()
+            .find(|r| !r.pending && r.kind == RoomSearchResultKind::Message);
+        let row = row.expect("the held message's row");
+        assert_eq!(row.sent_at_ms, Some(held.timestamp_ms));
+        assert_eq!(row.text, held.body.lines().next().unwrap_or_default());
+    }
+    let post = rows.last().expect("the post row, in the served order");
+    assert_eq!(post.kind, RoomSearchResultKind::Post);
+    assert_eq!(
+        post.navigation,
+        RoomSearchNav::Post {
+            post_id: "ab".repeat(32),
+            home_nest_url: None,
+        }
+    );
+
+    // Closing drops the query and the results.
+    seat.manager.close_room_search(seat.thread.clone());
+    assert_eq!(search_of(&seat), None);
+
+    // A room homed on another nest: the relay, and a post hit opens there.
+    seat.backend
+        .record_channel_home(channel, "https://home.example");
+    ceremony.searches.lock().unwrap().clear();
+    seat.manager
+        .room_search(seat.thread.clone(), "hedgehog".to_string())
+        .await;
+    assert_eq!(
+        ceremony.searches.lock().unwrap().as_slice(),
+        &[(
+            channel.to_string(),
+            "hedgehog".to_string(),
+            Some("https://home.example".to_string())
+        )],
+        "a room homed elsewhere is searched through the relay"
+    );
+    let remote = search_of(&seat).expect("the relayed answer");
+    assert_eq!(
+        remote.results.last().map(|r| r.navigation.clone()),
+        Some(RoomSearchNav::Post {
+            post_id: "ab".repeat(32),
+            home_nest_url: Some("https://home.example".to_string()),
+        }),
+        "a post hit on a room homed elsewhere opens through that home"
+    );
+
+    // A refusal is the page's; the result region stays blank.
+    *ceremony.refuse_search.lock().unwrap() = Some("not a member".to_string());
+    seat.manager
+        .room_search(seat.thread.clone(), "aardvark".to_string())
+        .await;
+    let failed = search_of(&seat).expect("the strip stays open");
+    assert_eq!(failed.status, RoomSearchStatus::Failed);
+    assert!(failed.results.is_empty());
+    assert_eq!(
+        seat.manager.snapshot().error.map(|e| e.key),
+        Some("conversations.unified.error_room_search".to_string())
+    );
+
+    // Switching threads clears the strip.
+    seat.manager
+        .select_thread(fauna_conversations::thread::ThreadId("elsewhere".into()));
+    seat.manager.select_thread(seat.thread.clone());
+    assert_eq!(search_of(&seat), None);
+}
+
+/// The post-read seam behind the room's search, scripted: each read is
+/// recorded with the home it was handed, and answered from `envelopes` — a
+/// post id absent there is the post door's miss.
+struct ScriptedPostReader {
+    reads: Mutex<Vec<(String, Option<String>)>>,
+    envelopes: Mutex<HashMap<String, fauna_conversations::backend::RoomSearchPostEnvelope>>,
+}
+
+impl ScriptedPostReader {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            reads: Mutex::new(Vec::new()),
+            envelopes: Mutex::new(HashMap::new()),
+        })
+    }
+}
+
+#[async_trait]
+impl fauna_conversations::backend::RoomSearchPostReader for ScriptedPostReader {
+    async fn read_room_search_post(
+        &self,
+        post_id_hex: String,
+        home_nest_url: Option<String>,
+    ) -> Result<fauna_conversations::backend::RoomSearchPostEnvelope, ConvRpcError> {
+        self.reads
+            .lock()
+            .unwrap()
+            .push((post_id_hex.clone(), home_nest_url));
+        self.envelopes
+            .lock()
+            .unwrap()
+            .get(&post_id_hex)
+            .cloned()
+            .ok_or_else(|| ConvRpcError::Rejected {
+                message: "fauna.posts.not_found".to_string(),
+            })
+    }
+}
+
+/// **A post hit paints its author, time and teaser from the post's envelope,
+/// read through the post-read seam** (`room-search.md` § The surface → *What a
+/// hit row paints*). One read per post hit, after the search answers, handed
+/// the room's recorded home when it is another nest; the author is named as
+/// the room knows them, else by the bridged face the nest served. A read that
+/// fails leaves that row word-less and its navigation intact — the search
+/// itself never fails on it.
+#[tokio::test]
+async fn a_room_searchs_post_hit_paints_the_envelope_the_post_read_seam_answered() {
+    use fauna_conversations::backend::{RoomSearchHitRef, RoomSearchPostEnvelope};
+    use fauna_conversations::room::{RoomSearchNav, RoomSearchResultKind, RoomSearchStatus};
+    let nest = Arc::new(MockNest::default());
+    let (seat, ceremony, floor) = policy_seat(&nest, "owner");
+    let channel = ChannelId([0x5C; 32]);
+    seat.backend.bind_channel(seat.thread.clone(), channel);
+    seat_home_nest(&floor);
+    let posts = ScriptedPostReader::new();
+    seat.backend.set_room_search_post_reader(posts.clone());
+    seat.backend
+        .tend_community_room(&seat.manager, &channel)
+        .await;
+    let rows_of = |seat: &RoomSeat| {
+        seat.manager
+            .thread_detail(seat.thread.clone())
+            .and_then(|d| d.room)
+            .and_then(|r| r.search)
+            .expect("the strip shows the answer")
+    };
+
+    let bridged = "ab".repeat(32);
+    let unknown = "cd".repeat(32);
+    let missing = "ef".repeat(32);
+    posts.envelopes.lock().unwrap().insert(
+        bridged.clone(),
+        RoomSearchPostEnvelope {
+            author_actor_hex: "11".repeat(32),
+            author_display: Some("Alice on the far network".to_string()),
+            created_at_ms: 1_700_000_000_123,
+            teaser: "Hedgehogs at dusk\nthe rest of the teaser".to_string(),
+        },
+    );
+    posts.envelopes.lock().unwrap().insert(
+        unknown.clone(),
+        RoomSearchPostEnvelope {
+            author_actor_hex: "22".repeat(32),
+            author_display: None,
+            created_at_ms: 1_700_000_500_000,
+            teaser: "A second hedgehog".to_string(),
+        },
+    );
+    *ceremony.search_hits.lock().unwrap() = vec![
+        RoomSearchHitRef::Post {
+            post_id_hex: bridged.clone(),
+        },
+        RoomSearchHitRef::Post {
+            post_id_hex: unknown.clone(),
+        },
+        RoomSearchHitRef::Post {
+            post_id_hex: missing.clone(),
+        },
+    ];
+
+    // Same-nest room: each post read once, with no home.
+    seat.manager
+        .room_search(seat.thread.clone(), "hedgehog".to_string())
+        .await;
+    assert_eq!(
+        posts.reads.lock().unwrap().as_slice(),
+        &[
+            (bridged.clone(), None),
+            (unknown.clone(), None),
+            (missing.clone(), None),
+        ],
+        "one read per post hit, in the served order, at this nest"
+    );
+    let done = rows_of(&seat);
+    assert_eq!(
+        done.status,
+        RoomSearchStatus::Done,
+        "a failed read never fails the search"
+    );
+    let [first, second, third] = done.results.as_slice() else {
+        panic!("three post rows, as served: {:?}", done.results);
+    };
+    assert_eq!(first.kind, RoomSearchResultKind::Post);
+    assert_eq!(
+        first.sender_display.as_deref(),
+        Some("Alice on the far network"),
+        "the bridged face the nest served names the author"
+    );
+    assert_eq!(first.sent_at_ms, Some(1_700_000_000_123));
+    assert_eq!(first.text, "Hedgehogs at dusk", "the teaser's first line");
+    assert_eq!(
+        second.sender_display,
+        Some(fauna_core::format::account_display_label(
+            None,
+            &"22".repeat(32)
+        )),
+        "an author the room does not know is named by their actor id"
+    );
+    assert_eq!(second.sent_at_ms, Some(1_700_000_500_000));
+    assert_eq!(second.text, "A second hedgehog");
+    assert_eq!(third.sender_display, None, "a failed read paints no words");
+    assert_eq!(third.sent_at_ms, None);
+    assert_eq!(third.text, "");
+    assert_eq!(
+        third.navigation,
+        RoomSearchNav::Post {
+            post_id: missing.clone(),
+            home_nest_url: None,
+        },
+        "and still opens"
+    );
+
+    // A room homed elsewhere: its home rides each read.
+    seat.manager.close_room_search(seat.thread.clone());
+    seat.backend
+        .record_channel_home(channel, "https://home.example");
+    posts.reads.lock().unwrap().clear();
+    seat.manager
+        .room_search(seat.thread.clone(), "hedgehog".to_string())
+        .await;
+    let home = Some("https://home.example".to_string());
+    assert_eq!(
+        posts.reads.lock().unwrap().as_slice(),
+        &[
+            (bridged.clone(), home.clone()),
+            (unknown.clone(), home.clone()),
+            (missing.clone(), home.clone()),
+        ],
+        "a room homed elsewhere hands its home to the post read"
+    );
+    let remote = rows_of(&seat);
+    assert_eq!(remote.results[0].text, "Hedgehogs at dusk");
+    assert_eq!(
+        remote.results[0].navigation,
+        RoomSearchNav::Post {
+            post_id: bridged,
+            home_nest_url: home,
+        }
     );
 }
 
@@ -21596,6 +22247,7 @@ async fn an_unkeyed_room_folds_for_now_and_its_key_in_reopens_the_catch_up_windo
                 attachments: vec![],
                 badges: MessageBadges::default(),
                 legal_takedown_ref: None,
+                admin_block_reason: None,
                 plane_ref: None,
             })
             .expect("setup ingest");
@@ -22949,6 +23601,7 @@ async fn bob_ingests_and_polls(
         &welcome.channel_hex,
         &welcome.welcome_bytes,
         "",
+        None,
     )
     .await
     .expect("welcome ingest");
@@ -23138,6 +23791,7 @@ async fn an_attachment_whose_opened_length_is_not_its_declared_size_is_skipped()
     nest.blob_put(
         channel.to_string(),
         None,
+        None,
         sealed_cid_hex.clone(),
         sealed.sealed,
     )
@@ -23237,6 +23891,7 @@ async fn bob_receives_under_a_budget(
         &welcome.channel_hex,
         &welcome.welcome_bytes,
         "",
+        None,
     )
     .await
     .expect("welcome ingest");

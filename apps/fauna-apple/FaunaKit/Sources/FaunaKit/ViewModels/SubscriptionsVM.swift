@@ -178,6 +178,29 @@ public final class SubscriptionsVM {
         return paymentsWebhookUrl(
             baseUrl: api.nodeUrl.absoluteString, authorIdHex: authorIdHex, kind: formProviderKind)
     }
+
+    /// The post-checkout redirect to register at the selected §4 provider
+    /// (`subscription-provider-form-return-url`) — the shared
+    /// `payments_return_url` over the creator's **web-site origin** (active
+    /// custom domain > enabled subdomain, the origin `web-settings` shows),
+    /// never the nest URL the webhook display uses: the paywall return door
+    /// resolves the site owner from the request `Host`. `nil` while the creator
+    /// has no public web address (or no kind is selected) — the form then shows
+    /// `subscriptions.return_url_unavailable` and the copy button is inert.
+    public func providerReturnUrl(origin: String?) -> String? {
+        guard let origin, !formProviderKind.isEmpty else { return nil }
+        return paymentsReturnUrl(siteUrl: origin, kind: formProviderKind)
+    }
+    #endif
+
+    #if !FAUNA_EXCISE_PAYMENTS && !FAUNA_KIDS
+    /// Hydrate the shared web-publish cache once as the §4 form opens, so the
+    /// return-URL display has the creator's web-site origin (a no-op once
+    /// hydrated — `web-settings` and the feed menu share the same store).
+    public func hydrateSiteOrigin(_ store: WebPublishStore, handle: String) async {
+        guard let api, !store.isHydrated else { return }
+        await store.hydrate(api: api, handle: handle)
+    }
     #endif
 
     /// Re-read the tier list + pending requests + configured providers + claim

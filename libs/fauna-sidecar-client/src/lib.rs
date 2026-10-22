@@ -2,7 +2,7 @@
 //! run the `fauna.sidecar.hello` token handshake, and hand back an authenticated,
 //! scope-bound [`RpcDispatcher`]. ONE audited copy of the dial+handshake glue,
 //! shared by every co-located Rust sidecar that dials nest — today the
-//! `fauna-iroh-relay` server binary.
+//! `fauna-iroh-relay` server binary and `fauna-sni-router`.
 //!
 //! **Why a shared crate, not `fauna-ws-substrate`.** `fauna-ws-substrate` owns the
 //! substrate-neutral *mechanism* (the tungstenite `Bytes` adapter, keepalive, the
@@ -168,8 +168,8 @@ pub const DIAL_BACKOFF_CEILING: Duration = Duration::from_secs(30);
 /// the token file's current contents.
 ///
 /// This is the one shared retry policy for every co-located Rust sidecar — the
-/// same reason the dial+handshake glue itself lives here; the relay
-/// (`bins/fauna-iroh-relay`) is its one caller today. (A one-shot twin that
+/// same reason the dial+handshake glue itself lives here; its callers are the
+/// relay (`bins/fauna-iroh-relay`) and the sni-router (`bins/fauna-sni-router`). (A one-shot twin that
 /// returned its first success served the relay's startup cert fetch and was
 /// deleted once the relay held its channel for life.) `on_retry` observes each
 /// retried failure and the delay before the next attempt — the seam a sidecar

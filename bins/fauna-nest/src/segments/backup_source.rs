@@ -20,8 +20,8 @@
 //!   nest-hosted and a client-driven coordinator can never disagree about what
 //!   this nest holds;
 //! - bytes → the store's own pair read
-//!   ([`crate::segments::list_handler::ServedSegments::read_pair`]):
-//!   finalize-on-read, then the `.dat` **and** its `.meta` sidecar read under
+//!   ([`crate::segments::list_handler::ServedSegments::open_pair`]):
+//!   finalize-on-read, then the `.dat` **and** its `.meta` sidecar opened under
 //!   the scope lock — the same two files
 //!   `GET /api/v1/segments/{kind}/{actor}/{id}` and its `/meta` sibling
 //!   (`crate::segments::segment_route`) serve, as one observation. Until
@@ -157,6 +157,30 @@ impl NestLocalSegmentSource {
         fauna_core::hex32::decode(scope_hex)
             .map_err(|e| anyhow::anyhow!("nest-local segment source: bad scope {scope_hex:?}: {e}"))
     }
+
+    /// One segment's pair, **opened** — the backup pass's read door. A segment
+    /// has no size ceiling, so the pass streams each half off its handle
+    /// rather than holding it (`message-segment-store.md` § Segment size).
+    ///
+    /// Finalize-on-read, exactly as the HTTP route does before serving — and
+    /// both files opened under the scope lock, so the pair describes the same
+    /// records and any further append rotates a *new* segment rather than
+    /// growing this one under the coordinator's feet. A finalized pair is never
+    /// rewritten in place, so the handles keep reading that observation after
+    /// the lock is released ([`fauna_segment_store::SegmentPairFiles`]).
+    pub async fn open_pair(
+        &self,
+        kind: &str,
+        scope_hex: &str,
+        segment_id: u32,
+    ) -> Result<fauna_segment_store::SegmentPairFiles> {
+        let actor = Self::scope_actor(kind, scope_hex)?;
+        let served = crate::segments::list_handler::served_segments_for_kind(&self.state, kind)
+            .with_context(|| format!("nest-local segment source: no store serves {kind:?}"))?;
+        served.open_pair(&actor, segment_id).await.with_context(|| {
+            format!("open nest-local segment pair kind={kind} scope={scope_hex} seg={segment_id}")
+        })
+    }
 }
 
 #[async_trait]
@@ -173,31 +197,27 @@ impl SegmentSource for NestLocalSegmentSource {
             .with_context(|| format!("list nest-local segments kind={kind} scope={scope_hex}"))
     }
 
+    /// The pair whole, through [`Self::open_pair`] — the trait's in-memory
+    /// form. The nest's own backup pass never calls it: it seals each half off
+    /// its handle a chunk at a time (`crate::segment_backup`).
     async fn segment_pair(
         &self,
         kind: &str,
         scope_hex: &str,
         segment_id: u32,
     ) -> Result<SegmentPair> {
-        let actor = Self::scope_actor(kind, scope_hex)?;
-        // Finalize-on-read, exactly as the HTTP route does before serving —
-        // and both files read under the scope lock, so the pair describes the
-        // same records and any further append rotates a *new* segment rather
-        // than growing this one under the coordinator's feet.
-        let served = crate::segments::list_handler::served_segments_for_kind(&self.state, kind)
-            .with_context(|| format!("nest-local segment source: no store serves {kind:?}"))?;
-        let pair = served
-            .read_pair(&actor, segment_id)
-            .await
-            .with_context(|| {
-                format!(
-                    "read nest-local segment pair kind={kind} scope={scope_hex} seg={segment_id}"
-                )
-            })?;
-        Ok(SegmentPair {
-            dat: pair.dat,
-            meta: pair.meta,
-        })
+        use std::io::Read;
+        let mut files = self.open_pair(kind, scope_hex, segment_id).await?;
+        let (mut dat, mut meta) = (Vec::new(), Vec::new());
+        files
+            .dat
+            .read_to_end(&mut dat)
+            .context("read nest-local .dat")?;
+        files
+            .meta
+            .read_to_end(&mut meta)
+            .context("read nest-local .meta")?;
+        Ok(SegmentPair { dat, meta })
     }
 }
 

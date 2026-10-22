@@ -87,16 +87,24 @@ def installed_version_line(root: Path = ROOT) -> str | None:
     return lines[0] if lines else None
 
 
+# The tarball members a wasm32 C build uses: the clang driver and its versioned
+# binary, llvm-ar, and clang's builtin headers — about 400 MB of the full tree's
+# 12 GB. The Dockerfile's rust-wasm stage unpacks the same list
+# (test_wasm32_cc.py holds the two equal).
+EXTRACT_MEMBERS = ("*/bin/clang", "*/bin/clang-[0-9]*", "*/bin/llvm-ar", "*/lib/clang/*/include")
+
+
 def install_steps(pin: dict, arch: str, root: Path = ROOT, downloads: Path = DOWNLOAD_DIR) -> list[str]:
     entry = pin["arch"][arch]
     tarball = downloads / entry["url"].rsplit("/", 1)[1]
     q = shlex.quote
+    members = " ".join(q(m) for m in EXTRACT_MEMBERS)
     return [
         f"mkdir -p {q(str(downloads))}",
         f"curl -fL --proto '=https' -o {q(str(tarball))} {q(entry['url'])}",
         f"echo '{entry['sha256']}  {tarball}' | sha256sum -c -",
         f"rm -rf {q(str(root))} && mkdir -p {q(str(root))}",
-        f"tar -xJf {q(str(tarball))} -C {q(str(root))} --strip-components=1",
+        f"tar -xJf {q(str(tarball))} -C {q(str(root))} --strip-components=1 --wildcards {members}",
         f"{q(str(tool_path('clang', root)))} --version | head -n 1",
     ]
 

@@ -119,6 +119,12 @@ object TestAgent {
     var calendarImportPick: ((path: String) -> Unit)? = null
 
     /**
+     * Always null in release, so `PushHost` always asks the real UnifiedPush
+     * distributor. The debug twin stands one in for the e2e harness.
+     */
+    val pushDistributor: com.fauna.app.core.push.PushDistributor? = null
+
+    /**
      * Always null in release, so `LaunchModule.provideSecretBackend` always
      * picks the real encrypted store. `var` for the same reason as
      * [isRealConversationsActive].

@@ -38,7 +38,7 @@ mod recovery_kit;
 mod trust_prompt;
 mod vps_config;
 #[allow(dead_code)]
-mod widgets;
+pub(crate) mod widgets;
 
 pub mod awaiting_manual_dns;
 pub mod nest_retire;
@@ -304,6 +304,20 @@ fn spawn_recheck_manual_dns(m: Arc<OnboardingMachine>) {
     );
 }
 
+/// Await the registry probe behind `vps_config`'s default channel and row
+/// descriptions off the GTK thread. The machine starts the probe itself only
+/// when a tokio runtime is current on the caller's thread, which GTK's is not;
+/// the probe is idempotent (once per wizard) and notifies the observer when it
+/// lands, so nothing here touches a widget.
+fn spawn_channel_probe(m: Arc<OnboardingMachine>) {
+    crate::async_helper::run_on_tokio(
+        async move {
+            m.probe_channel_availability().await;
+        },
+        |()| {},
+    );
+}
+
 /// Persist the deferred-DNS resume record into the per-actor registry slot.
 ///
 /// Deliberately writes **no `nest_url`** on the identity: the nest is not
@@ -372,17 +386,31 @@ fn persist_awaiting_dns(
 ///   and the reason the pre-registry single slot (which this arm used to
 ///   overwrite, for a boot re-mirror to heal) could retire.
 ///
-/// Log-only on failure, matching every other app's confirm-identity write (tui
-/// `tracing::error!`, web's swallowing commit, apple `try?`): the machine has
-/// already advanced, so failing loudly here would only desync the UI from
-/// wizard state. The read-back is what makes the log line fire at all.
-pub(super) fn commit_confirmed_identity(secret_hex: &str, append: bool) {
-    if let Err(e) = fauna_client_accounts::persist_confirmed_identity(
+/// **Loud on failure** (`apps/common.md` § Credential storage: linux has no
+/// headless arm, so a keyring failure "is a loud error, not a silent
+/// fallback"): the machine's [`OnboardingMachine::identity_commit_failed`] puts
+/// the wizard back on the screen the person confirmed on with the error in
+/// `error-message`, so nobody reaches handle entry holding a key stored
+/// nowhere; confirming again is the retry. The read-back is what makes a
+/// keyring that silently kept nothing fail here at all. Returns whether the
+/// identity is committed — a caller with a message of its own paints it only
+/// then, so it never covers this one.
+pub(super) fn commit_confirmed_identity(
+    m: &OnboardingMachine,
+    secret_hex: &str,
+    append: bool,
+) -> bool {
+    match fauna_client_accounts::persist_confirmed_identity(
         &crate::account_registry(),
         secret_hex,
         append,
     ) {
-        tracing::error!("[onboarding] committing the confirmed identity failed: {e:#}");
+        Ok(_) => true,
+        Err(e) => {
+            tracing::error!("[onboarding] committing the confirmed identity failed: {e:#}");
+            m.identity_commit_failed(add_refusal_line(&e, session_error::persist_successor));
+            false
+        }
     }
 }
 
@@ -1095,6 +1123,9 @@ fn handle_change(
                 // same-session submit transitions into it with the page already
                 // entered). The timer itself guards on the state.
                 start_pending_invite_poll(m);
+            }
+            if entered && name == STEP_VPS_CONFIG {
+                spawn_channel_probe(m.clone());
             }
             if entered && name == STEP_NEST_RECOVERY {
                 fetch_recovery_boxes(m);

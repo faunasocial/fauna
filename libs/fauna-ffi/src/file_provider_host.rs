@@ -1869,7 +1869,10 @@ fn settle_peer_bodies(
     if let Some(tree) = owned
         && let Err(e) = tree.settle_peer_bodies(engine, reconcile)
     {
-        tracing::warn!("file-provider host ({folder}): settling peer-landed bodies failed: {e:#}");
+        tracing::warn!(
+            "file-provider host ({}): settling peer-landed bodies failed: {e:#}",
+            fauna_core::log_redact::log_folder_name(folder)
+        );
     }
 }
 

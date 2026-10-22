@@ -1123,6 +1123,10 @@ pub fn establish(
     // obtains its region's policy). The device record already armed the engine
     // at start; this only ever replaces it with a newer verified document.
     crate::region::attach_session(app, Arc::clone(&client), tx);
+    // The fourth — the session nest's published rules (`nest-rules.md` § The
+    // nest content policy → *Carriage*): its self-description, verified and
+    // kept by the shared book, binds the engine's nest source.
+    crate::nest_rules::attach_session(app, Arc::clone(&client), tx);
     // Settings rides the same hook — the Status account/quota surface + the
     // quota/handle-change RPC seam (`ui/settings.md`). Unlike the others this
     // AUGMENTS the pre-loaded client-local prefs (`SettingsState::load`) rather
@@ -1916,6 +1920,17 @@ impl fauna_client_recovery::aftermath::AftermathSink for AftermathUi {
             .send(UiMessage::Data(DataMessage::GrantRemintProgress(progress)));
     }
 
+    fn period_rotation(
+        &mut self,
+        progress: fauna_client_subscriptions::orchestration::PeriodRotationProgress,
+    ) {
+        let _ = self
+            .tx
+            .send(UiMessage::Data(DataMessage::PeriodRotationProgress(
+                progress,
+            )));
+    }
+
     fn drafts_reseal(&mut self, progress: fauna_client_drafts::DraftsResealProgress) {
         let _ = self
             .tx
@@ -1999,17 +2014,26 @@ pub(crate) struct ConfirmIdentitySink {
 
 /// Commit a confirmed identity through [`confirm_identity_sink`]'s registry.
 ///
-/// Best-effort and log-only, matching every other app's confirm-identity write
-/// (linux `tracing::error!`, web's swallowing commit, apple `try?`): the
-/// machine has already advanced, so a throw here would only desync the UI from
-/// wizard state. The shared helper's read-back is what makes this log line
-/// fire on a keystore that silently kept nothing; in append mode the helper
-/// writes nothing at all.
-pub(crate) fn persist_confirmed_identity(sink: &ConfirmIdentitySink, secret_hex: &str) {
+/// **Loud on failure** (`apps/common.md` § Credential storage): the shared
+/// machine's `identity_commit_failed` puts the wizard back on the screen the
+/// person confirmed on with the error in `error-message`, so nobody reaches
+/// handle entry holding a key stored nowhere; confirming again is the retry —
+/// the same shape on every app. The shared helper's read-back is what makes
+/// a keystore that silently kept nothing fail here at all; in append mode the
+/// helper writes nothing.
+pub(crate) fn persist_confirmed_identity(
+    sink: &ConfirmIdentitySink,
+    machine: &fauna_onboarding_machine::OnboardingMachine,
+    secret_hex: &str,
+) {
     if let Err(e) =
         fauna_client_accounts::persist_confirmed_identity(&sink.registry, secret_hex, sink.append)
     {
         tracing::error!("[onboarding] committing the confirmed identity: {e}");
+        machine.identity_commit_failed(add_refusal_line(
+            &e,
+            fauna_i18n::strings::onboarding::session_error::persist_successor,
+        ));
     }
 }
 

@@ -27,18 +27,18 @@
   // have no nest handler yet (mail-mass-mailing.md § Implementation status today).
   // The machines return the honest "unimplemented" rejection; this section renders
   // it via `error` and stays at empty lists/members until the nest track lands.
-  import { identity } from '$lib/store';
-  import { mailListsMachine, mailListMembersMachine } from '$lib/rpc';
-  import { ensureWasm, memberStatusLabel, archiveUrlNeedsConfirm } from '$lib/wasm';
-  import { resolveLocalized } from '$lib/i18n/localized';
+  import { identity } from '#lib/store';
+  import { mailListsMachine, mailListMembersMachine } from '#lib/rpc';
+  import { ensureWasm, memberStatusLabel, archiveUrlNeedsConfirm } from '#lib/wasm';
+  import { resolveLocalized } from '#lib/i18n/localized';
   import { afterNavigate } from '$app/navigation';
   import { onMount } from 'svelte';
-  import { t } from '$lib/i18n/strings';
+  import { t } from '#lib/i18n/strings';
   import type {
     WasmMailListsMachine,
     WasmMailListMembersMachine,
   } from '../../../static/fauna_wasm.js';
-  import { IDS } from '$lib/generated/uiIds';
+  import { IDS } from '#lib/generated/uiIds';
 
   // The parent settings page owns the single error surface; list dispatch errors
   // flow into it (the same surface the other mail-settings sections bind to).

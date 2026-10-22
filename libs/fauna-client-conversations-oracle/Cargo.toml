@@ -1,0 +1,36 @@
+[package]
+name = "fauna-client-conversations-oracle"
+description = "The conversations oracle's custodian: the door a signed-in app serves to a device principal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# The door's vocabulary, transport and endpoint (`fauna_ipc::oracle`).
+fauna-ipc = { path = "../fauna-ipc" }
+# The oracle's grammar: the class table, `grant_admits`, the ceiling.
+fauna-core = { path = "../fauna-core" }
+# The possession proof's seal (`wrapped_blob::envelope::hpke_seal`) and its
+# AAD binding.
+fauna-mls = { path = "../fauna-mls" }
+# What the custodian performs through: the page's own manager.
+# `client-display`: the oracle renders sender addresses with `typed_address_display`.
+fauna-conversations = { path = "../fauna-conversations", features = ["client-display"] }
+# The record row the custodian submits (`fauna.principals.ops.record`).
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# `runtime`: the owner's grant log (`SuccessionLedgerStore`), the device's
+# content index (`LocalIndexResolver`), and the outbox's encoding.
+fauna-client-config = { path = "../fauna-client-config" }
+fauna-client-search = { path = "../fauna-client-search" }
+fauna-cbor = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+zeroize = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# The in-memory grant log the runtime account's tests read
+# (`FakeSuccessionLedgerStore`).
+fauna-client-config = { path = "../fauna-client-config", features = ["test-helpers"] }

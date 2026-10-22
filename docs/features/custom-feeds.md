@@ -48,11 +48,11 @@ Stamped 2026-10-01 at d8cb0887cb.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.2-dev+4bc2efab standalone |
-| linux | ✅ full | 0.1.4-dev+52904896 standalone |
-| windows | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| macos | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| ios | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| web | ✅ full | 0.1.5-dev+110d1248 standalone |
+| linux | ✅ full | 0.1.4-dev+ea391d07 standalone |
+| windows | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| macos | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| ios | ⚠ partial | 0.1.5-dev+61b844ca standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.2-dev+831d48ef live |
 
@@ -73,6 +73,6 @@ Stamped 2026-10-01 at d8cb0887cb.
 | 5 | nest | `tests/e2e-unified/tests/api/test_feed_api.py::test_feed_with_several_rules_serves_all_or_any` | nest (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_feed_creation.py::test_a_feed_with_several_rules_requires_all_of_them_or_any_one` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_trained_factor_publishes_as_a_scrubbed_text_model` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_the_factor_picker_offers_a_trained_topic_by_its_name` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_feed_creation.py::test_watched_to_the_end_and_skipped_past_weigh_into_a_feed` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 8 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_the_factor_picker_offers_a_trained_topic_by_its_name` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_feed_creation.py::test_watched_to_the_end_and_skipped_past_weigh_into_a_feed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

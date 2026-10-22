@@ -24,15 +24,11 @@ from helpers.mail_wire import (
 )
 
 
-def assert_the_password_never_reached_the_nest(nest: dict, source) -> None:
-    """Outcome 14 (`mailbox-migration.md` § Credential handling): after an
-    import that signed in to ``source`` (a `fakes.fake_imap_source.FakeImapSource`)
-    with ``source.password``, its bytes are nowhere the nest keeps anything —
-    every file under its data directory (the database and its write-ahead log
-    included) and its log — and the session row names the source by provider,
-    user and host only."""
-    secret = source.password.encode()
-    assert len(secret) >= 16, "a short password could match by accident"
+def assert_never_reached_the_nest(nest: dict, secret: bytes, what: str) -> None:
+    """``secret``'s bytes are nowhere the nest keeps anything — every file
+    under its data directory (the database and its write-ahead log included)
+    and its log. ``what`` names the secret in the failure."""
+    assert len(secret) >= 16, f"a short {what} could match by accident"
     files = [p for p in Path(nest["tmp_dir"]).rglob("*") if p.is_file()]
     log = nest.get("log_path")
     if log:
@@ -44,7 +40,16 @@ def assert_the_password_never_reached_the_nest(nest: dict, source) -> None:
                 holding.append(str(path))
         except FileNotFoundError:
             continue  # a `-shm`/`-wal` side file SQLite removed mid-scan
-    assert not holding, f"the old provider's password is in {holding}"
+    assert not holding, f"the {what} is in {holding}"
+
+
+def assert_the_password_never_reached_the_nest(nest: dict, source) -> None:
+    """Outcome 14 (`mailbox-migration.md` § Credential handling): after an
+    import that signed in to ``source`` (a `fakes.fake_imap_source.FakeImapSource`)
+    with ``source.password``, its bytes are nowhere the nest keeps anything
+    (`assert_never_reached_the_nest`), and the session row names the source by
+    provider, user and host only."""
+    assert_never_reached_the_nest(nest, source.password.encode(), "old provider's password")
 
     db = sqlite3.connect(f"file:{nest['db_path']}?mode=ro", uri=True)
     try:
@@ -72,6 +77,21 @@ def import_session_counts(nest: dict) -> list[tuple[str, int, int, int, int]]:
         ]
     finally:
         db.close()
+
+
+def message_allowance(nest: dict) -> int | None:
+    """The per-user message allowance the admin saved (`admin-mail`'s IMAP
+    group, the `mail_imap_policy` overrides row), or ``None`` while the
+    catalog default stands — read off the nest's database, so a test can tell
+    the admin's Save landed before it relies on the allowance."""
+    import json
+
+    db = sqlite3.connect(f"file:{nest['db_path']}?mode=ro", uri=True)
+    try:
+        row = db.execute("SELECT overrides_json FROM mail_imap_policy WHERE id = 1").fetchone()
+    finally:
+        db.close()
+    return json.loads(row[0]).get("message_count_default") if row else None
 
 
 def stored_message_count(nest: dict) -> int:

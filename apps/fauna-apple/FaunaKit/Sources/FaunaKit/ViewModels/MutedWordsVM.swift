@@ -48,6 +48,17 @@ public final class MutedWordsVM {
         }
     }
 
+    /// The store-change notice's re-read (account-runtime.md § Multi-instance
+    /// concurrency, the own-pump notice, part 4): the list another device or
+    /// instance stored lands on the open page. Paints only what differs, and
+    /// a failed read replaces nothing and raises no banner — the next visit's
+    /// own `load()` reports it. The add field's draft lives in the view, so
+    /// it survives by construction.
+    public func resync() async {
+        guard let api, let fresh = try? await api.mutedKeywordsList() else { return }
+        if fresh != page { page = fresh }
+    }
+
     /// Add `word` (trimmed; a blank add is a no-op) — as a DELTA against the
     /// stored list, never this page's copy wholesale: the
     /// shared seam re-reads the list inside its own CAS update, so a term

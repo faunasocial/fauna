@@ -93,6 +93,7 @@ from .helpers import (
     register_primary_domain as _register_primary_domain,
     remove_container,
     restart_service as _restart_service,
+    scanner_wired_network,
     sighup_service as _sighup_service,
     start_container_with_ports,
     svstat as _svstat,
@@ -268,74 +269,77 @@ def _resume_serving_after_redeploy(name: str, nest: dict, mail_ports: dict, role
 
 @pytest.mark.feature("mail-server")
 def test_mail_bridge_serves_after_schema_upgrade(docker_image, tmp_path):
-    vol = f"fauna-upgrade-data-{os.getpid()}-{find_free_ports(1)[0]}"
-    subprocess.run(["docker", "volume", "create", vol], check=True, capture_output=True, timeout=30)
-    name_a = name_b = None
-    try:
-        # ── Phase 1: a fresh box, on a persistent volume, driven to serving. ──
-        http_a, *mail = find_free_ports(5)
-        mail_a = dict(zip((25, 465, 587, 993), mail))
-        name_a = f"fauna-upgrade-a-{http_a}"
-        start_container_with_ports(
-            name_a,
-            {3000: http_a, **mail_a},
-            env={"FAUNA_CLAIM_CODE": CLAIM_CODE, "FAUNA_PORT": "3000"},
-            data_volume=vol,
-        )
-        wait_for_health(http_a, name_a)
-        admin = claim_admin_api(http_a, CLAIM_CODE, handle="admin")
-        nest_a = {
-            "name": name_a, "port": http_a, "url": f"https://127.0.0.1:{http_a}",
-            "admin": admin, "mail_ports": mail_a,
-        }
-        _register_primary_domain(nest_a, DOMAIN)
-        bring_bridges_to_serving(name_a, nest_a, mail_a, DOMAIN)
-
-        # ── Phase 2: rewrite nest.db down to an older schema (two additive
-        # columns dropped from mail_domains).
-        _downgrade_schema_to_legacy(name_a, tmp_path)
-        remove_container(name_a)
-        name_a = None  # the volume (with the older-schema nest.db) persists
-
-        # ── Phase 3: redeploy a FRESH container on the same /data — THE GATE. ──
-        # The entrypoint takes its "existing config" path; the nest applies the
-        # genesis + reconciles the dropped columns; the bridge's fetch_config succeeds and
-        # it serves. On the image the bridge crash-looped here.
-        http_b, *mail = find_free_ports(5)
-        mail_b = dict(zip((25, 465, 587, 993), mail))
-        name_b = f"fauna-upgrade-b-{http_b}"
-        start_container_with_ports(
-            name_b,
-            {3000: http_b, **mail_b},
-            # No claim code — the persisted /data is already claimed; the admin
-            # actor (Ed25519) persists, so the same signing key still auths.
-            env={"FAUNA_PORT": "3000"},
-            data_volume=vol,
-        )
-        wait_for_health(http_b, name_b)
-        nest_b = {
-            "name": name_b, "port": http_b, "url": f"https://127.0.0.1:{http_b}",
-            "admin": admin, "mail_ports": mail_b,
-        }
-
-        # Nest-side corroboration (Layer 4): the config query the bridge boots
-        # from succeeds post-reconcile, so the mail-health signal is green — the
-        # break is healed *before* we even probe the ports.
-        with _admin_ws(nest_b) as admin_b:
-            status = admin_b.call("fauna.setup.status", {})
-            assert status.get("mail_subsystem_ok") is True, (
-                "mail_subsystem_ok must be true after redeploy against the "
-                f"older-schema /data (reconciler healed the SELECT); got {status!r}"
+    with scanner_wired_network("fauna-upgrade") as (network, scan_env):
+        vol = f"fauna-upgrade-data-{os.getpid()}-{find_free_ports(1)[0]}"
+        subprocess.run(["docker", "volume", "create", vol], check=True, capture_output=True, timeout=30)
+        name_a = name_b = None
+        try:
+            # ── Phase 1: a fresh box, on a persistent volume, driven to serving. ──
+            http_a, *mail = find_free_ports(5)
+            mail_a = dict(zip((25, 465, 587, 993), mail))
+            name_a = f"fauna-upgrade-a-{http_a}"
+            start_container_with_ports(
+                name_a,
+                {443: http_a, **mail_a},
+                env={"FAUNA_CLAIM_CODE": CLAIM_CODE, "FAUNA_PORT": "3000", **scan_env},
+                data_volume=vol,
+                network=network,
             )
+            wait_for_health(http_a, name_a)
+            admin = claim_admin_api(http_a, CLAIM_CODE, handle="admin")
+            nest_a = {
+                "name": name_a, "port": http_a, "url": f"https://127.0.0.1:{http_a}",
+                "admin": admin, "mail_ports": mail_a,
+            }
+            _register_primary_domain(nest_a, DOMAIN)
+            bring_bridges_to_serving(name_a, nest_a, mail_a, DOMAIN)
 
-        # The headline gate: the redeployed bridge serves all four mail ports.
-        _resume_serving_after_redeploy(name_b, nest_b, mail_b)
-    finally:
-        if name_a:
+            # ── Phase 2: rewrite nest.db down to an older schema (two additive
+            # columns dropped from mail_domains).
+            _downgrade_schema_to_legacy(name_a, tmp_path)
             remove_container(name_a)
-        if name_b:
-            remove_container(name_b)
-        subprocess.run(["docker", "volume", "rm", "-f", vol], capture_output=True, timeout=30)
+            name_a = None  # the volume (with the older-schema nest.db) persists
+
+            # ── Phase 3: redeploy a FRESH container on the same /data — THE GATE. ──
+            # The entrypoint takes its "existing config" path; the nest applies the
+            # genesis + reconciles the dropped columns; the bridge's fetch_config succeeds and
+            # it serves. On the image the bridge crash-looped here.
+            http_b, *mail = find_free_ports(5)
+            mail_b = dict(zip((25, 465, 587, 993), mail))
+            name_b = f"fauna-upgrade-b-{http_b}"
+            start_container_with_ports(
+                name_b,
+                {443: http_b, **mail_b},
+                # No claim code — the persisted /data is already claimed; the admin
+                # actor (Ed25519) persists, so the same signing key still auths.
+                env={"FAUNA_PORT": "3000", **scan_env},
+                data_volume=vol,
+                network=network,
+            )
+            wait_for_health(http_b, name_b)
+            nest_b = {
+                "name": name_b, "port": http_b, "url": f"https://127.0.0.1:{http_b}",
+                "admin": admin, "mail_ports": mail_b,
+            }
+
+            # Nest-side corroboration (Layer 4): the config query the bridge boots
+            # from succeeds post-reconcile, so the mail-health signal is green — the
+            # break is healed *before* we even probe the ports.
+            with _admin_ws(nest_b) as admin_b:
+                status = admin_b.call("fauna.setup.status", {})
+                assert status.get("mail_subsystem_ok") is True, (
+                    "mail_subsystem_ok must be true after redeploy against the "
+                    f"older-schema /data (reconciler healed the SELECT); got {status!r}"
+                )
+
+            # The headline gate: the redeployed bridge serves all four mail ports.
+            _resume_serving_after_redeploy(name_b, nest_b, mail_b)
+        finally:
+            if name_a:
+                remove_container(name_a)
+            if name_b:
+                remove_container(name_b)
+            subprocess.run(["docker", "volume", "rm", "-f", vol], capture_output=True, timeout=30)
 
 
 # ── Incompatible-boot degraded-serve gate (version-compatibility.md § 2.2) ──────
@@ -464,7 +468,7 @@ def test_incompatible_schema_boots_degraded_then_recovers(docker_image, tmp_path
         name_a = f"fauna-incompat-a-{http_a}"
         start_container_with_ports(
             name_a,
-            {3000: http_a},
+            {443: http_a},
             env={"FAUNA_CLAIM_CODE": CLAIM_CODE, "FAUNA_PORT": "3000"},
             data_volume=vol,
         )
@@ -486,7 +490,7 @@ def test_incompatible_schema_boots_degraded_then_recovers(docker_image, tmp_path
         start_container_with_ports(
             name_b,
             # No claim code — the persisted /data is already claimed.
-            {3000: http_b},
+            {443: http_b},
             env={"FAUNA_PORT": "3000"},
             data_volume=vol,
         )
@@ -528,7 +532,7 @@ def test_incompatible_schema_boots_degraded_then_recovers(docker_image, tmp_path
         name_c = f"fauna-incompat-c-{http_c}"
         start_container_with_ports(
             name_c,
-            {3000: http_c},
+            {443: http_c},
             env={"FAUNA_PORT": "3000"},
             data_volume=vol,
         )

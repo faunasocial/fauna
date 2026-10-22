@@ -2,7 +2,7 @@
 
 Owns: federation, rate-limiting
 Status: ratified
-Authority: owns the nest↔nest peer-auth model, federation carrier + kind inventory, open-federation trust model, KP privacy/exhaustion, anonymous-surface security model, and request-level rate-limiting (anonymous + federation throttles); what a client concludes from a foreign domain's `by_handle` answer or non-answer (discovery-failure semantics, the dial rule) → foreign-handle-resolution.md; connection-level caps → transport-connection.md § Abuse posture; mail per-IP cap → behavior/mail-policy-config.md; client↔nest WS-RPC → transport.md; HTTP classification → api-layers.md.
+Authority: owns the nest↔nest peer-auth model, federation carrier + kind inventory, open-federation trust model, KP privacy/exhaustion, anonymous-surface security model, and request-level rate-limiting (anonymous + federation throttles); what a client concludes from a foreign domain's `by_handle` answer or non-answer (discovery-failure semantics, the dial rule) → foreign-handle-resolution.md; the kinds, gates and wire rules of cross-nest shared folders + channel append (the public folder read plane included) → federation-shared-folders.md; connection-level caps → transport-connection.md § Abuse posture; mail per-IP cap → behavior/mail-policy-config.md; client↔nest WS-RPC → transport.md; HTTP classification → api-layers.md.
 
 > **Audience:** nest and shared-Rust contributors touching any cross-nest path
 > (conversations, knock/contacts, nest-sync, report and trend exchange,
@@ -57,7 +57,7 @@ migration is complete (§ Transport, § Implementation status today).
   **Discovery trust rule (ruled and ENFORCED 2026-09-25).** "Authenticated TLS" is judged by the nest at the
   moment it would believe a `nest.info` answer, from the cert the capturing
   verifier saw on that dial (the anonymous dial is encrypt-only until then —
-  `security.md` § Transport trust, Axis 1). The answer is believed only when the
+  `transport-trust.md` § Transport trust, Axis 1). The answer is believed only when the
   served cert is **WebPKI-valid for the dialed authority** (a domain, or a public
   IP under `nest/tls-certificates.md` § B-IP), with exactly two carve-outs: **(1) a
   loopback literal** — the in-process fixture, the same test-only carve-out the
@@ -161,7 +161,7 @@ slice 4f-i) — `fauna.federation.folder.public.fetch`
 into the folder content-plane row: same subject, but a different auth target
 entirely (the addressed folder's own audience, never the caller), and the auth
 target is the column this table is keyed on. It is also the family's first kind
-whose request carries no requesting actor at all (§ The public folder read plane
+whose request carries no requesting actor at all ([`federation-shared-folders.md`](federation-shared-folders.md) § The public folder read plane
 owns the reasoning). **The room plane's two conversation kinds landed
 2026-09-09 and 2026-09-10** — `fauna.federation.conversation.write_token.mint`
 (a room's attachment write relay) and
@@ -205,34 +205,36 @@ against the registered `FederationRouter` kinds 2026-10-02 — 41 distinct
 |---|---|---|---|---|
 | Key-package **fetch** | `GET /api/v1/keypackage/{actor}` | **nest-signature** | `fauna.federation.keypackage.fetch` | destructive (`take_key_package`); last-resort fallback + throttle (§ Key packages). `forbid_replay` on the channel. Bearer was the slice-2 residual bug, now fixed. |
 | MLS **Welcome** deliver | `POST /api/v1/welcome/{actor}?nest_url=…` | **nest-signature** | `fauna.federation.welcome.deliver` | `push_inbox` + `Welcome` push. Records the foreign recipient as a channel member (home `nest_id`) on the channel-home nest, so the next row can authorize the relayed fetch. |
-| Conversation **channel-message fetch** | **(none — channel-only, net-new)** | **nest-signature** + channel-membership-bound-to-home-`nest_id` | `fauna.federation.channel.fetch` | net-new, NOT residue: the **open-federation** cross-nest message pull for **unpaired** nests (`direct-messages.md` § Technical Flow — Cross-Nest, step 3). Read-only; returns the channel's ciphertext entries `(seq, envelope)` the relay cannot decrypt (MLS E2E, § Security). A member's drain on its home nest originates it to the channel-home nest, which serves it iff the requesting actor is a recorded member of the channel **and** the verified `origin_nest_id` is that member's recorded home nest (the structural defense against a hostile signer harvesting an un-hosted channel). Per-originating-nest throttled. Distinct from the `is_paired`-gated `mls_pull` below (that is the paired-nest buffer-pull optimization). **Carries the member's announced `handle@domain` (additive `requesting_handle`/`requesting_domain`, 2026-09-10)** — the id→handle ruling's one mechanism: the originating nest volunteers what it joins from its own `users` row, and the home nest records it beside the binding only after resolving the domain to the originator's key (§ Cross-nest shared folders + channel append, the id→handle bullet, owns the rule). **Carries a community room's verdicts beside each entry (additive `labels`/`scores`, 2026-09-10)** — what the room's named labelers derived (`../behavior/community-rooms.md` § The three classes → *What the home nest does with its read* owns what they are and who may read them), filled exactly when the requesting actor is a live floor member of the room: the gate the same-nest read keys on its caller, applied to the actor the binding admitted, never to the peer — and never beside a withheld envelope. The relaying nest forwards them onto its member's `ChannelFetchEntry` and stores none. The skew is benign both ways, which is why an additive field suffices here: an older home serves none and an older relaying nest ignores them, and either way the member reads the envelopes alone — the pre-field behaviour, never a wrong verdict. |
+| Conversation **channel-message fetch** | **(none — channel-only, net-new)** | **nest-signature** + channel-membership-bound-to-home-`nest_id` | `fauna.federation.channel.fetch` | net-new, NOT residue: the **open-federation** cross-nest message pull for **unpaired** nests (`direct-messages.md` § Technical Flow — Cross-Nest, step 3). Read-only; returns the channel's ciphertext entries `(seq, envelope)` the relay cannot decrypt (MLS E2E, § Security). A member's drain on its home nest originates it to the channel-home nest, which serves it iff the requesting actor is a recorded member of the channel **and** the verified `origin_nest_id` is that member's recorded home nest (the structural defense against a hostile signer harvesting an un-hosted channel). Per-originating-nest throttled. Distinct from the `is_paired`-gated `mls_pull` below (that is the paired-nest buffer-pull optimization). **Carries the member's announced `handle@domain` (additive `requesting_handle`/`requesting_domain`, 2026-09-10)** — the id→handle ruling's one mechanism: the originating nest volunteers what it joins from its own `users` row, and the home nest records it beside the binding only after resolving the domain to the originator's key ([`federation-shared-folders.md`](federation-shared-folders.md) § Cross-nest shared folders + channel append, the id→handle bullet, owns the rule). **Carries a community room's verdicts beside each entry (additive `labels`/`scores`, 2026-09-10)** — what the room's named labelers derived (`../behavior/community-rooms.md` § The three classes → *What the home nest does with its read* owns what they are and who may read them), filled exactly when the requesting actor is a live floor member of the room: the gate the same-nest read keys on its caller, applied to the actor the binding admitted, never to the peer — and never beside a withheld envelope. The relaying nest forwards them onto its member's `ChannelFetchEntry` and stores none. The skew is benign both ways, which is why an additive field suffices here: an older home serves none and an older relaying nest ignores them, and either way the member reads the envelopes alone — the pre-field behaviour, never a wrong verdict. |
 | Namespace + MLS **sync** | `/api/v1/nest-sync/{pull,push,mls-pull,mls-ack}` | **nest-signature** (`is_paired`) | `fauna.federation.sync.{pull,push,mls_pull,mls_ack}` | already nest-signed today; the private paired-nest surface. |
 | Mail **relay** (public→private) | **(none — channel-only)** | **nest-signature** + `mail_pull` capability (`pairing_has_capability`) | `fauna.federation.sync.{mail_pull,mail_ack}` | net-new, NOT residue: the public→private `__mail` relay (`deployment-home-with-public-relay.md` § Inbound mail). Built channel-only (no HTTP twin) — slice 5 has nothing to retire here. Moves verbatim sealed `MailRecordEnvelope` bytes; ack→tombstone→compaction purge. |
 | Post **forward** (relay) | `POST /api/v1/forward` | **nest-signature** + `post_forward` capability (`pairing_has_capability`), under the `paired_only` submission policy | `fauna.federation.post.{forward,delete}` | private paired-nest post relay (`federation_handlers.rs` `register_post_federation_handlers`). The twin's extra per-forward nest-signature over the JSON body is **gone** — the channel handshake authenticates the relay, so only the post's own author envelope rides. Origination (the private-side outbox worker) is owned by `nest/private-mode.md` § Post Forwarding. **`post.delete`** (added 2026-07-15) is the delete twin: the author-signed `Tombstone` rides verbatim (re-verified on receipt) so a forwarded copy on the public nest does not outlive the original (`feed.md` § State & data shape → Post deletion → Propagation), gated by the same `post_forward` capability. |
-| Discovery-feed query / post fetch | `POST /api/v1/feeds/query`, `GET /api/v1/posts/{id}` | unauthenticated public-data | `fauna.federation.feed.query`, `fauna.federation.post.get` | scoring/post bytes; **unauthenticated today** — gains attribution + per-nest throttle on the channel. |
+| Discovery-feed query / post fetch | `POST /api/v1/feeds/query`, `GET /api/v1/posts/{id}` | unauthenticated public-data | `fauna.federation.feed.query`, `fauna.federation.post.get` | scoring/post bytes; **unauthenticated today** — gains attribution + per-nest throttle on the channel. **`post.get` gains a client relay leg (ruled 2026-10-16; built 2026-10-16, `posts_handlers::posts_get_remote_handler` — the home's `fauna.federation.not_found` comes back as `fauna.posts.not_found`, so the relayed door answers a missing post as the local one does):** the distinct kind `fauna.posts.get_remote { post_id, nest_url }` — the deep-link door's read for a post this nest does not hold ([`feed-read-model.md`](feed-read-model.md) § The read model → *Opening a post the timeline never loaded* → *A post homed on another nest* owns the door) — which the reader's own nest originates here and forwards unstored, `legal_takedown` marker included — stamping `home_nest_actor_id`, the `peer_nest_id` it dialed the channel as (`federation_pool::resolve_peer_nest_id`), the root the client's byte plane graduates its pin against ([`transport-trust.md`](transport-trust.md) § Transport trust, the federation-granted row's *post arm*; ruled 2026-10-19, unbuilt) — under the same `caller = None` quarantine posture as the trend import's fetch; the reply is the **envelope only** — the sealed body and every attachment are fetched by the client by content address from the home's public `GET /api/v1/blob/{hash}`, direct (a room post opens under the room's key; a broadcast-gated post's `KeyBlob` is a roster and is read through the follower's own nest — [`../behavior/federated-follow.md`](../behavior/federated-follow.md) § Decision 3): **bulk bytes never ride this channel** ([`federation-shared-folders.md`](federation-shared-folders.md) § Cross-nest shared folders + channel append). Distinct, not an additive field on `fauna.posts.get`, for two reasons: the `_remote` family's one shape (`posts.room_labels_remote`, `room.list_roster_remote`, `generations_remote`), and because a kind that makes this nest dial a caller-named peer is a different trust shape from a local read — it takes its own allowlist, offline-class and deadline rows (`OnlineOnly`, the 30 s peer round-trip deadline, never pre-identity), not `posts.get`'s. |
 | Social inbox **deliver** | ~~`POST /api/v1/inbox/{actor}`~~ *(twin DELETED 2026-06-09 — channel-only)* | **nest-signature** | `fauna.federation.inbox.deliver` | cross-nest Fauna-native signed `(ContactRequest, Post)` delivery → recipient `InboxMode` routing + inbox row + push (`routes::deliver_inbox_payload_core`, kept — the channel rides it). |
-| Report exchange/export | **(none — channel-only, net-new)** | **nest-signature** | `fauna.federation.reports.{exchange,export}` | the k-anonymized per-item report aggregates (`behavior/report-sharing.md` § Federation exchange — that doc owns the mechanism): only `(content-hash, factor, count)` crosses, importer re-validates the k-gate, hard 1024-entry cap, per-peer row cap. **All peer aggregates for a hash collapse into one non-scaling peer bucket** — a peer's `nest_id` is self-minted and free, so neither a peer's claimed count nor the number of peers may scale the local distinct-reporter consensus (the ruling paragraph below the table, *What outlives the leg*, keeps the reason). Open-federation, per-origin throttled. Registered 2026-07-07 (`register_reports_federation_handlers`). |
-| Abuse-report **forwarding** *(BUILT 2026-09-26)* | **(none — channel-only, net-new)** | **nest-signature** | `fauna.federation.abuse_report.{deliver,withdraw,outcome}` | user-initiated reporting's cross-nest leg (`behavior/moderation.md` § Routing — that doc owns the mechanism): a report on a foreign author is forwarded reporter-anonymously to the author's home nest, which accepts it only for a subject it hosts; the withdrawal and the outcome follow, each pinned to the nest the delivery was verified as. Every leg is idempotent on the receiver (a delivery is keyed on the verified origin plus its `report_ref`), so each is retry-safe; the sender drains them from a durable queue with backoff. Open-federation, per-origin throttled (`abuse_report_federation::register_abuse_report_federation_handlers`). |
-| Channel **append** *(BUILT 2026-07-19; ratified 2026-07-18)* | **(none — channel-only, net-new)** | **nest-signature** + foreign-member-bound-to-home-`nest_id` | `fauna.federation.channel.append` | the **mutating twin of `channel.fetch`** — a foreign member's send relayed by their home nest into the channel-home nest's log (same structural gate as the fetch). Commit admission on claimed folder channels is **roster-membership** (re-ratified 2026-08-24 — a foreign member's device-owned-epoch takeover must land; owner-only roster management is enforced member-side, since commit content is ciphertext to the nest); off-roster actors refused; conversation channels open. Rides the L3 `idempotency_key`. § Cross-nest shared folders + channel append. |
+| Report exchange/export | **(none — channel-only, net-new)** | **nest-signature** | `fauna.federation.reports.{exchange,export}` | the k-anonymized per-item report aggregates (`behavior/report-sharing.md` § Federation exchange — that doc owns the mechanism): only `(content-hash, factor, count)` crosses, importer re-validates the k-gate, hard 1024-entry cap, per-peer row cap, table-wide row cap (§ Security → *Rate limiting*). **All peer aggregates for a hash collapse into one non-scaling peer bucket** — a peer's `nest_id` is self-minted and free, so neither a peer's claimed count nor the number of peers may scale the local distinct-reporter consensus (the ruling paragraph below the table, *What outlives the leg*, keeps the reason). Open-federation, per-origin throttled. Registered 2026-07-07 (`register_reports_federation_handlers`). |
+| Abuse-report **forwarding** *(BUILT 2026-09-26)* | **(none — channel-only, net-new)** | **nest-signature** | `fauna.federation.abuse_report.{deliver,withdraw,outcome}` | user-initiated reporting's cross-nest leg (`behavior/moderation.md` § Routing — that doc owns the mechanism): a report on a foreign author is forwarded reporter-anonymously to the author's home nest, which accepts it only for a subject it hosts; the withdrawal and the outcome follow, each pinned to the nest the delivery was verified as. Every leg is idempotent on the receiver (a delivery is keyed on the verified origin plus its `report_ref`), so each is retry-safe; the sender drains them from a durable queue with backoff. Open-federation, per-origin throttled and per-target budgeted (§ Security → *Rate limiting*) (`abuse_report_federation::register_abuse_report_federation_handlers`). |
+| Profile read across nests *(RULED 2026-10-19 — [`../ui/profile.md`](../ui/profile.md) § Where logic lives → *The remote read* owns the opt-in, the client leg and the fallback; BUILT 2026-10-19 in the nest)* | **(none — channel-only, net-new)** | **nest-signature** + the actor's own consent: served only for an actor hosted here whose latest signed profile decodes with `audience = Everyone` | `fauna.federation.profile.get` | the profile twin of the post-fetch row: `{ actor_id }` → the actor's latest signed profile bytes (`profile_handlers::latest_profile_bytes`, verbatim — the client verifies the Ed25519 signature as the same-nest read does); not hosted, no profile, `audience = ThisNest` or an unknown audience all answer `fauna.federation.not_found` — one refusal, so a peer learns nothing about whether an actor publishes a profile. Client leg: the distinct kind `fauna.profile.get_remote { actor_id, nest_url }` (`User`, `OnlineOnly`, 30 s, never pre-identity — the `_remote` family's shape, for the post-fetch row's two reasons), the reader's nest forwarding unstored and re-speaking the home's `not_found` as `fauna.profile.not_found`. `avatar` / `banner` bytes are fetched by the client from the home's public blob route, direct, the relay reply stamping the home's dial-proved identity (`home_nest_actor_id`, the post arm's stamp) for the plane's pin ([`transport-trust.md`](transport-trust.md) § Mechanism for the federation-granted row → *The post arm* → *A relayed profile's pictures*). **Why a kind and not a public route:** it is the owner's 2026-10-19 re-open of the 2026-08-17 decline of any anonymous profile read ([`../behavior/identity-succession.md`](../behavior/identity-succession.md) § Don't do these) — the home gets attribution and the per-nest throttle, the pre-identity surface stays closed, and the consent is the actor's signed word, which the home cannot forge. |
+| Moderation **obligation delivery + relayed appeal** *(RULED 2026-10-18 — [`../behavior/takedown-and-block.md`](../behavior/takedown-and-block.md) § Legal takedown → *The author homed on another nest* owns the mechanism; built 2026-10-19)* | **(none — channel-only, net-new)** | **nest-signature** — `obligation.deliver`: the named author is hosted by the receiver, and a `post` is that author's by the receiver's own store (a conversation record cannot be checked; the budgets bound it); `moderation.appeal`: the verified origin is the nest the row was delivered to and `author` the row's `author_hex` | `fauna.federation.moderation.obligation.deliver`, `fauna.federation.moderation.appeal` | the transparency triple's appeal leg across a nest boundary: a takedown or admin block whose author the deciding nest does not host (a foreign member's conversation record on the channel home; the local projection of a foreign post on the reporter's nest) **pushes** the author's `obligation_action_records` row to the author's home nest, which serves it on the author's own queue, and the author's appeal rides back through their home nest to the issuer's gate and audit chain. The delivery is durable on the moderation plane's queue (the abuse-report triad's), idempotent on `(verified origin, issuer ref)`, per-origin throttled and per-target budgeted (§ Security → *Rate limiting*); the appeal is an inline relay (the `posts.get_remote` posture), the home recording its own `moderation:appeal-relayed` row only on the issuer's acknowledgement. |
+| Channel **append** *(BUILT 2026-07-19; ratified 2026-07-18)* | **(none — channel-only, net-new)** | **nest-signature** + foreign-member-bound-to-home-`nest_id` | `fauna.federation.channel.append` | the **mutating twin of `channel.fetch`** — a foreign member's send relayed by their home nest into the channel-home nest's log (same structural gate as the fetch). Commit admission on claimed folder channels is **roster-membership** (re-ratified 2026-08-24 — a foreign member's device-owned-epoch takeover must land; owner-only roster management is enforced member-side, since commit content is ciphertext to the nest); off-roster actors refused; conversation channels open. Rides the L3 `idempotency_key`. [`federation-shared-folders.md`](federation-shared-folders.md) § Cross-nest shared folders + channel append. |
 | Channel **leave** *(BUILT 2026-07-19; ratified 2026-07-18; room-hardened 2026-09-11)* | **(none — channel-only, net-new)** | **nest-signature** + foreign-member-bound-to-home-`nest_id` | `fauna.federation.channel.leave` | the **first mutating member-gated self-scoped kind**: deletes the requester's own `channel_foreign_members` row (idempotent; absent = success), killing all future federated fetches. Generic — conversations and folder channels alike. ⚠ **On a floor-authoritative room it runs the room's own leave body instead** (`conversations_handlers::room_leave_apply`, shared with the *room leave* row below), because on a room the binding delete is only half a departure: the seat stays, and a seat nobody occupies is not inert — the roster-coverage gate *obliges* every later generation mint to wrap to its reception key, and `room.invite` refuses to re-admit a principal that is already a member, so the ghost both keeps drawing key material and blocks the re-admission that would heal it. Nothing of ours calls this kind with a room channel id (the conversations plane has its own kind, and no app carries a conversation self-leave gesture at all), but a peer nest can, and a door that converges only when the caller picks the right kind is not converged. The `removed` flag keeps naming the **binding**, which is this kind's own contract. The absent-row arm still unseats nothing, deliberately: with no binding this nest can prove nothing about the caller's home, and unseating on an unproven claim would hand any peer a removal door for any principal on any room's floor. |
 | Channel **roster read** *(BUILT 2026-07-29; ratified 2026-07-29)* | **(none — channel-only, net-new)** | **nest-signature** + foreign-member-bound-to-home-`nest_id` | `fauna.federation.channel.actors` | the **roster-read twin of `channel.fetch`** — the add-participant heal's discriminator for a member whose channel is foreign-homed (heal mechanics: `mls-group-key-material.md` § M2 *Admitting a member*, chat bullet). The home nest answers the union `actor_channels ∪ channel_foreign_members` — **hex actor ids only, never nest URLs** (members already read the full membership off the MLS ratchet tree, so the ids disclose nothing new; URLs would) — and the read is **strictly read-only on every hop**: no auto-register anywhere (a roster read that wrote a row would make every phantom look healthy to the next caller). The **client leg is the distinct kind** `fauna.conversations.channel.actors_remote { channel_id, nest_url }` — never an additive `nest_url` on `channel.actors`, for a sharper reason than `send_remote`'s (`../behavior/direct-messages.md` § step 3b): an old member-nest ignoring an additive field would answer its **partial** roster as a clean success, and the heal consuming it would evict a healthy member under supported version skew — while an unknown kind fails loud and the seam's error→"roster unreadable" mapping lands in the heal's refuse arm, the correct degradation on every skew pairing. The fetch-vs-actors dividing line: fetch's additive field is safe because its old-nest degrade is a benign stale/empty read; the actors read feeds a **membership-mutating** heal, so a silently wrong answer corrupts. |
-| Conversation **attachment write token** *(BUILT 2026-09-09; ratified 2026-09-09)* | **(none — channel-only, net-new)** | **nest-signature** + foreign-member-bound-to-home-`nest_id` | `fauna.federation.conversation.write_token.mint` | the **blob twin of `channel.append`**: a room's attachment bytes rest on its home nest beside the record that pins them (`../behavior/conversation-rooms.md` § The home nest → *Attachment bytes* owns the residency), so a foreign member's own nest relays this mint and the member POSTs the sealed attachment DIRECT to the home nest's `POST /api/v1/blob` under the returned short-lived, write-only bulk token (purpose `ForeignConversationWrite`, TTL the same `FOREIGN_WRITE_TOKEN_TTL_SECS` Rust constant, bridge-mint-refused) — **bytes never ride this channel**. Gate: the `channel.fetch` gate verbatim (`require_foreign_member`) — no `access == 'writer'` arm, because a conversation has no claimant and every member posts; no metering, because a room carries no owner-pays byte policy (§ Cross-nest → *Substrate vs. policy*). Client leg: the distinct kind `fauna.conversations.blob.write_token.get { channel_id, nest_url }` (unknown-kind-loud on an old own nest, S5-mapped to `peer_nest_outdated`); the read leg needs no kind — a member fetches by content address from the home nest's public `GET /api/v1/blob/{hash}`, direct. |
+| Conversation **attachment write token** *(BUILT 2026-09-09; ratified 2026-09-09)* | **(none — channel-only, net-new)** | **nest-signature** + foreign-member-bound-to-home-`nest_id` | `fauna.federation.conversation.write_token.mint` | the **blob twin of `channel.append`**: a room's attachment bytes rest on its home nest beside the record that pins them (`../behavior/conversation-rooms.md` § The home nest → *Attachment bytes* owns the residency), so a foreign member's own nest relays this mint and the member POSTs the sealed attachment DIRECT to the home nest's `POST /api/v1/blob` under the returned short-lived, write-only bulk token (purpose `ForeignConversationWrite`, TTL the same `FOREIGN_WRITE_TOKEN_TTL_SECS` Rust constant, bridge-mint-refused) — **bytes never ride this channel**. Gate: the `channel.fetch` gate verbatim (`require_foreign_member`) — no `access == 'writer'` arm, because a conversation has no claimant and every member posts; no metering, because a room carries no owner-pays byte policy ([`federation-shared-folders.md`](federation-shared-folders.md) § Cross-nest → *Substrate vs. policy*). Client leg: the distinct kind `fauna.conversations.blob.write_token.get { channel_id, nest_url }` (unknown-kind-loud on an old own nest, S5-mapped to `peer_nest_outdated`); the read leg needs no kind — a member fetches by content address from the home nest's public `GET /api/v1/blob/{hash}`, direct. |
 | Conversation **room generation read** *(BUILT 2026-09-10; ratified 2026-09-08)* | **(none — channel-only, net-new)** | **nest-signature** + foreign-member-bound-to-home-`nest_id` | `fauna.federation.conversation.generations.fetch` | the **key-read twin of `channel.fetch`**, and the piece that makes a community room reachable from a foreign member at all: the log `channel.fetch` relays is sealed under a room generation key (`../behavior/community-rooms.md` § The three classes → *Community*), so a member homed elsewhere needs its own wraps as well as the ciphertext, and "a member on a foreign nest reaches the room only through their own home nest" (§ The home nest). Gate: the `channel.fetch` gate verbatim (`require_foreign_member`) — a room id **is** its channel id. ⚠ **The request carries `{ requesting_actor_id, room_id }` and deliberately NO `entry_id`, and never may:** the room home resolves which wraps to serve from the requesting actor's own live floor entry (the same resolution the same-nest `room.generations` uses), because the home nest of a community room is *itself* a seated floor principal with a room-read wrap — an entry-named request would let a relay ask for that one and read the room, when a relay is specified to carry ciphertext and hold no wrap (§ The home nest). Bound as it is, the worst a hostile relay can request is a wrap belonging to one of **its own** members, sealed to that member's reception key and opaque to it. Read-only on every hop: serving a wrap registers nothing and mints nothing. Client leg: the distinct kind `fauna.conversations.room.generations_remote { room_id, nest_url }` — distinct for the `channel.actors_remote` reason, not `send_remote`'s: an old own-nest ignoring an additive `nest_url` would answer from its own empty room plane as a clean success, and the member would read "this room has no generations", a silently wrong answer **about key material**; an unknown kind fails loud. The relaying nest forwards the reply and stores none of it. |
-| Conversation **room roster read** *(BUILT 2026-09-10; ratified 2026-09-10)* | **(none — channel-only, net-new)** | **nest-signature** + foreign-member-bound-to-home-`nest_id` | `fauna.federation.conversation.roster.fetch` | the **name-read twin of `channel.fetch`**, and the piece that carries the id→handle announce to the one seat it could not reach: the **foreign member's own device**. A room's floor roster lives on its home nest alone (`../behavior/conversation-rooms.md` § The home nest), so a member homed elsewhere has no roster read at all — its own nest holds no room record and answers `permission_denied`, indistinguishable from "you are not a member" — and every co-member it has not met renders as an elided actor id, including the members the announce names for everyone on the room's home. Gate: the `channel.fetch` gate verbatim (`require_foreign_member`) — a room id **is** its channel id. ⚠ **The gate is that and deliberately NOT `is_room_member` on top:** the home nest's `channel_foreign_members` row is its own record of the Welcome it relayed and the binding it pinned — admission itself — whereas an end-to-end room's floor roster is a member-*reported* mirror (§ The floor roster) that routinely lags a membership commit, so stacking it on would deny the read to the newest-seated member, precisely the one whose co-members are still nameless. Nothing is disclosed by that choice: an admitted channel member already reads every member's actor id off the MLS ratchet tree — and **admitted** is a live fact, not a historical one, because a removal ends the admission along with the seat. So this gate closes with the membership, and the doors beside it that read the same row alone — the write-token mint and `channel.actors` — close with it. ⚠ **Which ceremony closes them differs by class, and both are needed for that sentence to hold** (2026-09-11): a **community** room's `room.remove` *purges* the binding before it unseats, exactly as `members.evict` does on the folder plane (S8, the *Channel append* row) — the ceremony is [`../behavior/community-rooms.md`](../behavior/community-rooms.md) § Implementation status today → *A removal severs*; an **end-to-end** room has no such door (its membership authority is its MLS group, so `room.remove` refuses the class outright) and removes a member by membership commit plus the committing device's roster report, whose absorb stamps `removed_at` and purges nothing — so on that class these three doors *read the floor's verdict* and refuse a **positively removed** requester (`federation_handlers::refuse_removed_room_member`). **The two ceremonies are complementary, never cumulative:** the floor read is skipped on a floor-authoritative room, exactly the class `room.remove` serves, so every room has one severance mechanism and none has two — and the skip is required, because on the purge's class the binding *is* admission and the seat is a separate act, so a re-invite's relayed Welcome re-inserts the purged binding and must be served while the old `removed_at` row the purge superseded still stands. The ceremony is [`../behavior/conversation-rooms.md`](../behavior/conversation-rooms.md) § Implementation status today → *A removal severs on the end-to-end class too*. A requester with **no** floor row stays admitted under either ceremony — that is still the newest-seated member this row's gate is ratified to protect. **The resulting per-class asymmetry, declared:** the purge shuts all four doors on a community room including `channel.fetch`'s ciphertext drain, where the floor read shuts only these three plaintext doors and leaves an end-to-end room's `channel.fetch` open — ratified, because that removal re-keys the MLS group, so what a removed member may still fetch it cannot open, and the residue is the one its own retained keys already are. The floor read was chosen over purging on absorb *because* the report ratchet deliberately admits a departing member's final report, so a purge there would let one live member's false report sever every co-member's binding past recovery (the Welcome relay's insert arm holds `InsertOnly` power) — `principles.md` § No client-causable unrecoverable nest state. **Handles ride the reply, and that is the read.** This is emphatically NOT the refused id→handle oracle (§ Cross-nest shared folders + channel append, the id→handle bullet): that shape answered "what handle does actor X wear?" to any nest holding an id, under a gate that could verify nothing about the asker; here the asker must prove, through the same binding that lets it fetch the room's ciphertext, that one of its own members sits on this room's floor — exactly the audience the ratified announce names ("the rooms it is in"). The neighbouring `channel.actors` row serves hex ids only because *its* consumer is a membership-mutating heal that needs identity and never names; here naming is the whole point. The home serves it from `conversations_handlers::room_roster_reply`, the **same body** the same-nest door serves, so a foreign member sees the same names a home member sees and the two replies cannot drift. Read-only on every hop: serving a roster registers nothing and mints nothing. Client leg: the distinct kind `fauna.conversations.room.list_roster_remote { room_id, nest_url }` — distinct for the `channel.actors_remote` reason, since an old own-nest ignoring an additive `nest_url` would answer its own room plane's clean `permission_denied`, a refusal the seam cannot tell from "you were removed", leaving the members silently elided; an unknown kind fails loud. The relaying nest forwards the reply and stores none of it. |
+| Conversation **room roster read** *(BUILT 2026-09-10; ratified 2026-09-10)* | **(none — channel-only, net-new)** | **nest-signature** + foreign-member-bound-to-home-`nest_id` | `fauna.federation.conversation.roster.fetch` | the **name-read twin of `channel.fetch`**, and the piece that carries the id→handle announce to the one seat it could not reach: the **foreign member's own device**. A room's floor roster lives on its home nest alone (`../behavior/conversation-rooms.md` § The home nest), so a member homed elsewhere has no roster read at all — its own nest holds no room record and answers `permission_denied`, indistinguishable from "you are not a member" — and every co-member it has not met renders as an elided actor id, including the members the announce names for everyone on the room's home. Gate: the `channel.fetch` gate verbatim (`require_foreign_member`) — a room id **is** its channel id. ⚠ **The gate is that and deliberately NOT `is_room_member` on top:** the home nest's `channel_foreign_members` row is its own record of the Welcome it relayed and the binding it pinned — admission itself — whereas an end-to-end room's floor roster is a member-*reported* mirror (§ The floor roster) that routinely lags a membership commit, so stacking it on would deny the read to the newest-seated member, precisely the one whose co-members are still nameless. Nothing is disclosed by that choice: an admitted channel member already reads every member's actor id off the MLS ratchet tree — and **admitted** is a live fact, not a historical one, because a removal ends the admission along with the seat. So this gate closes with the membership, and the doors beside it that read the same row alone — the write-token mint and `channel.actors` — close with it. ⚠ **Which ceremony closes them differs by class, and both are needed for that sentence to hold** (2026-09-11): a **community** room's `room.remove` *purges* the binding before it unseats, exactly as `members.evict` does on the folder plane (S8, the *Channel append* row) — the ceremony is [`../behavior/community-rooms.md`](../behavior/community-rooms.md) § Implementation status today → *A removal severs*; an **end-to-end** room has no such door (its membership authority is its MLS group, so `room.remove` refuses the class outright) and removes a member by membership commit plus the committing device's roster report, whose absorb stamps `removed_at` and purges nothing — so on that class these three doors *read the floor's verdict* and refuse a **positively removed** requester (`federation_handlers::refuse_removed_room_member`). **The two ceremonies are complementary, never cumulative:** the floor read is skipped on a floor-authoritative room, exactly the class `room.remove` serves, so every room has one severance mechanism and none has two — and the skip is required, because on the purge's class the binding *is* admission and the seat is a separate act, so a re-invite's relayed Welcome re-inserts the purged binding and must be served while the old `removed_at` row the purge superseded still stands. The ceremony is [`../behavior/conversation-rooms.md`](../behavior/conversation-rooms.md) § Implementation status today → *A removal severs on the end-to-end class too*. A requester with **no** floor row stays admitted under either ceremony — that is still the newest-seated member this row's gate is ratified to protect. **The resulting per-class asymmetry, declared:** the purge shuts all four doors on a community room including `channel.fetch`'s ciphertext drain, where the floor read shuts only these three plaintext doors and leaves an end-to-end room's `channel.fetch` open — ratified, because that removal re-keys the MLS group, so what a removed member may still fetch it cannot open, and the residue is the one its own retained keys already are. The floor read was chosen over purging on absorb *because* the report ratchet deliberately admits a departing member's final report, so a purge there would let one live member's false report sever every co-member's binding past recovery (the Welcome relay's insert arm holds `InsertOnly` power) — `principles.md` § No client-causable unrecoverable nest state. **Handles ride the reply, and that is the read.** This is emphatically NOT the refused id→handle oracle ([`federation-shared-folders.md`](federation-shared-folders.md) § Cross-nest shared folders + channel append, the id→handle bullet): that shape answered "what handle does actor X wear?" to any nest holding an id, under a gate that could verify nothing about the asker; here the asker must prove, through the same binding that lets it fetch the room's ciphertext, that one of its own members sits on this room's floor — exactly the audience the ratified announce names ("the rooms it is in"). The neighbouring `channel.actors` row serves hex ids only because *its* consumer is a membership-mutating heal that needs identity and never names; here naming is the whole point. The home serves it from `conversations_handlers::room_roster_reply`, the **same body** the same-nest door serves, so a foreign member sees the same names a home member sees and the two replies cannot drift. Read-only on every hop: serving a roster registers nothing and mints nothing. Client leg: the distinct kind `fauna.conversations.room.list_roster_remote { room_id, nest_url }` — distinct for the `channel.actors_remote` reason, since an old own-nest ignoring an additive `nest_url` would answer its own room plane's clean `permission_denied`, a refusal the seam cannot tell from "you were removed", leaving the members silently elided; an unknown kind fails loud. The relaying nest forwards the reply and stores none of it. |
 | Conversation **room roster report** *(BUILT 2026-09-10; ratified 2026-09-10)* | **(none — channel-only, net-new)** | **nest-signature** + foreign-member-bound-to-home-`nest_id` | `fauna.federation.conversation.roster.report` | the **write twin of the roster read above**, and the piece that lets a member homed elsewhere keep the room's floor roster true: § The floor roster has the committing device report the resulting roster to the room's **home** nest after every membership or policy commit, and a foreign member's commit rides its own nest's relay to the home's log — so its report must ride the relay too, or the home's floor (routing fan-out, the custody serve door, the cross-nest relay gate, succession targets) goes stale until a same-nest member happens to commit (`../behavior/conversation-rooms.md` § The home nest). The request carries `{ requesting_actor_id, room_id, members, policy_version, commit_seq }` — the same-nest `room.roster_report` body plus the requester the home binds; `commit_seq` is additive, and it is the home's own log position, since the member's commit rode the same relay to the home's log. Gate: the `channel.fetch` gate verbatim (`require_foreign_member`) **in place of** the same-nest door's routing-roster gate 1, and strictly stronger than it: the `channel_foreign_members` row is the home's own record of the Welcome it relayed and the binding it pinned, where a routing row is `channel.send`-self-registered and proves only knowledge of the channel id. Behind that gate the home runs **the same body its same-nest door runs** (`conversations_handlers::room_roster_report_apply`: roster validation, gate 0's provenance refusal of a floor-authoritative room, the gate 2 ratchet against the STORED roster, the commit-order guard of `../behavior/conversation-rooms.md` § The floor roster — whose authorship half reads the `requesting_actor_id` the home bound here as the reporter, and compares it against the sender the home recorded for the commit at that position, which for a foreign member's commit is the same bound id its `federation.channel.append` carried — the wholesale replace) — one body, so the two doors cannot drift, and the bootstrap bound (`conversation-rooms.md` § Implementation status today) does not widen: a relayed first report is admissible only from a Welcome-bound member naming itself, never from any routing-roster actor. Client leg: the distinct kind `fauna.conversations.room.roster_report_remote { room_id, nest_url, members, policy_version, commit_seq }` — distinct for the `channel.actors_remote` reason: an old own-nest ignoring an additive `nest_url` would run its same-nest door on a room it does not home and, the reporter being on its routing roster, bootstrap a **stray floor** as a clean success while the real home stayed stale — a silently wrong answer about membership; an unknown kind fails loud and the seam tallies the report undelivered. The glue picks the kind where the read does, from the channel's recorded home (`RoomRosterReport.home_nest_url`). The relaying nest forwards the position and the ack and stores none of it: it holds no room record for a room homed elsewhere, and a roster it cached would be a membership question it has no authority over. Replay-safe on both hops (a wholesale replace is idempotent). |
 | Conversation **room-post verdict read** *(BUILT 2026-09-11; ratified 2026-09-11)* | **(none — channel-only, net-new)** | **nest-signature** + foreign-member-bound-to-home-`nest_id` | `fauna.federation.conversation.room_labels.fetch` | the **verdict-read twin of `channel.fetch`** for the one room read that had none, and the piece that puts a room post's badge on a foreign member's card: a room *message*'s verdicts ride `channel.fetch`'s page, which already relays, but a room **post** is its author's ordinary post — it reaches every follower through `fauna.posts.get`, the feed pages and the deep-link door, none of them floor-gated because the bytes are sealed — so its verdicts take a post-scoped door of their own that no envelope read carries ([`../behavior/restricted-posts.md`](../behavior/restricted-posts.md) § Encryption at rest → *Room-restricted — the ruling* → *Built* detail (v) owns that door). That door resolves each post's room from the serving nest's **own** reception-pass map, which only the room's home nest writes (`room_post_view::index_room_post` runs on the nest that *stores* the post), so a member homed elsewhere resolved nothing and was answered empty — and empty is deliberately indistinguishable from “nobody labelled this post”, so the card lost its badge silently rather than loudly. Gate: the `channel.fetch` gate verbatim (`require_foreign_member`) — a room id **is** its channel id — **and the floor on top of it**, unlike the *room roster read* row above. That is not a fresh decision but the verdict plane's standing one: `conversations_handlers::page_verdicts` is already the one home for both rules, shared by the same-nest `channel.fetch` and its federated twin, so the **message** verdict read across this very relay stacks `is_live_floor_member` too, and the two verdict reads may not drift on who a verdict reaches. The roster read's ratified refusal to stack a seat check cannot apply here: it feared denying the newest-seated member off a member-*reported* mirror, and `is_live_floor_member` refuses any room that is not floor-authoritative outright (`db::rooms::RoomRecord::is_floor_authoritative` — “the nest's own ceremonies write its roster”), so the only rooms it passes are ones whose floor this nest writes itself. ⚠ **The request carries `{ requesting_actor_id, room_id, post_ids }` — `room_id` where the same-nest request deliberately has none**, and that difference is the gate's: the same-nest read is post-scoped precisely so a caller need not know which room indexed a post, while the structural gate needs the channel id before anything is resolved. The requester always holds it (a room post names its room in its own `KeyAccess::Room` arm, which is what it opened the post by), and naming it also **narrows** the read — the home answers only for posts its own map assigns to *that* room, so one request cannot fish across rooms. Behind the gate the home runs **the same body its same-nest door runs** (`posts_handlers::room_labels_for`, narrowed to the named room), so a foreign member reads exactly what a member homed here reads. Read-only on every hop: serving a verdict registers nothing and mints nothing. Client leg: the distinct kind `fauna.posts.room_labels_remote { room_id, post_ids, nest_url }` — distinct for the `channel.actors_remote` reason, since an old own-nest ignoring an additive `nest_url` would answer from its own reception-pass map, which indexes no post of a room it does not home, as a clean **empty success** the reader cannot tell from “nobody labelled this post”; an unknown kind fails loud, and the feed's best-effort read then keeps the card's own labels. The glue picks the kind where the conversations plane picks it, from the channel's recorded home (the `RoomPostKeys::room_home_nest_url` seam over `ChannelHome`). The relaying nest forwards the reply and stores none of it: it holds no room record, no map row and no verdict row for a room homed elsewhere, and a verdict it cached would be a floor question it has no authority over. |
+| Conversation **room search** *(BUILT 2026-10-17; ruled 2026-10-16)* | **(none — channel-only, net-new)** | **nest-signature** + foreign-member-bound-to-home-`nest_id` **+ the floor on top** (the verdict-read row's gate, for the verdict-read row's reason: `is_live_floor_member` is the same-nest door's own gate, and the two doors may not drift on who a hit reaches) | `fauna.federation.conversation.room.search.fetch` | the search twin of `channel.fetch` for a member homed elsewhere — the one community-room read of a live floor member that still had no relay (`../behavior/community-rooms.md` § Implementation status today owns the door and its rule: hits name positions, ids and ranks, never text; `include_posts` names the room posts the home stores). `{ requesting_actor_id, room_id, query, limit?, include_posts }` → the same-nest `RoomSearchReply`, the home resolving the requester's standing itself and running the body its own `room.search` door runs (`conversations_handlers::room_search_for` — whose floor-seat gate is the floor this row stacks, so it is stacked by construction, never restated); read-only on every hop, the relaying nest stores nothing. Client leg: the distinct kind `fauna.conversations.room.search_remote { room_id, query, limit?, include_posts, nest_url }`, the glue picking it by the channel's recorded home as every `_remote` relay is picked. **Why it exists here:** it is the discovery door a room post takes to a foreign member until the federated follow lands — a post hit, with the room's home, opens through the `posts.get_remote` relay (the post-fetch row above). |
 | Conversation **room leave** *(BUILT 2026-09-11; ratified 2026-09-11)* | **(none — channel-only, net-new)** | **nest-signature** + foreign-member-bound-to-home-`nest_id` | `fauna.federation.conversation.room.leave` | the **self-scoped twin of the roster report above**, the room plane's first *mutating self-scoped* relay, and the piece that gives a member homed elsewhere a departure at all: [`../behavior/conversation-rooms.md`](../behavior/conversation-rooms.md) § Roles and authorization grants *leave (remove self)* to every role but owner with no homing carve-out, yet `room.leave` is a same-nest door and a leaver's own nest holds no room record for a room homed elsewhere, so it answers "no such room" (§ The home nest — every other nest relays). What a departing foreign member could actually reach was the generic `channel.leave` row above, which drops the relay binding and never touches the floor — so the seat outlived the departure. That residue is not inert: the roster-coverage gate **obliges** every later generation mint to wrap to a live floor entry carrying a reception key, so the room could not mint afterwards without handing the generation to a member who had left; and `room.invite` refuses a principal that is already a member, so the same ghost blocked the re-admission that would have healed it, while the departed member — binding gone — could not even read the floor it was still on. Gate: the `channel.fetch` gate verbatim (`require_foreign_member`), and **self-scoped past it** — the body retires the *requesting* actor's seat and nothing else, so a peer nest can end only its own members' membership, never somebody else's. Behind the gate the home runs **the same body its same-nest door runs** (`conversations_handlers::room_leave_apply`: the owner's refusal — a room is never owner-less, unreachable here because a room is born on its owner's home and a transfer re-homes it — then — on a floor-authoritative room only — the binding purge, then the unseat; an end-to-end room's departure moves the seat alone, since that class severs by reading the floor, [`../behavior/conversation-rooms.md`](../behavior/conversation-rooms.md) § Roles and authorization → *Leaving — the mechanism*), so the two doors cannot drift, and the generic `channel.leave` runs it too on a room. **Two acts in the ratified fail-closed order**, `room.remove`'s verbatim ([`../behavior/community-rooms.md`](../behavior/community-rooms.md) § Implementation status today → *A removal severs*): purge the binding **before** the unseat, because the purge reads no floor, so a failed purge changes nothing and a purge over a failed unseat leaves a seat with no relayed reach — tighter than it was, never leakier. The one way this door's residue differs from the removal's is that a *self*-leave's own authorization is the binding it just purged, so its own retry is refused at the gate rather than converging; `room.remove` from any remaining owner or admin — a door that reads a rank, not a binding — is what converges it. **No rotation**, and that is a reason rather than an omission (same §, the leave paragraph): a leaver holds no mint authority, and a mint it could build would still wrap to itself. **Idempotent**, as the same-nest door is too since 2026-09-23: a caller already off the floor is answered with the live count, because this is the door a §4.D re-send arrives at and a refusal here would report a departure that landed as a failure that never happened; the gate still fails loud for a member this nest never bound. Client leg: the distinct kind `fauna.conversations.room.leave_remote { room_id, nest_url }` — distinct for the `channel.actors_remote` reason, since an old own-nest ignoring an additive `nest_url` would run its same-nest door on a room it does not home and answer "no such room", an `invalid_params` the seam cannot tell from a mistyped room id, leaving the leaver believing a departure failed for a reason it could fix while the real home kept them seated; an unknown kind fails loud. It is also the one relayed twin whose `forbid_replay` deliberately differs from its door's (`false` where `room.leave` is `true`), for the idempotence above. The glue picks the kind where the roster relays pick it, from the channel's recorded home (`ChannelHome`). The relaying nest forwards the ack and stores none of it: it holds no room record for a room homed elsewhere, and a seat it mirrored would be a membership question it has no authority over. |
 | Conversation **room invite delivery** *(BUILT 2026-09-26; ratified 2026-09-26)* | **(none — channel-only, net-new)** | **nest-signature**; the recipient's own reach policy against the SIGNED inviter | `fauna.federation.conversation.room.invite` | the **room home's push of a community-room knock** to an invitee homed on the receiving nest ([`../behavior/room-invitations.md`](../behavior/room-invitations.md) § Join rules and invites → *A cross-nest invitation*, ruling 1–2). The request carries `{ recipient_actor_id, signed_invite, origin_nest_url }` — the inviter's signed `SignedRoomInvite` verbatim (the record names the room, the invitee, the role and the policy version, and is what the receiver verifies before delivering a word of it) plus the home's self-declared address, honoured only against the connection's verified identity (`federation_handlers::resolve_origin_home_url`, one helper shared with the Welcome relay's `nest_url`). The receiver refuses an unregistered recipient (F10), a record that does not verify or names another invitee, and — **unlike a Welcome, whose wire carries no signed sender** — runs the recipient's reach policy in full over the inviter (`conversations_handlers::conversation_initiation_reach_gate` at `Federation` origin: the floor's `federation_contact` pillar, the inbox mode against the contact edge), then delivers one `InboxKind::RoomInvite` envelope under the recipient's quota with `room_node` bound to the verified home, and stores no room record and no invitation row. Why a kind of its own: `inbox.deliver`'s wire is a signed contact-request pair with its own verification, and `welcome.deliver` fails the reach floor closed for want of a signed sender. **`forbid_replay=true`** on `inbox.deliver`'s grounds (a delivery appends a row and charges quota per call); the home records its `room_invites` row BEFORE originating and consumes it on a failed delivery, so a retry re-delivers exactly one knock. Originated by `room.invite` itself when `invitee_node` is non-empty (`conversations_handlers::room_invite_deliver_abroad`); the home's own reach gate is deliberately not run for a foreign invitee. |
 | Conversation **room accept** *(BUILT 2026-09-26; ratified 2026-09-26)* | **(none — channel-only, net-new)** | **nest-signature** + **the delivered invitation names the origin as the invitee's home** (NOT the foreign-member binding) | `fauna.federation.conversation.room.accept` | the **seating twin of the room leave above**, and the one relayed room door whose gate is not `require_foreign_member` — because the `channel_foreign_members` row is what this door WRITES, and writing it at delivery time would open the binding-only doors (the relayed roster read above all) to an invitee who never accepted. The request carries `{ requesting_actor_id, room_id, reception_pubkey }` (the same-nest `room.accept_invite` body plus the requester the home binds). Gate: the home's `room_invites` row for `(room, requester)` must carry the verified `nest_id` the invitation was DELIVERED to — resolved from the delivery dial's handshake, never inviter-declared (`db/rooms.rs::room_invite_home_binding`) — so only the nest an invitation went to can seat that invitee, and self-scoped past it. Behind the gate the home runs **the same body its same-nest door runs** (`conversations_handlers::room_accept_apply`: the standing-offer judgement, the policy-version compare-and-swap seating, the lapse) and THEN inserts the binding with `InsertOnly` power — **seat first, bind second**, the removal's purge-then-unseat inverted for the inverted reason (a seat without reach is the tighter half-state; a binding without a seat would serve the floor to a non-member). **Idempotent**, `room.leave`'s posture: a requester whose invitation from this nest is already accepted and who holds a live seat is answered with its role and its binding re-asserted, which also converges the half-landed "seated, not yet bound" state; a consumed invitation, or an accepted one whose seat was since removed (`unseat_room_member` clears the row), is refused as a stale same-nest accept is. No routing-roster row for a foreign member (pull-only, `../behavior/community-rooms.md` § Implementation status today). Client leg: the distinct kind `fauna.conversations.room.accept_invite_remote { room_id, nest_url, reception_pubkey }` — distinct for the `channel.actors_remote` reason: an old own-nest ignoring an additive `nest_url` would run its same-nest door on a room it does not home and answer "no invitation pending", indistinguishable from a genuine lapse; an unknown kind fails loud. `forbid_replay=false` on the client leg as on `leave_remote`, for the idempotence above. The glue picks the kind off the knock's `room_node` (`RoomCeremonyRpc::room_accept_invite`'s `home_nest_url`), and the shared manager records that URL as the channel's home so every later relay of the room (fetch, send, roster, generations, leave) is routed by the one `ChannelHome` signal. The relaying nest forwards the ack and stores none of it. Proof: `conformance_cross_nest_conversations_client.rs::a_cross_nest_invitation_seats_the_foreign_member_through_its_own_nest`. |
 | Conversation **room invite issue** *(BUILT 2026-09-26; ratified 2026-09-26)* | **(none — channel-only, net-new)** | **nest-signature** + foreign-member-bound-to-home-`nest_id`, and the signed act's signer IS the requesting actor | `fauna.federation.conversation.room.invite_issue` | the **issuing twin of the room accept above**, and the leg that gives a member homed elsewhere the *invite* that `member-invite` grants every member ([`../behavior/room-invitations.md`](../behavior/room-invitations.md) § Join rules and invites → *A cross-nest invitation*, the closing paragraph): `room.invite` is a same-nest door, and an inviter's own nest holds no room record for a room homed elsewhere, so it answers "no such room". The request carries `{ requesting_actor_id, signed_invite, invitee_node, origin_nest_url }` — the same-nest `room.invite` body plus the requester the home binds and the relaying nest's self-declared address. Gate: the signed act's signer must be the requesting actor (`conversations_handlers::verify_room_invite_act`, the same-nest door's own first act, run on the relaying nest too so it never forwards an act under its member's name), then `require_foreign_member` verbatim — that actor holds a live binding on the room from the verified origin; a removal purges the binding with the seat on this class, and the body's seat read refuses whoever a purge missed. Behind the gate the home runs **the same body its same-nest door runs** (`conversations_handlers::room_invite_apply`: the floor-authoritative check, the join-rule judgement, the already-a-member refusal, the delivery), so the two doors cannot drift and a foreign member is granted and refused exactly as a member homed there. **Three deliveries, one body:** `invitee_node` keeps its inviter-side meaning (the invitee's home as the inviter knows it, empty for the inviter's own nest) and picks the arm — empty is resolved by the home to the relaying nest's **verified** identity (`resolve_origin_home_url`, the helper the Welcome and invite-delivery relays share; `origin_nest_url` is honoured only against that identity) and served by the *room invite delivery* push above, aimed back at the relaying nest; a node naming the home itself is a same-nest delivery into the invitee's own inbox under the invitee's reach policy at `Federation` origin (a nest never dials itself); any other node is the same push to that third nest. The delivery's dial records the invitee's home as before, so each invitee's later accept is gated exactly as the *room accept* row says. **`forbid_replay=true`** on both hops, `room.invite`'s own posture and unlike the leave and accept twins: a delivery per call, so the inviter re-issues and the pending invitation is refreshed rather than duplicated. Client leg: the distinct kind `fauna.conversations.room.invite_remote { invite, nest_url, invitee_node }` — distinct for the `channel.actors_remote` reason: an old own-nest ignoring an additive `nest_url` would run its same-nest door on a room it does not home and answer "no such room", an `invalid_params` the seam cannot tell from a mistyped room id; an unknown kind fails loud. The glue picks the kind off the channel's recorded home (`ChannelHome`), as `leave_remote` does. The relaying nest forwards the ack and stores none of it. Proof: `conformance_cross_nest_conversations_client.rs::a_foreign_member_invites_through_its_own_nest_under_member_invite`. |
-| Folder **content plane** *(BUILT — read kinds 2026-07-19, write kinds 2026-07-20; ratified 2026-07-18)* | **(none — channel-only, net-new)** | **nest-signature** + foreign-member-bound-to-home-`nest_id` (+ `access == 'writer'` on the write kinds) | `fauna.federation.folder.{changes.fetch,content_key.fetch,actors.fetch,changes.record,write_token.mint}` | cross-nest shared-set discovery + write relay (`actors.fetch` — the writer roster read, BUILT 2026-09-29; § Cross-nest shared folders + channel append → *The cross-nest writer roster read*); chunk/manifest **bytes never ride this channel** (open by-hash HTTPS bulk plane, `transport.md` § carve-out; the write side gets a short-lived write-only bulk token from `write_token.mint`). **With `folder.read_token.mint` (BUILT 2026-10-03 — the read-scoped twin of `write_token.mint`, member gate alone) this is the whole BUILT folder federation kind set — no `lease`/`conflicts` twin (v1 scope; conflicts a named gap); two more kinds, `folder.serve.announce` and `folder.chunk.wanted`, carry relay serving across nests (ruled 2026-10-01, BUILT 2026-10-04; *Relay serving across nests* in the section).** § Cross-nest shared folders + channel append. |
-| Folder **public read plane** *(BUILT 2026-08-18; ratified 2026-08-18)* | **(none — channel-only, net-new)** | **nest-signature** for attribution + throttle only — the authorization is the ADDRESSED FOLDER's own `audience == 'public'`, never the caller | `fauna.federation.folder.public.fetch` | the publicly-synced follow's read leg (§ The public folder read plane owns the gate reasoning; behavior: [`../behavior/folders.md`](../behavior/folders.md) § Publicly-synced follow). **The one kind here whose request carries NO requesting actor** — deliberate, not an omission: there is no membership to check, so a follower's identity never crosses the wire and the home nest sees only the requesting nest + source IP (its throttle keys). **Deliberately NOT an audience arm on `folder.changes.fetch`:** an OR-ed world-readability branch inside the member gate is one bug away from opening member data, so this kind's gate is the inverse shape — *serve iff the addressed row's current `audience == 'public'`, else `not_found`* (`folder_public::resolve_public_folder`, the one core both this kind and its client twin `fauna.folders.public.fetch` authorize through). Same reasoning nest-locally: `folder_authz::can_read_folder` keeps its membership-only behavior; `FolderReadGrant` gained a `Public` variant that names the grant but is never *returned* by that resolver. **Zero state, zero metering:** the handler writes nothing (no follower rows — not enumerable, not floodable into disk) and charges nothing. Rows are floor-filtered (`folders.public_floor_seq`, schema v44 — nothing recorded before the latest flip-to-public is served) and **stripped** of `device_id`/`author_actor_id`/`path_sealed`/`content_key_version`. Bulk bytes stay off this channel per the standing carve-out: manifests/chunks GET by hash on the open bulk plane, plaintext for a public folder. A flip-back makes the next read answer `not_found` — that IS the revoke. |
+| Folder **content plane** *(BUILT — read kinds 2026-07-19, write kinds 2026-07-20; ratified 2026-07-18)* | **(none — channel-only, net-new)** | **nest-signature** + foreign-member-bound-to-home-`nest_id` (+ `access == 'writer'` on the write kinds) | `fauna.federation.folder.{changes.fetch,content_key.fetch,actors.fetch,changes.record,write_token.mint}` | cross-nest shared-set discovery + write relay (`actors.fetch` — the writer roster read, BUILT 2026-09-29; [`federation-shared-folders.md`](federation-shared-folders.md) § Cross-nest shared folders + channel append → *The cross-nest writer roster read*); chunk/manifest **bytes never ride this channel** (open by-hash HTTPS bulk plane, `transport.md` § carve-out; the write side gets a short-lived write-only bulk token from `write_token.mint`). **With `folder.read_token.mint` (BUILT 2026-10-03 — the read-scoped twin of `write_token.mint`, member gate alone) this is the whole BUILT folder federation kind set — no `lease`/`conflicts` twin (v1 scope; conflicts a named gap); two more kinds, `folder.serve.announce` and `folder.chunk.wanted`, carry relay serving across nests (ruled 2026-10-01, BUILT 2026-10-04; *Relay serving across nests* in the section).** [`federation-shared-folders.md`](federation-shared-folders.md) § Cross-nest shared folders + channel append. |
+| Folder **public read plane** *(BUILT 2026-08-18; ratified 2026-08-18)* | **(none — channel-only, net-new)** | **nest-signature** for attribution + throttle only — the authorization is the ADDRESSED FOLDER's own `audience == 'public'`, never the caller | `fauna.federation.folder.public.fetch` | the publicly-synced follow's read leg ([`federation-shared-folders.md`](federation-shared-folders.md) § The public folder read plane owns the gate reasoning; behavior: [`../behavior/folders.md`](../behavior/folders.md) § Publicly-synced follow). **The one kind here whose request carries NO requesting actor** — deliberate, not an omission: there is no membership to check, so a follower's identity never crosses the wire and the home nest sees only the requesting nest + source IP (its throttle keys). **Deliberately NOT an audience arm on `folder.changes.fetch`:** an OR-ed world-readability branch inside the member gate is one bug away from opening member data, so this kind's gate is the inverse shape — *serve iff the addressed row's current `audience == 'public'`, else `not_found`* (`folder_public::resolve_public_folder`, the one core both this kind and its client twin `fauna.folders.public.fetch` authorize through). Same reasoning nest-locally: `folder_authz::can_read_folder` keeps its membership-only behavior; `FolderReadGrant` gained a `Public` variant that names the grant but is never *returned* by that resolver. **Zero state, zero metering:** the handler writes nothing (no follower rows — not enumerable, not floodable into disk) and charges nothing. Rows are floor-filtered (`folders.public_floor_seq`, schema v44 — nothing recorded before the latest flip-to-public is served) and **stripped** of `device_id`/`author_actor_id`/`path_sealed`/`content_key_version`. Bulk bytes stay off this channel per the standing carve-out: manifests/chunks GET by hash on the open bulk plane, plaintext for a public folder. A flip-back makes the next read answer `not_found` — that IS the revoke. |
 | Trend exchange/export *(BUILT 2026-07-14; ratified 2026-07-12)* | **(none — channel-only, net-new)** | **nest-signature** | `fauna.federation.trends.{exchange,export}` | k-gated trend-velocity aggregates (`behavior/trending.md` owns the mechanism — landed there through 2026-07-14, including the exchange-originator legs + the import-triggered `post.get` fetch). **The one ratified, scoped exception to the non-scaling rule (frame D7, 2026-07-12):** distinct chosen peers contribute presence-only buckets that sum on a **capped log ramp** (ceiling 300‰) — permitted because trending is promote-only into a user-chosen feed; claimed magnitudes still buy nothing, and reports keep the flat bucket verbatim. Open-federation, per-origin throttled, small entry cap + peer-row TTL. |
+| **Federated follow** *(ruled 2026-10-16 as TARGET STATE; designed the same day — [`../behavior/federated-follow.md`](../behavior/federated-follow.md) owns the design; the subscribe twin, the state leg, the key-blob relay and delivery BUILT 2026-10-17 — § Implementation status today)* | **(none — channel-only, net-new)** | **nest-signature** + the subscriber's own signed `FollowIntent` (under `Capability::Follow`, naming its home nest's id) carried verbatim by their nest, which the home binds to the verified `origin_nest_id` — the `write_token.mint` posture | five kinds, all nest-signature, net-new: `fauna.federation.follow.subscribe` and `follow.unsubscribe` (the signed twins of `fauna.subscriptions.{subscribe,unsubscribe}`, originated inline by the follower's nest and answered with the home's `SubscribeReply`), `follow.deliver` (**push** — the author's nest's outbox sends each stored post's envelope, the `post.forward` payload shape, once per distinct follower home; the receiver admits it only for an author one of its users follows from that origin), `follow.state` (the home's push of a request's fate — approved / rejected / removed — to the subscriber's home) and `follow.key_blob.fetch` (the follower's nest relaying its subscriber's `key_blob.get` to the home, served iff on the roster from that origin); the delete leg widens `fauna.federation.post.delete` with a follow arm rather than adding a kind | a follower on nest A subscribes to an author on nest B and A receives B's author's post **envelopes** for its own index — delivery semantics [`feed-read-model.md`](feed-read-model.md) § The read model → *Posts of authors you follow on other nests*; the subscription and key leg [`../behavior/monetization.md`](../behavior/monetization.md) § Pillar 1 → *A follow across nests*. Envelopes only: the sealed body, `KeyBlob` and attachments stay on the author's nest — the body and attachments fetched by content address from its public blob route, the `KeyBlob` (a roster) read through the follower's own nest over `follow.key_blob.fetch` — and bulk bytes never ride this channel. |
 | Nostr proxy-delegation relay *(BUILT 2026-07-22; ratified 2026-07-22)* | **(none — channel-only, net-new)** | **nest-signature** + `nostr_push` pairing capability (`pairing_has_capability`) | `fauna.federation.sync.{nostr_push,nostr_pull}` | Phase-2 head↔public-box proxy relay (`ui/nostr.md` § The bridging gate → Phase 2 owns the mechanism): the paired head **pushes** its `origin='ingest'` rows public-ward (the RPC reply is the ack; auto-provisions the public box's `signing_mode='proxied'` account row, refusing to clobber a deposited `nsec` or a different pubkey) and **pulls** externally-deposited rows head-ward, cursor-parameterized on the head-persisted compound `(stored_at, id)`, non-destructive (the public box keeps serving what it relays — no purge, hence no ack kind). Wire carries only signed public Nostr wire JSON + opaque kind-1059 wraps, never key material. Feature-gated (`nostr`; on in the shipping build — `Dockerfile`'s `--features bluesky,nostr,activitypub`). Registered 2026-07-22 (`register_sync_federation_handlers`). |
 | Nest-writer backup plane *(BUILT 2026-07-23; ratified 2026-07-23)* | **(none — channel-only, net-new)** | **nest-signature** + a user-minted **nest-writer grant** (`origin_nest_id` == the owner's granted writer pubkey, unrevoked; gate `require_backup_writer`) | `fauna.federation.backup.{changes.record,write_token.mint}` | the cross-location segment-backup writer plane (§ Nest-writer backup plane owns it): a source nest's in-process coordinator relays an owner's segment-backup custody into the owner's reserved custody-copy set here (resolved-or-created lazily behind the gate, same `record_change_core` as every write plane, owner-charged) and mints a short-lived write-only bulk token (`NestBackupWrite` purpose, 600 s Rust constant) for direct HTTPS chunk POSTs — **bytes never ride this channel**. **NOT pairing-gated:** `is_paired` stays scoped to the private nest-sync surface; the user-minted grant is the allowlist entry, so revocation at the destination freezes the source's writes with the source fully hostile. Registered 2026-07-23 (`register_backup_federation_handlers`). |
-| Identity-succession **propagation push** *(BUILT 2026-07-29; anchor-rule hardening 2026-07-29; ratified 2026-07-23)* | **(none — channel-only, net-new)** | **nest-signature** (attribution + throttle only — **no authorization gate**) | `fauna.federation.succession.push` | a home nest tells a peer that an identity the peer holds residue about was superseded (`succession-propagation.md` § Propagation owns the mechanism **and the anchor rule**). **The one mutating kind here with no gate, deliberately — because the push is a HINT whose payload is never trusted:** the receiver takes only *which identity to check* from the request, then verifies against the chain it fetches from its own recorded anchor for that identity (oldest addressable `channel_foreign_members` binding + its persisted `foreign_recovery_heads` head), refusing identities it holds no anchor for; hint-triggered verifies are throttled. A gate would add no security — the trust decision never rests on the sender. (The request's former `chain` field, kept for pre-hardening receivers that verified from the payload, left the wire with the 2026-09-24 compat-remnant sweep.) On acceptance the peer writes its own `actor_successions` row and re-points `channel_foreign_members` + contact edges; a statement naming a **locally-homed** identity is refused (only the client-facing `fauna.recovery.succession.submit` may supersede a local account, because only it re-points the account). Pushed best-effort to peers resolved from the residue rows' `home_nest_id` mapped through the nest-wide `nest_addresses` id→URL directory — each target identity's known addresses, proven-first and per-identity-fair capped, never the membership row's own overwritable address column (`succession-propagation.md` § Propagation owns the rule); the **pull** direction has no federation kind — a peer reads the pre-identity `fauna.recovery.{succession.lookup,registration.chain}` from its anchor over an anonymous client connection, the same way `federation_pool::resolve_peer_nest_id` reads `fauna.nest.info`. Registered 2026-07-29 (`register_succession_federation_handlers`). |
-
-**Ratified target-state, not yet built, deliberately NOT a table row until registered (2026-07-23): identity-succession propagation.** A push kind carrying a user's RecoveryKey-signed succession statement to every peer holding residue for that actor, plus a pre-identity pull of the succession chain from the old identity's home nest; a verifying peer re-points its remote-identity residue (`channel_foreign_members`, contact edges, cached key packages) and refuses *new* content signed by the superseded key. Statement shape, verification rule, and consumer obligations: [`../behavior/succession-propagation.md`](../behavior/succession-propagation.md) § Propagation — that doc owns the ceremony; this table gains the row when the kinds register.
+| Identity-succession **propagation push** *(BUILT 2026-07-29; anchor-rule hardening 2026-07-29; ratified 2026-07-23)* | **(none — channel-only, net-new)** | **nest-signature** (attribution + throttle only — **no authorization gate**) | `fauna.federation.succession.push` | a home nest tells a peer that an identity the peer holds residue about was superseded (`succession-propagation.md` § Propagation owns the mechanism **and the anchor rule**). **The one mutating kind here with no gate, deliberately — because the push is a HINT whose payload is never trusted:** the receiver takes only *which identity to check* from the request, then verifies against the chain it fetches from its own recorded anchor for that identity (oldest addressable `channel_foreign_members` binding + its persisted `foreign_recovery_heads` head), refusing identities it holds no anchor for; hint-triggered verifies are throttled. A gate would add no security — the trust decision never rests on the sender. (The request's former `chain` field, kept for pre-hardening receivers that verified from the payload, left the wire with the 2026-09-24 compat-remnant sweep.) On acceptance the peer writes its own `actor_successions` row and re-points `channel_foreign_members` + contact edges; a statement naming a **locally-homed** identity is refused (only the client-facing `fauna.recovery.succession.submit` may supersede a local account, because only it re-points the account). Pushed best-effort to peers resolved from the residue rows' `home_nest_id` mapped through the nest-wide `nest_addresses` id→URL directory — each target identity's known addresses, proven-first and per-identity-fair capped, never the membership row's own overwritable address column (`succession-propagation.md` § Propagation owns the rule); the **pull** direction has no federation kind — a peer reads the pre-identity `fauna.recovery.{succession.lookup,registration.chain}` from its anchor over an anonymous client connection, the same way `federation_pool::resolve_peer_nest_id` reads `fauna.nest.info`. Registered 2026-07-29 (`register_succession_federation_handlers`, `federation_handlers.rs:4405`); the push originates in `originate_succession_push` (`federation_pool.rs:2804`) and is fired by `push_succession_detached` (`recovery_handlers.rs:518`). |
 
 **The exchange originator plane is BUILT (2026-07-13; the 2026-07-12 distributed-moderation plan, Phase 1).** The `exchange_originator` worker (`bins/fauna-nest/src/exchange_originator.rs`, spawned beside the discovery poller) originates the reports and trends pairs: per cycle it **pushes** this nest's local exportable aggregates (`*.exchange`) to each peer and **pulls** each peer's (`*.export`), importing through the *same* validation + peer-bucket functions the serving exchange handlers use (`federation_handlers::import_report_entries`, and `import_trend_entries` for trends — one import path, both directions). Peer set, re-assembled every cycle (deduped, self-excluded): on a private nest, the distinct `nest_url`s of the live pairing rows whose actor is an admin of the nest (the deployment's own topology — `nest/private-mode.md` § Pairing Flow), distinct `feed_contributors` nests, and prior exchange partners (`exchange_peers`, recorded at origination time after a successful cycle — the channel handshake carries no origin URL, so inbound peers are unrecordable; the push+pull cycle keeps data flow bidirectional anyway). Triggers: startup, an ~hourly tick, debounced local-aggregate transitions (report capture/withdrawal, report-share opt-out), and peering events (a contributor grant/seed adding a new peer URL); every cadence constant is hard-coded Rust. Throttled both directions: a per-peer min-exchange-interval on origination (throttled pushes are delayed, never dropped) plus the serving side's per-nest `federation_rate_limit`. Proven by the two-nest cycle conformance test (push + pull + partner memory + no-laundering + throttle) and the two-binary tier_3 e2e (`test_federation_exchange_originator.py`: k=3 reports on nest A move to nest B's `peer_content_reports` + flat 100‰ bus row with no manual federation RPC). The trends pair lands on this same plane.
 
@@ -330,867 +332,7 @@ into the anonymous `by_handle` reply as a boolean (§ Key packages).
 
 ## Cross-nest shared folders + channel append (ratified 2026-07-18; nest plane + client read-side BUILT 2026-07-19, write plane BUILT 2026-07-20)
 
-Design + rationale: the 2026-07-18 read-write/cross-nest design (tracked internally);
-behavior/UI owner: `../ui/folders.md` § Sharing; custody/crypto owner:
-`mls-group-key-material.md` § M2. This section owns the **kinds, gates, and wire rules**.
-
-**Substrate vs. policy (rationale of record, 2026-07-19 — the one-sentence model for the
-two rails).** Conversations and shared folders share one substrate — one MLS group =
-one channel, one roster (`actor_channels` + `channel_foreign_members`), one Welcome
-relay, one fetch/append/leave kind family, bulk bytes on the by-hash HTTP plane for
-both — and the **channel claim is the single discriminator**: an unclaimed channel is
-egalitarian (any member posts and commits — a conversation), a claimed channel is
-owner-managed (roster-membership Commit admission, owner-only share/evict/rotate —
-a folder).
-Everything above that bit is deliberately per-rail **policy**, not accidental drift:
-reader/writer access, byte caps, and metering exist only on the claimed side because a
-filesystem has an owner and a storage-exhaustion abuse model, while a chat has neither
-(its abuse model is spam → behavioral checks). Do not force symmetry at the policy
-layer: a future conversations access feature (e.g. read-only announcement members)
-copies the channel-keyed *pattern* of `folder_member_access`, never generalizes the
-table or its claimant-gated writer (a conversation has no claimant to gate on). The
-known place substrate symmetry bites is the conv-reuse latent (a folder bound to a
-live conversation's group would flip that conversation to owner-only share/evict/
-rotate — Commit admission is unaffected, since `fauna.federation.channel.append`
-below already makes it roster-membership on both rails) — the claim-time fix belongs
-to whatever flow first builds real conversation-binding; its full obligation list is
-owned by `mls-group-key-material.md` § M2 / Rotate-on-removal, not restated here.
-
-- **One structural gate for the whole family** — the `channel.fetch` gate reused
-  verbatim: serve iff `foreign_member_home_nest(channel_id, requester) ==` the
-  connection's verified `origin_nest_id` (the row the home nest itself wrote at
-  Welcome-relay time). Write kinds (`changes.record`, `write_token.mint`,
-  `channel.append` on folder channels for content) additionally require the
-  owner-granted `access == 'writer'` in `folder_member_access`. Consistent with
-  § Trust model: the peer's signature is attribution; the authorization is state
-  this nest wrote.
-- **`fauna.federation.channel.actors` — REGISTERED 2026-07-29 (cross-nest chat
-  add slice 2); its contract lives on its kind-table row above** (§ the
-  cross-nest calls table, *Channel roster read*): the `channel.fetch` gate
-  verbatim, the union answer, the ids-only disclosure rule, the
-  no-auto-register-on-any-hop rule, and the distinct-client-kind
-  (`fauna.conversations.channel.actors_remote`) skew rationale. Heal
-  mechanics stay owned by `mls-group-key-material.md` § M2, chat bullet.
-- **The nest→nest id→handle question — RATIFIED 2026-09-10: no nest ever
-  asks another what handle an actor wears; a member's own home nest TELLS the
-  room's home, on the member's own drain.** The question this answers: a room
-  member homed on another nest has no `users` row on the room's home, so the
-  floor roster read (`../behavior/conversation-rooms.md` § Implementation
-  status today, the roster bullet) could not name it and the member rendered
-  as its elided actor id. Two shapes were weighed and one refused:
-  - **REFUSED — a reverse lookup, `"what handle does actor X wear?"`, as a
-    kind, under any gate.** The nest that would answer (the actor's home) can
-    verify nothing about the asker's standing: a foreign room's floor roster
-    lives on that room's home nest, and the actor's own nest records nothing
-    about the rooms its member joined elsewhere. So the only gate available
-    is the nest-signature — attribution and throttling, never authorization
-    (§ Trust model) — which makes the kind an *open* id→handle oracle bounded
-    by rate alone: the first surface in any plane to serve that direction, on
-    the disclosure-minimal roster surface whose one relay answers "hex actor
-    ids only" (the `channel.actors` row). Handles are public in the forward
-    direction (§ Key packages — `by_handle` is world-readable), but the
-    reverse turns an opaque 32-byte id — observable only by those an actor
-    has actually reached: co-members, recipients — into a name for whoever
-    holds the id. Not built, and not to be built.
-  - **RATIFIED — the announce.** The member's own home nest is the authority
-    for handles at its own domain, and it already originates every federated
-    call for that member. So it volunteers the member's `handle@domain` —
-    joined nest-side from its own `users` row, never taken from the client —
-    as two additive fields on the `fauna.federation.channel.fetch` it relays
-    (`FedChannelFetchRequest::requesting_handle` / `requesting_domain`), and
-    the room's home records the pair on the member's `channel_foreign_members`
-    binding **after** `require_foreign_member` admits the drain
-    (`federation_handlers::record_announced_handle`). `room.list_roster` then
-    joins it exactly as it joins a local member's `users.handle`; nothing on
-    the client changes shape. The name travels *with* the member into the
-    rooms it is in — the audience every chat product shows a member's name
-    to, and the audience the local join already served — never *out* to
-    whoever asks.
-  - **The domain is bound to the announcing key from the domain end, never
-    taken on the announcer's word.** Any nest can advertise any domain string
-    (its `nest.info.domain` is a self-description), so a hostile nest could
-    otherwise seat its member as `alice@bank.example` in every room it joins.
-    The room's home therefore runs the ordinary discovery chain of § Peer-auth
-    model *from the asserted domain* — `https://{domain}` → the shared
-    SRV/port resolver → `fauna.nest.info` over authenticated TLS
-    (`FederationChannelPool::resolve_domain_nest_id`, cached per domain) — and
-    stores the pair only when that chain lands on the authenticated
-    `origin_nest_id`. The same TLS floor § Security rests on; a nest naming
-    its member at a domain it does not serve is refused and logged as the
-    signal it is. The verification runs off the fetch path — a spawned task
-    the reply never awaits — so a slow or hostile domain never delays the
-    page. **Validated and rate-limited before anything is recorded.** The
-    asserted domain must first be a syntactically valid `host[:port]`
-    authority (`fauna_core::web::is_domain_authority_syntax`: a bare hostname
-    or IP literal, an optional numeric port, at most
-    `fauna_core::web::MAX_HOSTNAME_BYTES` octets) or the announce is ignored
-    like a malformed handle, before it ever reaches the dedup/verification
-    state. Identical announces are a no-op before any lookup, and a failed
-    resolution is cached too, both for a bounded window: a hostile peer buys
-    at most one discovery **per distinct domain** per window, never one per
-    fetch (alternating between two non-resolving domains does not defeat
-    this, since the cache keys on the domain, not the binding), and past the
-    window the same assertion is re-verified, so a domain that was only
-    transiently unreachable is not stuck on its first failure forever
-    (`FederationChannelPool::resolve_domain_nest_id`'s negative cache,
-    ). **The window alone bounds
-    the cost, not the resident memory** — a peer sending fresh
-    syntactically-valid domains fast enough would otherwise grow the negative
-    cache without limit inside one window, so it is additionally capped at a
-    fixed size (`FederationChannelPool::MAX_DOMAIN_FAILURE_ENTRIES`). **Past
-    the cap a newly-failing domain is simply not cached — nothing is evicted
-    to make room for it**, so the one-discovery-per-distinct-domain-per-window
-    bound above holds only while a peer's distinct-domain footprint inside one
-    window stays at or under the cap; a peer that floods past it pays a fresh
-    discovery on every single assertion of whichever domains the cap turned
-    away, while the resident negative-cache set itself still never exceeds
-    the cap either way (). A
-    domain already being resolved by a concurrent binding short-circuits to a
-    distinct "in flight" outcome rather than starting a second network
-    attempt or being mistaken for a cached failure (singleflight per domain);
-    total concurrently in-flight verifications across every peer are capped
-    too (`FederationChannelPool::MAX_CONCURRENT_ANNOUNCE_VERIFICATIONS`),
-    checked before the assertion is recorded so a drop at either cap is never
-    mistaken for a completed check and is free to retry on the member's next
-    drain ().
-  - **Why an additive field and not a distinct kind** — the `channel.actors`
-    row's own dividing line, answered rather than assumed away: an old home
-    nest ignoring the pair leaves the member elided, an old member-nest
-    omitting it leaves the member elided — both the shipped fallback, benign
-    in both skew directions — where `actors`' partial-roster-as-clean-success
-    would have corrupted a membership-mutating heal. A benign degrade rides
-    an additive field; a corrupting one needs a distinct kind.
-  - **Staleness.** The announce rides *every* drain, so a rename lands on the
-    member's next poll; the stored pair is display-only, refreshed by the
-    member's own reads and gone with the binding row on `channel.leave` — no
-    cache, no TTL, no invalidation protocol. Client-side the id-keyed read
-    re-asks a listed-but-nameless member at a widening gap of polls
-    (`FaunaMlsBackend::NAMELESS_REASK_CAP`), because "nameless" now means
-    "not announced yet", which the member's first drain changes.
-  - **Never an identity input.** What lands is what the roster *shows*;
-    every membership decision keys on the actor id, an announce for an actor
-    with no binding row writes nothing, and the member-reported mirror still
-    carries no handle (`../behavior/conversation-rooms.md` § The floor
-    roster). Witness: `conformance_cross_nest_conversations_client.rs`
-    (`a_foreign_members_handle_rides_its_own_drain_and_the_room_home_names_it`
-    — the honest drain names the member on the room's home and through the
-    client seam, the spoof at another nest's domain is refused, a rename at
-    the member's own domain lands, a malformed handle is ignored).
-- **The foreign-member binding is inviter-asserted (TOFU) — a named, accepted
-  premise (analysis 2026-07-18).** The `channel_foreign_members` row's
-  `home_nest_id` is resolved from the *inviter-client-supplied* `nest_url` at
-  Welcome-relay time — nothing binds it cryptographically to the recipient. A
-  hostile inviter (the owner, for folders; any member, for conversations) can
-  therefore misbind a recipient to an attacker-controlled nest. Bounded and
-  accepted for v1: MLS still carries confidentiality + message authenticity (the
-  misbound nest gains only ciphertext/metadata reads), misattribution stays inside
-  the declared nest-asserted-provenance envelope (`key-material-hierarchy.md`
-  § M2), and the residual effects are read-DoS of the genuine member plus
-  last-writer-wins re-binding on re-invite — all within the inviter's existing
-  power (they chose to add the member). Consequence for every kind in this family:
-  never derive quota, billing, or identity decisions from `home_nest_id` alone.
-  **That bound is enforced in two layers (2026-08-30).** The claimant gate
-  settled who may *write* a grant; it left the *conflict* arm open, and on the
-  conversation rail there is no claimant to gate on — so the power to move an
-  existing binding rested on knowledge of the 32-byte channel id alone. The
-  sole writer now splits insert-if-absent from update-existing: a first grant
-  stays open to any permitted caller (cross-nest DM initiation depends on it —
-  the caller is on no roster yet), while **rebinding an existing grant
-  requires standing on the channel** (the claimant, or a rostered actor on the
-  unclaimed conversation rail) — and **first authenticated use pins the
-  binding**: the first federated call the bound home nest is served for the
-  member (`require_foreign_member`, the one seam every exercising call flows
-  through — an outbound Welcome-relay ack is contact with the
-  *inviter-asserted* nest and deliberately confirms nothing) stamps the grant
-  confirmed, after which the standing-based arm refuses to move it. Only the
-  claimant — a claimed folder channel's owner, whose rebind power is the
-  accepted premise above — still moves a confirmed grant, and the move clears
-  the stamp so the incoming nest must earn its own confirmation. The pin is
-  what excludes the **MLS-removed ex-member**: removal is an encrypted commit
-  the nest never observes, and nothing deletes conversation-rail roster rows
-  (the only roster delete is folder-rail eviction/self-leave; the rail has no
-  same-nest leave kind at all), so standing there can only ever attest "was
-  ever rostered" — a predicate a former member passes forever. Rather than
-  asking the roster for an event it cannot see, the gate stops trusting the
-  roster once the binding has been exercised.
-  **The narrowed accepted residual is the establishment window, for a newly
-  created binding**: between the Welcome relay and the bound nest's first
-  served call, a rostered actor (an ex-member included) can still move the
-  unconfirmed grant — the healing window. Accepted because the window is
-  short by construction (the recipient's first drain, `direct-messages.md`
-  § Technical Flow — Cross-Nest step 3, is the very next thing that happens)
-  and re-binding inside it stays within the premise above. Two consequences
-  are deliberate, not oversights: a grant misbound at relay time and then
-  exercised by the misbound nest is pinned too — the healing rebind died with
-  the attack it enabled, and the remedy on the conversation rail is a fresh
-  channel; and a confirmed member whose home nest dies without an identity
-  succession is re-established the same way, since the cooperative re-homing
-  path — the bound nest's own `channel.leave` (deleting the grant), then
-  re-invite, or the claimant's evict + re-invite on the folder rail — needs
-  the old nest alive. Read "the inviter" in the premise above as: the
-  claimant, or — while the grant is unconfirmed — a rostered actor. That a
-  confirmed binding on an unclaimed channel thereby has no mover but the
-  incumbent is ruled a **per-object remedy** satisfying the client-state
-  recoverability invariant — conditions and rationale at
-  [`nest/common.md`](nest/common.md) § Client-state recoverability →
-  *Per-object remedies*, with this case as the worked example.
-
-  **Identity succession re-points the member, never the binding (2026-08-31).**
-  A verified peer succession `A → A'` renames the actor on every
-  `channel_foreign_members` row it owns; it does **not** move `home_nest_id`.
-  The statement carries no home-nest field at all (`../behavior/identity-succession.md`
-  § The succession statement (wire)), so there is nothing for it to assert, and
-  the powers enumerated above are the complete list — a succession is not the
-  claimant and not a rostered actor. Where the successor already holds a row on
-  the same channel (separately welcomed, or a second statement re-pointing onto
-  an existing edge), the primary key admits one row and the **predecessor's**
-  binding is the one kept, stamp and all; the successor's is dropped and, when
-  the two disagreed about the home nest, logged. Resolving that collision the
-  other way is what let a caller who merely knew the 32-byte channel id take a
-  pinned grant: plant a first grant for the (public) successor id through the
-  permissive `Unclaimed` arm, let the succession delete the genuine row in its
-  favour, then earn the pin on the first served call — after which, on an
-  unclaimed conversation channel, nothing could move it back. Re-homing through
-  a succession is therefore the same act as any other re-home, subject to the
-  same powers: a rostered actor's re-invite while the kept grant is unconfirmed,
-  the claimant's once it is confirmed, and otherwise the fresh channel the
-  previous paragraph names — the paragraph's aside about a nest that dies
-  "without an identity succession" is about the *statement* keeping the old nest
-  reachable for a cooperative `channel.leave`, never about the succession
-  rebinding anything by itself.
-  **The member's grant rides the re-point (built 2026-10-03), and a second
-  predecessor does not (ruled 2026-10-02, not built):** the same transaction carries the member's
-  `folder_member_access` rows on the channels whose roster row it moved (a
-  grant the successor already holds stands), and a statement naming a
-  successor this nest already holds a link into is refused — owner
-  [`writer-signed-change-records.md`](writer-signed-change-records.md)
-  § Writer-signed change records, ruling (8)(j).
-
-  **A second, distinct residual — the migration window, for every binding
-  that existed before `confirmed_at` did (2026-08-30).** The column is
-  additive and nullable with no backfill — correctly, since no backfill
-  could honestly claim contact the nest never witnessed — so at upgrade
-  every pre-existing binding starts unconfirmed, exactly as exposed as
-  before the confirm-on-first-use fix landed. For these rows the window is
-  *migration → that binding's own next served federated call*, not *Welcome
-  relay → first drain*: there is no Welcome relay inside it, so the
-  short-by-construction reasoning above does not bound it. The bound instead
-  is a client-driven poll — nothing nest-side drains a channel on its own,
-  only a member's own client calling `fauna.conversations.channel.fetch`
-  with `nest_url` set originates the federated fetch that pins the grant —
-  so a **dormant** conversation (no member currently polling that channel)
-  leaves its legacy binding movable indefinitely. **Accepted for v1, on the
-  same terms as the establishment window above**: the alpha population is
-  small, the window self-heals the moment any member's client next drains
-  the channel rather than only on redeploy, and the exposure stays inside
-  the inviter's already-accepted power — read-DoS of the genuine member plus
-  last-writer-wins re-binding, MLS confidentiality and message authenticity
-  untouched. Not a request to backfill a witness the nest never observed;
-  revisit only if a mechanism arrives that can derive one honestly (e.g. a
-  boot-time reconcile keyed on a served-call record that predates the
-  migration).
-- **`fauna.federation.channel.append`** — the mutating twin of `channel.fetch`,
-  shared by conversations (cross-nest send — `direct-messages.md` § Technical Flow
-  — Cross-Nest owns that flow) and any channel-riding surface. **Folder-channel
-  Commit admission (re-ratified 2026-08-24, superseding the 2026-07-18
-  claimant-only refusal; both planes — `channel.append` reuses
-  `channel_send_core` verbatim):** on a claimed folder channel a
-  `ChannelEnvelope::Commit` is admitted from the claimant **or any actor on the
-  channel roster**; off-roster actors are refused (the `ingest_channel_envelope`
-  roster check, side-effect free). The 2026-07-18 rule — only the claimant may
-  append a Commit — was found mutually unsatisfiable with two other ratified
-  rules: members MUST send application traffic
-  on the set's channel (`p2p.md` § Cross-user shared-set transfer — the
-  advertisement/custody carriage), and the device-owned-epoch invariant
-  (`devices.md` § Cross-device MLS group-state sync) makes every member device
-  post a bare self-`Update` takeover Commit before its first application send —
-  so under claimant-only, a member seat could structurally never advertise or
-  receipt custody. The resolution moves owner-only **roster management** to the
-  only layer that can see commit content: MLS commits are PrivateMessage
-  ciphertext to the nest (it classifies *that* an envelope is a Commit, never
-  *what* it commits), while every member decrypts the staged commit. So:
-
-  - **Nest**: roster-membership is the Commit admission rule (evicted members
-    and outsiders stay out — the roster-**add** paths all stay claimant-gated,
-    **both halves of the roster**: `actor_channels` and the cross-nest
-    `channel_foreign_members`, whose relay-side write is a roster-add like any
-    other and gates the same way, so eviction durability is
-    unchanged; removed-member *exclusion* never rested on this gate —
-    `mls-group-key-material.md` § Rotate-on-removal owns the claim guard's
-    families).
-  - **Members** (shared Rust, all apps): `MlsEngine::process_commit`'s **folder
-    commit policy** — on a channel stamped with a durable folder owner
-    (owner-side at group mint; member-side at `join_folder_welcome` from the
-    Welcome's MLS-authenticated sender), a proposal-carrying commit
-    (Add/Remove/PSK/extensions — any roster or group-state change) merges only
-    when its leaf-authenticated committer is the owner; a bare self-`Update`
-    (the takeover) merges from any member. Deterministic at every honest
-    member; refused commits are skipped like intrinsically invalid records,
-    with a durable pre-decrypt memo so the every-launch folder-rail re-walk
-    repeats the verdict instead of stalling on the consumed ratchet
-    generation.
-
-  **The marker follows the owner's verified succession (ratified
-  2026-09-22).** The durable folder owner is a **trust
-  anchor with two readers**: the commit policy above, and the owner-attested
-  declassification verdict, for which a member's seat supplies it as the one
-  identity the nest cannot forge
-  ([`encryption-at-rest.md`](encryption-at-rest.md) § Readable classes →
-  *The declassification is owner-ATTESTED*). A succession retires an identity
-  key, typically because it was stolen, so a marker that keeps naming the
-  predecessor keeps handing the thief exactly the two powers the succession
-  exists to remove: roster authority on the channel, and the power to write a
-  member's copy of the folder unsealed. The marker therefore **re-points to
-  the successor, from an anchor the nest cannot forge**, and the same rule
-  answers both readers at once — they never diverge. **Member side:** the
-  in-group succession statement the sweep posts between its two commits
-  (`GroupMetaMessage::Succession`,
-  [`../behavior/succession-propagation.md`](../behavior/succession-propagation.md)
-  § Propagation → *MLS groups*) reaches the folder channel like any other
-  application envelope — the folder rail already decrypts them to route the
-  share-endpoints body — and is put through the **same session-wired
-  witness and the same roster-pair door** the conversations rail uses
-  (`SuccessionWitness`, `settle_verified_succession`): a statement that
-  verifies, whose `old_actor_id` **is this channel's recorded owner**, and
-  whose successor **is seated here** re-stamps the marker to `new_actor_id`
-  **at once — at the ceremony's midpoint, before the remove-old commit** —
-  and that timing is load-bearing in both directions. Not on the roster
-  pair's completion: the remove-old is authored by the successor's leaf, so
-  it is the re-stamp that admits it, and a marker that waited for it would
-  wait for ever. Not on verification alone either: a true statement is
-  public and any member may carry one ahead of the sweep, and a marker moved
-  before the add-successor landed would refuse that add — the old leaf's
-  one constructive act — and strand the channel. A statement whose successor
-  holds no leaf here is dropped, exactly as the conversations arm drops it,
-  and when the sweep reaches this channel it posts the statement again beside
-  its own add. A statement the witness cannot settle yet parks and re-drives
-  under the conversations arm's rules, keyed by channel (a folder channel has
-  no thread), because a consumed application message is the only copy the
-  seat will ever hold. **Owner side:** the sweep stamps its own join
-  (`fauna_client_recovery::group_sweep`, `stamp_successor_folder_owner`): the
-  successor's fresh seat takes the marker the predecessor's engine held —
-  re-pointed to the successor where the predecessor was the owner, copied as
-  is where it had merely joined someone else's folder channel — on the fresh
-  and the resumed path alike, and that stamp reaches the successor's other
-  devices through the MLS state-replica plane like every other provider value
-  (`devices.md` § Cross-device MLS group-state sync). The anchor is again one
-  the nest cannot forge: the predecessor's own engine, on the device running
-  the ceremony. The registry-anchored re-stamp — `MlsEngine::restamp_folder_owner_markers`
-  over the predecessors this device attested
-  (`attested_predecessor_actor_ids`), never a served field — is the
-  belt-and-braces primitive for a marker the replica plane left naming a
-  predecessor; the launch backfill that was to host it was removed 2026-09-25
-  (below), so it has no launch caller today, and the sweep's stamp is the
-  owner-side mechanism. **No self-authored record confers this authority:** a governed
-  room's step-0 succession record is what its *policy* admits the two commits
-  under, but the old leaf's holder can author one naming any successor, so on
-  a folder channel the chain-verified statement is the only source. **What
-  this leaves, stated plainly:** a member seat the statement never reaches
-  keeps the retired key as its anchor — the same residual
-  `succession-propagation.md` names for a group the sweep never reached (the
-  nest's transport half, the claim re-point of
-  [`../behavior/succession-aftermath.md`](../behavior/succession-aftermath.md)
-  § Re-key scope → the MLS-groups row, has been built since 2026-08-03, so the
-  sweep does reach a succeeded owner's claimed channels); a legacy unstamped
-  member seat stays on open commit processing as before; and a statement the
-  witness refuses *for now* on a seat whose walk then meets the remove-old is
-  answered by the hold below, inside the bound it states. Build ledger:
-  § Implementation status today.
-
-  **The folder commit walk inherits the harvest wait (ratified 2026-09-28).**
-  The fork the arm left open: a statement the witness refuses *for now* (no
-  anchor held yet for the retired identity) parks, but the successor's
-  remove-old that follows it in the same walk meets a marker still naming the
-  predecessor, is refused by the commit policy and **memoized** — the decrypt
-  consumed the committer's ratchet generation, so the memo is what keeps the
-  every-launch re-walk from stalling on it — and the re-drive that later
-  re-stamps the marker can never re-admit that commit; the seat has forked
-  from the group's epoch. **The rule: while a witness-refused statement
-  naming this channel's recorded owner is parked on it, the member seat's
-  folder commit walk stops BEFORE every commit record on that channel** —
-  cursor left behind the record, nothing decrypted, nothing memoized, the
-  next pass retries — after re-asking the witness once (an anchor may have
-  landed since the park; verified, the marker re-stamps and the commit folds
-  in the same pass). The consumption is the irreversible act, so the only
-  sound hold is ahead of the decrypt: a peek at the staged commit's committer
-  ahead of the memo was refused on that ground (staging is the decrypt), and
-  holding a staged commit un-merged across passes would leave a crash with a
-  consumed generation and no memo — the wedge the memo exists to close. **The
-  bound is the witness's own harvest wait, one level up**
-  ([`../behavior/identity-succession.md`](../behavior/identity-succession.md)
-  § The succession statement → *the harvest wait*), because a parked
-  statement is any member's to post — the transport sender is unbound by
-  design, and to a witness holding no anchor a forgery naming the owner is
-  indistinguishable from the honest statement — so an unconditional hold
-  would let one hostile member wedge every other member's commit rail for the
-  session. So the walk holds **only in a session that runs a peer-anchor
-  sweep** (`arm_succession_harvest_wait` — the same announcement that arms the
-  witness; never armed, never held: the wait fails open exactly as the
-  witness's does), **only until the sweep has settled the recorded owner by
-  any arm** — a seed, a standing outcome, the spent retry budget, which the
-  backend records as *spoken for* — and **never past it**: after the settle a
-  still-refused statement holds nothing (it stays parked for a read-path seed,
-  as before), the walk resumes, and the commit meets the marker as it stands.
-  **To make that settle a guaranteed event, every folder channel's recorded
-  owner joins the harvest's walk** (`RailBackend::harvest_anchor_wants`, the
-  FaunaMls rail's folder-channel owners, this account's own identity excluded
-  → `ConversationsManager::harvest_walk_actors`): the sweep walked thread
-  rosters and room-policy names only, and a folder channel has no thread, so
-  an owner the member shares no conversation with was never harvested — the
-  folder park already broke the parking-bound premise "nothing parked waits on
-  a harvest that will not come", and the hold would have made that an
-  indefinite wedge. Same door, same grade, same once-per-session guard and
-  retry ladder as a roster peer; bounded by the seats this device holds. **The
-  bound, stated as the attacker sees it:** a forged statement naming the owner
-  holds the channel's commit walk from its decode until the sweep settles the
-  owner — one profile fetch online, the ladder's ~100 s budget offline — once
-  per session; a second statement after the settle holds nothing. A
-  poll-count lifetime was refused as a clock in disguise (it releases before an
-  offline sweep's budget and holds after an online settle), and dropping the
-  park at the settle was refused because a read-path seed may still re-stamp
-  the marker later in the session. **The park rests with the engine (built
-  2026-09-28)**, so the hold survives the session: a launch re-walks the log
-  from 0 but cannot re-read a statement an earlier launch consumed, and
-  without the rested copy its first walk would meet the successor's
-  remove-old with no statement and no hold — refused, memoized, forked. Every
-  park is mirrored to the engine's provider KV, one slot per channel
-  (`fauna:parked_folder_succession:<channel_id>`, latest wins; the
-  owner-bound admission is unchanged and is what bounds it); each launch's
-  first walk over the channel drains it back into the park before any
-  record; the harvest speaking for the owner — verified or still refused —
-  forgets it (after draining it, should the sweep speak first), so a forged
-  statement costs at most one hold window per launch; a walk that drops the
-  statement forgets it, and so does leaving the channel
-  (`MlsEngine::forget_group`). Derived, recreatable state — the statement
-  rides the channel log whether or not a seat consumed it. **The folder rail
-  diverges from the conversations rail here on purpose:** that park stays
-  session-lifetime ([`../behavior/identity-succession.md`](../behavior/identity-succession.md)
-  § The succession statement → *the harvest wait* (e), "Parking keeps its
-  roster bound and session lifetime"; the at-rest variant it rejected under
-  *What a statement may cost the member who receives it* was forger-minted
-  re-drive work every later session pays, plus an expiry policy, to close a
-  seconds-wide race). Here the harm is a forked seat, and neither cost
-  carries over: the owner's settle is the expiry, and the slot is one per
-  channel. **Residuals, stated plainly:** (1) retired — the session ending
-  before the sweep reaches the owner no longer ends the hold; (2) an owner the sweep cannot read — homed on
-  another nest (`fauna.profile.get` answers for same-nest identities only),
-  resting delegated, or never having mirrored a head — settles at once with
-  no anchor, and the walk resumes into the pre-hold residual; (3) a session
-  with no sweep never holds. The remedy for all three is unchanged: the owner
-  re-shares the set to the forked member. Pinned by `fauna-conversations`
-  `a_witness_refused_statement_holds_the_remove_old_until_the_harvest_settles_it`,
-  `a_forged_statement_holds_the_walk_only_until_the_harvest_settles_the_owner`,
-  `without_an_armed_sweep_the_folder_walk_never_holds` and
-  `the_folder_owner_joins_the_harvest_walk`.
-
-  **Named residuals, accepted with the re-ratification:** (a) a hostile member
-  can churn epochs with takeover commits — the same set-DoS class as
-  Application-envelope spam (which was always roster-open); a nest-side
-  per-(actor, channel) commit rate cap is BUILT (`conversations_handlers::
-  channel_send_core`, claimant exempt, `bridge_rate_limit::
-  CHANNEL_COMMIT_LIMITER_CONFIG` — 60/hour, refusal is the retryable
-  `fauna.conversations.rate_limited`, `RpcError::action() => Transient`; the
-  federation `channel.append` relay inherits it for free, same chokepoint);
-  (b) two
-  distinct exposures share this name and only the first is a mere transition
-  window — **(b-i)** an old client **build** (code predating the member-side
-  policy) merges hostile roster commits until the user upgrades: a
-  transition-window exposure bounded by the alpha population, no wire shape
-  changed (old member clients' takeover commits simply start landing against
-  a new nest; a new client against an old nest keeps today's
-  refused-and-retrying behavior); **(b-ii)** an upgraded client's **legacy
-  seat** — a channel this engine minted or joined *before* the marker existed
-  — is not fixed merely by upgrading the build, since the marker is stamped
-  once, at mint/join time, never retroactively by a code update. **No
-  legacy seat exists** since the 2026-09-24 baseline reset — every seat was
-  minted or joined by code that stamps — so the owner-side launch backfill
-  that once swept for them (`FoldersAuthor::backfill_owner_markers`) was
-  removed by the compat-remnant sweep (`compat-remnant-sweep.md` § Program
-  4), and (b-ii) is closed on both sides by construction.
-  Pinned by
-  `channel_send_admits_rostered_member_commit_on_claimed_folder_channel`
-  (nest), `fauna-mls`'s folder-commit-policy tests (member side, both halves
-  red-verified), and `stamping_the_owner_marker_arms_the_policy_on_an_unstamped_channel`
-  (`fauna-mls`, the stamp alone arms the policy). The claim table keys on
-  `folder_channel_claimed_by`,
-  which marks only **pure** (fresh-group) folder channels; the
-  conversation-reuse caveat is unchanged — its full obligation list is owned by
-  `mls-group-key-material.md` § M2 / Rotate-on-removal, not restated here.
-  Conversation channels are unchanged: any member may commit.
-  Redelivery-safe via the L3 `idempotency_key`; duplicate MLS payloads quiet-skip
-  as past-epoch — note the L3 cache is per-connection and TTL'd, so append
-  consumers rely on MLS-layer duplicate tolerance, never on nest-side
-  exactly-once.
-- **`fauna.federation.channel.leave`** — self-scoped, idempotent delete of the
-  requester's own `channel_foreign_members` row. The first mutating member-gated
-  kind; deliberately generic (a cross-nest conversation participant's leave is the
-  same operation). Revokes future discovery only — never key material already held
-  (parity with same-nest voluntary leave).
-- **`fauna.federation.folder.{changes.fetch, content_key.fetch}`** — the
-  read plane: change-log rows (manifest refs, sizes, `content_key_version`,
-  `author_actor_id`) and the sealed content-key envelope (opaque to both nests).
-  The home nest resolves `channel_id → folders` row via `mls_group_id`.
-- **`fauna.federation.folder.changes.record` + `write_token.mint`** — the write
-  plane: the record relay runs the same owner-pays metering + per-member-cap +
-  version-floor transaction as a local record and nest-stamps
-  `author_actor_id = requester`; the mint returns a **short-lived, write-only
-  bulk-byte token** (the `BulkWriteAuth` token arm's shape) for direct HTTPS
-  chunk/manifest POSTs. **Bulk bytes never ride the federation channel** in either
-  direction (`transport.md` § carve-out): reads GET by ciphertext hash on the open
-  bulk plane; writes POST with the token. Two contract points (Phase-3 pass,
-  2026-07-19): **(i) the record relay is exactly-once by CONTENT, never by the
-  L3 key** — the per-connection idempotency cache cannot span reconnects, so the
-  handler treats a record matching the path's latest entry on
-  `(acting actor, path_hash, manifest_hash, change_type, content_key_version)`
-  as already-applied: it returns the existing seq and charges the owner's meter
-  nothing (the same dedupe applies to the same-nest record path — uniform
-  shape); **(ii) the token is TTL-bound, not revocation-checked per POST** — it
-  carries `Write` scope only, a hard-coded short TTL, and a `(channel, actor)`
-  binding that routes metering to the owner's quota under that member's cap;
-  eviction/demotion refuses the next *mint*, and an outstanding token's residual
-  window is one TTL constant — accepted (parity with "generations already held
-  are not revoked"), no per-POST grant re-check without a measured abuse signal.
-- **`fauna.federation.conversation.write_token.mint` — the conversation rail's
-  byte-plane write leg (ratified + BUILT 2026-09-09).** The same short-lived,
-  write-only bulk-token shape as `folder.write_token.mint` (contract point (ii)
-  verbatim: TTL-bound, not revocation-checked per POST — a leave refuses the
-  next *mint*), behind the structural foreign-member gate alone. Its purpose in
-  the fleet: `../behavior/conversation-rooms.md` § The home nest → *Attachment
-  bytes* rules that a room's attachment bytes rest on the room's home nest, and
-  this is how a foreign member's bytes get there without ever riding the
-  channel. Contract on its kind-table row above (*Conversation attachment
-  write token*).
-- **Relay serving across nests (ruled 2026-10-01; refutable; the read token
-  and the read door BUILT 2026-10-03, the `residency` stamp and both serving
-  kinds BUILT 2026-10-04).** The flow, and why it has this shape, is
-  [`../behavior/file-sync.md`](../behavior/file-sync.md) § Relay serving → *A
-  member on another nest*; this bullet owns the kinds, gates and stamps. All of
-  it is additive, and bulk bytes still never ride this channel.
-  - **`fauna.federation.folder.serve.announce`** (member's nest → home nest).
-    Names the member, one of its devices, and whether that device serves the
-    folder. Gate: the write gate — foreign-member-bound-to-home-`nest_id` plus
-    `access == 'writer'`. The home nest keeps the result in memory only, bounded
-    in count, on a lease of a hard-coded length that the member's nest renews;
-    an announce that says *no longer serving*, a lapsed lease, and the member's
-    removal or demotion each drop it.
-  - **`fauna.federation.folder.chunk.wanted`** (home nest → member's nest — the
-    one folder kind besides the Welcome that the HOME nest originates). Carries
-    the member, the device, a request id and a store key. The member's nest
-    serves it only when the calling nest's verified `nest_id` is the one it
-    forwarded that device's announce to, so a nest can ask only about a folder
-    the seat itself announced with that nest as its home. It pushes the ask on
-    that one connection and replies whether a connection was there to push to.
-    It learns a store key; it never sees the answer, which goes from the seat to
-    the home nest's bulk plane.
-  - **`fauna.federation.folder.read_token.mint`** (member's nest → home nest).
-    The read-scoped twin of `write_token.mint`, behind the structural member
-    gate alone — a reader holds no write grant to mint under. Same TTL rule
-    (contract point (ii) above). The token is `Read`-scoped, so every bulk
-    write route refuses it; its purpose is `ForeignFolderRead`, which no
-    bridge can mint. The member's client asks through its own nest with
-    `fauna.folders.read_token.get`, the twin of `write_token.get`.
-  - **Where a federated byte-plane token is taken for a read.** One door: the
-    store-miss arm of the home nest's chunk route. It takes a read token or a
-    write token, reads the token's actor, and resolves the hinted folder against
-    `channel_foreign_members` at every use — so unlike a write, a read is
-    re-checked per request and ends with the membership row. The answer route of
-    relay serving is a bulk write route and takes the write token as every such
-    route does. The door reads the token's purpose, and only to pick the
-    roster: a token of the foreign-folder pair is resolved through
-    `channel_foreign_members` and nothing else (never the owner arm, never
-    the same-nest roster), among folders whose channel the folder's owner
-    claimed; a token of any other purpose does not open the arm. The hint is
-    the one every reader sends — the folder's name, or its name hash, which
-    wins — and a miss of any kind is the plain `404`.
-  - **The `residency` stamp.** The folder's content residency rides beside
-    `caller_access` on every federated folder read reply and beside `access` on
-    the Welcome relay, nest-authoritative on both as `access` is. Absent means
-    *not stated* — never *full*.
-- **Recipient-side access discovery (ratified 2026-07-20; seed + refresh wire
-  BUILT 2026-07-22).**
-  Two wire-additive deltas, no new kind:
-  `fauna.federation.welcome.deliver`'s request gains `#[serde(default)] access:
-  Option<String>` (resolved nest-authoritatively from `folder_member_access` at
-  `welcome_deliver_core`, exactly as `set_name` is — never sender-asserted), and
-  **every federated folder READ reply** gains `caller_access: Option<String>`
-  (the home nest stamps the requester's current role — it resolves membership
-  for the gate anyway), threaded through the relay reply so the recipient's
-  client can refresh its stored copy. *Scope widened at build time (2026-07-22),
-  extending rather than revising the ratified design:* the 2026-07-20 statement
-  named `changes.fetch` as the carrier, but the `nest_url`-routed
-  `fauna.sync.changes.list` relay has **no production client caller** (only nest
-  conformance tests) until the sync agent gains foreign read routing — whereas
-  `content_key.fetch` is the federated read a foreign member's client runs on
-  every commit poll. Both kinds now stamp it, so the refresh is live today and
-  the rule a cold reader carries is one line: *every federated folder read
-  reply stamps the caller's current access.*
-  **The value is advisory-for-UI only,
-  never an authz input** — enforcement remains this section's write-kind gate
-  (`require_foreign_writer`), and a bind is verified by an eager
-  `write_token.get` at the bind gesture (a typed refusal fails the bind loudly).
-  An **absent** stamp asserts nothing (a pre-Phase-4 home nest, or a set with no
-  role row = the implicit reader default): the client keeps the value it holds,
-  and it is never read as a revocation — demotion is enforced at the next
-  mint/record, never inferred from a missing field.
-  No push/notification kind for demotion — poll-parity with same-nest access
-  changes (which have no push either); mid-life revocation is enforced at the
-  next mint/record and handled fail-closed + loud client-side (mechanics owner:
-  `../behavior/file-sync.md` § Multi-writer shared sets). The asserted value
-  rides inside the accepted TOFU inviter-binding envelope above: a lying or
-  misbound home nest asserting `writer` gains only what it already has
-  (ciphertext + the duty to accept writes it cannot read).
-  **A companion field rides the SAME carriers** (the Welcome relay + the
-  `content_key.fetch` reply), additive, no new kind, same absent-asserts-nothing
-  semantics — the home nest's own deployment
-  `nest_actor_id`, the identity root the member's agent needs to graduate an SPKI
-  pin for the **direct byte-plane dial** to a self-signed home (owner:
-  `security.md` § Transport trust, the federation-granted Axis-2 row;
-  `../behavior/file-sync.md` § Multi-writer shared sets). Both flow into the
-  member's `ForeignFolder` row (the `fauna.state.folder-keys` kind's `foreign/`
-  rows since the `__config` rail retired 2026-10-02 —
-  [`config-dissolution.md`](config-dissolution.md) § The `__config` dissolution
-  schedule → *The kinds*) and the pushed engine-key blob. Like
-  `access`, both are home-nest-resolved and peer-asserted-safe: the cadence is a
-  backstop interval; the identity is only ever *checked* against the channel
-  binding the byte plane proves, so a wrong value fails the pin, never weakens it.
-  **A third field rides the `content_key.fetch` reply alone (built 2026-09-28):**
-  the set's owner-stamped `content_key_floor`, the value `fauna.folders.list`
-  projects on the row a cross-nest member does not have — refreshed into
-  `ForeignFolder.content_key_floor` so the member's engine arms its pre-seal hold
-  from it (owner: `../behavior/on-demand-files-shared-sets.md` § Shared sets on a capability
-  host → *One mechanism*, question 2). Same absent-asserts-nothing semantics; an
-  input to the member's own HOLD only — the enforcement stays this nest's
-  `stale_content_key` refusal, so a wrong value costs a held or refused write,
-  never a seal under a rotated-past generation.
-- **The cross-nest owner label (ratified 2026-10-03; BUILT 2026-10-05).** A set shared across nests names its owner on
-  two member surfaces — the pending-share knock ("Shared by ‹…›",
-  `../behavior/value-formatting.md` § Account display label) and the shared
-  set's display name in the member's file browser (`docs (alice)`,
-  `../behavior/on-demand-files-shared-sets.md` § Shared sets on a capability host,
-  decision 3) — and a cross-nest member's own nest holds no `users` row for
-  that owner, so without a label both fall back (an unknown sharer; the
-  home nest's host). The id→handle bullet above forecloses the obvious fix: no nest asks
-  the owner's nest what handle an actor wears. The ratified shape is the
-  announce's, applied to the folder plane:
-  - **Carrier — the home nest volunteers, on the two stamps it already
-    originates.** The set's home nest is the authority for its owner's handle
-    and already stamps the Welcome relay and every federated folder read
-    reply nest-authoritatively (`set_name`, `access`, `home_nest_actor_id` —
-    the *Recipient-side access discovery* bullet). It adds the owner's handle
-    and domain, joined from its own `users` row and `handle_domain_if_set()`
-    — never client-asserted — as two additive fields on each: the
-    `fauna.federation.welcome.deliver` request (`owner_handle` /
-    `owner_domain`; a folder share is owner-gated — `share_core` verifies the
-    caller owns the set — so the sharer the Welcome names IS the owner, one
-    meaning on both carriers) and `fauna.federation.folder.content_key.fetch`'s
-    reply (the read a foreign member's client runs on every commit poll, so a
-    renamed handle refreshes exactly as `caller_access` does). The pair is
-    split on every wire and at rest, as the announce
-    (`requesting_handle`/`requesting_domain`) and the roster read
-    (`RoomMemberRow.handle`/`domain`) carry it; it is joined only at display.
-  - **Trust rule — the member's own nest binds the domain to the origin's key
-    before anything reaches the client; a bare handle never crosses a nest
-    boundary.** A handle rendered bare is, everywhere in the apps, one of the
-    viewer's own nest's users, so a foreign nest stamping `alice` would seat a
-    stranger as a local contact on the one surface — the knock — whose whole
-    job is to let the recipient weigh who is asking. So the receiving nest
-    (the Welcome relay) and the relaying nest (the read reply) forward the
-    pair only when the ordinary discovery chain *from the asserted domain*
-    (`FederationChannelPool::resolve_domain_nest_id` — the id→handle bullet's
-    verification, same syntax validation, caches and TLS floor) lands on the
-    authenticated origin: the handshake-verified `origin_nest_id` on the
-    relay, the pool's verified identity behind `peer_url`
-    (`resolve_peer_nest_id`) on the read. A mismatch forwards nothing and is
-    logged as the signal it is. The `shared_by` actor id stays unstamped
-    cross-nest, so the contact gate still reads every cross-nest arrival as a
-    knock (`../ui/folders.md` § Sharing) — the label names, never admits. The
-    client's trust rule is one line: a handle with a domain beside it is a
-    foreign user its own nest bound to that domain's key; a handle with none
-    is a local `users` row.
-  - **When the binding runs differs by path, under one cost budget.** The
-    Welcome relay is a one-shot, per-share delivery, and the knock is where
-    the name matters most, so the receiving nest AWAITS the resolve inline —
-    cached after the first contact per domain, singleflighted, under the
-    resolver's own dial timeout and the announce's concurrency cap
-    (`MAX_CONCURRENT_ANNOUNCE_VERIFICATIONS`; past the cap, or on any
-    failure, the Welcome delivers unstamped — a slow or unreachable domain
-    never refuses a share, it only leaves the fallback standing). The read
-    reply is the polled path the announce was designed around: it forwards
-    the pair on a cache hit only, and a miss spawns the same verification so
-    the next poll carries it — the reply is never delayed.
-  - **Join rule on the member.** `WelcomeInbox`/`WelcomePayload` carry the
-    pair as `shared_by_handle` + an additive `shared_by_domain`
-    (`shared_by_handle` is no longer same-nest-only: bare for a local sharer,
-    paired with its domain for a verified foreign one); `ContentKeyGetReply`
-    carries `owner_handle`/`owner_domain`; the member's `ForeignFolder` record
-    gains both as a fifth latest-wins advisory pair under `updated_at`
-    (written at accept from the Welcome, refreshed by
-    `custody::refresh_foreign_set_from_reply` from every read reply; an older
-    device's stamp-less newer write clears it and the next refresh restores
-    it — never a wrong name). The display string is the canonical
-    `handle@domain` from one shared formatter
-    (`fauna_core::format::qualified_handle`, lifted from
-    `RoomRosterKnownMember::qualified_handle` so the roster and the folder
-    surfaces cannot drift — `../behavior/value-formatting.md` § Account
-    display label owns the label), fed to `account_display_label` as the
-    handle: `shared_by_display` on the knock, `docs (alice@example.com)` from
-    `on_demand_presence::held_sets`, the home nest's host standing in until
-    the pair lands. Display-only on every hop, as `set_name` is: never a
-    lookup key, never an authorization input.
-  - **Refused:** qualifying the handle with the verified origin's *host*
-    (`alice@nest.example:8443`) — honest without a resolve, but a host is not
-    a handle domain, so it would name the owner by a string no picker
-    resolves and no roster shows, diverging from the one identity form every
-    other cross-nest surface uses; and a distinct cross-nest-only field
-    carrying an unverified handle — the receiving nest can verify, so an
-    unverified name reaching the client would regress the announce's own
-    rule.
-- **Client-kind wire rule (ratified):** a cross-nest client kind must **fail loud
-  on a relay-unaware home nest**. An additive `nest_url` field is permitted only
-  where the old-nest path fails visibly anyway (`changes.list`/`content_key.get`/
-  `changes.record`/`folders.leave` → local `not_found`); where the additive path
-  would **silently misdirect a write** — `channel.send`, whose local append
-  blackholes the message — a **distinct kind** is required
-  (`fauna.conversations.channel.send_remote`); so is a read whose answer is an
-  **authorization input** and could come back partial or from the wrong set as
-  a clean success (`fauna.conversations.channel.actors_remote`, the *Channel
-  roster read* row; `fauna.folders.members.list_actors_remote`, *The cross-nest
-  writer roster read* below).
-- **Old-peer error shapes differ by plane; both are loud (verified 2026-07-18).**
-  A new *client* kind on an old home nest fails typed `unknown_kind` (per-actor
-  plane). A new *federation* kind sent to an old peer hits the allowlist first and
-  fails `fauna.protocol.unauthenticated` (connection stays open). The relaying
-  nest maps the peer-side `unauthenticated` to a client-visible "the home nest
-  needs an update" — never a spurious auth failure.
-- **The cross-nest writer roster read (ratified 2026-09-29; BUILT 2026-09-29).** The one read the writer-signed change-record
-  reader runs to learn which actors hold `writer` on a set
-  (`writer-signed-change-records.md` § Writer-signed change records, ruling (3)
-  — same-nest `fauna.folders.members.list_actors`) gains its cross-nest arm as
-  **one new federation kind, `fauna.federation.folder.actors.fetch`
-  `{requesting_actor_id, channel_id}`**, in the folder content plane's family:
-  the family's one structural gate (`require_foreign_member`), the S7
-  claim-resolve (`claimed_folder_for_channel`), the **same projection the
-  same-nest read serves** (`actor_channels` ∪ `channel_foreign_members`, each
-  with its `folder_member_access` grant, the owner as the `role == "owner"`
-  row — one projection function behind both doors), and the `caller_access`
-  stamp every federated folder read reply carries. **Disclosure follows the
-  *Channel roster read* row: hex actor ids, roles and grants — `handle` rides
-  EMPTY across nests** (the reader needs ids; a member already holds the
-  membership off the MLS tree; and id→handle is the announce's direction, never
-  a nest's answer to another — the 2026-09-10 ruling above). The owner row and
-  each `writer` row also carry the landed succession statements that end at
-  that member (ruled and BUILT 2026-10-01 — `mls-group-key-material.md`
-  ruling (8)(b) owns why a reader needs them and how it verifies them; a
-  reader-access row carries none). A statement is a public record — the
-  pre-identity `fauna.recovery.succession.lookup` serves it to anyone holding
-  the retired id, and the sweep posts it in the set's own group — so the read
-  discloses a writer's retired id to the set's other members and nothing more.
-  Read-only on every hop: registers nothing, mints nothing. **The client leg is the distinct kind
-  `fauna.folders.members.list_actors_remote { channel_id, nest_url }`** (reply
-  shape = `ActorMembersListReply`), never an additive `nest_url` on
-  `members.list_actors`, for exactly the *Channel roster read* row's sharper
-  reason: a roster is an **authorization input** to the reader, and an old
-  member-nest ignoring an additive field on a *name*-addressed request would
-  answer the member's own same-named set's roster as a clean success —
-  installing another set's writers on this one — whereas an unknown kind fails
-  typed `unknown_kind`, the read fails, and the reader's fail-closed posture
-  holds (the last roster stands; never read ⇒ a member's rows are held). An old
-  HOME nest refuses the federation kind `unauthenticated` → the relaying nest's
-  `peer_nest_outdated` → the same hold. Birth-shape under the 2026-09-24
-  baseline, like the signature it serves. **Rejected:** carrying the roster on
-  the `ForeignFolder` record (the reader-side reasons are ruling (3)'s: a
-  nest-projected authorization fact inside `BackupKey`-sealed custody, merged
-  per device by a CRDT, where the same-nest reader keeps no on-disk roster
-  either); an `access` field on `fauna.federation.channel.actors` (access is
-  claimed-side *policy* and that kind's union answer is the substrate's — the
-  § *Substrate vs. policy* rationale at the top of this section); a plain
-  additive `nest_url` on `members.list_actors` (above). Consequence, not ruled
-  here: the p2p share leg's cross-nest carve-out
-  (`SyncEngine::refresh_share_writer_roster`) reads the same roster and may lift
-  on this relay when p2p cross-nest is scoped.
-- **Throttling:** all kinds inherit the channel's per-IP + per-nest throttles —
-  the write plane's record kind at the writer-plane budget, every other kind at
-  the channel default (§ Nest-writer backup plane → *Throttling* owns the budget
-  and its reasoning); nothing new to configure (no-operator invariant — cadences
-  and budgets are Rust constants).
-
-### The public folder read plane (design ratified 2026-08-18; BUILT 2026-08-18 — folders re-model phase 4, slice 4f-i; see the § Status bullet below)
-
-Behavior owner: `../behavior/folders.md` § Publicly-synced follow (address/floor/strip/flip-back
-semantics live there). This subsection owns the **kinds, gates, and wire rules** — what the
-deliberately-closed kind inventory admits, and why the member-gated family above is untouched.
-
-- **One new federation kind: `fauna.federation.folder.public.fetch`** (read-only), plus its
-  client twin `fauna.folders.public.fetch` (the caller's own nest relays, exactly as the
-  member reads relay — same carrier, same loud-failure shapes on an old peer/home). The kind
-  inventory grows by **one read-only kind**, a deliberate decision of this design pass: the
-  v1-closed inventory (decision of record 2026-07-20) closed the *write/conflict/lease* surface;
-  the publicly-synced read path is ratified product surface (`principles.md` public exception +
-  the re-model's audience bullet), and a public folder is the one folder shape the existing
-  family structurally **cannot** address — every kind above is `channel_id`-keyed and
-  membership-gated, while a public folder is typically unbound (no MLS group, no channel, no
-  roster row to gate on).
-- **Why a distinct kind, not an audience arm on `folder.changes.fetch`:** the family's one
-  structural gate (`foreign_member_home_nest == origin_nest_id`) stays exactly as strong as it
-  is. An OR-ed audience arm would put a world-readability branch inside the member gate, where
-  one bug opens member data; the distinct kind's gate is the inverse shape — **serve iff the
-  addressed row's current `audience == 'public'`, else `not_found`** — and its handler can never
-  serve a sealed row's data because nothing else is reachable through it. Same reasoning
-  nest-locally: `folder_authz::can_read_folder` keeps its membership-only behavior (the
-  `FolderReadGrant` enum gains a `Public` variant for surfaces that need to name the grant, but
-  no blanket arm — a blanket arm would flow into `authorize_snapshot`, folder listing, and every
-  future call site; the public read core authorizes independently, fail-closed by construction).
-- **Request carries NO `requesting_actor_id`** — deliberate, not an omission: there is no
-  membership to check, so the follower's identity never crosses the wire. The home nest sees the
-  requesting *nest* + source IP (the throttle keys) and nothing about which user follows.
-  Addressing: `(owner_actor_id, folder_name)` or the pinned `folder_id`, `since` cursor, `limit`
-  — reply: folder meta (`folder_id`, plaintext name, `home_nest_actor_id` stamp for the
-  byte-plane SPKI pin) + the floor-filtered, stripped `SyncChange` rows (projection contract:
-  `../behavior/folders.md` § Publicly-synced follow).
-- **Zero state, zero metering:** the handler writes nothing (no follower rows — not enumerable,
-  not floodable into disk) and charges nothing (reads are unmetered everywhere; the abuse bound
-  is the existing per-source-IP `/64` + per-nest throttles every `fauna.federation.*` kind
-  already rides — `serve_request` step 2.5). Bulk bytes stay off this channel per the standing
-  carve-out: manifests/chunks GET by hash on the open bulk plane (plaintext for a public folder;
-  world-readable by ratified design).
-- **Version compat:** all additive. The client twin on a relay-unaware home nest fails typed
-  (`unknown_kind` / the peer-side `unauthenticated` mapped to "the home nest needs an update") —
-  loud per the client-kind wire rule; nothing silently misdirects (reads only).
-- **Status: BUILT 2026-08-18** (phase 4 slice 4f-i, `git log --grep 'phase 4 slice 4f-i'`).
-  Both kinds are registered and the § Federation residue surface table carries this plane's
-  row. What landed: the floor column `folders.public_floor_seq` (schema **v44**, additive —
-  `MIN_READER` stays 42 — stamped in the ONE audience writer, in the same UPDATE as the flip
-  and guarded on the pre-update value so a re-assert never re-stamps); the independent read
-  core `bins/fauna-nest/src/folder_public.rs` (address resolve → audience-only gate → floor
-  filter → strip → frame budget), which both kinds call; `FolderReadGrant::Public`, named but
-  never returned by `can_read_folder`; and `bins/fauna-nest/tests/
-  conformance_folder_public_fetch.rs` pinning all four design oracles (the gate's
-  indistinguishability, the floor + its re-stamp, the strip, flip-back-as-revoke) plus
-  "a public read writes nothing".
-- **One wire detail the design's prose did not anticipate.** The stripped projection means
-  **no value**, not **no key**: `author_actor_id`, `path_sealed` and `content_key_version`
-  carry `skip_serializing_if` and so lose their keys, but `SyncChange.device_id` is one of the
-  struct's original fields with neither `skip_serializing_if` nor `#[serde(default)]`, so it
-  rides as an explicit `null`. Adding the attribute would make a new nest emit rows that fail
-  to decode on every peer and client lacking the matching `#[serde(default)]` — a compat break
-  inside a major ([`version-compatibility.md`](version-compatibility.md)). A `null` discloses
-  nothing about the owner's device fleet, so the confidentiality property is identical.
-- **The client half is BUILT (status refreshed 2026-10-02 — this entry read "not yet built"
-  from 2026-08-18 on, long after the pieces landed).** 4f-ii: `FollowedFolder`
-  (`libs/fauna-core/src/data.rs`) rests on the `fauna.state.follows` kind — one row per
-  followed folder, an unfollow a tombstone (`libs/fauna-account-plane/src/follows_rows.rs`;
-  planned for `__config` first, on the kind since 2026-10-02 —
-  [`config-dissolution.md`](config-dissolution.md) § The `__config` dissolution schedule →
-  *The kinds*); the follow/unfollow write recipes are shared Rust
-  (`libs/fauna-client-folders/src/follow_ops.rs`, lifted 2026-08-20), the followed-folders
-  list is `fauna_client_config::load_followed_folders`, and the reads (availability, the
-  listing from the relayed changes) are `public_follow.rs` beside it. 4f-iii: the follow UX
-  ships on the apps (web's `wasm-folders.ts` wrappers landed 2026-08-19; the e2e markers below
-  name the rest). 4f-iv: `tests/e2e-unified/tests/api/test_public_folder_follow_cross_nest.py`
-  (2026-08-18) drives two real nests over the API, and
-  `tests/e2e-unified/tests/test_folder_follow_outcomes.py` (2026-09-22) drives the cross-nest
-  follow through the app UI on tui, web, linux, macos, ios and windows, beside its one-nest
-  unfollow, revoke, bad-address and network-fault cases.
+*Moved 2026-10-17 to [`federation-shared-folders.md`](federation-shared-folders.md), verbatim* — the kinds, gates and wire rules of the cross-nest shared-folder and channel-append plane: the substrate-vs-policy model, the structural foreign-member and foreign-writer gates, the Welcome relay's set name and owner label, the folder-owner marker and its succession arm, recipient-side access discovery, the cross-nest writer roster read, relay serving across nests and § The public folder read plane. Every `§ Cross-nest shared folders + channel append` reference (and every `→ *…*` item under it) resolves there. The kinds themselves stay listed in § Federation residue surface above.
 
 ## Nest-writer backup plane (ratified 2026-07-23; auth plane BUILT 2026-07-23)
 
@@ -1252,7 +394,7 @@ wait, retry, and after a full window pause the tuple with its progress kept
 (`segment-backup-protocol.md` § Cross-location backup protocol → *Backpressure*
 owns that contract). **The same answer for both record kinds, one difference:**
 `folder.changes.record` is the same shape (member-gated, owner-charged,
-exactly-once by content — § Cross-nest shared folders + channel append) and its
+exactly-once by content — [`federation-shared-folders.md`](federation-shared-folders.md) § Cross-nest shared folders + channel append) and its
 rate is a relaying nest's whole user population's edit rate on foreign-homed
 sets, so it takes the same budget; its backpressure stays the relaying client's
 own retry, because that write has a user behind it and the relay passes the
@@ -1328,9 +470,20 @@ mechanism: its § *Custody grace window (T)*).
   (b) makes `addressable` ~equivalent to "exists", so the probe leaks nothing beyond
   what a successful `by_handle` already revealed.
 - **Fetch exhaustion is the real hazard** (one-time KPs are consumed). Mitigated by
-  the last-resort fallback, **per-originating-nest throttling**, and the
-  **nest-signature gate** (fetch is never anonymous). Together these bound the rate
-  and keep the target reachable.
+  the last-resort fallback, the channel's per-originating-nest and per-source-IP
+  throttles, the **nest-signature gate** (fetch is never anonymous) — and, the
+  one bound a stranger cannot multiply, a **per-TARGET budget (ruled 2026-10-17)**:
+  summed over every originating nest and source, at most 10 one-time KPs per hour
+  leave one user's pool through `fauna.federation.keypackage.fetch`
+  (`bridge_rate_limit::KEYPACKAGE_FETCH_TARGET_LIMITER_CONFIG`), and a fetch past
+  it is served the last-resort KP, consuming nothing. Any fresh keypair passes the
+  hello and the fetch names no requester, so the per-nest bucket is keyed on an id
+  the caller mints and no relationship can gate the kind without closing open
+  federation (§ Trust model: a stranger's first conversation starts with this
+  fetch); the target's own bucket is the key that holds. Over budget the target
+  stays reachable — new conversations start on the shared last-resort package
+  until the window turns — and the pool, half the client's top-up target, is never
+  drained between two top-ups.
 - **`by_handle` discovery (handle→actor_id) is world-readable by design** — handles
   are public identifiers (like email / fediverse `@handle`). The anonymous discovery
   surface is per-source rate-limited to bound directory harvesting.
@@ -1363,7 +516,26 @@ Full analysis in the Spec Y2 doc § 8. Load-bearing rules:
   **source IP** first, before the
   per-nest bucket is even touched — `federation_channel.rs`'s `serve_request`
   step 2.5, a distinct key slot from the per-nest bucket so the two budgets never
-  collide. The same review closed the companion `welcome.deliver` flood
+  collide. **The hello is metered too (2026-10-17):** each costs the listener one
+  Ed25519 verify and one sign, so `serve_listener` admits at most
+  `FEDERATION_HELLO_MAX_PER_IP` (10) per source IP per window before the verify
+  runs, and refuses the rest `rate_limited`. **A kind that stores or notifies
+  for a caller it has no binding to also spends a per-TARGET budget (ruled and
+  built 2026-10-17):** the source IP bounds one address, not a botnet, so every
+  open-federation kind that writes for a stranger is bounded on something this
+  nest owns — a hosted account, the admin's queue, the whole table — summed over
+  every origin. The key-package budget is § Key packages'; the other four are
+  owned beside their kinds: `post.forward`'s unpaired forwards
+  ([`nest/private-mode.md`](nest/private-mode.md) § Post Forwarding, step 2),
+  the federated follow's stranger intents
+  ([`../behavior/federated-follow.md`](../behavior/federated-follow.md)
+  § Decision 2), `abuse_report.deliver` per subject and per nest
+  ([`../behavior/moderation.md`](../behavior/moderation.md) § Routing), and the
+  report/trend imports' table-wide row caps
+  ([`../behavior/report-sharing.md`](../behavior/report-sharing.md)
+  § Federation exchange, [`../behavior/trending.md`](../behavior/trending.md)
+  § Federation exchange). A refusal is `rate_limited`, which every sender's
+  durable queue retries. The same review closed the companion `welcome.deliver` flood
   (reject delivery to a non-registered local actor before any write). All
   federation/anonymous limiter `DashMap`s are periodically swept (`main.rs`,
   `lib.rs`) so a rotating-source flood can't grow them unboundedly. Reuse
@@ -1540,6 +712,18 @@ tracked internally, Spec Y2 slice 4). Load-bearing shape (further mechanics trac
   detection and the backoff supervisor; reconnect re-runs the
   handshake. Peer URL is **TLS-only** (loopback only for tests), as
   `federation_channel::validate_peer_url` enforces.
+- **Two byte fetches stay off the channel (decided 2026-10-19).** A video
+  segment's cache-on-fetch (`GET /api/v1/video/segments/<hash>`,
+  `video_routes.rs`) and a follow-delivered room post's sealed body
+  (`GET /api/v1/blob/<digest>`, `room_post_view.rs`) are HTTPS GETs to the
+  peer's **public, content-addressed** read routes, not federation kinds: the
+  bytes are verified against the hash the requester already holds, the routes
+  answer any client the same way, and nothing about the peer's identity is
+  asserted, so the channel's handshake would buy nothing. Their dial is the
+  SSRF guard's (`ssrf::peer_fetch_get`: https only, every resolved address
+  global and pinned, no redirect followed, the body read capped) because the
+  peer URL is one a remote party recorded (`deployment-threat-model.md`
+  § Concern 2, item 3); loopback peers are admitted only on the test state.
 - **Uniform migration + mixed-version safety.** The channel absorbs every
   Fauna↔Fauna federation call (§ Federation residue surface carries the
   authoritative, current row/kind count — kept there only, not restated here
@@ -1573,6 +757,11 @@ re-verified 2026-08-14; individual bullets below carry their own landing
 dates).** The nest↔nest WS-RPC channel is the sole Fauna↔Fauna carrier, live
 end-to-end:
 
+- **Moderation obligation delivery + relayed appeal (§ Federation residue surface, that row) — RULED 2026-10-18, BUILT 2026-10-19 (nest).** Both kinds are registered (`moderation_federation.rs`, `forbid_replay: false`), the delivery rides `abuse_report_outbox` and the per-target budgets sit beside the abuse-report pair in `bridge_rate_limit.rs`; what was built and its two-nest witness are [`../behavior/moderation.md`](../behavior/moderation.md) § Implementation status today, the mechanism § Legal takedown → *The author homed on another nest*. Owed: the issuer named on the tui queue row and the two-nest tui witness.
+- **The profile read across nests (§ Federation residue surface, that row) — RULED 2026-10-19, BUILT 2026-10-19 (nest).** `fauna.federation.profile.get` is registered (`federation_handlers::register_profile_federation_handlers`, `forbid_replay: false`, 30 s) and serves `latest_profile_bytes` only for a hosted actor whose profile decodes with `audience = Everyone`, every other case the one `not_found`; the relay `fauna.profile.get_remote` originates it through `federation_pool::originate_profile_get`. What was built, its two-nest witness and the app legs still open are [`../ui/profile.md`](../ui/profile.md) § Implementation status today.
+- **The federated follow (§ Federation residue surface, the *Federated follow* row) — RULED 2026-10-16 as target state, DESIGNED the same day, BUILT in the nest 2026-10-17.** All five kinds are registered (`follow.{subscribe,unsubscribe,state,key_blob.fetch}` in `bins/fauna-nest/src/follow_federation.rs`, `follow.deliver` in `follow_delivery.rs`), `outbox` carries a `peer_nest_id` target, and `fauna.federation.post.delete` has its follow arm (`follow_delivery::delete_custody`); the succession re-points are not built; the design, what is built and the remaining build rows are [`../behavior/federated-follow.md`](../behavior/federated-follow.md) § Implementation status today.
+- **The per-target key-package budget and the hello's per-IP meter (ruled and BUILT 2026-10-17, § Key packages — privacy & exhaustion and § Security → *Rate limiting*).** `federation_handlers::keypackage_fetch_handler` checks `AppState::keypackage_fetch_target_limit` (swept with the other limiters in `main.rs`) and serves `CacheDb::last_resort_key_package` past it; `federation_channel::serve_listener` checks `hello_admits` before `listener_handshake` verifies. Pinned by `conformance_federation_channel.rs`'s `keypackage_fetch_from_fresh_keypairs_cannot_drain_a_pool` (three fresh nest identities together take exactly the budget; every later fetch is served the last-resort package) and `federation_hello_is_throttled_per_source_ip`. The same-nest `fauna.conversations.keypackage.fetch` is not budgeted: its callers are this nest's own accounts.
+- **The per-target budgets on the other open kinds (ruled and BUILT 2026-10-17, § Security → *Rate limiting*).** One limiter, `AppState::federation_target_budget` (`bridge_rate_limit::FEDERATION_TARGET_LIMITER_CONFIG`, a one-hour window, swept in `main.rs`), holds the `post.forward`, follow-intent and abuse-report families, each under its own `*_TARGET_MAX` constant; the report/trend caps are `db::reports::MAX_PEER_REPORT_ROWS_TOTAL` and `db::trends::MAX_PEER_TREND_ROWS_TOTAL`, trimmed once per imported batch. Pinned by `bins/fauna-nest/tests/conformance_federation_target_budgets.rs` — one test per kind, each dialling from several fresh nest identities that together cannot exceed the bound while the legitimate caller (a paired relay, a subscriber already seen, a re-delivered report, the next batch) still succeeds. The welcome and inbox deliveries also check the recipient's quota before the payload store spills (`routes::inbox_quota_order_tests`), so a refused delivery leaves no blob for the sweep's grace to carry.
 - **Owner-only `keypackage.count` and the by-id `keypackage.addressable`
   probe (ruled 2026-10-09, § Key packages — privacy & exhaustion) — BUILT
   2026-10-11.** `conversations_handlers::keypackage_count_handler` refuses a
@@ -1586,96 +775,7 @@ end-to-end:
   `conformance_conversations_keypackage.rs` (`count_refuses_another_actors_supply`,
   `addressable_*`), `fauna_mls_backend_tests.rs::resolve_address_last_resort_only_peer_resolves`,
   and the tier_3 `test_starter_key_supply.py::test_a_signed_in_neighbour_learns_only_whether_you_can_be_reached`.
-- **Relay serving across nests (ruled 2026-10-01) — the read direction BUILT
-  2026-10-03, the stamp and the serving kinds BUILT 2026-10-04, the seat
-  BUILT 2026-10-09** (§ Cross-nest shared folders + channel
-  append → *Relay serving across nests*). **Built:**
-  `fauna.federation.folder.read_token.mint`
-  (`federation_handlers::folder_read_token_mint_handler` — the structural
-  member gate, then a `Read` token of purpose `ForeignFolderRead` on the
-  write token's TTL constant), its relay `fauna.folders.read_token.get` on
-  the member's nest, and the client call
-  `fauna_client_folders::FoldersClient::read_token_get`; and the read door —
-  `chunk_routes::relay_chunk_for_folder` takes a bulk token of the
-  foreign-folder pair and resolves the hint through
-  `folder_authz::resolve_foreign_readable_folder`, one roster read per
-  request. Pinned in `bins/fauna-nest/tests/sync_relay_serving.rs` (a
-  cross-nest member reads a metadata-only folder's chunk by relay under its
-  write token and under a read token, nothing rests; no other roster or
-  purpose opens the arm; a removal ends the reads inside the token's life; a
-  read token opens no write route) and in
-  `conformance_federation_channel.rs` (the mint's gate). **A reader's engine
-  takes the read token (2026-10-05):** `engine_lifecycle::assemble_engine`
-  gives a cross-nest binding marked `read_only` the read-token bearer
-  (`write_token_bearer::folder_read_token_bearer`) and every other one the
-  write-token bearer, so a cross-nest READER's on-demand host hydrates —
-  driven across two nests by `cross_nest_agent_capstone.rs`;
-  `../behavior/on-demand-files-shared-sets.md` § Shared sets on a capability host,
-  *Implementation status* → *Decision 3*. **Built (2026-10-04): the `residency` stamp** —
-  `federation_handlers::residency_stamp`, always stated, on the three
-  federated folder read replies and on the Welcome relay, threaded through
-  the member nest's relays to the member's custody record; pinned in
-  `conformance_federation_channel.rs` and, across two real nests, in
-  `conformance_cross_nest_conversations_client.rs`. **Built (2026-10-04):
-  the two serving kinds** — `fauna.federation.folder.serve.announce`
-  (`federation_handlers::folder_serve_announce_handler`: the write gate,
-  then a lease in `chunk_relay::ForeignSeats`, asked back at the roster
-  row's `nest_url`, the reply stating the lease length; *no longer serving*
-  drops only the calling nest's seat) and
-  `fauna.federation.folder.chunk.wanted`
-  (`federation_handlers::folder_chunk_wanted_handler`: push only on the
-  connection that announced that device and folder with the caller as its
-  home, reply `pushed`), originated by the member's nest from
-  `fauna.sync.serve.announce`'s additive `foreign` list and by the home
-  nest's relay walk to the leasing `nest_id` alone; pinned in
-  `bins/fauna-nest/tests/conformance_relay_serving_cross_nest.rs`.
-  **Built (2026-10-09): the seat** — the per-user agent's engine of a
-  folder homed on another nest is announced in that `foreign` list by its
-  home nest and answers on its own byte plane, and the interim refusal of
-  the metadata-only ⊕ cross-nest-member pair is gone; the witness across two
-  real nests and the real agent is `cross_nest_agent_capstone.rs`.
-  Mechanism and pins: `../behavior/file-sync.md` § Relay serving, its
-  status paragraph.
-- **BUILT 2026-10-05 — the cross-nest owner label**
-  (§ Cross-nest shared folders + channel append → *The cross-nest owner
-  label*): the home nest stamps `owner_handle`/`owner_domain`
-  (`federation_handlers::owner_label_stamp`) on the folder Welcome relay
-  (`welcome_deliver_core`) and on the content-key fetch reply; the receiving
-  nest awaits the domain binding inline (`verified_owner_label`) and the
-  relaying nest forwards on a warm cache only (`folder_handlers::
-  relayed_owner_label`, over `FederationChannelPool::cached_domain_nest_id`),
-  both through the announce's one binding (`well_formed_asserted_name`,
-  `start_domain_verification`, `bind_domain_to_origin` — one cap); the pair
-  lands on `WelcomeInbox`/`WelcomePayload` as `shared_by_handle` +
-  `shared_by_domain`, on `ContentKeyGetReply`, and on `ForeignFolder` as the
-  fifth latest-wins advisory pair (accept: `join_folder_welcome`; refresh:
-  `custody::refresh_foreign_set_from_reply`); `fauna_core::format::
-  qualified_handle` joins it for `FolderPendingShare.shared_by_display` and
-  `on_demand_presence::held_sets`. Pinned at tier 1 (the formatter, the merge,
-  the custody refresh, the pending-share label, `held_sets`, the relay's
-  warm/cold/mismatch cases in `folder_handlers`' tests) and against two real
-  nests in `conformance_cross_nest_conversations_client.rs` (an honest pair
-  arrives, a domain resolving to another nest's key and a non-folder relay
-  carry none; a production share records the pair and the relayed read
-  forwards it).
-- **BUILT 2026-09-29 — the cross-nest writer roster read**
-  (§ Cross-nest shared folders + channel append → *The cross-nest writer roster
-  read*): `fauna.federation.folder.actors.fetch`
-  (`federation_handlers::folder_actors_fetch_handler`, the same
-  `folder_handlers::actor_roster_for_channel` projection the same-nest
-  `members.list_actors` serves, handles blanked, `caller_access` stamped;
-  `conformance_federation_channel.rs` pins the gate, the ids-only disclosure and
-  the S7 refusal) and its distinct client kind
-  `fauna.folders.members.list_actors_remote` (reply `ActorMembersListReply`,
-  which gained the additive `caller_access`); the sync engine's reader leg
-  (`SyncEngine::refresh_reader_roster`) relays a foreign-routed set's read there,
-  and a cross-nest member's signed row is held until the first read, as
-  same-nest. **The succession-statement
-  carriage on the owner and `writer` rows is BUILT 2026-10-01** — the
-  projection fills it, so both doors serve it
-  (`conformance_federation_channel.rs::folder_actors_fetch_carries_the_same_succession_statements_as_the_same_nest_read`);
-  what the carriage does not do is `mls-group-key-material.md`
-  § Implementation status today's to say.
+- *Moved 2026-10-17 to [`federation-shared-folders.md`](federation-shared-folders.md) § Implementation status today, verbatim:* the build record of the cross-nest shared-folder plane — the nest plane, client read side and write plane (2026-07-19/20), relay serving across nests, the cross-nest owner label, the cross-nest writer roster read, and the folder-owner marker's succession arm.
 - **BUILT 2026-09-25 — the discovery trust rule** (§ Peer-auth model →
   *Discovery trust rule*): `resolve_peer_nest_id` refuses a `nest.info` peer
   whose served cert is not WebPKI-valid outside the loopback and
@@ -1693,72 +793,10 @@ end-to-end:
   and the host class
   is judged from the one resolution the dial connects to
   (`classify_peer_host_resolving`); `conformance_discovery_tls_root.rs` pins the refusal of a
-  mismatched answerer, including over an answer cached before the pin.
-- **Built 2026-09-28 — the folder-owner marker's succession arm (ratified
-  2026-09-22, § Cross-nest shared folders + channel append → *The marker
-  follows the owner's verified succession*)**, landed with the owner-attested declassification's reader
-  half, which is the first reader of the marker. **Member side:**
-  `poll_inbound_folder` routes a `GroupMetaMessage::Succession` body through
-  `route_folder_succession` — the session-wired `SuccessionWitness`, then
-  `settle_folder_owner_succession`, the folder twin of the conversations
-  rail's roster-pair door: verified, `old_actor_id == folder_channel_owner`,
-  successor seated (`AwaitingRemoveOld` or `Complete`) re-stamps at once;
-  `NotHere` drops; a witness-refused statement parks **by channel**
-  (`parked_folder_successions`, admitted only where its `old_actor_id` is the
-  recorded owner) and re-drives on the channel's next folded commit and on
-  the harvest settle (`redrive_after_harvest`). **Owner side:** the sweep
-  stamps its own join (`stamp_successor_folder_owner`, fresh and resumed
-  paths); `MlsEngine::restamp_folder_owner_markers` is the registry-anchored
-  primitive (no launch caller — the ruling, above). **Nest:** the claim
-  re-point (`folder_channel_claims.claimed_by`, `Succession::Move`) has been
-  built since 2026-08-03
-  ([`../behavior/succession-propagation.md`](../behavior/succession-propagation.md)
-  § Implementation status today); this ledger wrongly called it unbuilt until
-  2026-09-28. Pins: `fauna-conversations`
-  `the_folder_rail_re_stamps_the_owner_marker_at_the_midpoint_and_admits_remove_old`,
-  `without_the_statement_the_successors_remove_old_is_refused_on_a_member_seat`,
-  `a_statement_carried_ahead_of_the_add_re_stamps_nothing`,
-  `a_witness_refused_statement_parks_by_channel_and_re_stamps_on_the_harvest_re_drive`;
-  `fauna-client-recovery`
-  `a_sweep_stamps_the_successor_as_folder_owner_where_the_predecessor_owned_the_channel`,
-  `a_resumed_sweep_stamps_the_marker_the_interrupted_run_never_reached`;
-  `fauna-mls` `restamping_moves_only_markers_that_name_an_attested_predecessor`;
-  `fauna-sync-engine`
-  `binding_member_seat_follows_the_folder_owner_marker_through_a_succession`
-  (the anchor moving with the marker). **Built 2026-09-28 — the hold behind
-  a parked statement:** the refused-then-memoized
-  fork the arm declared is closed inside the ruled bound (*The folder commit
-  walk inherits the harvest wait*, above): `poll_inbound_folder` re-asks the
-  witness ahead of every commit while a statement naming the recorded owner
-  is parked (`redrive_parked_folder_in_channel`, now run before the commit as
-  well as after a fold) and returns `stalled: true` ahead of the record while
-  the sweep has yet to speak for that owner (`FaunaMlsBackend::
-  folder_walk_waits_on` — `harvest_armed`, set by
-  `arm_succession_harvest_wait` natively and `note_harvest_sweep_armed` on
-  web, and `harvest_spoken_for`, written by both harvest re-drive arms);
-  `SuccessionStatementCounts::held_commits` counts the holds. The owner joins
-  the sweep through `RailBackend::harvest_anchor_wants` →
-  `ConversationsManager::harvest_walk_actors`. Pins: the four tests the
-  ruling names. Residuals stand as the ruling states them. **The at-rest
-  half (built 2026-09-28):** `FaunaMlsBackend::
-  park_folder_succession` mirrors each park to `MlsEngine::
-  park_folder_succession` (`PARKED_FOLDER_SUCCESSION_PREFIX`);
-  `poll_inbound_folder` drains it once per channel per session
-  (`load_rested_folder_park`, the `folder_park_loaded` memo);
-  `redrive_after_harvest`'s folder arm drains every rested park, then forgets
-  those naming the owner (`forget_rested_folder_parks_naming`);
-  `redrive_parked_folder_in_channel` forgets the copy of a statement it drops;
-  `MlsEngine::forget_group` drops the key. Pins:
-  `fauna_mls_backend_tests.rs::{the_hold_behind_a_parked_folder_statement_survives_a_relaunch,
-  a_forged_statements_hold_does_not_recur_on_the_launch_after_the_settle}`
-  and `engine.rs::the_folder_park_rests_per_channel_and_goes_with_the_group`.
-  **The slot is a bounded set that displaces nothing (ruled 2026-10-12):**
-  the rule, its one exception and its residual are `identity-succession.md`'s
-  (§ The succession statement (wire) → *The slot's replacement policy*); this
-  rail's share is that the at-rest mirror rests the **whole set** of the
-  channel's slot, and a rested value that fails to decode as one is forgotten
-  (a hold lost once, inside the 0.1.x compat-free window). Pinned by
-  `fauna_mls_backend_tests.rs::the_rested_folder_park_holds_the_whole_set_across_a_relaunch`.
+  mismatched answerer, including over an answer cached before the pin, and
+  that the dial connects to `ClassifiedPeerHost::dial_addr` rather than
+  re-resolving the name (an unresolvable `.invalid` URL dialed by its judged
+  address).
 - **Channel + auth:** `GET /api/v1/federation/ws` (subprotocol
   `fauna.federation.v1`), the mutual `fauna.federation.hello` nest-key handshake
   (reuses `federation_sig`; binds both `nest_id`s + a fresh `channel_nonce` + the
@@ -1787,9 +825,11 @@ end-to-end:
 - **Originators channel-only:** the KP-fetch + Welcome relay
   (`conversations_handlers`), the nest-sync worker, the discovery-feed poller,
   the channel-fetch drain, and the group-invite inbox fan-out all originate via
-  `federation_pool::originate_*`; `post.get` has no production originator (the
-  poller stores a `fetch_url` the *client* reads — its serving handler stays
-  ready).
+  `federation_pool::originate_*`; `post.get`'s production originator is the trend
+  import's fetch (`exchange_originator`, since 2026-07-14), and — since
+  2026-10-16 — the `fauna.posts.get_remote` deep-link relay is its second (§ Federation
+  residue surface, the post-fetch row); the discovery poller stores a `fetch_url`
+  the *client* reads.
 - **One table drives serving, the wire hint, and the §4.D retry policy
   (2026-08-01).** Both channel ends attach a metadata-only registry derived
   from the serving `FederationRouter` (`hint_registry`), so an originated
@@ -1806,7 +846,7 @@ end-to-end:
   pinned by
   `federation_router.rs::the_federation_replay_forbidden_set_is_exactly_these_kinds`;
   flag semantics owner: `transport.md` § Idempotency and reconnect-with-resume.
-- **The id→handle announce — BUILT 2026-09-10 (§ Cross-nest shared folders +
+- **The id→handle announce — BUILT 2026-09-10 ([`federation-shared-folders.md`](federation-shared-folders.md) § Cross-nest shared folders +
   channel append, the id→handle bullet).** `conversations_handlers`'
   relaying `channel.fetch` joins the caller's `users.handle` +
   `handle_domain_if_set()` and passes them to
@@ -1862,305 +902,6 @@ end-to-end:
   (two real nests; the verdict reaches the member's client seam, an unseated
   bound actor reads none, the relaying nest keeps no row) and the three
   relayed-read cases in `conformance_conversation_rooms.rs`.
-- **Cross-nest shared folders + channel append — NEST PLANE BUILT
-  (2026-07-19, Phase 2 first slice; § Cross-nest shared folders + channel
-  append above is no longer fully "unbuilt").** The four kinds serve with the
-  one structural gate (`federation_handlers::require_foreign_member`):
-  `channel.append` (reuses `channel_send_core` verbatim — the S2 commit gate
-  covers the federated plane by construction), `channel.leave` (the first
-  `channel_foreign_members` delete; wrong-home-nest refusal, idempotent
-  absent-row success), `folder.{changes.fetch, content_key.fetch}` (S7
-  claim-resolve via `claimed_folder_for_channel`; same `SyncChange` wire rows
-  as same-nest `changes.list`; frame-budgeted). Client-kind relays live:
-  `fauna.conversations.channel.send_remote` (distinct kind, routed client-side
-  by `FaunaMlsBackend::send_on_channel` over the recorded `channel_home_url` —
-  **every** producer, gated commits included: the commit gate reaches that door
-  through `fauna_client_mls_sync::BackendChannelSend` and holds no conversations
-  rpc of its own, so a gated commit cannot address a nest the channel does not
-  live on. Until 2026-08-29 it did: `send_commit_gated` called `channel_send`
-  unconditionally, so a cross-nest member's device-owned-epoch takeover — and
-  every gated add/remove — landed on the *member's own* nest while the
-  advertisement it was taken for routed to the home nest. Co-members read the
-  home log, so they never saw the takeover and could not decrypt what followed
-  it; the roster-membership Commit admission ratified above, and the commit rate
-  cap that throttles it, had no client producer at all, since the local nest
-  reports the channel `Unclaimed`). **The recorded
-  home is durable as of 2026-08-30, and the sentence above depends on it being
-  so.** `FaunaMlsBackend::channel_home` is a RAM map written only by the three
-  Welcome-**join** paths, so until then it was empty after every relaunch, and
-  an established foreign-homed channel read as same-nest at all *five*
-  consumers of `channel_home_url` — the send door and, identically, the three
-  inbound drains and `channel_actors`, so the member stopped *receiving* the
-  channel as well as failing to send on it. The routing datum now rides the
-  channel's own at-rest record (`ChannelHistorySlice.home_nest_url`, additive
-  and `serde(default)`), stamped on persist and re-seeded into the map by the
-  launch restore beside its existing `bind_channel` — one write and one read,
-  because all five consumers resolve through the same map. **Stated, not closed:** a slice written before that
-  field existed decodes as `None`, which is indistinguishable from a genuine
-  same-nest channel, so a cross-nest channel joined by a pre-2026-08-30 binary
-  keeps the old behaviour. Refusing every `None` is not the safe reading of that
-  ambiguity — it would refuse the same-nest common case, which is the
-  overwhelming majority of channels — so the fail direction is bought by the
-  datum being present, not by the send door second-guessing it. **What
-  re-delivery does and does not buy** (corrected 2026-08-30; the sentence here
-  previously named a re-delivered Welcome as the recovery, which no path
-  performed): each of the three
-  Welcome paths now records the home **above** its idempotency guard, so a
-  Welcome that *is* re-delivered re-teaches the home at no init-key cost —
-  before, all three learned it only below the guard, and none of them ever
-  reached that line on a re-delivery (`ingest_welcome` returns at
-  `thread_for_channel`, which the launch restore repopulates; scheduling returns
-  at `is_scheduling_channel`, which ORs in a durable engine marker; the folder
-  path's RAM-only marker misses instead, and the re-join then fails on the spent
-  init key). That makes the mechanism real, **not** the population whole: an
-  inbox Welcome is acked once drained, so a channel established in an earlier
-  session is normally never offered one again. The pre-field cross-nest
-  population is therefore recovered only where its Welcome is still undrained (a
-  crash between ingest and ack); otherwise it stays mis-routed, and closing it
-  needs a datum that is durable independently of the slice. **The FOLDER half of
-  that population is closed as of 2026-08-30**: a member's cross-nest folder
-  join writes a `ForeignFolder` row into their own folder-key custody (in
-  `__config` until the rail retired 2026-10-02; since then a `foreign/` row of
-  the `fauna.state.folder-keys` kind — [`config-dissolution.md`](config-dissolution.md)
-  § The `__config` dissolution schedule → *The kinds*), carrying the
-  set's `channel_id` and `home_nest_url`, and that row outlives both the slice
-  and the drained Welcome. The launch restore now spends it — one custody
-  read for the whole foreign population (`FolderCustodySink::foreign_homes` →
-  `FaunaMlsBackend::seed_channel_homes_from_custody`), run **after** the slice
-  loop and writing only into holes, so a channel's own at-rest home — the more
-  specific of the two data — still wins, and no init key is spent and no
-  Welcome re-delivered. Per channel this would have been one fetch each over a
-  list whose same-nest majority holds no record at all, which is why the seam is
-  a population read and not a loop over the single-channel
-  `foreign_home_url`. The record rests in the
-  folder-key custody, which is readable only once the seat's account runtime
-  has assembled, and the restore can finish first — so the launch folder pass
-  runs the seed again once custody is readable (in line, or detached until it
-  is), where a restore-only seed used to fill nothing on a launch the runtime
-  lost; the rule is
-  [`mls-group-key-material.md`](mls-group-key-material.md)'s (§ M2 →
-  *Rotate-on-removal*, the launch-time resume). **The conversations half is
-  CLOSED BY DECISION (2026-08-30): the population does not justify the
-  machinery**. Folder-key custody holds a
-  foreign-set row for a shared *set* only, never for a conversations channel,
-  so a pre-field cross-nest conversations channel has no durable datum outside
-  its slice and stays mis-routed — and **all three routes to resolving it were
-  examined on 2026-08-30 and are closed**: the two bullets at the end of this
-  entry, then the decision paragraph that follows them.
-  Both writers of `history/<ch>` stamp the home: the
-  Rule-3 flush and the debounced replica autosave. The autosave did not, and it
-  is the only writer a Welcome recipient who has merely *received* ever runs, so
-  until 2026-08-30 that population was written away as home-less on current
-  binaries too — the residual was never purely historical. The two closed
-  routes for the conversations remainder: **(a) a total encoding does
-  not buy the fail direction here** — making the map total, so that a *missing*
-  entry means "pre-field" rather than "same-nest", works for slices written
-  from now on and for those alone; every legacy slice lacks the marker and the
-  overwhelming majority of legacy channels are same-nest, so refusing on "no
-  recorded home" refuses precisely the same-nest common case this entry already
-  ruled out. The rule stands as written — the fail direction is bought by the
-  datum being present, and for this population it is absent by construction;
-  the encoding would still *name* the ambiguous set, but that set stopped
-  growing when the autosave began stamping the home, so nothing is lost while
-  it stays unnamed. **(b) Resolving the home by asking this nest is
-  contaminated by auto-register** — the natural probe, "does my own nest home
-  this channel?", would be decisive if the answer were untouched, but
-  `channel.send`'s core auto-registers the poster on an **unclaimed** channel's
-  `actor_channels` roster (every DM / group / conversations channel is
-  unclaimed), and that is the very call each mis-routed send has been making
-  since the join, so this nest holds a roster row for a channel it does not
-  home and the probe answers "yes, mine" for exactly the population it was
-  meant to detect. **(c) The remaining route — the MLS roster — was examined
-  by the design slice and deliberately NOT built (decided 2026-08-30)**. It is the one route whose datum neither the
-  client's own state nor its own nest's roster can have forged, and it is
-  real in sketch: the local engine's leaf-authenticated roster
-  (`MlsEngine::group_members`) names the members' actor ids; each candidate
-  member's nest can then be probed through the structural fetch gate, whose
-  answer is decisive — the true home serves (it wrote the
-  `channel_foreign_members` binding at Welcome-relay time, and every
-  cross-nest channel postdates that plane), a non-home refuses loud, and a
-  hostile co-member's nest answering falsely sits inside the same envelope as
-  the TOFU inviter premise (a co-member already holds plaintext; the capture
-  is read-DoS + metadata, remedied by a fresh channel). What sinks it is the
-  step between: **an actor id resolves to a home nest NOWHERE on the client.**
-  Discovery is handle-keyed end to end (`resolve_handle_domain` →
-  `fauna.actor.by_handle`, the recipient-picker path) and the MLS leaf
-  credential carries exactly the 32-byte `ActorId` — no handle, no nest — so
-  the route requires new actor-id-keyed resolution machinery (a new directory
-  read or federation kind) plus the probe loop plus tri-state send-door
-  semantics: permanent wire and client complexity serving a population that
-  is **frozen** (stopped growing 2026-08-30 — every current join and autosave
-  stamps the home at birth, so the ambiguous set cannot regrow), **bounded**
-  (a member enters it only via a cross-nest conversations channel, which
-  needs two federated production nests with real users during the closed
-  alpha), and **self-remediable in-product** (a fresh conversation with the
-  same peer routes correctly under current code; the mis-routed channel's
-  local history stays readable). So the send door keeps datum-present
-  routing: the pre-field conversations population keeps the old local-arm
-  behavior, and the folder at-rest rider stays on its accepted residual
-  above. **Re-opening this requires evidence of an actual affected
-  population, and starts from route (c)'s recorded sketch — not from a
-  fourth hypothesis, and never from (a) or (b).**
-  **The pre-guard write itself was a plant vector, and is CLOSED as of
-  2026-08-30**: recording the
-  home *above* the idempotency guard (the re-delivery recovery)
-  means it runs **before any MLS authentication** of the re-delivery, on a value the peer
-  declared — and `welcome.deliver` is open-federation with a Dm/Group Welcome
-  ungated on the client, so an absent entry was fillable by any peer. A same-nest
-  channel was merely *absent*, so every ordinary local DM and group was such a
-  hole. Two constraints close it, on two planes. **Nest-side:** the relayed
-  Welcome's home `nest_url` is now bound to the connection's handshake-**verified**
-  `origin_nest_id`, not the peer-declared `origin_nest_url` — the nest forwards a
-  **dial-proven** `nest_addresses` address of the verified origin, honouring the
-  declaration only when it is itself one of the origin's proven addresses (a
-  migration between two proven addresses — its own current self-claim wins) or
-  when the origin has no proven address yet (first contact, where the declaration
-  is also recorded as an *unproven* sighting for a later handshake to promote),
-  the same verified-origin discipline the folder-relay set name already uses. So
-  a plant is bounded to the sender's **own** verified nest, never an arbitrary
-  URL. **Client-side:** `FaunaMlsBackend::channel_home` is now a **total
-  encoding** — `Foreign` / `SameNest` / absent — and a channel created or joined
-  under current code carries an explicit `SameNest` marker, persisted via the
-  additive `ChannelHistorySlice.home_same_nest` and re-established on restore; the
-  pre-guard fills only an **absent** entry, so it can never re-home a
-  known-same-nest channel. This closes the plant entirely for the current-binary
-  population. **This is the total encoding used for the FAIL direction, not the
-  recovery direction route (a) ruled out** — the marker never *recovers* a legacy
-  channel's home; it only stops the pre-guard from inventing one. A channel
-  persisted by a **pre-marker** binary restores as absent and stays fillable —
-  the declared, bounded residual, now capped by the nest-side constraint to the
-  sender's own verified nest. **That cap is a cap on a URL, and a peer may
-  decline to name one** — omitting or blanking `origin_nest_url` on the
-  federation door takes its no-declared-origin arm, which the client blanks and
-  hands to the pre-guard. The pre-guard briefly wrote `SameNest` for a blank,
-  which — the marker being deliberately immovable — let one unauthenticated
-  Welcome pin a foreign-homed channel permanently, closing both recovery routes
-  (the genuine re-delivery finds no hole; the durable folder seed fills `Vacant`
-  only). **A blank now writes nothing** (2026-08-31), restoring the general property: *no unauthenticated
-  write may produce a routing state a later authenticated datum cannot correct.*
-  **A channel pinned during the blank-writes-`SameNest` window stays pinned
-  today.** That arm existed only between 2026-08-30 15:37 UTC+2
-  and 2026-08-31 01:25 UTC+2 — about ten hours, in closed alpha
-   — and the marker's deliberate
-  immovability means neither recovery route reaches a channel pinned there: no
-  migration is planned, since the population is bounded by that ten-hour
-  window and the loss is recoverability of a routing datum rather than
-  confidentiality (`SameNest` and absent both route sends locally), which
-  [`nest/common.md`](nest/common.md) § Client-state recoverability →
-  *Per-object remedies* accepts as the standing frame for exactly this shape
-  of unrepairable per-object state.
-  The stated cost is that a pre-marker **local** channel is no longer upgraded
-  absent → `SameNest` by a genuine same-nest re-delivery; it stays in this same
-  declared residual, which the URL cap above does bound.
-  **The same value also rests in the member's own `ForeignFolder` records, and
-  a record written before the nest-side constraint landed rests UNCONSTRAINED —
-  a declared, accepted residual, decided rather than gated (2026-08-30).** The launch seed
-  above replays those records into the routing map as written: a seed is
-  client-side restoration with no handshake to verify against, and no marker
-  tells the two populations apart at rest. Accepted on three grounds. **(1)
-  The lineage is the inviter-asserted TOFU premise this doc already accepts
-  for v1** (§ Cross-nest shared folders + channel append, the foreign-member
-  binding bullet): the record exists only where this user **explicitly
-  accepted** the share — every pushed folder path fails closed to Knock, a
-  cross-nest relay always stamps `shared_by: None` — and its URL is what the
-  accepted sender's relay declared at share time. A hostile inviter misrouting
-  this member's reads gains ciphertext/metadata plus a read-DoS of this
-  member, inside the premise's envelope, and the premise's remedy heals it:
-  leave + re-accept, or a re-share, either of which mints a fresh record
-  carrying the now-verified value. **(2) A written-under-new-code marker on
-  the record would be structurally empty**: a channel joined under current
-  code rests with its slice-carried home, so the seed's load-bearing
-  population is exactly the pre-fix records (plus the crash window before a
-  current channel's first autosave, whose records already carry the
-  constrained value) — a marker the seed refuses on deletes the recovery the
-  seed exists to perform, and one it admits enforces nothing. **(3) The
-  population stopped growing when the nest-side constraint landed** and is
-  bounded by the closed-alpha federated population. The launch-seam pin
-  (`a_pre_field_folder_channels_home_is_seeded_from_its_foreign_set_record`)
-  witnesses the decided semantics — the record routes as written. The
-  roster-derived home resolution that could one day re-derive these records
-  from an unforgeable datum was examined and deliberately not built — route
-  (c) in the conversations-half decision above; if that decision is ever
-  re-opened, the folder legacy population rides the same design (a folder
-  channel's roster leaf-authenticates its owner where `welcome_sender`
-  survives, subject to the same legacy-seat caveat as residual (b-ii) in
-  § Cross-nest shared folders + channel append).
-  and additive `nest_url` (+ channel addressing) on
-  `changes.list`/`content_key.get`/`folders.leave`; S5 old-peer mapping is
-  the shared typed `fauna.federation.peer_nest_outdated` (NeedsUpdate class).
-  Owner-side: `members.list_actors` unions foreign rows (`remote: true`);
-  `members.evict` purges the foreign row (S8). S6: the two byte GET routes
-  carry route-scoped `Any`-origin no-credentials CORS outside the blanket
-  credentialed layer, admitting the `Authorization` request header a
-  folder-hinted read's bearer rides (`file-sync.md` § Relay serving, step
-  (4) — a script-held bearer is no ambient authority). **Client read-side BUILT (2026-07-19, Phase 2 second
-  slice):** the Welcome relay wire carries an additive `set_name`
-  (home-nest-resolved from the claimed row, never sender-asserted —
-  `WelcomeInbox`/`WelcomePayload`/`FedWelcomeDeliverRequest`); the recipient's
-  accept writes a durable `ForeignFolder` record (`FoldersConfig.foreign_sets`,
-  union-by-channel CRDT merge) via the extended `FolderCustodySink`; the
-  custody-ingest and Media key-resolver route foreign sets through the
-  `nest_url`+`channel_id` relays; the byte plane fetches direct from the home
-  nest per resolved `home_nest_url` (`ForeignBlobFetcherFactory` — native
-  plain-WebPKI GET, wasm fetch under the S6 CORS); the member-visible list
-  unions foreign records (`DevicesMachine::ForeignSetsSource` under the same
-  MLS join-filter); and leave relays via `FoldersClient::leave_with_home`
-  (home URL durably resolved from the record after relaunch). Two-nest
-  client-level conformance:
-  `conformance_cross_nest_conversations_client.rs::cross_nest_shared_folder_reads_evict_and_leave_through_client_stack`
-  (+ the send_remote round-trip in `bob_receives_alices_cross_nest_message…`).
-  **Write plane BUILT (2026-07-20, Phase 3):** the two federation write
-  kinds serve behind `require_foreign_writer` (the structural
-  foreign-member gate **then** owner-granted `access == 'writer'`):
-  `folder.changes.record` runs the same owner-pays metering + per-member
-  cap + version floor as a same-nest record via the shared
-  `sync_handlers::record_change_core`, nest-stamping `author_actor_id =
-  requester` and **content-idempotent by construction** (a re-relayed
-  record returns the original seq and charges nothing — the durable
-  exactly-once guarantee in `record_sync_change_metered`, keyed on
-  `(actor, path_hash, manifest_hash, change_type, content_key_version)`
-  vs the path's head; the same-nest path shares it); `folder.write_token.mint`
-  mints a short-lived `Write`-only bulk token (TTL the Rust constant
-  `FOREIGN_WRITE_TOKEN_TTL_SECS = 600`, purpose `ForeignFolderWrite`,
-  bridge-mint-refused) for direct chunk/manifest POSTs. Client kinds:
-  additive `nest_url`+`channel_id` on `fauna.sync.changes.record` (relay
-  branch fails loud on an old own nest — local `not_found`) and the
-  net-new per-actor `fauna.folders.write_token.get` (unknown-kind-loud
-  on an old own nest, S5-mapped to `peer_nest_outdated`). Engine:
-  `SyncEngine::set_foreign_routing` threads the control-plane relay,
-  and `fauna_client::write_token_bearer::WriteTokenBearer` is the
-  byte-plane bearer (lazy mint + proactive refresh; lifted from
-  `fauna-sync-engine` 2026-09-09 when the conversation rail's
-  `fauna.federation.conversation.write_token.mint` +
-  `fauna.conversations.blob.write_token.get` became its third consumer —
-  `../behavior/conversation-rooms.md` § The home nest → *Attachment
-  bytes*, proven by
-  `cross_nest_attachment_bytes_rest_on_the_home_nest_and_survive_gc_through_client_stack`). Two-nest client conformance:
-  `cross_nest_writer_records_and_uploads_owner_reads_back_through_client_stack`
-  (Success a+e); gate/idempotence/cap pinned at the federation-channel +
-  DB levels (`folder_write_plane_gates_on_writer_and_is_content_idempotent`,
-  `writer_record_charges_owner_and_enforces_member_cap`). **This serving
-  plane is real and reachable by any correctly-driven caller** — the caveat
-  was upstream of it, and closed on 2026-07-22: the discovery deltas
-  (§ Cross-nest → *Recipient-side access discovery*) are **BUILT**, so a
-  recipient learns its own grant, and the client leg that drives this plane
-  (foreign engine routing + the eager bind-time mint verify) is built for
-  **linux**.
-  **PROVEN end-to-end 2026-07-22** by the task-6 capstone
-  (`bins/fauna-sync-agent/tests/cross_nest_agent_capstone.rs`: two real nests +
-  the real sync-agent process — share, bind, bytes both ways, demotion parks);
-  the client-side revocation surface — a typed mint/record refusal parks the set
-  fail-closed and loudly — landed 2026-07-22 (task 4). Owner for client-leg status:
-  `../behavior/file-sync.md` § Multi-writer shared sets →
-  *Implementation status today*.
-  **v1 scope (decision of record 2026-07-20):** the write plane is exactly
-  these two federation kinds — the kind inventory above lists no
-  `lease`/`conflicts` federation twin, and the read-write/cross-nest
-  design makes cross-nest conflict-report relay a **named v1 gap** (the
-  losing version is still structurally retained; nothing is lost) and does
-  not route the advisory upload lease cross-nest (concurrent cross-nest
-  writes auto-resolve as conflicts). A cross-nest writer's holder-scoped
-  same-nest lease-release fix landed alongside.
 - **Client cross-nest path (shared Rust, end-to-end):** the `ConversationsRpc`
   seam carries `actor_by_handle_remote` (anonymous discovery against the peer)
   + `peer_domain` relay routing (`libs/fauna-conversations`,
@@ -2184,7 +925,7 @@ end-to-end:
   single door `check_conn`, since 2026-08-24: the caps bind the kind on every
   connection class, § Security above; mechanism owned by
   `transport-connection.md` § Abuse posture); the account age band's nonce
-  mint `fauna.account.age_nonce` (2026-08-24, `behavior/family-safety.md`
+  mint `fauna.account.age_nonce` (2026-08-24, `behavior/account-age-band.md`
   § The account age band) rides the
   same gate — an unauthenticated in-memory nonce-store write, the same
   memory-growth profile as the escrow/replacement challenge pair; anonymous

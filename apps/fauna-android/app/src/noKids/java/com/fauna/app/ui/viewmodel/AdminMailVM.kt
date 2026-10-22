@@ -11,9 +11,11 @@ import uniffi.fauna_client_mail_settings.AuthPolicyView
 import uniffi.fauna_client_mail_settings.DmarcPolicyView
 import uniffi.fauna_client_mail_settings.ImapPolicyView
 import uniffi.fauna_client_mail_settings.MailPolicyAction
+import uniffi.fauna_client_mail_settings.MailPolicyConfirm
 import uniffi.fauna_client_mail_settings.MailPolicyMachine
 import uniffi.fauna_client_mail_settings.MailPolicySnapshot
 import uniffi.fauna_client_mail_settings.MailPolicyStatus
+import uniffi.fauna_client_mail_settings.MicrosoftRegistrationView
 import uniffi.fauna_client_mail_settings.OutboundPolicyView
 import uniffi.fauna_client_mail_settings.SpamPolicyView
 import uniffi.fauna_client_mail_settings.SubmissionPolicyView
@@ -67,9 +69,10 @@ class AdminMailVM @Inject constructor(
      *  run, then a health re-read. */
     fun recheckHealth() = dispatch(MailPolicyAction.RecheckHealth)
 
-    /** `admin-mail-health-warmup-reset-button` (after the screen's same-button
-     *  two-click confirm): restart the fresh-IP warm-up ramp at day 1. */
-    fun resetWarmup() = dispatch(MailPolicyAction.ResetWarmup)
+    /** One press of a same-button two-click confirm (the warm-up reset, the two
+     *  secret rotations): the shared machine arms it, or — when it is the armed
+     *  one — runs its act; the screen keeps no arm of its own. */
+    fun press(button: MailPolicyConfirm) = dispatch(MailPolicyAction.Press(button = button))
 
     fun saveSpam(policy: SpamPolicyView) = dispatch(MailPolicyAction.SaveSpam(policy = policy))
     fun saveAuth(policy: AuthPolicyView) = dispatch(MailPolicyAction.SaveAuth(policy = policy))
@@ -77,10 +80,14 @@ class AdminMailVM @Inject constructor(
     fun saveImap(policy: ImapPolicyView) = dispatch(MailPolicyAction.SaveImap(policy = policy))
     fun saveOutbound(policy: OutboundPolicyView) = dispatch(MailPolicyAction.SaveOutbound(policy = policy))
     fun saveAlias(policy: AliasPolicyView) = dispatch(MailPolicyAction.SaveAlias(policy = policy))
+    fun saveDmarc(policy: DmarcPolicyView) = dispatch(MailPolicyAction.SaveDmarc(policy = policy))
 
-    /** Publish the opt-in aggregate as the deployment baseline; the outcome lands
-     *  in `snapshot.baselinePublishResult`. */
-    fun publishSpamBaseline() = dispatch(MailPolicyAction.PublishSpamBaseline)
+    /** `admin-mail-microsoft-save-button`: the two drafts go out as typed; the
+     *  shared machine checks them (both blank clears) and refuses a bad pair onto
+     *  `snapshot.error` before any round trip. */
+    fun saveMicrosoftRegistration(clientId: String, tenant: String) =
+        dispatch(MailPolicyAction.SetMicrosoftRegistration(clientId = clientId, tenant = tenant))
+
 
     /** The standing-publish toggle's own gesture: the machine full-PUTs the
      *  persisted spam group with the one field flipped and re-reads. */
@@ -172,8 +179,6 @@ class AdminMailVM @Inject constructor(
             ),
             // Pre-hydration placeholder, like every group above: the first
             // `Refresh` replaces it with the nest's `get_dmarc_policy` answer.
-            // No control renders it yet (the app control waits on rule-A
-            // approval of its ids).
             dmarc = DmarcPolicyView(
                 policyMode = "reject",
                 subdomainPolicyMode = "reject",
@@ -188,11 +193,20 @@ class AdminMailVM @Inject constructor(
                 aggregateRetentionDays = 90u,
                 forensicRetentionDays = 30u,
             ),
+            // Pre-hydration placeholder: the project's registration, until the
+            // first `Refresh` reads `fauna.setup.status`.
+            microsoftRegistration = MicrosoftRegistrationView(
+                clientId = "",
+                tenant = "",
+                isDefault = true,
+            ),
             status = MailPolicyStatus.IDLE,
             baselineState = null,
             baselinePublishResult = null,
             health = null,
             error = null,
+            armed = null,
+            secretRotation = null,
         )
     }
 }

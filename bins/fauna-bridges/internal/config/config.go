@@ -159,6 +159,14 @@ type OperatorHatch struct {
 	// MTA-role only. Same deployment-topology-not-policy rationale as
 	// ClamdAddr.
 	RspamdURL string `toml:"rspamd_url"`
+
+	// ContentScanners is the artifact's declaration of whether both scanner
+	// addresses above are wired ("wired" / "absent"). The bridge does not read
+	// it — the nest does, at boot, to keep the MTA down and refuse a mail
+	// enable on a box that cannot scan (mail-bridge-lifecycle.md § Default-off
+	// on first claim). It is on the allow-list only so the entrypoint-written
+	// hatch still loads.
+	ContentScanners string `toml:"content_scanners"`
 }
 
 // ErrForbiddenField is returned when the operator-hatch file contains

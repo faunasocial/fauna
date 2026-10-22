@@ -1,8 +1,8 @@
 import SwiftUI
 import FaunaKit
 
-/// The admin Dashboard page — headline nest metrics from `fauna.admin.stats`
-/// (+ `fauna.nest.info` for the version), admin.md § 1 Dashboard. Session-authed
+/// The admin Dashboard page — the shared card set (`admin_dashboard_snapshot()`,
+/// admin.md § 1. Dashboard → *The card set*), rendered as a card grid. Session-authed
 /// over the FFI-backed `AdminVM` (no admin token, no `/admin/api/*`). The user
 /// list / invite minting / pending requests moved to the consolidated
 /// `admin-users` hub (`AdminUsersHubView`); the legacy audit log was dropped
@@ -25,8 +25,8 @@ struct AdminDashboardView: View {
                     }
                 }
 
-                if let stats = vm.stats {
-                    statsSection(stats)
+                if let snapshot = vm.dashboard {
+                    statsSection(snapshot)
                 } else if vm.isLoading {
                     ProgressView(L.admin.dashboard.loadingDashboard)
                         .frame(maxWidth: .infinity)
@@ -42,17 +42,17 @@ struct AdminDashboardView: View {
         .task(id: reloadToken) { await vm.loadDashboardUntilReady() }
     }
 
-    private func statsSection(_ stats: FfiAdminStats) -> some View {
-        // Stat *definitions* are shared with iOS via `dashboardStatItems` so an
-        // add/relabel/reorder/recolor lands once (admin.md § 1); macOS keeps its
-        // own card-grid layout shell (a phone-wrong 4-col grid).
+    private func statsSection(_ snapshot: FfiAdminDashboardSnapshot) -> some View {
+        // The cards are the shared fold's (admin.md § 1. Dashboard → *The card
+        // set*); macOS keeps only its own card-grid layout shell (a phone-wrong
+        // 4-col grid).
         LazyVGrid(columns: [
             GridItem(.flexible()),
             GridItem(.flexible()),
             GridItem(.flexible()),
             GridItem(.flexible()),
         ], spacing: 16) {
-            ForEach(dashboardStatItems(stats: stats, version: vm.version)) { item in
+            ForEach(dashboardStatItems(snapshot)) { item in
                 StatCard(item: item)
             }
         }
@@ -64,9 +64,6 @@ private struct StatCard: View {
 
     var body: some View {
         VStack(spacing: 8) {
-            Image(systemName: item.systemImage)
-                .font(.title2)
-                .foregroundStyle(item.color)
             automationText(Ids.adminStatCardValue, item.value)
                 .font(.title3.bold())
             automationText(Ids.adminStatCardLabel, item.label)

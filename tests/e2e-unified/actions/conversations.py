@@ -625,6 +625,50 @@ class ConversationsActions:
         (`conversations.unified.error_withdraw_room_invite`). The invitee is
         told nothing — their envelope simply stops standing."""
         self.driver.click("room-pending-invite-withdraw-button", index=index)
+    # --- The room's search (`room-search.md` § The surface) ---
+
+    def room_search_offered(self) -> bool:
+        """Whether the open thread's header paints `room-search-button` —
+        painted iff `capabilities.can_search_room` (a community room whose
+        floor seats this account)."""
+        return self.driver.is_visible("room-search-button")
+
+    def search_room(self, query: str) -> None:
+        """Search the open community room's words: open the strip with
+        `room-search-button` when it is closed, type ``query`` into
+        `room-search-field` and press `room-search-submit-button`. Submit-driven
+        — typing alone asks nothing. The answer lands as `room-search-result-item`
+        rows, `room-search-no-results`, or a refusal on `error-message`; the
+        caller waits on whichever it expects (convention 14), never on a timer."""
+        if not self.driver.is_visible("room-search-field"):
+            self.driver.click("room-search-button")
+            self.driver.wait_for("room-search-field", timeout=10.0)
+        self.driver.clear_and_type("room-search-field", query)
+        self.driver.click("room-search-submit-button")
+
+    def room_search_results(self) -> list[tuple[str, str]]:
+        """The painted hits as ``(kind, text)`` in the served order — `kind` is
+        the row's `message | post` attribute; empty while none paint."""
+        return [
+            (self.driver.get_attr("room-search-result-item", "kind", index=i) or "",
+             self.driver.get_text("room-search-result-item", index=i))
+            for i in range(self.driver.count("room-search-result-item"))
+        ]
+
+    def room_search_found_nothing(self) -> bool:
+        """Whether the strip paints its empty state, `room-search-no-results`."""
+        return self.driver.is_visible("room-search-no-results")
+
+    def open_room_search_result(self, index: int = 0) -> None:
+        """Activate `room-search-result-item[index]`: a message hit selects its
+        position in the thread, a post hit opens the feed's `post_detail`
+        (through the relay to the room's home when the room lives elsewhere)."""
+        self.driver.click("room-search-result-item", index=index)
+
+    def close_room_search(self) -> None:
+        """`room-search-button` again — close the strip; the stream returns."""
+        self.driver.click("room-search-button")
+
     def room_labeler_index(self, labeler_hex: str) -> int | None:
         """The row index of ``labeler_hex`` among the open editor's
         `room-labeler-toggle[i]` rows, or None when it is not listed. Found by
@@ -632,10 +676,16 @@ class ConversationsActions:
         session nest may list other runs' labelers around this one. A row's
         text carries the id's first 16 hex characters."""
         prefix = labeler_hex.lower()[:16]
-        for i in range(self.driver.count("room-labeler-toggle")):
-            if prefix in self.driver.get_text("room-labeler-toggle", index=i):
-                return i
-        return None
+        # The catalog is read when the editor opens, so the rows land a moment
+        # after it: a deadline poll over the painted rows (convention 14).
+        deadline = time.monotonic() + 15.0
+        while True:
+            for i in range(self.driver.count("room-labeler-toggle")):
+                if prefix in self.driver.get_text("room-labeler-toggle", index=i):
+                    return i
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.25)
 
     def room_labeler_staged(self, index: int) -> bool:
         """`room-labeler-toggle[index]`'s `checked` attribute — whether the
@@ -1030,6 +1080,33 @@ class ConversationsActions:
             if body in (text or ""):
                 return self.driver.in_viewport("dm-message-text", index=i)
         return False
+
+    def scan_result_rows(self) -> list[str]:
+        """The open thread's ``dm-message-scan-result`` rows, in bubble order —
+        a received mail message's own perimeter scan verdict
+        (`mail-content-scanning.md` § User sees their own message's row).
+        Empty while no message's verdict has been read, or none was scanned."""
+        return [t or "" for t in self.driver.get_texts("dm-message-scan-result")]
+
+    def delivered_to_alias_tags(self) -> list[str]:
+        """The open thread's ``dm-message-delivered-to-alias`` tags, in bubble
+        order — the alias a received mail message arrived on and its label
+        (`mail-aliases.md` § Label). Empty until the account's alias rows have
+        been read, and for every message no alias delivered."""
+        return [t or "" for t in self.driver.get_texts("dm-message-delivered-to-alias")]
+
+    def withheld_badges(self) -> list[str]:
+        """The open thread's ``dm-message-withheld-badge`` texts, in bubble
+        order — the badge beside the body of the user's OWN message the nest
+        took down or blocked, matched to their queue row (`moderation.md`
+        § Legal takedown → *App render*). Empty until the thread's queue read
+        answered, and on every message the nest withholds nothing of."""
+        return [t or "" for t in self.driver.get_texts("dm-message-withheld-badge")]
+
+    def open_withheld_appeal(self, index: int = 0) -> None:
+        """Tap the ``index``-th withheld badge: the app moves to the
+        moderation page with that queue row's appeal form open."""
+        self.driver.click("dm-message-withheld-badge", index=index)
 
     def inject_send_failure_for_test(self, thread_id: str, reason: str) -> None:
         """Stamp ``thread_id``'s compose into ``send_state = Failed { reason }``

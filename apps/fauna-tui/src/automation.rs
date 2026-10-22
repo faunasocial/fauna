@@ -968,6 +968,24 @@ fn state_json(app: &App, machine_result: Option<String>) -> Value {
     // registry read has ANSWERED, read off the loop while the nav's awaited
     // read is held at the nest (`admin::custody_hosting::state_json`).
     state["data"]["admin_custody_hosting"] = crate::admin::custody_hosting_state_json(&app.admin);
+    // Convention 17's "a nest Block never renders silent" — the region field's
+    // twin (`crate::nest_rules::block_render_json`).
+    state["nest_block_render"] = crate::nest_rules::block_render_json(app);
+    // The nest's one-line changed notice (`nest-rules.md` § Acceptance at
+    // joining, and a change of rules) — painted id-less on the app's notice
+    // line, as the doc says it adds no id, so it rides here like
+    // `focused_line_count`: `null` when there is none.
+    state["nest_rules_changed_notice"] = serde_json::json!(app.nest_rules.changed_notice);
+    // How many rules the guardian's rule document the render engine holds
+    // carries (`nest-rules.md` § The shared rule editor (b)) — `null` with no
+    // guardian document. The ward-side witness that a guardian's save reached
+    // this device's engine, read before its render is asked to apply it.
+    state["ward_rule_document_rules"] =
+        serde_json::json!(app.content_policy.ward_document_rule_count());
+    // Which sources the render engine holds — what a content-render test's
+    // failure prints, so a red names whether a read never landed or a render
+    // ignored what it held (convention 6).
+    state["content_policy_sources"] = app.content_policy.sources_json();
     state
 }
 
@@ -1918,7 +1936,7 @@ async fn dispatch_command(
         // gate the tick calls) and AWAITS the round trip, so the ack is a true
         // barrier — the guardian can be logged in the moment this returns.
         // The ≤hourly cadence gate is untouched; the first flush is eager, which
-        // is the only case a test needs. web's twin is `$lib/family-notify-e2e`
+        // is the only case a test needs. web's twin is `#lib/family-notify-e2e`
         // (fire-and-forget), windows' is `GuardianNotifyCache.CheckNowAsync`.
         // Contract: `fauna_e2e_agent::FAMILY_NOTIFY_CHECK_NOW`.
         fauna_e2e_agent::FAMILY_NOTIFY_CHECK_NOW => {
@@ -2845,6 +2863,26 @@ async fn dispatch_command(
             fauna_client_capabilities::trust_clock::set_clock_offset_secs(offset);
             recognized(true)
         }
+        // Moves the submission-token refresh's clock — the `now` the 7-day
+        // re-mint cadence is measured against and every re-minted token is
+        // issued at (`fauna_client_mail_settings::token_refresh`), never the
+        // bearer clock. The cadence and the 30-day lifetime are Rust
+        // constants, so "a mail app keeps sending month after month" has a
+        // witness only by moving the clock — convention 14's fake clock, never
+        // a sleep. `now_offset_secs: 0` resets it; the offset is process-wide
+        // and nothing auto-resets it.
+        //
+        // Nothing runs here: the refresh reads the clock on its next pass —
+        // the session's next reconnect, or the daily tick — so the journey's
+        // witness is the production trigger, not this command.
+        "mail_token_refresh_advance_clock" => {
+            let offset = payload
+                .get("now_offset_secs")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            fauna_client_mail_settings::token_refresh::set_clock_offset_secs(offset);
+            recognized(true)
+        }
         // Moves the co-present ceremony's ADMISSION clock — the `now` a
         // receive-act expectation is minted and judged against
         // (`fauna_sync_engine::ceremony_clock`, read per call by the `NowFn`
@@ -3195,10 +3233,18 @@ async fn apply_nav(app: &mut App, nav: &Value) {
     // for the empty actor.
     if view == Page::Profile.view_name() {
         let entry_actor = top.get("actor_id").and_then(|v| v.as_str());
+        // The entry's optional `home_nest_url` is the open target's routing
+        // hint (`profile.md` § Layout & flow → *Reaching another actor's
+        // profile*) — the door a driver takes to open a profile with the home
+        // carried, as a Find User hit or a relayed post's author line does.
+        let home = top
+            .get("home_nest_url")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
         match entry_actor {
             Some(raw) => {
                 let own = app.session.as_ref().map(|s| s.actor_id.as_str());
-                app.open_profile(profile_nav_target(raw, own));
+                app.open_profile(profile_nav_target(raw, own), home);
             }
             None => run_nav_enter(app, Page::Profile).await,
         }
@@ -4268,7 +4314,7 @@ mod tests {
         let mut app = test_app();
         let mut registry = Registry::default();
         let gesture =
-            || crate::element::Gesture::Feed(crate::feed::Action::ToggleSellSubscribersFree);
+            || crate::element::Gesture::Profile(crate::profile::Action::ToggleAutoApprove);
         registry.element(crate::element::Element::checkbox_gesture(
             "on",
             "On",
@@ -5085,6 +5131,8 @@ mod tests {
                     "invite-code-input",
                     "invite-code-check-button",
                     "invite-code-status",
+                    "onboarding-terms-notice",
+                    "onboarding-terms-link",
                     "invite-request-continue-button",
                     "invite-request-back-button",
                 ],
@@ -5095,6 +5143,8 @@ mod tests {
                     "claim-code-input",
                     "claim-code-submit-button",
                     "claim-code-status",
+                    "onboarding-terms-notice",
+                    "onboarding-terms-link",
                     "claim-code-back-button",
                 ],
             ),
@@ -5113,7 +5163,7 @@ mod tests {
             ),
             // Box recovery, step 4. `NestRecovery` is pinned in its EMPTY state
             // (nothing custodied): the rows are data-driven, so the populated
-            // shape — `recover-box-list` + the indexed `recover-box-item-{i}` —
+            // shape — `recover-box-list` + the indexed `recover-box-item` rows —
             // has its own test below.
             (
                 OnboardingStep::NestRecovery,
@@ -5192,6 +5242,7 @@ mod tests {
                 &[
                     "vps-provider-row",
                     "vps-config-mail-mode-toggle",
+                    "vps-config-ssh-door-toggle",
                     "vps-config-update-channel-row",
                     "vps-config-back-button",
                     "vps-config-continue-button",
@@ -5208,6 +5259,8 @@ mod tests {
                     "provisioning-start-button",
                     "provisioning-back-button",
                     "provisioning-continue-button",
+                    "onboarding-terms-notice",
+                    "onboarding-terms-link",
                 ],
             ),
             (
@@ -5559,6 +5612,7 @@ mod tests {
 
         fn request(id: i64, tier: &str, paid: bool) -> PendingRequest {
             PendingRequest {
+                home: None,
                 request_id: id,
                 subscriber_id: fauna_core::identity::ActorId::from_hex(&"ef".repeat(32)).unwrap(),
                 tier_name: tier.to_string(),
@@ -5692,7 +5746,7 @@ mod tests {
     }
 
     /// `nest_recovery` in its POPULATED state (the pin above covers the empty
-    /// one): one indexed `recover-box-item-{i}` per custodied box, and the two
+    /// one): one indexed `recover-box-item` per custodied box, and the two
     /// re-provision methods gated on a selection — the client mirroring the
     /// machine's `require_selected_recovery_box` guard rather than letting the
     /// admin click into an error.
@@ -5714,15 +5768,11 @@ mod tests {
             0,
             "the empty message must not paint when boxes ARE custodied"
         );
-        for i in 0..2 {
-            assert_eq!(
-                registry
-                    .matches(&format!("recover-box-item-{i}"), &[])
-                    .count(),
-                1,
-                "one indexed row per custodied box"
-            );
-        }
+        assert_eq!(
+            registry.matches("recover-box-item", &[]).count(),
+            2,
+            "one row per custodied box, all under the one indexed id"
+        );
         // Gated until a box is picked.
         let enabled = |r: &Registry, id: &str| r.matches(id, &[]).next().map(|e| e.enabled);
         assert_eq!(

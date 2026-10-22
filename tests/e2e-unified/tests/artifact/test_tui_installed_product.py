@@ -18,12 +18,16 @@ outcome rather than a tui-specific one.
 
 **What only this module can catch:**
 
-* The archive carries BOTH binaries and `install.sh` installs both — the app
+* The archive carries ALL THREE binaries and `install.sh` installs them — the app
   resolves `fauna-sync-agent` beside itself (`agent_spawner::agent_binary_absolute`),
   and in the build tree it is beside the app by accident; under an install it is
-  there only because the channel deliberately put it there.
-* The installed binary is launchable *at its installed path* (the `install -Dm755`
-  mode; nothing resolving a path relative to the build tree).
+  there only because the channel deliberately put it there. `fauna-cli`, the cli
+  app's device shell, is the archive's third member (`installers/tui.md`
+  § Decisions, decision 4): no other channel reaches a headless box with it, so
+  the archive dropping it is the whole cli app unobtainable there.
+* The installed binaries are launchable *at their installed paths* (the
+  `install -Dm755` mode; nothing resolving a path relative to the build tree) —
+  the terminal app by the driven journey, the cli by its own `--help`.
 * The layout `assemble-archive.sh` produces is the one `install.sh` reads —
   the two scripts are the channel, and this runs the real ones.
 
@@ -32,8 +36,10 @@ seam (the real `assemble-archive.sh` over the DEBUG binaries, and why debug),
 and the throwaway `XDG_CONFIG_HOME` every invocation carries.
 """
 
+import os
 import re
 import stat
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -45,6 +51,7 @@ from helpers.tui_installed_product import (
     install_prefix,
     installed_agent_path,
     installed_app_path,
+    installed_cli_path,
     run_install,
     run_uninstall,
     staged_archive_dir,
@@ -64,15 +71,36 @@ pytestmark = [pytest.mark.tier_4, pytest.mark.tui, pytest.mark.installed_product
 
 
 @pytest.fixture(scope="session")
-def installed_product(tui_app_path):
+def cli_debug_binary(tui_app_path):
+    """The cli app's device shell, built through its build-if-stale recipe into
+    the SAME debug dir `tui_app_path` names — the third binary the archive
+    carries. `just cli-debug` is the e2e flavor the cli's own tier_3 journey
+    drives (`test_cli_mcp.py::cli_binary`, the same shape); a failed build fails
+    the module — it is part of the product under test, never an environment
+    skip. Depends on `tui_app_path` only for the ordering: both builds run
+    before any staging."""
+    repo = Path(get_repo_root())
+    built = subprocess.run(["just", "cli-debug"], cwd=repo, capture_output=True, text=True)
+    binary = Path(tui_app_path).parent / ("fauna-cli.exe" if os.name == "nt" else "fauna-cli")
+    if built.returncode != 0 or not binary.exists():
+        pytest.fail(
+            f"`just cli-debug` did not build the device shell at {binary}:\n"
+            f"{built.stdout[-2000:]}\n{built.stderr[-2000:]}"
+        )
+    return str(binary)
+
+
+@pytest.fixture(scope="session")
+def installed_product(tui_app_path, cli_debug_binary):
     """Stage the archive with the real `assemble-archive.sh`, run its real
     `install.sh`, yield the installed app, then uninstall it.
 
-    `tui_app_path` is the ordering that matters: it BUILDS the debug binaries
-    (`just tui-debug` builds `fauna-tui` and `fauna-sync-agent` together), so the
-    staging always has both to carry. Session-scoped because the tui driver is,
-    and because `_installed_tui_app_override` is session-wide — the install must
-    exist before the first app launch of the run.
+    `tui_app_path` and `cli_debug_binary` are the ordering that matters: they
+    BUILD the debug binaries (`just tui-debug` builds `fauna-tui` and
+    `fauna-sync-agent` together, `just cli-debug` the cli beside them), so the
+    staging always has all three to carry. Session-scoped because the tui
+    driver is, and because `_installed_tui_app_override` is session-wide — the
+    install must exist before the first app launch of the run.
     """
     repo = Path(get_repo_root())
     proc = run_install(repo, Path(tui_app_path).parent)
@@ -99,8 +127,8 @@ def journey_app(installed_product, logged_in_app):
     return logged_in_app
 
 
-def test_the_archive_carries_both_binaries_and_the_installer(installed_product):
-    """The staged layout is the channel's whole payload: two binaries and the
+def test_the_archive_carries_the_three_binaries_and_the_installer(installed_product):
+    """The staged layout is the channel's whole payload: three binaries and the
     script — `assemble-archive.sh`'s one definition, read back here."""
     staged = staged_archive_dir(Path(get_repo_root()))
     for name in (*STAGED_BINARIES, "install.sh"):
@@ -131,6 +159,33 @@ def test_the_install_puts_the_sync_agent_where_the_app_looks_for_it(installed_pr
         f"(installers/tui.md § What any channel must satisfy)."
     )
     assert agent.stat().st_mode & stat.S_IXUSR, f"{agent} is not executable"
+
+
+def test_the_install_puts_the_cli_app_beside_the_terminal_app_and_it_runs(installed_product):
+    """The archive's third member, installed and launchable at its installed path.
+
+    `fauna-cli --help` is the one invocation that needs no host, no account and
+    no store: the `argv` shell's overview (`libs/fauna-cli/src/argv.rs`), which
+    lists the catalog's commands and exits 0. A binary that lands but does not
+    start (a missing shared library, a wrong mode) is what the launch catches."""
+    cli = installed_cli_path(Path(get_repo_root()))
+    assert cli.is_file(), (
+        f"{cli} is missing: the cli app's device shell is the archive's third "
+        f"member (installers/tui.md § Decisions, decision 4), and no other channel "
+        f"reaches a headless box with it."
+    )
+    assert cli.stat().st_mode & stat.S_IXUSR, f"{cli} is not executable"
+    proc = subprocess.run(
+        [str(cli), "--help"], capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0, (
+        f"the installed {cli} --help exited {proc.returncode}:\n"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    assert "commands:" in proc.stdout and "mcp" in proc.stdout, (
+        f"the installed fauna-cli's --help names neither its commands nor `mcp` — "
+        f"not the device shell's overview:\n{proc.stdout}"
+    )
 
 
 @pytest.mark.feature("get-the-app")
@@ -183,9 +238,14 @@ def test_install_scripts_branch_on_no_build_configuration():
     # And install.sh really does read from beside itself — the seam this module
     # stages through.
     install = (packaging / "install.sh").read_text()
-    assert 'BINARY="$SCRIPT_DIR/fauna-tui"' in install and 'AGENT_BINARY="$SCRIPT_DIR/fauna-sync-agent"' in install, (
-        "install.sh no longer installs the binaries beside itself — the staging "
-        "seam is gone and this module is installing something other than it thinks."
+    assert (
+        'BINARY="$SCRIPT_DIR/fauna-tui"' in install
+        and 'AGENT_BINARY="$SCRIPT_DIR/fauna-sync-agent"' in install
+        and 'CLI_BINARY="$SCRIPT_DIR/fauna-cli"' in install
+    ), (
+        "install.sh no longer installs the three binaries beside itself — the "
+        "staging seam is gone and this module is installing something other than "
+        "it thinks."
     )
 
 

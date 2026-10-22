@@ -80,3 +80,49 @@ def test_missing_asset_under_the_hashed_tree_is_not_found_not_the_page(spa_servi
     deep = urllib.request.urlopen(f"{nest_url}/app/feed/some/deep/route")
     assert deep.status == 200
     assert b"<html" in deep.read().lower()
+
+
+@pytest.mark.feature("get-the-app")
+def test_the_nest_served_app_drives_a_login_to_feed_journey(request, app, spa_serving_nest):
+    """Web's obtain-then-drive witness: the app as its channel delivers it.
+
+    Web's install channel is "served by your nest in the browser"
+    (`docs/goal/architecture/installers/README.md` § The channel contract), so
+    the subject here is the page the nest itself serves at ``/app/`` — not the
+    harness's `_serve_spa_proxy`, which every other web journey loads, and
+    which is the CORS shim a production nest never needs. The page is opened on
+    the nest's own origin (`WebBridgeDriver.serve_from`), signs in through the
+    ordinary login path with that same origin as its nest, and must reach the
+    feed: the sentence `docs/features/get-the-app.md` outcome 1 makes — the
+    app, obtained the way the platform provides it, ends open and signed in.
+
+    Like the installed-product witnesses on linux and macOS, it asserts its own
+    subject before its outcome: a page that silently stayed on the proxy would
+    colour web's cell from the build tree's delivery, not the nest's.
+    """
+    from urllib.parse import urlsplit
+
+    from conftest import _login_app_as, _make_user
+
+    nest = spa_serving_nest
+    nest_origin = "{0.scheme}://{0.netloc}".format(urlsplit(nest["url"]))
+    user = _make_user(nest)
+    restore = app.driver.serve_from(nest["url"])
+    try:
+        served = app.driver.eval_js("location.origin + location.pathname")
+        assert served.startswith(f"{nest_origin}/app/"), (
+            f"the page must be the nest's own /app/ ({nest_origin}/app/), got "
+            f"{served!r} — colouring get-the-app outcome 1 from this run would "
+            f"claim the nest's channel was proven when another origin served it."
+        )
+        _login_app_as(app, request, nest, user, spa_url=nest_origin, verify_live_actor=True)
+        app.wait_for("feed-tab")
+        assert app.is_visible("feed-tab"), (
+            f"the nest-served app signed in but never rendered the feed. "
+            f"error element: {app.error_text()!r}"
+        )
+        assert app.driver.eval_js("location.origin") == nest_origin, (
+            "the signed-in page left the nest's origin"
+        )
+    finally:
+        restore()

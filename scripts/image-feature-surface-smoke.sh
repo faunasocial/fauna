@@ -3,7 +3,7 @@
 #
 # Asserts a BOOTED nest image serves one route per compiled-in bridge plane —
 # ActivityPub, Nostr, Bluesky — from that plane's own handler, never the
-# router's landing-page fallback ("Fauna Nest API"). Run by build-nest-image.yml's
+# router's landing-page fallback ("<h1>Fauna nest</h1>"). Run by build-nest-image.yml's
 # smoke steps on the freshly built image, before anything is pushed.
 #
 # Why on the artifact: from 2026-09-02 to 2026-10-04 every image shipped without
@@ -16,7 +16,7 @@
 set -euo pipefail
 
 addr=${1:?usage: image-feature-surface-smoke.sh <host:port>}
-landing='Fauna Nest API'
+landing='<h1>Fauna nest</h1>'
 fail=0
 
 fetch() {

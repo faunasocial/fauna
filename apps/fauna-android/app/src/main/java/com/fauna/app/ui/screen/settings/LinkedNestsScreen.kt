@@ -103,6 +103,7 @@ fun LinkedNestsScreen(
     val errorMessage by vm.errorMessage.collectAsState()
     val custodyNestRows by vm.custodyNestRows.collectAsState()
     val escrowHolders by vm.escrowHolders.collectAsState()
+    val restoreNotice by vm.restoreNotice.collectAsState()
     val appMessages = LocalAppMessages.current
     val context = androidx.compose.ui.platform.LocalContext.current
 
@@ -131,6 +132,15 @@ fun LinkedNestsScreen(
         onRevokeCustody = vm::revokeCustody,
         receiptStatusLine = { com.fauna.app.ui.util.custodyReceiptStatusText(context, it) },
         heldBytesLine = { com.fauna.app.ui.util.custodyHeldBytesText(context, it) },
+        restoreNotice = restoreNotice,
+        onRestoreFromCustodian = vm::restoreFromCustodian,
+        // The shared `notice_parts` decision: each part resolved nested (the
+        // revoked reason is itself a key), joined by a space.
+        restoreNoticeText = { outcome ->
+            com.fauna.ffi.custodianRestoreNotice(outcome).joinToString(" ") {
+                com.fauna.app.ui.util.resolveLocalizedNested(context, it) ?: ""
+            }
+        },
     )
 }
 
@@ -193,8 +203,26 @@ fun LinkedNestsContent(
     onRevokeCustody: (ByteArray, ByteArray?) -> Unit = { _, _ -> },
     receiptStatusLine: (uniffi.fauna_client_capabilities.CustodyReceiptRowView) -> String = { "" },
     heldBytesLine: (uniffi.fauna_client_capabilities.CustodyReceiptRowView) -> String = { "" },
+    // Restore from a custodian nest (`nests.md` § Trust facet — restore from a
+    // custodian nest): the last restore's state, the one command both entries
+    // dispatch (the typed address, a custodian row's own), and the outcome's
+    // notice text — the shared `notice_parts` decision, injected so the
+    // Content stays FFI-free for the Robolectric harness.
+    restoreNotice: LinkedNestsVM.RestoreNotice? = null,
+    onRestoreFromCustodian: (String) -> Unit = {},
+    restoreNoticeText: (com.fauna.ffi.FfiCustodianRestoreOutcome) -> String = { "" },
 ) {
     var showForm by remember { mutableStateOf(false) }
+    var showRestoreForm by remember { mutableStateOf(false) }
+    var restoreInput by remember { mutableStateOf("") }
+    // A restore that reached the custodian closes the form; every failure
+    // keeps it open with the address kept.
+    LaunchedEffect(restoreNotice) {
+        if ((restoreNotice as? LinkedNestsVM.RestoreNotice.Done)?.closesForm == true) {
+            showRestoreForm = false
+            restoreInput = ""
+        }
+    }
     // The link-form value: a nest address (URL) → both-ends LinkBoth, or a 64-hex
     // identity → single-end Link. The shared classifier routes it (see the VM).
     var addInput by remember { mutableStateOf("") }
@@ -306,6 +334,25 @@ fun LinkedNestsContent(
                 }
             }
 
+            // Restore from a custodian nest (page-level): after the forward
+            // queue, before the nest rows, on every signed-in visit — the cold
+            // device has no custody rows, and it is who the button is for.
+            item {
+                CustodyRestoreBlock(
+                    formOpen = showRestoreForm,
+                    input = restoreInput,
+                    notice = restoreNotice,
+                    noticeText = restoreNoticeText,
+                    onReveal = { showRestoreForm = true },
+                    onInput = { restoreInput = it },
+                    onSubmit = { onRestoreFromCustodian(restoreInput) },
+                    onCancel = {
+                        showRestoreForm = false
+                        restoreInput = ""
+                    },
+                )
+            }
+
             // The nest list: home row first (nests.md § Layout), then pairings.
             val rows = listOfNotNull(snapshot.home) + snapshot.pairings
             if (rows.isEmpty() && custodyNestRows.isEmpty()) {
@@ -345,11 +392,78 @@ fun LinkedNestsContent(
                         row = custody,
                         shortId = shortId,
                         onRevokeCustody = onRevokeCustody,
+                        onRestore = onRestoreFromCustodian,
                         receiptStatusLine = receiptStatusLine,
                         heldBytesLine = heldBytesLine,
                     )
                 }
             }
+        }
+    }
+}
+
+/**
+ * The page-level restore block (`nests-custody-restore-*`): the reveal, the
+ * inline form (the `nests-add-*` shape) and the last restore's notice — tui's
+ * `push_custody_restore`. The shell holds no dial, handshake or walk logic;
+ * the restore dials the custodian, never this session's own nest, so no
+ * own-nest wire kind gates the submit.
+ */
+@Composable
+private fun CustodyRestoreBlock(
+    formOpen: Boolean,
+    input: String,
+    notice: LinkedNestsVM.RestoreNotice?,
+    noticeText: (com.fauna.ffi.FfiCustodianRestoreOutcome) -> String,
+    onReveal: () -> Unit,
+    onInput: (String) -> Unit,
+    onSubmit: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedButton(
+            onClick = onReveal,
+            modifier = Modifier.testTag(Ids.NESTS_CUSTODY_RESTORE_BUTTON),
+        ) { Text(stringResource(R.string.nests_custody_restore_button)) }
+        if (formOpen) {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    OutlinedTextField(
+                        value = input,
+                        onValueChange = onInput,
+                        label = { Text(stringResource(R.string.nests_custody_restore_input_label)) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag(Ids.NESTS_CUSTODY_RESTORE_INPUT),
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = onSubmit,
+                            enabled = input.isNotBlank() &&
+                                notice != LinkedNestsVM.RestoreNotice.Running,
+                            modifier = Modifier.testTag(Ids.NESTS_CUSTODY_RESTORE_SUBMIT_BUTTON),
+                        ) { Text(stringResource(R.string.nests_custody_restore_submit)) }
+                        OutlinedButton(
+                            onClick = onCancel,
+                            modifier = Modifier.testTag(Ids.NESTS_CUSTODY_RESTORE_CANCEL_BUTTON),
+                        ) { Text(stringResource(R.string.nests_custody_restore_cancel)) }
+                    }
+                }
+            }
+        }
+        val text = when (notice) {
+            null -> null
+            LinkedNestsVM.RestoreNotice.Running -> stringResource(R.string.nests_custody_restore_running)
+            is LinkedNestsVM.RestoreNotice.Done -> noticeText(notice.outcome)
+        }
+        if (text != null) {
+            Text(
+                text,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.testTag(Ids.NESTS_CUSTODY_RESTORE_NOTICE),
+            )
         }
     }
 }
@@ -366,6 +480,7 @@ private fun CustodyNestItemRow(
     row: uniffi.fauna_client_capabilities.CustodyHolderRowView,
     shortId: (String) -> String,
     onRevokeCustody: (ByteArray, ByteArray?) -> Unit,
+    onRestore: (String) -> Unit,
     receiptStatusLine: (uniffi.fauna_client_capabilities.CustodyReceiptRowView) -> String,
     heldBytesLine: (uniffi.fauna_client_capabilities.CustodyReceiptRowView) -> String,
 ) {
@@ -424,6 +539,15 @@ private fun CustodyNestItemRow(
                     Text(stringResource(R.string.devices_custody_revoke))
                 }
                 DisabledControlReasonText(revokeGate.reason)
+                // The warm explicit restore gesture (`nests.md` § Trust facet —
+                // restore from a custodian nest): the same command as the
+                // page-level form, the row's own address pre-filled.
+                row.custodianNestUrl?.let { url ->
+                    OutlinedButton(
+                        onClick = { onRestore(url) },
+                        modifier = Modifier.testTag(Ids.NEST_TRUST_CUSTODY_RESTORE_BUTTON),
+                    ) { Text(stringResource(R.string.nests_custody_restore_row_button)) }
+                }
             }
         }
     }
@@ -642,7 +766,24 @@ private fun TrustFacet(
                 // plainly trusted, and rendering "not trusted to read anything"
                 // directly above "Backs up your messages for you" states the
                 // opposite of the row beneath it.
-                if (row.trustGrants.isEmpty() && row.trustBackups.isEmpty()) {
+                // A roster that could not be read is not an empty one
+                // (`nests.md:125`): the home-row status says so and takes
+                // `nest-trust-empty`'s place; empty text otherwise.
+                if (row.isHome) {
+                    Text(
+                        if (row.trustHoldersUnreachable) {
+                            stringResource(R.string.nests_holders_status_unreachable)
+                        } else {
+                            ""
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.testTag(Ids.NEST_TRUST_HOLDERS_STATUS),
+                    )
+                }
+                if (row.trustGrants.isEmpty() && row.trustBackups.isEmpty() &&
+                    !row.trustHoldersUnreachable
+                ) {
                     Text(
                         stringResource(R.string.nests_not_trusted),
                         style = MaterialTheme.typography.bodySmall,

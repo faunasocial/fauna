@@ -314,6 +314,7 @@ mod tests {
             attachments: vec![],
             badges: MessageBadges::default(),
             legal_takedown_ref: None,
+            admin_block_reason: None,
             plane_ref: None,
         }
     }

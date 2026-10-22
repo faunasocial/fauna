@@ -346,6 +346,7 @@ class AdminUsersVM @Inject constructor(
         handle: String,
         tier: String,
         guardianActor: ByteArray?,
+        ageBand: String?,
         invalidActorHint: String,
     ) {
         val trimmed = actorHex.trim()
@@ -361,6 +362,7 @@ class AdminUsersVM @Inject constructor(
                 tier,
                 handle.trim().takeIf { it.isNotEmpty() },
                 guardianActor,
+                ageBand,
             )
             reloadUsers()
         }

@@ -89,19 +89,22 @@ public extension View {
         onFaunaNotification(.faunaAddressBookChanged, action: action)
     }
 
-    /// Re-run `action` with the changed folder's name whenever a `fauna.sync.changed`
-    /// push arrives (`.faunaFolderDeviceActivityChanged`, posted by `FaunaClient`'s
-    /// push observer with the folder name as `object`). The Folders page's per-set
-    /// device-activity section attaches this and gates on the name matching its own
+    /// Re-run `action` with the push's `FolderDeviceActivityChange` (folder name +
+    /// hash) whenever a `fauna.sync.changed` push arrives
+    /// (`.faunaFolderDeviceActivityChanged`, posted by `FaunaClient`'s push
+    /// observer as `object`). The Folders page's per-set
+    /// device-activity section attaches this and gates on `change.names(_:)` matching its own
     /// (currently-expanded) set — never a blanket refetch for a collapsed row (the
     /// apple twin of tui's `device_activity_resync_op` / windows' `_expandedFolder
     /// == folder` guard; `transport.md` § Push events). Unlike the other modifiers
     /// here this one passes the payload through rather than discarding it, since the
     /// gate needs to know which set changed.
-    func onFolderDeviceActivityChanged(_ action: @escaping (String) async -> Void) -> some View {
+    func onFolderDeviceActivityChanged(
+        _ action: @escaping (FolderDeviceActivityChange) async -> Void
+    ) -> some View {
         onReceive(NotificationCenter.default.publisher(for: .faunaFolderDeviceActivityChanged)) { note in
-            guard let folder = note.object as? String else { return }
-            Task { await action(folder) }
+            guard let change = note.object as? FolderDeviceActivityChange else { return }
+            Task { await action(change) }
         }
     }
 
@@ -117,6 +120,14 @@ public extension View {
     /// cross-set aggregate).
     func onMediaChanged(_ action: @escaping () async -> Void) -> some View {
         onFaunaNotification(.faunaMediaChanged, action: action)
+    }
+
+    /// Re-run `action` whenever another device changes this account's spam
+    /// training history (`.faunaMailSpamChanged`, from `FfiStaleSurfaces.mail_spam`).
+    /// The Spam page attaches it to re-hydrate its history live; only a mounted
+    /// view receives it, which is the page gate.
+    func onMailSpamChanged(_ action: @escaping () async -> Void) -> some View {
+        onFaunaNotification(.faunaMailSpamChanged, action: action)
     }
 
     /// Re-run `action` whenever the account registry is mutated from outside the

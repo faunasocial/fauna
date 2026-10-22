@@ -229,6 +229,21 @@ fn issuance_errors(acme_dir: &std::path::Path) -> Vec<CertIssuanceError> {
         .collect()
 }
 
+/// This module's admin-plane kinds for an admin-consented principal —
+/// the DNS page's certificate-health read (every certificate write is sovereign and absent) — each its actor handler behind
+/// [`crate::principal_handlers::admin_twin`] (`authorization-server.md`
+/// § Scope grammar → *The admin arms* names the set).
+pub(crate) fn principal_admin_handlers()
+-> Vec<(&'static str, crate::principal_handlers::PrincipalHandler)> {
+    use crate::principal_handlers::admin_twin;
+    let kinds: [(&'static str, crate::rpc_router::RpcHandler); 1] =
+        [("fauna.tls.cert_status", cert_status_handler())];
+    kinds
+        .into_iter()
+        .map(|(kind, actor)| (kind, admin_twin(kind, actor)))
+        .collect()
+}
+
 /// Register the `fauna.tls.*` kinds with the WS-RPC router.
 pub fn register_tls_handlers(b: &mut RpcRouterBuilder) {
     fn meta(handler: RpcHandler) -> RpcKindMeta {

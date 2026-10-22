@@ -86,7 +86,7 @@ Stamped 2026-10-08 at f7e52bc137.
 27. [app] Replying to or quoting a fediverse post while your federation is off is refused with the reason, and nothing is posted — `docs/goal/behavior/activitypub.md` § Reply and quote
    - `tests/e2e-unified/tests/test_feed_fediverse_reply.py::test_replying_or_quoting_with_federation_off_is_refused_inline`
 28. [app] With follows no longer accepted by themselves, each fediverse follow request shows on the network's card, and you approve or refuse it there — `docs/goal/behavior/bridges.md` § Follow requests
-   - (none)
+   - `tests/e2e-unified/tests/test_bridges_follow_requests.py::test_follow_requests_are_listed_and_approved_or_refused_on_the_card`
 29. [nest] A follower you approve starts receiving your posts, and one you refuse is told no and receives nothing — `docs/goal/behavior/activitypub.md` § Follow requests
    - `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_approving_a_request_sends_accept_and_later_posts_reach_it`
    - `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_refusing_a_request_sends_reject_and_later_posts_do_not_reach_it`
@@ -157,7 +157,7 @@ Stamped 2026-10-08 at f7e52bc137.
 | 25 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubInboundIngest::test_only_followed_or_addressed_posts_enter_your_feed` | nest (linux): passed |
 | 26 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_a_delete_after_federation_is_off_still_reaches_the_followers` | nest (linux): passed |
 | 27 | app | `tests/e2e-unified/tests/test_feed_fediverse_reply.py::test_replying_or_quoting_with_federation_off_is_refused_inline` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 28 | app | (none) | — |
+| 28 | app | `tests/e2e-unified/tests/test_bridges_follow_requests.py::test_follow_requests_are_listed_and_approved_or_refused_on_the_card` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 29 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_approving_a_request_sends_accept_and_later_posts_reach_it` | nest (linux): passed |
 | 29 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_refusing_a_request_sends_reject_and_later_posts_do_not_reach_it` | nest (linux): passed |
 | 29 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_a_held_back_follow_is_listed_as_a_request` | nest (linux): passed |

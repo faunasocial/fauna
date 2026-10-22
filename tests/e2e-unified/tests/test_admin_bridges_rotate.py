@@ -36,7 +36,6 @@ import pytest
 
 from i18n.strings import S
 from helpers.audit_time import audit_time_near
-from helpers.bridge_enrollment import enroll_and_approve_bridge
 
 # `tui` added 2026-07-29 with the page itself (`apps/fauna-tui/src/admin/bridges.rs`),
 # rotate confirm included as an inline reveal per `admin.md` § Approved-bridges roster.
@@ -52,16 +51,14 @@ pytestmark = [
 ]
 
 
-def _seed_approved_bridge(nest_instance, role: str = "mta") -> str:
+def _seed_approved_bridge(planted_bridges, role: str = "mta") -> str:
     """Enroll and approve a bridge (setup) over ``request_enrollment`` +
-    ``approve_pending_bridge``. Nothing proves possession of the key at
-    enrollment, so a synthetic 32-byte value is enough to exercise the roster +
-    rotate flow. Returns the hex pubkey."""
+    ``approve_pending_bridge``, through the ``planted_bridges`` fixture so a row
+    the test leaves approved is revoked at teardown. Nothing proves possession
+    of the key at enrollment, so a synthetic 32-byte value is enough to exercise
+    the roster + rotate flow. Returns the hex pubkey."""
     pubkey = secrets.token_bytes(32)
-    enroll_and_approve_bridge(
-        nest_instance["url"], nest_instance["admin"]["signing_key"], pubkey, role,
-        f"{role}-{secrets.token_hex(4)}",
-    )
+    planted_bridges.plant(pubkey, role, f"{role}-{secrets.token_hex(4)}")
     return pubkey.hex()
 
 
@@ -118,14 +115,14 @@ def _poll_card(admin_app, id_prefix: str, pubkey_hex: str, *, want: bool) -> int
 
 
 @pytest.mark.feature("admin-bridges")
-def test_admin_rotates_approved_mta_service_user_key(admin_app, nest_instance):
+def test_admin_rotates_approved_mta_service_user_key(admin_app, nest_instance, planted_bridges):
     """An approved MTA bridge appears in the Approved roster; rotating it (the
     dialog shows no DKIM warning) revokes it so it drops from the roster, and the
     nest's DKIM selectors are unchanged — a re-key touches no DKIM key."""
     domain = _add_mail_domain(nest_instance)
     selectors_before = _dkim_selectors(nest_instance, domain)
     assert selectors_before, f"adding {domain!r} must mint the nest-held DKIM key"
-    pubkey_hex = _seed_approved_bridge(nest_instance, "mta")
+    pubkey_hex = _seed_approved_bridge(planted_bridges, "mta")
     admin_app.admin.navigate_bridges_pending()
 
     # --- the approved roster now surfaces it (list_service_users(status=approved)).
@@ -161,10 +158,10 @@ def test_admin_rotates_approved_mta_service_user_key(admin_app, nest_instance):
 
 
 @pytest.mark.feature("admin-bridges")
-def test_mda_rotation_hides_dkim_warning(admin_app, nest_instance):
+def test_mda_rotation_hides_dkim_warning(admin_app, nest_instance, planted_bridges):
     """An MDA bridge's rotate dialog shows the base warning and no DKIM warning —
     the same as every other role (admin.md § Approved-bridges roster)."""
-    pubkey_hex = _seed_approved_bridge(nest_instance, "mda")
+    pubkey_hex = _seed_approved_bridge(planted_bridges, "mda")
     admin_app.admin.navigate_bridges_pending()
 
     aidx = _poll_card(admin_app, "admin-bridges-approved", pubkey_hex, want=True)
@@ -197,12 +194,12 @@ def _service_user(nest_instance, pubkey_hex: str) -> dict | None:
 
 
 @pytest.mark.feature("admin-bridges")
-def test_cancelling_a_rotation_leaves_the_helper_approved(admin_app, nest_instance):
+def test_cancelling_a_rotation_leaves_the_helper_approved(admin_app, nest_instance, planted_bridges):
     """Cancelling the rotate confirm changes nothing: the confirm closes, the
     helper stays in the Approved roster, and the nest still holds it approved
     under the same key (``mail-bridge-lifecycle.md`` § Service-user re-keying —
     only the confirm revokes)."""
-    pubkey_hex = _seed_approved_bridge(nest_instance, "mta")
+    pubkey_hex = _seed_approved_bridge(planted_bridges, "mta")
     before = _service_user(nest_instance, pubkey_hex)
     assert before and before["status"] == "approved", f"seed not approved: {before!r}"
     admin_app.admin.navigate_bridges_pending()
@@ -243,13 +240,13 @@ def test_cancelling_a_rotation_leaves_the_helper_approved(admin_app, nest_instan
 
 
 @pytest.mark.feature("admin-bridges")
-def test_approved_row_shows_name_and_when_approved(admin_app, nest_instance):
+def test_approved_row_shows_name_and_when_approved(admin_app, nest_instance, planted_bridges):
     """Each approved helper's row shows its friendly per-role name and when it
     was approved (``admin.md`` § Approved-bridges roster) — a helper approved a
     moment ago reads as the fixed local audit timestamp, never the empty
     placeholder."""
     made = datetime.datetime.now()
-    pubkey_hex = _seed_approved_bridge(nest_instance, "mta")
+    pubkey_hex = _seed_approved_bridge(planted_bridges, "mta")
     row = _service_user(nest_instance, pubkey_hex)
     assert row and row.get("approved_at"), f"the nest stamped no approval time: {row!r}"
     admin_app.admin.navigate_bridges_pending()
@@ -294,7 +291,7 @@ def _poll_dns_dkim(admin_app, domain: str) -> list[str]:
 
 
 @pytest.mark.feature("admin-bridges")
-def test_mta_rotation_leaves_the_dns_page_signing_record_unchanged(admin_app, nest_instance):
+def test_mta_rotation_leaves_the_dns_page_signing_record_unchanged(admin_app, nest_instance, planted_bridges):
     """After the mail-sending helper's key is rotated from the Approved roster,
     each domain's signing record on the DNS page reads exactly as before —
     nothing needs republishing (`mail-bridge-lifecycle.md` § Service-user
@@ -308,7 +305,7 @@ def test_mta_rotation_leaves_the_dns_page_signing_record_unchanged(admin_app, ne
         f"(error: {admin_app.driver.get_text('error-message') if admin_app.has_error() else 'none'})"
     )
 
-    pubkey_hex = _seed_approved_bridge(nest_instance, "mta")
+    pubkey_hex = _seed_approved_bridge(planted_bridges, "mta")
     admin_app.admin.navigate_bridges_pending()
     aidx = _poll_card(admin_app, "admin-bridges-approved", pubkey_hex, want=True)
     assert aidx is not None, f"approved bridge {pubkey_hex[:16]}… not in roster"

@@ -291,6 +291,7 @@ struct AftermathProgress {
     backup_regrant: Option<fauna_client_config::BackupRegrantProgress>,
     mls_reseal: Option<fauna_client_mls_sync::ReplicaResealProgress>,
     grant_remint: Option<fauna_client_capabilities::GrantRemintProgress>,
+    period_rotation: Option<fauna_client_subscriptions::orchestration::PeriodRotationProgress>,
     corpus_reseal: Option<fauna_client_sync::agent::CorpusResealProgress>,
     mail_burn: Option<fauna_client_mail_settings::MailBurnProgress>,
     drafts_reseal: Option<fauna_client_drafts::DraftsResealProgress>,
@@ -305,6 +306,7 @@ struct AftermathProgress {
 pub enum AftermathUpdate {
     BackupRegrant(fauna_client_config::BackupRegrantProgress),
     GrantRemint(fauna_client_capabilities::GrantRemintProgress),
+    PeriodRotation(fauna_client_subscriptions::orchestration::PeriodRotationProgress),
     DraftsReseal(fauna_client_drafts::DraftsResealProgress),
     MailBurn(fauna_client_mail_settings::MailBurnProgress),
     /// The `__mls` state-replica re-seal, reported from
@@ -343,6 +345,7 @@ pub(crate) fn fold_aftermath(update: AftermathUpdate) {
     match update {
         AftermathUpdate::BackupRegrant(p) => session.progress.backup_regrant = Some(p),
         AftermathUpdate::GrantRemint(p) => session.progress.grant_remint = Some(p),
+        AftermathUpdate::PeriodRotation(p) => session.progress.period_rotation = Some(p),
         AftermathUpdate::DraftsReseal(p) => session.progress.drafts_reseal = Some(p),
         AftermathUpdate::MailBurn(p) => session.progress.mail_burn = Some(p),
         AftermathUpdate::MlsReseal(p) => session.progress.mls_reseal = Some(p),
@@ -401,6 +404,7 @@ struct Widgets {
     backup_regrant_status_label: gtk::Label,
     mls_reseal_status_label: gtk::Label,
     grant_remint_status_label: gtk::Label,
+    period_rotation_status_label: gtk::Label,
     corpus_reseal_status_label: gtk::Label,
     drafts_reseal_status_label: gtk::Label,
     mail_burn_status_label: gtk::Label,
@@ -533,6 +537,7 @@ pub fn build_recovery_kit_group(error_label: &gtk::Label) -> (adw::PreferencesGr
     let backup_regrant_status_label = new_status_label(ids::RECOVERY_KIT_BACKUP_REGRANT_STATUS);
     let mls_reseal_status_label = new_status_label(ids::RECOVERY_KIT_MLS_RESEAL_STATUS);
     let grant_remint_status_label = new_status_label(ids::RECOVERY_KIT_GRANT_REMINT_STATUS);
+    let period_rotation_status_label = new_status_label(ids::RECOVERY_KIT_PERIOD_ROTATION_STATUS);
     let corpus_reseal_status_label = new_status_label(ids::RECOVERY_KIT_CORPUS_RESEAL_STATUS);
     // Leg 7 before leg 6, same reason the task runs them in that order: the
     // burn is the only leg that takes something away, so every restoring leg
@@ -749,6 +754,7 @@ pub fn build_recovery_kit_group(error_label: &gtk::Label) -> (adw::PreferencesGr
         backup_regrant_status_label,
         mls_reseal_status_label,
         grant_remint_status_label,
+        period_rotation_status_label,
         corpus_reseal_status_label,
         drafts_reseal_status_label,
         mail_burn_status_label,
@@ -1276,6 +1282,10 @@ fn repaint(state: &RecoveryState, widgets: &Widgets) {
         grant_remint_status_text(state.aftermath.grant_remint.as_ref()),
     );
     set_optional_line(
+        &widgets.period_rotation_status_label,
+        period_rotation_status_text(state.aftermath.period_rotation.as_ref()),
+    );
+    set_optional_line(
         &widgets.corpus_reseal_status_label,
         corpus_reseal_status_text(state.aftermath.corpus_reseal.as_ref()),
     );
@@ -1393,6 +1403,17 @@ fn grant_remint_status_text(
         .map(|line| line.resolve(crate::i18n::strings::lookup))
 }
 
+/// The aftermath's subscriber-tier period-key rotation leg. `settings.md`
+/// § Recovery kit, leg 8. Its `nest_too_old` arm reports an exposure that is
+/// still open, so it renders like any other line.
+fn period_rotation_status_text(
+    rotation: Option<&fauna_client_subscriptions::orchestration::PeriodRotationProgress>,
+) -> Option<String> {
+    rotation
+        .and_then(fauna_client_subscriptions::orchestration::PeriodRotationProgress::status_line)
+        .map(|line| line.resolve(crate::i18n::strings::lookup))
+}
+
 /// The aftermath's file-corpus leg. `settings.md` § Recovery kit, leg 5.
 fn corpus_reseal_status_text(
     progress: Option<&fauna_client_sync::agent::CorpusResealProgress>,
@@ -1467,6 +1488,7 @@ mod tests {
                 "recovery-kit-backup-regrant-status",
                 "recovery-kit-mls-reseal-status",
                 "recovery-kit-grant-remint-status",
+                "recovery-kit-period-rotation-status",
                 "recovery-kit-corpus-reseal-status",
                 "recovery-kit-drafts-reseal-status",
                 "recovery-kit-mail-burn-status",
@@ -1524,6 +1546,7 @@ mod tests {
                 "recovery-kit-backup-regrant-status",
                 "recovery-kit-mls-reseal-status",
                 "recovery-kit-grant-remint-status",
+                "recovery-kit-period-rotation-status",
                 "recovery-kit-corpus-reseal-status",
                 "recovery-kit-drafts-reseal-status",
                 "recovery-kit-mail-burn-status",
@@ -1596,6 +1619,7 @@ mod tests {
                 backup_regrant_status_label: gtk::Label::new(None),
                 mls_reseal_status_label: gtk::Label::new(None),
                 grant_remint_status_label: gtk::Label::new(None),
+                period_rotation_status_label: gtk::Label::new(None),
                 corpus_reseal_status_label: gtk::Label::new(None),
                 drafts_reseal_status_label: gtk::Label::new(None),
                 mail_burn_status_label: gtk::Label::new(None),
@@ -1756,6 +1780,7 @@ mod tests {
             let regrant = find_by_test_id(&group, "recovery-kit-backup-regrant-status").unwrap();
             let mls = find_by_test_id(&group, "recovery-kit-mls-reseal-status").unwrap();
             let remint = find_by_test_id(&group, "recovery-kit-grant-remint-status").unwrap();
+            let rotation = find_by_test_id(&group, "recovery-kit-period-rotation-status").unwrap();
             let corpus = find_by_test_id(&group, "recovery-kit-corpus-reseal-status").unwrap();
             let drafts = find_by_test_id(&group, "recovery-kit-drafts-reseal-status").unwrap();
             let mail = find_by_test_id(&group, "recovery-kit-mail-burn-status").unwrap();
@@ -1809,6 +1834,7 @@ mod tests {
                 backup_regrant_status_label: regrant.clone().downcast().unwrap(),
                 mls_reseal_status_label: mls.clone().downcast().unwrap(),
                 grant_remint_status_label: remint.clone().downcast().unwrap(),
+                period_rotation_status_label: rotation.clone().downcast().unwrap(),
                 corpus_reseal_status_label: corpus.clone().downcast().unwrap(),
                 drafts_reseal_status_label: drafts.clone().downcast().unwrap(),
                 mail_burn_status_label: mail.clone().downcast().unwrap(),
@@ -1819,7 +1845,9 @@ mod tests {
             // All `None` (the ordinary account, or before the drive
             // ever runs): every line stays hidden.
             repaint(&RecoveryState::default(), &widgets);
-            for w in [&regrant, &mls, &remint, &corpus, &drafts, &mail, &filters] {
+            for w in [
+                &regrant, &mls, &remint, &rotation, &corpus, &drafts, &mail, &filters,
+            ] {
                 assert!(!w.is_visible(), "must stay hidden with nothing to report");
             }
 
@@ -1831,6 +1859,9 @@ mod tests {
             use fauna_client_drafts::{DraftsResealOutcome, DraftsResealProgress};
             use fauna_client_mail_settings::MailBurnProgress;
             use fauna_client_mls_sync::{ReplicaResealOutcome, ReplicaResealProgress};
+            use fauna_client_subscriptions::orchestration::{
+                PeriodRotationOutcome, PeriodRotationProgress,
+            };
             use fauna_client_sync::agent::{CorpusResealOutcome, CorpusResealProgress};
 
             let state = RecoveryState {
@@ -1846,6 +1877,11 @@ mod tests {
                         },
                     )),
                     grant_remint: Some(GrantRemintProgress::Failed("nest unreachable".into())),
+                    // The open-exposure arm: nothing failed, yet the line must
+                    // render — a quiet surface would report a clean aftermath.
+                    period_rotation: Some(PeriodRotationProgress::Settled(
+                        PeriodRotationOutcome::NestCannotRotate,
+                    )),
                     // The silent steady state: nothing moved, nothing owed.
                     corpus_reseal: Some(CorpusResealProgress::Settled(
                         CorpusResealOutcome::Resealed {
@@ -1878,6 +1914,11 @@ mod tests {
                 rk::grant_remint_failed("nest unreachable")
             );
             assert!(remint.is_visible());
+            assert_eq!(
+                widgets.period_rotation_status_label.text(),
+                rk::TIER_PERIOD_ROTATION_NEST_TOO_OLD
+            );
+            assert!(rotation.is_visible());
             // Corpus's silent steady state (`resealed: 0, owed: 0`) and
             // drafts' `AlreadyCurrent` are both "nothing is owed" — the line
             // must stay hidden, mirroring tui's "no permanent no-op clutter"
@@ -2366,6 +2407,7 @@ mod tests {
                 backup_regrant_status_label: gtk::Label::new(None),
                 mls_reseal_status_label: gtk::Label::new(None),
                 grant_remint_status_label: gtk::Label::new(None),
+                period_rotation_status_label: gtk::Label::new(None),
                 corpus_reseal_status_label: gtk::Label::new(None),
                 drafts_reseal_status_label: gtk::Label::new(None),
                 mail_burn_status_label: gtk::Label::new(None),

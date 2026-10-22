@@ -374,7 +374,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_mail_checksum_func_verify_inbound()
 		})
-		if checksum != 17739 {
+		if checksum != 943 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_mail: uniffi_fauna_mail_checksum_func_verify_inbound: UniFFI API checksum mismatch")
 		}
@@ -383,7 +383,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_mail_checksum_func_verify_inbound_observed()
 		})
-		if checksum != 49227 {
+		if checksum != 11875 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_mail: uniffi_fauna_mail_checksum_func_verify_inbound_observed: UniFFI API checksum mismatch")
 		}
@@ -3088,6 +3088,7 @@ func (err AuthError) Unwrap() error {
 // Err* are used for checking error type with `errors.Is`
 var ErrAuthErrorUnparseable = fmt.Errorf("AuthErrorUnparseable")
 var ErrAuthErrorResolverInit = fmt.Errorf("AuthErrorResolverInit")
+var ErrAuthErrorTimeout = fmt.Errorf("AuthErrorTimeout")
 
 // Variant structs
 type AuthErrorUnparseable struct {
@@ -3136,6 +3137,32 @@ func (self AuthErrorResolverInit) Is(target error) bool {
 	return target == ErrAuthErrorResolverInit
 }
 
+// The lookups outran [`VERIFY_DEADLINE`]. Transient — the MTA tempfails
+// (451) — never a verdict: a sender controls the DNS its own SPF and
+// DKIM lookups reach, and a verdict computed without them would let a
+// hung DKIM key fail a victim domain's DMARC open.
+type AuthErrorTimeout struct {
+}
+
+// The lookups outran [`VERIFY_DEADLINE`]. Transient — the MTA tempfails
+// (451) — never a verdict: a sender controls the DNS its own SPF and
+// DKIM lookups reach, and a verdict computed without them would let a
+// hung DKIM key fail a victim domain's DMARC open.
+func NewAuthErrorTimeout() *AuthError {
+	return &AuthError{err: &AuthErrorTimeout{}}
+}
+
+func (e AuthErrorTimeout) destroy() {
+}
+
+func (err AuthErrorTimeout) Error() string {
+	return fmt.Sprint("Timeout")
+}
+
+func (self AuthErrorTimeout) Is(target error) bool {
+	return target == ErrAuthErrorTimeout
+}
+
 type FfiConverterAuthError struct{}
 
 var FfiConverterAuthErrorINSTANCE = FfiConverterAuthError{}
@@ -3162,6 +3189,8 @@ func (c FfiConverterAuthError) Read(reader io.Reader) *AuthError {
 		return &AuthError{&AuthErrorResolverInit{
 			Field0: FfiConverterStringINSTANCE.Read(reader),
 		}}
+	case 3:
+		return &AuthError{&AuthErrorTimeout{}}
 	default:
 		panic(fmt.Sprintf("Unknown error code %d in FfiConverterAuthError.Read()", errorID))
 	}
@@ -3174,6 +3203,8 @@ func (c FfiConverterAuthError) Write(writer io.Writer, value *AuthError) {
 	case *AuthErrorResolverInit:
 		writeInt32(writer, 2)
 		FfiConverterStringINSTANCE.Write(writer, variantValue.Field0)
+	case *AuthErrorTimeout:
+		writeInt32(writer, 3)
 	default:
 		_ = variantValue
 		panic(fmt.Sprintf("invalid error value `%v` in FfiConverterAuthError.Write", value))
@@ -3187,6 +3218,8 @@ func (_ FfiDestroyerAuthError) Destroy(value *AuthError) {
 	case AuthErrorUnparseable:
 		variantValue.destroy()
 	case AuthErrorResolverInit:
+		variantValue.destroy()
+	case AuthErrorTimeout:
 		variantValue.destroy()
 	default:
 		_ = variantValue
@@ -5846,8 +5879,9 @@ func fauna_mail_uniffiFreeGorutine(data C.uint64_t) {
 // the canonical wire form, so we never accept a re-serialized
 // `ParsedMessage` here). `mail_from` is the SMTP envelope sender address.
 // `client_ip` is the connecting MTA's IP as a string (e.g. `"192.0.2.1"`).
-// `client_helo` is the HELO/EHLO hostname. The DNS resolver is built from
-// system configuration.
+// `client_helo` is the HELO/EHLO hostname. The DNS resolver, built once from
+// system configuration, is shared across calls; the lookups are bounded by
+// `VERIFY_DEADLINE`.
 //
 // Note: `client_ip` is accepted as `String` because `std::net::IpAddr` has
 // no UniFFI binding. An unparseable IP falls back to `127.0.0.1`.
@@ -5889,7 +5923,8 @@ func VerifyInbound(raw []byte, mailFrom string, clientIp string, clientHelo stri
 // The same pipeline and inputs as `verify_inbound`; the observation carries
 // what an RFC 7489 aggregate report needs and the verdicts flatten away (the
 // From and envelope domains, the aligned DKIM and SPF results, each DKIM
-// signature's raw result). The MTA calls this one at the SMTP perimeter.
+// signature's raw result). The MTA calls this one at the SMTP perimeter, so
+// it shares one resolver across messages and is bounded by `VERIFY_DEADLINE`.
 func VerifyInboundObserved(raw []byte, mailFrom string, clientIp string, clientHelo string) (fauna_core.InboundAuthOutcome, error) {
 	res, err := uniffiRustCallAsync[*AuthError](
 		FfiConverterAuthErrorINSTANCE,

@@ -4,7 +4,7 @@
 // "the same artifact, same shape"), each drawn as one <svg> with one <rect>
 // per dark module rather than pulling a JS QR library (priorities #1/#2). The
 // grid itself is shared Rust (`fauna_core::qr_matrix`, over wasm).
-import { qrMatrix, qrQuietZoneModules } from '$lib/wasm';
+import { qrMatrix, qrQuietZoneModules } from '#lib/wasm';
 
 export interface QrDisplay {
   side: number;

@@ -44,9 +44,13 @@ pub struct ThreadHeader {
     /// room's peer — emptied, never hidden, so no stale marker lingers.
     guardian_slot: gtk::Box,
     room_settings_btn: gtk::Button,
+    /// `room-search-button` — opens or closes the room's search strip; painted
+    /// iff `capabilities.can_search_room`.
+    room_search_btn: gtk::Button,
     _on_rename: VoidCb,
     _on_add_participant: VoidCb,
     _on_room_settings: VoidCb,
+    _on_room_search: VoidCb,
     on_remove_member: RemoveMemberCb,
     on_keep_member: KeepMemberCb,
 }
@@ -129,6 +133,15 @@ impl ThreadHeader {
         );
         top.append(&room_settings_btn);
 
+        // The room's search door: view state only (the strip opens on the
+        // detail), so it declares no wire kind — the submit does.
+        let room_search_btn =
+            gtk::Button::with_label(crate::i18n::strings::conversations::unified::ROOM_SEARCH);
+        room_search_btn.add_css_class("flat");
+        room_search_btn.set_visible(false);
+        crate::testid::set_test_id(&room_search_btn, ids::ROOM_SEARCH_BUTTON);
+        top.append(&room_search_btn);
+
         root.append(&top);
 
         // Members row: chips horizontally + add-participant-button at end.
@@ -175,6 +188,16 @@ impl ThreadHeader {
             });
         }
 
+        let on_room_search: VoidCb = Rc::new(RefCell::new(None));
+        {
+            let cb = on_room_search.clone();
+            room_search_btn.connect_clicked(move |_| {
+                if let Some(f) = cb.borrow().as_ref() {
+                    f();
+                }
+            });
+        }
+
         Self {
             root,
             title_label,
@@ -186,9 +209,11 @@ impl ThreadHeader {
             room_notice_label,
             guardian_slot,
             room_settings_btn,
+            room_search_btn,
             _on_rename: on_rename,
             _on_add_participant: on_add_participant,
             _on_room_settings: on_room_settings,
+            _on_room_search: on_room_search,
             on_remove_member: Rc::new(RefCell::new(None)),
             on_keep_member: Rc::new(RefCell::new(None)),
         }
@@ -388,6 +413,12 @@ impl ThreadHeader {
         *self._on_room_settings.borrow_mut() = Some(Box::new(f));
     }
 
+    /// Set the callback fired by `room-search-button` — wired to open or close
+    /// the room's search strip.
+    pub fn on_room_search(&self, f: impl Fn() + 'static) {
+        *self._on_room_search.borrow_mut() = Some(Box::new(f));
+    }
+
     fn apply_capabilities(&self, caps: &ThreadCapabilities) {
         // Render unconditionally; gate on visibility
         // (capability gating, never rail branches).
@@ -398,6 +429,9 @@ impl ThreadHeader {
         // governed room may not invite (`ui/conversations.md`
         // § Architectural rules 5; the roles table is applied in shared Rust).
         self.add_participant_btn.set_sensitive(caps.can_invite);
+        // The room's search door — a community room whose floor seats this
+        // account (`room-search.md` § The surface), decided in shared Rust.
+        self.room_search_btn.set_visible(caps.can_search_room);
     }
 
     pub fn on_rename(&self, f: impl Fn() + 'static) {
@@ -659,7 +693,9 @@ mod tests {
             labelers: None,
             awaiting_key: false,
             moderation_unverified: false,
+            bridge_disconnected: false,
             pending_invites: None,
+            search: None,
         };
         detail.capabilities = room.gate(detail.capabilities);
         detail.room = Some(room);

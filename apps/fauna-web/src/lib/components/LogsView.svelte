@@ -20,10 +20,10 @@
   // Redaction rule (observability.md § Persistence & privacy): we render only
   // what `tracing` captured; call sites are forbidden from logging message
   // plaintext or secrets. This layer enforces nothing.
-  import { t } from '$lib/i18n/strings';
-  import { logFilterEntries, logRenderedText, logRows, type LogEntry } from '$lib/wasm';
-  import { IDS } from '$lib/generated/uiIds';
-  import { utcOffsetSeconds } from '$lib/utcOffset';
+  import { t } from '#lib/i18n/strings';
+  import { logFilterEntries, logRenderedText, logRows, type LogEntry } from '#lib/wasm';
+  import { IDS } from '#lib/generated/uiIds';
+  import { utcOffsetSeconds } from '#lib/utcOffset';
 
   let {
     entries = [],

@@ -95,7 +95,9 @@ func TestNotifyAnnouncesTheHostnameToEveryRelay(t *testing.T) {
 func TestAnnouncesAreThrottledWithOneTrailingAnnounce(t *testing.T) {
 	fr, srv := newFakeRelay(t, http.StatusOK)
 	ann := New("pds.example.com", []string{srv.URL}, nil, nil)
-	ann.minInterval = 300 * time.Millisecond
+	// Wide enough that a loaded box (a gate pass saturates it) cannot stretch the
+	// burst and the silence check past the window's end.
+	ann.minInterval = 2 * time.Second
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go ann.Run(ctx)
@@ -108,7 +110,7 @@ func TestAnnouncesAreThrottledWithOneTrailingAnnounce(t *testing.T) {
 		ann.Notify()
 		time.Sleep(10 * time.Millisecond)
 	}
-	expectSilence(t, fr, 150*time.Millisecond)
+	expectSilence(t, fr, 500*time.Millisecond)
 	expectAnnounce(t, fr, "pds.example.com")
 	expectSilence(t, fr, 500*time.Millisecond)
 	if n := fr.count(); n != 2 {

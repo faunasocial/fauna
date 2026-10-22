@@ -9,7 +9,7 @@
     {
       "id": "web",
       "label": "Web app",
-      "channel": "Served by every nest at its own address under /app/, and later by the project's own hosted origin.",
+      "channel": "Served by every nest at its own address under /app/, and later by the project's own hosted origin, which serves the app's code and holds nothing of yours.",
       "identities": [
         {
           "kind": "front-door-app-host",
@@ -34,7 +34,7 @@
     {
       "id": "macos",
       "label": "macOS",
-      "channel": "A signed and notarized download from fauna.social, updated in place by the app's own update channel.",
+      "channel": "A signed and notarized download from the project's releases page; the app tells you when a newer version is out.",
       "identities": [
         {
           "kind": "apple-bundle-id",
@@ -66,7 +66,7 @@
           "label": "Mac App Store listing",
           "value": null,
           "status": "pending",
-          "pending": "There is no Mac App Store listing. The macOS app is distributed as a download from fauna.social.",
+          "pending": "There is no Mac App Store listing. The macOS app is distributed as a download from the project's releases page.",
           "source": null,
           "how_to_check": "A Mac App Store entry calling itself Fauna is not the association's."
         }
@@ -188,7 +188,7 @@
           "label": "Direct-download installer signature",
           "value": null,
           "status": "pending",
-          "pending": "The direct-download installer carries no Windows code signature: the association holds no public-trust certificate. Each release's installer is signed as a file with the release identity under Server and installers below, and Store installs are signed by the Store.",
+          "pending": "The direct-download installer carries no Windows code signature until the SignPath Foundation's certificate for it is issued. Each release's installer is signed as a file with the release identity under Server and installers below, and Store installs are signed by the Store.",
           "source": null,
           "how_to_check": "Verify the installer file with cosign against the release identity below rather than by its Windows signature."
         }

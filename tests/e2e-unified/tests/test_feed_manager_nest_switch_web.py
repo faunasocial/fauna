@@ -74,6 +74,7 @@ import pytest
 from actions import ActionLayer
 from common.auth import register_handled_actor
 from conftest import MAIL_PRIMARY_DOMAIN, _serve_spa_proxy
+from common.accounts import single_account_seed
 from drivers import create_driver
 from tests.api import ws_api
 
@@ -134,12 +135,6 @@ def _text_or_absent(driver, element_id: str) -> str:
         return driver.get_text(element_id)
     except Exception:
         return "<absent>"
-
-
-def _seed_registry_identity(driver, *, secret_hex: str, node_url: str) -> str:
-    """Write one signed-in identity in the registry shape `identity.init()`
-    reads (`helpers/web_store.seed_identity`); returns its actor id."""
-    return web_store.seed_identity(driver, secret_hex, nest_url=node_url)
 
 
 def _wait_connected(actions, timeout: float = 90.0) -> None:
@@ -218,15 +213,16 @@ def test_web_same_actor_nest_switch_rebuilds_feed_manager(
     alt_url, alt_server = _serve_spa_proxy(static_dir, handled_nest["url"])
 
     driver = create_driver("web")
-    driver.launch({"url": spa + "/app/"})
+    driver.launch({
+        "url": spa + "/app/",
+        "seed_credentials": single_account_seed(secret, nest_url=spa),
+    })
     try:
         actions = ActionLayer(driver)
 
         # ── A signs in and BUILDS the FeedManager singleton. Visiting Feed is the
         #    only thing that calls `getFeedManager()` (feed/+page.svelte's
         #    onMount), and composing forces the full async build. ──
-        _seed_registry_identity(driver, secret_hex=secret, node_url=spa)
-        driver.hard_reload()
         driver.wait_for("feed-tab", timeout=30)
         driver.click("feed-tab")
         _wait_connected(actions)

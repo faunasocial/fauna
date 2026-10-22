@@ -29,12 +29,15 @@ import time
 import pytest
 
 from fake_imap_source import (
+    OUTLOOK_IMAP_HOST,
     FakeImapSource,
     SourceMailbox,
     mint_localhost_chain,
     sample_message,
     session_ca_pem,
     session_cert,
+    session_cert_for,
+    session_preset_redirect,
 )
 
 pytestmark = pytest.mark.tier_1
@@ -486,3 +489,113 @@ def test_a_dropped_source_stays_down_until_it_comes_back():
             sock.close()
         assert source.fetched_uids == [("INBOX", 1), ("INBOX", 2)]
         assert source.refused_connections == 2
+
+
+def _xoauth2_initial(user: str, bearer: str) -> str:
+    """The SASL XOAUTH2 initial response `session.rs` sends, verbatim."""
+    import base64
+
+    return base64.b64encode(f"user={user}\x01auth=Bearer {bearer}\x01\x01".encode()).decode()
+
+
+def test_xoauth2_is_advertised_and_accepted_in_both_forms():
+    """`AUTHENTICATE XOAUTH2` — the Outlook source's sign-in — with the initial
+    response on the command line (SASL-IR) and after a `+` continuation, each
+    recorded as `(user, bearer)` and never with the response in `commands`."""
+    with FakeImapSource(_mailboxes(), username="me@outlook.example", xoauth2_token="tok-1") as source:
+        sock = _raw_session(source)
+        sock.sendall(b"A1 CAPABILITY\r\n")
+        caps = _read_until_tagged(sock, "A1")
+        assert b"AUTH=XOAUTH2" in caps and b"SASL-IR" in caps, caps
+        initial = _xoauth2_initial("me@outlook.example", "tok-1")
+        sock.sendall(f"A2 AUTHENTICATE XOAUTH2 {initial}\r\n".encode())
+        assert b"A2 OK" in _read_until_tagged(sock, "A2")
+        sock.close()
+
+        sock = _raw_session(source)
+        sock.sendall(b"B1 AUTHENTICATE XOAUTH2\r\n")
+        assert _read_until_tagged(sock, None).startswith(b"+")
+        sock.sendall(f"{initial}\r\n".encode())
+        assert b"B1 OK" in _read_until_tagged(sock, "B1")
+        sock.close()
+
+        assert source.xoauth2_auths == [("me@outlook.example", "tok-1")] * 2
+        assert all(initial not in c for c in source.commands), source.commands
+        assert "AUTHENTICATE XOAUTH2" in source.commands
+
+
+def test_xoauth2_refuses_a_wrong_bearer_and_a_server_without_it():
+    with FakeImapSource(_mailboxes(), username="me@outlook.example", xoauth2_token="tok-1") as source:
+        sock = _raw_session(source)
+        sock.sendall(
+            f"A1 AUTHENTICATE XOAUTH2 {_xoauth2_initial('me@outlook.example', 'stale')}\r\n".encode()
+        )
+        assert b"A1 NO [AUTHENTICATIONFAILED]" in _read_until_tagged(sock, "A1")
+        sock.close()
+        assert source.xoauth2_auths == [("me@outlook.example", "stale")]
+
+    with FakeImapSource(_mailboxes()) as source:
+        sock = _raw_session(source)
+        sock.sendall(b"A1 CAPABILITY\r\n")
+        assert b"XOAUTH2" not in _read_until_tagged(sock, "A1")
+        sock.sendall(f"A2 AUTHENTICATE XOAUTH2 {_xoauth2_initial('u', 't')}\r\n".encode())
+        assert b"A2 NO" in _read_until_tagged(sock, "A2")
+        sock.close()
+
+
+# ── the preset-host redirect seed's harness half (`e2e-gated-seeds.md`
+# § The preset-host redirect seed) ─────────────────────────────────────────
+
+
+def test_an_outlook_named_source_verifies_under_the_outlook_name_on_a_given_port():
+    """A source standing in for the Outlook preset: bound to the port it is
+    handed, presenting a leaf the session CA issued for the Outlook host — so a
+    client that dialled loopback but verifies `outlook.office365.com`, as the
+    app does under the redirect seed, completes the handshake, and one
+    verifying `localhost` against that leaf does not."""
+    import socket
+
+    from drivers.port_util import find_free_port
+
+    port = find_free_port()
+    cert = session_cert_for(OUTLOOK_IMAP_HOST)
+    assert session_cert_for(OUTLOOK_IMAP_HOST) == cert, "one leaf per name per session"
+    with FakeImapSource(_mailboxes(), port=port, cert=cert) as source:
+        assert source.port == port
+        ctx = ssl.create_default_context()
+        ctx.load_verify_locations(cadata=session_ca_pem())
+        # OpenSSL's strict mode (on by default since Python 3.13) wants an
+        # Authority Key Identifier the session chain does not carry; the
+        # property under test is the name, and rustls — the app's verifier —
+        # does not ask for one.
+        ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
+
+        raw = socket.create_connection(("127.0.0.1", port), timeout=10)
+        sock = ctx.wrap_socket(raw, server_hostname=OUTLOOK_IMAP_HOST)
+        assert _read_until_tagged(sock, None).startswith(b"* OK")
+        sock.close()
+
+        raw = socket.create_connection(("127.0.0.1", port), timeout=10)
+        with pytest.raises(ssl.SSLCertVerificationError):
+            ctx.wrap_socket(raw, server_hostname="localhost")
+        raw.close()
+
+
+def test_the_session_redirect_names_the_outlook_host_on_one_leased_port():
+    host, port = session_preset_redirect()
+    assert host == OUTLOOK_IMAP_HOST
+    assert session_preset_redirect() == (host, port), "leased once per session"
+    assert 0 < port < 65536
+
+
+def test_a_stopped_source_frees_its_port_for_the_next_one():
+    """Successive tests bind the preset-host redirect's ONE leased port, so a
+    stopped source must stop listening at once. A bare `close` on Linux leaves
+    the accept thread's socket LISTENING, and the next bind failed `EADDRINUSE`
+    — the second Outlook walk of a session never started."""
+    from drivers.port_util import find_free_port
+
+    port = find_free_port()
+    for _ in range(3):
+        with FakeImapSource(_mailboxes(), port=port) as source:
+            assert source.port == port

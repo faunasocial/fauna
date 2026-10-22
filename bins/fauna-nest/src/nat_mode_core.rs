@@ -175,6 +175,7 @@ pub async fn apply_node_mode_change(
         .unwrap_or_default();
     crate::mail_enable::reconcile_supervisor(
         new_mode,
+        state.content_scanners,
         toggles.mail,
         toggles.caldav,
         toggles.carddav,
@@ -223,7 +224,6 @@ mod tests {
             submission: None,
             acme: None,
             email: None,
-            update: Default::default(),
         }
     }
 }

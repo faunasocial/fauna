@@ -35,10 +35,12 @@
 //!   host/port/tls-mode stay on the provider preset
 //!   (`MailImportMachine::apply_client_action`'s `SelectSourceKind` arm),
 //!   unpainted.
-//! - **Outlook** paints the OAuth button **and** the IMAP-fallback fields
-//!   (host/port/tls-mode/username/password) — ui.yaml's own
-//!   "(+ Outlook fallback)" annotations on those four ids is what settles this
-//!   (the doc's step 1: "OAuth … **or** IMAP user/password fallback").
+//! - **Outlook** paints `source-username` (the Microsoft account's address,
+//!   the XOAUTH2 user) and **Sign in with Microsoft** — no password field, no
+//!   host field: Microsoft takes no password from a mail app, so the fallback
+//!   is withdrawn and the triple is a preset (`mailbox-migration.md`
+//!   § Microsoft sign-in — the device-code grant). No Connect button either:
+//!   the grant connects by itself.
 //! - **Generic** paints host/port/tls-mode/username/password; no app-password,
 //!   no OAuth button.
 //!
@@ -83,21 +85,31 @@
 //! (`resume_credential_elements`), and Resume commits it first through the
 //! shared `resume_actions`.
 //!
-//! # The Outlook OAuth button is disabled
+//! # The Outlook source signs in with Microsoft
 //!
-//! `mail-import-source-oauth-button` paints (ui.yaml requires the element
-//! exist) but is never actuable (`enabled: false`) — no app wires the
-//! Microsoft Graph dance yet (`mailbox-migration.md`'s own "Not in scope"
-//! list). The IMAP fallback fields beside it are the real, working path for
-//! an Outlook account today.
+//! `mail-import-source-oauth-button` dispatches the shared
+//! `microsoft_sign_in_actions` (commit the address, `BeginMicrosoftSignIn`);
+//! `Op::MailImportDispatch`'s executor then spawns
+//! `MailImportMachine::run_microsoft_sign_in`, the polling half, exactly as it
+//! spawns `run_import`. While the code is out, `mail-import-source-oauth-code`
+//! paints the code and Microsoft's address (its `code` and `url` attributes
+//! carry each alone) with an id-less **Open in browser** beside it, through
+//! `os_open` — the person may equally type the code on a phone. The
+//! page's one-second tick (`settings::mail_import_progress_active`) repaints
+//! while the sign-in is in flight, and a grant moves the step on by itself;
+//! a declined, expired or consent-refused sign-in lands its sentence on
+//! `error-message`. Until the platform can sign in at all
+//! (`MailImportSnapshot::microsoft_signin_available` — the project's
+//! application ID still empty) the button paints inert beside
+//! `mail_import.microsoft_unavailable`, never a failing request.
 
 use fauna_ui_ids as ids;
 use std::sync::Arc;
 
 use fauna_client_mail_settings::{
-    DEFAULT_MAX_SIZE_MB, ImportSourceKind, ImportStep, ImportTlsMode, MailImportAction,
-    MailImportMachine, MailImportSnapshot, SOURCE_KINDS, TLS_MODES, import_source_kind_label,
-    import_tls_mode_label,
+    DEFAULT_MAX_SIZE_MB, ImportPauseReason, ImportSessionState, ImportSourceKind, ImportStep,
+    ImportTlsMode, MailImportAction, MailImportMachine, MailImportSnapshot, MicrosoftSignInState,
+    SOURCE_KINDS, TLS_MODES, import_source_kind_label, import_tls_mode_label,
 };
 use fauna_core::secret::SecretString;
 use fauna_i18n::strings::mail_import as t;
@@ -115,7 +127,7 @@ pub(crate) struct MailImportState {
     pub(super) machine: Option<Arc<MailImportMachine>>,
     /// The last rendered snapshot. `None` until the first hydrate resolves.
     pub(super) snapshot: Option<MailImportSnapshot>,
-    /// Step 1 (Generic/Outlook-fallback) — local drafts, committed by
+    /// Step 1 (Generic) — local drafts, committed by
     /// `connect_actions` on Connect.
     pub(super) host_input: String,
     pub(super) port_input: String,
@@ -136,6 +148,10 @@ pub(crate) struct MailImportState {
     /// Whether Review skipped has revealed the skip log on the Done screen
     /// — the `ArchiveImportState::show_skipped` shape.
     pub(super) show_skipped: bool,
+    /// Whether this visit's Source drafts were filled from the remembered
+    /// source already (`settings::apply_mail_import_snapshot`) — once per
+    /// visit, so a repaint never refills a field the user emptied.
+    pub(super) drafts_seeded: bool,
 }
 
 impl Default for MailImportState {
@@ -151,6 +167,7 @@ impl Default for MailImportState {
             max_size_input: DEFAULT_MAX_SIZE_MB.to_string(),
             cancel_armed: false,
             show_skipped: false,
+            drafts_seeded: false,
         }
     }
 }
@@ -159,9 +176,14 @@ impl MailImportState {
     /// Build the page's shared machine from the session's WS handle. No
     /// keypair: the import RPCs are user-tier, so the nest derives the owning
     /// actor from the authenticated caller (the Export reasoning).
-    pub(super) fn build(nest: Arc<fauna_client::NestClient>) -> Self {
+    pub(super) fn build(
+        nest: Arc<fauna_client::NestClient>,
+        memory: Arc<dyn fauna_client_config::MailImportSourceStore>,
+    ) -> Self {
         Self {
-            machine: Some(Arc::new(crate::mail_glue::build_mail_import_machine(nest))),
+            machine: Some(Arc::new(
+                crate::mail_glue::build_mail_import_machine(nest).with_source_memory(memory),
+            )),
             ..Self::default()
         }
     }
@@ -173,6 +195,7 @@ impl MailImportState {
     pub(super) fn reset_form(&mut self) {
         self.cancel_armed = false;
         self.show_skipped = false;
+        self.drafts_seeded = false;
         self.host_input.clear();
         self.port_input.clear();
         self.username_input.clear();
@@ -351,21 +374,25 @@ fn source_step_elements(
             els.push(Element::chrome(help));
         }
         ImportSourceKind::Outlook => {
-            els.push(Element::gesture_button(
-                ids::MAIL_IMPORT_SOURCE_OAUTH_BUTTON,
-                t::SOURCE_OAUTH_BUTTON,
-                // Disabled — see the module docs. `MailImportOAuthStart` is a
-                // deliberate no-op, defense in depth if ever actuated anyway.
-                false,
-                Gesture::Settings(Action::MailImportOAuthStart),
-            ));
-            els.extend(imap_fallback_fields(e, tls_mode));
+            els.push(
+                Element::input(
+                    ids::MAIL_IMPORT_SOURCE_USERNAME,
+                    e.username_input.clone(),
+                    Field::Settings(SettingsField::MailImportUsername),
+                )
+                .labelled(t::SOURCE_OUTLOOK_ADDRESS_LABEL),
+            );
+            els.extend(microsoft_sign_in_elements(e.snapshot.as_ref()));
+            els.extend(forget_source_element(e.snapshot.as_ref()));
+            // The grant connects by itself — no Connect button to press.
+            return els;
         }
         ImportSourceKind::Generic => {
-            els.extend(imap_fallback_fields(e, tls_mode));
+            els.extend(generic_imap_fields(e, tls_mode));
         }
     }
 
+    els.extend(forget_source_element(e.snapshot.as_ref()));
     els.push(Element::gesture_button(
         ids::MAIL_IMPORT_CONNECT_BUTTON,
         t::CONNECT_BUTTON,
@@ -375,10 +402,76 @@ fn source_step_elements(
     els
 }
 
-/// The host/port/tls-mode/username/password field group — Generic's required
-/// set, reused as Outlook's IMAP fallback (ui.yaml's "(+ Outlook fallback)"
-/// annotation on these four ids).
-fn imap_fallback_fields(e: &MailImportState, tls_mode: ImportTlsMode) -> Vec<Element> {
+/// `mail-import-source-forget-button` — painted for every provider while the
+/// account remembers a source (`MailImportSnapshot::source_remembered`,
+/// `mailbox-migration.md` § Credential handling).
+fn forget_source_element(snapshot: Option<&MailImportSnapshot>) -> Option<Element> {
+    snapshot.filter(|s| s.source_remembered).map(|_| {
+        Element::gesture_button(
+            ids::MAIL_IMPORT_SOURCE_FORGET_BUTTON,
+            t::SOURCE_FORGET_BUTTON,
+            true,
+            Gesture::Settings(Action::MailImportForgetSource),
+        )
+    })
+}
+
+/// Whether the Outlook source's sign-in is under way — a code requested, out,
+/// or its grant connecting. The button stays inert meanwhile, and the page's
+/// tick keeps repainting (`settings::mail_import_progress_active`).
+pub(super) fn microsoft_sign_in_in_flight(snapshot: &MailImportSnapshot) -> bool {
+    snapshot.microsoft_signin.as_ref().is_some_and(|v| {
+        matches!(
+            v.state,
+            MicrosoftSignInState::Requesting
+                | MicrosoftSignInState::Waiting
+                | MicrosoftSignInState::Connecting
+        )
+    })
+}
+
+/// The Outlook source's sign-in (module docs): the button — inert beside the
+/// unavailable sentence until this platform can sign in, and while a sign-in
+/// is in flight — then, once Microsoft has answered, the code and its address
+/// with Open in browser. Shared by the Source step and an adopted session's
+/// Progress step (`resume_credential_elements`).
+fn microsoft_sign_in_elements(snapshot: Option<&MailImportSnapshot>) -> Vec<Element> {
+    let available = snapshot.is_some_and(|s| s.microsoft_signin_available);
+    let in_flight = snapshot.is_some_and(microsoft_sign_in_in_flight);
+    let mut els = vec![Element::gesture_button(
+        ids::MAIL_IMPORT_SOURCE_OAUTH_BUTTON,
+        t::SOURCE_OAUTH_BUTTON,
+        available && !in_flight,
+        Gesture::Settings(Action::MailImportOAuthStart),
+    )];
+    if !available {
+        els.push(Element::chrome(t::MICROSOFT_UNAVAILABLE));
+        return els;
+    }
+    let Some(view) = snapshot.and_then(|s| s.microsoft_signin.as_ref()) else {
+        return els;
+    };
+    if view.state == MicrosoftSignInState::Waiting && !view.user_code.is_empty() {
+        els.push(
+            Element::label(
+                ids::MAIL_IMPORT_SOURCE_OAUTH_CODE,
+                t::microsoft_code_fmt(&view.verification_uri, &view.user_code),
+            )
+            .attr("code", view.user_code.clone())
+            .attr("url", view.verification_uri.clone()),
+        );
+        els.push(Element::chrome_button(
+            t::MICROSOFT_OPEN_BROWSER,
+            Gesture::Settings(Action::MailImportOpenMicrosoftSignIn),
+        ));
+        els.push(Element::chrome(t::MICROSOFT_WAITING));
+    }
+    els
+}
+
+/// The host/port/tls-mode/username/password field group — the Generic
+/// source's required set (`mailbox-migration.md` § Wizard steps step 1).
+fn generic_imap_fields(e: &MailImportState, tls_mode: ImportTlsMode) -> Vec<Element> {
     vec![
         Element::input(
             ids::MAIL_IMPORT_SOURCE_HOST,
@@ -414,7 +507,9 @@ fn imap_fallback_fields(e: &MailImportState, tls_mode: ImportTlsMode) -> Vec<Ele
 }
 
 /// Step 3 — scope. The mailbox multi-select, the date buffer, the max-size
-/// buffer, and the mapping info line.
+/// buffer, the mapping info line, and the advanced "Import duplicates anyway"
+/// toggle, whose label carries its double-storage warning
+/// (`mailbox-migration.md` § Opt-out per session, § Don't do these).
 ///
 /// The per-mailbox checkboxes carry the REAL, indexed `mail-import-scope-
 /// mailbox-item` id (user-approved 2026-08-28), unlike `mail_export.rs`'s
@@ -425,6 +520,7 @@ fn imap_fallback_fields(e: &MailImportState, tls_mode: ImportTlsMode) -> Vec<Ele
 /// change (flagged, not fixed, in the same approval — TODO owed there).
 fn scope_step_elements(e: &MailImportState, snapshot: Option<&MailImportSnapshot>) -> Vec<Element> {
     let mailboxes = snapshot.map(|s| s.mailboxes.as_slice()).unwrap_or(&[]);
+    let import_duplicates = snapshot.is_some_and(|s| s.import_duplicates);
 
     let mut els = vec![
         Element::chrome(t::SCOPE_TITLE),
@@ -465,6 +561,15 @@ fn scope_step_elements(e: &MailImportState, snapshot: Option<&MailImportSnapshot
         ids::MAIL_IMPORT_SCOPE_MAILBOX_MAPPING,
         t::SCOPE_MAILBOX_MAPPING_LABEL,
     ));
+    els.push(
+        Element::checkbox_gesture(
+            ids::MAIL_IMPORT_SCOPE_IMPORT_DUPLICATES_TOGGLE,
+            t::SCOPE_IMPORT_DUPLICATES_LABEL,
+            import_duplicates,
+            Gesture::Settings(Action::MailImportToggleImportDuplicates),
+        )
+        .attr("state", if import_duplicates { "on" } else { "off" }),
+    );
     els.push(Element::gesture_button(
         ids::WIZARD_BACK_BUTTON,
         t::BACK,
@@ -557,25 +662,50 @@ fn progress_step_elements(
         )
         .attr("fraction", format!("{fraction:.4}")),
     ];
-    if let Some(s) = snapshot.filter(|s| s.resume_needs_credentials) {
-        els.extend(resume_credential_elements(e, s));
-    }
-    els.extend([
-        Element::gesture_button(
-            ids::MAIL_IMPORT_PAUSE_BUTTON,
-            t::PAUSE_BUTTON,
+    let failed = snapshot.and_then(|s| s.session_state) == Some(ImportSessionState::Errored);
+    if failed {
+        // A failed import is a record, not a run (`mailbox-migration.md` § A
+        // failed import is a record the wizard shows until the user moves
+        // on): none of the three controls applies, and its one control is
+        // Dismiss. Its reason is the error log's last line.
+        els.push(Element::gesture_button(
+            ids::MAIL_IMPORT_DISMISS_BUTTON,
+            t::DISMISS_FAILED_BUTTON,
             true,
-            Gesture::Settings(Action::MailImportPause),
-        ),
-        Element::gesture_button(
-            ids::MAIL_IMPORT_RESUME_BUTTON,
-            t::RESUME_BUTTON,
-            true,
-            Gesture::Settings(Action::MailImportResume),
-        ),
+            Gesture::Settings(Action::MailImportDismiss),
+        ));
+    } else {
+        if let Some(s) = snapshot.filter(|s| s.resume_needs_credentials) {
+            els.extend(resume_credential_elements(e, s));
+        }
+        els.extend([
+            Element::gesture_button(
+                ids::MAIL_IMPORT_PAUSE_BUTTON,
+                t::PAUSE_BUTTON,
+                true,
+                Gesture::Settings(Action::MailImportPause),
+            ),
+            Element::gesture_button(
+                ids::MAIL_IMPORT_RESUME_BUTTON,
+                t::RESUME_BUTTON,
+                true,
+                Gesture::Settings(Action::MailImportResume),
+            ),
+        ]);
+        // A source mailbox the old provider rebuilt (§ Resume protocol step
+        // 4): its warning is already in the error log; the restart is offered
+        // while one is pending.
+        if snapshot.is_some_and(|s| !s.rebuilt_mailboxes.is_empty()) {
+            els.push(Element::gesture_button(
+                ids::MAIL_IMPORT_RESTART_BUTTON,
+                t::RESTART_BUTTON,
+                true,
+                Gesture::Settings(Action::MailImportRestart),
+            ));
+        }
         // Two-click inline confirm: the relabel is the gate's only visible
         // affordance, the `mail_export.rs` shape.
-        Element::gesture_button(
+        els.push(Element::gesture_button(
             ids::MAIL_IMPORT_CANCEL_BUTTON,
             if e.cancel_armed {
                 fauna_i18n::strings::common::CONFIRM_Q
@@ -584,7 +714,26 @@ fn progress_step_elements(
             },
             true,
             Gesture::Settings(Action::MailImportCancel),
-        ),
+        ));
+    }
+    // The full-mailbox notice (`mailbox-migration.md` § Failure handling →
+    // *Nest-side errors*): ask the admin then Resume, Skip the rest, or
+    // Cancel — the first and last are the buttons above.
+    if snapshot.is_some_and(|s| {
+        s.pause_reason == Some(ImportPauseReason::MailboxFull)
+            && s.session_state == Some(ImportSessionState::Paused)
+    }) {
+        els.extend([
+            Element::label(ids::MAIL_IMPORT_QUOTA_NOTICE, t::QUOTA_NOTICE),
+            Element::gesture_button(
+                ids::MAIL_IMPORT_QUOTA_SKIP_REST_BUTTON,
+                t::QUOTA_SKIP_REST_BUTTON,
+                true,
+                Gesture::Settings(Action::MailImportSkipRest),
+            ),
+        ]);
+    }
+    els.extend([
         Element::label(
             ids::MAIL_IMPORT_ERROR_LOG,
             snapshot.map(|s| s.error_log.join("\n")).unwrap_or_default(),
@@ -608,7 +757,7 @@ fn progress_step_elements(
 /// own credential field for the session's provider — the app password, or
 /// Generic's password with its port and connection security, which the
 /// session row does not record. The Outlook source asks for the Microsoft
-/// sign-in, whose button stays inert on tui (module docs).
+/// sign-in again (module docs).
 fn resume_credential_elements(e: &MailImportState, s: &MailImportSnapshot) -> Vec<Element> {
     match s.source_kind {
         ImportSourceKind::Gmail | ImportSourceKind::ICloud => vec![
@@ -641,15 +790,11 @@ fn resume_credential_elements(e: &MailImportState, s: &MailImportSnapshot) -> Ve
             )
             .labelled(t::SOURCE_PASSWORD_PLACEHOLDER),
         ],
-        ImportSourceKind::Outlook => vec![
-            Element::chrome(t::RESUME_NEEDS_MICROSOFT),
-            Element::gesture_button(
-                ids::MAIL_IMPORT_SOURCE_OAUTH_BUTTON,
-                t::SOURCE_OAUTH_BUTTON,
-                false,
-                Gesture::Settings(Action::MailImportOAuthStart),
-            ),
-        ],
+        ImportSourceKind::Outlook => {
+            let mut els = vec![Element::chrome(t::RESUME_NEEDS_MICROSOFT)];
+            els.extend(microsoft_sign_in_elements(Some(s)));
+            els
+        }
     }
 }
 
@@ -752,6 +897,7 @@ fn done_step_elements(e: &MailImportState, snapshot: Option<&MailImportSnapshot>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::element::Role;
     use crate::settings::SubPage;
     use fauna_client_mail_settings::testing::a_mail_import_snapshot as a_snapshot;
     use fauna_client_mail_settings::{ImportMailboxProgress, SourceMailboxOption};
@@ -767,6 +913,21 @@ mod tests {
 
     fn ids(els: &[Element]) -> Vec<String> {
         els.iter().map(|e| e.id.clone()).collect()
+    }
+
+    /// An Outlook Source step whose sign-in code is out: this platform can
+    /// sign in, and Microsoft answered the button with a code.
+    fn outlook_waiting() -> MailImportSnapshot {
+        let mut snap = a_snapshot(ImportStep::Source);
+        snap.source_kind = ImportSourceKind::Outlook;
+        snap.microsoft_signin_available = true;
+        snap.microsoft_signin = Some(fauna_client_mail_settings::MicrosoftSignInView {
+            user_code: "FAUNA-42".into(),
+            verification_uri: "https://microsoft.example/devicelogin".into(),
+            expires_at_ms: 900_000,
+            state: MicrosoftSignInState::Waiting,
+        });
+        snap
     }
 
     fn text_of(els: &[Element], id: &str, index: usize) -> String {
@@ -807,6 +968,17 @@ mod tests {
         let mut reviewing = state_with(a_snapshot(ImportStep::Done));
         reviewing.mail_import.show_skipped = true;
         painted.extend(ids(&mail_import_elements(&reviewing)));
+        // The sign-in code paints only while Microsoft's code is out.
+        painted.extend(ids(&mail_import_elements(&state_with(outlook_waiting()))));
+        // The full-mailbox notice paints only on that pause.
+        let mut full = a_snapshot(ImportStep::Progress);
+        full.session_state = Some(ImportSessionState::Paused);
+        full.pause_reason = Some(ImportPauseReason::MailboxFull);
+        painted.extend(ids(&mail_import_elements(&state_with(full))));
+        // Dismiss paints only on a failed import's Progress step.
+        let mut failed = a_snapshot(ImportStep::Progress);
+        failed.session_state = Some(ImportSessionState::Errored);
+        painted.extend(ids(&mail_import_elements(&state_with(failed))));
         for id in [
             "page-heading",
             // "error-message" is registered globally by ui::register_frame
@@ -815,6 +987,7 @@ mod tests {
             "mail-import-source-picker",
             "mail-import-source-app-password",
             "mail-import-source-oauth-button",
+            "mail-import-source-oauth-code",
             "mail-import-source-host",
             "mail-import-source-port",
             "mail-import-source-tls-mode",
@@ -826,6 +999,7 @@ mod tests {
             "mail-import-scope-date-from",
             "mail-import-scope-max-size",
             "mail-import-scope-mailbox-mapping",
+            "mail-import-scope-import-duplicates-toggle",
             "wizard-next-button",
             "wizard-back-button",
             "mail-import-confirm-summary",
@@ -835,6 +1009,9 @@ mod tests {
             "mail-import-pause-button",
             "mail-import-resume-button",
             "mail-import-cancel-button",
+            "mail-import-quota-notice",
+            "mail-import-quota-skip-rest-button",
+            "mail-import-dismiss-button",
             "mail-import-error-log",
             "mail-import-mailbox-progress-list",
             "mail-import-done-summary",
@@ -846,6 +1023,34 @@ mod tests {
                 painted.contains(&id.to_string()),
                 "missing {id:?}; painted {painted:?}"
             );
+        }
+    }
+
+    /// The "Import duplicates anyway" toggle reflects the SNAPSHOT — off by
+    /// default, flipped only by a dispatch that reached the machine — and its
+    /// own label carries the double-storage warning (§ Opt-out per session,
+    /// § Don't do these: never suppressed).
+    #[test]
+    fn the_import_duplicates_toggle_is_off_by_default_and_carries_its_warning() {
+        let toggle = |on: bool| {
+            let mut snap = a_snapshot(ImportStep::Scope);
+            snap.import_duplicates = on;
+            mail_import_elements(&state_with(snap))
+                .into_iter()
+                .find(|e| e.id == "mail-import-scope-import-duplicates-toggle")
+                .expect("the toggle paints on Scope")
+        };
+        let state = |e: &Element| {
+            e.attrs
+                .iter()
+                .find(|(k, _)| k == "state")
+                .map(|(_, v)| v.clone())
+        };
+        assert!(!a_snapshot(ImportStep::Scope).import_duplicates);
+        assert_eq!(state(&toggle(false)).as_deref(), Some("off"));
+        assert_eq!(state(&toggle(true)).as_deref(), Some("on"));
+        for on in [false, true] {
+            assert_eq!(toggle(on).text, t::SCOPE_IMPORT_DUPLICATES_LABEL);
         }
     }
 
@@ -873,6 +1078,78 @@ mod tests {
                 .any(|id| id == "mail-import-view-imported-button")
         );
         assert!(!done.iter().any(|id| id == "mail-import-pause-button"));
+    }
+
+    /// A failed import is painted on its Progress step with the reason as the
+    /// error log's last line; Pause / Resume / Cancel are not offered, nor the
+    /// resume credential, and its one control is Dismiss
+    /// (`mailbox-migration.md` § A failed import is a record the wizard shows
+    /// until the user moves on).
+    #[test]
+    fn a_failed_import_offers_dismiss_and_none_of_the_three_controls() {
+        let mut snap = a_snapshot(ImportStep::Progress);
+        snap.session_state = Some(ImportSessionState::Errored);
+        snap.resume_needs_credentials = true;
+        snap.error_log = vec!["INBOX uid 2: dedup".into(), "The import stopped.".into()];
+        let els = mail_import_elements(&state_with(snap));
+        let painted = ids(&els);
+        for id in [
+            "mail-import-pause-button",
+            "mail-import-resume-button",
+            "mail-import-cancel-button",
+            "mail-import-source-app-password",
+        ] {
+            assert!(!painted.iter().any(|p| p == id), "{id} on a failed import");
+        }
+        assert_eq!(
+            text_of(&els, "mail-import-dismiss-button", 0),
+            t::DISMISS_FAILED_BUTTON
+        );
+        let dismiss = els
+            .iter()
+            .find(|e| e.id == "mail-import-dismiss-button")
+            .unwrap();
+        assert!(matches!(
+            dismiss.role,
+            Role::Button(Gesture::Settings(Action::MailImportDismiss))
+        ));
+        assert_eq!(
+            text_of(&els, "mail-import-error-log", 0),
+            "INBOX uid 2: dedup\nThe import stopped."
+        );
+
+        // A live import keeps its three controls and paints no Dismiss.
+        let mut live = a_snapshot(ImportStep::Progress);
+        live.session_state = Some(ImportSessionState::Running);
+        let painted = ids(&mail_import_elements(&state_with(live)));
+        assert!(painted.iter().any(|p| p == "mail-import-pause-button"));
+        assert!(!painted.iter().any(|p| p == "mail-import-dismiss-button"));
+    }
+
+    /// The push re-read is page-gated (`StaleSurfaces::mail_import`): only the
+    /// open Import sub-page, and only once a machine exists, produces an op.
+    #[test]
+    fn the_import_push_re_reads_only_the_open_import_page() {
+        let mut state = state_with(a_snapshot(ImportStep::Progress));
+        assert!(
+            crate::settings::mail_import_resync_op(&state).is_none(),
+            "no machine pre-login, no op"
+        );
+        let nest = fauna_client::NestClient::new(
+            "http://127.0.0.1:9".to_string(),
+            fauna_core::identity::ActorKeypair::from_secret([7u8; 32]),
+        );
+        state.mail_import.machine =
+            Some(Arc::new(crate::mail_glue::build_mail_import_machine(nest)));
+        assert!(matches!(
+            crate::settings::mail_import_resync_op(&state),
+            Some(crate::settings::Op::ResyncMailImport { .. })
+        ));
+        state.sub = SubPage::MailSpam;
+        assert!(
+            crate::settings::mail_import_resync_op(&state).is_none(),
+            "another sub-page shown"
+        );
     }
 
     /// A session adopted after a restart asks for the provider's own
@@ -913,6 +1190,16 @@ mod tests {
         let outlook = progress_ids(ImportSourceKind::Outlook, true);
         assert!(has(&outlook, "mail-import-source-oauth-button"));
         assert!(!has(&outlook, "mail-import-source-password"));
+
+        // The adopted Outlook session's sign-in shows its code there too.
+        let mut signing_in = outlook_waiting();
+        signing_in.step = ImportStep::Progress;
+        signing_in.resume_needs_credentials = true;
+        let els = mail_import_elements(&state_with(signing_in));
+        assert_eq!(
+            text_of(&els, "mail-import-source-oauth-code", 0),
+            t::microsoft_code_fmt("https://microsoft.example/devicelogin", "FAUNA-42"),
+        );
     }
 
     /// Pre-hydrate the wizard still opens on a usable Source step with the
@@ -952,8 +1239,10 @@ mod tests {
     }
 
     /// Per-provider field visibility: Gmail/iCloud show app-password, never
-    /// host/port; Outlook shows BOTH the OAuth button and the IMAP fallback
-    /// fields; Generic shows the fallback fields, never app-password or OAuth.
+    /// host/port; Outlook shows the address and Sign in with Microsoft — no
+    /// password, no host, no Connect (`mailbox-migration.md` § Microsoft
+    /// sign-in: the fallback is withdrawn); Generic shows the IMAP fields,
+    /// never app-password or OAuth.
     #[test]
     fn per_provider_source_fields_match_the_visibility_table() {
         let painted_for = |kind: ImportSourceKind| {
@@ -974,9 +1263,22 @@ mod tests {
 
         let outlook = painted_for(ImportSourceKind::Outlook);
         assert!(outlook.contains(&"mail-import-source-oauth-button".to_string()));
-        assert!(outlook.contains(&"mail-import-source-host".to_string()));
-        assert!(outlook.contains(&"mail-import-source-password".to_string()));
-        assert!(!outlook.contains(&"mail-import-source-app-password".to_string()));
+        assert!(outlook.contains(&"mail-import-source-username".to_string()));
+        for absent in [
+            "mail-import-source-host",
+            "mail-import-source-port",
+            "mail-import-source-tls-mode",
+            "mail-import-source-password",
+            "mail-import-source-app-password",
+            "mail-import-connect-button",
+            // No code before the button was pressed.
+            "mail-import-source-oauth-code",
+        ] {
+            assert!(
+                !outlook.contains(&absent.to_string()),
+                "{absent}: {outlook:?}"
+            );
+        }
 
         let generic = painted_for(ImportSourceKind::Generic);
         assert!(generic.contains(&"mail-import-source-host".to_string()));
@@ -985,18 +1287,89 @@ mod tests {
         assert!(!generic.contains(&"mail-import-source-app-password".to_string()));
     }
 
-    /// The OAuth button is present but disabled — `mailbox-migration.md`'s "no
-    /// app wires it" gap, honestly represented rather than hidden or faked.
+    fn oauth_button(els: &[Element]) -> &Element {
+        els.iter()
+            .find(|e| e.id == "mail-import-source-oauth-button")
+            .expect("oauth button painted")
+    }
+
+    /// Until this platform can sign in (the project's application ID still
+    /// empty) the button paints inert beside the unavailable sentence — never
+    /// a failing request (§ Microsoft sign-in, *Whose registration*).
     #[test]
-    fn the_oauth_button_is_disabled() {
+    fn the_oauth_button_is_inert_until_sign_in_is_available() {
         let mut snap = a_snapshot(ImportStep::Source);
         snap.source_kind = ImportSourceKind::Outlook;
+        snap.microsoft_signin_available = false;
+        let els = mail_import_elements(&state_with(snap.clone()));
+        assert!(!oauth_button(&els).enabled);
+        assert!(els.iter().any(|e| e.text == t::MICROSOFT_UNAVAILABLE));
+
+        snap.microsoft_signin_available = true;
         let els = mail_import_elements(&state_with(snap));
-        let button = els
+        let button = oauth_button(&els);
+        assert!(button.enabled);
+        assert!(matches!(
+            button.gesture(),
+            Some(Gesture::Settings(Action::MailImportOAuthStart))
+        ));
+        assert!(!els.iter().any(|e| e.text == t::MICROSOFT_UNAVAILABLE));
+    }
+
+    /// Once Microsoft answered, the code and its address paint on
+    /// `mail-import-source-oauth-code` (each alone as an attribute, for a
+    /// driver to read) with Open in browser beside it, and the button stays
+    /// inert while the sign-in is in flight — and the page's tick runs.
+    #[test]
+    fn a_waiting_sign_in_paints_the_code_and_its_address() {
+        let state = state_with(outlook_waiting());
+        let els = mail_import_elements(&state);
+        let code = els
             .iter()
-            .find(|e| e.id == "mail-import-source-oauth-button")
-            .expect("oauth button painted");
-        assert!(!button.enabled, "the OAuth button must not be actuable yet");
+            .find(|e| e.id == "mail-import-source-oauth-code")
+            .expect("code painted");
+        assert_eq!(
+            code.text,
+            t::microsoft_code_fmt("https://microsoft.example/devicelogin", "FAUNA-42")
+        );
+        assert_eq!(
+            code.attrs
+                .iter()
+                .find(|(k, _)| k == "code")
+                .map(|(_, v)| v.as_str()),
+            Some("FAUNA-42")
+        );
+        assert_eq!(
+            code.attrs
+                .iter()
+                .find(|(k, _)| k == "url")
+                .map(|(_, v)| v.as_str()),
+            Some("https://microsoft.example/devicelogin")
+        );
+        assert!(els.iter().any(|e| e.text == t::MICROSOFT_OPEN_BROWSER
+            && matches!(
+                e.gesture(),
+                Some(Gesture::Settings(Action::MailImportOpenMicrosoftSignIn))
+            )));
+        assert!(!oauth_button(&els).enabled, "one sign-in at a time");
+        assert!(crate::settings::mail_import_progress_active(&state));
+    }
+
+    /// A sign-in that ended — declined, expired, refused — leaves no code and
+    /// a live button for another try; its sentence is on `error-message`, and
+    /// the tick goes quiet.
+    #[test]
+    fn an_ended_sign_in_offers_the_button_again() {
+        let mut snap = outlook_waiting();
+        if let Some(v) = snap.microsoft_signin.as_mut() {
+            v.state = MicrosoftSignInState::Declined;
+        }
+        snap.error = Some(t::MICROSOFT_DECLINED.into());
+        let state = state_with(snap);
+        let els = mail_import_elements(&state);
+        assert!(!ids(&els).contains(&"mail-import-source-oauth-code".to_string()));
+        assert!(oauth_button(&els).enabled);
+        assert!(!crate::settings::mail_import_progress_active(&state));
     }
 
     /// The security pin this closes: both
@@ -1331,6 +1704,52 @@ mod tests {
         assert_eq!(armed, fauna_i18n::strings::common::CONFIRM_Q);
     }
 
+    /// The restart offer (`mailbox-migration.md` § Resume protocol step 4)
+    /// is painted only while the machine holds a rebuilt mailbox, and its
+    /// press is the restart gesture.
+    #[test]
+    fn the_restart_button_is_offered_only_for_a_rebuilt_mailbox() {
+        let plain = mail_import_elements(&state_with(a_snapshot(ImportStep::Progress)));
+        assert!(!ids(&plain).contains(&"mail-import-restart-button".to_string()));
+
+        let mut snap = a_snapshot(ImportStep::Progress);
+        snap.rebuilt_mailboxes = vec!["INBOX".into()];
+        let els = mail_import_elements(&state_with(snap));
+        let button = els
+            .iter()
+            .find(|e| e.id == "mail-import-restart-button")
+            .expect("restart offered");
+        assert_eq!(button.text, t::RESTART_BUTTON);
+        assert!(matches!(
+            button.role,
+            crate::element::Role::Button(Gesture::Settings(Action::MailImportRestart))
+        ));
+    }
+
+    /// The forget control is offered on the Source step, for every provider,
+    /// only while the account remembers a source (§ Credential handling).
+    #[test]
+    fn the_forget_button_is_offered_only_while_a_source_is_remembered() {
+        let plain = mail_import_elements(&state_with(a_snapshot(ImportStep::Source)));
+        assert!(!ids(&plain).contains(&"mail-import-source-forget-button".to_string()));
+
+        for kind in SOURCE_KINDS {
+            let mut snap = a_snapshot(ImportStep::Source);
+            snap.source_kind = kind;
+            snap.source_remembered = true;
+            let els = mail_import_elements(&state_with(snap));
+            let button = els
+                .iter()
+                .find(|e| e.id == "mail-import-source-forget-button")
+                .unwrap_or_else(|| panic!("forget offered for {kind:?}"));
+            assert_eq!(button.text, t::SOURCE_FORGET_BUTTON);
+            assert!(matches!(
+                button.role,
+                crate::element::Role::Button(Gesture::Settings(Action::MailImportForgetSource))
+            ));
+        }
+    }
+
     /// View imported navigates to Conversations; Review skipped toggles the
     /// skip log onto the Done screen instead (§ Wizard steps step 6).
     #[test]
@@ -1432,6 +1851,38 @@ mod tests {
         assert_eq!(
             text_of(&els, "mail-import-done-summary", 0),
             "10 imported · 1 skipped · 2 errored · took 2h 0m"
+        );
+    }
+
+    /// § Failure handling → *Nest-side errors*: the full-mailbox pause paints
+    /// the notice and Skip the rest beside Resume and Cancel; any other pause
+    /// does not.
+    #[test]
+    fn a_full_mailbox_pause_paints_the_notice_and_skip_the_rest() {
+        let ids_of =
+            |els: &[Element]| -> Vec<String> { els.iter().map(|e| e.id.to_string()).collect() };
+        let mut snap = a_snapshot(ImportStep::Progress);
+        snap.session_state = Some(ImportSessionState::Paused);
+        snap.pause_reason = Some(ImportPauseReason::MailboxFull);
+        let els = mail_import_elements(&state_with(snap.clone()));
+        assert_eq!(
+            text_of(&els, "mail-import-quota-notice", 0),
+            t::QUOTA_NOTICE
+        );
+        let painted = ids_of(&els);
+        for id in [
+            "mail-import-quota-skip-rest-button",
+            "mail-import-resume-button",
+            "mail-import-cancel-button",
+        ] {
+            assert!(painted.iter().any(|p| p == id), "{id} missing: {painted:?}");
+        }
+
+        snap.pause_reason = Some(ImportPauseReason::ConnectionLost);
+        let painted = ids_of(&mail_import_elements(&state_with(snap)));
+        assert!(
+            !painted.iter().any(|p| p.starts_with("mail-import-quota-")),
+            "{painted:?}"
         );
     }
 }

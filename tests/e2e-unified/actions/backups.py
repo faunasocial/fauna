@@ -43,6 +43,7 @@ SNAPSHOT_CREATE_WAIT_S = 30         # a new snapshot row appears after create
 SNAPSHOT_DETAIL_OPEN_WAIT_S = 25    # the opened snapshot's detail pane mounts
 SNAPSHOT_FILES_WAIT_S = 30          # per-file rows render inside the open detail
 SNAPSHOT_DOWNLOAD_WAIT_S = 40       # a downloaded file's bytes finish writing
+SNAPSHOT_RESTORE_WAIT_S = 120       # a whole-snapshot restore's outcome line renders
 LAST_BACKED_UP_WAIT_S = 40          # the last-backed-up label re-derives
 PRUNE_PREVIEW_WAIT_S = 40           # the dry-run prune preview renders
 PRUNE_PREVIEW_GONE_WAIT_S = 40      # the prune preview clears
@@ -743,6 +744,37 @@ class BackupsActions:
         self.download_file(index=index)
         return self.wait_for_downloaded_file(filename)
 
+    # --- Whole-snapshot restore (tui, linux, macos, windows; ui/backups.md
+    # § Whole-snapshot restore) ---
+
+    def restore_snapshot_to(self, destination: str,
+                            timeout: float = SNAPSHOT_RESTORE_WAIT_S) -> str:
+        """Restore the open snapshot's whole file tree into ``destination``
+        through ``snapshot-restore-button`` and return the finished
+        ``snapshot-restore-result`` line.
+
+        The wait is on the outcome line itself — present only after a run — so
+        it holds however long the walk takes (convention 14). Raises on timeout
+        with the progress line and the error element, so a hung or refused
+        restore names itself.
+        """
+        self.driver.clear_and_type("snapshot-restore-destination-input", destination)
+        self.driver.click("snapshot-restore-button")
+        deadline = time.monotonic() + timeout
+        while True:
+            if self.driver.is_visible("snapshot-restore-result"):
+                text = self.driver.get_text("snapshot-restore-result")
+                if text:
+                    return text
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    f"no snapshot-restore-result within {timeout}s: "
+                    f"{self.driver.diagnose('snapshot-restore-progress')} "
+                    f"{self.driver.diagnose('snapshot-restore-button')} "
+                    f"{self.driver.diagnose('error-message')}"
+                )
+            time.sleep(0.5)
+
     def wait_for_downloaded_file(self, filename: str, timeout: float = SNAPSHOT_DOWNLOAD_WAIT_S) -> bytes:
         """Wait for the client to finish writing `filename` into the driver's
         e2e download directory and return its bytes.
@@ -1323,6 +1355,32 @@ class BackupsActions:
         )
         self.driver.click("backup-destination-reseed-confirm-button")
 
+    def require_pull_back_supported(self) -> None:
+        """Skip unless this app hosts the nest-held pull-back — the re-seed
+        gesture on a surviving nest destination's row (`ui/backups.md`
+        § Restore after losing the nest; owner-approved placement 2026-10-16)
+        — e2e convention 7. tui leads (2026-10-17, over the shared
+        `fauna_sync_engine::reseed_pull::pull_back_from_destination`); linux
+        calls the same host and android its ffi face, and web its wasm twin
+        over the shared leg (2026-10-18); the others follow in their batched
+        trickle-down lifts, each admitted here as it lands."""
+        from helpers.app_surface import app_name, skip_unbuilt
+
+        if app_name(self.driver) not in ("tui", "linux", "android", "web"):
+            skip_unbuilt(
+                self.driver,
+                surface="backup-destination-reseed-button (nest-kind row)",
+                detail="tui leads the nest-held pull-back; this app has not lifted it",
+                tracked="ui/backups.md § Restore after losing the nest",
+            )
+
+    def reseed_from_nest_row(self, index: int = 0) -> None:
+        """Restore the signed-in nest from a surviving nest destination's copy:
+        press `backup-destination-reseed-button` inside that destination's
+        `backup-destination-status-row[index]` and confirm. Returns once the
+        confirm is pressed; read the outcome with `reseed_result_text`."""
+        self.reseed_from_custodian_row(index)
+
     def reseed_result_text(self) -> str:
         """`backup-destination-reseed-result`'s text, or '' while it is absent."""
         if self.driver.is_absent("backup-destination-reseed-result"):
@@ -1335,13 +1393,15 @@ class BackupsActions:
         convention 7. Built on tui, the lead app (2026-10-08), and on web
         (2026-10-10, a nest destination's banner only — web is never a
         custodian) and linux (2026-10-11, a nest destination's banner, and
-        this device's own custodian row through the sync agent's store leg);
-        the other four follow in their batched trickle-down lifts. (windows
-        built the nest-destination gesture 2026-10-13 but is not admitted until
-        the journey is green there.)"""
+        this device's own custodian row through the sync agent's store leg),
+        and on macos and ios (2026-10-21, a nest destination's banner and this
+        device's own custodian row — the agent's store leg on macos, in
+        process on ios); the rest follow in their batched trickle-down lifts. (windows built the
+        nest-destination gesture 2026-10-13 but is not admitted until the
+        journey is green there.)"""
         from helpers.app_surface import app_name, skip_unbuilt
 
-        if app_name(self.driver) not in ("tui", "web", "linux"):
+        if app_name(self.driver) not in ("tui", "web", "linux", "macos", "ios"):
             skip_unbuilt(
                 self.driver,
                 surface="backup-audit-recover-button",
@@ -1646,6 +1706,45 @@ class BackupsActions:
         if not self.driver.is_visible(probe):
             self.expand_folder(i)
         return i
+
+    def bind_location(self, name: str, path: str, timeout: float = 60.0) -> int:
+        """Bind the local folder ``path`` to the set whose title contains
+        ``name`` through the row's nested binding form — the user's gesture
+        (`folders.md` § Layout & flow), so the engine the bind starts is the
+        real one — and return the row's index once the bound folder renders
+        as a ``folder-location-row`` under it.
+
+        The expand is retried: the page mounts its rows before each row's
+        member roster loads, and that load rebuilds the row and discards an
+        expand that arrived first (measured live 2026-07-24,
+        ``test_filesync_multiseat_live._bind_folder``). Polled on the observed
+        form, never on elapsed time (convention 14)."""
+        self.navigate_folders()
+        deadline = time.monotonic() + timeout
+        while True:
+            idx = self.find_and_expand_folder(name)
+            settle = time.monotonic() + 5.0
+            while time.monotonic() < settle:
+                if self.driver.count("folder-location-path-input") >= 1:
+                    break
+                time.sleep(0.25)
+            if self.driver.count("folder-location-path-input") >= 1:
+                break
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    f"the {name!r} row never opened its binding form "
+                    f"(folder-location-path-input count=0 after {timeout:.0f}s of "
+                    "expand clicks) — the row is present, so this is the "
+                    "mount-vs-member-load rebuild, not a missing set"
+                )
+        self.driver.type_text("folder-location-path-input", path)
+        self.driver.click("folder-location-add-button")
+        wait_until(
+            lambda: self.driver.count("folder-location-row", scope=f"folder-row[{idx}]") >= 1,
+            timeout,
+            diagnose=lambda: f"the bound folder {path!r} never rendered under {name!r}",
+        )
+        return idx
 
     def find_and_expand_folder_until(
         self, name: str, element_id: str, timeout: float = 15.0
@@ -2453,6 +2552,12 @@ class BackupsActions:
         contract. Assert :meth:`paywall_select_visible` first if the
         missing-vs-disabled distinction matters."""
         return self.driver.is_enabled("folder-paywall-tier-select")
+
+    def paywall_hint_text(self) -> str:
+        """The expanded row's ``folder-paywall-hint`` — the "create a
+        subscription tier first" line, present exactly while
+        ``folder-paywall-tier-select`` is disabled for want of an own tier."""
+        return self.driver.get_text("folder-paywall-hint")
 
     def set_paywall_tier(self, tier: str) -> None:
         """Pick ``tier`` on the expanded website-enabled row's

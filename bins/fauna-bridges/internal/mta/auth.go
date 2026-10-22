@@ -37,6 +37,7 @@ import (
 	gosmtp "github.com/emersion/go-smtp"
 
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/auth"
+	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/connlimit"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mailfauna"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/wsrpc"
 )
@@ -139,8 +140,10 @@ func (s *submissionSession) authenticateOAUTHBEARER(payload string) error {
 //
 // Every code path that reaches step 2 fires exactly one report
 // (success at step 6 or fail at any earlier branch via
-// `reportAuthFail`). The D.7 lockout branch is the *only* exit that
-// skips report_auth_event — the audit log doesn't see the lockout
+// `reportAuthFail`) — save a busy credential-KDF gate (kdfBusy), which
+// checked no credential and so neither audits nor counts a lockout
+// failure. Among real verdicts the D.7 lockout branch is the *only* exit
+// that skips report_auth_event — the audit log doesn't see the lockout
 // 421 (the bridge surfaces lockout events via the bridge-local
 // "AUTH locked out" log line instead). Skipping the audit avoids
 // inflating audit storage during a sustained brute-force.
@@ -186,7 +189,12 @@ func (s *submissionSession) runAuth(username string, secret []byte, kind mailfau
 		// resolveActor returns ErrRecipientRejected when nest rejects;
 		// other errors are transport/decode. Map both to AUTH-fail on
 		// the wire (no per-error wire distinction — attackers could
-		// otherwise probe valid-vs-invalid recipients).
+		// otherwise probe valid-vs-invalid recipients). An unknown user runs
+		// the dummy KDF so it costs what a known user's wrong password does
+		// (network-exposure.md § Rulings F3), as on IMAP/CalDAV.
+		if mailfauna.DummyCredentialKDF(secret, kind, s.sourceIP) != nil {
+			return s.kdfBusy()
+		}
 		lockout.RecordFailureFor(principal, credentialID, s.sourceIP)
 		return s.reportAuthFail(nil, credentialID, err)
 	}
@@ -199,12 +207,19 @@ func (s *submissionSession) runAuth(username string, secret []byte, kind mailfau
 	if blob == nil {
 		// Nest has no submission token on file for this (actor,
 		// credential). User hasn't enabled SMTP submission via their
-		// Fauna app yet. Wire response is the same opaque 535.
+		// Fauna app yet. Wire response is the same opaque 535, and the
+		// dummy KDF keeps the timing uniform with a wrong password (F3).
+		if mailfauna.DummyCredentialKDF(secret, kind, s.sourceIP) != nil {
+			return s.kdfBusy()
+		}
 		lockout.RecordFailureFor(principal, credentialID, s.sourceIP)
 		return s.reportAuthFail(actorID, credentialID, errors.New("no submission token on file"))
 	}
 
-	token, err := mailfauna.UnsealSubmissionTokenBlob(blob, secret, actorID, credentialID, kind)
+	token, err := mailfauna.UnsealSubmissionTokenBlob(blob, secret, actorID, credentialID, kind, s.sourceIP)
+	if errors.Is(err, mailfauna.ErrKDFBusy) {
+		return s.kdfBusy()
+	}
 	if err != nil {
 		// AEAD-fail or inner-signature-fail. The mailfauna error
 		// wording carries the discriminant ("AEAD verify failed" vs
@@ -221,6 +236,10 @@ func (s *submissionSession) runAuth(username string, secret []byte, kind mailfau
 	s.submissionToken = token
 	s.authenticated = true
 	s.mu.Unlock()
+	// The one auth-success point (PLAIN and OAUTHBEARER both end here) lifts
+	// the pre-auth connection deadline (smtp-server.md § Connection-time
+	// limits); nil-safe.
+	connlimit.MarkAuthenticated(s.netConn)
 
 	lockout.ResetFor(principal, credentialID, s.sourceIP)
 
@@ -236,6 +255,19 @@ func (s *submissionSession) runAuth(username string, secret []byte, kind mailfau
 		}
 	}
 	return nil
+}
+
+// kdfBusy answers an attempt the credential-KDF gate had no slot for:
+// SMTP `454 4.7.0`, the temporary failure the client retries. The password was
+// never checked, so it records no lockout failure and no result=fail audit row —
+// a flood must not book an honest user's correct password as a wrong one. The
+// unknown-user dummy-KDF paths answer the same, so a saturated gate tells a
+// prober nothing about which accounts exist.
+func (s *submissionSession) kdfBusy() error {
+	if s.backend.logger != nil {
+		s.backend.logger.Warn("mta: AUTH deferred, credential KDF busy", "source_ip", s.sourceIP)
+	}
+	return errSubmissionAuthInternal
 }
 
 // reportAuthFail fires a result=fail audit event and returns the

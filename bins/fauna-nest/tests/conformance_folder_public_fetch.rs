@@ -1,7 +1,7 @@
 //! Production-flow round-trips for the **public folder read plane** — the
 //! folders re-model phase 4 slice 4f-i (`docs/goal/behavior/folders.md`
 //! § Publicly-synced follow owns the behavior; `docs/goal/architecture/
-//! federation.md` § The public folder read plane owns the kinds and gates).
+//! federation-shared-folders.md` § The public folder read plane owns the kinds and gates).
 //!
 //! The four oracles the ratified design names, each driven through the real
 //! `fauna.folders.public.fetch` handler over a real `CacheDb`:

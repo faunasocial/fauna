@@ -157,4 +157,32 @@ pub trait BackupsNestApi: fauna_core::MaybeSendSync + std::fmt::Debug {
         folder: &str,
         verify_content: bool,
     ) -> Result<SnapshotCheckReply, BackupsApiError>;
+
+    // ── Kind entries (§ Snapshot-list shape → *Kind entries*) ──────────
+    // A kind entry is a set like any other on the page; these are the four
+    // verbs whose request addresses the set, in their message-kind form. Row
+    // gestures (delete, undelete, immediate delete) are snapshot-id addressed
+    // and need no kind twin.
+
+    /// `fauna.filesync.snapshot.list` in **message-kind mode** — the
+    /// bearer's rows of one kind (conv: every channel the bearer belongs to).
+    async fn list_kind_snapshots(
+        &self,
+        kind: &str,
+    ) -> Result<Vec<SnapshotSummaryRow>, BackupsApiError>;
+
+    /// `fauna.filesync.snapshot.create_message_kind` with `actor_id: None` —
+    /// the owner's own scope, and for conv the batched all-my-channels form.
+    async fn create_kind_snapshot(&self, kind: &str) -> Result<(), BackupsApiError>;
+
+    /// [`Self::prune_set_policy`] addressed by `message_kind`.
+    async fn prune_kind_policy(
+        &self,
+        kind: &str,
+        dry_run: bool,
+    ) -> Result<SnapshotPruneSetPolicyReply, BackupsApiError>;
+
+    /// [`Self::check`] addressed by `message_kind`: verifies each active row's
+    /// pinned segments are on disk (a kind row has no chunk listing).
+    async fn check_kind(&self, kind: &str) -> Result<SnapshotCheckReply, BackupsApiError>;
 }

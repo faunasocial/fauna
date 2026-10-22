@@ -19,24 +19,22 @@ state → kind → live router flow, which only a running nest has.
 """
 
 import urllib.error
-import urllib.request
 
 import pytest
 
 from clients.ws_rpc_admin_client import RpcCallError, WsRpcAdminClient
 from clients.ws_rpc_anon_client import WsRpcAnonClient
+from common.auth import no_redirect_opener
 
 pytestmark = pytest.mark.tier_3
 
 CENTRAL = "https://app.fauna.social"
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-_OPENER = urllib.request.build_opener(_NoRedirect)
+# A redirect is the assertion here, so it is handed back rather than
+# followed — under the floor-cert rule a TLS-serving nest needs
+# (`common.auth.no_redirect_opener`).
+_OPENER = no_redirect_opener()
 
 
 def _get(url: str, path: str):

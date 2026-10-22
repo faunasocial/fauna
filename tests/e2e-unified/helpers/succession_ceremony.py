@@ -214,9 +214,9 @@ def closing_act_console(app, *, label: str = "") -> str:
 
 
 #: The console prefixes each link of the closing act (and the relaunch under
-#: it) reports itself with — `[succession]` in `$lib/wasm`, the settings page
+#: it) reports itself with — `[succession]` in `#lib/wasm`, the settings page
 #: and the root layout; `[identity]` for the relaunch's silent sign-in
-#: (`$lib/store`); `[launch]` for the launch route; `[pageerror]` for what
+#: (`#lib/store`); `[launch]` for the launch route; `[pageerror]` for what
 #: escaped every handler.
 _CHAIN_MARKERS = ("[succession]", "[identity]", "[launch]", "[pageerror]", "[actor-scope]")
 

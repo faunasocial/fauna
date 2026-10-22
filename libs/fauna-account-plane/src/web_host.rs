@@ -14,7 +14,7 @@
 //!    seedless caller);
 //! 2. the rest of the bundle — the SAME [`PrincipalBundle`] every native
 //!    machine keeps, over the caller's secret store (the SPA's
-//!    `LocalStorageSecretStore`, ruling (4)'s decision (c)) and [`TabSection`];
+//!    `WebIdentityStore`, ruling (4)'s decision (c)) and [`TabSection`];
 //!    the predecessor carriage; the enrollment grant's mint when the slot has
 //!    no current one;
 //! 3. the succession probe, seed-holding only, over the app session
@@ -33,8 +33,10 @@
 //!    `EngineLock::try_acquire(store_name)`, degrade-open when the API is
 //!    missing: the driver's [`elect_at_start`] owns what that means; web has
 //!    no sync agent, so its presence probe answers absent without asking);
-//! 7. [`AccountDriver::serve`] with [`NoLegs`] — web has no iroh and hosts no
-//!    custody — looping on [`ServeEnd`] as the native worker does.
+//! 7. [`AccountDriver::serve`] with [`WebLegs`] — web has no iroh and hosts no
+//!    custody, so its legs run nothing per pass; they carry the SPA's
+//!    custodian dial for the restore gesture — looping on [`ServeEnd`] as the
+//!    native worker does.
 //!
 //! Steps 3 and 4 restart assembly exactly as the native worker's
 //! `'assembly` loop does: the probe's one-rotation cap is the driver's
@@ -60,8 +62,10 @@ use tokio::sync::{broadcast, oneshot, watch};
 
 use crate::account_driver::{
     AccountDriver, AccountStoreHandle, Assembly, DriverConfig, ElectionOutcome, EngineElection,
-    MembershipSource, NoLegs, Presence, RuntimePrincipal, ServeEnd, elect_at_start,
+    HostLegs, LegsCtx, LegsOutput, MembershipSource, Presence, PumpReport, RestoreCtx,
+    RuntimePrincipal, ServeEnd, elect_at_start,
 };
+use crate::custodian_restore::{CustodianDial, CustodianRestoreOutcome, NoCustodianDial};
 use crate::principal_bundle::{
     self, PrincipalBundle, SecretStore, SlotSection, WriterKeyProvenance,
 };
@@ -126,9 +130,55 @@ impl EngineElection for WebElection {
     }
 }
 
+/// Web's host legs ([`HostLegs`]): no peer leg (no iroh) and no custody leg
+/// (web hosts no custody), so a pass runs nothing here; the restore gesture
+/// dials a custodian nest through the SPA's dial
+/// ([`crate::custodian_restore::restore_with_derived_view`] — the shared walk,
+/// the revocation view derived from the store at the gesture).
+/// `custodian_dial: None` answers the gesture `Err`, as [`NoLegs`] does.
+///
+/// [`NoLegs`]: crate::account_driver::NoLegs
+pub struct WebLegs<D> {
+    /// The account the runtime serves — the handshake's claimed owner and the
+    /// identity the grant log folds as.
+    pub actor_id: ActorId,
+    pub custodian_dial: Option<D>,
+}
+
+impl<B, R, D> HostLegs<B, R> for WebLegs<D>
+where
+    B: fauna_account_store::backend::StoreBackend,
+    R: fauna_protocol::RpcRequester,
+    D: CustodianDial,
+{
+    async fn run(&mut self, _ctx: LegsCtx<'_, B, R>, _report: &mut PumpReport) -> LegsOutput {
+        LegsOutput::default()
+    }
+
+    async fn stand_down(&mut self) {}
+
+    async fn restore_from_custodian(
+        &mut self,
+        ctx: RestoreCtx<'_, B>,
+        url: &str,
+        content_scopes: &mut dyn FnMut() -> Vec<fauna_protocol::scope::ContentScope>,
+    ) -> Result<CustodianRestoreOutcome> {
+        crate::custodian_restore::restore_with_derived_view(
+            self.custodian_dial.as_ref(),
+            self.actor_id,
+            ctx,
+            url,
+            content_scopes,
+        )
+        .await
+    }
+}
+
 /// What only the SPA knows (ruling (4)'s decision (f)); everything else the
-/// host resolves itself.
-pub struct WebRuntimeParams<R> {
+/// host resolves itself. `D` is the SPA's custodian dial
+/// ([`Self::custodian_dial`]); a caller that supplies none names
+/// [`NoCustodianDial`], the default.
+pub struct WebRuntimeParams<R, D = NoCustodianDial> {
     /// Where the account's stores live — [`StoreRoot::platform`] in the SPA;
     /// a test isolates its own root.
     pub store_root: StoreRoot,
@@ -168,6 +218,12 @@ pub struct WebRuntimeParams<R> {
     /// anonymous socket to each owed nest and a bearer-minted sign-in as each
     /// retired identity whose seed the tab holds. `None` delivers nothing.
     pub owed_nests: Option<crate::account_driver::OwedNestDeliverer<R>>,
+    /// The restore gesture's custodian dial (`account-replica-posture.md`
+    /// § *Corollary — the cold device*, the web clause) — in the SPA an
+    /// anonymous browser socket that mints the fleet bearer, a one-shot bearer
+    /// socket whose actor is the device key, and a streaming fetch of the
+    /// segment byte route. `None` answers the gesture `Err`.
+    pub custodian_dial: Option<D>,
 }
 
 /// Start the account runtime for one account in this tab. Returns once the
@@ -175,14 +231,15 @@ pub struct WebRuntimeParams<R> {
 /// the fleet bootstrap written) — never on a network pass, so an offline tab
 /// comes up. The caller keeps the handle for the account's session and calls
 /// [`AccountStoreHandle::shutdown`] before another account signs in.
-pub async fn start<S, R>(
-    params: WebRuntimeParams<R>,
+pub async fn start<S, R, D>(
+    params: WebRuntimeParams<R, D>,
     credentials: Arc<S>,
 ) -> Result<AccountStoreHandle>
 where
     S: SecretStore + 'static,
     R: KeyedRpcRequester + Clone + 'static,
     R::Error: RpcErrorClass,
+    D: CustodianDial + 'static,
 {
     fauna_core::hex32::decode(&params.actor_id_hex)
         .map_err(|e| anyhow::anyhow!("account runtime: actor id: {e}"))?;
@@ -407,8 +464,8 @@ where
 
 /// The store task's body: assemble, hand the driver one assembly at a time,
 /// until it says the runtime is over.
-async fn worker<S, R>(
-    params: WebRuntimeParams<R>,
+async fn worker<S, R, D>(
+    params: WebRuntimeParams<R, D>,
     credentials: Arc<S>,
     mut driver: AccountDriver,
     ready_tx: oneshot::Sender<Result<()>>,
@@ -416,6 +473,7 @@ async fn worker<S, R>(
     S: SecretStore + 'static,
     R: KeyedRpcRequester + Clone + 'static,
     R::Error: RpcErrorClass,
+    D: CustodianDial + 'static,
 {
     let WebRuntimeParams {
         store_root,
@@ -426,8 +484,15 @@ async fn worker<S, R>(
         enrollment_target_device_id,
         linked_nests,
         owed_nests,
+        custodian_dial,
         ..
     } = params;
+    let actor_id =
+        ActorId(fauna_core::hex32::decode(&actor_id_hex).expect("start validated the actor id"));
+    let mut legs = WebLegs {
+        actor_id,
+        custodian_dial,
+    };
     let mut ready_tx = Some(ready_tx);
     let mut shutdown_reply: Option<oneshot::Sender<()>> = None;
     // The lost-slot arm's own cap (refinement 10, bound (a)): at most ONE
@@ -484,7 +549,7 @@ async fn worker<S, R>(
                     linked_nests: linked_nests.as_ref(),
                     owed_nests: owed_nests.as_ref(),
                 },
-                &mut NoLegs,
+                &mut legs,
                 &parts.election,
                 role,
                 ready_tx.take(),

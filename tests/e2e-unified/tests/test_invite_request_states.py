@@ -78,6 +78,7 @@ def _attested_claim(platform, nonce_hex):
     }
 
 
+@pytest.mark.feature("join-a-nest")
 def test_age_notice_is_declared_for_an_attestation_the_nest_did_not_list(app):
     """`invite-request-age-notice` (family-safety.md § App surface → *Age-band
     surfaces*): the notice tells the user what the nest will RECORD. The shared
@@ -116,6 +117,7 @@ def test_age_notice_is_declared_for_an_attestation_the_nest_did_not_list(app):
     )
 
 
+@pytest.mark.feature("join-a-nest")
 def test_age_notice_follows_the_minted_nonces_platform_list(app, nest_instance):
     """The verified form is reached the way the glue reaches it: mint the nonce
     through the machine (`request_age_nonce`, against the real nest), attest

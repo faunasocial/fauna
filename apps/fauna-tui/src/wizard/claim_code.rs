@@ -26,7 +26,7 @@ pub fn description() -> Vec<String> {
 
 pub fn elements(w: &Wizard) -> Vec<Element> {
     let snap = w.machine.claim_code_snapshot();
-    vec![
+    let mut out = vec![
         // Labelled: an unlabelled input prompts with its raw element id
         // (`apps/tui.md` § Rendering → *Control vocabulary*).
         Element::input(
@@ -42,11 +42,15 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
             Action::SubmitClaimCode,
         ),
         Element::label(ids::CLAIM_CODE_STATUS, localized(&snap.message)),
-        Element::button(
-            ids::CLAIM_CODE_BACK_BUTTON,
-            common::BACK,
-            true,
-            Action::Back,
-        ),
-    ]
+    ];
+    // Claiming a nest makes an account: the terms notice above the bottom row
+    // (`terms-and-content-guidelines.md` § The decisions, item 3).
+    out.extend(super::terms_notice());
+    out.push(Element::button(
+        ids::CLAIM_CODE_BACK_BUTTON,
+        common::BACK,
+        true,
+        Action::Back,
+    ));
+    out
 }

@@ -289,6 +289,12 @@ KIDS_EXCISED_ID_PREFIXES = (
     "bridge-", "profile-follow-button", "profile-tiers-tab", "link-preview-card",
     "folder-paywall-tier-select",
 )
+# Nest retirement's ids, gated on the Swift table ONLY (not in the list above, which
+# `android-kids-check` mirrors): android hand-gates its two retire renders and R8 strips
+# the unreferenced fields, while iOS has no retirement page yet (nest-retirement.md),
+# so gating the ids here makes the coming trickle-down a compile error in the kids
+# build rather than a silent leak.
+SWIFT_KIDS_ONLY_ID_PREFIXES = ("admin-nest-retire-", "launch-retire-button")
 # Apple's kids condition — POSITIVE, added only by the kids target and absent
 # everywhere else (family-safety.md § The account age band, the kids-app bullet,
 # item (5)), so the table's gate reads `#if !FAUNA_KIDS`.
@@ -299,14 +305,14 @@ def kids_split(ids: list[str]) -> tuple[list[str], list[str]]:
     """`(ids every flavor keeps, ids the kids flavor excises)`. A prefix matching
     nothing is a hard error, for `load_gated`'s reason: the witness reading it would
     go vacuously green."""
-    for prefix in KIDS_EXCISED_ID_PREFIXES:
+    for prefix in KIDS_EXCISED_ID_PREFIXES + SWIFT_KIDS_ONLY_ID_PREFIXES:
         if not any(i.startswith(prefix) for i in ids):
             raise SystemExit(
                 f"ui-ids-generate: the kids prefix '{prefix}' matches no element id this "
                 f"table emits. Either the ids were renamed (fix KIDS_EXCISED_ID_PREFIXES "
                 f"and android-kids-check's ID_PATS together) or the surface is gone."
             )
-    kids = [i for i in ids if i.startswith(KIDS_EXCISED_ID_PREFIXES)]
+    kids = [i for i in ids if i.startswith(KIDS_EXCISED_ID_PREFIXES + SWIFT_KIDS_ONLY_ID_PREFIXES)]
     return [i for i in ids if i not in set(kids)], kids
 
 

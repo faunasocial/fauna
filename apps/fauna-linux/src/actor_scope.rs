@@ -96,13 +96,13 @@ fn claim_poll_slot_in(generation_counter: &AtomicU64, armed_for: &AtomicU64) -> 
     Some(generation)
 }
 
-fn poll_still_current_in(generation_counter: &AtomicU64, armed_generation: u64) -> bool {
+pub(crate) fn poll_still_current_in(generation_counter: &AtomicU64, armed_generation: u64) -> bool {
     generation_counter.load(Ordering::SeqCst) == armed_generation
 }
 
 /// Retire the current generation. Split out from [`reset_actor_scoped_state`] so
 /// the generation primitives are testable without a GTK main loop.
-fn bump_actor_generation_in(generation_counter: &AtomicU64) {
+pub(crate) fn bump_actor_generation_in(generation_counter: &AtomicU64) {
     generation_counter.fetch_add(1, Ordering::SeqCst);
 }
 
@@ -160,11 +160,19 @@ pub fn reset_actor_scoped_state(
 /// is how an unhooked line here reddens a test.
 fn drop_actor_scoped_caches() {
     crate::content_policy::clear_for_identity_change();
+    // The outgoing account's conversations oracle door: given up here, so the
+    // account's next app on this device takes it over on its next tick
+    // (`conversations-oracle.md` § The custodian and the door).
+    crate::conversations::conv_backend::stop_oracle_door();
     // …but the region source is the DEVICE's, not the departing identity's:
     // re-arm it on the fresh engine, and forget only the session's refresh
     // clock (tui's `App::reset_for_identity_change` does the same).
     crate::region::clear_session();
     crate::region::apply_rule_sets();
+    // The nest-rules book is the device's too; the session nest it binds is
+    // not — forgotten until the incoming session's self-description read
+    // (`crate::nest_rules`; re-arms the fresh engine with no nest sets).
+    crate::nest_rules::clear_session();
     crate::critical_alerts::clear_for_identity_change();
     crate::screen_lock::clear_for_identity_change();
     // The outgoing ward's own pending asks — a stale one would paint "asked —

@@ -219,23 +219,16 @@ def _launch_registry_seat(request, nest_instance, app: str, rows: list[dict], ac
         _wait_signed_in(driver, as_actor=active)
         return driver
 
-    # Web has no pre-navigation seeding hook: seed the origin's store, then
-    # reboot over it, so the SPA signs in from the registry alone.
+    # Web is single-origin: each row dials the SPA proxy the page is served
+    # from, and the launch's seed hook boots the SPA over the registry alone.
     spa_url = request.getfixturevalue("spa_url")
     seed = build_registry_seed(
         [{**row, "nest_url": spa_url, "device_id": secrets.token_hex(32)} for row in rows],
         active=active,
     )
     driver = create_driver("web")
-    driver.launch({"url": spa_url + "/app/"})
+    driver.launch({"url": spa_url + "/app/", "seed_credentials": seed})
     try:
-        driver.eval_js(
-            ";".join(
-                f"localStorage.setItem({json.dumps(k)},{json.dumps(v)})"
-                for k, v in seed.items()
-            )
-        )
-        driver.hard_reload()
         _wait_signed_in(driver, as_actor=active)
     except BaseException:
         driver.teardown()
@@ -442,4 +435,118 @@ def test_a_profile_edit_still_saves_after_the_retired_account_is_removed(
         )
         _assert_republished_by_successor(nest_instance, account, new_name)
     finally:
+        driver.teardown()
+
+
+@pytest.mark.web
+@pytest.mark.standalone_only
+@pytest.mark.feature("take-your-account-back")
+def test_web_learns_the_predecessor_link_only_under_a_sibling_tabs_registry_lock(
+    nest_instance, request
+):
+    """A linkless successor's tab records the learned link only once a sibling
+    tab lets go of the registry lock.
+
+    web only: the lock is the Web Locks API; every native app takes the kernel
+    file lock inside ``record_predecessors``. ``long-term-store.md`` § Multi-account
+    evolution → *Cross-process mutation lock*.
+
+    The sign-in hop (and the edit form's base load) reads the successor's row,
+    proves the predecessor from the landed statement and records the link with
+    ``AccountRegistry::record_predecessors`` — a read-modify-write of
+    ``fauna/index``. Run unlocked, it can overwrite a sibling tab's concurrent
+    registry write. **The write isolated** is the successor row's
+    ``succeeded_from``: nothing else on this boot writes it.
+
+    Arranged so the learn is deterministically mid-flight when the lock is
+    contended (convention 14): the sibling tab takes the lock BEFORE the app
+    boots, the nest parks the hop's succession lookup, and the reply is released
+    only once the sibling holds the lock. The learn then has the proof in hand
+    and nothing but the lock between it and the write. Observed as state: the
+    lock queue GROWS by the learn's own request (the baseline is read while the
+    lookup is parked, so launch-time requests are already counted), and the link
+    stays unwritten until the sibling releases.
+    """
+    import time
+
+    from helpers.rpc_hold import arm_rpc_hold, release_rpc_hold, wait_for_held_rpc
+    from helpers.web_tabs import HOLD_LOCK_JS, RELEASE_LOCK_JS, REGISTRY_LOCK, lock_queue
+
+    account = _succeeded_account(nest_instance, uuid.uuid4().hex[:8])
+    _assert_still_predecessor_signed(nest_instance, account, "before the device signs in")
+    port = nest_instance["port"]
+    lookup_kind = "fauna.recovery.succession.lookup"
+
+    spa_url = request.getfixturevalue("spa_url")
+    seed = build_registry_seed(
+        [
+            {
+                "actor_id": account["successor_id"],
+                "secret_hex": account["successor_seed"],
+                "device_id": secrets.token_hex(32),
+                "nest_url": spa_url,
+            }
+        ],
+        active=account["successor_id"],
+    )
+    driver = create_driver("web")
+    driver.launch({"url": spa_url + "/app/"})
+    try:
+        # Seeded by hand, not by the launch's `seed_credentials` hook: the boot
+        # over this store must run while the sibling tab holds the registry
+        # lock, and the hook would boot before the lock is taken.
+        driver.eval_js(
+            ";".join(
+                f"localStorage.setItem({json.dumps(k)},{json.dumps(v)})"
+                for k, v in seed.items()
+            )
+        )
+        holder = driver.open_lock_holder_tab()
+        assert holder.eval_js(HOLD_LOCK_JS) is True
+        assert REGISTRY_LOCK in lock_queue(holder)["held"], (
+            f"the sibling tab never got the registry lock; queue={lock_queue(holder)!r}"
+        )
+
+        arm_rpc_hold(port, lookup_kind)
+        driver.hard_reload()
+        wait_for_held_rpc(
+            port,
+            lookup_kind,
+            diagnose=lambda: f"queue={lock_queue(holder)!r} index={_registry_index(holder)!r}",
+        )
+        baseline = lock_queue(holder)["pending"].count(REGISTRY_LOCK)
+        assert _succeeded_from(holder, account["successor_id"]) in ([], None)
+        release_rpc_hold(port, lookup_kind)
+
+        deadline = time.monotonic() + APP_RELAUNCH_S
+        queue = None
+        while time.monotonic() < deadline:
+            link = _succeeded_from(holder, account["successor_id"])
+            queue = lock_queue(holder)
+            assert link in ([], None), (
+                "the sign-in hop recorded the learned succession link while a sibling "
+                f"tab held the registry lock {REGISTRY_LOCK!r} — "
+                "record_predecessors ran outside the Web Lock. "
+                f"succeeded_from={link!r} queue={queue!r}"
+            )
+            if queue["pending"].count(REGISTRY_LOCK) > baseline:
+                break
+            time.sleep(0.2)
+        assert queue and queue["pending"].count(REGISTRY_LOCK) > baseline, (
+            "the learn never queued its own request on the registry lock: "
+            f"baseline={baseline} queue={queue!r}"
+        )
+
+        assert holder.eval_js(RELEASE_LOCK_JS) is True
+        wait_until(
+            lambda: _succeeded_from(holder, account["successor_id"])
+            == [account["predecessor_id"]],
+            APP_RELAUNCH_S,
+            diagnose=lambda: (
+                "the learned link never landed after the sibling released the lock; "
+                f"queue={lock_queue(holder)!r} index={_registry_index(holder)!r}"
+            ),
+        )
+    finally:
+        release_rpc_hold(port, lookup_kind)
         driver.teardown()

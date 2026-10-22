@@ -3,7 +3,7 @@
 // self-test probe that proves it.
 //
 // This module exists ONLY in builds made for testing (convention 15): its sole
-// importer is `$lib/e2e-automation`, itself reached only through
+// importer is `#lib/e2e-automation`, itself reached only through
 // `+layout.svelte`'s `if (__FAUNA_E2E_AUTOMATION__)` branch, which a production
 // `vite build` constant-folds away.
 //
@@ -27,7 +27,7 @@
 // (convention 14's corollary: an effect must be initiated synchronously inside a
 // handler whose completion is observable), not a longer barrier.
 
-import { registerE2eCommands } from '$lib/e2e-commands';
+import { registerE2eCommands } from '#lib/e2e-commands';
 
 // The cross-app action names. Kept in sync with `fauna_e2e_agent::BARRIER` /
 // `::BARRIER_PROBE`, which is where the contract is documented for all 7 apps —

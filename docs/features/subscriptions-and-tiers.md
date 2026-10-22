@@ -31,6 +31,7 @@ Stamped 2026-10-01 at dfa27a899f.
 4. [app] Connect a payment provider, see the address to register with it, and remove it; a paid subscriber redeems a code — `docs/goal/behavior/monetization.md` § Pillars 2+3 — app UX
    - `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_config_add_and_remove`
    - `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_webhook_url_preview`
+   - `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_return_url_display`
    - `tests/e2e-unified/tests/test_subscription_payments.py::test_claim_redeem_via_ui`
    - `tests/e2e-unified/tests/test_subscription_payments.py::test_manual_claim_mint_and_list`
 5. [nest] A signed payment grants the tier, an unmatched one becomes a code, a refund before approval demotes it, and forgeries are refused — `docs/goal/behavior/monetization.md` § Pillar 3
@@ -63,17 +64,21 @@ Stamped 2026-10-01 at dfa27a899f.
    - `tests/e2e-unified/tests/api/test_payments_webhook.py::test_providers_list_shows_config_without_secret`
 17. [nest] A tier cannot be named "room": the name is kept for posts addressed to a room — `docs/goal/behavior/restricted-posts.md` § Encryption at rest
     - `tests/e2e-unified/tests/api/test_reserved_room_tier_name.py::test_a_creator_cannot_name_a_tier_room`
+18. [app] You void a claim code you handed out: a first press names what voiding does and a second confirms it, after which the code reads voided and can no longer be redeemed — `docs/goal/behavior/monetization.md` § Pillar 3
+   - `tests/e2e-unified/tests/test_subscription_payments.py::test_manual_claim_void`
+19. [app] You follow someone whose account lives on another nest from their profile, and their posts, the followers-only ones included, arrive in your feed on your own nest; a post they delete leaves it — `docs/goal/behavior/federated-follow.md` § Decision 2
+   - `tests/e2e-unified/tests/test_federated_follow_cross_nest.py::test_a_reader_follows_an_author_on_another_nest_and_their_posts_reach_the_readers_feed`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.3-dev+a7a1fa35 standalone |
-| linux | ✅ full | 0.1.4-dev+52904896 standalone |
+| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
+| linux | ✅ full | 0.1.4-dev+ea391d07 standalone |
 | windows | ⚠ partial | 0.1.2-dev+068e152c.dirty standalone |
-| macos | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| ios | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| macos | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| ios | ⚠ partial | 0.1.5-dev+61b844ca standalone |
 | android |  no run recorded | |
 | tui | ⚠ partial | 0.1.3-dev+6e958b22 standalone |
 
@@ -86,8 +91,9 @@ Stamped 2026-10-01 at dfa27a899f.
 | 2 | app | `tests/e2e-unified/tests/test_profile.py::test_other_profile_offers_render_and_subscribe` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_profile.py::test_activating_the_tiers_tab_rereads_the_offers_section` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): failed |
 | 3 | app | `tests/e2e-unified/tests/test_subscriptions.py::test_subscription_settings_lists_active_subscription_and_unsubscribes` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_config_add_and_remove` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_config_add_and_remove` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_webhook_url_preview` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_return_url_display` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_claim_redeem_via_ui` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_manual_claim_mint_and_list` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/api/test_payments_webhook.py::test_signed_webhook_with_reference_enqueues_the_grant` | nest (linux): passed |
@@ -96,7 +102,7 @@ Stamped 2026-10-01 at dfa27a899f.
 | 5 | nest | `tests/e2e-unified/tests/api/test_payments_webhook.py::test_refund_before_approval_strips_the_payment_marker` | nest (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/api/test_payments_webhook.py::test_bad_signature_and_unknown_provider_are_non_2xx` | nest (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_subscriptions.py::test_subscription_approve_grants_keyblob` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_subscription_tier_management.py::test_editing_a_tier_changes_what_it_offers` | web (linux): failed, linux (linux): passed, tui (linux): passed |
+| 7 | app | `tests/e2e-unified/tests/test_subscription_tier_management.py::test_editing_a_tier_changes_what_it_offers` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_subscription_tier_management.py::test_deleting_a_tier_removes_it` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_subscriptions.py::test_subscription_approve_grants_keyblob` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 10 | app | `tests/e2e-unified/tests/test_subscription_tier_management.py::test_turning_a_subscribe_request_down` | web (linux): passed, linux (linux): passed, tui (linux): passed |
@@ -107,4 +113,6 @@ Stamped 2026-10-01 at dfa27a899f.
 | 15 | nest | `tests/e2e-unified/tests/api/test_payments_webhook.py::test_a_refund_on_a_granted_subscription_ends_access` | nest (linux): passed |
 | 16 | nest | `tests/e2e-unified/tests/api/test_payments_webhook.py::test_providers_list_shows_config_without_secret` | nest (linux): passed |
 | 17 | nest | `tests/e2e-unified/tests/api/test_reserved_room_tier_name.py::test_a_creator_cannot_name_a_tier_room` | nest (linux): passed |
+| 18 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_manual_claim_void` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 19 | app | `tests/e2e-unified/tests/test_federated_follow_cross_nest.py::test_a_reader_follows_an_author_on_another_nest_and_their_posts_reach_the_readers_feed` | linux (linux): passed, tui (linux): passed |
 <!-- features-render:end -->

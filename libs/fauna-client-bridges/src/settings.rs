@@ -6,7 +6,41 @@
 //! this Rust.
 
 use fauna_protocol::Value;
+use fauna_protocol::bridge_search_policy::SETTING_TYPE_NUMBER;
 use fauna_protocol::bridges_ui::BridgeSetting;
+
+/// Which control a bridge setting paints (`bridges.md` § Bridge settings).
+/// The one classifier every app asks, so no app hand-lists the spellings
+/// providers use for a type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingControl {
+    /// An on/off switch.
+    Toggle,
+    /// A picker over the setting's `options`.
+    Select,
+    /// An editable, committing integer input.
+    Number,
+    /// An editable, committing text input.
+    Text,
+    /// A `setting_type` this build predates (a newer nest): a read-only
+    /// "label: value" line, never a dropped row.
+    Unknown,
+}
+
+/// Classify a `BridgeSetting.setting_type` into the control it paints.
+/// Providers do not agree on one spelling: the shared default emits `bool`,
+/// ActivityPub `boolean`, and `toggle` is accepted too; `string` is the
+/// plugin manifest's spelling of `text`. Anything else is
+/// [`SettingControl::Unknown`].
+pub fn setting_control(setting_type: &str) -> SettingControl {
+    match setting_type {
+        "bool" | "boolean" | "toggle" => SettingControl::Toggle,
+        "select" => SettingControl::Select,
+        SETTING_TYPE_NUMBER => SettingControl::Number,
+        "text" | "string" => SettingControl::Text,
+        _ => SettingControl::Unknown,
+    }
+}
 
 /// Read a boolean setting off the bridge's settings vec, falling back when the
 /// key is absent **or** carries a non-boolean value. Pure — unit-tested
@@ -53,6 +87,23 @@ mod tests {
             value,
             options: None,
             extra: Default::default(),
+        }
+    }
+
+    /// Every spelling a provider or the plugin manifest emits lands on one
+    /// control; an unlisted one is `Unknown` (the read-only fallback).
+    #[test]
+    fn setting_control_pins_every_spelling() {
+        for t in ["bool", "boolean", "toggle"] {
+            assert_eq!(setting_control(t), SettingControl::Toggle, "{t}");
+        }
+        assert_eq!(setting_control("select"), SettingControl::Select);
+        assert_eq!(setting_control("number"), SettingControl::Number);
+        for t in ["text", "string"] {
+            assert_eq!(setting_control(t), SettingControl::Text, "{t}");
+        }
+        for t in ["", "enum", "Bool", "slider"] {
+            assert_eq!(setting_control(t), SettingControl::Unknown, "{t:?}");
         }
     }
 

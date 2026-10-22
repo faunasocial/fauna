@@ -115,6 +115,15 @@ pub fn notification_text_for(item: FfiNotifItem) -> FfiNotificationText {
     fauna_client_notifications::notification_text(&NotifItem::from(item)).into()
 }
 
+/// Whether this row's dismiss is greyed at `now_micros` — a `security.notice`
+/// inside its retention window (`behavior/notifications.md` § Retention rule
+/// 2). A **pure** function over one row, like [`notification_text_for`]; the
+/// nest's `fauna.notifications.retained` refusal stays the authority.
+#[uniffi::export]
+pub fn notification_retained_for(item: FfiNotifItem, now_micros: i64) -> bool {
+    fauna_client_notifications::notification_retained(&NotifItem::from(item), now_micros)
+}
+
 // ── Deep-link destination ──────────────────────────────────────────────
 
 /// FFI mirror of [`fauna_client_notifications::NotificationDestination`] —
@@ -273,6 +282,31 @@ impl FfiNotificationsClient {
             .await
             .map_err(stringify)?;
         Ok(reply.marked_read)
+    }
+
+    /// `fauna.notifications.dismiss` — delete one of the caller's rows by `id`
+    /// (`behavior/notifications.md` § Retention rule 2). Returns whether a row
+    /// of that id was the caller's; a `security.notice` inside its window is
+    /// refused with `fauna.notifications.retained`.
+    pub async fn dismiss(&self, id: i64) -> Result<bool, FfiError> {
+        let reply = self
+            .client()
+            .notifications_dismiss(id)
+            .await
+            .map_err(stringify)?;
+        Ok(reply.dismissed)
+    }
+
+    /// `fauna.notifications.clear` — delete every row of the caller's created
+    /// at or before `up_to` (micros; `None` ⇒ now). Returns the number of rows
+    /// deleted; a `security.notice` inside its window is skipped, not counted.
+    pub async fn clear(&self, up_to: Option<i64>) -> Result<i64, FfiError> {
+        let reply = self
+            .client()
+            .notifications_clear(up_to)
+            .await
+            .map_err(stringify)?;
+        Ok(reply.cleared)
     }
 
     /// `fauna.notifications.count` — the calling actor's unread notification

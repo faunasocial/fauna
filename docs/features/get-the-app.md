@@ -19,6 +19,7 @@ the nest and all seven apps ship together at one version.
 Stamped 2026-09-19 at 0bb8814071.
 
 1. [app] Getting the app the way your platform provides it — served by your nest in the browser, installed on a computer, installed from the store on a phone — ends with the app open and you signed in to your account — `docs/goal/architecture/installers/README.md` § The channel contract
+   - `tests/e2e-unified/tests/test_static_serving.py::test_the_nest_served_app_drives_a_login_to_feed_journey`
    - `tests/e2e-unified/tests/platform/docker/test_docker_e2e.py::test_docker_browser_onboarding`
    - `tests/e2e-unified/tests/artifact/test_macos_app_bundle.py::test_the_bundle_drives_a_login_to_feed_journey`
    - `tests/e2e-unified/tests/artifact/test_macos_dmg_install.py::test_the_dmg_installed_app_launches_and_renders`
@@ -35,16 +36,17 @@ Stamped 2026-09-19 at 0bb8814071.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web |  no run recorded | |
+| web | ⚠ partial | |
 | linux | ⚠ partial | |
 | windows | ⚠ partial | 0.1.2-dev+2f8445a0 standalone |
 | macos | ⚠ partial | 0.1.3-dev+1cd3bd62 standalone |
 | ios | ⚠ partial | |
 | android | ⚠ partial | |
-| tui | ⚠ partial | 0.1.2-dev+38eef7c4 standalone |
+| tui | ⚠ partial | 0.1.2-dev+74b3bcbd standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
+| 1 | app | `tests/e2e-unified/tests/test_static_serving.py::test_the_nest_served_app_drives_a_login_to_feed_journey` | web (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/platform/docker/test_docker_e2e.py::test_docker_browser_onboarding` | — |
 | 1 | app | `tests/e2e-unified/tests/artifact/test_macos_app_bundle.py::test_the_bundle_drives_a_login_to_feed_journey` | macos (macos): passed |
 | 1 | app | `tests/e2e-unified/tests/artifact/test_macos_dmg_install.py::test_the_dmg_installed_app_launches_and_renders` | macos (macos): passed |

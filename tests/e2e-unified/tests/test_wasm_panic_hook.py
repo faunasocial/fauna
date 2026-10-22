@@ -67,9 +67,9 @@ def test_wasm_chunk_panic_hook_names_itself(logged_in_app, chunk_name, stem):
     install" step to race.
     """
     driver = logged_in_app.driver
-    # `svelte.config.js` sets `paths.base = '/app'` — every built static asset
+    # `vite.config.ts` sets the kit `paths.base = '/app'` — every built static asset
     # (including these wasm bundles) is served under that prefix, not the
-    # site root (mirrors `$lib/wasm-media.ts`'s `${base}/fauna_wasm_media_bg.wasm`
+    # site root (mirrors `#lib/wasm-media.ts`'s `${base}/fauna_wasm_media_bg.wasm`
     # pattern; hardcoded here since `base` is a compiled-in constant for the
     # whole SPA, not something a raw eval_js script can import).
     script = (

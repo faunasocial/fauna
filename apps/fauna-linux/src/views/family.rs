@@ -49,7 +49,6 @@ use std::sync::Arc;
 use adw::prelude::*;
 
 use fauna_core::data::{FeedSources, UnknownPeerDm, UnknownSenderMail};
-use fauna_core::obligation::{ContentFloor, ContentPolicy};
 
 use fauna_client_family::FamilyClient;
 use fauna_client_family::family::{
@@ -172,40 +171,6 @@ fn unknown_peer_dm_index_for_render(wire: Option<&str>) -> u32 {
         .expect("ORDER always contains Allow") as u32
 }
 
-/// The ordered content-floor catalog (`inherit / collapse / block`), resolved to
-/// display labels for the four `family-policy-content-*-select` ComboRows.
-/// Index-aligned with [`ContentFloor::ORDER`] (`family-safety.md` § Content policy).
-fn content_floor_labels() -> Vec<String> {
-    fauna_core::format::content_floor_option_labels(crate::i18n::strings::lookup)
-}
-
-/// Position of a stored content-floor wire value in `ORDER`, parsed by the shared
-/// fail-closed rule first (an unparseable value lands on `block`, never index 0).
-fn content_floor_index(wire: &str) -> u32 {
-    let parsed = match ContentFloor::from_wire(wire) {
-        // `Unknown` is not a picker option — a value this client cannot parse
-        // renders at the strict `block` position (family-safety.md § Content policy).
-        ContentFloor::Unknown => ContentFloor::FAIL_CLOSED,
-        v => v,
-    };
-    ContentFloor::ORDER
-        .iter()
-        .position(|v| *v == parsed)
-        .expect("from_wire (mapped off Unknown) always yields a member of ORDER") as u32
-}
-
-/// The content-floor wire value at a `ComboRow` position, degrading an
-/// out-of-range index to the **fail-closed** `block`, never the permissive
-/// `inherit` at index 0.
-fn content_floor_at(index: u32) -> String {
-    ContentFloor::ORDER
-        .get(index as usize)
-        .copied()
-        .unwrap_or(ContentFloor::FAIL_CLOSED)
-        .as_str()
-        .to_string()
-}
-
 /// The one `fauna.family.status` + `fauna.family.approvals.list` read that fills
 /// BOTH sections (the windows `LoadAsync` shape).
 struct FamilyView {
@@ -272,10 +237,12 @@ struct Widgets {
     federation: adw::SwitchRow,
     feed_sources: adw::ComboRow,
     unknown_peer_dm: adw::ComboRow,
-    content_nsfw: adw::ComboRow,
-    content_spam: adw::ComboRow,
-    content_phishing: adw::ComboRow,
-    content_commercial: adw::ComboRow,
+    /// The guardian's mounting of the shared rule editor
+    /// (`family-policy-rules-section` — `nest-rules.md` § The shared rule
+    /// editor (b)), where the four content-floor selects stood. Saved by its
+    /// own button through `FamilyClient::save_content_rules`.
+    rules: crate::rule_editor::RuleEditorPanel,
+    rules_section: gtk::Box,
     content_notify: adw::SwitchRow,
     /// Screen time (Slice E) — the usage window's two `HH:MM` bounds and the
     /// daily budget in whole minutes. Free-text rather than spin buttons so an
@@ -528,38 +495,23 @@ fn build_page_widgets() -> (adw::PreferencesPage, Widgets) {
     set_test_id(&unknown_peer_dm, ids::FAMILY_POLICY_UNKNOWN_PEER_DM_SELECT);
     policy_group.add(&unknown_peer_dm);
 
-    // ── Content policy (family-safety.md § Content policy, Slice C) ──
-    // Four per-category floor selects (inherit / collapse / block) + the Notify
-    // toggle. All share the ONE content-floor catalog from shared Rust.
-    let content_nsfw = adw::ComboRow::builder().build();
-    content_nsfw.set_title(S::POLICY_CONTENT_NSFW_LABEL);
-    content_nsfw.set_model(Some(&string_list(content_floor_labels())));
-    set_test_id(&content_nsfw, ids::FAMILY_POLICY_CONTENT_NSFW_SELECT);
-    policy_group.add(&content_nsfw);
-
-    let content_spam = adw::ComboRow::builder().build();
-    content_spam.set_title(S::POLICY_CONTENT_SPAM_LABEL);
-    content_spam.set_model(Some(&string_list(content_floor_labels())));
-    set_test_id(&content_spam, ids::FAMILY_POLICY_CONTENT_SPAM_SELECT);
-    policy_group.add(&content_spam);
-
-    let content_phishing = adw::ComboRow::builder().build();
-    content_phishing.set_title(S::POLICY_CONTENT_PHISHING_LABEL);
-    content_phishing.set_model(Some(&string_list(content_floor_labels())));
-    set_test_id(
-        &content_phishing,
-        ids::FAMILY_POLICY_CONTENT_PHISHING_SELECT,
-    );
-    policy_group.add(&content_phishing);
-
-    let content_commercial = adw::ComboRow::builder().build();
-    content_commercial.set_title(S::POLICY_CONTENT_COMMERCIAL_LABEL);
-    content_commercial.set_model(Some(&string_list(content_floor_labels())));
-    set_test_id(
-        &content_commercial,
-        ids::FAMILY_POLICY_CONTENT_COMMERCIAL_SELECT,
-    );
-    policy_group.add(&content_commercial);
+    // ── Content rules (family-safety.md § App surface → *Content rules*) ──
+    // The shared rule editor in `family-policy-rules-section`, where the four
+    // content-floor selects stood (nest-rules.md § The shared rule editor (b)):
+    // a set floor shows as a category rule, and the editor saves by its own
+    // button — the policy form's save leaves the rules as they are. The Notify
+    // toggle stays a policy knob.
+    let rules_section = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    rules_section.set_margin_top(12);
+    rules_section.set_margin_bottom(6);
+    set_test_id(&rules_section, ids::FAMILY_POLICY_RULES_SECTION);
+    let rules_title = gtk::Label::new(Some(crate::i18n::strings::rule_editor::FAMILY_SECTION));
+    rules_title.add_css_class("heading");
+    rules_title.set_halign(gtk::Align::Start);
+    rules_section.append(&rules_title);
+    let rules = crate::rule_editor::RuleEditorPanel::new("fauna.family.policy.update");
+    rules_section.append(rules.widget());
+    policy_group.add(&rules_section);
 
     let content_notify = adw::SwitchRow::builder().active(false).build();
     content_notify.set_title(S::POLICY_CONTENT_NOTIFY_LABEL);
@@ -614,6 +566,8 @@ fn build_page_widgets() -> (adw::PreferencesPage, Widgets) {
     screen_caveat.set_halign(gtk::Align::Start);
     screen_caveat.set_wrap(true);
     screen_caveat.set_xalign(0.0);
+    // `family-policy-screen-hint`, user-approved 2026-10-16.
+    set_test_id(&screen_caveat, ids::FAMILY_POLICY_SCREEN_HINT);
     policy_group.add(&screen_caveat);
 
     let save_button = gtk::Button::with_label(S::POLICY_SAVE_BUTTON);
@@ -834,10 +788,8 @@ fn build_page_widgets() -> (adw::PreferencesPage, Widgets) {
         federation,
         feed_sources,
         unknown_peer_dm,
-        content_nsfw,
-        content_spam,
-        content_phishing,
-        content_commercial,
+        rules,
+        rules_section,
         content_notify,
         screen_window_start,
         screen_window_end,
@@ -887,6 +839,69 @@ fn wire(client: &Rc<FaunaClient>, widgets: Widgets, page: &adw::PreferencesPage)
     });
 
     refresh(&ctx);
+
+    // The guardian's rule editor: the labeler picker over the guardian's own
+    // subscriptions (read as the section arrives), and its own save —
+    // `FamilyClient::save_content_rules` re-reads the ward, writes the reach
+    // knobs as reported and the content pillar, and answers the ward's fresh
+    // entry, which re-seeds the editor with what the nest stored.
+    crate::rule_editor::bind_labeler_fetch(&ctx.w.rules, client);
+    {
+        let nest = ctx.nest.clone();
+        let rt = ctx.rt.clone();
+        let rules = ctx.w.rules.clone();
+        ctx.w.rules_section.connect_map(move |_| {
+            let nest = nest.clone();
+            let rules = rules.clone();
+            crate::async_helper::spawn_with_snapshot(
+                &rt,
+                move || crate::rule_editor::read_labelers(nest),
+                move |labelers| rules.set_labelers(labelers),
+            );
+        });
+    }
+    {
+        let weak = Rc::downgrade(&ctx);
+        ctx.w.rules.connect_save(move |panel| {
+            let Some(ctx) = weak.upgrade() else { return };
+            let Some(ward) = ctx.selected_ward.borrow().clone() else {
+                return;
+            };
+            // Enabled only while the crate's `can_save` holds; the guard keeps
+            // an agent click on a disabled button inert too.
+            let Some(document) = panel.saveable_document() else {
+                return;
+            };
+            panel.set_status(Some(crate::i18n::strings::rule_editor::SAVING.to_string()));
+            let nest = ctx.nest.clone();
+            let panel = panel.clone();
+            crate::async_helper::spawn_with_snapshot(
+                &ctx.rt,
+                move || async move {
+                    FamilyClient::new(nest)
+                        .save_content_rules(&ward, document)
+                        .await
+                        .map_err(|e| format!("save content rules: {e}"))
+                },
+                move |saved| match saved {
+                    Ok(Some(entry)) => {
+                        panel.load(fauna_client_policy::RuleEditor::load_guardian(
+                            entry.policy.content_policy.as_ref(),
+                        ));
+                        panel
+                            .set_status(Some(crate::i18n::strings::rule_editor::SAVED.to_string()));
+                    }
+                    // No longer this caller's ward: nothing was written, and
+                    // the page's own read repaints the list (tui's arm).
+                    Ok(None) => {
+                        panel.set_status(None);
+                        refresh_page();
+                    }
+                    Err(e) => panel.set_status(Some(e)),
+                },
+            );
+        });
+    }
 
     // Re-read on every navigation to the page (`connect_map` fires when the
     // content stack makes this child visible) — the guardian's queue is
@@ -1418,6 +1433,7 @@ fn render(ctx: &Rc<Ctx>, view: FamilyView) {
     // guardian being present (`crate::ward_asks::set_from_status`).
     crate::ward_asks::set_from_status(
         view.guardian_handle.is_some(),
+        view.policy.as_ref(),
         view.contact_requests.clone(),
         view.feed_requests.clone(),
     );
@@ -1879,17 +1895,11 @@ fn load_editor(ctx: &Rc<Ctx>, ward: &FamilyWardInfo) {
         ));
     ctx.unknown_peer_dm_edited.set(false);
 
-    // Content policy (§ Content policy): the four per-category floors + Notify.
-    // An absent content_policy is the all-inherit unsupervised-equivalent default.
-    let content = ward.policy.content_policy.unwrap_or_default();
-    w.content_nsfw
-        .set_selected(content_floor_index(content.nsfw.as_str()));
-    w.content_spam
-        .set_selected(content_floor_index(content.spam.as_str()));
-    w.content_phishing
-        .set_selected(content_floor_index(content.phishing.as_str()));
-    w.content_commercial
-        .set_selected(content_floor_index(content.commercial.as_str()));
+    // Content rules (§ App surface → *Content rules*): the ward's guardian
+    // document — a floor still set shows as a category rule — and Notify.
+    w.rules.load(fauna_client_policy::RuleEditor::load_guardian(
+        ward.policy.content_policy.as_ref(),
+    ));
     let notify_on = ward.policy.content_notify.unwrap_or(false);
     w.content_notify.set_active(notify_on);
 
@@ -2091,16 +2101,9 @@ fn editor_policy(w: &Widgets, unknown_peer_dm_edited: bool) -> Result<ReachPolic
         // whatever this render happened to show.
         unknown_peer_dm: unknown_peer_dm_edited
             .then(|| unknown_peer_dm_at(w.unknown_peer_dm.selected())),
-        // Content policy (§ Content policy, Slice C): the four per-category floors
-        // + the Notify toggle are now authored here, so `Some(...)` replaces them
-        // on policy.update. content_floor_at fails closed to `block` for an
-        // out-of-range index, never the permissive `inherit`.
-        content_policy: Some(ContentPolicy {
-            nsfw: ContentFloor::from_wire(&content_floor_at(w.content_nsfw.selected())),
-            spam: ContentFloor::from_wire(&content_floor_at(w.content_spam.selected())),
-            phishing: ContentFloor::from_wire(&content_floor_at(w.content_phishing.selected())),
-            commercial: ContentFloor::from_wire(&content_floor_at(w.content_commercial.selected())),
-        }),
+        // The content pillar is the rule editor's own save
+        // (`save_content_rules`); absent here leaves the rules as they are.
+        content_policy: None,
         content_notify: Some(w.content_notify.is_active()),
         // Screen time (§ Screen time, Slice E) is now authored here, so
         // `Some(...)` replaces it on policy.update — an all-empty editor sends
@@ -2136,11 +2139,18 @@ fn policy_summary(p: ReachPolicy, usage_today_minutes: Option<u32>) -> String {
     lines
         .into_iter()
         .map(|l| {
-            format!(
+            let line = format!(
                 "{}: {}",
                 l.label.resolve(crate::i18n::strings::lookup),
                 l.value.resolve(crate::i18n::strings::lookup)
-            )
+            );
+            // A line a rule of the guardian's document makes carries that
+            // rule's reason, appended verbatim (`nest-rules.md` § The shared
+            // rule editor → *The reason is the member's to read*).
+            match l.reason_text(crate::nest_rules::UI_LANG) {
+                Some(reason) => format!("{line} — {reason}"),
+                None => line,
+            }
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -2198,10 +2208,8 @@ mod tests {
                 "family-policy-federation-toggle",
                 "family-policy-feed-sources-select",
                 "family-policy-unknown-peer-dm-select",
-                "family-policy-content-nsfw-select",
-                "family-policy-content-spam-select",
-                "family-policy-content-phishing-select",
-                "family-policy-content-commercial-select",
+                "family-policy-rules-section",
+                "rule-editor-status",
                 "family-policy-content-notify-toggle",
                 "family-policy-screen-window-start-input",
                 "family-policy-screen-window-end-input",

@@ -258,7 +258,7 @@ fn start_with_db(
         conv_push_source(Arc::clone(&nest)),
     );
 
-    // The room plane's four nest-backed seams, the SAME object again, registered
+    // The room plane's five nest-backed seams, the SAME object again, registered
     // as one bundle so no seam can be left out (`RoomSeams`):
     // - the floor-roster REPORT (`conversation-rooms.md` § The floor roster):
     //   after every membership commit this device authors on a governed room,
@@ -279,7 +279,10 @@ fn start_with_db(
     //   keying it through `room.publish_generation`, and the governance doors.
     //   Unlike the reads, unset is not a quiet skip: founding refuses by name,
     //   because a room founded on a device that cannot key it is a room nobody
-    //   could ever send into.
+    //   could ever send into;
+    // - the POST READ behind the room search (`room-search.md` § The surface):
+    //   a post hit's author, time and teaser through `fauna.posts.get` or its
+    //   relay. Unset, a post hit's row stays word-less.
     session.set_room_seams(room_seams);
 
     // Outbound mail (send) rail — registered here so a client that RECEIVES
@@ -385,6 +388,30 @@ fn start_with_db(
     }
     session
         .set_index_builder_launcher(Arc::clone(&index_launcher) as Arc<dyn IndexBuilderLauncher>);
+    // The conversations oracle's door (`conversations-oracle.md` § The
+    // custodian and the door): this login holds the account's engine, so it
+    // may serve; the endpoint lock decides whether it does. Not under the
+    // in-crate tests, which would serve a real endpoint in this user's agent
+    // dir.
+    #[cfg(all(unix, not(test)))]
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        let slot = runtime.clone();
+        state.oracle_door =
+            fauna_client_account_runtime::conversations_door::spawn_conversations_door(
+                fauna_client_account_runtime::conversations_door::ConversationsDoorInputs {
+                    actor_id: self_actor.0,
+                    manager: session.manager(),
+                    nest: Arc::clone(&nest),
+                    ledger: grant_log.clone(),
+                    store: Arc::new(move || slot.lock().ok().and_then(|handle| handle.clone())),
+                    index: Some(fauna_client_conversations::LauncherLocalIndex::new(
+                        Arc::clone(&index_launcher),
+                        session.manager(),
+                    )),
+                },
+                &handle,
+            );
+    }
     state.index_launcher = Some(index_launcher);
 
     // Scheduling drain — the mailbox-less CalDAV iMIP rail: the loop drains
@@ -825,21 +852,19 @@ fn parse_actor_hex(actor_id_hex: &str) -> Result<ActorId, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     const SECRET: &str = "2222222222222222222222222222222222222222222222222222222222222222";
 
-    /// A unique per-test MLS db path under the OS temp dir — no
-    /// process-global env mutation (tests run in parallel), no extra dev-dep.
-    fn a_db_path(tag: &str) -> std::path::PathBuf {
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let n = N.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "fauna-tui-convtest-{}-{tag}-{n}",
-            std::process::id()
-        ));
-        let _ = std::fs::create_dir_all(&dir);
-        dir.join("mls_state.db")
+    /// A unique per-test MLS db path in a dir the caller holds — no
+    /// process-global env mutation (tests run in parallel), and the dir goes
+    /// when the guard drops (`testing.md` § Test temp-dir hygiene).
+    fn a_db_path(tag: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("fauna-tui-convtest-{tag}-"))
+            .tempdir()
+            .expect("a temp dir");
+        let path = dir.path().join("mls_state.db");
+        (dir, path)
     }
 
     fn a_state() -> (
@@ -878,7 +903,7 @@ mod tests {
     #[tokio::test]
     async fn a_same_account_relogin_gets_the_conversations_role_back() {
         let (mut state, tx, _rx) = a_state();
-        let db_path = a_db_path("relogin");
+        let (_dir, db_path) = a_db_path("relogin");
 
         start_with_db(
             &mut state,
@@ -938,7 +963,7 @@ mod tests {
     #[tokio::test]
     async fn a_newer_builds_mls_state_latches_the_update_refusal_and_is_not_written() {
         let (mut state, tx, _rx) = a_state();
-        let db_path = a_db_path("newer-state");
+        let (_dir, db_path) = a_db_path("newer-state");
 
         // A real store, as an earlier launch leaves it; dropping the engine
         // releases its role lock before the forge.
@@ -995,13 +1020,14 @@ mod tests {
     #[tokio::test]
     async fn login_wires_the_real_session_over_the_pages_own_manager() {
         let (mut state, tx, _rx) = a_state();
+        let (_dir, db_path) = a_db_path("wires");
         start_with_db(
             &mut state,
             an_offline_nest(),
             SECRET,
             Arc::new(fauna_client_config::test_helpers::FakeMailStore::empty()),
             "alice@nest.test".into(),
-            &a_db_path("wires"),
+            &db_path,
             None,
             &tx,
             Vec::new(),
@@ -1024,13 +1050,14 @@ mod tests {
     #[tokio::test]
     async fn a_malformed_secret_leaves_the_page_unwired_not_broken() {
         let (mut state, tx, _rx) = a_state();
+        let (_dir, db_path) = a_db_path("malformed");
         start_with_db(
             &mut state,
             an_offline_nest(),
             "not-hex",
             Arc::new(fauna_client_config::test_helpers::FakeMailStore::empty()),
             "alice@nest.test".into(),
-            &a_db_path("malformed"),
+            &db_path,
             None,
             &tx,
             Vec::new(),

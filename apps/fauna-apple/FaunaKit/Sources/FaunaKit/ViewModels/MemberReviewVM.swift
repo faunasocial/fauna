@@ -6,7 +6,7 @@ import Foundation
 /// is resolved from whatever handle `APIClient.memberReviewHandleForPerson`
 /// found at LOAD time — re-resolving it after a Remove would find no seat left
 /// to read one off.
-public struct MemberReviewRow: Identifiable {
+public struct MemberReviewRow: Identifiable, Equatable {
     public let person: Data
     public let text: MemberReviewRowText
     public var id: Data { person }
@@ -83,6 +83,27 @@ public final class MemberReviewVM {
                 }
             }
         }
+    }
+
+    /// The store-change notice's re-read (account-runtime.md § Multi-instance
+    /// concurrency, the own-pump notice, part 4 — the member-review roster):
+    /// a verdict another device recorded drops its row, a review it raised
+    /// adds one. One attempt, no retry loop (the socket is up if a notice
+    /// fired); a failed read keeps the rows and raises no banner; rows are
+    /// replaced only when they differ.
+    public func resync() async {
+        guard let api, loaded else { return }
+        guard let reviews = try? await api.memberReviewList() else { return }
+        var built: [MemberReviewRow] = []
+        built.reserveCapacity(reviews.count)
+        for review in reviews {
+            let handle = await api.memberReviewHandleForPerson(person: review.person)
+            guard let text = try? api.memberReviewRowText(
+                person: review.person, reasons: review.reasons, handle: handle)
+            else { return }
+            built.append(MemberReviewRow(person: review.person, text: text))
+        }
+        if built != rows { rows = built }
     }
 
     /// Record **Keep** — closes every open item for `person` with no group

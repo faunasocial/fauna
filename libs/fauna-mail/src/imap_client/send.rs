@@ -22,10 +22,10 @@
 
 use fauna_protocol::RpcRequester;
 use fauna_protocol::bridge_routing::{
-    FailImportSessionRequest, ImportMessageBatchReply, ImportMessageBatchRequest,
-    ImportMessageReply, ImportMessageRequest, ImportSessionActionReply, ImportSessionActionRequest,
-    ImportSessionInfo, ListImportSessionsReply, ListImportSessionsRequest, StartImportSessionReply,
-    StartImportSessionRequest,
+    DiscardImportSessionReply, FailImportSessionRequest, ImportMessageBatchReply,
+    ImportMessageBatchRequest, ImportMessageReply, ImportMessageRequest, ImportSessionActionReply,
+    ImportSessionActionRequest, ImportSessionInfo, ListImportSessionsReply,
+    ListImportSessionsRequest, StartImportSessionReply, StartImportSessionRequest,
 };
 
 use super::ImportUnit;
@@ -98,12 +98,17 @@ impl<R: RpcRequester> MailImportClient<R> {
     /// row is the only durable record of the range: a resumed session that
     /// never recorded it can only import everything the user excluded
     /// (`mailbox-migration.md` § Wizard steps step 3).
+    /// `skip_dedup` is the scope step's "Import duplicates anyway" choice,
+    /// recorded on the row for the same reason: a resume after a restart
+    /// sends it with every message without having to guess
+    /// (`mailbox-migration.md` § Opt-out per session).
     pub async fn start_session(
         &self,
         source_descriptor: impl Into<String>,
         total_count: u64,
         scope: Vec<String>,
         date_from: impl Into<String>,
+        skip_dedup: bool,
         source_sealed: Option<Vec<u8>>,
     ) -> Result<StartImportSessionReply, R::Error> {
         self.nest
@@ -114,6 +119,7 @@ impl<R: RpcRequester> MailImportClient<R> {
                     total_count,
                     scope,
                     date_from: date_from.into(),
+                    skip_dedup,
                     source_sealed: source_sealed.map(serde_bytes::ByteBuf::from),
                 },
             )
@@ -219,6 +225,23 @@ impl<R: RpcRequester> MailImportClient<R> {
             .await
     }
 
+    /// `fauna.bridges.discard_import_session` — a failed import's Dismiss
+    /// (`mailbox-migration.md` § A failed import is a record the wizard shows
+    /// until the user moves on): delete a terminal row. `existed = false` is a
+    /// row already gone, deliberately not an error; a live one is refused.
+    pub async fn discard_session(&self, session_id: impl Into<String>) -> Result<bool, R::Error> {
+        let reply: DiscardImportSessionReply = self
+            .nest
+            .request(
+                "fauna.bridges.discard_import_session",
+                ImportSessionActionRequest {
+                    session_id: session_id.into(),
+                },
+            )
+            .await?;
+        Ok(reply.existed)
+    }
+
     async fn session_action(
         &self,
         kind: &'static str,
@@ -310,7 +333,14 @@ mod tests {
         );
         let client = MailImportClient::new(m);
         let reply = client
-            .start_session("gmail:user@example.com", 42, vec!["INBOX".into()], "", None)
+            .start_session(
+                "gmail:user@example.com",
+                42,
+                vec!["INBOX".into()],
+                "",
+                false,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(reply.session_id, "sess-1");
@@ -338,6 +368,7 @@ mod tests {
                 42,
                 vec!["INBOX".into(), "Sent".into()],
                 "2023-11-14",
+                true,
                 None,
             )
             .await
@@ -350,6 +381,8 @@ mod tests {
         // The since date rides the same call, and for the same reason: the row
         // is the only durable record of what the session was allowed to take.
         assert_eq!(decoded.date_from, "2023-11-14");
+        // So does the duplicates choice (§ Opt-out per session).
+        assert!(decoded.skip_dedup);
     }
 
     /// The seal the caller minted reaches the nest **on the wire**, and a
@@ -388,6 +421,7 @@ mod tests {
                 42,
                 vec![],
                 "",
+                false,
                 Some(sealed.clone()),
             )
             .await
@@ -406,7 +440,7 @@ mod tests {
         let recorder = Arc::new(RecordingRequester::new(reply));
         let client = MailImportClient::new(recorder.clone());
         client
-            .start_session("gmail:user@example.com", 42, vec![], "", None)
+            .start_session("gmail:user@example.com", 42, vec![], "", false, None)
             .await
             .unwrap();
         let (_, payload) = recorder.recorded();

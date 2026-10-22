@@ -83,6 +83,7 @@ fun BackupDestinationsSection(
     val orphanedStoreBytes by vm.orphanedStoreBytes.collectAsState()
     val reseedRunning by vm.reseedRunning.collectAsState()
     val reseedResult by vm.reseedResult.collectAsState()
+    val reseedPulledFrom by vm.reseedPulledFrom.collectAsState()
     val appMessages = LocalAppMessages.current
     val context = LocalContext.current
 
@@ -92,10 +93,19 @@ fun BackupDestinationsSection(
     // the result — the data IS back, so that one never replaces the verdict.
     val reseedFailed = stringResource(R.string.backups_backup_reseed_failed)
     val reseedReenrollFailed = stringResource(R.string.backups_backup_reseed_reenroll_failed)
+    val pullBackReenrollFailed = stringResource(R.string.backups_backup_reseed_pull_back_reenroll_failed)
     LaunchedEffect(reseedResult) {
         val result = reseedResult ?: return@LaunchedEffect
         result.stopped?.let { appMessages.showError(reseedFailed.replace("{reason}", it)) }
-        result.reenrollError?.let { appMessages.showError(reseedReenrollFailed.replace("{reason}", it)) }
+        result.reenrollError?.let { reason ->
+            // A pull-back's re-enrollment failure names the nest it pulled from.
+            val message = reseedPulledFrom?.let { dest ->
+                pullBackReenrollFailed
+                    .replace("{name}", backupDestinationLabel(dest.displayName, dest.destinationNestUrl))
+                    .replace("{reason}", reason)
+            } ?: reseedReenrollFailed.replace("{reason}", reason)
+            appMessages.showError(message)
+        }
     }
     val reseedRunningText = stringResource(R.string.backups_backup_reseed_running)
     // `backup-destination-reseed-result`: the running line while the ceremony
@@ -267,6 +277,7 @@ fun BackupDestinationsSection(
         reseedRunning = reseedRunning,
         reseedResultText = reseedResultText,
         onReseed = vm::reseed,
+        reseedRunsPullBack = { id -> vm.reseedRunsPullBack(destinations, id) },
     )
 }
 
@@ -567,18 +578,26 @@ fun BackupDestinationsContent(
     reseedRunning: Boolean = false,
     /** `backup-destination-reseed-result` text, or `null` while it must be absent. */
     reseedResultText: String? = null,
-    /** Run the confirmed restore. */
-    onReseed: () -> Unit = {},
+    /** Run the confirmed restore from the pressed row (`null`: the orphaned store's). */
+    onReseed: (String?) -> Unit = {},
+    /**
+     * Whether a destination row's restore pulls back from that surviving nest
+     * (the shared `backupReseedRunsPullBack`) — its confirm then names the nest.
+     */
+    reseedRunsPullBack: (String) -> Boolean = { false },
 ) {
     var form by remember { mutableStateOf<FormMode>(FormMode.Closed) }
     var removing by remember { mutableStateOf<FfiBackupDestinationView?>(null) }
     var confirmingReclaim by remember { mutableStateOf(false) }
     var confirmingReseed by remember { mutableStateOf(false) }
+    // The row whose button armed the confirm: `null` for the orphaned store's.
+    var reseedSource by remember { mutableStateOf<String?>(null) }
     // One confirm at a time: arming the restore closes the reclaim's, as
     // apple's `armReseed` does — the two act on the same store.
-    val armReseed = {
+    val armReseed = { source: String? ->
         if (!reseedRunning) {
             confirmingReclaim = false
+            reseedSource = source
             confirmingReseed = true
         }
     }
@@ -683,7 +702,7 @@ fun BackupDestinationsContent(
                     // The restore sits ahead of the reclaim: it is the gesture
                     // that keeps the copy's value, the reclaim the one that ends it.
                     if (null in reseedRows) {
-                        ReseedButton(enabled = !working && !reseedRunning, onClick = armReseed)
+                        ReseedButton(enabled = !working && !reseedRunning, onClick = { armReseed(null) })
                     }
                     Button(
                         onClick = { confirmingReclaim = true },
@@ -702,8 +721,13 @@ fun BackupDestinationsContent(
         }
 
         if (confirmingReseed) {
+            val source = reseedSource
             ReseedConfirm(
-                onConfirm = { confirmingReseed = false; onReseed() },
+                pulledFrom = source
+                    ?.takeIf(reseedRunsPullBack)
+                    ?.let { id -> destinations.firstOrNull { it.destinationId == id } }
+                    ?.let(destinationLabel),
+                onConfirm = { confirmingReseed = false; onReseed(source) },
                 onCancel = { confirmingReseed = false },
             )
         }
@@ -745,7 +769,7 @@ fun BackupDestinationsContent(
                     onRemove = { removing = dest },
                     offerReseed = dest.destinationId in reseedRows,
                     reseedEnabled = !working && !reseedRunning,
-                    onReseed = armReseed,
+                    onReseed = { armReseed(dest.destinationId) },
                 )
             }
         }
@@ -882,17 +906,26 @@ private fun ReseedButton(enabled: Boolean, onClick: () -> Unit) {
  */
 @Composable
 private fun ReseedConfirm(
+    pulledFrom: String?,
     onConfirm: () -> Unit,
     onCancel: () -> Unit,
 ) {
+    // A pull-back's confirm names the nest whose copy it pulls back; the
+    // custodian's keeps this device's wording.
+    val title = pulledFrom
+        ?.let { stringResource(R.string.backups_backup_reseed_pull_back_confirm_title).replace("{name}", it) }
+        ?: stringResource(R.string.backups_backup_reseed_confirm_title)
+    val body = pulledFrom
+        ?.let { stringResource(R.string.backups_backup_reseed_pull_back_confirm_body).replace("{name}", it) }
+        ?: stringResource(R.string.backups_backup_reseed_confirm_body)
     Card(modifier = Modifier.fillMaxWidth().testTag(Ids.BACKUP_DESTINATION_RESEED_CONFIRM_MODAL)) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
-                stringResource(R.string.backups_backup_reseed_confirm_title),
+                title,
                 style = MaterialTheme.typography.titleSmall,
             )
             Text(
-                stringResource(R.string.backups_backup_reseed_confirm_body),
+                body,
                 style = MaterialTheme.typography.bodySmall,
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

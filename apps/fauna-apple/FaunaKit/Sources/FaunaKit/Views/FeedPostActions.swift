@@ -500,12 +500,12 @@ public struct FeedPostMutedPlaceholder: View {
 
     public var body: some View {
         HStack(spacing: 8) {
-            automationText(Ids.feedPostMuted, L.feed.postMutedPlaceholder)
+            automationText(Ids.feedPostMuted, L.mutedWords.collapsed)
                 .font(.caption)
                 .italic()
                 .foregroundStyle(.secondary)
             Spacer(minLength: 4)
-            Button(L.feed.postMutedReveal) {
+            Button(L.mutedWords.reveal) {
                 onReveal()
             }
             .buttonStyle(.borderless)

@@ -551,12 +551,12 @@ pub async fn pull_set_from_peer(
         // The byte gate, re-read per page: a relayed connection with the nest
         // reachable fetches no body — the rows below still go through the
         // door, and the gate prices a page that moves nothing.
-        let path = channel.path();
-        let plan = if !plan.is_empty() && !bytes_may_ride(path, nest) {
+        let route = channel.path();
+        let plan = if !plan.is_empty() && !bytes_may_ride(route, nest) {
             tracing::debug!(
                 folder = %fauna_core::log_redact::log_folder_name(&spec.folder),
                 peer = %&peer_hex[..16],
-                path = path.label(),
+                route = route.label(),
                 bodies = plan.len(),
                 "share pump: relayed connection while the nest answers; the page's bodies are left to the nest path"
             );
@@ -913,10 +913,14 @@ async fn spool_planned(
                 .fold(spent.bytes, |acc, b| acc.saturating_add(b.len() as u64));
         }
         spent.files = spent.files.saturating_add(1);
-        tokio::fs::write(&manifest_path, &manifest_bytes).await?;
+        // Every write atomic, the manifest LAST: a present manifest is what
+        // the next pass skips the refill on, so it must mean every body
+        // under it landed whole (`file-sync.md` § *A failed change must not
+        // strand the device* — a torn write never rests under the full name).
         for (key, body) in store_keys.iter().zip(bodies) {
-            tokio::fs::write(spool_chunk_path(spool, key), body).await?;
+            crate::atomic_write::atomic_write_file(&spool_chunk_path(spool, key), &body).await?;
         }
+        crate::atomic_write::atomic_write_file(&manifest_path, &manifest_bytes).await?;
     }
     Ok(spent)
 }
@@ -1657,6 +1661,34 @@ mod spool_spend_tests {
         assert!(
             spent.bytes > 0,
             "a peer that prices its own transfers at zero must not transfer for free"
+        );
+    }
+
+    /// A spool write that fails mid-file leaves NO manifest, so a present
+    /// manifest means every body under it landed whole (`file-sync.md`
+    /// § *A failed change must not strand the device*: a cache write is
+    /// atomic). Written manifest-first, a failed chunk write left the
+    /// manifest behind, and the next pass skipped the refill on its presence.
+    #[tokio::test]
+    async fn a_failed_body_write_leaves_no_manifest_in_the_spool() {
+        let peer = LyingPeer::one_file(4 * 1024);
+        let dir = tempfile::tempdir().expect("tempdir");
+        // The chunk's name is taken by a directory: its write cannot land.
+        let key = ContentHash::of_raw(&peer.body);
+        std::fs::create_dir_all(spool_chunk_path(dir.path(), &key)).unwrap();
+        let plan = vec![PlannedFetch {
+            manifest_hash: peer.manifest_hash,
+            size: 0,
+            context: "some/file".to_string(),
+        }];
+
+        spool_planned(&peer, &plan, dir.path(), None)
+            .await
+            .expect_err("the body write fails");
+
+        assert!(
+            !spool_manifest_path(dir.path(), &peer.manifest_hash).exists(),
+            "the manifest lands last, so a failed body leaves none"
         );
     }
 

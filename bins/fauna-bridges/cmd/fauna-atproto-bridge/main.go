@@ -45,6 +45,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -59,6 +60,7 @@ import (
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/confinement"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/keypair"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/logging"
+	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/logplane"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mailfauna"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/proxyproto"
 	bridgetls "github.com/faunasocial/fauna/bins/fauna-bridges/internal/tls"
@@ -386,6 +388,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	// outage is only visible by re-fetching), and by the verify path on an
 	// unknown `kid`. Same buffered-1 discipline.
 	issuerKeyNudge := make(chan struct{}, 1)
+	var reconnectAttempts atomic.Int64
 	reconnector = wsrpc.NewReconnectingClient(context.Background(), client, wsrpc.ReconnectConfig{
 		Dial: func(c context.Context) (*wsrpc.Client, error) {
 			dctx, dcancel := context.WithTimeout(c, rpcDeadline)
@@ -420,6 +423,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 				return fmt.Errorf("reconnect fetch_config: %w", ferr) // transient → retry
 			}
 			logger.Info("reconnect: re-verified whoami + re-fetched config")
+			logplane.NestReconnected(reconnectAttempts.Add(1))
 			select {
 			case mintNudge <- struct{}{}:
 			default:
@@ -432,6 +436,30 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		},
 		Logger: logger,
 	})
+
+	// ── Sidecar log plane: ship catalogued events to nest's admin ring ──
+	//
+	// observability.md § The sidecar log plane — the same wiring as the mail
+	// bridge (cmd/fauna-mail-bridge/main.go). The catalogue this binary reports
+	// is internal/logplane's shared catalogue.go plus catalogue_atproto.go.
+	// Strictly best-effort: a flush failure never touches PDS serving.
+	//
+	// Rooted in context.Background() so the plane outlives the process ctx: the
+	// final flush carries the shutdown-path events. Its defer is registered
+	// AFTER the reconnector's Close defer, so it runs BEFORE it (LIFO) and that
+	// flush goes out over a still-open connection; and BEFORE the XRPC
+	// listener's shutdown defer below, so it runs AFTER that one — which is
+	// what lets a forced shutdown's event reach the final flush.
+	planeCtx, planeCancel := context.WithCancel(context.Background())
+	planeDone := make(chan struct{})
+	go func() {
+		logplane.Run(planeCtx, reconnector)
+		close(planeDone)
+	}()
+	defer func() {
+		planeCancel()
+		<-planeDone
+	}()
 
 	// ── F1 XRPC auth surface (atproto-pds-full.md § F1 detail) ──
 	//
@@ -561,6 +589,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		// drift.
 		blobSource := nestBlobSource{client: nestHTTP, endpoint: *nestEndpoint}
 		projector := atprotorepo.NewProjector(store, funnel, ffiTranslator{}, blobSource, logger)
+		projector.SetOnRemuxFailed(logplane.VideoRemuxFailed)
 		// F2: the authed write surface commits through the SAME funnel the
 		// projection loop uses (C1 — one writer per repo, never a second) with
 		// the same per-account signing key.
@@ -623,6 +652,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 				if verr := store.VerifyRepo(ctx, rp.DID, nil); verr != nil {
 					logger.Error("atproto self-check FAILED: persisted repo does not reload",
 						"did", rp.DID, "rev", rp.Rev, "err", verr)
+					logplane.RepoSelfCheckFailed()
 					continue
 				}
 				logger.Info("atproto self-check ok", "did", rp.DID, "rev", rp.Rev)
@@ -743,6 +773,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		if rerr := tlsProvider.Refresh(refreshCtx); rerr != nil {
 			logger.Warn("initial pds tls refresh failed (will retry on backoff schedule)",
 				"primary_domain", snapshot.PrimaryDomain, "err", rerr)
+			// The admin-meaningful half; `rerr` stays in the slog record above
+			// (it can carry upstream text — catalogue.go § The interpolation rule).
+			logplane.TLSCertFetchFailed()
 		}
 		refreshCancel()
 		tlsProvider.Start(ctx)
@@ -764,6 +797,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		// § Co-resident process trust boundary); nil ⇒ trust-any-loopback.
 		rawXrpc, lerr := net.Listen("tcp", *xrpcListen)
 		if lerr != nil {
+			// Deliverable: the return below runs the plane's final flush before
+			// the reconnector closes. The port only — never the bind host.
+			logplane.ListenerBindFailed("pds", logplane.PortOf(*xrpcListen))
 			return fmt.Errorf("xrpc listen on %s: %w", *xrpcListen, lerr)
 		}
 		routerProxyAuth := proxyproto.RouterAuthFromEnv(logger)
@@ -785,7 +821,14 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		defer func() {
 			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer shutdownCancel()
-			_ = httpServer.Shutdown(shutdownCtx)
+			if serr := httpServer.Shutdown(shutdownCtx); serr != nil {
+				// The drain window expired with requests still in flight: cut
+				// them rather than leave them to die with the process, and say
+				// so (the plane's final flush runs after this defer).
+				_ = httpServer.Close()
+				logger.Warn("xrpc listener force-closed in-flight requests (drain window expired)")
+				logplane.ShutdownForced()
+			}
 			tlsProvider.Close()
 		}()
 	}
@@ -805,6 +848,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		"plc_directory", deps.directoryBaseURL,
 		"xrpc_listen", *xrpcListen,
 	)
+	logplane.Ready(whoami.Role)
 	ticker := time.NewTicker(mintPollInterval)
 	defer ticker.Stop()
 	var loopErr error
@@ -827,6 +871,7 @@ loop:
 			break loop
 		case err := <-xrpcListenErr:
 			logger.Error("xrpc listener failed; shutting down", "err", err)
+			logplane.PDSListenerFailed()
 			loopErr = fmt.Errorf("xrpc listener: %w", err)
 			break loop
 		case <-ticker.C:

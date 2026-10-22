@@ -390,6 +390,11 @@ async fn oauth_par(
 /// never collide with a parameter a future OAuth extension defines.
 pub(crate) const HOLDER_X25519_PARAM: &str = "fauna_holder_x25519";
 
+/// The token answer's member naming the principal row the grant's client
+/// holds, as hex — present once a consent minted the row. Namespaced like
+/// [`HOLDER_X25519_PARAM`].
+pub(crate) const PRINCIPAL_ID_FIELD: &str = "fauna_principal_id";
+
 /// The start parameter a client attests its writer key in: the base64url
 /// (unpadded) encoding of the Ed25519 public key it signs its `ext.*` rows
 /// with (`third-party-kinds.md` § Principal write authority) — the same
@@ -584,6 +589,7 @@ const POLL_MAX_BODY_BYTES: usize = 4 * 1024;
 /// `default-src 'none'`, so the consent surface can never be made to load
 /// something an attacker named — the same posture that keeps `logo_uri` off the
 /// approval card entirely.
+// public-text: nest-oauth-consent
 const AUTHORIZE_PAGE: &str = r#"<!doctype html>
 <html lang="en">
 <head>
@@ -664,6 +670,7 @@ h1{font-size:1.15rem;margin:0 0 .75rem}p{margin:0;color:#57534e}</style>
 <body><main><h1>{{title}}</h1><p>{{detail}}</p></main></body>
 </html>
 "#;
+// public-text-end: nest-oauth-consent
 
 /// One permission set as this page renders it.
 ///
@@ -744,11 +751,13 @@ fn authorize_page_headers(script_nonce: Option<&str>) -> [(axum::http::HeaderNam
 }
 
 fn error_page(status: axum::http::StatusCode, title: &str, detail: &str) -> Response {
+    // public-text: nest-oauth-consent
     let body = render_page(
         AUTHORIZE_ERROR_PAGE,
         &serde_json::json!({ "title": title, "detail": detail }),
     )
     .unwrap_or_else(|()| "<!doctype html><title>Request failed</title>".to_string());
+    // public-text-end: nest-oauth-consent
     let mut response = (status, body).into_response();
     let headers = response.headers_mut();
     for (name, value) in authorize_page_headers(None) {
@@ -766,11 +775,13 @@ fn error_page(status: axum::http::StatusCode, title: &str, detail: &str) -> Resp
 /// `request_uri`s must not be able to tell which kind of dead it found, and the
 /// user's remedy is the same in all four.
 fn unusable_request_page() -> Response {
+    // public-text: nest-oauth-consent
     error_page(
         axum::http::StatusCode::BAD_REQUEST,
         "Unknown or expired request",
         "This authorization request does not exist or has expired. Start again from the application.",
     )
+    // public-text-end: nest-oauth-consent
 }
 
 #[derive(serde::Deserialize)]
@@ -793,21 +804,25 @@ async fn oauth_authorize(
     axum::extract::Query(query): axum::extract::Query<AuthorizeQuery>,
 ) -> Response {
     if crate::oauth_issuer_routes::issuer(&state).is_none() {
+        // public-text: nest-oauth-consent
         return error_page(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             "Authorization is not available",
             "This nest has not claimed a domain yet, so it is not serving authorization requests.",
         );
+        // public-text-end: nest-oauth-consent
     }
     let now = fauna_core::data::Timestamp::now_secs_or_zero();
     let runtime = &state.oauth_as;
 
     if query.client_id.is_empty() || query.request_uri.is_empty() {
+        // public-text: nest-oauth-consent
         return error_page(
             axum::http::StatusCode::BAD_REQUEST,
             "Malformed authorization request",
             "The link that brought you here is incomplete. Start again from the application.",
         );
+        // public-text-end: nest-oauth-consent
     }
     let Some(stored) = runtime.par.take(&query.request_uri, now) else {
         return unusable_request_page();
@@ -863,19 +878,23 @@ async fn oauth_authorize(
         // breaking its own contract, and answered as the failure it is.
         Ok(None) => {
             tracing::error!("oauth: the browser start opened no consent row");
+            // public-text: nest-oauth-consent
             return error_page(
                 axum::http::StatusCode::BAD_GATEWAY,
                 "Could not start the approval",
                 "This nest could not open the approval request. Start again from the application.",
             );
+            // public-text-end: nest-oauth-consent
         }
         Err(e) => {
             tracing::error!(error = %format!("{e:#}"), "oauth: open consent request failed");
+            // public-text: nest-oauth-consent
             return error_page(
                 axum::http::StatusCode::BAD_GATEWAY,
                 "Could not start the approval",
                 "This nest could not open the approval request. Start again from the application.",
             );
+            // public-text-end: nest-oauth-consent
         }
     };
 
@@ -913,11 +932,13 @@ async fn oauth_authorize(
     };
     let nonce = page.nonce.clone();
     let Ok(body) = render_page(AUTHORIZE_PAGE, &page) else {
+        // public-text: nest-oauth-consent
         return error_page(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             "Could not render the approval page",
             "Start again from the application.",
         );
+        // public-text-end: nest-oauth-consent
     };
 
     // The flow outlives its consent row by a slack window, so the page's next
@@ -1921,6 +1942,18 @@ async fn issue_tokens(
         "scope": join_scope(&grant.scopes),
         "sub": grant.subject,
     });
+    // The principal row this grant's client holds, so a device principal can
+    // name itself at a key-side door (`conversations-oracle.md` § The
+    // custodian and the door: the handshake names the `principal_id`). The
+    // row is minted at the consent, never told to the client before this.
+    if let Ok(actor) = <[u8; 32]>::try_from(grant.actor_id.as_slice())
+        && let Ok(Some(principal_id)) = state
+            .db
+            .get_third_party_principal_id(&actor, &grant.client_id)
+            .await
+    {
+        body[PRINCIPAL_ID_FIELD] = serde_json::Value::String(hex::encode(principal_id));
+    }
     if let Some(request) = id_token {
         // Under the SAME signer as the access token — one key, two classes,
         // separated by `typ` (`key-material-hierarchy.md` § Audience:

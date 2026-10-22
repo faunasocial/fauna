@@ -704,7 +704,7 @@ pub async fn finalize_user_deletion(state: &Arc<AppState>, actor_id: &[u8; 32]) 
     // drops each predecessor's `admin_actor_ids` row and `delete_user` its
     // `users` row, so a predecessor's admin row would otherwise leave without
     // `admin.remove`'s quorum or the superadmin floor — the last superadmin
-    // included (`admin.md` § Admin continuity and succession). Refuse, never
+    // included (`admin.md` § Cutting a user off, the `Admin ⊇ User` paragraph). Refuse, never
     // strip, for the reason above; `admin.remove` on the predecessor unblocks it.
     let holders = db.local_predecessors_holding_admin(actor_id).await?;
     if let Some(held) = holders.first() {

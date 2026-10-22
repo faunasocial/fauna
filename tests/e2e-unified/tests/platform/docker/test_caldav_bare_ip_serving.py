@@ -133,7 +133,7 @@ def bare_ip_caldav_nest(docker_image):
         # MDA's directly-bound CalDAV listener on the DEFAULT port, router-bypassing.
         # The nest's internal port is 3000, so 8443 is CalDAV-only — no collision
         # even with the all-interfaces (FAUNA_LAN_BIND_IP=0.0.0.0) harness bind.
-        {3000: http_port, 8443: caldav_host_port},
+        {443: http_port, 8443: caldav_host_port},
         env={
             # NO FAUNA_DOMAIN — the bare-IP / domainless case (the home2 shape).
             "FAUNA_CLAIM_CODE": CLAIM_CODE,
@@ -218,3 +218,33 @@ def test_bare_ip_caldav_listener_serves_on_published_port(bare_ip_caldav_nest):
         f"(proves the MDA CalDAV listener answered on the published bare-IP port, "
         f"not nest); got header {www_auth!r}"
     )
+
+
+def test_home_hatch_reports_a_direct_dav_listener(bare_ip_caldav_nest):
+    """The member's mail settings page follows the serving shape the nest
+    reports (``caldav-server.md`` § Network exposure — Any-locator serving):
+    under the home bundle's hatch (``caldav_bind_host`` from
+    ``FAUNA_LAN_BIND_IP``) ``fauna.bridges.get_caldav_port`` declares the
+    listener direct, so the shared ``MuaInstructions::apply_dav_listener``
+    shows the box's own address at the reported port — for a home box with a
+    domain too, where ``mail.<domain>:443`` reaches nothing. The address the
+    page composes must answer: a PROPFIND on the reported port (published to
+    the host here) is the MDA's own challenge."""
+    with admin_ws(bare_ip_caldav_nest) as admin_client:
+        reply = admin_client.call("fauna.bridges.get_caldav_port", {})
+    assert reply.get("direct_listener") is True, (
+        f"a LAN-bound home box must declare its DAV listener direct; got {reply!r}"
+    )
+    assert reply.get("port") == 8443, (
+        f"the reported port is the one the MDA binds (the default 8443); got {reply!r}"
+    )
+    host_port = bare_ip_caldav_nest["caldav_host_port"]  # published from 8443
+    resp = requests.request(
+        "PROPFIND",
+        f"https://127.0.0.1:{host_port}/caldav/",
+        verify=False,
+        timeout=30,
+    )
+    assert resp.status_code == 401 and "fauna-caldav" in resp.headers.get(
+        "WWW-Authenticate", ""
+    ), f"the reported DAV address must answer; got {resp.status_code}"

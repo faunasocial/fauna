@@ -119,6 +119,7 @@ func (b *submissionBackend) NewSession(c *gosmtp.Conn) (gosmtp.Session, error) {
 	}
 	sess := &submissionSession{backend: b}
 	if c != nil && c.Conn() != nil {
+		sess.netConn = c.Conn()
 		if addr, ok := c.Conn().RemoteAddr().(*net.TCPAddr); ok {
 			sess.sourceIP = addr.IP.String()
 		} else if c.Conn().RemoteAddr() != nil {
@@ -171,6 +172,11 @@ type submissionSession struct {
 	// `report_auth_event` rejects in production but tolerates with
 	// a stub caller.
 	sourceIP string
+
+	// netConn is the accepted connection (a *tls.Conn on 465, the pre-auth
+	// wrapper itself on 587); the auth-success point hands it to
+	// connlimit.MarkAuthenticated. Nil in tests that drive the session directly.
+	netConn net.Conn
 
 	// recipientCount tracks the running RCPT TO count for the current
 	// transaction; cleared on each MAIL FROM and on RSET (D.3). The
@@ -762,7 +768,8 @@ func (s *submissionSession) dispatchForwarderRedirect(parsed *mailfauna.ParsedMe
 	}
 	if dispatchForward(ctx, s.backend.client, s.backend.logger, s.backend.outboundTrigger,
 		s.sourceIP, from, parsed.Headers, raw, rcpt.forwarderActorID, rcpt.forwardTarget,
-		origMsgID, "forwarder", wsrpc.ForwardCopyModeRedirect) == forwardFailed {
+		origMsgID, "forwarder", wsrpc.ForwardCopyModeRedirect,
+		submissionForwardDoor) == forwardFailed {
 		return forwarderTempfailError()
 	}
 	return nil

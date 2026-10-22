@@ -76,14 +76,14 @@ export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS := "--remap-path-prefix=" +
 # on PATH (release-integrity.md § Release signing → Web-app verifiability, piece
 # 1, "The wasm32 C compiler"). Every wasm32 build recipe depends on
 # `_wasm32-cc-check`, which refuses an unpinned or missing install once the pin
-# is ACTIVE — once it records its `clang --version` line, the first install's
-# measurement. The commit that records it also adds, here, the two exports
-# `CC_wasm32_unknown_unknown` / `AR_wasm32_unknown_unknown` naming the fixed
-# per-machine root (`scripts/wasm32-cc.py`'s ROOT, spelled out so no subprocess
-# runs on every `just` parse): an active pin's check refuses unless both name
-# that root, and test_wasm32_cc.py fails an active pin without them. Until then
-# no export, so cc-rs resolves the compiler exactly as before. No override: a
+# is ACTIVE — it records its `clang --version` line, the first install's
+# measurement. The two exports below name the fixed per-machine root
+# (`scripts/wasm32-cc.py`'s ROOT, spelled out so no subprocess runs on every
+# `just` parse): an active pin's check refuses unless both name that root, and
+# test_wasm32_cc.py fails an active pin without them. No override: a
 # build-machine path is wiring, not a choice.
+export CC_wasm32_unknown_unknown := home_directory() / ".local/share/fauna/wasm32-cc/bin/clang"
+export AR_wasm32_unknown_unknown := home_directory() / ".local/share/fauna/wasm32-cc/bin/llvm-ar"
 
 # ── The interpreter: ALWAYS uv, never bare `python3` (user ruling 2026-08-23) ──
 # Bare `python3` resolves to a DIFFERENT interpreter per machine — 3.14 on the
@@ -222,6 +222,13 @@ exe_suffix := if os() == "windows" { ".exe" } else { "" }
 # script is the maintainers' own and is not part of this tree: without it every
 # `slot_*` variable below is the empty string and the recipe line runs directly.
 slot_build :=if path_exists(justfile_directory() / "scripts/build-slot.py") == "true" { py + " scripts/build-slot.py --pool build --" } else { "" }
+# The debug SwiftPM builds (swift test, mac-debug, the FaunaiOS typecheck) emit no
+# dSYM: SwiftPM's default dwarf format writes a ~0.9 GB dSYM per linked product
+# (three a checkout, 2.5 G) that `ditto --hfsCompression` leaves uncompressed, and
+# no recipe symbolicates from it. EVERY debug SwiftPM line passes the same flag so
+# the build graph never flips between formats (a flip rebuilds the lot).
+# build-target-layout-macos.md § The per-checkout physical budget.
+swiftpm_debug := "-debug-info-format none"
 slot_build_wide := if path_exists(justfile_directory() / "scripts/build-slot.py") == "true" { py + " scripts/build-slot.py --pool build --cores 4-8 --" } else { "" }
 slot_tier_1 :=if path_exists(justfile_directory() / "scripts/build-slot.py") == "true" { py + " scripts/build-slot.py --pool tier_1 --" } else { "" }
 slot_focus :=if path_exists(justfile_directory() / "scripts/build-slot.py") == "true" { if os() == "linux" { "" } else { py + " scripts/build-slot.py --pool focus --" } } else { "" }
@@ -783,7 +790,7 @@ _wasm-onboarding-test-impl: _wasm32-cc-check
 # Folder wizard + page-level Devices WASM chunk (libs/fauna-wasm-folders:
 # `FolderWizardMachine` + `DevicesMachine`). Wired into the `wasm:` aggregate
 # (and `web-test`) so `just web` builds it; the web Devices page renders off the
-# shared `DevicesMachine` via `$lib/wasm-folders` (web-renderer track).
+# shared `DevicesMachine` via `#lib/wasm-folders` (web-renderer track).
 wasm-folders:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -807,7 +814,7 @@ _wasm-folders-impl: _wasm32-cc-check
 # Backups is a distinct page from Devices — the same reason wasm-media and
 # wasm-labeler-catalog stand alone. Wired into the `wasm:` aggregate (and
 # `web-test`) so `just web` builds it; the web Backups page renders the snapshot
-# half off the shared `BackupsMachine` via `$lib/wasm-backups`.
+# half off the shared `BackupsMachine` via `#lib/wasm-backups`.
 wasm-backups:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -830,7 +837,7 @@ _wasm-backups-impl: _wasm32-cc-check
 # `MediaMachine`). Its own chunk (not folded into fauna-wasm-folders) because
 # Media is a distinct page from Devices. Wired into the `wasm:` aggregate so
 # `just web` builds it; the web Media page renders off the shared `MediaMachine`
-# via `$lib/wasm-media`.
+# via `#lib/wasm-media`.
 wasm-media:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -855,7 +862,7 @@ _wasm-media-impl: _wasm32-cc-check
 # labeler-catalog page is distinct from Devices/Media. Wired into the `wasm:`
 # aggregate so `just web` builds it; the web labeler-catalog page (and the
 # personalization home's subscribed-labelers facet) render off the shared
-# `LabelerCatalogMachine` via `$lib/wasm-labeler-catalog`.
+# `LabelerCatalogMachine` via `#lib/wasm-labeler-catalog`.
 wasm-labeler-catalog:
     @{{py}} scripts/build-if-stale.py --label wasm-labeler-catalog \
         --target apps/fauna-web/static/fauna_wasm_labeler_catalog_bg.wasm \
@@ -901,7 +908,7 @@ _wasm-share-impl: _wasm32-cc-check
 # connected-apps page is distinct from Devices/Media. Wired into the `wasm:`
 # aggregate so `just web` builds it; the web connected-apps page (and the
 # personalization home's subscribed-labelers facet) render off the shared
-# `LabelerCatalogMachine` via `$lib/wasm-connected-apps`.
+# `LabelerCatalogMachine` via `#lib/wasm-connected-apps`.
 wasm-connected-apps:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -927,7 +934,7 @@ _wasm-connected-apps-impl: _wasm32-cc-check
 # page is distinct from every other settings sub-page. Wired into the
 # `wasm:` aggregate so `just web` builds it; the web atproto-settings page
 # renders off the shared `AtprotoSettingsMachine` via
-# `$lib/wasm-atproto-settings`.
+# `#lib/wasm-atproto-settings`.
 #
 # TWO producers, same shape as wasm-onboarding/wasm-onboarding-test — this
 # recipe and `wasm-atproto-settings-test` below, which builds the SAME crate
@@ -1060,7 +1067,6 @@ web: wasm i18n-generate providers-generate
         --target apps/fauna-web/build \
         --source apps/fauna-web/src \
         --source apps/fauna-web/static \
-        --source apps/fauna-web/svelte.config.js \
         --source apps/fauna-web/vite.config.ts \
         --source apps/fauna-web/vite.share-viewer.config.ts \
         --source apps/fauna-web/share-viewer \
@@ -1337,7 +1343,6 @@ web-test: i18n-generate providers-generate
         --target apps/fauna-web/build \
         --source apps/fauna-web/src \
         --source apps/fauna-web/static \
-        --source apps/fauna-web/svelte.config.js \
         --source apps/fauna-web/vite.config.ts \
         --source apps/fauna-web/vite.share-viewer.config.ts \
         --source apps/fauna-web/share-viewer \
@@ -1394,8 +1399,8 @@ web-dev: web
 # The association's governing documents are a real source of this build: the
 # bylaws pages import that markdown at build time — bylaws § 17 requires the
 # bylaws be published at fauna.social and kept up to date — so editing a
-# governing document correctly re-fires this gate. Those documents are kept in
-# the development repo, outside the published tree, alongside the site itself.
+# governing document correctly re-fires this gate. Those documents live in
+# docs/governance/; both they and the site's public parts ship in the public tree.
 # See build-system.md § Public website build.
 #
 # Build the public fauna.social site (no-op when sources unchanged)
@@ -1408,7 +1413,7 @@ site:
         --source sites/fauna-social/deno.json \
         --source sites/fauna-social/deno.lock \
         --source sites/fauna-social/package.json \
-        --source docs/organization \
+        --source docs/governance \
         --source docs/sites/fauna-social \
         --source docs/features \
         --source installer/official-apps.json \
@@ -1426,9 +1431,25 @@ site-preview: site
     @echo "Serving sites/fauna-social/dist at http://127.0.0.1:4321 (Ctrl-C to stop)"
     cd sites/fauna-social && deno task preview
 
-# Build fauna-nest release binary
-nest: i18n-generate providers-generate
-    {{slot_build}} cargo build -p fauna-nest --release
+# Build the fauna-nest release binary in the image's flavor: the feature set the
+# Dockerfile's nest build line enables, so a downloaded nest and the image are one
+# server. `release.yml` builds the released nest with this recipe, one `target`
+# per runner (empty = the host); per-invocation feature resolution, as every
+# artifact build (.cargo/config.toml § feature unification).
+nest target="": i18n-generate providers-generate
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{slot_build}} cargo build --locked -p fauna-nest --features bluesky,nostr,activitypub --release {{ if target == "" { "" } else { "--target " + target } }}
+
+# The three small server binaries a release ships beside the nest, each in its
+# OWN invocation (one naming several packages unifies their features). `target`
+# as for `nest`; `release.yml` builds them with this recipe.
+servers-release target="": i18n-generate providers-generate
+    #!/usr/bin/env bash
+    set -euo pipefail
+    {{slot_build_body}}
+    export CARGO_RESOLVER_FEATURE_UNIFICATION=selected
+    for crate in fauna-push-relay fauna-cors-proxy fauna-front-door; do
+        cargo build --locked -p "$crate" --release {{ if target == "" { "" } else { "--target " + target } }}
+    done
 
 # Build nest Docker image
 docker-build: i18n-generate providers-generate
@@ -1438,13 +1459,14 @@ docker-build: i18n-generate providers-generate
     version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
     {{slot_build}} docker build --build-arg FAUNA_BUILD_COMMIT="$commit" --build-arg FAUNA_VERSION="$version" -t fauna-nest:local .
 
-# Run nest Docker container locally (http://localhost:3000, web app at /app/)
+# Run nest Docker container locally (https://localhost:3443, web app at /app/).
+# The nest's own :3000 binds container loopback; the SNI router's :443 fronts it.
 docker-run: docker-build
     -docker rm -f fauna-nest-local 2>/dev/null
-    docker run -d --name fauna-nest-local -p 3000:3000 -p 8080:8080 -v fauna-nest-local-data:/data -e FAUNA_PORT=3000 fauna-nest:local
+    docker run -d --name fauna-nest-local -p 3443:443 -p 8080:8080 -v fauna-nest-local-data:/data -e FAUNA_PORT=3000 fauna-nest:local
     @echo ""
-    @echo "Nest running at http://localhost:3000"
-    @echo "Web app at    http://localhost:3000/app/"
+    @echo "Nest running at https://localhost:3443"
+    @echo "Web app at    https://localhost:3443/app/"
     @echo ""
     @docker logs fauna-nest-local 2>&1 | grep "CLAIM CODE" -A4 || true
 
@@ -1669,11 +1691,11 @@ e2e-tier-4-test *ARGS:
 # sweep, not the red-green loop; `--nest standalone` (the default) stays the
 # inner loop and pays nothing for this recipe existing.
 #
-# The image is NOT built here and never should be: building the nest image on a
-# dev VM is forbidden — the dev VMs share one physical host and the build
-# starves them (image-pipeline.md § Image tags & channels). Pull a published one first
-# (`docker pull ghcr.io/faunasocial/nest:latest`), or dispatch a real build via
-# `gh workflow run build-nest-image.yml --ref main` and pull its tag. An absent
+# The image is NOT built here: this recipe runs a named image. Pull a published
+# one first (`docker pull ghcr.io/faunasocial/nest:latest`), or test your own tree
+# through a local build — an image only for tests is built locally, never
+# dispatched, since a dispatch adds `:sha-<sha>` to the public package
+# (image-pipeline.md § Image tags & channels, owner ruling 2026-10-19). An absent
 # image refuses the run loudly rather than falling back to standalone.
 # Usage: just e2e-docker-mode-test
 #        just e2e-docker-mode-test ghcr.io/faunasocial/nest:sha-abc123
@@ -1741,8 +1763,8 @@ e2e-live-mode-test URL="https://dev.fauna.build" *ARGS:
 # resolved per box too: FAUNA_LIVE_MAIL_ADDRESS / FAUNA_LIVE_MAIL_PASSWORD > the
 # staging-box file's handle / mail_password, so a provisioned box needs nothing
 # exported; see each test's docstring.
-# Usage: just e2e-cd-gate https://dev.example.com
-#        just e2e-cd-gate https://dev.example.com -k port25
+# Usage: just e2e-cd-gate https://dev.fauna.build
+#        just e2e-cd-gate https://dev.fauna.build -k port25
 e2e-cd-gate URL *ARGS:
     pytest tests/e2e-unified/tests -m cd_suite --nest live:{{URL}} --live-box disposable --fail-on-skip -v {{ARGS}}
 
@@ -1872,6 +1894,17 @@ e2e-version-skew-test *ARGS:
 e2e-walk-sweep *ARGS:
     pytest tests/e2e-unified/tests/walk/ --walk-sweep -v {{ARGS}}
 
+# Produce the store-listing screenshots: the real app on injected fixture content,
+# its own window sized and captured to PNG, each checked against the store's
+# desktop limits (installers/windows.md § Store distribution, the screenshots
+# paragraph). Writes tests/e2e-unified/screenshots/store-listing/<app>/ (git-ignored) unless
+# --store-listing-out names another directory. `--store-listing` is the COLLECTION
+# gate, as `--walk-sweep` is above: the directory produces files, so no default
+# sweep or tier filter may pull it in.
+# Usage: just e2e-store-listing-screenshots --app windows
+e2e-store-listing-screenshots *ARGS:
+    pytest tests/e2e-unified/tests/store_listing/ --store-listing -v {{ARGS}}
+
 # OPT-IN, never the inner loop, for two independent reasons: `--macos-artifact`
 # swaps what `--app macos` launches (a run-level mode, like `--nest docker`), and
 # the same flag is the COLLECTION gate on tests/artifact/ — without it that
@@ -1969,20 +2002,22 @@ e2e-tui-artifact-test *ARGS:
 # The full-flavor RELEASE build of the terminal app — what the archive channel
 # ships (installers/tui.md § What any channel must satisfy: a direct download
 # carries the full default-feature build; `tui-store-safe` is the store flavor).
-# Both binaries, because the archive is two binaries: tui's spawner expects
-# fauna-sync-agent beside it. `release.yml` inlines the same two builds per
-# target; this recipe is the local twin (`just tui-release` → `assemble-archive.sh`).
-tui-release: i18n-generate providers-generate
-    {{slot_build}} cargo build --locked -p fauna-tui -p fauna-sync-agent --release
+# The archive's three binaries: tui's spawner expects fauna-sync-agent beside it,
+# and fauna-cli is the cli app's device shell. `release.yml` (Linux) and
+# `release-macos.yml` (darwin) build the archive with this recipe, one `target`
+# per runner (empty = the host); then `assemble-archive.sh`.
+tui-release target="": i18n-generate providers-generate
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{slot_build}} cargo build --locked -p fauna-tui -p fauna-sync-agent -p fauna-cli-device --release {{ if target == "" { "" } else { "--target " + target } }}
 
 # Live, OPT-IN Hetzner provisioning e2e: provisions a REAL, PAID VPS through the
-# client onboarding path (real api.hetzner.cloud — server + DNS on ONE token),
+# client onboarding path (real api.hetzner.cloud — server and DNS, a token each),
 # runs the live-box deploy-verify gates against it (health/TLS/claim/firewall/
 # mail-ports/DKIM, no SSH), then ALWAYS tears the box + DNS records down.
 # The ONLY required input is HETZNER_API_TOKEN (a Cloud Read&Write token) — from
-# the env, or from the cloud project's token file on this machine
-# (~/.config/fauna/cloud/uat.token for the throwaway boxes; the env wins when
-# both are set; helpers/live_provision.py `hetzner_token`); this
+# the env, or from the two cloud projects' token files on this machine
+# (~/.config/fauna/cloud/uat.token for the throwaway boxes' servers and
+# zone.token for their records under fauna.build; the env wins for both when
+# set; helpers/live_provision.py `hetzner_token`); this
 # recipe sets the FAUNA_E2E_LIVE=1 opt-in for you. Optional env:
 #   FAUNA_E2E_ZONE=<apex>     pick the DNS zone if the token manages >1
 #   FAUNA_E2E_KEEP=1          leave the box up for inspection (no teardown)
@@ -2283,16 +2318,18 @@ feature-test-compile-check:
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-account-store --tests --features test-helpers
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-atproto-settings-machine --tests --features account-port
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-calendar --tests --features nest-segments
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-cli --tests --features device
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-client-backup --tests --features local-clock
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-client-capabilities --tests --features local-clock,p2p-share
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-client-connected-apps --tests --features local-clock,rpc-glue
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-client-dns --tests --features test-helpers
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-client-folders --tests --features mls,p2p-share
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-client-mail-settings --tests --features rpc-glue
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-client-policy --tests --features scorers
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-client-recovery --tests --features aftermath
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-client-search --tests --features query
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-contacts --tests --features nest-segments
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-conversations --tests --features test-helpers
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-conversations --tests --features local-clock,test-helpers
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-core --tests --features format_text,local-clock,qr_render,sqlite-schema-meta
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-credential-store --tests --features live-keychain
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-devices-machine --tests --features rpc-glue,account-port
@@ -2303,7 +2340,7 @@ feature-test-compile-check:
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-labeler-catalog-machine --tests --features rpc-glue
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-launch-machine --tests --features test-helpers,test-observer
     {{ if os() == "linux" { "CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-linux --tests --features live-secret-service" } else { "true" } }}
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-mail --tests --features caldav-schedule,dmarc-report,domain-rename,imap-client,imap-client-native,mail-export,multidomain,nest-segments,outbound-net,role-overrides,segments-codec,segments-receive,staged-envelope,tls-test-fixtures,tlsrpt-report
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-mail --tests --features caldav-schedule,dmarc-report,dmarc-report-view,domain-rename,imap-client,imap-client-native,mail-export,multidomain,nest-segments,outbound-net,role-overrides,segments-codec,segments-receive,staged-envelope,tls-test-fixtures,tlsrpt-report
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-media-machine --tests --features rpc-glue
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-nest-http --tests --features launch-machine
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-onboarding-machine --tests --features test-observer
@@ -2329,7 +2366,13 @@ feature-test-compile-check:
 # `setsid`-spawned environment `merge-gate-check.sh` uses, which inherits no
 # desktop session's `DISPLAY`.
 fauna-linux-test-check:
-    {{slot_build}} xvfb-run -a cargo test --locked -p fauna-linux --bins -- --test-threads=1
+    #!/usr/bin/env bash
+    set -euo pipefail
+    {{slot_build_body}}
+    xvfb-run -a cargo test --locked -p fauna-linux --bins -- --test-threads=1
+    cargo build --locked -p fauna-linux --bin fauna-desktop
+    "${CARGO_TARGET_DIR:-target}/debug/fauna-desktop" --version
+    if command -v desktop-file-validate >/dev/null 2>&1; then desktop-file-validate apps/fauna-linux/packaging/social.fauna.fauna.desktop; else echo "SKIPPED: desktop-file-validate not installed on this machine -- the public linux-desktop job still runs it"; fi
 
 # The PQ-2 peer-channel hardening bounded smoke (p2p.md § Cross-user shared-set
 # transfer → Open questions PQ-2, gate: green before any p2p data-plane slice
@@ -2616,7 +2659,33 @@ workspace-clippy-check:
 # recomputes this whole split, so a NEW dark feature cannot land silently.
 workspace-test-check:
     {{slot_build}} cargo test --locked --workspace --lib --bins \
-        --features fauna-iroh/quic,fauna-client-core/auth-ceremony,fauna-ffi/test-helpers,fauna-mail/mail-export \
+        --features fauna-iroh/quic,fauna-client-core/auth-ceremony,fauna-ffi/test-helpers,fauna-mail/mail-export,fauna-mail/dmarc-report \
+        --exclude fauna-nest \
+        --exclude fauna-linux \
+        --exclude fauna-bridge-service \
+        --exclude fauna-nest-service \
+        --exclude fauna-cfapi \
+        --exclude fauna-shellext-fixture \
+        --exclude fauna-wasm \
+        --exclude fauna-wasm-content-index \
+        --exclude fauna-wasm-onboarding \
+        --exclude fauna-wasm-folders \
+        --exclude fauna-wasm-backups \
+        --exclude fauna-wasm-media \
+        --exclude fauna-wasm-labeler-catalog \
+        --exclude fauna-wasm-connected-apps \
+        --exclude fauna-wasm-atproto-settings \
+        --exclude fauna-wasm-launch
+
+# CHECK-tier gate — RUNS the workspace's doctests, the public workflow's
+# `cargo test --workspace` half that `workspace-test-check`'s `--lib --bins`
+# never reaches (merge-gate-catalog.md § The public CI's dev twins). Same
+# `--features` and `--exclude` list as `workspace-test-check`, so it resolves
+# the same graph. Measured 2026-10-18 on the primary dev VM: 78s warm (400s cold, 146 crates),
+# under the five-minute line that decides a doctest gate is worth a pass slot.
+workspace-doctest-check:
+    {{slot_build}} cargo test --locked --workspace --doc \
+        --features fauna-iroh/quic,fauna-client-core/auth-ceremony,fauna-ffi/test-helpers,fauna-mail/mail-export,fauna-mail/dmarc-report \
         --exclude fauna-nest \
         --exclude fauna-linux \
         --exclude fauna-bridge-service \
@@ -2804,10 +2873,16 @@ onboarding-machine-integration-test-check:
 # every native arm also runs (`src/conformance.rs`), so the web replica is held
 # to the one statement of the `StoreBackend` contract. `--features test-helpers`
 # is the harness (the suite + its memory test double); `tests/web.rs` requires it.
+# `WASM_BINDGEN_TEST_DRIVER_TIMEOUT=60` (2026-10-15): the snap geckodriver can
+# take longer to bind its port on a loaded box than the runner's default wait,
+# and the runner then SIGKILLs it ("driver failed to bind port during
+# startup") before any test runs — a merge-gate red 2026-10-14, and 2 of 2 solo runs of
+# fauna-account-port at load ~27, green with the longer wait.
 wasm-test-check:
     #!/usr/bin/env bash
     set -euo pipefail
     {{slot_build_body}}
+    export WASM_BINDGEN_TEST_DRIVER_TIMEOUT=60
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected wasm-pack test --headless --firefox libs/fauna-wasm --locked
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected wasm-pack test --headless --firefox libs/fauna-rpc-wasm --locked
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected wasm-pack test --headless --firefox libs/fauna-account-port --locked
@@ -3288,6 +3363,21 @@ android-debug: android-ffi-test i18n-generate providers-generate
 android-tunnel-spec login="" address="":
     @{{py}} tests/e2e-unified/helpers/android_venue.py "{{login}}" "{{address}}"
 
+# Print the script that makes the android e2e venue standing: three launchd user
+# agents on the emulator's machine (adb server, headless emulator, the tunnel
+# above), each RunAtLoad + KeepAlive, so the venue is up after every restart with
+# nobody acting. Generated from the same port
+# constants as the tunnel. Prints only; the user runs it on the emulator's machine.
+android-venue-agents login="" address="":
+    @{{py}} tests/e2e-unified/helpers/android_venue.py --agents "{{login}}" "{{address}}"
+
+# Is the android e2e venue up? One line — `venue UP: … serves emulator-5554` or
+# `venue DOWN: <which leg>` — asked of the tunnelled adb server through the
+# harness's own adb prefix (`-L tcp:127.0.0.1:18509`, which never starts a local
+# server). Exit 0 when up, 1 otherwise. Cheap: one `adb devices`, 5 s at most.
+android-venue-probe:
+    @{{py}} tests/e2e-unified/helpers/android_venue.py --probe
+
 # Build Android release APK
 android-release: android-ffi i18n-generate providers-generate
     {{slot_build}} apps/fauna-android/gradlew -p apps/fauna-android assembleRelease
@@ -3315,12 +3405,51 @@ android-release: android-ffi i18n-generate providers-generate
 # packed bytes reports zero for everything — which reads exactly like a perfect
 # strip (the same trap `android-store-safe-check` documents at length).
 android-bundle: (android-ffi "dist") i18n-generate providers-generate
+    @just _android-bundle release
+
+# Build the Play upload AAB of the `storeSafe` build type — the `0.1.4` Play
+# upload (installers/android.md § Goal, "The `0.1.4` Play upload is the
+# `storeSafe` build", user-ruled 2026-10-14; from `0.1.5` the Play upload is
+# `android-bundle-store-no-payments`, below): `android-bundle`'s twin over the
+# store-safe FFI, so payments, zaps and peer-to-peer sharing are excised.
+#
+# `storeSafe` is `initWith(release)` with no application-id suffix and no
+# version-name suffix, so the bundle carries the main Play identity
+# (`social.fauna.fauna`, the fleet `versionName`) and the release signing
+# config — signed exactly where `android-bundle` is.
+#
+# Its excision witness runs on the bundle itself, after the automation-surface
+# strip check: `scripts/android-store-safe-scan.sh absent` over `base/dex` and
+# `base/lib`, the same pattern list `android-store-safe-check` holds the witness
+# APK to. The scan's positive controls stand in for that recipe's default
+# column, so the upload build needs no second, payments-carrying bundle.
+android-bundle-store-safe: (android-ffi-store-safe "dist") i18n-generate providers-generate
+    @just _android-bundle storeSafe
+
+# Build the Play upload AAB of the `storeNoPayments` build type — the second
+# store flavor (dynamic-features.md § The App-Store escape hatch → *The store
+# flavors*): payments and zaps excised, peer-to-peer sharing kept. THE Play
+# upload from `0.1.5` on (installers/android.md § Goal, owner-ruled 2026-10-18:
+# no payments on Play until each app has made its first successful release in
+# every store it ships through). Same identity and signing as
+# `android-bundle-store-safe`; its scan is the `no-payments` mode, which proves
+# both halves on the bundle itself.
+android-bundle-store-no-payments: (android-ffi-store-no-payments "dist") i18n-generate providers-generate
+    @just _android-bundle storeNoPayments
+
+# The body both Play bundles share: build `bundle<Variant>`, find the AAB, run
+# the automation-surface strip check, then (the two store build types) the
+# excision scan in the mode that matches the variant,
+# and report the signing state.
+_android-bundle variant:
     #!/usr/bin/env bash
     set -euo pipefail
     export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-21-openjdk-arm64}"
-    {{slot_build}} apps/fauna-android/gradlew -p apps/fauna-android bundleRelease
+    VARIANT="{{variant}}"
+    TASK="bundle${VARIANT^}"
+    {{slot_build}} apps/fauna-android/gradlew -p apps/fauna-android "$TASK"
 
-    AAB="apps/fauna-android/app/build/outputs/bundle/release/app-release.aab"
+    AAB="apps/fauna-android/app/build/outputs/bundle/$VARIANT/app-$VARIANT.aab"
     [ -f "$AAB" ] || { echo "ERROR: no bundle at $AAB" >&2; exit 1; }
 
     WORK="$(mktemp -d "{{tmp_root}}/android-bundle-check.XXXXXX")"
@@ -3335,7 +3464,7 @@ android-bundle: (android-ffi "dist") i18n-generate providers-generate
     rc=0
     for marker in '/app/commands' '/app/state' 'TestAgentEntryPoint' 'Starting with bridge'; do
         if grep -qF -- "$marker" "$WORK/dex.strings"; then
-            echo "FAIL: automation-surface marker '$marker' present in the release bundle dex" >&2
+            echo "FAIL: automation-surface marker '$marker' present in the $VARIANT bundle dex" >&2
             rc=1
         fi
     done
@@ -3343,7 +3472,13 @@ android-bundle: (android-ffi "dist") i18n-generate providers-generate
         echo "  the src/debug TestAgent reached a shipping flavor; see testing.md convention 15" >&2
         exit 1
     fi
-    echo "android-bundle: automation surface absent from the release dex (4 markers checked)"
+    echo "android-bundle: automation surface absent from the $VARIANT dex (4 markers checked)"
+
+    if [ "$VARIANT" = storeSafe ]; then
+        bash scripts/android-store-safe-scan.sh absent "$AAB" "$WORK/store-safe"
+    elif [ "$VARIANT" = storeNoPayments ]; then
+        bash scripts/android-store-safe-scan.sh no-payments "$AAB" "$WORK/store-no-payments"
+    fi
 
     # Signed-or-not is a property of THIS machine key custody, not of the build,
     # so report it rather than requiring it.
@@ -3366,6 +3501,13 @@ android-bundle: (android-ffi "dist") i18n-generate providers-generate
 android-store-safe: android-ffi-store-safe i18n-generate providers-generate
     {{slot_build}} apps/fauna-android/gradlew -p apps/fauna-android assembleStoreSafe
 
+# Build the store-no-payments Android APK — the second store flavor
+# (dynamic-features.md § The App-Store escape hatch → *The store flavors*):
+# `assembleStoreNoPayments` is `storeSafe`'s twin with `BuildConfig.P2P_SHARE =
+# true` and the built ceremony glue, over the `store-safe,p2p-share` FFI.
+android-store-no-payments: android-ffi-store-no-payments i18n-generate providers-generate
+    {{slot_build}} apps/fauna-android/gradlew -p apps/fauna-android assembleStoreNoPayments
+
 # Build the Fauna Kids APK (family-safety.md § The account age band, the
 # kids-app bullet; installers/android.md § Goal): the `kids` build type —
 # `storeSafe` under the `social.fauna.faunakids` identity, over the
@@ -3386,11 +3528,13 @@ android-kids: android-ffi-kids i18n-generate providers-generate
 android-foss: android-ffi-foss i18n-generate providers-generate
     {{slot_build}} apps/fauna-android/gradlew -p apps/fauna-android assembleFoss
 
-# The `foss` witness: the assembled APK's dex must name NO
-# `com.google.android.play` class — that absence is what makes the artifact
-# F-Droid-includable and honest on a Play-less device. Greps the dex members,
-# not the packed APK (the `android-store-safe-check` trap: deflate-compressed
-# dex strings read as a perfect strip).
+# The `foss` witness: the assembled APK's dex must name NO Play, Play-services
+# or Firebase class (`com.google.android.play`, `com.google.android.gms`,
+# `com.google.firebase` — the last two the push fallback's reach, kept off
+# `foss` by android.md § Push Notifications) — that absence is what makes the
+# artifact F-Droid-includable and honest on a Play-less device. Greps the dex
+# members, not the packed APK (the `android-store-safe-check` trap:
+# deflate-compressed dex strings read as a perfect strip).
 android-foss-check: android-foss
     #!/usr/bin/env bash
     set -euo pipefail
@@ -3400,14 +3544,17 @@ android-foss-check: android-foss
     WORK="$(mktemp -d "{{tmp_root}}/android-foss-check.XXXXXX")"
     trap 'rm -rf "$WORK"' EXIT
     unzip -q -o "$APK" 'classes*.dex' -d "$WORK"
-    HITS="$(cat "$WORK"/classes*.dex | strings -a | grep -c 'com/google/android/play/' || true)"
-    if [ "$HITS" != "0" ]; then
-        echo "ERROR: the foss APK's dex names com.google.android.play $HITS time(s) — a Play library reached the F-Droid artifact" >&2
-        exit 1
-    fi
+    strings -a "$WORK"/classes*.dex > "$WORK/strings.txt"
+    for PREFIX in com/google/android/play/ com/google/android/gms/ com/google/firebase/; do
+        HITS="$(grep -c "$PREFIX" "$WORK/strings.txt" || true)"
+        if [ "$HITS" != "0" ]; then
+            echo "ERROR: the foss APK's dex names ${PREFIX//\//.} $HITS time(s) — a Play, Play-services or Firebase library reached the F-Droid artifact" >&2
+            exit 1
+        fi
+    done
     # The debug-only cleartext overlay (127.0.0.1) must not be in the packed config.
     bash scripts/android-apk-nsc-check.sh "$APK"
-    echo "android-foss-check: OK — no com.google.android.play class in $APK"
+    echo "android-foss-check: OK — no Play, Play-services or Firebase class in $APK"
 
 android-ffi-foss profile="release": i18n-generate providers-generate
     @just _android-ffi-flavor foss "" all "{{profile}}"
@@ -3446,6 +3593,14 @@ android-ffi-test: i18n-generate providers-generate
 # `app/src/noP2pShare/` for this variant.
 android-ffi-store-safe profile="release": i18n-generate providers-generate
     @just _android-ffi-flavor storeSafe store-safe all "{{profile}}"
+
+# Store-no-payments Android FFI — the second store flavor (dynamic-features.md
+# § The App-Store escape hatch → *The store flavors*): the complement plus
+# `p2p-share`, so the face carries no payments or zap export (the app's
+# `src/noPayments/` glue) and keeps the ceremony face (`src/p2pShare/`).
+# Stages into `src/storeNoPayments/`, that build type's own source set.
+android-ffi-store-no-payments profile="release": i18n-generate providers-generate
+    @just _android-ffi-flavor storeNoPayments store-safe,p2p-share all "{{profile}}"
 
 # Kids Android FFI — the Fauna Kids flavor (family-safety.md § The account age
 # band, the kids-app bullet; dynamic-features.md § Compile-time excision).
@@ -3529,9 +3684,12 @@ _android-ffi-flavor buildtype features abis="all" profile="release":
     # always-on composition the apple recipes use.
     if [ "$FEATURES" = "store-safe" ]; then
         FEATURE_FLAGS="--no-default-features --features store-safe,file-provider-host"
-    # `store-safe,<extra>` is the complement PLUS a named interim carry (see
-    # `_STORE_SAFE_INTERIM_CARRY` in `test_payments_excision_spine.py`, which
-    # pins every shell to none today), never a second spelling of the complement.
+    # `store-safe,<member>` is the complement PLUS the registry members a store
+    # flavor keeps — `store-safe,p2p-share` is `store-no-payments`
+    # (dynamic-features.md § The App-Store escape hatch → *The store flavors*) —
+    # never a second spelling of the complement. The `store-safe` recipes pin
+    # their own carry to none (`_STORE_SAFE_INTERIM_CARRY` in
+    # `test_payments_excision_spine.py`).
     elif [ "${FEATURES#store-safe,}" != "$FEATURES" ]; then
         FEATURE_FLAGS="--no-default-features --features $FEATURES,file-provider-host"
     # The kids flavor (family-safety.md § The account age band, the kids-app
@@ -3770,7 +3928,7 @@ _android-ffi-bindgen target_dir stage_java stage_jni abis="all" profile_dir="rel
     # the moment it is proving itself clean.
     SEAMS="$( { grep -rl 'ForTest' "$STAGE_JAVA/uniffi" "$STAGE_JAVA/com/fauna/ffi" 2>/dev/null || true; } | wc -l )"
     case "$STAGE_JAVA" in
-      */src/release/*|*/src/storeSafe/*|*/src/foss/*|*/src/kids/*)
+      */src/release/*|*/src/storeSafe/*|*/src/storeNoPayments/*|*/src/foss/*|*/src/kids/*)
         # `storeSafe` is a shipping flavor too (dynamic-features.md § The
         # App-Store escape hatch), so it holds convention 15's production bar,
         # not the test flavor's. Without this arm it would fall through to the
@@ -3834,6 +3992,9 @@ _android-ffi-bindgen target_dir stage_java stage_jni abis="all" profile_dir="rel
     case "$STAGE_JAVA" in
       */src/release/*)   FLAVOR_FLAG=--production-tree; SIBLING="${STAGE_JAVA%/release/java}/debug/java"; SIBLING_REFRESH="just android-ffi-test" ;;
       */src/storeSafe/*) FLAVOR_FLAG=--production-tree; SIBLING="";                                       SIBLING_REFRESH="" ;;
+      # `storeNoPayments` differs from `debug` by the `payments`/`zaps` plane as
+      # well as `test-helpers`, so it takes no sibling, for `storeSafe`'s reason.
+      */src/storeNoPayments/*) FLAVOR_FLAG=--production-tree; SIBLING="";                                 SIBLING_REFRESH="" ;;
       # `kids` is `storeSafe`'s case one flavor further: it differs from `debug`
       # by the kids-excised planes as well, so it takes no sibling either. Their
       # absence is the kids dex witness's to measure (the `android-kids-check`
@@ -3919,8 +4080,8 @@ _android-ffi-bindgen target_dir stage_java stage_jni abis="all" profile_dir="rel
 # the primary dev VM. Routes around the Rosetta-AOT NDK block by regenerating
 # bindings from a HOST-target libfauna_ffi.so — the app/build.gradle.kts
 # testOptions wiring points JNA at $CARGO_TARGET_DIR/debug so FFI-touching
-# tests initialize instead of dying at class-init. Not CI-gated; run by hand
-# after android changes.
+# tests initialize instead of dying at class-init. Run by hand after android
+# changes; the merge-gate check runs it daily as `android-host-test-check`.
 #
 # ONE slot for the whole recipe (build-machine-resources.md § Build/e2e slot
 # locks → The slot is the recipe's dataset lease). The body builds
@@ -3980,20 +4141,15 @@ _android-host-test-impl *ARGS:
     {{slot_build}} apps/fauna-android/gradlew -p apps/fauna-android :app:testDebugUnitTest {{ARGS}}
 
 # Compile-only gate for android's `src/test/` source set — the android sibling of `windows-cs-test-compile`
-# (merge-gate-check.md § Merge-gate check (win)). `:app:compileDebugUnitTestKotlin`
+# (merge-gate-check-win.md § Merge-gate check (win)). `:app:compileDebugUnitTestKotlin`
 # is a fraction of `testDebugUnitTest`'s cost (no Robolectric execution) and
 # catches exactly the class this gate exists for: a UniFFI record field-add
 # breaking the Kotlin construction sites in `src/test/` silently, since
 # nothing else on any merge path compiles that source set
 # (`android-store-safe-check` builds only `src/main + src/release`).
-# Deliberately compile-only, not `testDebugUnitTest`: when this gate was
-# armed android's test suite carried pre-existing unrelated failures (the
-# `peer-wg-key-copy-btn` fixtures, a WireGuard element already removed from
-# ui.yaml), so a test-RUN gate would have been red on arrival — the exact trap
-# `share-pump-check`'s deferred arming avoids. Those fixtures (the suite's
-# only deterministic reds, 1747/1750 green) were dropped 2026-09-29; a run
-# on a loaded box still flakes on Robolectric `AppNotIdleException`, so
-# promoting this gate to a test run is open.
+# Compile-only per commit, not `testDebugUnitTest`: a run costs ~6 min warm on
+# a scope that fires on nearly every pass. The run is `android-host-test-check`
+# below, once a day.
 android-unit-test-compile-check:
     {{slot_build}} just _android-unit-test-compile-check-impl
 
@@ -4113,9 +4269,20 @@ apple-ffi-watch profile="release": i18n-generate providers-generate
 # over UniFFI. This is what the iOS e2e path builds (conftest routes ios here) —
 # the `#if DEBUG` FaunaKit TestAgent that calls the seams is compiled into the
 # simulator build it drives. `just apple-ffi` (production) is what device/CI
-# builds and anything shippable takes.
+# builds and anything shippable takes. All three slices: a Debug `Fauna-iOS`
+# build for a real device links the `aarch64-apple-ios` one.
 apple-ffi-test profile="release": i18n-generate providers-generate
     @just _apple-ffi-flavor "test-helpers" "" "{{profile}}"
+
+# The iOS e2e's FFI — `apple-ffi-test` without the device slice (`sim`: the
+# 2-slice set `aarch64-apple-{ios-sim, darwin}`). The e2e app is built for the
+# iOS Simulator only, so the device slice — about a third of the three-slice
+# build, 4.1 G per checkout — was compiled for nothing. darwin stays because the
+# macOS app shares the staging slot and a run selecting both apple apps restores
+# this artifact last. conftest routes `ios` here. A later `apple-ffi-test` on the
+# same tree compiles only the device slice: cargo no-ops the two it shares.
+apple-ffi-test-sim profile="release": i18n-generate providers-generate
+    @just _apple-ffi-flavor "test-helpers" sim "{{profile}}"
 
 # Store-safe full FFI — the App-Store escape hatch's apple xcframework flavor
 # (`dynamic-features.md` § The App-Store escape hatch; the row this recipe
@@ -4161,7 +4328,7 @@ apple-ffi-kids profile="release": i18n-generate providers-generate
 # both flavors write ONE staging slot (Package.swift's binaryTarget path is
 # fixed), so the `.ffi-flavor` marker is the whole gate rather than a
 # convenience. See `_windows-ffi-flavor` for the same shape.
-_apple-ffi-flavor features watch="" profile="release":
+_apple-ffi-flavor features slices="" profile="release":
     #!/usr/bin/env bash
     set -euo pipefail
     # Fail fast on a dead display rather than build for twenty minutes and then
@@ -4179,17 +4346,21 @@ _apple-ffi-flavor features watch="" profile="release":
     # pass `dist` (installers/windows.md § Size & build profile).
     PROFILE="{{profile}}"
     # --- Slice SHAPE: the second axis over the same one staging slot ------------
-    # Default is the three triples something can actually LINK. The two watchOS
-    # slices are opt-in (`just apple-ffi-watch`) because no watchOS app build path
-    # exists — no `just` recipe, no Xcode target, no scheme — so they were two release compiles per checkout for zero consumers.
-    # SLICE_TRIPLES itself is (re)computed in `_apple-ffi-build-impl` from WATCH —
-    # this half only needs SHAPE, for the cache key and the flavor marker.
-    WATCH="{{watch}}"
-    if [ -n "$WATCH" ]; then
-        SHAPE=5slice
-    else
-        SHAPE=3slice
-    fi
+    # Default ("") is the three triples something can actually LINK. The two
+    # watchOS slices are opt-in (`watch`, `just apple-ffi-watch`) because no
+    # watchOS app build path exists — no `just` recipe, no Xcode target, no
+    # scheme — so they were two release compiles per
+    # checkout for zero consumers. `sim` drops the device slice for the iOS e2e,
+    # which links the simulator slice only (`apple-ffi-test-sim`).
+    # SLICE_TRIPLES itself is (re)computed in `_apple-ffi-build-impl` from
+    # SLICES — this half only needs SHAPE, for the cache key and the flavor marker.
+    SLICES="{{slices}}"
+    case "$SLICES" in
+        "") SHAPE=3slice ;;
+        watch) SHAPE=5slice ;;
+        sim) SHAPE=2slice ;;
+        *) echo "apple-ffi: unknown slice set '$SLICES' (expected '', watch or sim)" >&2; exit 2 ;;
+    esac
     # The `.ffi-flavor` marker records FLAVOR:FEATURES (see the guard in
     # `_apple-ffi-build-impl`), and the slice shape belongs in the FLAVOR half: it
     # is a property of the staged artifact, not of the feature set. Mirrors
@@ -4275,13 +4446,17 @@ _apple-ffi-flavor features watch="" profile="release":
         # Restore in a subshell; on any failure fall through to a real build
         # rather than exit 0 with half-restored artifacts. FFICompat.swift is
         # hand-written/tracked — the *.swift copy never names it, so it stands.
+        # Mtimes are kept (`cp -p`, 2026-10-21): a run selecting both apple apps
+        # restores this entry after every macOS host build, and fresh mtimes made
+        # the iOS `xcodebuild` recompile the bindings module and everything above
+        # it each time for byte-identical files.
         if [ -d "$HIT/FaunaFFI.xcframework" ] && (
                 set -e
                 rm -rf apps/fauna-apple/FaunaFFI.xcframework
-                cp -R "$HIT/FaunaFFI.xcframework" apps/fauna-apple/FaunaFFI.xcframework
+                cp -pRc "$HIT/FaunaFFI.xcframework" apps/fauna-apple/FaunaFFI.xcframework
                 rm -rf apps/fauna-apple/generated
-                cp -R "$HIT/generated" apps/fauna-apple/generated
-                cp apps/fauna-apple/generated/*.swift apps/fauna-apple/FaunaFFISwift/Sources/
+                cp -pRc "$HIT/generated" apps/fauna-apple/generated
+                cp -p apps/fauna-apple/generated/*.swift apps/fauna-apple/FaunaFFISwift/Sources/
             ); then
             echo "$CACHE_KEY" > "$STAMP"
             echo "$FLAVOR:$FEATURES" > apps/fauna-apple/.ffi-flavor
@@ -4298,6 +4473,66 @@ _apple-ffi-flavor features watch="" profile="release":
         echo "apple-ffi: cache disabled or working tree dirty (libs/Cargo.lock/toolchain) — building without cache"
     fi
 
+    # --- Local fast path, no cache key: a dirty libs/ tree or the cache off ---
+    # (2026-10-21) The cache above answers "nothing to do" only on a clean tree,
+    # so a dirty but warm tree used to take the build slot below just to find the
+    # slices and bindings current — and an e2e run's in-hold re-check, which
+    # refuses every `build` acquire, released its lane over it (build-slot-pool.md
+    # § Cross-pool acquisition order → the warm pass). The host flavor's shape,
+    # read UNSLOTTED: this flavor's cargo stamp (written by `_apple-ffi-build-impl`
+    # after its slice builds, listing the slices it built — SLICE_TRIPLES stays
+    # single-homed there) against the cargo inputs, then its bindgen stamp against
+    # those slices. Both fresh: the staged artifact is current when the marker
+    # names this flavor, and otherwise this flavor's stash — the clone of its
+    # last bindgen output the impl keeps — is restored, mtimes kept, so a
+    # flavor switch (an e2e run selecting both apple apps) re-checks without a
+    # slot too. Anything else falls through to the slotted build.
+    if [ -z "$CACHE_KEY" ]; then
+        LOCAL_ID="$SHAPE-$PROFILE-${FEATURES:-production}"
+        CARGO_STAMP="target/apple-ffi-cargo-$LOCAL_ID.stamp"
+        BINDGEN_STAMP="target/apple-ffi-bindgen-$LOCAL_ID.stamp"
+        STASH="target/apple-ffi-full/$LOCAL_ID/staged"
+        SLICE_TARGET_ARGS=()
+        SLICE_SOURCE_ARGS=()
+        if [ -f "$CARGO_STAMP" ] && [ -f "$BINDGEN_STAMP" ]; then
+            while IFS= read -r lib; do
+                [ -n "$lib" ] || continue
+                SLICE_TARGET_ARGS+=(--target "$lib")
+                SLICE_SOURCE_ARGS+=(--source "$lib")
+            done < "$CARGO_STAMP"
+        fi
+        if [ "${#SLICE_TARGET_ARGS[@]}" -gt 0 ] && \
+           {{py}} scripts/build-if-stale.py --check -q --stamp "$CARGO_STAMP" "${SLICE_TARGET_ARGS[@]}" \
+               --source libs ${VENDOR_SOURCE:-} --source Cargo.lock --source rust-toolchain.toml \
+               --source .cargo/config.toml \
+               --exclude '*/pkg/*' --exclude '*/pkg-test/*' --exclude 'libs/fauna-mail-go/*' && \
+           {{py}} scripts/build-if-stale.py --check -q --stamp "$BINDGEN_STAMP" "${SLICE_SOURCE_ARGS[@]}"; then
+            if [ "$(cat apps/fauna-apple/.ffi-flavor 2>/dev/null)" = "$FLAVOR:$FEATURES" ] && \
+               [ -d apps/fauna-apple/FaunaFFI.xcframework ] && \
+               [ -f apps/fauna-apple/FaunaFFISwift/Sources/FaunaFFI.swift ]; then
+                echo "apple-ffi: local $FLAVOR:${FEATURES:-production} artifacts current (cargo + bindgen stamps fresh) — nothing to do"
+                exit 0
+            fi
+            if [ -f "$STASH/.stashed" ] && [ ! "$BINDGEN_STAMP" -nt "$STASH/.stashed" ] && (
+                    set -e
+                    rm -rf apps/fauna-apple/FaunaFFI.xcframework
+                    cp -pRc "$STASH/FaunaFFI.xcframework" apps/fauna-apple/FaunaFFI.xcframework
+                    rm -rf apps/fauna-apple/generated
+                    cp -pRc "$STASH/generated" apps/fauna-apple/generated
+                    find apps/fauna-apple/FaunaFFISwift/Sources -maxdepth 1 -name '*.swift' \
+                        ! -name 'FFICompat.swift' -delete
+                    cp -p apps/fauna-apple/generated/*.swift apps/fauna-apple/FaunaFFISwift/Sources/
+                ); then
+                # The staged generation is no cache key's: a later clean tree
+                # must not fast-path against it.
+                rm -f apps/fauna-apple/.ffi-cache.stamp
+                echo "$FLAVOR:$FEATURES" > apps/fauna-apple/.ffi-flavor
+                echo "apple-ffi: restored the stashed $FLAVOR:${FEATURES:-production} artifacts (cargo + bindgen stamps fresh) — no rebuild"
+                exit 0
+            fi
+        fi
+    fi
+
     # ONE slot for the whole build (build-machine-resources.md § Build/e2e slot
     # locks → the slot is the recipe's dataset lease: the
     # xcframework assembly consumes the dataset staticlibs the slice builds
@@ -4307,14 +4542,14 @@ _apple-ffi-flavor features watch="" profile="release":
     # (build-slot.py § FIFO ticket queue). Passed via env, not `just` params — a
     # parametrized delegate call defeats the tier_1 tests' generic one-line-
     # delegation detection (`_recipe_body`), which requires the call to be bare.
-    export FEATURES WATCH CACHE_KEY CACHE_ROOT FLAVOR PROFILE
+    export FEATURES SLICES CACHE_KEY CACHE_ROOT FLAVOR PROFILE
     {{slot_build}} just _apple-ffi-build-impl
 
 # The slotted build phase split out of `_apple-ffi-flavor` (2026-08-25):
 # the cache lookup above stays unslotted (a warm tree must never queue) while
 # every phase that actually produces and consumes a build product — the slice
 # builds, the xcframework assembly, the cache populate — shares ONE lease.
-# Reads FEATURES/WATCH/CACHE_KEY/CACHE_ROOT/FLAVOR/PROFILE from the environment
+# Reads FEATURES/SLICES/CACHE_KEY/CACHE_ROOT/FLAVOR/PROFILE from the environment
 # (see the export above); never invoked directly.
 _apple-ffi-build-impl:
     #!/usr/bin/env bash
@@ -4328,7 +4563,7 @@ _apple-ffi-build-impl:
     # treats empty the same as unset — `set -u` alone still catches a genuinely
     # missing export.
     FEATURES="${FEATURES?}"
-    WATCH="${WATCH:-}"
+    SLICES="${SLICES:-}"
     CACHE_KEY="${CACHE_KEY:-}"
     CACHE_ROOT="${CACHE_ROOT:?}"
     FLAVOR="${FLAVOR:?}"
@@ -4354,22 +4589,30 @@ _apple-ffi-build-impl:
     else
         FEATURE_ARGS=(--features "file-provider-host")
     fi
-    # SHAPE/SLICE_TRIPLES: recomputed from WATCH rather than passed through
+    # SHAPE/SLICE_TRIPLES: recomputed from SLICES rather than passed through
     # (bash arrays do not survive `export`) — `_apple-ffi-flavor` above derives
-    # the same SHAPE from the same WATCH for the cache key, so this is one cheap
-    # deterministic if/else duplicated, not a second hand-kept slice list.
+    # the same SHAPE from the same SLICES for the cache key, so this is one cheap
+    # deterministic switch duplicated, not a second hand-kept slice list.
     #
     # ⚠ SLICE_TRIPLES is the SINGLE home of the slice set: the cargo lines, the
-    # build-if-stale `--source` list and `_apple-ffi-bindgen`'s slice arguments
-    # are all derived from it below. A second hand-listed copy is exactly how the
-    # windows bindgen gate went non-stamp — one list, always.
-    if [ -n "$WATCH" ]; then
-        SHAPE=5slice
-        SLICE_TRIPLES=(aarch64-apple-ios aarch64-apple-ios-sim aarch64-apple-watchos aarch64-apple-watchos-sim aarch64-apple-darwin)
-    else
-        SHAPE=3slice
-        SLICE_TRIPLES=(aarch64-apple-ios aarch64-apple-ios-sim aarch64-apple-darwin)
-    fi
+    # build-if-stale `--source` list, `_apple-ffi-bindgen`'s slice arguments and
+    # its library argument are all derived from it below. A second hand-listed
+    # copy is exactly how the windows bindgen gate went non-stamp — one list,
+    # always.
+    case "$SLICES" in
+        watch)
+            SHAPE=5slice
+            SLICE_TRIPLES=(aarch64-apple-ios aarch64-apple-ios-sim aarch64-apple-watchos aarch64-apple-watchos-sim aarch64-apple-darwin)
+            ;;
+        sim)
+            SHAPE=2slice
+            SLICE_TRIPLES=(aarch64-apple-ios-sim aarch64-apple-darwin)
+            ;;
+        *)
+            SHAPE=3slice
+            SLICE_TRIPLES=(aarch64-apple-ios aarch64-apple-ios-sim aarch64-apple-darwin)
+            ;;
+    esac
     # Deployment targets must match apps/fauna-apple/Package.swift's
     # `platforms:` mins, otherwise zstd-sys / ring / sqlite cc-rs builds use
     # the SDK default (e.g. iOS 26.4 on Xcode 26.4) while cargo's link step
@@ -4408,7 +4651,20 @@ _apple-ffi-build-impl:
         rm -rf apps/fauna-apple/FaunaFFI.xcframework
     fi
 
-    # iOS targets. `test-helpers` (TEST FLAVOR ONLY) exposes the OnboardingMachine
+    # This flavor's cargo stamp — read by `_apple-ffi-flavor`'s local fast path,
+    # never here (the slice builds below always run; cargo decides). Dated BEFORE
+    # the first slice build, inside this recipe's slot, and dropped until every
+    # slice has built, so a failed build leaves no stamp and an input edited
+    # mid-build stays newer than it.
+    LOCAL_ID="$SHAPE-$PROFILE-${FEATURES:-production}"
+    CARGO_STAMP="target/apple-ffi-cargo-$LOCAL_ID.stamp"
+    BINDGEN_STAMP="target/apple-ffi-bindgen-$LOCAL_ID.stamp"
+    mkdir -p target
+    rm -f "$CARGO_STAMP"
+    touch "$CARGO_STAMP.t0.$$"
+
+    # One build per slice in SLICE_TRIPLES, in its order. iOS and macOS slices:
+    # `test-helpers` (TEST FLAVOR ONLY) exposes the OnboardingMachine
     # snapshot setters via UniFFI for the E2E `call_machine_method` bridge. Until
     # 2026-08-02 there was only ONE recipe and it passed the feature unconditionally,
     # so all 23 seams were exported by the xcframework `mac-release` / `mac-app` /
@@ -4417,9 +4673,8 @@ _apple-ffi-build-impl:
     # FaunaKit's FileProviderHost.swift already calls FfiFileProviderHost, so every
     # apple slice needs it explicitly (it's default-OFF specifically so
     # windows doesn't compile it).
-    {{slot_build}} cargo build --locked -p fauna-ffi --profile "$PROFILE" "${FEATURE_ARGS[@]}" --target aarch64-apple-ios
-    {{slot_build}} cargo build --locked -p fauna-ffi --profile "$PROFILE" "${FEATURE_ARGS[@]}" --target aarch64-apple-ios-sim
-    # watchOS targets — OPT-IN ONLY (`just apple-ffi-watch`; see the SHAPE block
+    #
+    # watchOS slices — OPT-IN ONLY (`just apple-ffi-watch`; see the SHAPE block
     # above).
     # Build STATICLIB-ONLY via `cargo rustc --crate-type`: the xcframework below
     # consumes only the `.a` (every `--source …/libfauna_ffi.a`), never the cdylib.
@@ -4431,12 +4686,16 @@ _apple-ffi-build-impl:
     # includes watchOS (SystemConfiguration.framework doesn't exist there). Emitting
     # only the consumed `.a` skips the cdylib link on both slices (kept symmetric) and
     # the dead uniffi-bindgen bin build. See build-system.md § apple-ffi watchOS slice.
-    if [ -n "$WATCH" ]; then
-        {{slot_build}} cargo rustc --locked -p fauna-ffi --lib --crate-type staticlib --no-default-features --profile "$PROFILE" --target aarch64-apple-watchos
-        {{slot_build}} cargo rustc --locked -p fauna-ffi --lib --crate-type staticlib --no-default-features --profile "$PROFILE" --target aarch64-apple-watchos-sim
-    fi
-    # macOS target
-    {{slot_build}} cargo build --locked -p fauna-ffi --profile "$PROFILE" "${FEATURE_ARGS[@]}" --target aarch64-apple-darwin
+    for triple in "${SLICE_TRIPLES[@]}"; do
+        case "$triple" in
+            *-watchos|*-watchos-sim)
+                {{slot_build}} cargo rustc --locked -p fauna-ffi --lib --crate-type staticlib --no-default-features --profile "$PROFILE" --target "$triple"
+                ;;
+            *)
+                {{slot_build}} cargo build --locked -p fauna-ffi --profile "$PROFILE" "${FEATURE_ARGS[@]}" --target "$triple"
+                ;;
+        esac
+    done
     # cargo is incremental: the slice builds above no-op when fresh and relink
     # (bump each .a's mtime) only on an actual source/dep change. So the .a slices
     # are the precise staleness signal — regenerate the bindings + xcframework iff
@@ -4461,6 +4720,11 @@ _apple-ffi-build-impl:
         SLICE_SOURCE_ARGS+=(--source "target/$triple/$PROFILE/libfauna_ffi.a")
         SLICE_LIBS+=("target/$triple/$PROFILE/libfauna_ffi.a")
     done
+    # Every slice built: commit the cargo stamp, listing the slices (one per
+    # line — the fast path's only copy of the slice set), at the pre-build instant.
+    printf '%s\n' "${SLICE_LIBS[@]}" > "$CARGO_STAMP"
+    touch -r "$CARGO_STAMP.t0.$$" "$CARGO_STAMP"
+    rm -f "$CARGO_STAMP.t0.$$"
     # --stamp, not the staged xcframework, carries freshness — and here that is
     # a CORRECTNESS fix, not the usual cargo-no-op one. `_apple-ffi-bindgen`
     # generates the bindings FIRST and runs the seam witness LAST, so a witness
@@ -4482,13 +4746,13 @@ _apple-ffi-build-impl:
     # fixing it (production↔test, or 3slice↔5slice, silently serving the
     # other flavor's stamp). So the stamp path carries every discriminator the
     # label does: $SHAPE and $FEATURES both.
-    {{py}} scripts/build-if-stale.py --label "apple-ffi-$SHAPE-$PROFILE-${FEATURES:-production}" \
-        --stamp "target/apple-ffi-bindgen-$SHAPE-$PROFILE-${FEATURES:-production}.stamp" \
+    {{py}} scripts/build-if-stale.py --label "apple-ffi-$LOCAL_ID" \
+        --stamp "$BINDGEN_STAMP" \
         --target apps/fauna-apple/FaunaFFI.xcframework \
         --target apps/fauna-apple/FaunaFFISwift/Sources/FaunaFFI.swift \
         "${SLICE_SOURCE_ARGS[@]}" \
-        -- just _apple-ffi-bindgen "$FEATURES" \
-            target/aarch64-apple-ios/$PROFILE/libfauna_ffi.a \
+        -- just _apple-ffi-bindgen "$FEATURES" "--profile dev ${FEATURE_ARGS[*]}" \
+            "${SLICE_LIBS[0]}" \
             "${SLICE_LIBS[@]}"
 
     # --- Cross-checkout prebuilt-FFI cache: populate ----------------------------
@@ -4514,6 +4778,28 @@ _apple-ffi-build-impl:
         # the re-copy — written whether or not the shared populate won its race,
         # since the local artifacts match this key regardless.
         echo "$CACHE_KEY" > apps/fauna-apple/.ffi-cache.stamp
+    else
+        # A dirty-tree build staged a generation no cache key names: drop the
+        # stamp of whatever key was restored before, or a later clean tree at
+        # that key would fast-path against these artifacts.
+        rm -f apps/fauna-apple/.ffi-cache.stamp
+    fi
+    # This flavor's stash (the host flavor's mechanism, `_apple-ffi-host-flavor`):
+    # a clone of what the bindgen staged, restored by `_apple-ffi-flavor`'s local
+    # fast path on a switch back while it is the generation the bindgen stamp
+    # vouches for. Clones (`cp -c`) cost no disk until a later bindgen replaces
+    # the staged files; non-fatal.
+    STASH="target/apple-ffi-full/$LOCAL_ID/staged"
+    if [ ! -f "$STASH/.stashed" ] || [ "$BINDGEN_STAMP" -nt "$STASH/.stashed" ]; then
+        (
+            set -e
+            rm -rf "$STASH.tmp" "$STASH"
+            mkdir -p "$STASH.tmp"
+            cp -pRc apps/fauna-apple/FaunaFFI.xcframework "$STASH.tmp/FaunaFFI.xcframework"
+            cp -pRc apps/fauna-apple/generated "$STASH.tmp/generated"
+            touch "$STASH.tmp/.stashed"
+            mv "$STASH.tmp" "$STASH"
+        ) || { rm -rf "$STASH.tmp" "$STASH"; echo "apple-ffi: stash failed (non-fatal) — the next flavor switch rebuilds"; }
     fi
     # Record the on-disk artifact flavor for the host↔full and production↔test
     # guards above / in apple-ffi-host. Written only after a successful
@@ -4674,15 +4960,40 @@ _apple-ffi-host-flavor config features profile="":
     # cleanly instead of serving a stale xcframework whose mtime is newer than
     # this flavor's .a source. The marker carries FLAVOR:FEATURES for the reason
     # `_apple-ffi-flavor` spells out — the feature axis is the security-relevant
-    # one, and every flavor writes this one xcframework slot. The cargo stamp is
-    # dropped alongside it: the .a and the stamp are now per-flavor (they live
-    # under $ARTIFACTS, above), so a switch-back can no longer serve the OTHER
-    # flavor's .a from a "fresh"-reading stamp — but re-proving the slice on a
-    # flavor switch costs one warm cargo no-op plus a hardlink, and the
-    # xcframework it feeds was just deleted, so the belt stays on.
+    # one, and every flavor writes this one xcframework slot.
+    #
+    # The STASH (2026-10-21): every bindgen below leaves a clone of what it
+    # staged — the xcframework and `generated/` — in this flavor's own
+    # $ARTIFACTS, and a switch back restores that clone instead of re-running
+    # the bindgen under a build slot. It is restored only while it is the
+    # generation this flavor's bindgen stamp vouches for (`.stashed` no older
+    # than the stamp); otherwise the wipe stands and the gate below rebuilds.
+    # Mtimes are kept (`cp -p`), so `mac-debug`'s gate and SwiftPM read the same
+    # generation as the same files. This is what lets an e2e run that selects
+    # both apple apps — `apple-ffi-test` for iOS, this for macOS, alternating
+    # over the one staging slot — re-check a warm tree without a build slot
+    # (build-slot-pool.md § Cross-pool acquisition order → the warm pass). The
+    # cargo stamp is no longer dropped here: the .a and its stamp live under
+    # $ARTIFACTS, per flavor, so a fresh-reading stamp vouches for exactly this
+    # flavor's .a, and the drop only bought a slotted cargo no-op per switch.
+    STASH="$ARTIFACTS/staged"
+    BINDGEN_STAMP="$ARTIFACTS/apple-ffi-host-bindgen.stamp"
     [ "$(cat apps/fauna-apple/.ffi-flavor 2>/dev/null)" = "$FLAVOR:$FEATURES" ] || {
         rm -rf apps/fauna-apple/FaunaFFI.xcframework
-        rm -f "$CARGO_STAMP"
+        if [ -f "$STASH/.stashed" ] && [ -f "$BINDGEN_STAMP" ] && \
+           [ ! "$BINDGEN_STAMP" -nt "$STASH/.stashed" ] && (
+                set -e
+                cp -pRc "$STASH/FaunaFFI.xcframework" apps/fauna-apple/FaunaFFI.xcframework
+                rm -rf apps/fauna-apple/generated
+                cp -pRc "$STASH/generated" apps/fauna-apple/generated
+                find apps/fauna-apple/FaunaFFISwift/Sources -maxdepth 1 -name '*.swift' \
+                    ! -name 'FFICompat.swift' -delete
+                cp -p apps/fauna-apple/generated/*.swift apps/fauna-apple/FaunaFFISwift/Sources/
+            ); then
+            echo "apple-ffi-host: restored the stashed $FLAVOR:${FEATURES:-production} artifacts — no rebuild"
+        else
+            rm -rf apps/fauna-apple/FaunaFFI.xcframework
+        fi
     }
     # `file-provider-host` is default-OFF (Cargo.toml's feature comment has the
     # rationale) and rides both flavors — FaunaKit's FileProviderHost.swift
@@ -4691,10 +5002,18 @@ _apple-ffi-host-flavor config features profile="":
     # queue — build-machine-resources.md § Build/e2e slot locks), same --stamp shape as
     # mail-bridge-ffi-lib: a cargo no-op leaves the .a's mtime untouched, so an
     # .a-keyed gate would go permanently stale on any mtime churn (rebases).
+    # `--content-key` closes the rest of that churn: on a clean tree the stamp
+    # records the sources' HEAD tree ids, so a rebase, checkout or seed that
+    # touches every file without changing a byte reads fresh instead of taking
+    # a slot for a cargo pass that recompiles nothing new (build-system.md
+    # § How the gate works → *Gating a cargo step*). The full flavors need no
+    # such flag: on a clean tree the cross-checkout cache above already keys
+    # on `HEAD:libs`.
     {{py}} scripts/build-if-stale.py --label "apple-ffi-host-cargo-$PROFILE-${FEATURES:-production}" \
-        --stamp "$CARGO_STAMP" \
+        --stamp "$CARGO_STAMP" --content-key \
         --target "$SLICE" \
         --source libs ${VENDOR_SOURCE:-} --source Cargo.lock --source rust-toolchain.toml \
+        --source .cargo/config.toml \
         --exclude '*/pkg/*' --exclude '*/pkg-test/*' --exclude 'libs/fauna-mail-go/*' \
         -- {{slot_build}} cargo build --locked -p fauna-ffi --profile "$PROFILE" "${FEATURE_ARGS[@]}" \
            -Z unstable-options --artifact-dir "$ARTIFACTS"
@@ -4708,11 +5027,26 @@ _apple-ffi-host-flavor config features profile="":
     # $FEATURES directly), so the stamp needs no separate keying — it lives
     # beside `$CARGO_STAMP` above, same directory, same reasoning.
     {{py}} scripts/build-if-stale.py --label "apple-ffi-host-$PROFILE-${FEATURES:-production}" \
-        --stamp "$ARTIFACTS/apple-ffi-host-bindgen.stamp" \
+        --stamp "$BINDGEN_STAMP" \
         --target apps/fauna-apple/FaunaFFI.xcframework \
         --target apps/fauna-apple/FaunaFFISwift/Sources/FaunaFFI.swift \
         --source "$SLICE" \
-        -- just _apple-ffi-bindgen "$FEATURES" "$SLICE" "$SLICE"
+        -- just _apple-ffi-bindgen "$FEATURES" "--profile $PROFILE ${FEATURE_ARGS[*]}" "$SLICE" "$SLICE"
+    # Re-stash whenever the gate above produced a newer generation than the
+    # stash holds (see the flavor guard). Clones (`cp -c`), so it costs no disk
+    # until a later bindgen replaces the staged files; non-fatal — without a
+    # stash the next switch back simply rebuilds.
+    if [ ! -f "$STASH/.stashed" ] || [ "$BINDGEN_STAMP" -nt "$STASH/.stashed" ]; then
+        (
+            set -e
+            rm -rf "$STASH.tmp" "$STASH"
+            mkdir -p "$STASH.tmp"
+            cp -pRc apps/fauna-apple/FaunaFFI.xcframework "$STASH.tmp/FaunaFFI.xcframework"
+            cp -pRc apps/fauna-apple/generated "$STASH.tmp/generated"
+            touch "$STASH.tmp/.stashed"
+            mv "$STASH.tmp" "$STASH"
+        ) || { rm -rf "$STASH.tmp" "$STASH"; echo "apple-ffi-host: stash failed (non-fatal) — the next flavor switch rebuilds"; }
+    fi
     echo "$FLAVOR:$FEATURES" > apps/fauna-apple/.ffi-flavor
     # This path never populates the cross-checkout release cache; clear the release
     # fast-path stamp so a later `apple-ffi` rebuilds/restores its full release
@@ -4727,9 +5061,12 @@ _apple-ffi-host-flavor config features profile="":
 # {{bindgen_lib}}: the .a uniffi-bindgen reads UniFFI metadata from (any one slice
 # works — all slices share the ABI). {{slices}}: the .a's assembled into the
 # xcframework (1 for host, 3 or 5 for full — the caller derives the list from its
-# own SLICE_TRIPLES, so this recipe never re-lists them). Gated by the caller on .a freshness via
+# own SLICE_TRIPLES, so this recipe never re-lists them). {{cargo_args}}: the
+# `--profile` and feature arguments the generator binary is built with — the
+# caller's own, so cargo reuses units it already built (see the `cargo run`
+# below). Gated by the caller on .a freshness via
 # build-if-stale — don't invoke directly (it assumes the slices are built + current).
-_apple-ffi-bindgen features bindgen_lib +slices:
+_apple-ffi-bindgen features cargo_args bindgen_lib +slices:
     #!/usr/bin/env bash
     set -euo pipefail
     FEATURES="{{features}}"
@@ -4741,7 +5078,19 @@ _apple-ffi-bindgen features bindgen_lib +slices:
     # (testing.md convention 15).
     rm -rf apps/fauna-apple/generated/
     # Generate Swift bindings from one slice (all slices share the UniFFI ABI).
-    {{slot_build}} cargo run -p fauna-ffi --bin uniffi-bindgen generate \
+    # Library mode reads the bindings from {{bindgen_lib}}, so the generator
+    # binary's own features never reach the output — only its build cost
+    # differs. A bare `cargo run` builds it at the DEFAULT features in the dev
+    # profile, a fauna-ffi graph no flavor here builds: every libs change
+    # recompiled fauna-ffi (and every crate whose features it moves) a second
+    # time just to link the generator, 540 s a run on average on macOS over
+    # the 30 days to 2026-10-21. With the caller's profile and features the
+    # host flavors find the binary already built (`cargo build -p fauna-ffi`
+    # builds the package's bin too) and the full test flavor shares the
+    # `apple-ffi-host-test debug` tree (build-target-layout-macos.md § Host-only
+    # debug FFI → *The cargo shapes*). Same resolution as the caller's build:
+    # both export CARGO_RESOLVER_FEATURE_UNIFICATION=selected.
+    {{slot_build}} cargo run --locked -p fauna-ffi {{cargo_args}} --bin uniffi-bindgen generate \
         --library {{bindgen_lib}} \
         --language swift --out-dir apps/fauna-apple/generated/
     # Remove old XCFramework if present
@@ -4872,8 +5221,8 @@ swift-test: (apple-ffi-host-test "debug")
     {{slot_build}} just _swift-test-impl
 
 _swift-test-impl:
-    {{slot_build}} swift test --package-path apps/fauna-apple
-    {{slot_build}} swift build --package-path apps/fauna-apple --target FaunaiOS
+    {{slot_build}} swift test {{swiftpm_debug}} --package-path apps/fauna-apple
+    {{slot_build}} swift build {{swiftpm_debug}} --package-path apps/fauna-apple --target FaunaiOS
 
 # Build Fauna macOS desktop app (debug). Test FFI flavor for the same reason
 # swift-test takes it — this is also the binary the macOS e2e driver launches,
@@ -4891,6 +5240,17 @@ _swift-test-impl:
 # "stale → building", diagnosed to this file being the one apps/fauna-apple
 # source with no byte-comparing/--keep write, unlike the generated i18n/
 # providers files it sits beside).
+#
+# The other excludes (2026-10-21) are outputs other recipes write into the
+# package dir, none of them a SwiftPM input of this product: `mac-app`'s
+# xcodebuild derived data (`.xcode-build/`), the full flavor's cache stamp,
+# Xcode's per-user state, and the FFI staging — the xcframework and the bindgen's
+# `generated/` out-dir. The FFI still reaches the gate through
+# `FaunaFFISwift/Sources/`, which every bindgen rewrites, so a changed .a
+# rebuilds the app; a flavor switch that restores the same generation (the
+# host flavor's stash, mtimes kept) does not. Without them a warm re-check took a
+# `build` slot to prove nothing changed, which kept macOS out of the e2e warm
+# pass (build-slot-pool.md § Cross-pool acquisition order → the warm pass).
 mac-debug: (apple-ffi-host-test "debug")
     #!/usr/bin/env bash
     set -euo pipefail
@@ -4900,10 +5260,13 @@ mac-debug: (apple-ffi-host-test "debug")
         --target "$BIN_PATH/FaunaMacOS" \
         --source apps/fauna-apple \
         --exclude '*/.build/*' --exclude '*/.ffi-flavor' \
-        -- {{slot_build}} swift build --package-path apps/fauna-apple --product FaunaMacOS
+        --exclude 'apps/fauna-apple/.xcode-build/*' --exclude 'apps/fauna-apple/.ffi-cache.stamp' \
+        --exclude 'apps/fauna-apple/FaunaFFI.xcframework/*' --exclude 'apps/fauna-apple/generated/*' \
+        --exclude '*/xcuserdata/*' --exclude 'apps/fauna-apple/.swiftpm/xcode/*' \
+        -- {{slot_build}} swift build {{swiftpm_debug}} --package-path apps/fauna-apple --product FaunaMacOS
 
 # apple-swift-build-check — the mac merge-gate check's one gate (scripts/
-# merge-gate-check-mac.sh; merge-gate-check.md § Merge-gate check (mac)): compile
+# merge-gate-check-mac.sh; merge-gate-check-mac.md § Merge-gate check (mac)): compile
 # BOTH apple targets from freshly-regenerated bindings, run NO tests. mac-debug
 # = apple-ffi-host (bindgen from current libs/) + the FaunaMacOS product build;
 # the FaunaiOS line typechecks the iOS target for the macOS host — the same
@@ -4965,7 +5328,7 @@ apple-swift-build-check: mac-debug
     {{slot_build}} just _apple-swift-build-check-impl
 
 _apple-swift-build-check-impl:
-    {{slot_build}} swift build --package-path apps/fauna-apple --target FaunaiOS
+    {{slot_build}} swift build {{swiftpm_debug}} --package-path apps/fauna-apple --target FaunaiOS
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{slot_build}} cargo check --locked -p fauna-ffi --features file-provider-host --target aarch64-apple-ios
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{slot_build}} cargo check --locked -p fauna-ffi --no-default-features --target aarch64-apple-watchos
 
@@ -5277,7 +5640,7 @@ mac-tui-archive suffix dir:
     fi
     DIR="{{dir}}"
     NAME="fauna-tui-{{suffix}}"
-    for f in fauna-tui fauna-sync-agent install.sh; do
+    for f in fauna-tui fauna-sync-agent fauna-cli install.sh; do
         [ -f "$DIR/$f" ] || { echo "$DIR/$f not found — stage the archive with apps/fauna-tui/packaging/assemble-archive.sh first" >&2; exit 1; }
     done
     mkdir -p build
@@ -5286,10 +5649,16 @@ mac-tui-archive suffix dir:
     cp -R "$DIR" "$STAGE"
 
     echo "==> Signing $NAME (Developer ID, hardened runtime)..."
+    # fauna-cli (the cli app's device shell, the archive's third member) signs
+    # exactly as fauna-tui does — hardened runtime, no entitlements file: both
+    # are bare terminal binaries reading the shared login-Keychain slot, and the
+    # Developer ID signature is what keeps that identity stable across updates.
     codesign --sign "$FAUNA_SIGN_IDENTITY" --options runtime --timestamp --force "$STAGE/fauna-tui"
+    codesign --sign "$FAUNA_SIGN_IDENTITY" --options runtime --timestamp --force "$STAGE/fauna-cli"
     codesign --sign "$FAUNA_SIGN_IDENTITY" --options runtime --timestamp --force \
         --entitlements installer/macos/fauna-sync-agent.entitlements "$STAGE/fauna-sync-agent"
     codesign --verify --strict "$STAGE/fauna-tui"
+    codesign --verify --strict "$STAGE/fauna-cli"
     codesign --verify --strict "$STAGE/fauna-sync-agent"
 
     echo "==> Notarizing $NAME..."
@@ -5940,22 +6309,7 @@ _mail-bridge-ffi-bindgen lib:
 # `mail-bridge-ffi` (installers/macos.md § Size & build profile); under `dist` the Go binary also links `-trimpath -ldflags '-s -w'`
 # (windows parity — `_windows-go-cgo-build`'s identical GOLDFLAGS switch).
 mail-bridge-build profile="release": (mail-bridge-ffi profile)
-    #!/usr/bin/env bash
-    set -euo pipefail
-    TARGET_DIR="${CARGO_TARGET_DIR:-$(cargo metadata --format-version 1 --no-deps | {{py}} -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])')}"
-    INCLUDES=""
-    for d in libs/fauna-mail-go/*/; do INCLUDES="$INCLUDES -I$(pwd)/$d"; done
-    FFI_SLOT_FILE="$(mktemp)"
-    just mail-ffi-slot {{profile}} >"$FFI_SLOT_FILE"
-    FFI_SLOT="$TARGET_DIR/$(cat "$FFI_SLOT_FILE")"
-    rm -f "$FFI_SLOT_FILE"
-    export CGO_CFLAGS="$INCLUDES"
-    export CGO_LDFLAGS="-L$FFI_SLOT -lfauna_ffi -Wl,-rpath,$FFI_SLOT"
-    {{cgo_sdkroot}}
-    export LD_LIBRARY_PATH="$FFI_SLOT:${LD_LIBRARY_PATH:-}"
-    GOLDFLAGS=""
-    if [ "{{profile}}" = "dist" ]; then GOLDFLAGS="-s -w"; fi
-    {{slot_build}} go -C bins/fauna-bridges build -trimpath -ldflags="$GOLDFLAGS" ./cmd/fauna-mail-bridge
+    @just _go-cgo-build "./cmd/fauna-mail-bridge" "fauna-mail-bridge" "{{profile}}" ""
 
 # The e2e-unified test harness's cdylib slot (`tests/e2e-unified/fauna_ffi.py`)
 # — HARNESS-PRIVATE, for the same reason `mail-ffi-slot` above is: the shared
@@ -6044,20 +6398,53 @@ e2e-ffi-flavor-check:
 # binary lands at bins/fauna-bridges/seal-helper-testonly. Always `release` —
 # a test helper never needs `dist`'s shipping optimizations.
 seal-helper-build: mail-bridge-ffi
+    @just _go-cgo-build "./cmd/seal-helper-testonly" "seal-helper-testonly" "release" ""
+
+# Shared implementation of the four Unix Go/cgo build recipes (mail bridge, seal
+# helper, both atproto flavors) — the Unix twin of `_windows-go-cgo-build`: cgo
+# against the private `mail-ffi-slot` cdylib, output at
+# bins/fauna-bridges/{{out_name}}. The `go build` is freshness-gated OUTSIDE the
+# build slot, like every cargo step in the chain: an ungated `{{slot_build}}`
+# reaches the slot on a warm tree too, so the e2e in-hold re-check (refuse mode,
+# build-slot-pool.md § Cross-pool acquisition order → the warm pass) refused it
+# on every cycle however often the warm pass had just built it. --stamp, not the
+# binary, carries freshness (a no-op `go build` need not rewrite its output);
+# the stamp names {{profile}} and the build drops every other profile's stamp,
+# so a release<->dist switch rebuilds instead of serving the other flavor (the
+# binary's rpath names the profile's FFI slot). Sources: the Go module (minus
+# the binaries built into it), the cgo bindings, and the FFI slot it links.
+_go-cgo-build cmd out_name profile go_tags:
     #!/usr/bin/env bash
     set -euo pipefail
     TARGET_DIR="${CARGO_TARGET_DIR:-$(cargo metadata --format-version 1 --no-deps | {{py}} -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])')}"
     INCLUDES=""
     for d in libs/fauna-mail-go/*/; do INCLUDES="$INCLUDES -I$(pwd)/$d"; done
     FFI_SLOT_FILE="$(mktemp)"
-    just mail-ffi-slot >"$FFI_SLOT_FILE"
+    just mail-ffi-slot {{profile}} >"$FFI_SLOT_FILE"
     FFI_SLOT="$TARGET_DIR/$(cat "$FFI_SLOT_FILE")"
     rm -f "$FFI_SLOT_FILE"
     export CGO_CFLAGS="$INCLUDES"
     export CGO_LDFLAGS="-L$FFI_SLOT -lfauna_ffi -Wl,-rpath,$FFI_SLOT"
     {{cgo_sdkroot}}
     export LD_LIBRARY_PATH="$FFI_SLOT:${LD_LIBRARY_PATH:-}"
-    {{slot_build}} go -C bins/fauna-bridges build ./cmd/seal-helper-testonly
+    # Strip the Go binary for dist builds (windows parity — the same switch in
+    # `_windows-go-cgo-build`); release keeps symbols for debugging.
+    GOLDFLAGS=""
+    if [ "{{profile}}" = "dist" ]; then GOLDFLAGS="-s -w"; fi
+    # Unquoted on purpose: an empty go_tags must vanish rather than become an
+    # empty `-tags=` argument.
+    GOTAGS=""
+    if [ -n "{{go_tags}}" ]; then GOTAGS="-tags={{go_tags}}"; fi
+    STAMP_STEM="$TARGET_DIR/go-cgo-{{out_name}}"
+    export GOLDFLAGS GOTAGS STAMP_STEM
+    {{py}} scripts/build-if-stale.py --label "go-cgo-{{out_name}}-{{profile}}" \
+        --stamp "$STAMP_STEM-{{profile}}.stamp" \
+        --target "bins/fauna-bridges/{{out_name}}" \
+        --source bins/fauna-bridges --source libs/fauna-mail-go --source "$FFI_SLOT" \
+        --exclude 'bins/fauna-bridges/fauna-mail-bridge*' \
+        --exclude 'bins/fauna-bridges/fauna-atproto-bridge*' \
+        --exclude 'bins/fauna-bridges/seal-helper-testonly*' \
+        -- {{slot_build}} bash -c 'rm -f "$STAMP_STEM"-*.stamp && go -C bins/fauna-bridges build -trimpath $GOTAGS -ldflags="$GOLDFLAGS" -o "{{out_name}}" {{cmd}}'
 
 # Test the Go mail-bridge binary (depends on FFI bindings). The legs live in
 # `_mail-bridge-go-test-legs` below, which the Linux merge-gate check's
@@ -6220,7 +6607,7 @@ mail-bridge-test-win-cgo:
 # portable half can name (~1 min warm, no cargo) never waits on the gnullvm
 # `fauna-ffi` build (11m36s cold) to be reported. Git-Bash-only, because the cgo
 # half is. Gate 9 of the win merge-gate check runs exactly this, so a local green
-# and a gate green are the same fact (merge-gate-check.md § Merge-gate check
+# and a gate green are the same fact (merge-gate-check-win.md § Merge-gate check
 # (win); the dependency order is pinned by test_merge_gate_check_win.py).
 mail-bridge-test-win: _windows-go-bridge-test-preflight mail-bridge-test-portable mail-bridge-test-win-cgo
 
@@ -6272,8 +6659,11 @@ _go-bridge-test-subset subset tags +patterns:
 # gone — which is literally what the Damus precedent describes (Apple forced the
 # zap button off posts while the rest of the app stayed). Without it, nothing
 # distinguishes a real subset edge from `zaps` being an alias of `payments`.
+# A fourth column (2026-10-17) is the second store flavor, `store-no-payments`:
+# payments and zaps gone, `p2p-share` kept (dynamic-features.md § The
+# App-Store escape hatch → *The store flavors*).
 #
-# Measured 2026-08-10 on these three:
+# Measured 2026-08-10 on the first three:
 #   default    = 12 `fauna.payments.*` + 1 `fauna.tips.*` + 183 `FfiPaymentsClient`
 #                + 7 `fauna.nostr.zap_signers.` + 121 `FfiNostrZapSignerClient`
 #   damus      = payments present, 0 zap strings
@@ -6435,7 +6825,17 @@ _ffi-store-safe-check-impl:
     absent "Damus (payments-without-zaps)" "${ZAP_PATS[@]}" "${P2P_ID_PATS[@]}" "${P2P_FACE_PATS[@]}"
     present "Damus (payments-without-zaps)" 'fauna\.payments\.' 'FfiPaymentsClient' "${PAY_ID_PATS[@]}"
 
-    # --- column 3: the DEFAULT flavor must still ship both -------------------
+    # --- column 3: store-no-payments drops money and zaps, keeps sharing -----
+    # The second store flavor (dynamic-features.md § The App-Store escape hatch
+    # → *The store flavors*): the complement plus the one kept member. It asserts
+    # both directions, because an absence-only column would pass on a build that
+    # had fallen back to store-safe — the flavor this one exists to differ from.
+    {{slot_build}} cargo build --locked -p fauna-ffi --no-default-features --features store-safe,p2p-share
+    built "$LIB"
+    absent "store-no-payments" 'fauna\.payments\.' 'fauna\.tips\.' 'FfiPaymentsClient' "${ZAP_PATS[@]}" "${PAY_ID_PATS[@]}"
+    present "store-no-payments" "${P2P_ID_PATS[@]}" "${P2P_FACE_PATS[@]}"
+
+    # --- column 4: the DEFAULT flavor must still ship both -------------------
     # Without this the absences above are indistinguishable from greps that
     # match nothing, and the escape hatch would read "green" while excising
     # planes that were never there.
@@ -6443,7 +6843,7 @@ _ffi-store-safe-check-impl:
     built "$LIB"
     present "DEFAULT" 'fauna\.payments\.' 'FfiPaymentsClient' "${ZAP_PATS[@]}" "${PAY_ID_PATS[@]}" "${P2P_ID_PATS[@]}" "${P2P_FACE_PATS[@]}"
 
-    echo "ffi-store-safe-check: OK — payments+zaps+p2p-share in default, payments-only in damus, none in store-safe (kind strings, FFI faces AND element ids)"
+    echo "ffi-store-safe-check: OK — payments+zaps+p2p-share in default, payments-only in damus, p2p-share-only in store-no-payments, none in store-safe (kind strings, FFI faces AND element ids)"
 
 # The NEST column of the same witness (`dynamic-features.md` § The feature-matrix
 # test story). `ffi-store-safe-check` above keeps the CLIENT flavor honest; this
@@ -6709,7 +7109,36 @@ _tui-store-safe-check-impl:
         exit 1
     fi
 
-    # --- column 2: the DEFAULT tui must still ship all of it ------------------
+    # --- column 2: store-no-payments drops money and zaps, keeps sharing ------
+    # The second store flavor (dynamic-features.md § The App-Store escape hatch
+    # → *The store flavors*): the complement plus `p2p-share`. Both directions,
+    # because an absence-only column would pass on a build that had fallen back
+    # to store-safe — the flavor this one exists to differ from.
+    NO_PAYMENTS_ABSENT=('subscription-provider-' 'subscription-claim-' 'post-tip-' 'fauna\.payments\.' 'fauna\.tips\.' 'nostr-zap-signer-' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button')
+    NO_PAYMENTS_PRESENT=('offline-share-' 'offline-receive-' 'share-transfer-' 'share-serve-' 'fauna\.peer\.share\.')
+    {{slot_build}} cargo build --locked -p fauna-tui --bin fauna-tui --no-default-features --features store-safe,p2p-share
+    built "$BIN"
+    for pat in "${NO_PAYMENTS_ABSENT[@]}"; do
+        n="$(strings -a "$BIN" | grep -c "$pat" || true)"
+        if [ "$n" != "0" ]; then
+            echo "ERROR: the store-no-payments fauna-tui flavor still carries $n '$pat' occurrence(s)." >&2
+            echo "  The money plane must be compiled away in this flavor exactly as in" >&2
+            echo "  store-safe; a payments surface gated on p2p-share (or on nothing) is" >&2
+            echo "  the usual cause — gate it on feature = \"payments\"." >&2
+            exit 1
+        fi
+    done
+    for pat in "${NO_PAYMENTS_PRESENT[@]}"; do
+        n="$(strings -a "$BIN" | grep -c "$pat" || true)"
+        if [ "$n" = "0" ]; then
+            echo "ERROR: the store-no-payments fauna-tui flavor carries no '$pat'." >&2
+            echo "  This flavor KEEPS peer-to-peer sharing; a sharing surface gated on" >&2
+            echo "  payments (or a renamed id) has removed it." >&2
+            exit 1
+        fi
+    done
+
+    # --- column 3: the DEFAULT tui must still ship all of it ------------------
     # Without this the assertions above are indistinguishable from greps that
     # match nothing — a renamed id would read as a successful excision.
     {{slot_build}} cargo build --locked -p fauna-tui --bin fauna-tui
@@ -6724,7 +7153,7 @@ _tui-store-safe-check-impl:
             exit 1
         fi
     done
-    echo "tui-store-safe-check: OK — payments + p2p-share UI/kinds present in default, absent in store-safe; same-account peer-sync kinds present in store-safe"
+    echo "tui-store-safe-check: OK — payments + p2p-share UI/kinds present in default, absent in store-safe, p2p-share only in store-no-payments; same-account peer-sync kinds present in store-safe"
 
 # Build the excised linux desktop — tui's twin for the GTK shell
 # (`dynamic-features.md` § Platform-family surface excision).
@@ -6813,7 +7242,35 @@ _linux-store-safe-check-impl:
         fi
     done
 
-    # --- column 2: the DEFAULT shell must still ship all of it ----------------
+    # --- column 2: store-no-payments drops money and zaps, keeps sharing ------
+    # tui's column 2, for this shell (dynamic-features.md § The App-Store escape
+    # hatch → *The store flavors*). `nostr-zap-signer-` is not watched here, as
+    # in this recipe's other columns: linux paints no zap-signer control.
+    NO_PAYMENTS_ABSENT=('subscription-provider-' 'subscription-claim-' 'post-tip-' 'fauna\.payments\.' 'fauna\.tips\.' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button')
+    NO_PAYMENTS_PRESENT=('offline-share-' 'offline-receive-' 'share-transfer-' 'share-serve-')
+    {{slot_build}} cargo build --locked -p fauna-linux --bin fauna-desktop --no-default-features --features store-safe,p2p-share
+    built "$BIN"
+    for pat in "${NO_PAYMENTS_ABSENT[@]}"; do
+        n="$(strings -a "$BIN" | grep -c "$pat" || true)"
+        if [ "$n" != "0" ]; then
+            echo "ERROR: the store-no-payments fauna-desktop flavor still carries $n '$pat' occurrence(s)." >&2
+            echo "  The money plane must be compiled away in this flavor exactly as in" >&2
+            echo "  store-safe; a payments surface gated on p2p-share (or on nothing) is" >&2
+            echo "  the usual cause — gate it on feature = \"payments\"." >&2
+            exit 1
+        fi
+    done
+    for pat in "${NO_PAYMENTS_PRESENT[@]}"; do
+        n="$(strings -a "$BIN" | grep -c "$pat" || true)"
+        if [ "$n" = "0" ]; then
+            echo "ERROR: the store-no-payments fauna-desktop flavor carries no '$pat'." >&2
+            echo "  This flavor KEEPS peer-to-peer sharing; a sharing surface gated on" >&2
+            echo "  payments (or a renamed id) has removed it." >&2
+            exit 1
+        fi
+    done
+
+    # --- column 3: the DEFAULT shell must still ship all of it ----------------
     # Without this the assertions above are indistinguishable from greps that
     # match nothing — a renamed id would read as a successful excision.
     {{slot_build}} cargo build --locked -p fauna-linux --bin fauna-desktop
@@ -6828,7 +7285,7 @@ _linux-store-safe-check-impl:
             exit 1
         fi
     done
-    echo "linux-store-safe-check: OK — payments + p2p-share UI and payments kinds present in default, absent in store-safe"
+    echo "linux-store-safe-check: OK — payments + p2p-share UI and payments kinds present in default, absent in store-safe, p2p-share only in store-no-payments"
 
 # Build the excised WinUI app — the App-Store escape hatch's windows shell
 # flavor (`dynamic-features.md` § Platform-family surface excision), and the SIXTH
@@ -7334,43 +7791,21 @@ android-store-safe-check: i18n-generate providers-generate
     WORK="$(mktemp -d "{{tmp_root}}/android-store-safe-check.XXXXXX")"
     trap 'rm -rf "$WORK"' EXIT
 
-    # Unpack the two artifact members that can carry the surface and emit every
-    # printable string in them. `-a` because a dex is not a recognised object
-    # format; the `.so` is scanned in the same pass so one helper answers both
-    # criteria.
-    # Criterion 1 (element ids) and criterion 2 (kind strings) are scanned over
-    # DIFFERENT members, and the split is a measured finding rather than a
-    # convenience (2026-08-16, this witness's first run):
-    #
-    #   * Element ids are a claim about the SHELL — "no UI surface". They are
-    #     painted by Compose and live in `classes*.dex`. Scanning the packaged
-    #     `.so` for them instead reports the UniFFI docstrings that shared Rust
-    #     embeds in the cdylib's metadata: `TipView` and `value_format`'s tip
-    #     formatters are deliberately UNGATED inert surfaces (snapshot.rs's own
-    #     posture), and their doc comments *name* `post-tip-*` while painting
-    #     nothing and being reachable by nothing. Measured: 9 such occurrences,
-    #     every one a doc comment, zero in the dex.
-    #   * Kind strings ARE scanned everywhere, docstrings included — that is
-    #     criterion 2's explicit "absent means absent, prose included" rule, and
-    #     it passes: 0 `fauna.payments.` / `fauna.tips.` across the whole APK.
+    # The unpack, the dex-vs-native split of the two criteria, the positive
+    # controls and the ONE pattern list live in `scripts/android-store-safe-scan.sh`,
+    # which the Play bundles (`android-bundle-store-safe`,
+    # `android-bundle-store-no-payments`) scan with too — three
+    # artifacts, one list, no drift. The split is a measured finding, not a
+    # convenience (2026-08-16, this witness's first run): element ids are a claim
+    # about the SHELL and are scanned in `classes*.dex` only, because the
+    # packaged `lib/*/*.so` carries UniFFI docstrings that NAME `post-tip-*`
+    # (TipView and value_format's tip formatters are deliberately UNGATED inert
+    # surfaces) while painting nothing; kind strings are scanned everywhere,
+    # docstrings included — criterion 2's "absent means absent, prose included".
     #
     # ⚠ This does NOT weaken the gate against the defect it exists for. The
     # canonical mutant — an ungated `Modifier.testTag("post-tip-count")` — is
     # Compose code and lands in the dex, so it still dies here.
-    apk_strings() {
-        local apk="$1" out="$2" what="$3"
-        rm -rf "$out" && mkdir -p "$out"
-        case "$what" in
-            dex) unzip -q -o "$apk" 'classes*.dex' -d "$out" ;;
-            all) unzip -q -o "$apk" 'classes*.dex' 'lib/*/*.so' -d "$out" ;;
-        esac
-        # A silent zero-file unpack would make every assertion below vacuous.
-        [ -n "$(find "$out" -type f -print -quit)" ] || {
-            echo "ERROR: unpacking '$what' from $apk produced no files." >&2
-            exit 1
-        }
-        find "$out" -type f -print0 | xargs -0 strings -a
-    }
 
     # The `-d` guard is load-bearing under `set -euo pipefail`: a missing output
     # directory makes `find` exit non-zero, which would abort the recipe with
@@ -7393,38 +7828,21 @@ android-store-safe-check: i18n-generate providers-generate
     SS_APK="$(find_apk storeSafe)"
     [ -n "$SS_APK" ] || { echo "ERROR: no store-safe APK produced." >&2; exit 1; }
     bash scripts/android-apk-nsc-check.sh "$SS_APK"
-    apk_strings "$SS_APK" "$WORK/ss-dex" dex > "$WORK/ss-dex.txt"
-    apk_strings "$SS_APK" "$WORK/ss-all" all > "$WORK/ss-all.txt"
-    # The `p2p-share` member's four catalog prefixes ride the element-id
-    # column: its ceremony render is gated on `BuildConfig.P2P_SHARE`, and its
-    # plane half (`share-transfer-` / `share-serve-`) is painted nowhere on
-    # android, so all four must be absent from the dex.
-    for pat in 'subscription-provider-' 'subscription-claim-' 'post-tip-' 'nostr-zap-signer-' 'offline-share-' 'offline-receive-' 'share-transfer-' 'share-serve-' 'fauna\.payments\.' 'fauna\.tips\.' 'fauna\.nostr\.zap_signers\.' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button'; do
-        case "$pat" in
-            fauna*) SCAN="$WORK/ss-all.txt" ;;   # criterion 2 — prose included
-            *)      SCAN="$WORK/ss-dex.txt" ;;   # criterion 1 — the shell's own surface
-        esac
-        n="$(grep -c "$pat" "$SCAN" || true)"
-        if [ "$n" != "0" ]; then
-            echo "ERROR: the store-safe Android APK still carries $n '$pat' occurrence(s)." >&2
-            echo "  ($SS_APK)" >&2
-            echo "  An excised app artifact must contain NO UI surface (element ids) and NO" >&2
-            echo "  wire senders (kind strings) for the plane — dynamic-features.md" >&2
-            echo "  § What \"completely compiled away\" means, items 1-2." >&2
-            echo "  Two causes, in order of likelihood:" >&2
-            echo "   * a RENDER with no BuildConfig.PAYMENTS (or, for a p2p-share id," >&2
-            echo "     BuildConfig.P2P_SHARE) condition. It compiles fine —" >&2
-            echo "     the data it reads is an ungated inert record (PostSummary.tips is" >&2
-            echo "     the known one) — so it paints nothing and still ships every id it" >&2
-            echo "     would have painted. Gate the render, not just the resolver." >&2
-            echo "   * R8 kept the folded branch (a keep rule, or a reference that made it" >&2
-            echo "     reachable). Move that surface into app/src/payments/ (or p2pShare/) instead, where" >&2
-            echo "     the absence is the compiler's doing rather than the optimizer's." >&2
-            exit 1
-        fi
-    done
+    bash scripts/android-store-safe-scan.sh absent "$SS_APK" "$WORK/ss"
 
-    # --- column 2: the DEFAULT (release) APK must still ship all of it --------
+    # --- column 2: store-no-payments drops money and zaps, keeps sharing ------
+    # The second store flavor (dynamic-features.md § The App-Store escape hatch
+    # → *The store flavors*). The scan's `no-payments` mode asserts both halves:
+    # an absence-only scan would pass on an APK that had fallen back to
+    # store-safe, the flavor this one exists to differ from.
+    just _android-ffi-flavor storeNoPayments store-safe,p2p-share arm64
+    {{slot_build}} apps/fauna-android/gradlew -p apps/fauna-android assembleStoreNoPayments
+    NP_APK="$(find_apk storeNoPayments)"
+    [ -n "$NP_APK" ] || { echo "ERROR: no store-no-payments APK produced." >&2; exit 1; }
+    bash scripts/android-apk-nsc-check.sh "$NP_APK"
+    bash scripts/android-store-safe-scan.sh no-payments "$NP_APK" "$WORK/np"
+
+    # --- column 3: the DEFAULT (release) APK must still ship all of it --------
     # Without this the assertions above are indistinguishable from greps that
     # match nothing — a renamed id, or an unpack that silently extracted zero
     # files, would both read as a successful excision.
@@ -7433,30 +7851,8 @@ android-store-safe-check: i18n-generate providers-generate
     REL_APK="$(find_apk release)"
     [ -n "$REL_APK" ] || { echo "ERROR: no release APK produced." >&2; exit 1; }
     bash scripts/android-apk-nsc-check.sh "$REL_APK"
-    apk_strings "$REL_APK" "$WORK/rel-dex" dex > "$WORK/rel-dex.txt"
-    apk_strings "$REL_APK" "$WORK/rel-all" all > "$WORK/rel-all.txt"
-    # The two p2p-share prefixes android paints: `share-transfer-` /
-    # `share-serve-` are painted nowhere on android. `offline-receive-` is the
-    # one that caught a minified-build defect (2026-09-30, fixed 2026-10-08):
-    # with the `uniffi.*` binding packages unkept, R8 folded the ceremony's
-    # gates to false and the default dex carried no `offline-receive-` id at
-    # all — `offline-share-own-code` alone survived, which `offline-share-`
-    # by itself could not tell apart from a working build.
-    for pat in 'subscription-provider-' 'subscription-claim-' 'post-tip-' 'nostr-zap-signer-' 'offline-share-' 'offline-receive-' 'fauna\.payments\.' 'fauna\.nostr\.zap_signers\.' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button'; do
-        case "$pat" in
-            fauna*) SCAN="$WORK/rel-all.txt" ;;
-            *)      SCAN="$WORK/rel-dex.txt" ;;
-        esac
-        n="$(grep -c "$pat" "$SCAN" || true)"
-        if [ "$n" = "0" ]; then
-            echo "ERROR: the DEFAULT Android APK carries no '$pat' — the store-safe" >&2
-            echo "  assertion above is therefore vacuous. Either the surface was removed" >&2
-            echo "  from the default build (a product regression) or it was renamed and" >&2
-            echo "  this witness needs its patterns updated." >&2
-            exit 1
-        fi
-    done
-    echo "android-store-safe-check: OK — payments/zaps/p2p-share UI + kinds present in default, absent in store-safe"
+    bash scripts/android-store-safe-scan.sh present "$REL_APK" "$WORK/rel"
+    echo "android-store-safe-check: OK — payments/zaps/p2p-share UI + kinds present in default, absent in store-safe, p2p-share only in store-no-payments"
 
 # The Fauna Kids witness (family-safety.md § The account age band, the kids-app
 # bullet, item (5); installers/android.md § Goal): the `kids` APK carries none of
@@ -8412,7 +8808,7 @@ web-store-safe-check: wasm i18n-generate providers-generate
     # — see note (2) above.
     #
     # ⚠ AND excluding the wasm-bindgen JS GLUE, which note (2) does not cover
-    # because vite INLINES it into `_app`. `$lib/wasm` imports
+    # because vite INLINES it into `_app`. `#lib/wasm` imports
     # `../../static/fauna_wasm.js`, so the generated `WsRpcClient` class — every
     # method name included — is bundled as an app chunk rather than served as a
     # sibling file. Measured 2026-08-16: a correctly-excised store-safe bundle
@@ -8431,7 +8827,7 @@ web-store-safe-check: wasm i18n-generate providers-generate
     # `fauna-ffi` — only the id-naming DOC LINE is gated, never the function).
     # A `tipAmount` pattern on this axis was therefore satisfied only by the
     # `__wbindgen` deletion above — it was asserting the SPA's TypeScript
-    # wrapper (`$lib/payments.ts`) tree-shakes out, never that the wasm face
+    # wrapper (`#lib/payments.ts`) tree-shakes out, never that the wasm face
     # excises, despite sitting in the same list as patterns that do. **Dropped
     # 2026-08-18:** this axis names only faces that genuinely excise;
     # a criterion-2 pattern whose sole witness is "the glue we already delete"
@@ -8463,7 +8859,7 @@ web-store-safe-check: wasm i18n-generate providers-generate
                'subscription-offer-payment-link' 'gated-post-price' \
                'gated-post-payment-link' 'gated-post-buy-button' \
                'paymentsProvidersSet' 'paymentsClaimsMint' 'paymentsKnownKinds' \
-               'paymentsWebhookUrl'; do
+               'paymentsWebhookUrl' 'paymentsReturnUrl'; do
         # ⚠ `|| true` inside the braces, not after the pipe: grep exits 1 when it
         # finds nothing, and under `set -euo pipefail` that aborts the recipe —
         # on the column where finding nothing is the PASS. Same guard the tui and
@@ -8482,7 +8878,7 @@ web-store-safe-check: wasm i18n-generate providers-generate
             echo "     paints nothing, and still ships every id — gate the render, not the" >&2
             echo "     resolver feeding it." >&2
             echo "   • a face name survived: a payments function was defined outside" >&2
-            echo "     \`\$lib/payments\` — in \$lib/rpc, \$lib/wasm or \$lib/value-format, all" >&2
+            echo "     \`#lib/payments\` — in #lib/rpc, #lib/wasm or #lib/value-format, all" >&2
             echo "     of which are unconditionally in the bundle. Move it back." >&2
             exit 1
         fi
@@ -8502,7 +8898,7 @@ web-store-safe-check: wasm i18n-generate providers-generate
                'subscription-offer-payment-link' 'gated-post-price' \
                'gated-post-payment-link' 'gated-post-buy-button' \
                'paymentsProvidersSet' 'paymentsClaimsMint' 'paymentsKnownKinds' \
-               'paymentsWebhookUrl'; do
+               'paymentsWebhookUrl' 'paymentsReturnUrl'; do
         n="$({ grep -ro "$pat" "$WORK/default" || true; } | wc -l)"
         if [ "$n" = "0" ]; then
             echo "ERROR: the DEFAULT web bundle carries no '$pat' — the store-safe" >&2
@@ -8599,18 +8995,7 @@ release-flavor-compile-check:
 atproto-bridge-build: mail-bridge-ffi
     #!/usr/bin/env bash
     set -euo pipefail
-    TARGET_DIR="${CARGO_TARGET_DIR:-$(cargo metadata --format-version 1 --no-deps | {{py}} -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])')}"
-    INCLUDES=""
-    for d in libs/fauna-mail-go/*/; do INCLUDES="$INCLUDES -I$(pwd)/$d"; done
-    export CGO_CFLAGS="$INCLUDES"
-    FFI_SLOT_FILE="$(mktemp)"
-    just mail-ffi-slot >"$FFI_SLOT_FILE"
-    FFI_SLOT="$TARGET_DIR/$(cat "$FFI_SLOT_FILE")"
-    rm -f "$FFI_SLOT_FILE"
-    export CGO_LDFLAGS="-L$FFI_SLOT -lfauna_ffi -Wl,-rpath,$FFI_SLOT"
-    {{cgo_sdkroot}}
-    export LD_LIBRARY_PATH="$FFI_SLOT:${LD_LIBRARY_PATH:-}"
-    {{slot_build}} go -C bins/fauna-bridges build ./cmd/fauna-atproto-bridge
+    just _go-cgo-build "./cmd/fauna-atproto-bridge" "fauna-atproto-bridge" "release" ""
     # Convention 15 witness, on the artifact rather than on trust: every e2e
     # seam the tagged flavor carries must be absent from the production flavor —
     # the hostile-rotation capability (seize.go, `-tags fauna_e2e_seize`, keyed
@@ -8643,18 +9028,7 @@ atproto-bridge-build: mail-bridge-ffi
 atproto-bridge-build-e2e: mail-bridge-ffi
     #!/usr/bin/env bash
     set -euo pipefail
-    TARGET_DIR="${CARGO_TARGET_DIR:-$(cargo metadata --format-version 1 --no-deps | {{py}} -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])')}"
-    INCLUDES=""
-    for d in libs/fauna-mail-go/*/; do INCLUDES="$INCLUDES -I$(pwd)/$d"; done
-    export CGO_CFLAGS="$INCLUDES"
-    FFI_SLOT_FILE="$(mktemp)"
-    just mail-ffi-slot >"$FFI_SLOT_FILE"
-    FFI_SLOT="$TARGET_DIR/$(cat "$FFI_SLOT_FILE")"
-    rm -f "$FFI_SLOT_FILE"
-    export CGO_LDFLAGS="-L$FFI_SLOT -lfauna_ffi -Wl,-rpath,$FFI_SLOT"
-    {{cgo_sdkroot}}
-    export LD_LIBRARY_PATH="$FFI_SLOT:${LD_LIBRARY_PATH:-}"
-    {{slot_build}} go -C bins/fauna-bridges build -tags fauna_e2e_seize,fauna_e2e_fixtures -o fauna-atproto-bridge-e2e ./cmd/fauna-atproto-bridge
+    just _go-cgo-build "./cmd/fauna-atproto-bridge" "fauna-atproto-bridge-e2e" "release" "fauna_e2e_seize,fauna_e2e_fixtures"
     # The gate must switch BOTH ways, or the production witness above proves
     # nothing about the mechanism (a tag nobody honours also greps clean).
     for lit in seize-did FAUNA_ATPROTO_FAKE_DNS_URL FAUNA_ATPROTO_PLC_DIRECTORY_URL FAUNA_ATPROTO_PROXY_FIXTURES FAUNA_ATPROTO_PERMISSION_SET_FIXTURES FAUNA_ATPROTO_RELAY_URL; do
@@ -8935,8 +9309,15 @@ _windows-go-cgo-build cmd out_name rust_target go_arch profile go_tags:
     # process-wide PATH, which `mail-bridge-test-win-cgo` uses and a shipped exe
     # must not depend on), which is why the output lives in target/ next to its
     # DLLs rather than in bins/fauna-bridges/ like the Unix flavors.
+    # libunwind.dll is the TARGET's runtime: llvm-mingw keeps one per target triple
+    # under <root>/<triple>/bin/ on every host, while <root>/bin/ holds the host
+    # arch's copy only on a Windows host (none on a Linux one — Linux's
+    # cross-build, the first release rehearsal, 2026-10-21) — the fallback.
+    MINGW_BIN="$(dirname "$(command -v "$CC_BIN")")"
+    UNWIND="$(dirname "$MINGW_BIN")/${CC_BIN%-clang}/bin/libunwind.dll"
+    [ -f "$UNWIND" ] || UNWIND="$MINGW_BIN/libunwind.dll"
     cp "$REL/fauna_ffi.dll" "$(pwd)/target/"
-    cp "$(dirname "$(command -v "$CC_BIN")")/libunwind.dll" "$(pwd)/target/"
+    cp "$UNWIND" "$(pwd)/target/"
     echo "Built $OUT (+ staged fauna_ffi.dll, libunwind.dll in target/)"
 
 # The cargo step + cgo environment every Windows Go/cgo recipe shares — the four
@@ -8997,7 +9378,12 @@ _windows-go-cgo-env rust_target go_arch profile:
         dev) PROFILE_DIR=debug ;;
         *)   PROFILE_DIR="{{profile}}" ;;
     esac
-    REL="$(pwd)/target/{{rust_target}}/$PROFILE_DIR"
+    # Cargo's own target dir, never a hard-coded ./target: a Linux dev box may set
+    # CARGO_TARGET_DIR to a directory outside the checkout, and a ./target REL
+    # linked nothing there (`unable to find library -lfauna_ffi`, the first
+    # release rehearsal, 2026-10-21); on Windows and the runner both resolve to ./target.
+    TARGET_DIR="${CARGO_TARGET_DIR:-$(cargo metadata --format-version 1 --no-deps 2>/dev/null | {{py}} -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])' 2>/dev/null || echo "$(pwd)/target")}"
+    REL="$TARGET_DIR/{{rust_target}}/$PROFILE_DIR"
     # The cargo step is freshness-gated OUTSIDE the build slot (a warm tree must
     # not queue — build-machine-resources.md § Build/e2e slot locks), mirroring
     # `mail-bridge-ffi`'s composition and `_windows-ffi-flavor`'s vendor-source
@@ -9419,9 +9805,25 @@ tui-debug: i18n-generate providers-generate
         --exclude '*/pkg/*' --exclude '*/pkg-test/*' --exclude 'libs/fauna-mail-go/*' \
         -- {{slot_build}} cargo build -p fauna-tui -p fauna-sync-agent
 
-# Build fauna-linux release binary (+ the sync agent it spawns — see linux-debug)
-linux-release: i18n-generate providers-generate
-    {{slot_build}} cargo build --locked -p fauna-linux -p fauna-sync-agent --release
+# Build the cli app's device shell (`fauna-cli`, apps/cli.md § The device shell)
+# with its e2e seams — what the e2e driver launches as an LLM host would.
+cli-debug: i18n-generate providers-generate
+    #!/usr/bin/env bash
+    set -euo pipefail
+    TARGET_DIR="${CARGO_TARGET_DIR:-$(cargo metadata --format-version 1 --no-deps | {{py}} -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])')}"
+    {{py}} scripts/build-if-stale.py --label cli-debug \
+        --stamp "$TARGET_DIR/cli-debug.stamp" \
+        --target "$TARGET_DIR/debug/fauna-cli{{exe_suffix}}" \
+        --source libs ${VENDOR_SOURCE:-} --source apps/fauna-cli \
+        --source Cargo.lock --source rust-toolchain.toml \
+        --exclude '*/pkg/*' --exclude '*/pkg-test/*' --exclude 'libs/fauna-mail-go/*' \
+        -- {{slot_build}} cargo build -p fauna-cli-device --features e2e-agent
+
+# Build fauna-linux release binary (+ the sync agent it spawns — see linux-debug).
+# `release.yml` builds the released desktop binary with this recipe; `target` as
+# for `nest`.
+linux-release target="": i18n-generate providers-generate
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{slot_build}} cargo build --locked -p fauna-linux -p fauna-sync-agent --release {{ if target == "" { "" } else { "--target " + target } }}
 
 # Run fauna-linux debug build
 linux-run: i18n-generate providers-generate
@@ -9637,6 +10039,12 @@ ui-lint:
 ui-registry-lint *ARGS:
     uv run scripts/lint-ui-registry.py {{ARGS}}
 
+# The cli app's catalog snapshot (apps/cli.md § Not a ui.yaml app): regenerate
+# tests/e2e-unified/catalog-actual-cli.yaml from libs/fauna-cli. The library
+# test `the_checked_in_snapshot_is_current` is its drift gate.
+cli-catalog:
+    {{slot_build}} cargo run -q -p fauna-cli --example catalog_snapshot > tests/e2e-unified/catalog-actual-cli.yaml
+
 # Wire-schema evolution gate: diff libs/fauna-protocol/schemas/*.cddl against
 # the merge base and block non-additive drift (removed/renamed/retyped keys,
 # optional→required). Pure git + regex, stdlib-only, <1s. This is the only
@@ -9672,7 +10080,11 @@ cddl-evolution-check:
 # additive-evolution-check` (no args) keeps the original merge-base behavior,
 # meaningful when run by hand from a feature branch ahead of origin/main.
 additive-evolution-check *ARGS:
-    {{slot_build}} cargo run --locked -p check-additive-evolution -- {{ARGS}}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    {{slot_build_body}}
+    cargo test --locked -p check-additive-evolution
+    cargo run --locked -p check-additive-evolution -- {{ARGS}}
 
 # The brand mark stays readable by the rasterizer that derives every app icon
 # from it (scripts/_svg_flat_render.py → render-app-icons.py, render-appx-logos.py).
@@ -9933,6 +10345,18 @@ features-lint *ARGS:
 # and writes nothing. Maintainer operation: the ledger does not ship.
 features-prune *ARGS:
     {{py}} scripts/features-prune.py {{ARGS}}
+
+# Write one store submission's state into installer/store-review.toml — the record's
+# ONLY writer; a hand edit fails the tier_1 pin. Refuses a store, track, state or
+# flavour outside the owner doc's lists, a read before since or in the future, and
+# a note with an address. Writes and stops; the commit is yours. `--check` verifies only.
+# Usage: just store-review <store> <version> <state> --read YYYY-MM-DD
+#          [--track <t> --build <b> --flavour <f> --note "…"]  (all four on the first write)
+#          [--since YYYY-MM-DD]
+# Owner: installers/store-review.md § The record.
+[positional-arguments]
+store-review *args:
+    {{py}} scripts/store-review.py "$@"
 
 # Mode 5 (testing.md convention 7): informational inventory of PlatformDriver
 # capability predicates (supports_unclean_kill and friends) each leaf app

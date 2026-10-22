@@ -70,6 +70,16 @@ const CONNECT_DEADLINE: Duration = Duration::from_secs(10);
 /// verifies (§4.B / §4.C connection-class table).
 pub const HELLO_KIND: &str = "fauna.federation.hello";
 
+/// Inbound `fauna.federation.hello`s admitted per source IP per
+/// `federation_rate_limit` window (60 s). Each costs the listener one Ed25519
+/// verify and one sign, and any fresh keypair passes it, so it is throttled on
+/// the PROXY-v2-resolved source the peer cannot choose, before the verify
+/// (`federation.md` § Security → *Rate limiting is the primary DoS defense*).
+/// A peer keeps one long-lived channel per nest, so a legitimate source redials
+/// a handful of times a minute at most. A constant (an abuse bound the binary
+/// sets, not an admin preference).
+pub const FEDERATION_HELLO_MAX_PER_IP: u32 = 10;
+
 /// The WebSocket subprotocol identifying the federation connection class,
 /// distinct from the per-actor `fauna.v1` and the anonymous `fauna.v1` planes
 /// (§4.C connection-class table).
@@ -579,6 +589,7 @@ pub async fn federation_ws_handler(
     axum::extract::State(state): axum::extract::State<Arc<crate::routes::AppState>>,
     headers: axum::http::HeaderMap,
     crate::registration::OptionalConnectInfo(peer_addr): crate::registration::OptionalConnectInfo,
+    crate::served_name::OptionalServedName(served_name): crate::served_name::OptionalServedName,
     ws: WebSocketUpgrade,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
@@ -608,7 +619,7 @@ pub async fn federation_ws_handler(
             let scope = Arc::clone(&state);
             async move {
                 let _ = scope
-                    .spawn_scoped(serve_listener(state, socket, source_ip))
+                    .spawn_scoped(serve_listener(state, socket, source_ip, served_name))
                     .await;
             }
         })
@@ -621,6 +632,7 @@ async fn serve_listener(
     state: Arc<crate::routes::AppState>,
     socket: WebSocket,
     source_ip: Option<std::net::IpAddr>,
+    served_name: Option<Arc<str>>,
 ) {
     let adapter = WsMessageAdapter::with_heartbeat(socket, state.ws.heartbeat());
     let (dispatcher, driver) = RpcDispatcher::new(adapter);
@@ -656,14 +668,24 @@ async fn serve_listener(
     // §4.B/§4.C: no federation kind flows until the handshake verifies. The first
     // inbound Request MUST be `fauna.federation.hello`, within a short deadline.
     let listener_nest_id = hex::encode(state.nest_identity.public_key_bytes());
+    // The cert the peer's observed SPKI is compared with is the one this nest
+    // served *this* connection: the cert for the name the peer dialled, or the
+    // no-SNI cert (the § B-IP bridge while installed) for a dial that carried
+    // none (`served_name.rs`; `transport-trust.md` Axis 1, *the cert it served
+    // this connection* — the same read every client-leg producer makes).
     let served_spki = state
         .served_cert_spki
         .as_ref()
-        .and_then(|s| s.current_spki_sha256())
+        .and_then(|s| s.spki_for_served_name(served_name.as_deref()))
         .map(hex::encode)
         .unwrap_or_default();
 
     let peer_nest_id = match tokio::time::timeout(HANDSHAKE_DEADLINE, inbound.recv()).await {
+        Ok(Some(req)) if !hello_admits(&state.federation_rate_limit, source_ip) => {
+            tracing::debug!(?source_ip, "federation: hello throttled per source IP");
+            send_error(&dispatcher, req.correlation_id, rate_limited()).await;
+            return;
+        }
         Ok(Some(req)) => match listener_handshake(
             &dispatcher,
             &state.nest_identity.signing_key,
@@ -705,6 +727,26 @@ async fn serve_listener(
     .await;
 
     // `conn` and `dispatcher` drop here — the driver drains and exits.
+}
+
+/// Whether the inbound hello from `source_ip` is within
+/// [`FEDERATION_HELLO_MAX_PER_IP`] — checked before the verify, so a refused
+/// hello costs no signature work. Its own key slot, so a hello bucket never
+/// collides with a kind's per-IP bucket in [`throttle_admits`]. No source IP
+/// (the dialer side, an in-process test listener) → admitted.
+fn hello_admits(
+    limiter: &crate::bridge_rate_limit::Limiter,
+    source_ip: Option<std::net::IpAddr>,
+) -> bool {
+    const FED_HELLO_SLOT: [u8; 32] = [0xfeu8; 32];
+    source_ip.is_none_or(|ip| {
+        limiter.check_with_max(
+            &crate::anonymous_rate_limit::ip_key_bytes(ip),
+            &FED_HELLO_SLOT,
+            HELLO_KIND,
+            FEDERATION_HELLO_MAX_PER_IP,
+        )
+    })
 }
 
 /// Verify the inbound `fauna.federation.hello` and reply (§4.B). On success
@@ -2270,5 +2312,57 @@ mod tests {
             req2.replay_forbidden, None,
             "a replay-permitted federation kind must not carry the hint"
         );
+    }
+
+    // Property tests: the hello payload is decoded from a stranger's frame
+    // (already past the 2 MiB / depth-256 canonical-CBOR gate) before the
+    // signature or any relationship check. The decode must never panic, and a
+    // genuine hello must round-trip while corrupted ones are refused or decode
+    // to some value, never crash.
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn hello_decode_never_panics_on_bytes(bytes in proptest::collection::vec(any::<u8>(), 0..1024)) {
+            let _ = decode_strict::<FederationHello>(&bytes);
+            let _ = decode_strict::<FederationHelloReply>(&bytes);
+        }
+
+        #[test]
+        fn hello_roundtrips_and_corruption_never_panics(
+            initiator in "[0-9a-f]{0,64}",
+            nonce in "\\PC{0,64}",
+            spki in "[0-9a-f]{0,64}",
+            envelope in "[0-9a-f]{0,200}",
+            idx in any::<prop::sample::Index>(),
+            byte in any::<u8>(),
+        ) {
+            let hello = FederationHello {
+                initiator_nest_id: initiator,
+                channel_nonce: nonce,
+                spki_sha256: spki,
+                envelope,
+            };
+            let bytes = encode_canonical(&hello).unwrap();
+            let back: FederationHello = decode_strict(&bytes).unwrap();
+            prop_assert_eq!(&back, &hello);
+            // The `Value` hop the dispatcher takes (`value_to`) agrees.
+            let via: FederationHello = value_to(&to_value(&hello)).unwrap();
+            prop_assert_eq!(via, hello);
+
+            let mut corrupt = bytes.to_vec();
+            let i = idx.index(corrupt.len());
+            corrupt[i] = byte;
+            let _ = decode_strict::<FederationHello>(&corrupt);
+        }
+
+        /// Any generic payload `Value` a stranger can frame either converts to a
+        /// hello or errors.
+        #[test]
+        fn value_to_hello_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..512)) {
+            if let Ok(v) = decode_strict::<Value>(&bytes) {
+                let _ = value_to::<FederationHello>(&v);
+            }
+        }
     }
 }

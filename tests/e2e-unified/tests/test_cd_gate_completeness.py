@@ -184,7 +184,7 @@ def test_a_destructive_resident_is_selected_only_under_the_declaration(name):
     from helpers import nest_mode as nm, nest_surface as ns
 
     item = _Item(name)
-    shared = nm.parse_nest_mode("live:https://dev.example.com")
+    shared = nm.parse_nest_mode("live:https://dev.fauna.build")
     verdict = ns.classify(item, shared)
     assert verdict is not None and verdict.rule == ns.RULE_GLOBAL_ADMIN, (
         f"{name} is no longer class (3) on a shared box — if it stopped being "

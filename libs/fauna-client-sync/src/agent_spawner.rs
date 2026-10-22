@@ -121,6 +121,14 @@ impl UnitExec {
     pub fn for_binary(binary: PathBuf) -> Option<Self> {
         Self::new(format!("\"{}\"", binary.display()), binary)
     }
+
+    /// The `ExecStart=` value — also what the linux file manager's Share
+    /// module runs the agent's `--share-target` helper through, so the
+    /// channel's agent command has one spelling
+    /// (`apps/linux.md` § The file manager's Share entry (GNOME Files)).
+    pub fn exec_start(&self) -> &str {
+        &self.exec_start
+    }
 }
 
 /// The unit text (per-user:

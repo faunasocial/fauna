@@ -125,7 +125,7 @@ protect a user from where they were sent. Three consequences:
   nest's own `/app/`.
 
 The SPA's base path is `/app` on every origin it is served from
-(`apps/fauna-web/svelte.config.js` `paths.base`): the nest mounts the build
+(`apps/fauna-web/vite.config.ts`, the kit option `paths.base`): the nest mounts the build
 there, and the `app` vhost serves the same tree under the same prefix, so
 one URL shape — `<origin>/app/` — names the app everywhere and the redirect
 has one target to build.
@@ -265,7 +265,16 @@ Built 2026-08-21 (the deciding session), NOT yet deployed:
   hot-swap `ReloadableCertResolver`. Real-wire proof: `tests/pebble_http01.rs`
   (`just e2e-pebble-http01` — #[ignore], needs Docker; demonstrated green
   2026-08-21: a certificate issued end-to-end through the production
-  challenge listener against pebble).
+  challenge listener against pebble). Since 2026-10-17 the shared router
+  redirects only to a host its caller names (the door passes its SANs; any
+  other `Host` is `404`) and refuses request bodies, and the crate's own bare
+  listener is compiled only for that `test-helpers` harness — the nest serves
+  the router through its admitted accept loop
+  ([`deployment-threat-model.md`](deployment-threat-model.md) § Concern 1a,
+  finding M2). The door's own two listeners ride one accept loop
+  (`serve_listener`): per-IP connection cap, dead-peer detection, the shared
+  `fauna-conn-limit` header-read and TLS-handshake timeouts, and — on port 80 —
+  the per-peer-IP token bucket (`429` past it); each is unit-tested.
 - **The door binary exists:** `services/fauna-front-door` — vhost dispatch,
   hardened headers, burrow 404 + SPA fallback, loopback proxy pass, per-IP
   token bucket, TLS floor + hot-swap, renewal task; each behavior unit-tested.
@@ -305,7 +314,8 @@ Built 2026-08-21 (the deciding session), NOT yet deployed:
 NOT built/done: the box itself (user's VPS order), DNS staging and the
 nameserver switch, workflow activation, and the Azure teardown — all owned by
 the migration track. Until the cutover the site serves from Azure Static Web
-Apps (apex + `www` attached 2026-08-06), and `app.fauna.social` /
+Apps (apex + `www` attached 2026-08-06), deployed at every version's sync by
+`deploy-site.yml` ([`product-version.md`](product-version.md) § Bumping), and `app.fauna.social` /
 `proxy.fauna.social` do not resolve.
 
 **§ Which origin a user loads the app from — RATIFIED 2026-09-24, the origin

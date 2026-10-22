@@ -41,6 +41,12 @@ const appendRPCTimeout = 60 * time.Second
 // under HNDL).
 var sealToRecipient = mailfauna.EncryptToRecipientHybrid
 
+// appendLiteralCeiling is the byte ceiling Append holds a literal to: the
+// product's MaxMessageBytesCeiling. Indirected through a var only so a test can
+// lower it — the read-side bound is pinned by a literal that sends more than it
+// announced, which at the real ceiling would buffer hundreds of MB per run.
+var appendLiteralCeiling = func() int64 { return int64(mailfauna.MaxMessageBytesCeiling()) }
+
 // Append implements emersion/go-imap's Session.Append: seal-to-self
 // upload of a single RFC 5322 literal to one of the actor's mailboxes.
 // Per `docs/goal/behavior/imap-server.md` § Write surface and the
@@ -95,7 +101,7 @@ func (s *Session) Append(mailbox string, r imap.LiteralReader, opts *imap.Append
 	// whatever the IMAP library does with the announced size. The read itself
 	// is limited too, so a literal that under-announces its size cannot be
 	// buffered past the ceiling either.
-	maxLiteral := int64(mailfauna.MaxMessageBytesCeiling())
+	maxLiteral := appendLiteralCeiling()
 	if r.Size() > maxLiteral {
 		return nil, &imap.Error{
 			Type: imap.StatusResponseTypeBad,

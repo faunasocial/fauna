@@ -282,6 +282,15 @@ pub struct RpcConnection {
     /// the dispatcher's `requires_loopback_peer` gate, which keeps failing
     /// closed for every authenticated caller.
     pub loopback_peer: bool,
+    /// The TLS server name the upgrade's connection was accepted under —
+    /// `serve_tls`'s accept loop records it beside `ConnectInfo`
+    /// (`served_name.rs`); `None` on the plain listener and on a no-SNI dial.
+    /// Recorded on BOTH connection classes and fed to
+    /// [`crate::dispatch_core::CallerRef::served_name`], so every
+    /// channel-binding producer signs the SPKI of the cert served for *this*
+    /// name (`transport-trust.md` Axis 1) — with [`Self::loopback_peer`], the
+    /// only fact of the upgrade the authenticated connection keeps.
+    pub served_name: Option<std::sync::Arc<str>>,
     /// Flips `true` when this connection's actor loses its authority — account
     /// lockout, suspension, or deletion. Each live `run_connection` watches it;
     /// on the flip it stops reading new requests and closes the socket with WS
@@ -362,6 +371,13 @@ pub enum FatalCloseReason {
     /// alternative — dropping it silently — leaves the caller waiting out its
     /// full deadline for an answer that will never come.
     ReplyOverflow,
+    /// A connection with no identity bound sent frames faster than
+    /// `routes::PRE_IDENTITY_FRAMES_PER_SECOND` allows. RFC 6455's 1008 (policy
+    /// violation): the frames were well-formed, the rate was not. Every
+    /// pre-identity signature kind costs the nest an Ed25519 verify or sign, so
+    /// an anonymous connection's frames are the unmetered work a flood buys
+    /// (`deployment-threat-model.md` § Concern 1a, finding H2).
+    PreIdentityFrameBudget,
 }
 
 impl FatalCloseReason {
@@ -370,6 +386,7 @@ impl FatalCloseReason {
         match self {
             FatalCloseReason::ProtocolViolation => 4400,
             FatalCloseReason::ReplyOverflow => 1011,
+            FatalCloseReason::PreIdentityFrameBudget => 1008,
         }
     }
 
@@ -380,6 +397,7 @@ impl FatalCloseReason {
         match self {
             FatalCloseReason::ProtocolViolation => "protocol violation",
             FatalCloseReason::ReplyOverflow => "reply channel overflow",
+            FatalCloseReason::PreIdentityFrameBudget => "policy violation",
         }
     }
 }
@@ -426,7 +444,7 @@ pub struct ForeignServing {
     /// The home nest's URL the announce was forwarded to.
     pub nest_url: String,
     /// The home nest's verified `nest_id` — the one nest whose ask for this
-    /// seat is pushed (`federation.md` § … → *Relay serving across nests*).
+    /// seat is pushed (`federation-shared-folders.md` § … → *Relay serving across nests*).
     pub home_nest_id: [u8; 32],
 }
 
@@ -442,6 +460,7 @@ impl RpcConnection {
         peer_addr: Option<std::net::SocketAddr>,
         durable: Option<std::sync::Arc<crate::db::CacheDb>>,
         loopback_peer: bool,
+        served_name: Option<std::sync::Arc<str>>,
     ) -> Self {
         Self {
             conn_id,
@@ -466,6 +485,7 @@ impl RpcConnection {
             fatal_tx: tokio::sync::watch::channel(None).0,
             durable,
             loopback_peer,
+            served_name,
         }
     }
 
@@ -790,6 +810,10 @@ impl DispatchSink for RpcConnection {
 
     fn caller_loopback_peer(&self) -> bool {
         self.loopback_peer
+    }
+
+    fn caller_served_name(&self) -> Option<std::sync::Arc<str>> {
+        self.served_name.clone()
     }
 
     fn lookup_idempotent(&self, key: [u8; 16]) -> BoxFuture<'_, IdempotencyHit> {
@@ -1160,7 +1184,7 @@ impl WsState {
     /// the per-token teardown ([`RpcConnection::token_id`]). It stays for the
     /// dozen tests that only ever cared which actor a Push went to.
     pub fn subscribe(&self, actor_id: [u8; 32]) -> (Arc<RpcConnection>, mpsc::Receiver<Bytes>) {
-        self.subscribe_with_session(actor_id, None, None, false)
+        self.subscribe_with_session(actor_id, None, None, false, None)
     }
 
     /// Subscribe a new connection for `actor_id`, remembering **which session**
@@ -1185,6 +1209,7 @@ impl WsState {
         token_id: Option<String>,
         bound_device_key: Option<[u8; 32]>,
         loopback_peer: bool,
+        served_name: Option<std::sync::Arc<str>>,
     ) -> (Arc<RpcConnection>, mpsc::Receiver<Bytes>) {
         let (ws_tx, ws_rx) = mpsc::channel::<Bytes>(WS_OUTBOUND_BOUND);
         let conn_id = {
@@ -1207,8 +1232,9 @@ impl WsState {
         // depend on this field for authenticated callers either — they key on
         // `actor_id` (`anonymous_rate_limit::check_conn`). 2026-08-24.
         //
-        // The one peer fact this connection does keep is `loopback_peer`, a
-        // separate field the gate never reads (`RpcConnection::loopback_peer`).
+        // The two upgrade facts this connection does keep are `loopback_peer`,
+        // a separate field the gate never reads (`RpcConnection::loopback_peer`),
+        // and `served_name`, which only the channel-binding producers read.
         let conn = Arc::new(RpcConnection::new(
             conn_id,
             actor_id,
@@ -1220,6 +1246,7 @@ impl WsState {
             None,
             self.durable.clone(),
             loopback_peer,
+            served_name,
         ));
         self.subs
             .lock()
@@ -1238,6 +1265,7 @@ impl WsState {
     pub fn subscribe_anonymous(
         &self,
         peer_addr: Option<std::net::SocketAddr>,
+        served_name: Option<std::sync::Arc<str>>,
     ) -> (Arc<RpcConnection>, mpsc::Receiver<Bytes>) {
         let (ws_tx, ws_rx) = mpsc::channel::<Bytes>(WS_OUTBOUND_BOUND);
         let conn_id = {
@@ -1259,6 +1287,7 @@ impl WsState {
             peer_addr,
             None,
             peer_addr.is_some_and(|a| a.ip().is_loopback()),
+            served_name,
         ));
         (conn, ws_rx)
     }
@@ -1285,6 +1314,7 @@ impl WsState {
             id
         };
         let key = (binding.account, binding.principal_id.clone());
+        // No served name: a principal session answers no channel binding.
         let conn = Arc::new(RpcConnection::new(
             conn_id,
             [0u8; 32],
@@ -1296,6 +1326,7 @@ impl WsState {
             None,
             None,
             false,
+            None,
         ));
         self.principals
             .lock()
@@ -1573,7 +1604,7 @@ impl WsState {
     /// The live, unrevoked connection of `actor_id` that announced it serves
     /// the foreign folder `channel_id` from `device_id` with `home_nest_id` as
     /// its home — the one connection a `fauna.federation.folder.chunk.wanted`
-    /// from that nest is pushed on (`federation.md` § … → *Relay serving
+    /// from that nest is pushed on (`federation-shared-folders.md` § … → *Relay serving
     /// across nests*). `None` for an ask from any other nest.
     pub fn foreign_serving_connection(
         &self,
@@ -1650,6 +1681,26 @@ impl WsState {
             }
         }
         presence
+    }
+
+    /// Each of `actor_id`'s live connections as `(conn_id, announced device,
+    /// device-bound)` — the per-connection detail behind
+    /// [`Self::device_presence`], for the test-hooks presence read's
+    /// self-diagnosis: which connection left the actor unannounced.
+    #[cfg(feature = "test-hooks")]
+    pub fn presence_connections(&self, actor_id: &[u8; 32]) -> Vec<(u64, Option<String>, bool)> {
+        let subs = self.subs.lock().unwrap();
+        subs.get(actor_id)
+            .into_iter()
+            .flatten()
+            .map(|c| {
+                (
+                    c.conn_id,
+                    c.announced_device(),
+                    c.bound_device_key.is_some(),
+                )
+            })
+            .collect()
     }
 
     /// `true` if `actor_id` has at least one live connection **bound to** the
@@ -1890,6 +1941,17 @@ impl WsState {
             .unwrap_or_default()
     }
 
+    /// Every actor with at least one live subscribed connection — members and
+    /// approved bridges alike; anonymous and principal sessions never join
+    /// `subs`. A snapshot: the lock is dropped before the caller pushes.
+    pub fn connected_actor_ids(&self) -> Vec<[u8; 32]> {
+        let subs = self.subs.lock().unwrap();
+        subs.iter()
+            .filter(|(_, conns)| !conns.is_empty())
+            .map(|(actor, _)| *actor)
+            .collect()
+    }
+
     /// Emit a typed `PushEvent` to every subscribed connection for `actor_id`.
     /// Per spec § 1.5 (push events + seq) and § 1.6 (backpressure handling).
     ///
@@ -2089,6 +2151,7 @@ fn encode_push_payload(
         PushEvent::PushNotification(p) => enc!(p),
         PushEvent::SyncChanged(p) => enc!(p),
         PushEvent::SyncChunkWanted(p) => enc!(p),
+        PushEvent::NestInfoChanged(p) => enc!(p),
         PushEvent::BridgeMailboxState(p) => enc!(p),
         PushEvent::BridgeConfigChanged(p) => enc!(p),
         PushEvent::BridgeAtprotoSessionsChanged(p) => enc!(p),
@@ -2247,7 +2310,7 @@ mod tests {
         let ws = WsState::with_durable(db.clone());
         let key = [12u8; 16];
 
-        let (conn, mut _rx) = ws.subscribe_anonymous(None);
+        let (conn, mut _rx) = ws.subscribe_anonymous(None, None);
         conn.clone()
             .finish(
                 1,

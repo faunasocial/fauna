@@ -26,7 +26,7 @@ default = ["store-safe", "payments", "zaps", "p2p-share"]
 # lands here (kept by the kids app) or in `store-safe`'s own tail (excised),
 # never in a second copy. The kids build is
 # `--no-default-features --features kids-safe,kids-floor`.
-kids-safe = ["accounts-registry", "pairing", "value-format", "moderation-badge", "mime", "render", "folders", "folders-author", "logs", "conversations-session", "markdown-authoring", "backup-destinations", "backup-audit", "task-delegation", "deployment-seed", "host-address", "muted-keywords", "sync-prefs", "member-review", "contact-overlays", "recovery-ceremony", "recovery-aftermath", "filter-marks", "spam-threshold-override", "custody", "snapshots-immediate-delete", "profile-client", "nest-trust", "drafts", "labeler", "qr-render", "personalization", "sync-engine-host", "sync-agent-provisioning", "push-subscription", "account-runtime", "sessions"]
+kids-safe = ["accounts-registry", "pairing", "value-format", "moderation-badge", "mime", "render", "folders", "folders-author", "logs", "conversations-session", "markdown-authoring", "backup-destinations", "backup-audit", "task-delegation", "deployment-seed", "host-address", "muted-keywords", "nest-rules", "sync-prefs", "member-review", "contact-overlays", "recovery-ceremony", "recovery-aftermath", "filter-marks", "spam-threshold-override", "custody", "snapshots-immediate-delete", "profile-client", "nest-trust", "drafts", "labeler", "qr-render", "personalization", "sync-engine-host", "sync-agent-provisioning", "push-subscription", "account-runtime", "sessions"]
 # Every app surface that is NOT a gated-feature-registry member. This is the
 # App-Store escape-hatch flavor's feature set: the kids complement plus the
 # planes the kids flavor excises — the feed and posting (`feed-badge`,
@@ -35,7 +35,7 @@ kids-safe = ["accounts-registry", "pairing", "value-format", "moderation-badge",
 # `atproto-settings`, `nostr-npub-confirm`), web publishing (`web-content`),
 # monetization (`subscriptions-author`) and third-party anything
 # (`connected-apps`, `labeler-catalog`).
-store-safe = ["kids-safe", "feed-badge", "feed-rules", "feed-manager", "feed-client", "search", "search-manager", "search-client", "mail-admin", "mail-import", "atproto-settings", "nostr-npub-confirm", "web-content", "subscriptions-author", "connected-apps", "labeler-catalog"]
+store-safe = ["kids-safe", "rule-editor", "feed-badge", "feed-rules", "feed-manager", "feed-client", "search", "search-manager", "search-client", "mail-admin", "mail-import", "atproto-settings", "nostr-npub-confirm", "web-content", "subscriptions-author", "connected-apps", "labeler-catalog"]
 # The kids flavor's compiled-in content floor (`family-safety.md` § The account
 # age band → the kids-app bullet, item (4)): composes
 # `fauna_core::obligation::KIDS_CONTENT_FLOOR` — the four guardian categories at
@@ -162,7 +162,9 @@ zaps = ["payments", "fauna-protocol/zaps", "fauna-client-nostr/zaps"]
 # the same way; `fauna-client-dns/test-helpers` cannot forward it — fauna-wasm
 # turns that feature on for wasm32).
 e2e-harness = ["sync-engine-host", "dep:fauna-iroh", "dep:fauna-feed", "dep:fauna-archive-import-machine", "dep:fauna-credential-store", "dep:fauna-client-capabilities", "dep:fauna-bridge-nostr", "dep:fauna-client-share", "dep:fauna-atproto-settings-machine", "dep:fauna-client-atproto", "fauna-client-folders/mls", "mail-admin", "mail-import", "fauna-mail/test-helpers", "fauna-client-dns/test-helpers", "fauna-core/test-helpers", "dep:fauna-client-pair"]
-labeler = ["dep:fauna-labeler", "dep:serde_bare", "fauna-mail/parser"]
+# Also runs a nest document's `wasm` labelers in `FfiNestRulesBook::join_labels`
+# (`fauna-client-policy/scorers`) wherever the book is built.
+labeler = ["dep:fauna-labeler", "dep:serde_bare", "fauna-mail/parser", "fauna-client-policy?/scorers"]
 # The personalization surface's community-labeler-catalog page FFI
 # (src/labeler_catalog.rs — the `LabelerCatalogMachine` browse /
 # inspect-before-subscribe / (un)subscribe over `fauna.labelers.*`).
@@ -736,7 +738,11 @@ folders = [
 # --features sync-engine-host` build must pull its own, or the module fails to
 # compile (E0433 on `tracing`). `file-provider-host` below implies this feature,
 # so its module (which also logs unconditionally) inherits the same dep.
-sync-engine-host = ["fauna-sync-engine/engine-lifecycle", "dep:tracing", "account-runtime"]
+# `fauna-sync-engine/pull-back` because the nest-held pull-back face
+# (`reseed::backup_pull_back_from_destination`) is gated on this feature: an app
+# host holds the seed the pull-back signs with. Unified feature resolution used to
+# lend it from tui/linux; a per-invocation build of this crate needs it named here.
+sync-engine-host = ["fauna-sync-engine/engine-lifecycle", "fauna-sync-engine/pull-back", "dep:tracing", "account-runtime"]
 # The W3 (account-data-plane.md § Workstreams) account-store runtime this app hosts (src/account_runtime.rs) — the
 # third consumer of the shared `fauna-client-account-runtime` assembly after
 # tui and linux, and what gives windows/macOS/iOS an account plane of their
@@ -858,6 +864,19 @@ search = ["dep:fauna-client-search"]
 # `fauna-core/uniffi` so `ContentLabelStyle` gets its `uniffi::Record`
 # registration cross-crate. The bridge has no moderation surface.
 moderation-badge = ["fauna-core/uniffi"]
+# The member's side of the nest rules (`nest-rules.md` § The nest content
+# policy, § Acceptance at joining, and a change of rules) — `nest_rules.rs`: the
+# nest-rules book, and the region plane's `render_with_nest` with the guardian
+# document's keyword and labeler joins. In `kids-safe`: the kids app is a ward's
+# device, bound by its nest's rules and its guardian's document like any other.
+# The book's summary embeds bare `LocalizedText`, so it forwards
+# `fauna-core/uniffi` as `moderation-badge` does.
+nest-rules = ["dep:fauna-client-policy", "fauna-client-policy/uniffi", "fauna-core/uniffi"]
+# The shared rule editor (`fauna_client_policy`; `nest-rules.md` § The shared
+# rule editor) — `rule_editor.rs`: the editor and its three mountings' writes
+# and reads. In `store-safe`'s tail: a kids account is never an admin or a
+# guardian.
+rule-editor = ["nest-rules", "dep:fauna-client-labelers"]
 # Shared MIME-type detection (src/mime.rs — content_type_for_filename over the
 # fauna_core::share extension→MIME catalog). Default-on for the Apple/Android/
 # Windows app FFI (replaces per-app hand-rolled maps, e.g. the windows
@@ -907,7 +926,7 @@ nest-trust = []
 # `justfile` `mail-bridge-ffi` + `docs/goal/architecture/build-system.md`.
 # `account-runtime`: the credentialed DNS machine reads and writes the
 # account's `fauna.state.dns` row through the seat's account-store handle.
-mail-admin = ["dep:fauna-client-dns", "dep:fauna-client-mail-settings", "account-runtime", "fauna-client-folders/mail-settings"]
+mail-admin = ["dep:fauna-client-dns", "dep:fauna-client-mail-settings", "account-runtime", "fauna-client-folders/mail-settings", "fauna-mail/delivered-uniffi"]
 # The user-settings Linked-nests machine (src/pairing.rs). Default-on for the
 # Apple/Android/Windows app FFI, gated out of the Go mail-bridge
 # `--no-default-features` build for the same cross-namespace-import reason as
@@ -950,6 +969,10 @@ conversations-session = [
     "account-runtime",
     "fauna-mail/segments-receive",
     "fauna-conversations/client-display",
+    # The `dm-message-warmup-deferred` wording's release time in the viewer's
+    # local clock (`fauna_conversations::message::warmup_deferred_text`,
+    # exported beside `typed_address_display` under the same gate).
+    "fauna-conversations/local-clock",
     "dep:fauna-client-recovery",
     "fauna-client-recovery/conversations-witness",
 ]
@@ -1052,6 +1075,13 @@ test-helpers = [
     # `fauna-client-capabilities::trust_clock` gates its setter on
     # `debug_assertions OR e2e-agent`, and the dep is optional (weak `?/`).
     "fauna-client-capabilities?/e2e-agent",
+    # The submission-token refresh's clock
+    # (`set_mail_token_refresh_clock_offset_secs`, the
+    # `mail_token_refresh_advance_clock` agent command's mechanism) — same
+    # rationale: `fauna-client-mail-settings::token_refresh` gates its setter
+    # on `debug_assertions OR e2e-agent`, and the dep is optional (`mail-admin`,
+    # weak `?/`).
+    "fauna-client-mail-settings?/e2e-agent",
     # The fleet-removal convergence read (`device_set_state_json`, the
     # `FfiNestClient::device_set_state_json` export's mechanism) — same
     # rationale as the delegation clock above: `fauna-client-account-runtime`
@@ -1191,6 +1221,10 @@ fauna-client-family = { path = "../fauna-client-family" }
 # build does not compile the crate at all. NOT gated on `payments`/`zaps`: the
 # read answers for whichever registry members a build ships.
 fauna-client-features = { path = "../fauna-client-features", optional = true }
+# The shared rule editor model, behind `rule-editor`.
+fauna-client-policy = { path = "../fauna-client-policy", optional = true }
+# The labeler picker's reads (`FfiRuleLabelersClient`), behind `rule-editor`.
+fauna-client-labelers = { path = "../fauna-client-labelers", optional = true }
 # The region content plane's app side (src/region.rs). Optional behind
 # `value-format` for the same reason as `fauna-client-features` above.
 fauna-client-region = { path = "../fauna-client-region", optional = true }

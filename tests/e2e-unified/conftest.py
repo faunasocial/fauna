@@ -46,7 +46,7 @@ if _tests_dir not in sys.path:
 from common import (
     CLAIM_CODE,
     build_node,
-    build_sync_service_win,
+    build_sync_agent,
     start_nest,
     create_actor_and_register,
     get_repo_root,
@@ -122,7 +122,7 @@ def _find_simulator_udid() -> str | None:
 def _ios_derived_data_dir() -> Path:
     """Per-working-tree iOS derived-data path.
 
-    The iOS app build (`xcodebuild` below) and the macOS-host's `just apple-ffi-test`
+    The iOS app build (`xcodebuild` below) and the `just apple-ffi-test-sim`
     static lib are both per-working-tree. A single shared `/tmp/fauna-e2e-build`
     would let two concurrent working trees corrupt each other's `xcodebuild`
     derived data AND cross-link the wrong per-working-tree FFI into the `.app`.
@@ -203,7 +203,31 @@ def _create_ephemeral_simulator() -> str | None:
         return None
     udid = res.stdout.strip()
     atexit.register(_delete_simulator, udid)
+    _E2E_SIMULATORS.append(udid)
+    _note_simulators()
     return udid
+
+
+#: The UDIDs `_create_ephemeral_simulator` made this pytest session.
+_E2E_SIMULATORS: list[str] = []
+
+
+def _note_simulators() -> None:
+    """Name this run's simulators in its lane holder notes (`sims`).
+
+    A booted simulator is a `launchd_sim` tree that launchd parents, outside
+    this process's tree and every checkout, so the fleet agent read its load
+    (6-13 cores during an iOS run) as the desktop's — load nothing holds back.
+    Named here, it is this run's checkout's (fleet-core-broker.md § The agent).
+    getattr: the machine's build-slot copy may predate `annotate_note`."""
+    if _E2E_SLOT is None:
+        return
+    mod, held, _hold = _E2E_SLOT
+    annotate = getattr(mod, "annotate_note", None)
+    if annotate is None:
+        return
+    for fd, _pool in held:
+        annotate(fd, {"sims": list(_E2E_SIMULATORS)})
 
 
 def _delete_simulator(udid: str) -> None:
@@ -251,10 +275,10 @@ def _xcframework_slices() -> list[str]:
     """Slice directory names present in `apps/fauna-apple/FaunaFFI.xcframework`
     (``[]`` when the framework is absent).
 
-    ONE path is written by two mutually destructive producers: `just apple-ffi-test`
-    assembles the full slice set (darwin + ios + ios-sim; plus watchos +
-    watchos-sim only on the explicit `just apple-ffi-watch` opt-in, 2026-08-22 —
-    nothing links those, so the default set is 3),
+    ONE path is written by two mutually destructive producers: `just
+    apple-ffi-test-sim` — the iOS e2e's recipe — assembles darwin + ios-sim
+    (`apple-ffi-test` adds the device slice, `just apple-ffi-watch` the two
+    watchOS ones; nothing here links either),
     while `just apple-ffi-host-test` — a dependency of `just mac-debug` AND
     `just swift-test` — assembles the 1 darwin slice and `rm -rf`s whatever was
     there first (the justfile's `.ffi-flavor` guard). So a macOS build silently
@@ -266,8 +290,71 @@ def _xcframework_slices() -> list[str]:
     return sorted(p.name for p in xcf.iterdir() if p.is_dir())
 
 
+#: What the iOS app's freshness gate scans besides the FFI fingerprint: the
+#: whole apple package minus the outputs other recipes write into it — the
+#: excludes of `mac-debug`'s gate (the justfile spells why each is not a SwiftPM
+#: input), plus that gate's own stamp, which `mac-debug` rewrites on every macOS
+#: build and which would otherwise re-stale this gate after each one. The
+#: xcframework is excluded from the mtime scan and read by
+#: `_ios_app_ffi_fingerprint` instead.
+_IOS_APP_SOURCE_EXCLUDES = [
+    "*/.build/*", "*/.ffi-flavor",
+    "*/apps/fauna-apple/.xcode-build/*", "*/apps/fauna-apple/.ffi-cache.stamp",
+    "*/apps/fauna-apple/FaunaFFI.xcframework/*", "*/apps/fauna-apple/generated/*",
+    "*/xcuserdata/*", "*/apps/fauna-apple/.swiftpm/xcode/*",
+    "*/apps/fauna-apple/.mac-debug.stamp",
+]
+
+
+def _ios_app_ffi_fingerprint(package_dir: Path) -> str:
+    """Identity of the FFI the iOS app links: (path, size, mtime) of every file
+    in the staged `FaunaFFI.xcframework` and `FaunaFFISwift/Sources`, hashed.
+
+    Not an mtime comparison, because the full flavor's restores keep mtimes
+    (`cp -p`, the cross-checkout cache and the dirty-tree stash alike — kept so a
+    restore of the SAME generation leaves the app warm): a DIFFERENT generation
+    restored from the cache can carry mtimes older than this app's stamp, which a
+    newer-than-the-stamp test would read as fresh. Any other generation differs
+    in at least one file's size or mtime."""
+    h = hashlib.sha256()
+    for root in (package_dir / "FaunaFFI.xcframework", package_dir / "FaunaFFISwift" / "Sources"):
+        if not root.is_dir():
+            continue
+        for f in sorted(root.rglob("*")):
+            if f.is_file():
+                st = f.stat()
+                h.update(f"{f.relative_to(package_dir).as_posix()}\0{st.st_size}\0{st.st_mtime_ns}\n".encode())
+    return h.hexdigest()
+
+
+def _ios_app_build_is_fresh(package_dir: Path, exe: Path, stamp: Path) -> bool:
+    """The iOS app's freshness gate, read holding no slot: the built executable
+    exists, the stamp records the FFI generation staged now, and no package
+    source is newer than the stamp (dated at the build's slot grant)."""
+    if not exe.exists() or not stamp.exists():
+        return False
+    try:
+        recorded = stamp.read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    if recorded != _ios_app_ffi_fingerprint(package_dir):
+        return False
+    from common.nest import _load_build_if_stale
+
+    newest = _load_build_if_stale()._source_newest(package_dir, _IOS_APP_SOURCE_EXCLUDES)
+    return newest <= stamp.stat().st_mtime
+
+
 def _build_ios_app() -> str | None:
     """Build the iOS app for simulator testing. Returns the .app path.
+
+    Freshness-gated OUTSIDE the `build` slot, then compiled under it: a warm tree is a stamp read (`_ios_app_build_is_fresh`)
+    and runs no `xcodebuild` at all, so the warm pass can build the app holding
+    no lane and the in-hold re-check costs nothing; a stale one runs
+    `xcodebuild` through `common.nest._build_slot_cmd`, its stamp dated at the
+    grant (`build-if-stale.py::run_for_stamp`). The order is load-bearing: the
+    in-hold re-check runs in refuse mode, where an ungated `build` acquire is
+    refused on every call, warm tree or not.
 
     Returns ``None`` only when the apple package is genuinely absent. A build
     that FAILS raises — it must never degrade into the caller's
@@ -297,21 +384,38 @@ def _build_ios_app() -> str | None:
             "Cause: `just apple-ffi-host-test` (a dep of `just mac-debug` and "
             "`just swift-test`) deletes a full xcframework and reassembles it "
             "host-only.\n"
-            "Fix: run `just apple-ffi-test` LAST, after any macOS build:\n"
-            f"    just apple-ffi-test    # from {_repo_root}"
+            "Fix: run `just apple-ffi-test-sim` LAST, after any macOS build:\n"
+            f"    just apple-ffi-test-sim    # from {_repo_root}"
         )
 
-    result = subprocess.run(
-        ["xcodebuild", "build",
-         "-workspace", str(_ios_package_workspace(package_dir)),
-         "-scheme", "FaunaiOS",
-         "-destination", "platform=iOS Simulator,name=iPhone 17 Pro",
-         "-derivedDataPath", str(derived),
-         "-skipPackagePluginValidation", "-skipMacroValidation"],
-        capture_output=True, text=True, cwd=package_dir,
+    # xcodebuild for SPM puts bare binary in Products — create .app bundle
+    products = derived / "Build" / "Products" / "Debug-iphonesimulator"
+    exe = products / "FaunaiOS"
+    stamp = derived / ".fauna-ios-app.stamp"
+    if _ios_app_build_is_fresh(package_dir, exe, stamp):
+        print("[prebuild] ios app: up-to-date (stamp read, no xcodebuild, no slot)", flush=True)
+        return _bundle_ios_app(derived, exe)
+
+    from common.nest import _build_slot_cmd, _load_build_if_stale
+
+    bis = _load_build_if_stale()
+    # Read BEFORE the build: the generation the compile is about to link.
+    fingerprint = _ios_app_ffi_fingerprint(package_dir)
+    result, instant = bis.run_for_stamp(
+        _build_slot_cmd(_repo_root) + [
+            "xcodebuild", "build",
+            "-workspace", str(_ios_package_workspace(package_dir)),
+            "-scheme", "FaunaiOS",
+            "-destination", "platform=iOS Simulator,name=iPhone 17 Pro",
+            "-derivedDataPath", str(derived),
+            "-skipPackagePluginValidation", "-skipMacroValidation"],
+        # stdout (xcodebuild's build log) is captured for the failure tail;
+        # stderr streams, so a slot wait's `[build-slot]` lines — who holds the
+        # slot, a refusal — reach the run's log as they happen.
+        run=subprocess.run, stdout=subprocess.PIPE, text=True, cwd=package_dir,
     )
     if result.returncode != 0:
-        lines = (result.stdout + result.stderr).strip().split("\n")
+        lines = (result.stdout or "").strip().split("\n")
         tail = "\n".join(f"    {line}" for line in lines[-30:])
         raise RuntimeError(
             f"building the iOS app failed: xcodebuild exited "
@@ -320,21 +424,24 @@ def _build_ios_app() -> str | None:
             f"{tail or '    <no output captured>'}\n"
             f"--- end build output ---\n"
             f"Reproduce with:\n"
-            f"    just apple-ffi-test && xcodebuild build -scheme FaunaiOS "
+            f"    just apple-ffi-test-sim && xcodebuild build -scheme FaunaiOS "
             f"-destination 'platform=iOS Simulator,name=iPhone 17 Pro'\n"
             f"(run it from {package_dir})."
         )
 
-    # xcodebuild for SPM puts bare binary in Products — create .app bundle
-    products = derived / "Build" / "Products" / "Debug-iphonesimulator"
-    exe = products / "FaunaiOS"
     if not exe.exists():
         # xcodebuild reported success but produced nothing — a build-system
         # break, not an unavailable platform. Same rule as above: never a skip.
         raise RuntimeError(
             f"xcodebuild succeeded but the built executable is missing at {exe}"
         )
+    bis.commit_stamp(stamp, instant, fingerprint + "\n")
+    return _bundle_ios_app(derived, exe)
 
+
+def _bundle_ios_app(derived: Path, exe: Path) -> str:
+    """Wrap the bare SPM executable in the `.app` bundle `simctl install` takes;
+    returns the bundle path. Cheap, and run on every call — warm or built."""
     app_dir = derived / "FaunaiOS.app"
     app_dir.mkdir(exist_ok=True)
     shutil.copy2(str(exe), str(app_dir / "FaunaiOS"))
@@ -601,9 +708,10 @@ def get_available_apps() -> list[str]:
     if override:
         return _resolve_app_tokens(override)
     if detect_platform() == "github":
-        # Not a dev machine, and consulted by NOTHING today (see sweep_apps).
-        # The rust-first default is about the dev inner loop, and tui cannot
-        # be built there at all, so github keeps declaring its own set.
+        # Not a dev machine: the self-hosted tier_4 workflow's runner reads
+        # this (its tests are client-free, so no app artifact is built). The
+        # rust-first default is about the dev inner loop, and tui cannot be
+        # built there at all, so github keeps declaring its own set.
         return sweep_apps()
     return [DEFAULT_APP]
 
@@ -715,15 +823,15 @@ def _ensure_ap_nest_built() -> str:
 
 
 def _ensure_sync_agent_built() -> str:
-    """fauna-sync-agent.exe (windows Service-wrapped sync agent), once per
-    session; `sync_agent_binary`'s builder. Was the last fixture in this
-    layer left "bare cargo-win, no slot involved" — now routed through
-    `common.nest.build_sync_service_win`'s gate-then-slot composition,
-    same class as the nest builders above."""
+    """fauna-sync-agent (`.exe` on windows), once per session; the builder
+    behind `sync_agent_binary` (windows) and `macos_sync_agent_binary`. Routed
+    through `common.nest.build_sync_agent`'s gate-then-slot composition, same
+    class as the nest builders above: a warm tree is a stamp read and takes
+    no slot."""
 
     def build():
         _ensure_generated_files_fresh()
-        return build_sync_service_win()
+        return build_sync_agent()
 
     return _memoized_build("sync-agent-binary", build)
 
@@ -1563,7 +1671,8 @@ class _StandaloneProvider:
 
     #: Ruling (3)'s venue seam, standalone half. See `_start_mail_venue`.
     supported_venue_options = frozenset({"registration_open", "caldav_only",
-                                         "caldav_admin_port"})
+                                         "caldav_admin_port", "dav_toggles",
+                                         "domainless"})
 
     def start_mail_venue(self, request, tmp_path_factory, label, **options):
         """Standalone's mail venue: a nest plus HOST-SPAWNED MTA/MDA bridges.
@@ -1575,7 +1684,14 @@ class _StandaloneProvider:
         existed. `close()` on the generator raises `GeneratorExit` at its
         `yield`, which is what runs its `finally` (bridges, stub MX, fakes and
         nest torn down in order) — so the teardown is the same code too.
+
+        The ``dav_toggles`` venue (``dav_toggle_venue``) is the other shape: a
+        nest with its toggles set, one provisioned DAV user and an MDA alone —
+        ``_dav_toggle_venue_impl``, likewise the fixture's own pre-routing body.
         """
+        if "dav_toggles" in options:
+            return _dav_toggle_venue_impl(request, tmp_path_factory, label,
+                                          **options)
         gen = _dedicated_mail_nest_impl(
             request.getfixturevalue("mail_bridge_binary"),
             request.getfixturevalue("seal_helper_binary"),
@@ -1874,9 +1990,16 @@ class _DockerProvider(_OptionAwareProvider):
     #: 100% closable — the last MIXED sole-blocker in the audit (`conversations`).
     permanently_unsupported_options = frozenset({"handle_domain_seed"})
 
-    #: The default image when `--nest docker` carries no `:ref`. The tier_4
-    #: suite's locally-built tag, so a session that HAS built one gets it.
-    DEFAULT_IMAGE = "fauna-nest-test:local"
+    @staticmethod
+    def default_image() -> str:
+        """The image when `--nest docker` carries no `:ref`: the tier_4 suite's
+        locally-built image of THIS tree, its tag keyed on the tree's source
+        inputs (`helpers/nest_test_image.py`), so a session that has built it —
+        or any checkout with the same inputs — gets it, and never another
+        tree's. Git only, never docker."""
+        from helpers import nest_test_image
+
+        return nest_test_image.local_image_tag(Path(__file__).resolve().parents[2])
 
     def __init__(self, image: str | None = None):
         self._image = image
@@ -1886,11 +2009,13 @@ class _DockerProvider(_OptionAwareProvider):
 
         `feature_ledger.image_digest_for` calls this at collection time, before
         any nest boots (`_apply_feature_axis` runs from `pytest_collection_
-        modifyitems`), so it must never shell out or raise the way
+        modifyitems`), so it must never call docker or raise the way
         `_resolve_image` below does — a missing image is `start`'s refusal to
-        report, not a collection-time failure.
+        report, not a collection-time failure. Keying the default tag runs git
+        only, which `nest_test_image.local_image_tag` caches and never lets
+        raise.
         """
-        return mode.argument or self._image or self.DEFAULT_IMAGE
+        return mode.argument or self._image or self.default_image()
 
     def _resolve_image(self, mode) -> str:
         from helpers import nest_mode as nest_mode_mod
@@ -1904,14 +2029,16 @@ class _DockerProvider(_OptionAwareProvider):
             raise nest_mode_mod.NestModeError(
                 f"nest mode 'docker' needs the image {image!r}, which is not "
                 f"present on this machine. This provider deliberately does NOT "
-                f"build it: building the nest image on a dev VM is forbidden — "
-                f"the dev VMs share one physical host and the build starves "
-                f"them (image-pipeline.md § Image tags & channels). Either\n"
+                f"build it: a build is a heavy act no run starts by surprise "
+                f"(image-pipeline.md § Image tags & channels). Either\n"
                 f"  • run against an already-published image: "
-                f"--nest docker:ghcr.io/faunasocial/nest:latest "
+                f"--nest docker:ghcr.io/faunasocial/nest:dev "
                 f"(docker pull it first), or\n"
-                f"  • dispatch a real build: gh workflow run build-nest-image.yml "
-                f"--ref main, then pull the resulting tag.\n"
+                f"  • build this tree's own image locally — never a "
+                f"build-nest-image.yml dispatch, which adds :sha-<sha> to the "
+                f"public package (owner ruling 2026-10-19): run a tier_4 docker "
+                f"test with FAUNA_ALLOW_NEST_IMAGE_BUILD=1, which builds the "
+                f"keyed tag inside a build slot.\n"
                 f"Refusing rather than falling back to standalone: a silent "
                 f"fallback would report a green docker run against a nest the "
                 f"image never served."
@@ -2154,7 +2281,7 @@ class _DockerProvider(_OptionAwareProvider):
             try:
                 start_container_with_ports(
                     name,
-                    {3000: port, **(_venue_ports or {})},
+                    {443: port, **(_venue_ports or {})},
                     # The provider's own wiring FIRST, so the merge order says
                     # what the refusal above already guarantees: `extra_env` adds
                     # to how this nest is reached, it never redefines it.
@@ -2238,7 +2365,7 @@ class _DockerProvider(_OptionAwareProvider):
             # test needs is "this is the address a peer would use", and the fact
             # the classifier needs is "the nest will refuse it". Suppressing the
             # key would conflate them.
-            "peer_url": f"https://{container_ip(name)}:3000",
+            "peer_url": f"https://{container_ip(name)}:443",
             "db_path": os.path.join(data_dir, "nest.db").replace("\\", "/"),
             "blob_dir": os.path.join(data_dir, "blobs").replace("\\", "/"),
             "tmp_dir": data_dir,
@@ -2331,7 +2458,14 @@ class _DockerProvider(_OptionAwareProvider):
     #: `caldav_admin_port` is absent PERMANENTLY, by ratification: s6 owns the
     #: rebind in the image, which is why the admin-CalDAV-port rebind test stays
     #: standalone-only (`testing.md` § Default app and nest mode, ruling (3)).
-    supported_venue_options = frozenset({"registration_open", "caldav_only"})
+    #:
+    #: `dav_toggles` (with `domainless`) is the same move generalised: the four
+    #: deployment toggles set at setup, each writing the `/data/*-enabled` flag
+    #: the MDA run-script gates on, and one DAV user provisioned over the wire.
+    #: Its `rebind()` is a wait on the supervisor's restart, never a respawn —
+    #: the different act `MailVenueHandle.rebind_after_enable` already is here.
+    supported_venue_options = frozenset({"registration_open", "caldav_only",
+                                         "dav_toggles", "domainless"})
 
     def start_mail_venue(self, request, tmp_path_factory, label, **options):
         """Docker's mail venue: the image's OWN s6 bridges, ports published.
@@ -2380,6 +2514,13 @@ class _DockerProvider(_OptionAwareProvider):
         # those gates), and it converges at SETUP because it drives its own
         # enable rather than waiting for one the app under test fires.
         caldav_only = bool(options.get("caldav_only"))
+        # The `dav_toggles` venue takes the same MTA-free shape whenever its
+        # mail toggle is off, for the same one reason: nothing writes
+        # `/data/imap-enabled`. With mail on it is the mail shape, scanners and
+        # resolver included, because the image's MTA does come up then.
+        dav = options.get("dav_toggles")
+        domainless = bool(options.get("domainless"))
+        mta_free = caldav_only or (dav is not None and not dav["mail"])
 
         # The scanners must exist BEFORE the nest container, because their
         # addresses are container env. They are IP literals rather than names:
@@ -2391,7 +2532,7 @@ class _DockerProvider(_OptionAwareProvider):
         suffix = find_free_ports(1)[0]
         sidecars: list[str] = []
         scan: dict = {}
-        if not caldav_only:
+        if not mta_free:
             clamd_name = f"{_DOCKER_LEGACY_PREFIX}clamd-{suffix}"
             rspamd_name = f"{_DOCKER_LEGACY_PREFIX}rspamd-{suffix}"
             scan = start_fake_scanner_sidecars(
@@ -2425,7 +2566,7 @@ class _DockerProvider(_OptionAwareProvider):
 
         dns_ip = None
         records_dir = None
-        if not caldav_only:
+        if not mta_free:
             dns_name = f"{_DOCKER_LEGACY_PREFIX}dns-{suffix}"
             records_dir = str(tmp_path_factory.mktemp(f"{label}-dns"))
             try:
@@ -2443,7 +2584,7 @@ class _DockerProvider(_OptionAwareProvider):
             # race is why `start` retries a bind collision rather than
             # pre-reserving. The CalDAV-only venue publishes ONE port, and that
             # is what `DockerMailVenueHandle` reads its shape from.
-            venue_container_ports = (8443,) if caldav_only else (25, 465, 587, 993, 8443)
+            venue_container_ports = (8443,) if mta_free else (25, 465, 587, 993, 8443)
             mail_ports = dict(zip(
                 venue_container_ports, find_free_ports(len(venue_container_ports))))
             nest, nest_cleanup = self.start(
@@ -2454,7 +2595,7 @@ class _DockerProvider(_OptionAwareProvider):
                     # these into the operator hatch for the MTA's inbound
                     # content scan, and a deployment with no MTA terminates no
                     # inbound SMTP to scan.
-                    **({} if caldav_only else {
+                    **({} if mta_free else {
                         "FAUNA_CLAMD_ADDR": scan["clamd_addr"],
                         "FAUNA_RSPAMD_URL": scan["rspamd_url"],
                     }),
@@ -2489,7 +2630,9 @@ class _DockerProvider(_OptionAwareProvider):
             raise
 
         try:
-            domain = MAIL_PRIMARY_DOMAIN
+            # A `domainless` venue registers no domain at all: the home-nest
+            # shape, its MDA on the nest's floor cert.
+            domain = None if domainless else MAIL_PRIMARY_DOMAIN
             # **The domain set is the standalone hatch's, one for one** — this
             # is where "the MX override moves from the operator-hatch to DNS"
             # actually lands. `_dedicated_mail_nest_impl` writes an
@@ -2517,8 +2660,9 @@ class _DockerProvider(_OptionAwareProvider):
             # for the same reason it runs no scanners: both gates this answers
             # (HELO identity, envelope-sender domain) are the inbound SMTP
             # perimeter's, and this deployment terminates no SMTP.
-            if not caldav_only:
-                _resolvable = [domain, "external.test", "example.com"]
+            if not mta_free:
+                _resolvable = [d for d in (domain, "external.test", "example.com")
+                               if d is not None]
                 _nest_ip = container_ip(nest["container_name"])
                 write_dns_records(
                     records_dir,
@@ -2538,11 +2682,12 @@ class _DockerProvider(_OptionAwareProvider):
             # is stored and echoed but no reader in `dns_handlers.rs` or
             # `dns_verifier.rs` derives anything from it.)
             with admin_ws:
-                admin_ws.call(
-                    "fauna.bridges.add_local_domain",
-                    {"domain": domain,
-                     "mta_sts_cert_mode": "per_host"},
-                )
+                if domain is not None:
+                    admin_ws.call(
+                        "fauna.bridges.add_local_domain",
+                        {"domain": domain,
+                         "mta_sts_cert_mode": "per_host"},
+                    )
                 admin_ws.call(
                     "fauna.bridges.put_spam_policy",
                     {
@@ -2572,7 +2717,20 @@ class _DockerProvider(_OptionAwareProvider):
                         "helo_identity_required": False,
                     },
                 )
-                if caldav_only:
+                if dav is not None:
+                    # The `dav_toggles` venue sets exactly the toggles it was
+                    # asked for, in the standalone venue's order, and leaves an
+                    # unasked one unset — the "follows mail" state. Each writes
+                    # (or removes) the `/data/*-enabled` flag the MDA's s6
+                    # run-script gates on, so the supervisor, not the harness,
+                    # brings the MDA up bound to that shape.
+                    admin_ws.call("fauna.bridges.set_mail_enabled",
+                                  {"enabled": bool(dav["mail"])})
+                    for kind in ("caldav", "carddav", "webdav"):
+                        if dav.get(kind) is not None:
+                            admin_ws.call(f"fauna.bridges.set_{kind}_enabled",
+                                          {"enabled": bool(dav[kind])})
+                elif caldav_only:
                     # Explicit-off BEFORE the CalDAV enable, in the same order
                     # standalone uses and for the same reason it gives: an unset
                     # `mail_enabled` already reads OFF post-Stage-5, so this is
@@ -2603,12 +2761,26 @@ class _DockerProvider(_OptionAwareProvider):
                 # brings the MDA up EARLIER, which is closer to standalone (whose
                 # MDA is spawned at fixture setup) rather than further; the MTA
                 # is unaffected, gating on `/data/imap-enabled` alone.
-                admin_ws.call("fauna.bridges.set_caldav_enabled",
-                              {"enabled": True})
+                if dav is None:
+                    admin_ws.call("fauna.bridges.set_caldav_enabled",
+                                  {"enabled": True})
             if options.get("registration_open"):
                 from common.auth import open_registration
                 open_registration(nest)
 
+            if dav is not None:
+                # The DAV user, provisioned by the one helper both modes share,
+                # then the venue converges at SETUP like the CalDAV-only one:
+                # nothing in its tests fires an enable it could wait on.
+                prov = _provision_dav_toggle_user(
+                    nest, request.getfixturevalue("seal_helper_binary"), domain)
+                handle = DockerDavToggleVenueHandle(
+                    nest=nest, domain=domain, mail_ports=mail_ports,
+                    container_name=nest["container_name"], dav_toggles=dav,
+                    recipient=prov,
+                )
+                handle.converge(timeout=180.0)
+                return handle, _venue_cleanup(nest_cleanup, _drop_sidecars)
             handle = DockerMailVenueHandle(
                 nest=nest, domain=domain, mail_ports=mail_ports,
                 container_name=nest["container_name"],
@@ -2633,11 +2805,16 @@ class _DockerProvider(_OptionAwareProvider):
             _drop_sidecars()
             raise
 
-        def cleanup():
-            nest_cleanup()
-            _drop_sidecars()
+        return handle, _venue_cleanup(nest_cleanup, _drop_sidecars)
 
-        return handle, cleanup
+
+def _venue_cleanup(nest_cleanup, drop_sidecars):
+    """The docker venue's teardown: the nest container, then its sidecars."""
+    def cleanup():
+        nest_cleanup()
+        drop_sidecars()
+
+    return cleanup
 
 
 class _LiveProvider(_OptionAwareProvider):
@@ -2802,7 +2979,7 @@ class _LiveProvider(_OptionAwareProvider):
         # Every handle is the SAME box and the ledger is run-wide, so only the
         # LAST handle to close reaps. A module-scoped dedicated nest's teardown
         # reaping the ledger suspended the session `test_user` mid-run
-        # (measured 2026-10-05 on dev.example.com, after `test_archive_import`).
+        # (measured 2026-10-05 on the dev nest, after `test_archive_import`).
         self._open_handles = getattr(self, "_open_handles", 0) + 1
         closed = False
 
@@ -2956,6 +3133,19 @@ def nest_instance(request, nest_mode, tmp_path_factory):
 
 
 @pytest.fixture
+def planted_bridges(nest_instance):
+    """Plant approved, process-less bridge rows on the session `nest_instance`
+    (`helpers.bridge_enrollment.PlantedBridges`); every one is revoked at
+    teardown, so no later test's mail health counts a helper that never
+    connects."""
+    from helpers.bridge_enrollment import PlantedBridges
+
+    planted = PlantedBridges(nest_instance["url"], nest_instance["admin"]["signing_key"])
+    yield planted
+    planted.retire_all()
+
+
+@pytest.fixture
 def reclaimable_nest(request, nest_mode, tmp_path_factory):
     """A function-scoped, freshly-claimed dedicated nest a test may factory-reset
     + re-claim via `common.nest.factory_reset_and_restart` WITHOUT disturbing the
@@ -3044,9 +3234,10 @@ def _mail_bridge_ffi_dir() -> str:
 def _ensure_mail_bridge_built() -> str:
     """fauna-mail-bridge via its just recipe; returns the binary path.
 
-    The recipe's `mail-bridge-ffi` dep wraps its cargo build in `{{slot_build}}`
-    unconditionally, so this is exactly the call the collection-time prebuild
-    exists to keep out of per-test budgets."""
+    A cold recipe takes a `build` slot (the `mail-bridge-ffi` cargo step, then
+    `_go-cgo-build`'s `go build`), so this is exactly the call the
+    collection-time prebuild exists to keep out of per-test budgets; a warm one
+    is stamp reads only — both steps gate freshness outside `{{slot_build}}`."""
 
     def build():
         _ensure_generated_files_fresh()
@@ -3143,7 +3334,7 @@ def _ensure_atproto_bridge_e2e_built() -> str:
 
 def _ensure_seal_helper_built() -> str:
     """The TEST-ONLY seal-helper via its just recipe; returns the binary path.
-    Same `{{slot_build}}`-inside-`mail-bridge-ffi` shape as the mail bridge."""
+    Same gated `mail-bridge-ffi` + `_go-cgo-build` shape as the mail bridge."""
 
     def build():
         _ensure_generated_files_fresh()
@@ -3457,7 +3648,7 @@ _LOCAL_NEST_FIXTURE_USERS = (
 # needs neither, so a declared param would over-build there). A dynamic
 # `getfixturevalue` call is invisible to pytest's static `item.fixturenames`,
 # so `_prebuild_binaries`'s closure scan never sees these two names for a run
-# whose only mail-venue fixture is one of these four — the first such test
+# whose only mail-venue fixture is one of these — the first such test
 # pays the cold build inside its own 900 s budget instead. Measured
 # 2026-09-09: `test_addressbook.py::test_address_book_lists_and_details_mda_sealed_card[web]`
 # died as a bare `Timeout (>900.0s)` on `subprocess.run(["just",
@@ -3470,6 +3661,7 @@ _LOCAL_NEST_FIXTURE_USERS = (
 _MAIL_VENUE_FIXTURE_USERS = frozenset({
     "dedicated_mail_nest", "dedicated_mail_nest_handle_domain",
     "dedicated_caldav_mailbox_less_nest", "dedicated_caldav_only_nest",
+    "dav_toggle_venue",
 })
 
 
@@ -4494,6 +4686,24 @@ def _session_mail_bridges_supervised():
     _supervise_session_mail_bridges()
 
 
+def _session_mx_override_toml(domain, stub_mx, tls_stub_mx, v6_stub_mx) -> str:
+    """The `[mta_mx_override]` block every long-lived MTA bridge on the
+    session nest carries: the nest hands an outbound job to whichever MTA
+    bridge polls first, so a second session-lifetime MTA routed anywhere else
+    takes a share of `mail_bridge_mta`'s sends away from the stub MX its tests
+    watch (2026-10-16: `mail_bridge_inbound_to_imap`'s route-less MTA starved
+    three test_mail_lists_send deliveries in every full api-contract-check)."""
+    toml = (
+        f'\n[mta_mx_override]\n'
+        f'"external.test" = "{stub_mx.target}"\n'
+        f'"{domain}" = "{stub_mx.target}"\n'
+        f'"dane.test" = "{tls_stub_mx.target}"\n'
+    )
+    if v6_stub_mx is not None:
+        toml += f'"v6only.test" = "{v6_stub_mx.target}"\n'
+    return toml
+
+
 @pytest.fixture(scope="session")
 def mail_bridge_mta(mail_bridge_binary, seal_helper_binary, nest_instance, tmp_path_factory):
     """Spawn fauna-mail-bridge in MTA role against `nest_instance`.
@@ -4795,13 +5005,7 @@ def mail_bridge_mta(mail_bridge_binary, seal_helper_binary, nest_instance, tmp_p
     op_hatch_extra = (
         f'clamd_addr = "{fake_clamd.addr}"\n'
         f'rspamd_url = "{fake_rspamd.url}"\n'
-        f'\n[mta_mx_override]\n'
-        f'"external.test" = "{stub_mx.target}"\n'
-        f'"{domain}" = "{stub_mx.target}"\n'
-        f'"dane.test" = "{tls_stub_mx.target}"\n'
-    )
-    if v6_stub_mx is not None:
-        op_hatch_extra += f'"v6only.test" = "{v6_stub_mx.target}"\n'
+    ) + _session_mx_override_toml(domain, stub_mx, tls_stub_mx, v6_stub_mx)
     spawned = _spawn_mta_bridge(
         mail_bridge_binary=mail_bridge_binary,
         seal_helper_binary=seal_helper_binary,
@@ -5008,6 +5212,25 @@ class MailBridgeMDAHandle:
         # to the bridge if a test needs the bridge to unseal data the
         # admin-uploaded path would normally seal.
         self.x25519_secret = x25519_secret
+
+    def dav_listener_open(self) -> bool:
+        """Is anything accepting on this MDA's shared DAV port?
+
+        A venue question, because only the venue knows where to ask: a host
+        process's port is the answer itself, while a container's published
+        port is held by docker whether or not anything inside listens on it
+        (`DockerDavToggleVenueHandle.dav_listener_open`).
+        """
+        import socket as _socket
+
+        from helpers import budgets as _budgets
+
+        try:
+            _socket.create_connection(("127.0.0.1", self.caldav_port),
+                                      timeout=_budgets.RPC_ROUNDTRIP_S).close()
+        except OSError:
+            return False
+        return True
 
     def kill(self):
         try:
@@ -6828,17 +7051,19 @@ def _restartable_mta_venue(
 
 
 @pytest.fixture(scope="function")
-def dav_toggle_venue(nest_binary, mail_bridge_binary, seal_helper_binary, tmp_path_factory):
+def dav_toggle_venue(request, nest_mode, tmp_path_factory, seal_helper_binary):
     """Factory: a dedicated nest + one DAV user + one MDA, with the deployment's
-    mail / CalDAV / CardDAV toggles set as asked BEFORE the MDA boots.
+    mail / CalDAV / CardDAV / WebDAV toggles set as asked BEFORE the MDA boots.
 
-    ``dav_toggle_venue(mail=…, caldav=…, carddav=…, webdav=…)`` returns a
-    ``MailBridgeMDAHandle`` (plus ``handle.nest_instance``). A toggle passed as
+    ``dav_toggle_venue(mail=…, caldav=…, carddav=…, webdav=…)`` returns a venue
+    handle carrying ``nest_instance``, the DAV user's ``recipient_username`` /
+    ``recipient_password``, ``caldav_port`` (and ``imaps_port`` + ``domain`` when
+    mail is on), ``rebind()`` and ``dav_listener_open()``. A toggle passed as
     ``None`` is left unset — the "follows mail" state
     (`carddav-server.md` § Independent enablement). The toggles are set before
-    the spawn because the MDA binds its listener set once, from its first
+    the MDA boots because it binds its listener set once, from its first
     ``fetch_config``; flipping one later makes it exit for a rebind, which the
-    test answers by playing supervisor with ``handle.rebind()``.
+    test answers with ``handle.rebind()``.
 
     For the enablement witnesses that must not flip the shared session nest's
     toggles under every other mail test: contacts served with mail off, and
@@ -6846,18 +7071,91 @@ def dav_toggle_venue(nest_binary, mail_bridge_binary, seal_helper_binary, tmp_pa
     deployment identity) whatever mail says, so the apex well-known has a host
     to name. ``domainless=True`` is the home-nest shape instead: no domain at
     all, the MDA on the nest's self-signed floor cert, and the claimed admin —
-    the only handled actor — signing in by bare handle (``admin``). Standalone-only for the same reason as
-    ``restartable_mda_nest`` — it spawns its own binaries.
+    the only handled actor — signing in by bare handle (``admin``).
+
+    **Mode-routed** (`_start_mail_venue`, the ``dav_toggles`` venue option) —
+    see ``dedicated_mail_nest``. Standalone spawns the MDA on the host once the
+    toggles are set, and its ``rebind()`` plays supervisor; docker sets the same
+    toggles on the image, whose s6 supervisor brings the MDA up on the
+    ``/data/*-enabled`` flags they write, and its ``rebind()`` waits for that
+    supervisor's restart instead (`testing.md` § Default app and nest mode,
+    ruling (3)). ``seal_helper_binary`` is a real parameter because both modes
+    seal the DAV user's credentials with it, so the static closure is what
+    prebuilds it.
 
     Process safety: owns its nests + bridges; tears them down in reverse order,
     never pkill/killall.
     """
-    from clients.ws_rpc_admin_client import WsRpcAdminClient as _WsRpcAdminClient
-
     teardown = []
 
     def make(*, mail, caldav=None, carddav=None, webdav=None, domainless=False):
-        label = f"dav-toggle-{len(teardown)}"
+        handle, cleanup = _start_mail_venue(
+            request, nest_mode, tmp_path_factory, f"dav-toggle-{len(teardown)}",
+            dav_toggles={"mail": mail, "caldav": caldav, "carddav": carddav,
+                         "webdav": webdav},
+            domainless=domainless,
+        )
+        teardown.append(cleanup)
+        return handle
+
+    try:
+        yield make
+    finally:
+        for cleanup in reversed(teardown):
+            cleanup()
+
+
+def _provision_dav_toggle_user(nest, seal_helper_binary, domain):
+    """The ``dav_toggles`` venue's one DAV user, the same in every mode.
+
+    On a domained venue a fresh actor ``dav-toggle@<domain>``; on a
+    ``domain=None`` (home-nest) venue the claimed admin itself, whose handle is
+    its only login name, resolved through the handle→actor store.
+    """
+    if domain is None:
+        admin = nest["admin"]
+        owner = {
+            "actor_id_bytes": bytes(admin["signing_key"].verify_key),
+            "actor_id_hex": bytes(admin["signing_key"].verify_key).hex(),
+            "signing_key": admin["signing_key"],
+        }
+        return _provision_msek_recipient(
+            nest_instance=nest, seal_helper_binary=seal_helper_binary, domain=None,
+            local_part="admin", password="dav-home-password-1", actor=owner,
+        )
+    return _provision_msek_recipient(
+        nest_instance=nest,
+        seal_helper_binary=seal_helper_binary,
+        domain=domain,
+        local_part="dav-toggle",
+        password="dav-toggle-password-1",
+    )
+
+
+def _dav_toggle_venue_impl(request, tmp_path_factory, label, *, dav_toggles,
+                           domainless=False):
+    """Standalone's ``dav_toggles`` venue: a nest, the toggles, one DAV user and
+    a HOST-SPAWNED MDA. Returns ``(handle, cleanup)``.
+
+    The body ``dav_toggle_venue`` ran before it routed, unchanged; the docker
+    half is ``_DockerProvider.start_mail_venue``'s ``dav_toggles`` branch.
+    """
+    from clients.ws_rpc_admin_client import WsRpcAdminClient as _WsRpcAdminClient
+
+    nest_binary = request.getfixturevalue("nest_binary")
+    mail_bridge_binary = request.getfixturevalue("mail_bridge_binary")
+    seal_helper_binary = request.getfixturevalue("seal_helper_binary")
+    mail = dav_toggles["mail"]
+    caldav = dav_toggles.get("caldav")
+    carddav = dav_toggles.get("carddav")
+    webdav = dav_toggles.get("webdav")
+    teardown = []
+
+    def cleanup():
+        for step in reversed(teardown):
+            step()
+
+    try:
         nest, nest_cleanup = _make_nest(nest_binary, tmp_path_factory, label)
         teardown.append(nest_cleanup)
         admin = nest["admin"]
@@ -6878,26 +7176,7 @@ def dav_toggle_venue(nest_binary, mail_bridge_binary, seal_helper_binary, tmp_pa
                     {"domain": domain,
                      "mta_sts_cert_mode": "per_host"},
                 )
-        if domainless:
-            # A home nest's only login name is the claimed admin's handle (the
-            # claim's default `admin`), resolved through the handle→actor store.
-            owner = {
-                "actor_id_bytes": bytes(admin["signing_key"].verify_key),
-                "actor_id_hex": bytes(admin["signing_key"].verify_key).hex(),
-                "signing_key": admin["signing_key"],
-            }
-            prov = _provision_msek_recipient(
-                nest_instance=nest, seal_helper_binary=seal_helper_binary, domain=None,
-                local_part="admin", password="dav-home-password-1", actor=owner,
-            )
-        else:
-            prov = _provision_msek_recipient(
-                nest_instance=nest,
-                seal_helper_binary=seal_helper_binary,
-                domain=domain,
-                local_part="dav-toggle",
-                password="dav-toggle-password-1",
-            )
+        prov = _provision_dav_toggle_user(nest, seal_helper_binary, domain)
         spawned = _spawn_mda_bridge(
             mail_bridge_binary=mail_bridge_binary,
             nest_instance=nest,
@@ -6930,13 +7209,10 @@ def dav_toggle_venue(nest_binary, mail_bridge_binary, seal_helper_binary, tmp_pa
         # the MDA's exit-for-rebind, relaunch it with the same argv, wait until
         # it serves. `handle.proc` names the first process only.
         handle.rebind = spawned.rebind
-        return handle
-
-    try:
-        yield make
-    finally:
-        for cleanup in reversed(teardown):
-            cleanup()
+        return handle, cleanup
+    except BaseException:
+        cleanup()
+        raise
 
 
 class MailVenueBridges:
@@ -7069,8 +7345,8 @@ class MailBridgeInboundToImapHandle(MailVenueBridges):
 
 @pytest.fixture(scope="session")
 def mail_bridge_inbound_to_imap(
-    mail_bridge_mda, mail_bridge_binary, seal_helper_binary, nest_instance,
-    tmp_path_factory,
+    mail_bridge_mda, mail_bridge_mta, mail_bridge_binary, seal_helper_binary,
+    nest_instance, tmp_path_factory,
 ):
     """Stand up the full inbound→IMAP-read seam on real binaries (NO docker).
 
@@ -7135,13 +7411,20 @@ def mail_bridge_inbound_to_imap(
         admin_ws.call("fauna.bridges.put_spam_policy", dict(MTA_FIXTURE_SPAM_POSTURE))
 
     # Fake clamd + rspamd (benign verdicts) wired onto the MTA via the
-    # operator-hatch — same posture as `mail_bridge_mta`. No `[mta_mx_override]`:
-    # this seam is inbound-only (no outbound delivery), so no stub MX is needed.
+    # operator-hatch — same posture as `mail_bridge_mta`. The seam itself sends
+    # nothing, but this MTA lives for the session on the shared nest and polls
+    # for outbound like any other, so it carries `mail_bridge_mta`'s routes:
+    # whichever bridge takes a job, it lands on the stub MX the senders watch.
     fake_clamd = FakeClamd().start()
     fake_rspamd = FakeRspamd().start()
     op_hatch_extra = (
         f'clamd_addr = "{fake_clamd.addr}"\n'
         f'rspamd_url = "{fake_rspamd.url}"\n'
+    ) + _session_mx_override_toml(
+        mail_bridge_mta.domain,
+        mail_bridge_mta.stub_mx,
+        mail_bridge_mta.tls_stub_mx,
+        mail_bridge_mta.v6_stub_mx,
     )
 
     spawned = _spawn_mta_bridge(
@@ -7599,8 +7882,12 @@ class DockerMailVenueHandle(MailVenueHandle):
             )
         self._await_mda_serving(timeout=timeout)
 
-    def _await_mda_serving(self, *, timeout: float = 60.0) -> None:
-        """Wait until the supervised MDA is serving its DAV listener.
+    def _await_mda_serving(self, *, timeout: float = 60.0,
+                           port: int | None = None) -> None:
+        """Wait until the supervised MDA is serving its DAV listener — or, with
+        `port`, whichever of its published listeners that names (the
+        `dav_toggles` venue waits on IMAPS when mail is on, since its DAV
+        surfaces may all be off).
 
         Split out of `rebind_after_enable` because the CalDAV-only venue needs
         the identical convergence at its own SETUP rather than after an app's
@@ -7642,25 +7929,36 @@ class DockerMailVenueHandle(MailVenueHandle):
             f"the nest. {self.bridge_log_hint('mda')}"
         )
         st = svstat(self.container_name, "fauna-mail-bridge-mda")
-        assert is_commanded_up(st), (
-            f"MDA must be commanded up once {present} exists; got {st!r}. "
-            f"{self.bridge_log_hint('mda')}"
-        )
+        if not is_commanded_up(st):
+            # Which `up`/`down` the nest sent, and when: the one record of who
+            # left the supervised MDA down with its flag on disk.
+            supervisor = [ln for ln in self.bridge_log_lines("mda")
+                          if "supervisor" in ln or "mail_enable" in ln]
+            raise AssertionError(
+                f"MDA must be commanded up once {present} exists; got {st!r}. "
+                f"{self.bridge_log_hint('mda')}\n── supervisor commands ──\n  "
+                + "\n  ".join(supervisor[-20:])
+                + f"\n── bridge diagnostics ──\n"
+                f"{bridge_diag(self.container_name, ('mda',))}")
         try:
             await_keypairs(self.container_name, ("mda",))
             with admin_ws(self.nest) as admin:
                 assert "mda" in await_approved_bridges(admin, ("mda",)), (
                     "the MDA must reach approved (auto-approve on enable)")
             restart_service(self.container_name, "fauna-mail-bridge-mda")
+            # A domainless venue has no domain to synthesize a cert for: the
+            # nest's floor cert is written on every entry path and
+            # `fetch_tls_cert_blob` seals it regardless of domain
+            # (`tests/platform/docker/test_caldav_bare_ip_serving.py`).
             deadline = _time.monotonic() + timeout
             sealed: set = set()
-            while _time.monotonic() < deadline:
+            while self.domain is not None and _time.monotonic() < deadline:
                 reply = provision_self_signed_cert(self.nest, self.domain)
                 sealed = {b["role"] for b in reply.get("bridges_sealed_to", [])}
                 if "mda" in sealed:
                     break
                 _time.sleep(3.0)
-            assert "mda" in sealed, (
+            assert self.domain is None or "mda" in sealed, (
                 f"cert must fan out sealed to the mda (proves x25519 "
                 f"attestation); last sealed={sealed}")
             # `None`, NOT `()`: the helper reads the sentinel as "handshake
@@ -7669,12 +7967,116 @@ class DockerMailVenueHandle(MailVenueHandle):
             # CalDAV speaks HTTPS, so there is no banner to read — the completed
             # handshake IS the proof the cert reached the bridge.
             wait_for_tls_handshake(
-                "127.0.0.1", self.caldav_port,
+                "127.0.0.1", self.caldav_port if port is None else port,
                 expect_banner_prefixes=None, timeout=timeout)
         except (AssertionError, TimeoutError) as e:
             raise AssertionError(
                 f"{e}\n\n── bridge diagnostics ──\n"
                 f"{bridge_diag(self.container_name, ('mda',))}") from e
+
+
+class DockerDavToggleVenueHandle(DockerMailVenueHandle):
+    """The docker ``dav_toggles`` venue (``dav_toggle_venue``): the image's own
+    MDA, brought up by s6 on the toggles set at setup, plus the one DAV user.
+
+    The standalone venue answers the same contract with a host-spawned MDA
+    (``_dav_toggle_venue_impl``), so a consumer reads ``nest_instance``, the
+    ``recipient_*`` credentials, ``caldav_port`` (and ``imaps_port`` with mail
+    on) and calls ``rebind()`` / ``dav_listener_open()`` the same way in both.
+    """
+
+    def __init__(self, *, nest, domain, mail_ports, container_name, dav_toggles,
+                 recipient):
+        super().__init__(nest=nest, domain=domain, mail_ports=mail_ports,
+                         container_name=container_name)
+        self.nest_instance = nest
+        self.recipient_actor = recipient.recipient
+        self.recipient_username = recipient.username
+        self.recipient_password = recipient.password
+        self._mail = bool(dav_toggles["mail"])
+        #: The MDA process `converge` / `rebind` last saw serving — what tells
+        #: a supervisor restart apart from the process that was already up.
+        self._mda_pid = None
+
+    def _serving_port(self) -> int:
+        """The listener whose handshake proves the MDA serves: IMAPS while mail
+        is on (it binds whatever the DAV toggles say), else the DAV port."""
+        return self.imaps_port if self._mail else self.caldav_port
+
+    def _current_mda_pid(self) -> str | None:
+        """The supervised MDA's pid while s6 reports it up, else None.
+
+        s6-svstat prints `up (pid 443 pgid 443) 119 seconds`, so the pid is
+        matched as a prefix of the parenthesis, never the whole of it.
+        """
+        import re as _re
+
+        from tests.platform.docker.helpers import svstat
+
+        found = _re.match(r"up \(pid (\d+)\b",
+                          svstat(self.container_name, "fauna-mail-bridge-mda"))
+        return found.group(1) if found else None
+
+    def converge(self, *, timeout: float = 180.0) -> None:
+        """Return once the MDA the setup toggles brought up is serving — the
+        state the standalone venue hands back after its own spawn."""
+        self._await_mda_serving(timeout=timeout, port=self._serving_port())
+        self._mda_pid = self._current_mda_pid()
+
+    def rebind(self, *, timeout: float = 120.0) -> None:
+        """After a toggle flipped past boot: wait for the SUPERVISOR's restart.
+
+        The MDA binds its listener set once, from its first `fetch_config`, and
+        exits for a rebind on a later flip; standalone has no supervisor, so its
+        `rebind()` relaunches the process. Here s6 already has, so this waits for
+        a process other than the one last seen serving, then for it to serve —
+        the different act `MailVenueHandle.rebind_after_enable` names, never a
+        harness respawn (`testing.md` § Default app and nest mode, ruling (3)).
+        Latency-independent (convention 14): it polls the supervisor's state.
+        """
+        import time as _time
+
+        from tests.platform.docker.helpers import bridge_diag, wait_for_tls_handshake
+
+        deadline = _time.monotonic() + timeout
+        pid = self._current_mda_pid()
+        while (pid is None or pid == self._mda_pid) and _time.monotonic() < deadline:
+            _time.sleep(0.5)
+            pid = self._current_mda_pid()
+        assert pid is not None and pid != self._mda_pid, (
+            f"the MDA was never restarted by its supervisor within {timeout}s "
+            f"(still pid {self._mda_pid}): the toggle flip never reached it.\n"
+            f"{bridge_diag(self.container_name, ('mda',))}")
+        wait_for_tls_handshake(
+            "127.0.0.1", self._serving_port(), expect_banner_prefixes=None,
+            timeout=max(1.0, deadline - _time.monotonic()))
+        self._mda_pid = pid
+
+    def dav_listener_open(self) -> bool:
+        """Is the MDA listening on its DAV port INSIDE the container?
+
+        Asked of the container's own socket table, never of the published port:
+        docker holds a published host port open whether or not anything inside
+        listens on it, so a host-side connect would always succeed. Raises when
+        the table cannot be read — answering "closed" from a failed read would
+        make a test asserting closure pass vacuously.
+        """
+        import subprocess as _sp
+
+        result = _sp.run(
+            ["docker", "exec", self.container_name, "cat", "/proc/net/tcp",
+             "/proc/net/tcp6"],
+            capture_output=True, text=True, timeout=20)
+        assert result.returncode == 0 and result.stdout, (
+            f"cannot read {self.container_name!r}'s socket table: "
+            f"{result.stderr.strip()!r}")
+        suffix = f":{8443:04X}"
+        for line in result.stdout.splitlines():
+            fields = line.split()
+            # `sl local_address rem_address st …`; state 0A is LISTEN.
+            if len(fields) > 3 and fields[1].endswith(suffix) and fields[3] == "0A":
+                return True
+        return False
 
 
 def _dedicated_mail_nest_impl(
@@ -9292,18 +9694,32 @@ def two_nest_custody_rig(request, app, nest_mode, tmp_path_factory):
     alice is the app under test (``app``), a fresh handled actor on A logged in
     with her real handle — the kit's ``handle=`` and a restore's account field
     both need one. bob is a fresh handled actor on B, a second app of the same
-    client launched by ``_launch_second_real_faunamls_app``, who accepts alice
-    across the nests (his reachability — the reach policy is HIS nest's). Both
-    are on the real engine. B's periodic custody pump is HELD
+    client as alice's fleet seat, launched by ``_launch_second_real_faunamls_app``,
+    who accepts alice across the nests (his reachability — the reach policy is
+    HIS nest's). Both are on the real engine. B's periodic custody pump is HELD
     (``custody_hosting/hold``): every pass a consumer sees is its own
     ``run-now`` poke (convention 14).
+
+    **The mixed seat — web.** ``fleet_app`` is the seat alice's fleet runs on:
+    the ceremony (mint, the carrier), her pre-loss writes, and bob's client.
+    It IS ``alice_app`` on every app that drives the ceremony. On web, whose
+    ceremony is a declared absence (``ui/devices.md`` § Where logic lives),
+    ``fleet_app`` is a fresh **tui** seat (the lead app) and bob is tui too,
+    while ``alice_app`` — the web app under test — is left signed OUT: a
+    journey whose web leg is a new device (the cold device of
+    ``account-replica-posture.md`` § *Corollary — the cold device*, its web
+    clause) starts it from a reset, and a journey that needs the app under test
+    to run the ceremony declares the absence on ``alice_app`` exactly as before.
+    ``lose_fleet()`` is every device lost and the home nest with them: it stops
+    A and tears a separate fleet seat down (on the other apps the journey's own
+    ``driver.reset()`` is that loss).
 
     Function-scoped throughout: A dies in the test that uses it, and a
     custody's owner-side state outlives the test that made it.
 
     Yields a dict: ``home``, ``custodian`` (the two nest dicts, each with
     ``authority``), ``alice`` (her actor dict, ``handle`` bare), ``alice_app``,
-    ``bob``, ``bob_app``.
+    ``fleet_app``, ``lose_fleet``, ``bob``, ``bob_app``.
     """
     import secrets
 
@@ -9340,6 +9756,11 @@ def two_nest_custody_rig(request, app, nest_mode, tmp_path_factory):
                 custodian["port"], handle=f"bob{secrets.token_hex(4)}",
                 domain=custodian["authority"], base_url=custodian["url"],
             )
+            if app.driver.is_web():
+                yield from _custody_rig_on_a_fleet_seat(
+                    request, app, _launch_fresh_share_driver("tui", home, request),
+                    home, custodian, alice, bob, stop_home)
+                return
             _login_app_as(app, request, home, alice, verify_live_actor=True)
             for alice_app in _activate_real_faunamls(
                 app, context="the `two_nest_custody_rig` fixture (alice)"
@@ -9354,6 +9775,8 @@ def two_nest_custody_rig(request, app, nest_mode, tmp_path_factory):
                         "custodian": custodian,
                         "alice": alice,
                         "alice_app": alice_app,
+                        "fleet_app": alice_app,
+                        "lose_fleet": stop_home,
                         "bob": bob,
                         "bob_app": bob_app,
                     }
@@ -9361,6 +9784,59 @@ def two_nest_custody_rig(request, app, nest_mode, tmp_path_factory):
             custodian_cleanup()
     finally:
         stop_home()
+
+
+def _custody_rig_on_a_fleet_seat(
+    request, app, driver, home, custodian, alice, bob, stop_home,
+):
+    """``two_nest_custody_rig``'s mixed seat (its docstring owns the why):
+    alice's fleet on ``driver`` — a fresh tui seat, launched by the fixture so
+    the prebuild hoist's pin reads its literal — signed in on A, bob on tui on
+    B, and the app under test left signed out for its own cold-device leg.
+
+    The fleet seat is this rig's own launch, never the session-cached app, so
+    it takes the real engine directly (tui wires its real session at every
+    login; ``enable_real_faunamls`` is the readiness probe) with no mock to
+    restore at teardown — the seat dies with the rig, or earlier, at
+    ``lose_fleet()``."""
+    torn_down = False
+
+    def teardown_fleet_seat() -> None:
+        nonlocal torn_down
+        if torn_down:
+            return
+        torn_down = True
+        try:
+            driver.screenshot("teardown-custody-fleet-seat")
+        except Exception:
+            pass
+        driver.teardown()
+
+    def lose_fleet() -> None:
+        stop_home()
+        teardown_fleet_seat()
+
+    try:
+        fleet_app = ActionLayer(driver)
+        _login_app_as(fleet_app, request, home, alice, verify_live_actor=True)
+        fleet_app.conversations.enable_real_faunamls()
+        for bob_app, bob in _launch_second_real_faunamls_app(
+            request, fleet_app, custodian, alice,
+            suppress_push=True, fixture_name="two_nest_custody_rig",
+            bob=bob,
+        ):
+            yield {
+                "home": home,
+                "custodian": custodian,
+                "alice": alice,
+                "alice_app": app,
+                "fleet_app": fleet_app,
+                "lose_fleet": lose_fleet,
+                "bob": bob,
+                "bob_app": bob_app,
+            }
+    finally:
+        teardown_fleet_seat()
 
 
 @pytest.fixture
@@ -9547,6 +10023,14 @@ def _alice_extra_seat(app_name, request, test_user, nest_instance, *, screenshot
         # already carries). The agent would otherwise die at bind and the app would
         # report only "agent unreachable".
         config["home"] = tempfile.mkdtemp(prefix="fauna-e2e-alice-device-b-", dir="/tmp")
+    elif app_name == "ios":
+        # A second concurrently-live iOS app cannot share device A's simulator
+        # (`launch()`'s own uninstall+install would tear A's app down), so the
+        # extra seat takes the second-seat simulator, as bob's seat does.
+        second_udid = _get_ios_second_seat_udid()
+        if second_udid is None:
+            pytest.skip("could not allocate a second iOS simulator for the extra seat")
+        config["udid"] = second_udid
     elif app_name == "windows":
         # Pin device B's data dir (incl. the native `mls.db` MLS store) — the
         # app-side FAUNA_E2E_DATA_DIR seam the driver honors (`drivers/windows.py`;
@@ -10694,7 +11178,8 @@ def real_faunamls_linux_sender(request, logged_in_app, nest_instance):
         driver.teardown()
 
 
-def _serve_spa_proxy(static_dir, nest_url, abort_once_paths=None, bind_host="127.0.0.1"):
+def _serve_spa_proxy(static_dir, nest_url, abort_once_paths=None, bind_host="127.0.0.1",
+                     url_host=None):
     """Serve the built Svelte SPA on a local HTTP port, proxying ``/api/`` +
     ``/admin/`` (HTTP and the WebSocket upgrade) to ``nest_url``.
 
@@ -10726,6 +11211,13 @@ def _serve_spa_proxy(static_dir, nest_url, abort_once_paths=None, bind_host="127
     proxy would be ignored and the SPA would dial its own origin instead — and the
     browser contexts already carry ``ignore_https_errors``
     (``web-bridge/server.py``), as for any self-signed LAN nest.
+
+    ``url_host``, when given, names the returned URL's host in place of
+    ``bind_host`` — the bind stays where it is. Its one use is ``"localhost"``
+    over the loopback bind: WebAuthn refuses an IP-literal relying-party id, so a
+    journey that creates a passkey (``web.md`` § Identity store at rest → *A
+    passkey wrap*) must load the SPA by a NAME; ``localhost`` is one and is still
+    a secure context.
 
     **An ``https://`` ``nest_url`` is fine, and both hops carry the same posture.**
     The HTTP hop rides the process-global ``_FloorCertHTTPSHandler`` opener
@@ -10992,7 +11484,7 @@ def _serve_spa_proxy(static_dir, nest_url, abort_once_paths=None, bind_host="127
         scheme = "https"
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    return f"{scheme}://{bind_host}:{spa_port}", server
+    return f"{scheme}://{url_host or bind_host}:{spa_port}", server
 
 
 @pytest.fixture(scope="session")
@@ -11071,14 +11563,15 @@ def spa_proxy_for(static_dir):
 
     ``bind_host`` (default loopback) is ``_serve_spa_proxy``'s: the address the
     browser dials, part of the memo key so a LAN-bound proxy never aliases a
-    loopback one."""
+    loopback one. ``url_host`` likewise (``"localhost"`` for a passkey journey)."""
     servers = []
-    by_key: dict[tuple[str, str], str] = {}
+    by_key: dict[tuple[str, str, str | None], str] = {}
 
-    def make(nest_url: str, bind_host: str = "127.0.0.1") -> str:
-        key = (nest_url, bind_host)
+    def make(nest_url: str, bind_host: str = "127.0.0.1", url_host: str | None = None) -> str:
+        key = (nest_url, bind_host, url_host)
         if key not in by_key:
-            url, server = _serve_spa_proxy(static_dir, nest_url, bind_host=bind_host)
+            url, server = _serve_spa_proxy(static_dir, nest_url, bind_host=bind_host,
+                                           url_host=url_host)
             servers.append(server)
             by_key[key] = url
         return by_key[key]
@@ -11271,6 +11764,17 @@ _ios_setup_cache: dict | None = None
 _ios_setup_done = False
 
 
+def _ensure_ios_app_built() -> str | None:
+    """The iOS app's `xcodebuild`, once per session — split out of the one-shot
+    `_get_ios_setup` so the warm pass can run it holding no lane (the simulator
+    it is installed into stays one-shot, inside the hold). `_build_ios_app`
+    gates freshness outside its `build` slot, so the in-hold re-check is a
+    stamp read. None off macOS or without Xcode, as `_get_ios_setup`."""
+    if detect_platform() != "macos" or not shutil.which("xcodebuild"):
+        return None
+    return _memoized_build("ios-app", _build_ios_app)
+
+
 def _get_ios_setup() -> dict | None:
     """Boot iOS simulator and build the app. Returns dict or None. Cached."""
     global _ios_setup_cache, _ios_setup_done
@@ -11292,12 +11796,14 @@ def _get_ios_setup() -> dict | None:
             print("No iPhone simulator available (create + find both failed)")
             return None
 
-    # Start the boot BEFORE the app build so the two overlap — a cold device
-    # takes minutes to finish booting and `_build_ios_app` takes minutes to run,
-    # and they need nothing from each other.
+    # Start the boot BEFORE the app build so the two overlap when the build
+    # really compiles — a cold device takes minutes to finish booting and they
+    # need nothing from each other. Normally the build is its own earlier
+    # prebuild job (`_ensure_ios_app_built`, warmed holding no lane), and this
+    # call is a memo replay.
     subprocess.run(["xcrun", "simctl", "boot", udid], check=False)
 
-    app_path = _build_ios_app()
+    app_path = _ensure_ios_app_built()
     if not app_path:
         return None
 
@@ -11409,7 +11915,7 @@ def _restore_full_apple_ffi() -> None:
 
     Runs at collection time AFTER every app build, whenever a run selects both
     `ios` and `macos`. `_prebuild_binaries` builds apps in `sorted(apps)` order,
-    so `app[ios]` (`just apple-ffi-test`, writes the full slice set) always precedes
+    so `app[ios]` (`just apple-ffi-test-sim`, writes the multi-slice set) always precedes
     `app[macos]` (`just mac-debug` → `just apple-ffi-host-test`, which `rm -rf`s that
     framework and writes the 1 darwin slice — see `_xcframework_slices`). The
     iOS app is then built lazily at the first iOS test and cannot link, so
@@ -11423,7 +11929,8 @@ def _restore_full_apple_ffi() -> None:
     swapping the framework back cannot unbuild it, and the restore is a
     cross-checkout cache hit on a warm tree.
     """
-    _build_via_just("apple-ffi-test", "restoring the full FaunaFFI.xcframework")
+    # The same recipe `app[ios]` took — another shape would rebuild here.
+    _build_via_just("apple-ffi-test-sim", "restoring the full FaunaFFI.xcframework")
 
 
 def _ensure_macos_pkg_built() -> None:
@@ -11477,8 +11984,9 @@ def _build_app_via_just(app_name: str) -> None:
         # `#if DEBUG` FaunaKit TestAgent — the thing this harness drives — calls
         # the `*ForTest` UniFFI seams, which only the `test-helpers` bindings
         # carry. `just apple-ffi` is the PRODUCTION flavor and would not link
-        # (testing.md § convention 15).
-        "ios": "apple-ffi-test",
+        # (testing.md § convention 15). The `-sim` slice set: the app is built
+        # for the iOS Simulator, so the device slice would link nowhere.
+        "ios": "apple-ffi-test-sim",
         "android": "android-debug",
         "tui": "tui-debug",
     }
@@ -12253,7 +12761,7 @@ def _apply_mail_import_source_trust_env(env: dict, request) -> None:
     """Seed the source-IMAP trust anchor so a mail-import walk can reach a
     harness-run IMAP server.
 
-    `e2e-automation-surface-gating.md` § The source-IMAP trust seed owns the
+    `e2e-gated-seeds.md` § The source-IMAP trust seed owns the
     contract. The short version: `mailbox-migration.md` § The two TLS modes
     leaves a source session no plaintext variant — the user's foreign-mailbox
     password crosses it — and no harness can mint a publicly-chained cert for
@@ -12289,6 +12797,44 @@ def _apply_mail_import_source_trust_env(env: dict, request) -> None:
     # verifier refuse the handshake with `CaUsedAsEndEntity` — see
     # `fake_imap_source.mint_localhost_chain`.
     env["FAUNA_E2E_IMAP_EXTRA_CA_PEM"] = session_ca_pem()
+
+    # The Outlook source's Microsoft sign-in goes to the session's identity
+    # fake, never to Microsoft (`e2e-gated-seeds.md` § The Microsoft authority
+    # seed). Its certificate chains to the CA seeded above, so no second trust
+    # variable exists; and the seed redirects the authority alone — the client
+    # ID and the scopes are the app's own.
+    from fake_microsoft_identity import session_microsoft_identity
+
+    env["FAUNA_E2E_MICROSOFT_AUTHORITY"] = session_microsoft_identity().authority
+
+    # The bearer that sign-in mints is presented with `AUTHENTICATE XOAUTH2` to
+    # the Outlook preset's fixed IMAP host, which the app would otherwise dial
+    # at Microsoft. The preset-host redirect seed moves that one host's dial to
+    # the session's leased loopback port, keeping the name the handshake
+    # verifies (`e2e-gated-seeds.md` § The preset-host redirect seed); a test's
+    # `FakeImapSource(..., port=port, cert=session_cert_for(host))` answers it.
+    from fake_imap_source import session_preset_redirect
+
+    host, port = session_preset_redirect()
+    env["FAUNA_E2E_IMAP_HOST_MAP"] = f"{host}=127.0.0.1:{port}"
+
+
+def _mail_import_seed_ports(env: dict) -> list[int]:
+    """The loopback ports a launch environment's mail-import seeds name — the
+    Microsoft authority's and the preset-host redirect's — which an android
+    launch must `adb reverse`, the device reaching both only as its own
+    loopback (`e2e-gated-seeds.md` § The Microsoft authority seed, § The
+    preset-host redirect seed). Empty when the environment carries neither."""
+    from urllib.parse import urlparse
+
+    ports = []
+    authority = env.get("FAUNA_E2E_MICROSOFT_AUTHORITY")
+    if authority and urlparse(authority).port:
+        ports.append(urlparse(authority).port)
+    host_map = env.get("FAUNA_E2E_IMAP_HOST_MAP")
+    if host_map:
+        ports.append(int(host_map.rsplit(":", 1)[1]))
+    return ports
 
 
 def _apply_real_conversations_env(env: dict, request) -> None:
@@ -12460,6 +13006,52 @@ def _apply_place_accepts_log_env(env: dict) -> None:
     target = f"{PLACE_ACCEPTS_LOG_TARGET}=debug"
     existing = env.get("RUST_LOG")
     env["RUST_LOG"] = f"{existing},{target}" if existing else f"info,{target}"
+
+
+_TUI_OPENER_RECORD = pytest.StashKey[Path]()
+
+
+def _tui_opener_record(request) -> Path:
+    """The session's one record of every URL the shared tui launch handed to its
+    OS opener — one line per open, in order. Created empty on first call."""
+    stash = request.config.stash
+    if _TUI_OPENER_RECORD not in stash:
+        base = request.getfixturevalue("tmp_path_factory").mktemp("tui-opener")
+        record = base / "opened.txt"
+        record.touch()
+        stash[_TUI_OPENER_RECORD] = record
+    return stash[_TUI_OPENER_RECORD]
+
+
+def _apply_tui_opener_env(env: dict, request) -> None:
+    """Point the shared tui launch's OS opener (`os_open.rs`, the one
+    `FAUNA_TUI_MEDIA_OPENER` override every external open goes through) at a
+    fake that appends the URL to :func:`_tui_opener_record`.
+
+    Two reasons, both session-wide. A journey that activates a link — step 1's
+    `archive-import-source-export-link` first — witnesses the open by reading the
+    record (fixture ``tui_opened_urls``), never by launching a browser. And no
+    e2e click on the shared tui can start a real browser or player on a dev box.
+    Self-launching tui fixtures that pin their own fake (``tui_member``, the
+    media handoff journeys) override this in their own environment."""
+    record = _tui_opener_record(request)
+    if sys.platform == "win32":
+        opener = record.parent / "fake-opener.cmd"
+        opener.write_text(f'@echo off\r\n(echo %~1)>>"{record}"\r\n')
+    else:
+        opener = record.parent / "fake-opener.sh"
+        opener.write_text(f'#!/bin/sh\nprintf \'%s\\n\' "$1" >> "{record}"\n')
+        opener.chmod(0o755)
+    env["FAUNA_TUI_MEDIA_OPENER"] = str(opener)
+
+
+@pytest.fixture
+def tui_opened_urls(request):
+    """A callable returning every URL the shared tui launch has opened so far
+    this session, oldest first (:func:`_apply_tui_opener_env`). A journey reads
+    the count before its gesture and waits for the next line."""
+    record = _tui_opener_record(request)
+    return lambda: [line for line in record.read_text().splitlines() if line]
 
 
 def _apply_actuation_mode_env(env: dict, request) -> None:
@@ -12674,7 +13266,7 @@ def sync_agent_binary():
     fixture rather than each building their own — one spawner, not two.
 
     Delegates to `_ensure_sync_agent_built` (the memoized layer shared with the
-    collection-time prebuild hoist) → `common.nest.build_sync_service_win`,
+    collection-time prebuild hoist) → `common.nest.build_sync_agent`,
     which owns the build/freshness mechanics: a machine-wide `build` slot
     (previously ran completely unslotted), a warm-tree stamp that skips cargo
     entirely, the ROOT-workspace/implicit-host build shape (build-machine-
@@ -12686,12 +13278,17 @@ def sync_agent_binary():
     return _ensure_sync_agent_built()
 
 
-_MACOS_AGENT_BIN = _repo_root / "target" / "debug" / "fauna-sync-agent"
+def _macos_spawns_a_real_sync_agent(items) -> bool:
+    """Whether a run's macos launches spawn a real agent — the session-wide
+    `real_sync_agent` posture `_apply_real_sync_agent_env` turns on — so the
+    prebuild builds `macos_sync_agent_binary`, which the launch reaches only
+    through `request.getfixturevalue` and no item's closure names."""
+    return any(item.get_closest_marker("real_sync_agent") for item in items)
 
 
 @pytest.fixture(scope="session")
 def macos_sync_agent_binary():
-    """Build the host `fauna-sync-agent` once per session, then assert it exists.
+    """Build the host `fauna-sync-agent` once per session, then return its path.
 
     The macOS twin of :func:`sync_agent_binary` (windows), and the value behind
     ``FAUNA_E2E_SYNC_AGENT_BIN`` for a macos launch carrying `real_sync_agent`.
@@ -12706,24 +13303,21 @@ def macos_sync_agent_binary():
     up driving a stale, machine-global agent shared with the developer's own
     session (testing.md point 10) instead of the code under test.
 
-    Build goes through the machine-wide build slot like the `just` recipes do,
-    so it queues behind concurrent builds instead of oversubscribing the box.
-    The slot script is fleet-only tooling and does not ship — a solo checkout
-    falls back to an unslotted build.
+    Built by `_ensure_sync_agent_built` — the windows fixture's builder: a
+    freshness stamp read BEFORE the build slot, so a warm tree takes none.
+    Until 2026-10-21 this fixture ran its own `build-slot.py -- cargo build`
+    on every session, slot first, inside the first `real_sync_agent` test;
+    that slot-first path was one of the reasons macOS stayed out of the warm
+    pass. `_prebuild_binaries` now builds it at collection
+    time (`_macos_spawns_a_real_sync_agent`).
     """
-    _slot = _repo_root / "scripts" / "build-slot.py"
-    _cmd = (
-        [sys.executable, str(_slot), "--pool", "build", "--"] if _slot.exists() else []
-    ) + ["cargo", "build", "-p", "fauna-sync-agent"]
-    subprocess.run(_cmd, cwd=_repo_root, check=False)
-    if not _MACOS_AGENT_BIN.exists():
+    try:
+        return _ensure_sync_agent_built()
+    except Exception as exc:
         pytest.fail(
-            f"fauna-sync-agent not found at {_MACOS_AGENT_BIN}\n"
             "A macos test carrying the `real_sync_agent` marker needs the real "
-            "agent binary. Build it with:\n"
-            "  cargo build -p fauna-sync-agent"
+            f"agent binary, and building it failed:\n{exc}"
         )
-    return str(_MACOS_AGENT_BIN)
 
 
 @pytest.fixture(scope="session")
@@ -12903,7 +13497,7 @@ def _build_app_config(app_name: str, nest_instance: dict, request) -> dict:
             skip_unbuilt(
                 "ios",
                 surface="the iOS simulator/app",
-                detail="run 'just apple-ffi-test' first",
+                detail="run 'just apple-ffi-test-sim' first",
             )
         # Wire the e2e fake DNS-provider seam (same sentinel-gated hook as
         # linux/windows/macos) so the tier_2 managed-publish harness drives
@@ -13192,6 +13786,7 @@ def _build_app_config(app_name: str, nest_instance: dict, request) -> dict:
             # app-parametrized and the env has to be too.
             _apply_share_plane_env(config["environment"], app_name)
             _apply_place_accepts_log_env(config["environment"])
+            _apply_tui_opener_env(config["environment"], request)
             # The actuation gate (convention 11 one layer down), same flags as
             # apple and linux. tui is NOT staging: it has refused a disabled
             # `click` since its automation surface existed, and as of 2026-08-21
@@ -13268,10 +13863,13 @@ def _build_app_config(app_name: str, nest_instance: dict, request) -> dict:
             # *The name server's reach*).
             from helpers.acme_pebble import directory_port, name_server_port
 
+            # The mail-import seeds ride it too: the Microsoft authority and the
+            # preset-host redirect are loopback listeners the device reaches
+            # the same way (`_mail_import_seed_ports`).
             config["nest_ports"] = [
                 p for p in (nest_instance.get("port"), directory_port(env), name_server_port(env))
                 if p is not None
-            ]
+            ] + _mail_import_seed_ports(env)
         return config
 
 
@@ -13495,7 +14093,7 @@ _RESET_PROBE_SURFACES = (
     ("launch-identity-changed", "nest-identity-changed-warning"),
     # Covers TransientRetry/NeedsUpdate/InstanceChooser — the widest single net.
     ("launch-fallthrough", "launch-fallthrough-button"),
-    ("unlock-or-create-passphrase", "tui-unlock-passphrase-input"),
+    ("unlock-or-create-passphrase", "unlock-passphrase-input"),
     # Wizard steps other than IdentityChoice.
     ("wizard-handle-entry", "handle-input"),
     ("wizard-identity-created", "identity-continue-button"),
@@ -13649,6 +14247,7 @@ def pytest_runtest_teardown(item, nextitem):
         _post_frame_invariant_probe(driver, item)
         _record_foreground_takes(driver, item)
     yield
+    _yield_at_boundary(item, nextitem)
 
 
 # This run's windows foreground-take tally (convention 10's windows focus axis),
@@ -15213,7 +15812,7 @@ def ios_setup():
         skip_unbuilt(
             "ios",
             surface="the iOS simulator/app",
-            detail="run 'just apple-ffi-test' first",
+            detail="run 'just apple-ffi-test-sim' first",
         )
     return setup
 
@@ -15345,6 +15944,17 @@ def pytest_addoption(parser):
                           "microseconds instead of a round trip — so without this flag the "
                           "directory is never even collected. See e2e-conventions.md § convention "
                           "17 and helpers/ui_walk.py.")
+    parser.addoption("--store-listing", action="store_true", default=False,
+                     help="Opt in to tests/store_listing/ — the store-listing screenshots: "
+                          "the real app on injected fixture content, its own window sized "
+                          "and captured to PNG (installers/windows.md § Store distribution, "
+                          "the screenshots paragraph). It PRODUCES files rather than guarding "
+                          "behaviour, so without this flag the directory is never even "
+                          "collected. See `just e2e-store-listing-screenshots`.")
+    parser.addoption("--store-listing-out", default=None,
+                     help="Where tests/store_listing/ writes its PNGs, one sub-directory "
+                          "per app. Default: tests/e2e-unified/screenshots/store-listing/ (git-ignored) in this "
+                          "checkout.")
     parser.addoption("--reclaim-cycle", action="store_true", default=False,
                      help="Put the session's shared `nest_instance` through ONE real "
                           "factory-reset -> re-claim (same identity) cycle BEFORE any test or "
@@ -15549,6 +16159,7 @@ def pytest_configure(config):
     try:
         mode = nest_mode_mod.resolve_nest_mode(config.getoption("nest"))
         nest_mode_mod.provider_for(mode)
+        nest_mode_mod.refuse_acceptance_nest(mode)
     except nest_mode_mod.NestModeError as exc:
         raise pytest.UsageError(f"--nest: {exc}") from exc
     # The box declaration rides on the mode, validated here for the same
@@ -16054,12 +16665,59 @@ def pytest_runtest_logreport(report):
             "outcome": outcome,
             "duration": round(report.duration, 3),
         }
+    _last_green_note(report, outcome)
     if outcome == "error":
         _print_live_reason(report, "ERROR")
     elif outcome == "failed":
         _print_live_reason(report, "FAILED")
     if outcome is not None or report.when == "teardown":
         _feature_ledger_note(report, outcome)
+
+
+def _last_green_note(report, outcome):
+    """The last-green directory's half of the per-report event — every collected
+    test, tagged or not (delayed-testing.md § The last-green directory). Every phase
+    adds its duration; the skip class is the one the ledger reads, so an
+    environment skip records no outcome here either."""
+    from helpers import feature_ledger, last_green
+
+    last_green.note(report.nodeid, duration=getattr(report, "duration", 0.0) or 0.0,
+                    outcome=outcome,
+                    skip_class=feature_ledger.skip_class_this_test() if outcome == "skipped" else None)
+
+
+def _write_last_green(session, exitstatus=None):
+    """Merge this run into `<main checkout>/.claude/last-green/<platform>.json`.
+
+    Machine-local, never committed by a session — the merge-gate check's ledger
+    publish carries it to `docs/features/last-green/` (delayed-testing.md § The
+    published snapshot). Never fatal, like the ledger's writer.
+
+    **Of the two interruptions, one is written.** The tester yields to a load
+    spike (§ The background tester, the yield) at a test boundary first: a session
+    that stopped on its flag (`_yield_at_boundary`) ends `INTERRUPTED` with every
+    completed test observed, and those records are written — the boundary's test
+    and the rest never ran and record nothing. Any other interruption writes
+    nothing, its tests neither red nor green: the tester's `TERM` after the grace
+    never reaches this hook (no handler is installed, so the process dies before
+    `pytest_sessionfinish`), and a Ctrl-C does, as `INTERRUPTED`, and is declined.
+    """
+    from helpers import last_green
+    if exitstatus == pytest.ExitCode.INTERRUPTED and not _yield_stop:
+        print("\nlast-green directory: NOT written — the session was interrupted")
+        return
+    if os.environ.get(PREWARM_ONLY_ENV):
+        # The tester's warm step observes no test, like `--collect-only`.
+        print("\nlast-green directory: NOT written — a prewarm-only run")
+        return
+    try:
+        path = last_green.write()
+    except OSError as exc:
+        print(f"\nlast-green directory: NOT written ({exc})")
+        return
+    if path is not None:
+        print(f"\nlast-green directory: merged {len(last_green._run['node_ids'])} "
+              f"test(s) into {path}")
 
 
 def _print_live_reason(report, label):
@@ -16218,6 +16876,7 @@ def pytest_sessionfinish(session, exitstatus):
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
     _write_feature_ledger(session)
+    _write_last_green(session, exitstatus)
     _write_nest_gates(session)
 
     baseline_path = session.config.getoption("baseline_json")
@@ -16356,21 +17015,39 @@ _APP_MARKERS = frozenset({"web", "android", "ios", "macos", "windows", "linux", 
 #: Prebuild jobs the warm pass skips: they are not freshness-gated compiles
 #: whose result a second call re-verifies for free, but one-shot session side
 #: effects (loading a cdylib into this process, creating and booting a
-#: simulator, reassembling the apple xcframework) that must happen exactly once,
-#: inside the hold.
+#: simulator) that must happen exactly once, inside the hold. Neither takes a
+#: `build` slot on a warm tree: the cdylib's compile half and the iOS app's
+#: `xcodebuild` are prewarmed jobs of their own (`_ensure_fauna_ffi_built`,
+#: `_ensure_ios_app_built`), so the hold's calls are stamp reads. (The macOS
+#: `.pkg` was listed here until 2026-10-21, and the full xcframework restore
+#: until the iOS build became a job: both are freshness-gated builds, and the
+#: restore must precede the iOS build in the warm pass too.)
 _NOT_PREWARMED_BUILDERS = frozenset({
     "_ensure_fauna_ffi_loaded",
     "_get_ios_setup",
-    "_restore_full_apple_ffi",
-    "_ensure_macos_pkg_built",
 })
+
+#: Prebuild jobs that are session SETUP, not builds: they wait for no `build`
+#: slot, so the lane usage record reports their wall time as `inhold_setup_s`
+#: instead of inside `inhold_prebuild_s` —
+#: today the iOS simulator's create-and-finish-booting, up to minutes on a
+#: cold box. The time accumulates in `_PREBUILD_SETUP_S`.
+_SESSION_SETUP_BUILDERS = frozenset({"_get_ios_setup"})
+
+#: Wall seconds spent in `_SESSION_SETUP_BUILDERS` jobs by this process, summed
+#: over every `_prebuild_binaries` pass (read as a delta by `_timed_prebuild`).
+_PREBUILD_SETUP_S = 0.0
 
 #: Where the warm pass runs: the platforms on which every prebuild path gates
 #: freshness OUTSIDE its `{{slot_build}}`, so the in-hold re-check of a warm
 #: tree takes no build slot. Elsewhere a warm re-check may still queue for `build`, and
 #: the warm pass would buy a second wait instead of removing one. `win32` joined
-#: once its last ungated path, `tui-debug`'s extensionless `--target`, was fixed.
-_PREWARM_PLATFORMS = frozenset({"linux", "win32"})
+#: once its last ungated path, `tui-debug`'s extensionless `--target`, was fixed;
+#: `darwin` on 2026-10-21, once the macOS sync-agent fixture shared the windows
+#: stamp, `mac-debug`'s gate stopped counting its own generated outputs as
+#: sources, and the host FFI flavor came back from a per-flavor stash instead of
+#: a slotted rebuild (`_MACOS_ARTIFACT_MODE` runs stay out — `_prewarm_before_slot`).
+_PREWARM_PLATFORMS = frozenset({"linux", "win32", "darwin"})
 
 
 def _run_app_set(session) -> set:
@@ -16391,22 +17068,93 @@ def _run_app_set(session) -> set:
         apps.add("macos")
     available = set(get_available_apps())
     for item in session.items:
-        # An app-parametrized item launches its parameter; its markers only say
-        # which apps the test applies to (a `[tui]` item marked `linux`, `web`
-        # must not send a tui run to `e2e_other`).
+        # Unbounded by the selection, unlike the prebuild's own marker scan: the
+        # lane follows every app a run may launch.
         if not _item_param_apps(item, available):
-            apps.update({m.name for m in item.iter_markers()} & _APP_MARKERS)
+            apps.update(_item_marker_apps(item))
         if "[web]" in item.nodeid or "web" in item.nodeid.partition("[")[2]:
             apps.add("web")
     return apps
+
+
+#: Set by the merge-gate check's background tester on every shard it runs
+#: (delayed-testing.md § The background tester: the tester never compiles, and
+#: a tree whose binaries are not warm is a shard not run). While it is set the
+#: run skips the warm pass, takes its lane, and runs the in-hold re-check in
+#: refuse mode ONCE: a refusal ends the session INTERRUPTED — nothing built,
+#: nothing recorded in the last-green directory — printing `WARM_ONLY_REFUSAL`,
+#: the line the tester greps for. Internal wiring between the check and this
+#: hook, never a knob a person sets.
+WARM_ONLY_ENV = "FAUNA_E2E_WARM_ONLY"
+WARM_ONLY_REFUSAL = "[e2e-slot] warm-only run: binaries not warm"
+
+#: Set by the background tester on the warm step it runs before each shard
+#: (delayed-testing.md § The background tester, *The warm step*): the shard's
+#: own argv, but the run only runs the warm pass — on every platform, holding no
+#: lane, its builds under the pass's `build` slots — and exits OK without taking
+#: a lane, running a test or writing a last-green record. A build that fails
+#: exits non-zero, printing `PREWARM_ONLY_FAILED`. Internal wiring between the
+#: check and this hook, never a knob a person sets.
+PREWARM_ONLY_ENV = "FAUNA_E2E_PREWARM_ONLY"
+PREWARM_ONLY_FAILED = "[prebuild] prewarm-only run: build(s) FAILED"
+
+#: Set by the background tester on every shard it runs (delayed-testing.md § The
+#: background tester, *the yield*): the path of the flag file its watcher raises
+#: while a yield signal stands. At each test's end a raised flag ends the session
+#: there — pytest's own `shouldstop` — with every completed test recorded and the
+#: rest left for a later pick; the stop writes `<path>.stopped` (the reason, then
+#: one node id per line the session never reached) for the tester to read. A
+#: flag still standing after the grace is the tester's `TERM` instead. Internal
+#: wiring between the check and this hook, never a knob a person sets.
+YIELD_FILE_ENV = "FAUNA_E2E_YIELD_FILE"
+YIELD_STOPPED_SUFFIX = ".stopped"
+YIELD_STOP_PREFIX = "the tester yields: "
+#: The reason, once this session stopped on the flag — the one interruption
+#: `_write_last_green` records.
+_yield_stop = {}
+
+
+def _yield_at_boundary(item, nextitem):
+    """The test boundary's half of the yield: a raised flag after `item` — and
+    another test to come — stops the session before `nextitem`."""
+    path = os.environ.get(YIELD_FILE_ENV)
+    if not path or nextitem is None or _yield_stop:
+        return
+    try:
+        with open(path, encoding="utf-8") as fh:
+            reason = fh.read().strip() or "a signal stands"
+    except OSError:
+        return
+    session = item.session
+    items = list(getattr(session, "items", ()) or ())
+    rest = items[items.index(nextitem):] if nextitem in items else [nextitem]
+    try:
+        with open(path + YIELD_STOPPED_SUFFIX, "w", encoding="utf-8") as fh:
+            fh.write(YIELD_STOP_PREFIX + reason + "\n")
+            fh.writelines(f"{i.nodeid}\n" for i in rest)
+    except OSError as exc:
+        print(f"\n[delayed-e2e] the yield's stop file is NOT written ({exc}) — running on")
+        return
+    _yield_stop["reason"] = reason
+    session.shouldstop = YIELD_STOP_PREFIX + reason
 
 
 def _prewarm_before_slot(mod) -> bool:
     """Whether to run the warm prebuild pass before taking the e2e slot: on a
     `_PREWARM_PLATFORMS` machine, and only for a tree holding no slot yet — a
     run already inside the e2e family (an explicit lane wrap, a nested pytest)
-    has nothing to gain, and a build-held tree is refused at the acquire."""
+    has nothing to gain, and a build-held tree is refused at the acquire.
+
+    A `--macos-artifact` run is the one darwin run left out: its app build,
+    `just mac-app debug`, repackages the bundle on every call with no
+    freshness gate (xcodebuild, then the sync agent, then assembly — all under
+    one slot), so its in-hold re-check would always be refused. It ran 7 times
+    in the 30 days before 2026-10-21 (the slot ledger's `_mac-app-impl`
+    grants), against hundreds of bare-binary runs, so it keeps building inside
+    its hold rather than paying for a gate over three build systems."""
     if sys.platform not in _PREWARM_PLATFORMS:
+        return False
+    if _MACOS_ARTIFACT_MODE:
         return False
     if os.environ.get("FAUNA_SLOT_HELD_BUILD"):
         return False
@@ -16416,7 +17164,7 @@ def _prewarm_before_slot(mod) -> bool:
     return not os.environ.get("FAUNA_SLOT_HELD_E2E")
 
 
-def _prewarm_prebuilds(session) -> None:
+def _prewarm_prebuilds(session) -> list:
     """The warm pass: every compile this run needs, BEFORE the e2e slot, so a
     cold tree's `build` queue is waited out while no e2e slot sits idle.
 
@@ -16426,8 +17174,11 @@ def _prewarm_prebuilds(session) -> None:
     a warm tree the re-check is a stamp read and takes no slot; after an eviction
     it rebuilds, which is exactly what today's in-hold build would have cost.
     Failures are printed and kept memoized, so the in-hold pass replays them
-    instead of compiling the same error twice."""
+    instead of compiling the same error twice — and returned, one line each,
+    for the prewarm-only run (`PREWARM_ONLY_ENV`), which has no hold to replay
+    them in."""
     global _WEB_SPA_BUILT, _WASM_PANIC_WITNESS_BUILT
+    failed = []
     print(
         "[prebuild] warm pass — building before the e2e slot, so the slot is never "
         "held idle behind a build queue",
@@ -16437,12 +17188,28 @@ def _prewarm_prebuilds(session) -> None:
         _prebuild_web_spa(session)
     except Exception as exc:
         print(f"[prebuild] warm pass: web SPA build FAILED ({exc}); retried in the hold", flush=True)
+        failed.append(f"web SPA: {exc}")
     _prebuild_binaries(session, prewarm=True)
-    for key, (kind, _value) in list(_BINARY_BUILD_MEMO.items()):
+    for key, (kind, value) in list(_BINARY_BUILD_MEMO.items()):
         if kind == "ok":
             del _BINARY_BUILD_MEMO[key]
+        else:
+            failed.append(f"{key}: {value}")
     _WEB_SPA_BUILT = False
     _WASM_PANIC_WITNESS_BUILT = False
+    return failed
+
+
+def _prewarm_only(session) -> None:
+    """The tester's warm step (`PREWARM_ONLY_ENV`): the warm pass, then an exit —
+    no lane taken, no test run. OK when everything built; non-zero, naming each
+    failure, when something did not (the gate then reads `binaries not warm`)."""
+    failed = _prewarm_prebuilds(session)
+    if failed:
+        print(f"{PREWARM_ONLY_FAILED} — {'; '.join(f[:200] for f in failed)}",
+              file=sys.stderr, flush=True)
+        pytest.exit("prewarm-only run: a build failed", returncode=pytest.ExitCode.TESTS_FAILED)
+    pytest.exit("prewarm-only run: binaries warm", returncode=pytest.ExitCode.OK)
 
 
 def pytest_collection_finish(session):
@@ -16454,13 +17221,17 @@ def pytest_collection_finish(session):
         return
     _refuse_drafts_window_collision(session)
     heavy = {"tier_2", "tier_3", "tier_4"}
+    prewarm_only = bool(os.environ.get(PREWARM_ONLY_ENV))
     if not any(
         {m.name for m in item.iter_markers()} & heavy for item in session.items
     ):
+        if prewarm_only:
+            pytest.exit("prewarm-only run: no tier_2/3/4 test, nothing to warm",
+                        returncode=pytest.ExitCode.OK)
         _admit_tier_1_run()
         return
     mod = _build_slot_module()
-    if mod is None:
+    if mod is None and not prewarm_only:
         _prebuild_web_spa(session)
         _prebuild_binaries(session)
         return
@@ -16484,9 +17255,13 @@ def pytest_collection_finish(session):
         file=sys.stderr,
         flush=True,
     )
+    # The tester's warm step: the lane is named above but never taken.
+    if prewarm_only:
+        _prewarm_only(session)
     # The warm pass: compile before queueing for the slot, so a held e2e slot is
     # not spent waiting in the build queue.
-    warmed = _prewarm_before_slot(mod)
+    warm_only = bool(os.environ.get(WARM_ONLY_ENV)) and _refuse_mode_available(mod)
+    warmed = not warm_only and _prewarm_before_slot(mod)
     if warmed:
         _prewarm_prebuilds(session)
     # The long lane: a run whose heavy selection is long takes the 1-slot `e2e_long`
@@ -16512,6 +17287,16 @@ def pytest_collection_finish(session):
     hold = _new_hold(apps)
     held = _acquire_lanes(mod, e2e_pool, long_lane, cmd)
     _E2E_SLOT = (mod, held, hold)
+    if warm_only:
+        # The tester's shard (WARM_ONLY_ENV): one refusing re-check, no cycle.
+        # A warm tree's prebuilds are stamp reads and the run proceeds; a cold
+        # one ends here, and session finish releases the lane.
+        refused = _timed_prebuild(hold, lambda: _prebuild_in_hold_refusing(session, mod))
+        if refused:
+            print(f"{WARM_ONLY_REFUSAL} — {len(refused)} build(s) would have compiled: "
+                  f"{'; '.join(r[:120] for r in refused)}", file=sys.stderr, flush=True)
+            pytest.exit("binaries not warm (warm-only run)", returncode=pytest.ExitCode.INTERRUPTED)
+        return
     # No compile under a held lane: the in-hold
     # re-check runs in refuse mode, so a tree that is not warm after all (the
     # warm pass failed, an input moved during the lane wait, the target was
@@ -16521,11 +17306,7 @@ def pytest_collection_finish(session):
     # builds in the hold as before (the lock must never make work impossible).
     if warmed and _refuse_mode_available(mod) and not lane_unbounded:
         for cycle in range(1, _INHOLD_REFUSE_RETRIES + 1):
-            started = time.monotonic()
-            try:
-                refused = _prebuild_in_hold_refusing(session, mod)
-            finally:
-                hold["prebuild_s"] += time.monotonic() - started
+            refused = _timed_prebuild(hold, lambda: _prebuild_in_hold_refusing(session, mod))
             if not refused:
                 return
             print(
@@ -16553,12 +17334,24 @@ def pytest_collection_finish(session):
             file=sys.stderr,
             flush=True,
         )
-    started = time.monotonic()
-    try:
+    def in_hold_build():
         _prebuild_web_spa(session)
         _prebuild_binaries(session)
+
+    _timed_prebuild(hold, in_hold_build)
+
+
+def _timed_prebuild(hold: dict, fn):
+    """Run one in-hold prebuild pass `fn()` and charge its wall time to the
+    hold: the session-setup part (`_SESSION_SETUP_BUILDERS`, measured into
+    `_PREBUILD_SETUP_S`) to `setup_s`, the rest to `prebuild_s`."""
+    started, setup_before = time.monotonic(), _PREBUILD_SETUP_S
+    try:
+        return fn()
     finally:
-        hold["prebuild_s"] += time.monotonic() - started
+        setup = _PREBUILD_SETUP_S - setup_before
+        hold["setup_s"] += setup
+        hold["prebuild_s"] += time.monotonic() - started - setup
 
 
 def _admit_tier_1_run() -> None:
@@ -16588,11 +17381,13 @@ def _admit_tier_1_run() -> None:
 
 
 def _new_hold(apps) -> dict:
-    """One lane hold's bookkeeping for its usage record: the run's app set and
-    the wall seconds of the hold spent in the in-hold prebuild pass (the one
-    place a held lane can wait for or hold `build`). A refuse-mode requeue is a
-    new hold, with its own dict and its own usage line."""
-    return {"apps": sorted(apps), "prebuild_s": 0.0}
+    """One lane hold's bookkeeping for its usage record: the run's app set, the
+    wall seconds of the hold spent in the in-hold prebuild pass's builds (the
+    one place a held lane can wait for or hold `build`), and the seconds that
+    pass spent in session setup, which waits for no `build` (`_timed_prebuild`).
+    A refuse-mode requeue is a new hold, with its own dict and its own usage
+    line."""
+    return {"apps": sorted(apps), "prebuild_s": 0.0, "setup_s": 0.0}
 
 
 def _release_e2e_slot() -> None:
@@ -16672,7 +17467,15 @@ def _release_lanes(mod, held: list[tuple[int, str]], hold: dict | None = None) -
     for fd, pool in reversed(held):
         if log_hold is not None and hold is not None:
             try:
-                log_hold(fd, hold["apps"], inhold_prebuild_s=hold["prebuild_s"])
+                try:
+                    log_hold(fd, hold["apps"], inhold_prebuild_s=hold["prebuild_s"],
+                             inhold_setup_s=hold["setup_s"])
+                except TypeError:
+                    # A machine copy predating `inhold_setup_s`: the line it
+                    # can write, with setup counted inside prebuild as it
+                    # always was there.
+                    log_hold(fd, hold["apps"],
+                             inhold_prebuild_s=hold["prebuild_s"] + hold["setup_s"])
             except Exception:
                 pass
         if _refuse_mode_available(mod):
@@ -16794,7 +17597,7 @@ def _prebuild_web_spa(session):
 # never build, and hoisting them would silently change that contract).
 # `sync_agent_binary` WAS excluded here too ("bare cargo-win, no slot
 # involved") — no longer true since it routes through
-# `common.nest.build_sync_service_win`'s gate-then-slot composition.
+# `common.nest.build_sync_agent`'s gate-then-slot composition.
 #: The prebuild jobs that compile a local `fauna-nest`. Skipped whole in a mode
 #: whose nest comes from somewhere else (`nest_mode.builds_local_nest`).
 _LOCAL_NEST_BUILD_FIXTURES = frozenset({
@@ -16815,6 +17618,9 @@ _PREBUILD_BY_FIXTURE = (
     ("seal_helper_binary", "_ensure_seal_helper_built", ()),
     ("render_cloud_init_binary", "_ensure_render_cloud_init_built", ()),
     ("sync_agent_binary", "_ensure_sync_agent_built", ()),
+    # The same build, under the macos fixture's name (reached through the
+    # launch seam's `getfixturevalue`; `_prebuild_binaries` adds it).
+    ("macos_sync_agent_binary", "_ensure_sync_agent_built", ()),
     ("macos_app_path", "_ensure_app_built", ("macos",)),
     ("windows_app_path", "_ensure_app_built", ("windows",)),
     ("linux_app_path", "_ensure_app_built", ("linux",)),
@@ -16892,7 +17698,22 @@ _CROSS_APP_FIXTURE_APPS = {
     # The user's other computer on a viewer column (web and the mobiles make no
     # index pin and never build): `test_task_delegation.py::_Seats` launches tui.
     "delegation_seats": "tui",
+    # alice's fleet seat and bob, launched only on the web column (the
+    # ceremony is a web absence; `_custody_rig_on_a_fleet_seat`).
+    "two_nest_custody_rig": {"web": "tui"},
 }
+
+
+def _item_marker_apps(item) -> set:
+    """The app markers an item carries (`_APP_MARKERS`) — what a
+    non-parametrized app-specific suite launches. An app-parametrized item's
+    markers only say which apps the test applies to (a `[tui]` item marked
+    `linux`, `web` must not send a tui run to `e2e_other`), so callers read
+    this only for an item `_item_param_apps` finds nothing in."""
+    iter_markers = getattr(item, "iter_markers", None)
+    if iter_markers is None:
+        return set()
+    return {m.name for m in iter_markers()} & _APP_MARKERS
 
 
 def _item_param_apps(item, available: set) -> set:
@@ -16953,7 +17774,17 @@ def _prebuild_app_set(session, requested: set) -> set:
     available = set(get_available_apps())
     apps: set = set()
     for item in session.items:
-        apps.update(_item_param_apps(item, available))
+        param_apps = _item_param_apps(item, available)
+        apps.update(param_apps)
+        # A non-parametrized app-specific suite names its app by marker and
+        # reaches the app's build through `getfixturevalue` (the macos
+        # `real_sync_agent` tests' `macos_app_path`), so neither scan above sees
+        # it and the build ran inside its first test — and, on macOS, inside the
+        # held lane, after the warm pass had skipped it (measured 2026-10-21).
+        # Bounded by the selection: deselection already keeps only the marked
+        # apps the run selected.
+        if not param_apps:
+            apps.update(_item_marker_apps(item) & available)
     # A CROSS-APP fixture launches an app the item's own parametrization never
     # names, so neither scan above can see it — and the app it launches is the one
     # whose `just` build then runs inside the requesting test's 900 s budget, which
@@ -17033,6 +17864,7 @@ def _prebuild_binaries(session, *, prewarm: bool = False):
     no longer charged to any test's clock. Proofs:
     test_harness_self_termination.py § 5.
     """
+    global _PREBUILD_SETUP_S
     # Real fixture requests only — a DIRECTLY-parametrized argname also sits in
     # `fixturenames` and would prebuild the fixture it happens to share a name
     # with (`_is_real_fixture`; that collision on `app` wedged the whole tier_1
@@ -17062,6 +17894,11 @@ def _prebuild_binaries(session, *, prewarm: bool = False):
     # apps` guard keeps a run that launches no windows app from building it.
     if "windows" in apps and windows_isolates_its_sync_agent(session.items):
         requested.add("sync_agent_binary")
+    # The macos twin: `_apply_macos_sync_agent_bin` reaches the agent build at
+    # launch time the same invisible way, whenever the run's `real_sync_agent`
+    # posture is on.
+    if "macos" in apps and _macos_spawns_a_real_sync_agent(session.items):
+        requested.add("macos_sync_agent_binary")
 
     # A mode whose nest is not a local binary never executes one, so building it
     # is a cold cargo compile — and a machine-wide `build`-slot wait — spent on
@@ -17131,6 +17968,11 @@ def _prebuild_binaries(session, *, prewarm: bool = False):
     # `_restore_full_apple_ffi` / `_xcframework_slices`.
     if {"ios", "macos"} <= apps:
         jobs.append(("full FaunaFFI.xcframework restore", "_restore_full_apple_ffi", ()))
+    # The iOS app's `xcodebuild`, after the restore and before the simulator:
+    # a stamp-gated build like the app recipes above, so the warm pass compiles
+    # it holding no lane and the hold re-checks it for free.
+    if "ios" in apps:
+        jobs.append(("ios app (xcodebuild)", "_ensure_ios_app_built", ()))
     # iOS's simulator is the same bound inversion as a binary build, and a worse
     # one: `_get_ios_setup` creates a throwaway device and boots it, and a device
     # is not usable when `simctl list` first says `Booted` — it is usable when it
@@ -17152,6 +17994,7 @@ def _prebuild_binaries(session, *, prewarm: bool = False):
             f"timeout budget{'; warm pass, no e2e slot held' if prewarm else ''})",
             flush=True,
         )
+        started = time.monotonic()
         try:
             globals()[builder](*args)
         except Exception as exc:
@@ -17160,6 +18003,9 @@ def _prebuild_binaries(session, *, prewarm: bool = False):
                 f"error with this failure: {exc}",
                 flush=True,
             )
+        finally:
+            if builder in _SESSION_SETUP_BUILDERS:
+                _PREBUILD_SETUP_S += time.monotonic() - started
 
 
 def _login_admin_as(app, request, nest, *, spa_url_fixture: str, fixture_name: str) -> None:
@@ -17644,6 +18490,8 @@ _CLIENT_INDEPENDENT_FILES = {
     "test_android_driver_adb.py",  # tier_1 adb command-line pins against a fake adb — no driver/app/device
     "test_android_venue.py",  # tier_1 pins for the android venue's fixed ports, leases and tunnel spec — no driver/app
     "test_windows_driver_infobar_text.py",  # tier_1 pins of the windows driver's InfoBar-text strip against a canned read — no driver/app
+    "test_win_kache_wrapper_scope.py",  # tier_1 pins of win's dev-loop-only kache wiring (cargo-win-kache.cmd) — no driver/app
+    "test_mac_kache_wrapper_scope.py",  # tier_1 pins of mac's dev-loop kache decision (build-slot.py _kache_env) — no driver/app
 }
 
 
@@ -17783,6 +18631,10 @@ def pytest_ignore_collect(collection_path, config):
     # leaves a tier filter or a `just` recipe able to pull it in.
     if "walk" in path.parts and not config.getoption("--walk-sweep"):
         return True
+    # The store-listing screenshots (tests/store_listing/) write PNGs into the
+    # checkout — a producer, not a guard — so they are pruned like the three above.
+    if "store_listing" in path.parts and not config.getoption("--store-listing"):
+        return True
     if path.is_dir():
         return None
     if _wrong_os_platform_subtree(path):
@@ -17816,7 +18668,7 @@ def _item_features(item) -> list:
     return slugs
 
 
-def _repo_node_id(config, nodeid: str) -> str:
+def _repo_node_id(config, nodeid: str, *, keep_params: bool = False, path=None) -> str:
     """A rootdir-relative node id as the repo spells it: `tests/e2e-unified/…::test_x`.
 
     The catalog's contracts cite repo-relative paths — that is what makes them live
@@ -17824,16 +18676,35 @@ def _repo_node_id(config, nodeid: str) -> str:
     (`tests/e2e-unified/`, where pytest.ini sits). Normalising here means the ledger
     keys and the contract ids are the same strings, and the parametrization is
     dropped so every `[tui-docker]` / `[web-standalone]` variant of one test collapses
-    to the one line the contract names.
+    to the one line the contract names. `keep_params` keeps it: the last-green
+    directory's key is the test as pytest stamps it, app and nest mode included
+    (delayed-testing.md § The last-green directory).
+
+    A file outside the rootdir (a `tests/scripts/` suite run under this conftest)
+    gets an EMPTY path part from pytest — `::test_x` — so `path` (the item's real
+    file) stands in for it; with neither, the id has no file and is returned
+    as `::rest` for the caller to skip (`_has_repo_file`).
     """
-    path, _, rest = nodeid.partition("::")
-    rest = re.sub(r"\[.*\]$", "", rest)
-    try:
-        prefix = config.rootpath.relative_to(_REPO_ROOT).as_posix()
-    except (ValueError, AttributeError):
-        prefix = ""
-    full = f"{prefix}/{path}" if prefix and prefix != "." else path
+    node_path, _, rest = nodeid.partition("::")
+    if not keep_params:
+        rest = re.sub(r"\[.*\]$", "", rest)
+    if node_path:
+        try:
+            prefix = config.rootpath.relative_to(_REPO_ROOT).as_posix()
+        except (ValueError, AttributeError):
+            prefix = ""
+        full = f"{prefix}/{node_path}" if prefix and prefix != "." else node_path
+    else:
+        try:
+            full = Path(path).resolve().relative_to(_REPO_ROOT).as_posix()
+        except (TypeError, ValueError):
+            full = ""
     return f"{full}::{rest}" if rest else full
+
+
+def _has_repo_file(repo_id: str) -> bool:
+    """False for the pathless id `_repo_node_id` returns when it cannot name the file."""
+    return not repo_id.startswith("::")
 
 
 def _apply_feature_axis(config, items) -> None:
@@ -17884,7 +18755,7 @@ def _apply_feature_axis(config, items) -> None:
     node_ids = {}
     _selected_repo_ids.clear()
     for item in items:
-        repo_id = _repo_node_id(config, item.nodeid)
+        repo_id = _repo_node_id(config, item.nodeid, path=getattr(item, "path", None))
         # Every surviving item, tagged or not: the gates audit subtracts this
         # set from a page's contract to tell a mode exclusion apart from an
         # app-axis deselection or a stale citation, and an untagged item is
@@ -17898,10 +18769,42 @@ def _apply_feature_axis(config, items) -> None:
         for slug in slugs:
             feature_ledger.note_collected(slug, repo_id)
 
-    if not tagged or not feature_ledger.enabled(config):
+    if not feature_ledger.enabled(config):
         return
 
-    # Resolve the run's context ONCE — a git call and at most one `docker inspect` —
+    # The tree's identity, asked ONCE for both projections — the ledger's records
+    # and the last-green directory's (delayed-testing.md § The last-green
+    # directory: one event, two projections, so they cannot disagree about it).
+    # The tree, asked beside the commit: a commit names the code only when nothing
+    # uncommitted sits on top of it, and the default inner loop (edit, run, commit
+    # while it builds) is exactly the tree where something does. The run never
+    # refuses over it — it MARKS every record and cell (feature-catalog.md § The
+    # ledger, *Dirty trees*); a candidate run is refused below if dirty.
+    commit = feature_ledger.head_commit()
+    dirt = feature_ledger.tree_dirt()
+    dirty = feature_ledger.is_dirty(dirt)
+    # And main's place beneath the commit, asked from the same HEAD: the sha that
+    # still resolves after the pre-merge rebase has replaced `commit`
+    # (feature-catalog.md § The ledger, *Rebased commits*).
+    base = feature_ledger.main_base(commit)
+    # Every surviving item, tagged or not — the directory covers every collected
+    # test. A `--collect-only` run observes nothing and writes nothing.
+    if not getattr(getattr(config, "option", None), "collectonly", False):
+        from helpers import last_green
+
+        lg_ids = {item.nodeid: _repo_node_id(config, item.nodeid, keep_params=True,
+                                             path=getattr(item, "path", None))
+                  for item in items}
+        # A test whose file is not in this repository has no key worth keeping.
+        last_green.begin_run(
+            commit=commit, base=base, dirty=dirty,
+            node_ids={n: k for n, k in lg_ids.items() if _has_repo_file(k)},
+            live=isinstance(config, pytest.Config))
+
+    if not tagged:
+        return
+
+    # Resolve the rest of the run's context ONCE — at most one `docker inspect` —
     # so the per-report hook stays a dict write. Collection runs after
     # `pytest_configure`, so the nest mode is already settled here.
     from helpers import nest_mode as nest_mode_mod
@@ -17921,18 +18824,6 @@ def _apply_feature_axis(config, items) -> None:
                   "recipe (feature-catalog.md § Release-candidate run)."
             )
     version = feature_ledger.workspace_version()
-    commit = feature_ledger.head_commit()
-    # The tree, asked beside the commit: a commit names the code only when nothing
-    # uncommitted sits on top of it, and the default inner loop (edit, run, commit
-    # while it builds) is exactly the tree where something does. The run never
-    # refuses over it — it MARKS every record and cell (feature-catalog.md § The
-    # ledger, *Dirty trees*); a candidate run was already refused above if dirty.
-    dirt = feature_ledger.tree_dirt()
-    dirty = feature_ledger.is_dirty(dirt)
-    # And main's place beneath the commit, asked from the same HEAD: the sha that
-    # still resolves after the pre-merge rebase has replaced `commit`
-    # (feature-catalog.md § The ledger, *Rebased commits*).
-    base = feature_ledger.main_base(commit)
     _feature_run.clear()
     _feature_run.update({
         "features": tagged,
@@ -18136,7 +19027,7 @@ def pytest_collection_modifyitems(config, items):
             # semantics).
             nest_surface.record_gate(
                 _mode.name, item.nodeid, klass, reason,
-                repo_id=_repo_node_id(config, item.nodeid),
+                repo_id=_repo_node_id(config, item.nodeid, path=getattr(item, "path", None)),
                 features=_item_features(item),
                 rule=verdict.rule,
                 # Every rule that applies, not just the deciding one: the

@@ -218,7 +218,7 @@ def _start_box(net, dns_ip, scanners, *, name, domain, claim_code, http_port, ma
     DNS A/SPF records published once both boxes are up)."""
     start_container_with_ports(
         name,
-        {3000: http_port, **mail_ports},
+        {443: http_port, **mail_ports},
         env={
             "FAUNA_CLAIM_CODE": claim_code,
             "FAUNA_PORT": "3000",

@@ -384,18 +384,19 @@ def _wait_deployment_mail_enabled(nest_url: str, timeout: float = 60.0) -> bool:
 
 
 def _wait_all_deployment_enables(
-    admin_secret_hex: str, nest_url: str, timeout: float = 60.0
+    admin_secret_hex: str, nest_url: str, timeout: float = 60.0, *, axes=None
 ) -> dict[str, bool]:
-    """Poll `_read_deployment_enables` until all four axes read true, via the shared
-    `wait_until` deadline poll (convention 14), or return the last reading once
-    `timeout` elapses (never raises — the caller asserts on the returned dict so a
-    partial result still self-diagnoses which axis lagged)."""
+    """Poll `_read_deployment_enables` until all four axes (or just `axes`) read
+    true, via the shared `wait_until` deadline poll (convention 14), or return the
+    last reading once `timeout` elapses (never raises — the caller asserts on the
+    returned dict, which always carries all four, so a partial result still
+    self-diagnoses which axis lagged)."""
     last: dict[str, bool] = {}
 
     def _all_true() -> bool:
         nonlocal last
         last = _read_deployment_enables(admin_secret_hex, nest_url)
-        return all(last.values())
+        return all(last[a] for a in (axes or last))
 
     try:
         wait_until(_all_true, timeout, interval=2.0)
@@ -543,13 +544,70 @@ def unclaimed_real_domain_nest(request, app, nest_mode, tmp_path_factory):
             tracked="onboarding.md",
         )
 
+    yield from _real_domain_nest(
+        request, app, nest_mode, tmp_path_factory, "admin-claim-real-domain-nest"
+    )
+
+
+@pytest.fixture
+def unclaimed_social_only_real_domain_nest(request, app, nest_mode, tmp_path_factory):
+    """`unclaimed_real_domain_nest` on a box whose own build declares **no
+    content scanners** — a social-only box: its topology hatch carries
+    `content_scanners = "absent"`, so `fauna.setup.status` reports it and the
+    nest refuses a mail enable (`mail-bridge-lifecycle.md` § Default-off on first
+    claim → *A box with no content scanners cannot enable mail*).
+
+    The Docker image's entrypoint writes that hatch; here it is seeded into the
+    data dir before a restart in place, since the nest reads it once at boot —
+    the seam `tests/api/test_mail_unavailable_without_scanners.py` proves at the
+    API layer. An image nest regenerates its hatch on every start, so this
+    fixture is local-nest only."""
+    from helpers import nest_mode as nest_mode_mod
+    from helpers.app_surface import skip_environment
+
+    if not nest_mode_mod.builds_local_nest(nest_mode):
+        skip_environment(
+            "the hatch is seeded into a locally-spawned nest's data dir; an image "
+            "nest's entrypoint regenerates it on every start"
+        )
+    yield from _real_domain_nest(
+        request, app, nest_mode, tmp_path_factory, "admin-claim-social-only-nest",
+        content_scanners="absent",
+    )
+
+
+def _real_domain_nest(
+    request, app, nest_mode, tmp_path_factory, name, *, content_scanners=None
+):
+    """The body of the real-domain fixtures: start the unclaimed nest, optionally
+    seed its topology hatch's `content_scanners` declaration (a restart in place
+    — the claim-code file survives it), then install the `"nest"` override the
+    wizard and the authed session both ride, and clear it on teardown."""
+    import os
+
+    from common.nest import start_nest_in_place, stop_nest
     from conftest import _start_dedicated_nest
 
     nest, cleanup = _start_dedicated_nest(
-        request, nest_mode, tmp_path_factory, "admin-claim-real-domain-nest",
+        request, nest_mode, tmp_path_factory, name,
         handle_domain_seed=MAIL_PRIMARY_DOMAIN, unclaimed=True,
     )
     assert nest["admin"] is None, "fixture must hand the UI a genuinely unclaimed nest"
+    if content_scanners is not None:
+        try:
+            stop_nest(nest, graceful=True)
+            with open(os.path.join(nest["tmp_dir"], "operator-hatch.toml"), "w") as f:
+                f.write(f'content_scanners = "{content_scanners}"\n')
+            start_nest_in_place(nest)
+        except BaseException:
+            cleanup()
+            raise
+        with WsRpcAnonClient(nest["url"]) as anon:
+            status = anon.call("fauna.setup.status", {})
+        assert status.get("content_scanners") == content_scanners, (
+            f"fixture setup failed: the seeded hatch did not reach "
+            f"fauna.setup.status: {status}"
+        )
     from conftest import _relaunch_trusting_nest
 
     _relaunch_trusting_nest(app.driver, nest)
@@ -723,6 +781,63 @@ def test_marking_the_box_private_at_claim_leaves_all_four_serving_off(
         f"{ever} (the glue decided {decided!r}). The handle targets a real domain, so the ONLY thing that may "
         "hold these off is the NAT conjunct — on a home-relay box a mail enable "
         "here mints an MSEK that diverges from the fleet's. "
+        f"app error: {app.error_text()!r}"
+    )
+
+
+# The `feature("claim-a-fresh-nest")` marker lands with the catalog edit that
+# cites this test under outcome 4 (the catalog lint refuses an uncited
+# witness).
+def test_claiming_a_social_only_box_leaves_mail_off_and_serves_the_rest(
+    app, unclaimed_social_only_real_domain_nest
+):
+    """A box built without mail — its own `fauna.setup.status` reports
+    `content_scanners: "absent"` — claimed with a real-domain handle on the
+    public axis derives the **mail** intent OFF, while calendar, contacts and
+    files still derive ON and are enabled.
+
+    `onboarding.md` § 3b → *Third axis — the box's own build*: the mail intent
+    defaults ON only if `fauna_core::mail_availability::mta_can_run` holds over
+    the box's report, which the wizard's setup-status probe carries; the DAV
+    intents ride the HTTPS surface every box has and are untouched. The control
+    is `test_admin_claim_with_real_domain_handle_auto_enables_mail`: same
+    handle, same NAT answer, same journey, differing only in the box's hatch.
+
+    Why `decided` is the witness and not `mail_enabled` alone: the nest already
+    refuses `set_mail_enabled(true)` on such a box, so the flag reads false
+    with or without the third axis. Without it the glue would still plan the
+    mail step and run `enable_mail_with_generated_password` — minting the
+    admin's mail credential before the nest's refusal fails the step. The run's
+    own `decided.email == false` is what says the step was never planned, so
+    there was nothing to mint and nothing to fail. (A mailbox MSEK *is* minted
+    here — by the CalDAV step, which mints the shared MSEK when no earlier
+    protocol did; that is § 3b's mechanism, not a mail enable.)
+    """
+    nest = unclaimed_social_only_real_domain_nest
+
+    localpart = "admin" + secrets.token_hex(3)
+    secret_hex = secrets.token_hex(32)
+    _drive_admin_claim_to_logged_in(app, nest, secret_hex, f"{localpart}@{MAIL_PRIMARY_DOMAIN}")
+
+    # Convention 14: the run's completion is the anchor — the glue published
+    # `SERVING_ENABLEMENT_KEY` for this admin and every planned step answered.
+    decided, _ = _glue_verdict(app, secret_hex, nest["url"])
+    assert decided == {"email": False, "caldav": True, "carddav": True, "webdav": True}, (
+        "a social-only box (content_scanners=absent) claimed with a real-domain "
+        "public handle must derive mail OFF and the three DAV intents ON "
+        f"(onboarding.md § 3b → Third axis), but the glue decided {decided!r}. "
+        f"app error: {app.error_text()!r}"
+    )
+    enables = _wait_all_deployment_enables(
+        secret_hex, nest["url"], timeout=90.0,
+        axes=("caldav_enabled", "carddav_enabled", "webdav_enabled"),
+    )
+    assert enables == {
+        "mail_enabled": False, "caldav_enabled": True,
+        "carddav_enabled": True, "webdav_enabled": True,
+    }, (
+        "after the claim's serving-enablement run the box must hold mail OFF and "
+        f"calendar/contacts/files ON, but reads {enables}. "
         f"app error: {app.error_text()!r}"
     )
 

@@ -70,7 +70,7 @@ statement about.
 sealed at rest uniformly, and what a box can read is the set of user-minted capability grants
 (`nest/storage-modes.md` § What replaced each piece of the axis; the at-rest property: `encryption-at-rest.md`
 § The sealed posture). Clients verify payload **authorship/integrity** via sign-over-CID (`security.md` §
-Goal) and authenticate the **nest's TLS identity** via `nest_actor_id` pinning (`security.md` § Transport
+Goal) and authenticate the **nest's TLS identity** via `nest_actor_id` pinning (`transport-trust.md` § Transport
 trust), but **no client today verifies that the nest stored, ordered, and delivered each operation without
 tampering.** There is no changelog commitment, data commitment, or operation proof. (The account plane's own
 statement of that seam — bounds, accepted status, revisit trigger — is

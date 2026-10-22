@@ -149,10 +149,10 @@ def self_signed_floor_nest(app):
             tracked="",
         )
 
-    # `FAUNA_REUSE_IMAGE=1` + a pre-pulled `fauna-nest-test:local` is the
-    # sanctioned path (no local nest-image builds on a dev VM); this call is a
-    # no-op re-check when that tag already exists, matching every sibling
-    # fixture in this directory.
+    # This tree's keyed image (built on `FAUNA_ALLOW_NEST_IMAGE_BUILD=1`), or a
+    # pulled one named in `FAUNA_NEST_TEST_IMAGE`; this call is a no-op re-check
+    # when that image already exists, matching every sibling fixture in this
+    # directory.
     docker_build(get_repo_root())
 
     port = find_free_port()
@@ -193,7 +193,7 @@ def _app_route_serves_current_spa(url: str) -> bool:
         body = resp.read(4000).decode("utf-8", "replace")
     except Exception:
         return False
-    return "Fauna Nest API" not in body
+    return "<h1>Fauna nest</h1>" not in body
 
 
 def _connection_status(app) -> str | None:
@@ -251,7 +251,7 @@ def test_native_tofu_client_reaches_connected_and_admin_on_self_signed_floor(app
     assert app.is_visible("admin-tab"), (
         "am-i-admin should pass for the claimed admin once Connected — "
         "admin-tab is fail-closed on any transport/auth failure "
-        "(apps/fauna-web/src/routes/+layout.svelte's checkIsAdmin, mirrored "
+        "(apps/fauna-web/src/lib/components/RootShell.svelte's checkIsAdmin, mirrored "
         "natively), so its absence here would mean the WS connection isn't "
         "really usable even though the indicator reads Connected"
     )

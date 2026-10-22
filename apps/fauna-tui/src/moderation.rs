@@ -79,6 +79,10 @@ pub struct ModerationState {
     /// The last withdraw's outcome line, worded by the shared
     /// `withdraw_verdict`.
     pub withdraw_status: Option<String>,
+    /// The queue row a `dm-message-withheld-badge` tap asked to appeal, by
+    /// `content_id`: the next queue read opens its appeal draft
+    /// ([`queue_appeal`]), so the badge reaches the one appeal flow.
+    pub pending_appeal: Option<String>,
 }
 
 /// An appeal the user is composing against one queue row.
@@ -462,6 +466,35 @@ async fn fetch(nest: Arc<NestClient>, session: Option<Arc<ConversationsSession>>
     Outcome::Loaded(merge_queue(&reply.actions, &local), reports)
 }
 
+/// Ask for the appeal of the queue row `content_id` names — the
+/// `dm-message-withheld-badge` tap (`moderation.md` § Legal takedown → *App
+/// render*). The caller then enters the page, whose nav-edge read re-reads the
+/// queue; [`apply_outcome`] opens the draft on the matching row once it is
+/// loaded, so the appeal is the queue's own (one flow, the `appeal-*` ids).
+pub fn queue_appeal(app: &mut App, content_id: String) {
+    app.moderation.pending_appeal = Some(content_id);
+    app.moderation.appeal = None;
+    app.moderation.appeal_status = None;
+}
+
+/// Open the appeal draft a badge tap asked for, on the loaded row it names —
+/// through [`apply_local`]'s own [`Action::OpenAppeal`], so the same
+/// appealability rule gates it. A row the queue no longer carries opens
+/// nothing.
+fn open_pending_appeal(app: &mut App) {
+    let Some(content_id) = app.moderation.pending_appeal.take() else {
+        return;
+    };
+    if let Some(index) = app
+        .moderation
+        .rows
+        .iter()
+        .position(|row| row.content_id == content_id && row.action.is_some())
+    {
+        apply_local(app, Action::OpenAppeal { index });
+    }
+}
+
 /// Fold an [`Outcome`] back into the page. A failure lands on the page's
 /// canonical `error-message`; a load clears it (the page shows fresh truth).
 pub fn apply_outcome(app: &mut App, outcome: Outcome) {
@@ -470,6 +503,7 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             app.moderation.rows = rows;
             app.errors.remove(&Page::Moderation);
             apply_reports(app, reports);
+            open_pending_appeal(app);
         }
         Outcome::Withdrawn(error, reports) => {
             app.moderation.withdraw_status = Some(localized(
@@ -478,6 +512,8 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             apply_reports(app, reports);
         }
         Outcome::Failed(message) => {
+            // A badge tap whose queue read failed opens nothing later.
+            app.moderation.pending_appeal = None;
             app.errors.insert(Page::Moderation, message);
         }
         Outcome::Appealed(error) => {
@@ -636,6 +672,15 @@ fn appeal_elements(st: &ModerationState) -> Vec<Element> {
     els
 }
 
+/// The admin-block notice for a report reason's token (`moderation.md` § Admin
+/// block of a reported item) — the shared `admin_block_notice` face resolved
+/// with the nested lookup its `{reason}` key needs. The one place tui words
+/// it: the post detail, the quoted-post embed and the DM bubble all call it.
+pub fn admin_block_notice(reason_token: &str) -> String {
+    fauna_core::obligation::admin_block_notice(reason_token)
+        .resolve_nested(fauna_i18n::strings::lookup)
+}
+
 /// Build the `content-label-badge` element for a wire `category` — icon + label
 /// entirely through the shared `fauna_core::content_category::content_label_style`
 /// map, so tui hard-codes neither the canonical 5 nor their styling. An off-list
@@ -688,12 +733,22 @@ fn row_elements(index: usize, row: &QueueRow) -> Vec<Element> {
     if let Some(label) = &action_label {
         badge = badge.attr("action", label.clone());
     }
+    // A row another nest delivered names where the decision was made — the
+    // shared `issued_by` suffix on the action line, and the `issuer` fact on
+    // the badge (`moderation.md` § Legal takedown → *The author homed on
+    // another nest*).
+    if let Some(nest) = &row.issuer_nest {
+        badge = badge.attr("issuer", nest.clone());
+    }
     let mut els = vec![badge];
 
     // Server rows only — a local detection carries no `action`, so its action
     // column stays blank. Never fabricate one.
     if let Some(label) = action_label {
-        els.push(Element::chrome(label));
+        els.push(Element::chrome(match &row.issued_by {
+            Some(issued_by) => format!("{label} · {}", localized(issued_by)),
+            None => label,
+        }));
     }
 
     els.push(Element::chrome(format!(
@@ -748,6 +803,8 @@ mod tests {
             } else {
                 QueueRowSource::Local
             },
+            issuer_nest: None,
+            issued_by: None,
         }
     }
 
@@ -806,6 +863,55 @@ mod tests {
         };
         assert_eq!(attr("confidence").as_deref(), Some("88%"));
         assert_eq!(attr("action").as_deref(), Some(els[3].text.as_str()));
+    }
+
+    /// A row another nest delivered says where the decision was made: the
+    /// shared `issued_by` suffix rides on the action line (no id of its own),
+    /// and the badge publishes the issuer's domain as the `issuer` fact
+    /// (`moderation.md` § Legal takedown → *The author homed on another nest*).
+    #[test]
+    fn a_delivered_row_names_its_issuing_nest() {
+        let mut app = crate::app::tests::test_app();
+        let action = fauna_client_moderation::moderation::ObligationAction {
+            content_type: "post".into(),
+            content_id: "ab".repeat(32),
+            category: "illegal".into(),
+            confidence_per_mille: 1000,
+            action: 7,
+            issuer_nest: Some("issuer.example".into()),
+            ..Default::default()
+        };
+        app.moderation.rows = fauna_client_moderation::merge_queue(&[action], &[]);
+        let els = queue_elements(&app);
+        let label =
+            fauna_core::obligation::obligation_action_label(7).resolve(fauna_i18n::strings::lookup);
+        assert_eq!(
+            els[3].text,
+            format!("{label} · {}", t::queue::issued_by("issuer.example")),
+        );
+        let attr = |k: &str| {
+            els[2]
+                .attrs
+                .iter()
+                .find(|(key, _)| key == k)
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(attr("issuer").as_deref(), Some("issuer.example"));
+        // The badge's `action` fact stays the bare label.
+        assert_eq!(attr("action").as_deref(), Some(label.as_str()));
+    }
+
+    /// This nest's own decision names no issuer — no suffix, no `issuer` fact.
+    #[test]
+    fn an_own_decision_names_no_issuer() {
+        let mut app = crate::app::tests::test_app();
+        app.moderation.rows = vec![row("illegal", Some(7), 1000)];
+        let els = queue_elements(&app);
+        assert!(!els[2].attrs.iter().any(|(k, _)| k == "issuer"));
+        assert_eq!(
+            els[3].text,
+            fauna_core::obligation::obligation_action_label(7).resolve(fauna_i18n::strings::lookup),
+        );
     }
 
     /// A local detection's action column is **blank** — never fabricated
@@ -963,7 +1069,7 @@ mod tests {
             confidence_per_mille: 900,
             action: 7,
             timestamp: 10,
-            extra: Default::default(),
+            ..Default::default()
         }];
         let local = vec![LocalDetection {
             content_id: "cd".repeat(32),
@@ -985,6 +1091,35 @@ mod tests {
     /// nest-issued enforcement row carries it, a local detection does not —
     /// the shared `row_is_appealable` rule, painted
     /// (`moderation.md` § Legal takedown, the transparency triple).
+    #[test]
+    fn a_withheld_badge_tap_opens_the_appeal_on_its_queue_row_once_loaded() {
+        let mut app = crate::app::tests::test_app();
+        let mut other = row("spam", Some(1), 900);
+        other.content_id = "cd".repeat(32);
+        let mut withheld = row("illegal", Some(7), 1000);
+        withheld.content_type = "conversation".into();
+        queue_appeal(&mut app, withheld.content_id.clone());
+        assert!(
+            app.moderation.appeal.is_none(),
+            "nothing opens before the read"
+        );
+
+        apply_outcome(
+            &mut app,
+            Outcome::Loaded(vec![other, withheld.clone()], Ok(Vec::new())),
+        );
+        let draft = app.moderation.appeal.clone().expect("the appeal opens");
+        assert_eq!(draft.index, 1, "under the matched row, not the first");
+        assert_eq!(draft.content_id, withheld.content_id);
+        assert_eq!(app.moderation.pending_appeal, None, "asked once");
+
+        // A row the queue no longer carries opens nothing.
+        app.moderation.appeal = None;
+        queue_appeal(&mut app, "ef".repeat(32));
+        apply_outcome(&mut app, Outcome::Loaded(vec![withheld], Ok(Vec::new())));
+        assert!(app.moderation.appeal.is_none());
+    }
+
     #[test]
     fn only_a_server_row_paints_the_appeal_button() {
         let mut app = crate::app::tests::test_app();

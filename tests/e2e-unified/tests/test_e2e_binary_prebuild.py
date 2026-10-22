@@ -20,6 +20,7 @@ The `--stamp` freshness semantics themselves are pinned in
 `build_node` gate/slot/variant-pin.
 """
 
+import os
 import re
 import sys
 import time
@@ -118,6 +119,99 @@ def test_e2e_ffi_cargo_step_is_freshness_gated_outside_the_slot():
     # (It lands by rename — `test_ffi_slot_atomic_replace.py` pins why.)
     cp_pos = joined.index('mv -f "$LIB.$$.tmp" "$LIB"')
     assert cargo_pos < cp_pos, "the private-slot copy must run after the cargo build, in the same gated command"
+
+
+#: The Unix Go/cgo recipes the collection-time prebuild calls
+#: (`_ensure_mail_bridge_built`, `_ensure_seal_helper_built`, the two atproto
+#: ensurers) → the binary each writes into bins/fauna-bridges/.
+_GO_CGO_RECIPES = {
+    "mail-bridge-build": "fauna-mail-bridge",
+    "seal-helper-build": "seal-helper-testonly",
+    "atproto-bridge-build": "fauna-atproto-bridge",
+    "atproto-bridge-build-e2e": "fauna-atproto-bridge-e2e",
+}
+
+
+@pytest.mark.parametrize("recipe,out_name", sorted(_GO_CGO_RECIPES.items()))
+def test_go_cgo_recipes_build_through_the_gated_helper(recipe, out_name):
+    """Each Unix Go/cgo recipe builds through `_go-cgo-build` and runs no
+    `{{slot_build}}` of its own: an ungated `{{slot_build}} go build` reached
+    the slot on a warm tree too, so the in-hold re-check (refuse mode) refused
+    `seal-helper-build` on every cycle however often the warm pass had just
+    built it."""
+    body = _recipe_body(_JUSTFILE.read_text(encoding="utf-8"), recipe)
+    assert body, f"{recipe} recipe not found"
+    code = [ln for ln in body.splitlines() if not ln.lstrip().startswith("#")]
+    assert not any("{{slot_build}}" in ln for ln in code), (
+        f"{recipe} takes a build slot outside the freshness gate"
+    )
+    assert any(
+        "just _go-cgo-build" in ln and f'"{out_name}"' in ln for ln in code
+    ), f"{recipe} must build {out_name} through `_go-cgo-build`"
+
+
+def _go_cgo_helper_joined() -> str:
+    body = _recipe_body(_JUSTFILE.read_text(encoding="utf-8"), "_go-cgo-build")
+    assert body, "_go-cgo-build recipe not found"
+    return " ".join(
+        ln for ln in body.splitlines() if not ln.lstrip().startswith("#")
+    ).replace("\\", " ")
+
+
+def test_go_cgo_helper_is_freshness_gated_outside_the_slot():
+    """build-if-stale --stamp outermost, {{slot_build}} inside it, `go build`
+    innermost — the shape every cargo step in the chain already has."""
+    joined = " ".join(_go_cgo_helper_joined().split())
+    gate_pos = joined.index("build-if-stale.py")
+    assert "--stamp" in joined[gate_pos:], "the go build must be gated by --stamp"
+    slot_pos = joined.index("{{slot_build}}", gate_pos)
+    go_pos = joined.index("go -C bins/fauna-bridges build", gate_pos)
+    assert gate_pos < slot_pos < go_pos, (
+        "order must be build-if-stale OUTSIDE {{slot_build}} OUTSIDE go build"
+    )
+
+
+def test_a_freshly_built_go_binary_reads_warm(tmp_path):
+    """The gate's own output must not count as its source: the binaries land
+    INSIDE `bins/fauna-bridges`, a `--source`, so without the helper's excludes
+    a build's own output is newer than the stamp it just wrote and the next
+    check (the in-hold re-check) reads stale for ever. Runs build-if-stale's
+    --check with the helper's exact exclude list, after a build wrote every one
+    of the four binaries."""
+    excludes = re.findall(r"--exclude '([^']+)'", _go_cgo_helper_joined())
+    assert excludes, "_go-cgo-build must exclude its built binaries from its sources"
+    module = tmp_path / "bins" / "fauna-bridges"
+    (module / "cmd" / "seal-helper-testonly").mkdir(parents=True)
+    src = module / "cmd" / "seal-helper-testonly" / "seal.go"
+    src.write_text("package main\n")
+    old = time.time() - 600
+    os.utime(src, (old, old))
+    stamp = tmp_path / "go-cgo.stamp"
+    stamp.write_text("")
+    os.utime(stamp, (old + 60, old + 60))
+    for out_name in _GO_CGO_RECIPES.values():  # the build's outputs, after the stamp
+        (module / out_name).write_text("binary")
+    out = module / "seal-helper-testonly"
+
+    def check(*extra: str) -> int:
+        import subprocess
+
+        return subprocess.run(
+            [sys.executable, str(_REPO / "scripts" / "build-if-stale.py"), "--check", "-q",
+             "--stamp", str(stamp), "--target", "bins/fauna-bridges/seal-helper-testonly",
+             "--source", "bins/fauna-bridges", *extra],
+            cwd=tmp_path,
+        ).returncode
+
+    assert out.exists()
+    assert check() == 1, "sanity: without the excludes the output reads as a newer source"
+    assert check(*[a for p in excludes for a in ("--exclude", p)]) == 0, (
+        "a freshly built Go binary must read warm under the helper's excludes"
+    )
+    src.write_text("package main // edited\n")
+    assert check(*[a for p in excludes for a in ("--exclude", p)]) == 1, (
+        "a real source edit must still read stale"
+    )
 
 
 def test_e2e_prev_build_recipe_checks_warm_cache_outside_the_slot():
@@ -321,8 +415,8 @@ def test_prebuild_map_covers_the_bridges_nest_fixture():
 _STAMP_WRITERS = [
     ("build_node", "_nest_newest_source_mtime",
      lambda td: common_nest._nest_variant_paths(td, "test-hooks,nostr", "debug"), "fauna-nest"),
-    ("build_sync_service_win", "_sync_service_win_newest_source_mtime",
-     common_nest._sync_service_win_build_paths, "fauna-sync-agent"),
+    ("build_sync_agent", "_sync_agent_newest_source_mtime",
+     common_nest._sync_agent_build_paths, "fauna-sync-agent"),
     ("build_recovery_fixture", "_example_newest_source_mtime",
      lambda td: common_nest._example_build_paths(td, "recovery_fixture"), "recovery_fixture"),
     ("build_render_cloud_init", "_example_newest_source_mtime",
@@ -343,7 +437,7 @@ def _queued_build(tmp_path, monkeypatch, builder, mtime_hook, paths, stem, *, ed
     build_slot.parent.mkdir(parents=True, exist_ok=True)
     build_slot.write_text("")
     binary, _stamp = paths(target_dir)
-    built = tmp_path / stem  # cargo's JSON-reported exe (build_sync_service_win reads `binary`)
+    built = tmp_path / stem  # cargo's JSON-reported exe (build_sync_agent reads `binary`)
     built.write_text("fake built exe")
     source = {"mtime": 0.0}
     monkeypatch.setattr(common_nest, mtime_hook, lambda repo: source["mtime"])
@@ -460,11 +554,11 @@ class _FakeSlotModule:
         self.events.append(("acquire", pool))
         return self._next_fd
 
-    def log_lane_hold(self, fd, apps, inhold_prebuild_s=None):
+    def log_lane_hold(self, fd, apps, inhold_prebuild_s=None, inhold_setup_s=None):
         # The real writer records a hold only for a lane fd it granted.
         pool = self._pool_of.get(fd)
         if pool not in (None, self.E2E_LONG_POOL):
-            self.events.append(("hold", pool, sorted(apps), inhold_prebuild_s))
+            self.events.append(("hold", pool, sorted(apps), inhold_prebuild_s, inhold_setup_s))
 
     def release_slot(self, fd, pool=None):
         import os
@@ -620,6 +714,213 @@ def test_a_slot_module_predating_refuse_mode_runs_the_in_hold_pass_as_before(ref
         _FakeSlotModule.REFUSE_BUILD_ENV = "FAUNA_SLOT_REFUSE_BUILD"
     assert mod.events[-1] == "in-hold-built", mod.events
     assert ("release", "e2e_other") not in mod.events
+
+
+# ── The background tester's warm-only shard (delayed-testing.md § The background
+# tester: the tester never compiles; a tree whose binaries are not warm is a shard
+# not run).
+
+
+def test_a_warm_only_run_on_a_cold_tree_compiles_nothing_and_ends_interrupted(
+    refuse_loop, monkeypatch, capsys
+):
+    """No warm pass, one refusing re-check under the lane, then an INTERRUPTED exit
+    — the status the last-green writer declines, so the shard records nothing —
+    printing the line the merge-gate check's tester greps for."""
+    import os
+
+    mod, tree = refuse_loop
+    monkeypatch.setenv(conftest.WARM_ONLY_ENV, "1")
+    with pytest.raises(pytest.exit.Exception) as exited:
+        conftest.pytest_collection_finish(_FakeSession())
+    assert exited.value.returncode == pytest.ExitCode.INTERRUPTED
+    assert "warm-pass" not in mod.events and "warm-build" not in mod.events, mod.events
+    assert "in-hold-refused" in mod.events and "in-hold-built" not in mod.events, mod.events
+    assert ("release", "e2e_other") not in mod.events, "session finish releases the lane"
+    assert conftest.WARM_ONLY_REFUSAL in capsys.readouterr().err
+    assert mod.REFUSE_BUILD_ENV not in os.environ
+
+
+def test_a_warm_only_run_on_a_warm_tree_proceeds_on_stamp_reads(refuse_loop, monkeypatch):
+    mod, tree = refuse_loop
+    tree["cold"] = False
+    monkeypatch.setenv(conftest.WARM_ONLY_ENV, "1")
+    conftest.pytest_collection_finish(_FakeSession())
+    assert "warm-pass" not in mod.events and "in-hold-refused" not in mod.events, mod.events
+    assert [e for e in mod.events if isinstance(e, tuple) and e[0] == "acquire"] == [
+        ("acquire", "e2e_other")]
+    assert conftest._E2E_SLOT is not None and conftest._E2E_SLOT[1]
+
+
+def test_a_prewarm_only_run_warms_takes_no_lane_and_exits_ok(refuse_loop, monkeypatch):
+    """The tester's warm step (delayed-testing.md § The background tester, *The
+    warm step*): the warm pass runs — whatever `_prewarm_before_slot` says, so on
+    macOS too — no lane is acquired, no in-hold re-check runs, and the session
+    exits OK."""
+    mod, tree = refuse_loop
+    monkeypatch.setattr(conftest, "_prewarm_before_slot", lambda mod: False)
+    monkeypatch.setenv(conftest.PREWARM_ONLY_ENV, "1")
+    with pytest.raises(pytest.exit.Exception) as exited:
+        conftest.pytest_collection_finish(_FakeSession())
+    assert exited.value.returncode == pytest.ExitCode.OK
+    assert mod.events[:2] == ["warm-pass", "warm-build"], mod.events
+    assert not [e for e in mod.events if isinstance(e, tuple) and e[0] == "acquire"], mod.events
+    assert not [e for e in mod.events if str(e).startswith("in-hold")], mod.events
+    assert conftest._E2E_SLOT is None
+
+
+def test_a_prewarm_only_run_whose_build_fails_exits_non_zero(refuse_loop, monkeypatch, capsys):
+    mod, tree = refuse_loop
+    monkeypatch.setattr(conftest, "_prewarm_prebuilds",
+                        lambda session: ["nest_binary: RuntimeError('cargo exited 101')"])
+    monkeypatch.setenv(conftest.PREWARM_ONLY_ENV, "1")
+    with pytest.raises(pytest.exit.Exception) as exited:
+        conftest.pytest_collection_finish(_FakeSession())
+    assert exited.value.returncode != pytest.ExitCode.OK
+    err = capsys.readouterr().err
+    assert conftest.PREWARM_ONLY_FAILED in err and "cargo exited 101" in err
+    assert conftest._E2E_SLOT is None
+
+
+def test_the_warm_pass_returns_what_failed_and_forgets_what_built(monkeypatch):
+    """`_prewarm_prebuilds` reports its failures (the prewarm-only run's exit
+    reads them) and keeps them memoized, while every success is forgotten for the
+    in-hold re-check."""
+    monkeypatch.setattr(conftest, "_BINARY_BUILD_MEMO", {})
+
+    def fake_binaries(session, *, prewarm=False):
+        conftest._BINARY_BUILD_MEMO["nest_binary"] = ("ok", "/bin/nest")
+        conftest._BINARY_BUILD_MEMO["app:tui"] = ("failed", RuntimeError("boom"))
+
+    def fake_spa(session):
+        raise RuntimeError("deno exited 1")
+
+    monkeypatch.setattr(conftest, "_prebuild_web_spa", fake_spa)
+    monkeypatch.setattr(conftest, "_prebuild_binaries", fake_binaries)
+    failed = conftest._prewarm_prebuilds(_FakeSession())
+    assert failed == ["web SPA: deno exited 1", "app:tui: boom"]
+    assert list(conftest._BINARY_BUILD_MEMO) == ["app:tui"]
+
+
+def test_a_prewarm_only_run_writes_no_last_green_record(monkeypatch, capsys):
+    from helpers import last_green
+
+    monkeypatch.setenv(conftest.PREWARM_ONLY_ENV, "1")
+    monkeypatch.setattr(last_green, "write", lambda *a, **k: pytest.fail("wrote the directory"))
+    conftest._write_last_green(None, pytest.ExitCode.OK)
+    assert "NOT written — a prewarm-only run" in capsys.readouterr().out
+
+
+def test_an_interrupted_session_writes_no_last_green_record(monkeypatch, capsys):
+    """The yield's other half (delayed-testing.md § The background tester): a shard
+    the tester stops, or a warm-only refusal, ends INTERRUPTED and the directory's
+    writer declines it — the stopped tests stay neither red nor green."""
+    from helpers import last_green
+
+    monkeypatch.setattr(last_green, "write", lambda *a, **k: pytest.fail("wrote the directory"))
+    conftest._write_last_green(None, pytest.ExitCode.INTERRUPTED)
+    assert "NOT written — the session was interrupted" in capsys.readouterr().out
+
+
+# ── The yield at a test boundary: the tester's flag ends the session after the current test, the
+# completed tests recorded; a Ctrl-C still writes nothing.
+
+def test_a_yield_stopped_session_writes_its_completed_tests(monkeypatch, capsys):
+    from helpers import last_green
+
+    wrote = []
+    monkeypatch.setattr(last_green, "write", lambda *a, **k: wrote.append(1))
+    monkeypatch.setattr(conftest, "_yield_stop", {"reason": "a waiter in 'build'"})
+    conftest._write_last_green(None, pytest.ExitCode.INTERRUPTED)
+    assert wrote == [1], "the boundary stop's completed tests are the tester's to keep"
+    monkeypatch.setattr(conftest, "_yield_stop", {})
+    conftest._write_last_green(None, pytest.ExitCode.INTERRUPTED)
+    assert wrote == [1] and "NOT written — the session was interrupted" in capsys.readouterr().out
+
+
+_YIELD_PROJECT_CONFTEST = '''
+import importlib.util, json, os, sys
+import pytest
+
+sys.path.insert(0, {e2e!r})
+_spec = importlib.util.spec_from_file_location("e2e_conftest_for_yield", {conftest!r})
+real = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(real)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_teardown(item, nextitem):
+    yield
+    real._yield_at_boundary(item, nextitem)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    with open(os.environ["FAUNA_E2E_YIELD_FILE"] + ".session", "w") as fh:
+        json.dump({{"exit": int(exitstatus), "stop": real._yield_stop}}, fh)
+'''
+
+_YIELD_PROJECT_TESTS = '''
+import os
+
+def test_one():
+    with open(os.environ["FAUNA_E2E_YIELD_FILE"], "w") as fh:
+        fh.write("a waiter in 'build' (pid 20)")
+
+def test_two():
+    pass
+
+def test_three():
+    pass
+'''
+
+
+def test_a_raised_flag_ends_a_real_session_after_the_current_test(tmp_path):
+    """Real pytest, the real hook: the flag raised during the first test stops the
+    session at its end — exit INTERRUPTED, the two tests behind it never run and
+    are named in the stop file the tester reads."""
+    import json
+    import os
+    import subprocess
+
+    e2e = Path(conftest.__file__).resolve().parent
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "conftest.py").write_text(_YIELD_PROJECT_CONFTEST.format(
+        e2e=str(e2e), conftest=str(e2e / "conftest.py")))
+    (project / "test_yield.py").write_text(_YIELD_PROJECT_TESTS)
+    flag = tmp_path / "yield"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
+    env[conftest.YIELD_FILE_ENV] = str(flag)
+    out = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                          "--rootdir", str(project), str(project)],
+                         cwd=project, env=env, capture_output=True, text=True, timeout=120)
+    assert out.returncode == pytest.ExitCode.INTERRUPTED, out.stdout + out.stderr
+    assert "1 passed" in out.stdout, out.stdout
+    stopped = (tmp_path / "yield.stopped").read_text().splitlines()
+    assert stopped[0] == "the tester yields: a waiter in 'build' (pid 20)"
+    assert [line.rsplit("::", 1)[1] for line in stopped[1:]] == ["test_two", "test_three"]
+    session = json.loads((tmp_path / "yield.session").read_text())
+    assert session == {"exit": 2, "stop": {"reason": "a waiter in 'build' (pid 20)"}}
+
+
+def test_no_flag_or_no_next_test_stops_nothing(tmp_path, monkeypatch):
+    class _Session:
+        shouldstop = False
+        items = []
+
+    class _Item:
+        session = _Session()
+        nodeid = "t::a"
+
+    monkeypatch.setattr(conftest, "_yield_stop", {})
+    flag = tmp_path / "yield"
+    monkeypatch.setenv(conftest.YIELD_FILE_ENV, str(flag))
+    conftest._yield_at_boundary(_Item(), _Item())
+    assert _Item.session.shouldstop is False, "no flag raised"
+    flag.write_text("the fence")
+    conftest._yield_at_boundary(_Item(), None)
+    assert _Item.session.shouldstop is False, "the last test: the session ends on its own"
+    assert not (tmp_path / "yield.stopped").exists()
 
 
 # ── The lane usage record: every lane release logs its
@@ -784,3 +1085,166 @@ def test_prebuild_binaries_hoists_the_recovery_fixture_build(monkeypatch, tmp_pa
     assert ran == []
     conftest._prebuild_binaries(type("S", (), {"items": [other, user]})())
     assert ran == ["rf"]
+
+
+# ── The iOS app build: its `xcodebuild` is a prewarmed job of its
+# own, freshness-gated OUTSIDE a `build` slot and compiled under one — never a
+# plain slot-wrap, which the in-hold refuse mode would refuse on every run.
+
+
+@pytest.fixture
+def ios_build_tree(tmp_path, monkeypatch):
+    """A fake checkout for `_build_ios_app`: an apple package with a staged
+    3-slice xcframework, the slot script present (so `_build_slot_cmd` prefixes
+    it), a per-test derived-data dir, and `subprocess.run` replaced by a fake
+    `xcodebuild` that writes the executable and records each command."""
+    import types
+
+    repo = tmp_path / "repo"
+    pkg = repo / "apps" / "fauna-apple"
+    for rel in ("FaunaKit/View.swift", "FaunaFFISwift/Sources/FaunaFFI.swift",
+                "FaunaFFI.xcframework/ios-arm64-simulator/libfauna_ffi.a",
+                "FaunaFFI.xcframework/ios-arm64/libfauna_ffi.a",
+                "FaunaFFI.xcframework/macos-arm64/libfauna_ffi.a"):
+        (pkg / rel).parent.mkdir(parents=True, exist_ok=True)
+        (pkg / rel).write_text(rel)
+    old = time.time() - 600
+    for f in pkg.rglob("*"):
+        if f.is_file():
+            os.utime(f, (old, old))
+    (repo / "scripts").mkdir()
+    (repo / "scripts" / "build-slot.py").write_text("")
+    derived = tmp_path / "derived"
+    calls = []
+
+    def fake_run(cmd, *a, **k):
+        calls.append(list(cmd))
+        exe = derived / "Build" / "Products" / "Debug-iphonesimulator" / "FaunaiOS"
+        exe.parent.mkdir(parents=True, exist_ok=True)
+        exe.write_text("bin")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr=None)
+
+    monkeypatch.setattr(conftest, "_repo_root", repo)
+    monkeypatch.setattr(conftest, "_ios_derived_data_dir", lambda: derived)
+    monkeypatch.setattr(conftest, "_ios_package_workspace", lambda package_dir: tmp_path / "ws")
+    monkeypatch.setattr(conftest.subprocess, "run", fake_run)
+    return types.SimpleNamespace(repo=repo, pkg=pkg, derived=derived, calls=calls)
+
+
+def test_the_ios_app_compiles_under_a_build_slot_and_a_warm_tree_runs_no_xcodebuild(ios_build_tree):
+    t = ios_build_tree
+    app = conftest._build_ios_app()
+    assert app == str(t.derived / "FaunaiOS.app")
+    assert len(t.calls) == 1, t.calls
+    slot = common_nest._build_slot_cmd(t.repo)
+    assert slot, "the fake checkout carries the slot script"
+    assert t.calls[0][: len(slot)] == slot and t.calls[0][len(slot)] == "xcodebuild", (
+        "the compile path takes the `build` slot — the bare xcodebuild was mac's "
+        "zero-slot session-tick class"
+    )
+    assert (t.derived / ".fauna-ios-app.stamp").exists()
+    assert conftest._build_ios_app() == app
+    assert len(t.calls) == 1, "a warm tree is a stamp read: no xcodebuild, no slot"
+
+
+def test_the_ios_app_rebuilds_when_a_package_source_moves(ios_build_tree):
+    t = ios_build_tree
+    conftest._build_ios_app()
+    (t.pkg / "FaunaKit" / "View.swift").write_text("edited")
+    conftest._build_ios_app()
+    assert len(t.calls) == 2, t.calls
+
+
+def test_the_ios_app_rebuilds_when_another_ffi_generation_is_restored_with_older_mtimes(ios_build_tree):
+    """The full flavor's restores keep mtimes (`cp -p`), so a DIFFERENT
+    generation can arrive with mtimes older than the app's stamp — the gate
+    reads the generation's fingerprint, not a newer-than test."""
+    t = ios_build_tree
+    conftest._build_ios_app()
+    lib = t.pkg / "FaunaFFI.xcframework" / "ios-arm64-simulator" / "libfauna_ffi.a"
+    lib.write_text("another generation, another size")
+    older = time.time() - 3600
+    os.utime(lib, (older, older))
+    conftest._build_ios_app()
+    assert len(t.calls) == 2, t.calls
+
+
+def test_outputs_other_recipes_write_into_the_package_leave_the_ios_app_warm(ios_build_tree):
+    """`mac-debug` rewrites its stamp and `.build/` on every macOS build, the
+    flavor recipes rewrite `.ffi-flavor`: none is an input of the iOS app."""
+    t = ios_build_tree
+    conftest._build_ios_app()
+    for rel in (".mac-debug.stamp", ".ffi-flavor", ".ffi-cache.stamp", ".build/debug/x.o",
+                "generated/FaunaFFI.swift"):
+        (t.pkg / rel).parent.mkdir(parents=True, exist_ok=True)
+        (t.pkg / rel).write_text("new output")
+    conftest._build_ios_app()
+    assert len(t.calls) == 1, t.calls
+
+
+def test_a_failed_ios_compile_writes_no_stamp(ios_build_tree, monkeypatch):
+    import types
+
+    t = ios_build_tree
+    monkeypatch.setattr(conftest.subprocess, "run",
+                        lambda cmd, *a, **k: types.SimpleNamespace(returncode=75, stdout="refused"))
+    with pytest.raises(RuntimeError, match="building the iOS app failed"):
+        conftest._build_ios_app()
+    assert not (t.derived / ".fauna-ios-app.stamp").exists()
+
+
+def test_the_ios_app_is_a_prewarmed_job_after_the_restore_and_before_the_simulator(monkeypatch):
+    """Order in both passes: the iOS app's FFI (`app[ios]`), the macOS app, the
+    full xcframework restore, the iOS `xcodebuild`, then the simulator — and the
+    warm pass skips only the simulator, so the restore precedes the iOS build
+    there too."""
+    ran = []
+    for name in ("_ensure_app_built",):
+        monkeypatch.setattr(conftest, name, lambda app: ran.append(f"app[{app}]"))
+    for name in ("_restore_full_apple_ffi", "_ensure_ios_app_built", "_get_ios_setup"):
+        monkeypatch.setattr(conftest, name, (lambda n: lambda: ran.append(n))(name))
+    monkeypatch.setattr(conftest, "_real_fixture_closure", lambda item: set())
+    monkeypatch.setattr(conftest, "_prebuild_app_set", lambda s, r: {"ios", "macos"})
+    session = type("S", (), {"items": []})()
+    conftest._prebuild_binaries(session)
+    assert ran == ["app[ios]", "app[macos]", "_restore_full_apple_ffi",
+                   "_ensure_ios_app_built", "_get_ios_setup"], ran
+    ran.clear()
+    conftest._prebuild_binaries(session, prewarm=True)
+    assert ran == ["app[ios]", "app[macos]", "_restore_full_apple_ffi",
+                   "_ensure_ios_app_built"], ran
+
+
+def test_the_ios_simulator_boot_is_reported_as_setup_not_prebuild(monkeypatch):
+    """The simulator's create-and-finish-booting waits for no `build`, so the
+    hold charges it to `setup_s` (the usage line's `inhold_setup_s`) and only the
+    rest of the pass to `prebuild_s`."""
+    monkeypatch.setattr(conftest, "_ensure_app_built", lambda app: None)
+    monkeypatch.setattr(conftest, "_ensure_ios_app_built", lambda: None)
+    monkeypatch.setattr(conftest, "_get_ios_setup", lambda: time.sleep(0.3))
+    monkeypatch.setattr(conftest, "_real_fixture_closure", lambda item: set())
+    monkeypatch.setattr(conftest, "_prebuild_app_set", lambda s, r: {"ios"})
+    hold = conftest._new_hold({"ios"})
+    conftest._timed_prebuild(hold, lambda: conftest._prebuild_binaries(type("S", (), {"items": []})()))
+    assert hold["setup_s"] >= 0.3
+    assert 0 <= hold["prebuild_s"] < 0.3, hold
+
+
+def test_a_hold_logs_setup_apart_and_an_older_writer_gets_it_inside_prebuild(monkeypatch):
+    mod = _FakeSlotModule()
+    for name in ("FAUNA_SLOT_HELD_E2E", "FAUNA_SLOT_HELD_E2E_OTHER"):
+        monkeypatch.delenv(name, raising=False)
+    hold = {"apps": ["ios"], "prebuild_s": 6.0, "setup_s": 48.0}
+    fd = mod.acquire_slot("e2e_other")
+    conftest._release_lanes(mod, [(fd, "e2e_other")], hold)
+    assert _holds(mod) == [("hold", "e2e_other", ["ios"], 6.0, 48.0)]
+
+    class _Older(_FakeSlotModule):
+        def log_lane_hold(self, fd, apps, inhold_prebuild_s=None):
+            pool = self._pool_of.get(fd)
+            self.events.append(("hold", pool, sorted(apps), inhold_prebuild_s))
+
+    old = _Older()
+    fd = old.acquire_slot("e2e_other")
+    conftest._release_lanes(old, [(fd, "e2e_other")], hold)
+    assert _holds(old) == [("hold", "e2e_other", ["ios"], 54.0)], "a predating copy: setup counted as before"

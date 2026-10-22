@@ -72,8 +72,9 @@ pub use native::{
     logout_and_clear,
 };
 pub use oauth_device::{
-    DeviceAuthorization, DeviceFlow, FlowOutcome, MICROSOFT, MicrosoftIdentity, OAuthClient,
-    OAuthError, OAuthHttp, OAuthHttpResponse, PollStep, TokenGrant,
+    DeviceAuthorization, DeviceFlow, FlowOutcome, MICROSOFT, MicrosoftIdentity,
+    MicrosoftRegistration, OAuthClient, OAuthError, OAuthHttp, OAuthHttpResponse, PollStep,
+    TokenGrant,
 };
 pub use send::{ImportUnitReply, MailImportClient};
 pub use session::{

@@ -14,7 +14,7 @@
  *  bolt | globe | unknown | archive | bridge`), which is both the serde form on the conversations
  *  snapshot (`thread.glyph`) and the feed badge (`badge.glyph` off
  *  `classifySources`). Canonical concepts ratified by the user 2026-06-22. */
-import { sourceGlyphEmoji as wasmSourceGlyphEmoji } from '$lib/wasm';
+import { sourceGlyphEmoji as wasmSourceGlyphEmoji } from '#lib/wasm';
 
 export function sourceGlyphEmoji(glyph: string): string {
   return wasmSourceGlyphEmoji(glyph);

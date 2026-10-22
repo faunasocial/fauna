@@ -26,7 +26,7 @@
 #     binds the MDA's IMAP 993/143 listeners AND its direct CalDAV listener
 #     (<LAN-IP>:<admin caldav_port>, default 8443 — the entrypoint writes
 #     caldav_bind_host from it; caldav-server.md § Network exposure) on the LAN
-#     IP. The router-fronted mail.<domain> CalDAV on :443 keeps working too.
+#     IP. The router's mail.<domain> CalDAV route on :443 reaches nothing here (one CalDAV listener).
 #     Bind address is operator topology, never nest state (product invariant).
 #
 # ✅ tier_4 validated (Slice 6, 2026-06-04): the two-box bundle is exercised
@@ -76,8 +76,8 @@ services:
       FAUNA_DEPLOYMENT_SEED: ${FAUNA_DEPLOYMENT_SEED:-}
       # The box's LAN IP — binds the MDA IMAP 993/143 listeners and its direct
       # CalDAV listener (<LAN-IP>:<admin caldav_port>, default 8443) on the LAN
-      # so LAN MUAs can reach them (mail.<domain> CalDAV via the :443 router
-      # keeps working too). OS-deployment topology, never a user/nest setting.
+      # so LAN MUAs can reach them (CalDAV too, at the admin-set port; the :443
+      # router's mail.<domain> route has no listener behind it on this box). OS-deployment topology, never a user/nest setting.
       FAUNA_LAN_BIND_IP: ${FAUNA_LAN_BIND_IP}
       # nest's internal listener (the sni-router fronts it on :443). 3000 — kept
       # off 8443 so the MDA can serve user-facing CalDAV at <LAN-IP>:8443 with no
@@ -85,16 +85,15 @@ services:
       # image's production default.
       FAUNA_PORT: ${FAUNA_PORT:-3000}
       # Bind nest's internal listener to LOOPBACK under host networking.
-      # The bridge-networked production image leaves this 0.0.0.0 (its
-      # netns isolates the port), but here `network_mode: host` means 0.0.0.0
-      # would expose nest's full WS-RPC/HTTP surface on the box's LAN interfaces
+      # The image defaults to the same value; stated here because under
+      # `network_mode: host` anything wider would expose nest's full WS-RPC/HTTP surface on the box's LAN interfaces
       # — an unintended second public face. Every in-bundle consumer already
       # dials nest at 127.0.0.1:${FAUNA_PORT} (the SNI-router default/PROXY
       # backends, the MTA --nest-endpoint, the relay sidecar), so loopback is
       # transparent to them; only the LAN exposure is removed. The LAN reach the
       # home box DOES want — IMAP 993/143 and the :443 SNI router — is bound
       # separately (FAUNA_LAN_BIND_IP / the router's :443). OS-deployment-topology
-      # IPC, never a user/nest setting. (First-run only: baked into nest.toml.)
+      # IPC, never a user/nest setting. (Reconciled into nest.toml every boot.)
       FAUNA_BIND_ADDR: 127.0.0.1
       # NB: no FAUNA_CLAMD_ADDR / FAUNA_RSPAMD_URL — the home box runs no MTA, so
       # the inbound scan gate is never exercised here (scanning happened on the

@@ -7,8 +7,8 @@
   // is what spends the bytes. `data-state` (`idle` / `loading` / `playing` / `error`)
   // is the headless observable every player test reads; the native player's own error
   // UI is the error surface — no new element.
-  import { IDS } from '$lib/generated/uiIds';
-  import { notePlayback } from '$lib/feed-cues';
+  import { IDS } from '#lib/generated/uiIds';
+  import { notePlayback } from '#lib/feed-cues';
   interface Props {
     /** The blob URL whose first frame is the poster (`<video preload="metadata">`). Absent for a
      *  bridged `ProxiedVideo` (render-model.md § D6c → *Proxied video*): its first-frame grab

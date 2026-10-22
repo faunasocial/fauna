@@ -106,6 +106,17 @@ public class SessionState {
     /// `pendingTrustPromptGranted`.
     public var pendingRecoveryKitHex: String?
 
+    /// The DNS-provider credential the wizard verified at its `dns_config` step
+    /// (`onboarding-provisioning.md` § 4. DNS configuration, *Capture at
+    /// onboarding, seal via the launched app*). The wizard runs pre-identity, so
+    /// `OnboardingVM.performLoggedInHandoff` only latches the machine's
+    /// `capturedDnsCredential()` here and the post-auth launch glue
+    /// (`MailEnableGlue.sealCapturedDnsCredential`) seals it once through the
+    /// shared `seal_captured_dns_credential`. In memory only — never persisted;
+    /// `nil` on a skip, an append and every returning-user relaunch. Sibling of
+    /// `pendingRecoveryKitHex`.
+    public var pendingDnsCredential: CapturedDnsCredential?
+
     /// User-visible "off-box recovery isn't protected" warning, set by the launch
     /// glue when deployment-seed custody is **not confirmed** (BR-2 `RefusedMismatch`
     /// or the durable transient retries exhausted). The seed's sole hand-off is

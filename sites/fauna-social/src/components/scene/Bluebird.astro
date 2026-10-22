@@ -1,0 +1,27 @@
+---
+// A small blue bird, perched, chirping for all to hear — the public feed.
+// Drawn in profile facing right, as a group inside the meadow's SVG; the
+// origin is the middle of its body and the legs reach 10 units below it.
+interface Props {
+  x: number;
+  y: number;
+  scale?: number;
+}
+const { x, y, scale = 1 } = Astro.props;
+---
+<g transform={`translate(${x} ${y}) scale(${scale})`}>
+  <!-- the chirp -->
+  <g fill="none" stroke="#3b82c4" stroke-width="1.6" stroke-linecap="round">
+    <path d="M22 -3 A7 7 0 0 0 22 -13" />
+    <path d="M27 0 A12 12 0 0 0 27 -16" />
+    <path d="M32 3 A17 17 0 0 0 32 -19" />
+  </g>
+  <!-- tail, body, wing, head, beak, eye, legs -->
+  <path d="M-7 0 L-16 -6 L-15 3 Z" fill="#3b82c4" />
+  <ellipse cx="0" cy="0" rx="9.5" ry="6.5" fill="#4a9de0" />
+  <ellipse cx="-1" cy="-1" rx="6" ry="3.4" transform="rotate(-18 -1 -1)" fill="#3b82c4" />
+  <circle cx="8" cy="-5" r="5.6" fill="#4a9de0" />
+  <path d="M13 -5.5 L18 -4 L13 -2.5 Z" fill="#f4c95d" />
+  <circle cx="9.5" cy="-6.2" r="1.2" fill="#2b2a24" />
+  <path d="M-2 6 L-3 10 M3 6 L3 10" stroke="#6d675a" stroke-width="1.2" stroke-linecap="round" />
+</g>

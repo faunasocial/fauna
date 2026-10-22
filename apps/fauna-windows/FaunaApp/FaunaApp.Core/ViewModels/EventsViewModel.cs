@@ -4,8 +4,10 @@ using System.Linq;
 using System.Text;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using FaunaApp.Core.Logs;
 using FaunaApp.Core.Models;
 using FaunaApp.Core.Services;
+using uniffi.fauna_conversations;
 using uniffi.fauna_ffi;
 
 namespace FaunaApp.Core.ViewModels;
@@ -29,6 +31,29 @@ public sealed partial class CalendarRowVm : ObservableObject
 {
     public CalendarInfo Calendar { get; init; } = null!;
     [ObservableProperty] private bool _isVisible;
+}
+
+/// <summary>
+/// One `refused-change-item`: the four texts the shared <c>refused_change_view</c>
+/// worded (resolved through the app's one <c>LocalizedText</c> resolver — the
+/// phrasing of a security notice must not drift between apps) plus the date this
+/// platform formats. <see cref="Reason"/> carries the repeat count on its line
+/// (reason, a space, attempts) — ui.yaml gives the row four texts, not five.
+/// A record, so the store-change re-read's "nothing changed" test is value equality.
+/// </summary>
+public sealed record RefusedChangeRow(string Key, string Title, string Author, string Reason, string Time)
+{
+    internal static RefusedChangeRow From(FfiRefusedChange c) => new(
+        c.key,
+        Strings.Resolve(c.headline),
+        Strings.Resolve(c.author),
+        c.attempts is { } attempts
+            ? Strings.Resolve(c.reason) + " " + Strings.Resolve(attempts)
+            : Strings.Resolve(c.reason),
+        DateTimeOffset.FromUnixTimeSeconds(c.lastRefusedAt).ToLocalTime().ToString("d"));
+
+    internal static IReadOnlyList<RefusedChangeRow> From(IEnumerable<FfiRefusedChange> rows) =>
+        rows.Select(From).ToList();
 }
 
 public partial class EventsViewModel : ViewModelBase
@@ -223,6 +248,85 @@ public partial class EventsViewModel : ViewModelBase
             NoticeMessage = Strings.Format("events/calendar_exported", path);
         }
         catch (Exception ex) { ShowError(ex); }
+    }
+
+    // ── Refused scheduling changes (events.md § Refused scheduling changes) ──
+
+    /// <summary>The open refused-change rows, in the shared view's order. Empty
+    /// → the page paints no list at all (the page every user sees every day is
+    /// unchanged by this feature).</summary>
+    public ObservableCollection<RefusedChangeRow> RefusedChanges { get; } = new();
+
+    // Dismissals in flight: a store-change re-read waits them out (their own
+    // answer repaints the list).
+    private int _refusedOpsInFlight;
+
+    /// <summary>Re-read the list. Never throws: a store that is not up yet (or a
+    /// failed read) leaves the list as it stood — the page's own load reports a
+    /// real fault. Called on every page load; the open page re-reads through
+    /// <see cref="WatchStore"/> (the witness stays on the page and never
+    /// re-enters, and the calendar poll bails on a refused CANCEL, which changes
+    /// no calendar).</summary>
+    internal async Task LoadRefusedChangesAsync(ConversationsManager? manager)
+    {
+        if (manager is null) return;
+        try
+        {
+            var fresh = RefusedChangeRow.From(await _rpc.RefusedChangesOpenAsync(manager));
+            ReplaceRefusedChanges(fresh);
+        }
+        catch (Exception ex)
+        {
+            ShellLog.Warn(nameof(EventsViewModel), $"refused-change read failed: {ex.Message}");
+        }
+    }
+
+    /// <summary><c>refused-change-dismiss</c> — the row's only control, a local
+    /// store write that works with no nest. Re-reads so the row clears.</summary>
+    internal async Task DismissRefusedChangeAsync(string key, ConversationsManager? manager)
+    {
+        _refusedOpsInFlight++;
+        try
+        {
+            await _rpc.RefusedChangeDismissAsync(key);
+            await LoadRefusedChangesAsync(manager);
+        }
+        catch (Exception ex)
+        {
+            ShowError(ex);
+        }
+        finally
+        {
+            _refusedOpsInFlight--;
+        }
+    }
+
+    /// <summary>Start re-reading the list on the shared store-change notice —
+    /// call from the page's <c>Page_Loaded</c>, pair with
+    /// <see cref="ViewModelBase.CleanupStoreChange"/> on navigate-away
+    /// (<c>account-runtime.md</c> § A runtime's own pump is a source of the
+    /// notice too, parts 2 and 4). <paramref name="manager"/> is a getter so the
+    /// live session manager is read at each notice.</summary>
+    internal void WatchStore(Func<ConversationsManager?> manager) =>
+        WatchStoreChange(_rpc, () => RefusedChangesResyncAsync(manager()));
+
+    /// <summary>The store-change re-read, written to the level rule: <c>true</c>
+    /// only when the read changed what shows; nothing replaced when the read
+    /// fails; the calendars and any edit in progress are never touched.</summary>
+    internal async Task<bool> RefusedChangesResyncAsync(ConversationsManager? manager)
+    {
+        if (manager is null || _refusedOpsInFlight > 0) return false;
+        var fresh = RefusedChangeRow.From(await _rpc.RefusedChangesOpenAsync(manager));
+        if (_refusedOpsInFlight > 0) return false;
+        return ReplaceRefusedChanges(fresh);
+    }
+
+    private bool ReplaceRefusedChanges(IReadOnlyList<RefusedChangeRow> fresh)
+    {
+        if (fresh.SequenceEqual(RefusedChanges)) return false;
+        RefusedChanges.Clear();
+        foreach (var row in fresh) RefusedChanges.Add(row);
+        return true;
     }
 
     [RelayCommand]

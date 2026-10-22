@@ -14,7 +14,7 @@
 //! Receiving into the conversations view.
 
 use async_trait::async_trait;
-use fauna_client_mail_settings::InboxSpamScorer;
+use fauna_client_mail_settings::{InboxSpamScorer, judge_inbox_copy};
 use fauna_client_moderation::LocalDetectionStore;
 use fauna_conversations::backend::{
     InboundMailRecord, MailFeed, OutboundMailSink, RoomSeams, SelfAddress,
@@ -95,10 +95,10 @@ use fauna_client_folders::FoldersClient;
 use fauna_client_folders::orchestration::FoldersAuthor;
 #[cfg(target_arch = "wasm32")]
 use fauna_conversations::backend::FolderGateSink;
-// The single Welcome-ingest dispatch, shared with the native receive rail, plus
-// the two recipient-side leaves the pending-share faces drive.
+// The recipient-side folder join the pending-share faces drive (the leave is
+// the shared `fauna_client_folders::leave_share`).
 #[cfg(target_arch = "wasm32")]
-use fauna_conversations::backends::fauna_mls::{join_folder_welcome, leave_folder};
+use fauna_conversations::backends::fauna_mls::join_folder_welcome;
 #[cfg(target_arch = "wasm32")]
 use fauna_conversations::session::{
     FolderWelcomeContext, ingest_welcome_by_kind, poll_folder_feed, poll_scheduling_feed,
@@ -1023,6 +1023,21 @@ impl WasmConversationsManager {
         })
     }
 
+    /// Re-list the standing room invitations from the durable inbox
+    /// (`ConversationsManager::refresh_room_invitations`, a peek) — the JS
+    /// receive tick's twin of the native receive loop's `full_sweep!` arm, and
+    /// the only way an invitation reaches `room-invitation[i]` on web: the
+    /// inbox drain deliberately leaves the kind un-acked, so nothing else
+    /// projects it. Never rejects; resolves once listed.
+    #[wasm_bindgen(js_name = refreshRoomInvitations)]
+    pub fn refresh_room_invitations(&self) -> js_sys::Promise {
+        let mgr = self.manager.clone();
+        future_to_promise(async move {
+            mgr.refresh_room_invitations().await;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
     /// Commit a known Fauna actor (`handle` + 64-hex `actor_id`) directly as a
     /// new-thread recipient chip — the boundary form of `accept_new_thread_chip`
     /// for a typed-Fauna recipient (twin of [`Self::accept_add_participant_fauna_chip`]
@@ -1267,6 +1282,13 @@ impl WasmConversationsManager {
     /// per call for that merge's MSEK lookup (the manager holds no identity
     /// seed), and `now_secs` from JS under the wasm-time discipline — `f64`, not
     /// `i64`, so the JS side passes a plain number.
+    ///
+    /// `warmup_hold` is the record's own `InboxMessage.warmup_hold` as the JS
+    /// fetch decoded it (`{release_at, messages_ahead}`, `null`/`undefined` when
+    /// nothing holds it — always so on INBOX): it rides into the shared ingest,
+    /// which projects it as `MessageSnapshot.warmup_hold`
+    /// (`mail-deliverability.md` § Enforcement at submission time) — the twin
+    /// of the native `fauna-client-conversations` mail source's mapping.
     #[wasm_bindgen(js_name = ingestSealedInbound)]
     #[allow(clippy::too_many_arguments)]
     pub fn ingest_sealed_inbound(
@@ -1281,11 +1303,22 @@ impl WasmConversationsManager {
         mailbox: String,
         secret_hex: String,
         now_secs: f64,
+        warmup_hold: JsValue,
     ) -> Result<bool, JsValue> {
         if self.seen.borrow().contains(&message_id) {
             return Ok(false);
         }
         let mailbox = mail_feed_from_js(&mailbox)?;
+        let warmup_hold = if warmup_hold.is_null() || warmup_hold.is_undefined() {
+            None
+        } else {
+            let hold: fauna_protocol::email::WarmupHold =
+                serde_wasm_bindgen::from_value(warmup_hold).map_err(crate::rpc::err_to_js)?;
+            Some(fauna_conversations::backend::MailWarmupHold {
+                release_at_secs: hold.release_at,
+                messages_ahead: hold.messages_ahead,
+            })
+        };
         let rfc5322 = match open_sealed_mail_record(self, uid, stored_at_secs, &sealed_envelope) {
             Ok(rfc5322) => rfc5322,
             // Deterministic for this key set (`OpenMiss::Unopenable`): skipped,
@@ -1315,11 +1348,21 @@ impl WasmConversationsManager {
         // inside `observe`. Scores once per freshly-seen message (the dedup check
         // above already skipped re-polls of a message scored this session; the
         // watermark skips one scored in a prior session or by the MDA).
-        let mut junked = false;
-        if score && let Some(scorer) = self.spam_scorer.borrow_mut().as_mut() {
+        // The score-then-may-merge decision is the one shared `judge_inbox_copy`
+        // the native loop calls too (`dedup` above made this a fresh delivery).
+        let verdict = {
             let text = String::from_utf8_lossy(&rfc5322);
-            junked = scorer.observe(uid, &flags, &text);
-        }
+            let mut scorer = self.spam_scorer.borrow_mut();
+            judge_inbox_copy(
+                if score { scorer.as_mut() } else { None },
+                mailbox == MailFeed::Inbox,
+                true,
+                uid,
+                &flags,
+                &text,
+            )
+        };
+        let junked = verdict.junk;
         // A message the on-device scorer just classified as spam is kept OUT of the
         // inbox thread view: `flush_spam_scoring`'s `apply_spam_disposition` moves it
         // INBOX→Junk on the nest this same pass, so surfacing it here would show the
@@ -1338,7 +1381,7 @@ impl WasmConversationsManager {
         // The `seen` check above keeps a re-poll from merging twice this
         // session; across sessions the merge is idempotent.
         #[cfg(target_arch = "wasm32")]
-        if mailbox == MailFeed::Inbox {
+        if verdict.merge_reply {
             self.spawn_reply_merge(&rfc5322, secret_hex, now_secs);
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -1352,6 +1395,7 @@ impl WasmConversationsManager {
             // early-return above), so a record that reaches here is always shown.
             suppress_from_view: false,
             has_seen_flag: fauna_conversations::carries_seen_flag(&flags),
+            warmup_hold,
             mailbox,
         };
         let ingested = ingest_inbound_record(&self.manager, &record)
@@ -1891,6 +1935,16 @@ impl WasmConversationsManager {
         self.manager.select_thread(ThreadId(thread_id));
     }
 
+    /// Select a thread and mark one of its messages (`room-search-result-item`
+    /// of kind `message`, `SearchNav::Mail`) — `ThreadDetail.selected_message_id`,
+    /// resolved against the live window on every emit
+    /// (`conversations.md` § State & data shape → *The selected message*).
+    #[wasm_bindgen(js_name = selectThreadAndMessage)]
+    pub fn select_thread_and_message(&self, thread_id: String, message_id: String) {
+        self.manager
+            .select_thread_and_message(ThreadId(thread_id), MessageId(message_id));
+    }
+
     /// Clear the selection (back to the empty detail-pane hint).
     #[wasm_bindgen(js_name = clearSelection)]
     pub fn clear_selection(&self) {
@@ -2024,7 +2078,7 @@ impl WasmConversationsManager {
 // FEATURE ALONE, never the profile, so the generated JS/.d.ts face is a pure
 // function of the feature set. `just web-test` builds the `wasm-core-test` flavor
 // with the feature on; the SPA reaches these through a flavor-agnostic dispatch
-// (`$lib/conversations`'s `seam()`), so both flavors type-check.
+// (`#lib/conversations`'s `seam()`), so both flavors type-check.
 //
 // A SEPARATE impl block, deliberately: every method inside it is a test seam, so
 // there is no way to add an ungated one by accident.
@@ -2360,8 +2414,8 @@ impl WasmConversationsManager {
         manager.register_contact_roster(Arc::new(
             fauna_client_conversations::NestContactRoster::new(client.clone()),
         ));
-        // The room plane's four nest-backed seams, the SAME object again
-        // (`WsConversationsRpc` implements all four), registered on the backend
+        // The room plane's five nest-backed seams, the SAME object again
+        // (`WsConversationsRpc` implements all five), registered on the backend
         // below as one bundle so no seam can be left out.
         let room_seams = RoomSeams::from_rpc(&rpc);
         let fauna_mls = Arc::new(FaunaMlsBackend::new_shared(
@@ -2396,7 +2450,7 @@ impl WasmConversationsManager {
                 ),
             ),
         ));
-        // The room plane's four nest-backed seams (`RoomSeams`):
+        // The room plane's five nest-backed seams (`RoomSeams`):
         // - the floor-roster REPORT (`conversation-rooms.md` § The floor
         //   roster): after every membership commit this device authors on a
         //   governed room the backend reports the resulting roster to the
@@ -2412,7 +2466,10 @@ impl WasmConversationsManager {
         //   key;
         // - the community class's CEREMONY: founding, joining, keying and the
         //   governance doors, which the room-settings Save routes a community
-        //   room to.
+        //   room to;
+        // - the POST READ behind the room search (`room-search.md` § The
+        //   surface): a post hit's author, time and teaser through
+        //   `fauna.posts.get` or its relay.
         // The generation read's other half, the group-reception keys, rests on
         // the account plane: it is registered at the account runtime's
         // store-ready edge (`WsRpcClient::startAccountRuntime` →
@@ -2591,6 +2648,48 @@ impl WasmConversationsManager {
         let mgr = self.manager.clone();
         future_to_promise(async move {
             mgr.refresh_list_send(thread_id.map(ThreadId)).await;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    /// Read the scan verdict of every received mail message in thread
+    /// `threadId` that has none yet (`mail-content-scanning.md` § User sees
+    /// their own message's row). The page calls it when a thread opens, beside
+    /// [`refreshListSend`](Self::refresh_list_send); the next snapshot carries
+    /// each message's `scan_result_lines`. Resolves once read.
+    #[wasm_bindgen(js_name = refreshMessageScanResults)]
+    pub fn refresh_message_scan_results(&self, thread_id: String) -> js_sys::Promise {
+        let mgr = self.manager.clone();
+        future_to_promise(async move {
+            mgr.refresh_message_scan_results(ThreadId(thread_id)).await;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    /// Read the account's alias rows for thread `threadId`'s received mail
+    /// (`mail-aliases.md` § Label). The page calls it when a thread opens,
+    /// beside [`refreshMessageScanResults`](Self::refresh_message_scan_results);
+    /// the next snapshot carries each stamped message's `delivered_to`.
+    /// Resolves once read.
+    #[wasm_bindgen(js_name = refreshDeliveredAliases)]
+    pub fn refresh_delivered_aliases(&self, thread_id: String) -> js_sys::Promise {
+        let mgr = self.manager.clone();
+        future_to_promise(async move {
+            mgr.refresh_delivered_aliases(ThreadId(thread_id)).await;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    /// Read the account's own queue rows for thread `threadId`'s withheld
+    /// own messages (`moderation.md` § Legal takedown → *App render*). The
+    /// page calls it when a thread opens, beside
+    /// [`refreshDeliveredAliases`](Self::refresh_delivered_aliases); the next
+    /// snapshot carries each matched message's `withheld`. Resolves once read.
+    #[wasm_bindgen(js_name = refreshWithheldMessages)]
+    pub fn refresh_withheld_messages(&self, thread_id: String) -> js_sys::Promise {
+        let mgr = self.manager.clone();
+        future_to_promise(async move {
+            mgr.refresh_withheld_messages(ThreadId(thread_id)).await;
             Ok(JsValue::UNDEFINED)
         })
     }
@@ -2969,6 +3068,31 @@ impl WasmConversationsManager {
         })
     }
 
+    /// `room-search-button` — open the community room's search strip on
+    /// `thread_id` (`room-search.md` § The surface).
+    #[wasm_bindgen(js_name = openRoomSearch)]
+    pub fn open_room_search(&self, thread_id: String) {
+        self.manager.open_room_search(ThreadId(thread_id));
+    }
+
+    /// Esc, or `room-search-button` again — close the strip on `thread_id`.
+    #[wasm_bindgen(js_name = closeRoomSearch)]
+    pub fn close_room_search(&self, thread_id: String) {
+        self.manager.close_room_search(ThreadId(thread_id));
+    }
+
+    /// `room-search-submit-button`, or Enter in `room-search-field` — search
+    /// the room `thread_id` through its home nest; the hits land on
+    /// `ThreadDetail.room.search`, a refusal on the page's `error-message`.
+    #[wasm_bindgen(js_name = roomSearch)]
+    pub fn room_search(&self, thread_id: String, query: String) -> js_sys::Promise {
+        let mgr = self.manager.clone();
+        future_to_promise(async move {
+            mgr.room_search(ThreadId(thread_id), query).await;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
     /// `room-leave-confirm` — walk out of the room `thread_id`. One verb: the
     /// manager dispatches by the room's class inside the backend, so no app
     /// branches on it. The thread stays in the leaver's list; a refusal rides
@@ -3047,7 +3171,7 @@ impl WasmConversationsManager {
             // Same-nest (no home nest URL): the web cross-nest mailbox-less rail is
             // a documented follow-on (`direct-messages.md` § Implementation status
             // today — the wasm discovery path is native-gated).
-            match ingest_welcome(&backend, &mgr, &channel_id_hex, &welcome_bytes, "").await {
+            match ingest_welcome(&backend, &mgr, &channel_id_hex, &welcome_bytes, "", None).await {
                 Ok(thread_id) => Ok(JsValue::from_str(&thread_id.0)),
                 Err(e) => Err(JsValue::from_str(&format!("ingest welcome: {e}"))),
             }
@@ -3721,6 +3845,23 @@ impl WasmConversationsManager {
             .is_some_and(|raw| backend.engine().has_group(&ChannelId::from_group_id(&raw)))
     }
 
+    /// The MLS-recorded folder owner of the channel with this 32-byte id (the
+    /// `folder_channel_owner` marker, re-pointed by the owner's verified
+    /// succession), as a hex actor id — `undefined` before the engine exists,
+    /// for a malformed id or an unstamped channel. The member-row
+    /// declassification anchor the Media and Folders page machines verify an
+    /// audience attestation under (`encryption-at-rest.md` § Readable classes →
+    /// *The declassification is owner-ATTESTED*).
+    #[wasm_bindgen(js_name = foldersChannelOwner)]
+    pub fn folders_channel_owner(&self, channel_id: Vec<u8>) -> Option<String> {
+        let backend = self.fauna_mls.borrow().clone()?;
+        let raw: [u8; 32] = channel_id.try_into().ok()?;
+        backend
+            .engine()
+            .folder_channel_owner(&ChannelId(raw))
+            .map(|owner| owner.to_hex())
+    }
+
     // ── Recipient side (B5) — the web twins of fauna-ffi's
     // `folders_recipient.rs` free fns (`folders.md` § Sharing — *Recipient
     // side*). The knocked, un-acked `channel_type == "folder"` welcomes the
@@ -3838,30 +3979,26 @@ impl WasmConversationsManager {
     /// generations they held, `mls-group-key-material.md` § M2). Addressed by the
     /// raw MLS `group_id` hex from the member-visible `FolderSummary.mls_group_id`.
     ///
-    /// Two steps, **nest roster-drop first** (the durable, security-meaningful half —
-    /// off the roster their `content_key.get` is denied): `fauna.folders.leave`,
-    /// then the local `MlsEngine` forget so the set drops from the `has_group`-filtered
-    /// list. Both idempotent, so a crash between them converges on re-run. The web
-    /// twin of fauna-ffi's `folders_leave`; the cross-nest home URL resolves from
-    /// this session's RAM record only (web wires no foreign-set custody sink, so a
-    /// relaunched cross-nest leave falls back to the same-nest path).
+    /// The shared `fauna_client_folders::leave_share` sequence — the one
+    /// fauna-ffi's `folders_leave` and the linux/tui leaves run (priority #2):
+    /// **nest roster-drop first** (the durable, security-meaningful half — off
+    /// the roster their `content_key.get` is denied), relayed to the set's home
+    /// nest when it is foreign, then the local `MlsEngine` forget plus the
+    /// foreign-set record drop so the set leaves the member-visible list. The
+    /// home resolves from RAM, else durably from the foreign-set custody record
+    /// (the sink this manager wires), so it holds after a relaunch or a launch
+    /// seed that could not read custody; an unreadable custody is an UNKNOWN
+    /// home and the leave refuses before sending anything. Both steps are
+    /// idempotent, so a crash between them converges on re-run.
     #[wasm_bindgen(js_name = foldersLeave)]
     pub fn folders_leave(&self, group_id_hex: String) -> js_sys::Promise {
         let client = self.nest_client.borrow().clone();
         let backend = self.fauna_mls.borrow().clone();
         future_to_promise(async move {
             let (client, _engine, backend) = folders_author_parts(client, backend)?;
-            let home_url = hex::decode(group_id_hex.trim())
-                .ok()
-                .filter(|b| !b.is_empty())
-                .and_then(|raw| backend.channel_home_url(&ChannelId::from_group_id(&raw)))
-                .filter(|u| !u.is_empty());
-            FoldersClient::new(client)
-                .leave_with_home(group_id_hex.clone(), home_url)
+            fauna_client_folders::leave_share(client, &backend, group_id_hex)
                 .await
                 .map_err(|e| JsValue::from_str(&format!("leave shared set: {e}")))?;
-            leave_folder(&backend, &group_id_hex)
-                .map_err(|e| JsValue::from_str(&format!("leave shared set (local): {e}")))?;
             Ok(JsValue::UNDEFINED)
         })
     }
@@ -4914,15 +5051,20 @@ pub fn room_history_policy_token(policy: JsValue) -> Result<String, JsValue> {
 }
 
 /// The room's standing notice, if one holds — `"AwaitingKey"` /
-/// `"ModerationUnverified"` or `null` (`RoomNotice::for_facts`: awaiting-key
-/// wins). Takes the two facts off the projected room, so no app re-decides
-/// which one speaks (`thread-room-notice`).
+/// `"ModerationUnverified"` / `"BridgeDisconnected"` or `null`
+/// (`RoomNotice::for_facts`). Takes the three facts off the projected room,
+/// so no app re-decides which one speaks (`thread-room-notice`).
 #[wasm_bindgen(js_name = roomNoticeFor)]
 pub fn room_notice_for(
     awaiting_key: bool,
     moderation_unverified: bool,
+    bridge_disconnected: bool,
 ) -> Result<JsValue, JsValue> {
-    match fauna_conversations::room::room_notice_for(awaiting_key, moderation_unverified) {
+    match fauna_conversations::room::room_notice_for(
+        awaiting_key,
+        moderation_unverified,
+        bridge_disconnected,
+    ) {
         Some(notice) => crate::rpc::to_js(&notice),
         None => Ok(JsValue::NULL),
     }
@@ -4936,7 +5078,7 @@ pub fn room_notice_label(notice: JsValue) -> Result<String, JsValue> {
 }
 
 /// `thread-room-notice`'s `state` attribute — `moderation-unverified` /
-/// `awaiting-key` (`RoomNotice::attr_token`).
+/// `awaiting-key` / `bridge-disconnected` (`RoomNotice::attr_token`).
 #[wasm_bindgen(js_name = roomNoticeAttrToken)]
 pub fn room_notice_attr_token(notice: JsValue) -> Result<String, JsValue> {
     let notice: fauna_conversations::room::RoomNotice = crate::rpc::from_js(notice)?;

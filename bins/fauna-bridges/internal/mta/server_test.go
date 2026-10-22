@@ -631,6 +631,92 @@ func TestInboundBackendHELOSelfClaimRejects(t *testing.T) {
 	}
 }
 
+// TestInboundBackendRegreetIsCheckedAgain pins that a greeting change inside
+// one connection is checked exactly like a first greeting (smtp-server.md
+// § HELO / EHLO): EHLO good / MAIL / RSET / EHLO <name we host> / MAIL is
+// refused 554 on the second MAIL, so is a syntactically invalid second
+// greeting, and a repeat of the already-checked name is not checked twice.
+// net/smtp refuses a second Hello, so the conversation is driven raw.
+func TestInboundBackendRegreetIsCheckedAgain(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		second    string
+		wantCode  int
+		wantInErr string
+	}{
+		{"self_claim", "test.example", 554, "own name"},
+		// An IP literal that is not the peer's address fails the syntax rule
+		// even from the loopback test peer.
+		{"invalid_syntax", "[9.9.9.9]", 554, "Invalid HELO"},
+		{"same_name", "good.example", 250, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := newFakeResolver()
+			clk := newFakeClock(time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC))
+			pol := &Policy{
+				RateLimiter:      NewRateLimiter(60, time.Minute, clk),
+				DNSBL:            NewDNSBLChecker(nil, res),
+				FCrDNS:           NewFCrDNSChecker(res),
+				FCrDNSMode:       FCrDNSModeOff,
+				SkipHELOLoopback: true, // drive the non-loopback rules from 127.0.0.1
+			}
+			addr, cancel := startPolicyListener(t, pol)
+			defer cancel()
+			conn, err := net.Dial("tcp", addr)
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			defer func() { _ = conn.Close() }()
+			_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+			buf := make([]byte, 4096)
+			// reply sends one command and returns the first line of the reply
+			// (EHLO's multi-line reply is read whole: all of it arrives in one
+			// write from the server, and the final line starts "250 ").
+			reply := func(cmd string) string {
+				t.Helper()
+				if cmd != "" {
+					if _, err := io.WriteString(conn, cmd+"\r\n"); err != nil {
+						t.Fatalf("write %q: %v", cmd, err)
+					}
+				}
+				var got string
+				for {
+					n, err := conn.Read(buf)
+					if err != nil {
+						t.Fatalf("read after %q: %v (got %q)", cmd, err, got)
+					}
+					got += string(buf[:n])
+					lines := strings.Split(strings.TrimRight(got, "\r\n"), "\r\n")
+					if last := lines[len(lines)-1]; len(last) >= 4 && last[3] == ' ' {
+						return got
+					}
+				}
+			}
+			reply("") // banner
+			if r := reply("EHLO good.example"); !strings.HasPrefix(r, "250") {
+				t.Fatalf("first EHLO: %q", r)
+			}
+			if r := reply("MAIL FROM:<alice@example.org>"); !strings.HasPrefix(r, "250") {
+				t.Fatalf("first MAIL must pass: %q", r)
+			}
+			if r := reply("RSET"); !strings.HasPrefix(r, "250") {
+				t.Fatalf("RSET: %q", r)
+			}
+			if r := reply("EHLO " + tc.second); !strings.HasPrefix(r, "250") {
+				t.Fatalf("second EHLO: %q", r)
+			}
+			r := reply("MAIL FROM:<alice@example.org>")
+			if !strings.HasPrefix(r, fmt.Sprint(tc.wantCode)) {
+				t.Fatalf("second MAIL after EHLO %q: want %d, got %q", tc.second, tc.wantCode, r)
+			}
+			if !strings.Contains(r, tc.wantInErr) {
+				t.Errorf("second MAIL reply should contain %q, got %q", tc.wantInErr, r)
+			}
+		})
+	}
+}
+
 // senderDomainPolicy builds a Policy whose only active envelope gate is
 // the sender-domain MX/A check (HELO identity + FCrDNS off), so the
 // MAIL FROM tests below isolate the sender-domain verdict. skipLoopback
@@ -2554,6 +2640,7 @@ func TestSenderDomainRejectPaysTarpit(t *testing.T) {
 		logger:      slog.Default(),
 		clientIP:    "203.0.113.5",
 		mailChecked: true,
+		heloChecked: true, // checkedHELO "" matches the nil conn's greeting
 		policy:      &Policy{SenderDomain: NewSenderDomainChecker(res)},
 		sleep:       func(d time.Duration) { slept = append(slept, d) },
 	}
@@ -2590,6 +2677,7 @@ func TestInboundMessageRatePerIPRefusesOverTheHourlyCap(t *testing.T) {
 			clientIP:    ip,
 			policy:      &Policy{},
 			mailChecked: true, // HELO gates are not under test
+			heloChecked: true, // checkedHELO "" matches the nil conn's greeting
 			msgRate:     limiter,
 			sleep:       func(d time.Duration) { slept = append(slept, d) },
 		}

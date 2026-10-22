@@ -54,7 +54,7 @@ public final class AdminDnsVM {
     private var dnsMachine: DnsManagementMachine?
     private var localMachine: LocalDomainMachine?
     private var admin: FfiAdminClient?
-    /// Cached own-nest id (`SelfNest.id`) — the cert `target_nest_id`.
+    /// Cached connection-bound nest id (`boundNestId()`) — the cert `target_nest_id`.
     private var targetNestId: Data?
 
     public init() {}
@@ -262,6 +262,11 @@ public final class AdminDnsVM {
     public func setCatchAll(domain: String, actorId: Data?) async {
         await localDispatch(.setCatchAllActor(domain: domain, actorId: actorId))
     }
+    /// Only `dmarcPolicy` is set, so no other per-domain knob is touched.
+    public func setDmarcPolicy(domain: String, policy: DomainDmarcPolicy) async {
+        await localDispatch(.updateConfig(domain: domain, mtaStsMaxAgeSeconds: nil, mtaStsCertMode: nil,
+                                          spfRecord: nil, dmarcPolicy: policy))
+    }
     public func setRoleAddress(domain: String, role: RoleAddressKind, actorId: Data?) async {
         await localDispatch(.setRoleAddress(domain: domain, role: role, actorId: actorId))
     }
@@ -352,7 +357,7 @@ public final class AdminDnsVM {
     private func resolveTargetNestId() async -> Data? {
         if let targetNestId { return targetNestId }
         do {
-            let id = try await api?.thisNestId()
+            let id = try await api?.boundNestId()
             targetNestId = id
             return id
         } catch {

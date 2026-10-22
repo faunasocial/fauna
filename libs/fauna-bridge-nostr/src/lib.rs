@@ -26,3 +26,6 @@ pub mod serialize;
 pub mod signing;
 pub mod translate;
 pub mod types;
+
+#[cfg(test)]
+mod proptests;

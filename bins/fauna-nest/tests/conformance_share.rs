@@ -508,16 +508,15 @@ async fn router_and_state_with_store() -> (
     Arc<fauna_nest::backup::service::BackupService>,
 ) {
     let db = Arc::new(CacheDb::open_in_memory().unwrap());
-    let blob_dir = tempfile::tempdir().unwrap();
-    let blob_path = blob_dir.path().to_path_buf();
-    std::mem::forget(blob_dir); // outlive the test; never reused
+    let base = AppState::for_test(db.clone());
+    let blob_path = base.test_scratch_path("blobs");
     let backup_svc = Arc::new(
         fauna_nest::backup::service::BackupService::new(db.clone(), None, false, blob_path, None)
             .unwrap(),
     );
     let state = Arc::new(AppState {
         backup_service: Some(backup_svc.clone()),
-        ..AppState::for_test(db)
+        ..base
     });
     let mut b = RpcRouter::builder();
     share_handlers::register_share_handlers(&mut b);
@@ -648,31 +647,29 @@ fn private_content() -> Vec<u8> {
 /// sealed file seeded exactly as the sync engine uploads it.
 async fn private_nest() -> PrivateNest {
     let db = Arc::new(CacheDb::open_in_memory().unwrap());
-    let blob_dir = tempfile::tempdir().unwrap();
-    let blob_path = blob_dir.path().to_path_buf();
-    std::mem::forget(blob_dir);
-    let static_dir = tempfile::tempdir().unwrap();
+    let base = AppState::for_test(db.clone());
+    let blob_path = base.test_scratch_path("blobs");
+    let static_dir = base.test_scratch_path("static");
+    std::fs::create_dir_all(&static_dir).unwrap();
     // The SPA build's two entries: the app shell, and the viewer page the
     // private arm must answer instead — never the app shell, whose root layout
     // loads the identity store (`share-links.md` rule 3).
     std::fs::write(
-        static_dir.path().join("index.html"),
+        static_dir.join("index.html"),
         format!("<!doctype html><title>Fauna</title><p>{APP_SHELL_MARKER}</p>"),
     )
     .unwrap();
     std::fs::write(
-        static_dir.path().join("share-viewer.html"),
+        static_dir.join("share-viewer.html"),
         format!("<!doctype html><title>Fauna</title><p>{VIEWER_MARKER}</p>"),
     )
     .unwrap();
-    let static_path = static_dir.path().to_str().unwrap().to_string();
-    std::mem::forget(static_dir);
+    let static_path = static_dir.to_str().unwrap().to_string();
 
     let svc = Arc::new(
         fauna_nest::backup::service::BackupService::new(db.clone(), None, false, blob_path, None)
             .unwrap(),
     );
-    let base = AppState::for_test(db.clone());
     let mut config = (*base.config).clone();
     config.nest.static_dir = Some(static_path);
     config.nest.domain = Some("nest.example".into());

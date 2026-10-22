@@ -267,6 +267,13 @@ pub struct CustodyHeldRowView {
     /// The host stopped holding — a registry-row fact, so `false` for any
     /// consumer that could not apply the overlay.
     pub stopped: bool,
+    /// `Some` for a NEST-form hold only: the accept's URL verbatim — what
+    /// `custody-held-restore-address` renders (`ui/devices.md` § Custody facet).
+    /// Defaulted at the boundary so the six apps' fixtures build unchanged
+    /// until their own trickle-down rows render it.
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    #[serde(default)]
+    pub custodian_nest_url: Option<String>,
 }
 
 /// One incoming custody offer awaiting consent (`custody-offer-card` —
@@ -381,6 +388,7 @@ fn project_held(h: &HeldCustodyView, budget_draft: LocalizedText) -> CustodyHeld
             h.receipt.as_ref(),
         ),
         stopped: h.stopped,
+        custodian_nest_url: h.custodian_nest_url.clone(),
     }
 }
 
@@ -544,6 +552,7 @@ mod tests {
                     retained_bytes_cap: 2048,
                     receipt: None,
                     stopped: false,
+                    custodian_nest_url: None,
                 },
                 HeldCustodyView {
                     grant_id: vec![2u8; 16],
@@ -552,6 +561,7 @@ mod tests {
                     retained_bytes_cap: 4096,
                     receipt: Some(receipt(100, 4096, false)),
                     stopped: true,
+                    custodian_nest_url: None,
                 },
             ],
             offers: Vec::new(),
@@ -624,6 +634,7 @@ mod tests {
                 retained_bytes_cap: 2048,
                 receipt: Some(receipt(10, 2048, true)),
                 stopped: false,
+                custodian_nest_url: Some("https://friend-nest.example/".into()),
             }],
             offers: vec![CustodyOfferView {
                 grant_id: vec![5u8; 16],

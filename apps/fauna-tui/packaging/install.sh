@@ -3,7 +3,7 @@ set -e
 
 # Fauna terminal app — installer for the release archive.
 #
-# This script ships INSIDE the fauna-tui archive, beside the two binaries it
+# This script ships INSIDE the fauna-tui archive, beside the three binaries it
 # installs (docs/goal/architecture/installers/tui.md § The ratified channel).
 # Unpack the archive anywhere and run it from there.
 #
@@ -13,12 +13,16 @@ set -e
 #   PREFIX=/opt/fauna ./install.sh — install to custom prefix
 #   ./install.sh --uninstall       — remove installed files
 #
-# Two binaries, never one: fauna-tui's Folders and Devices pages provision the
+# Three binaries, never one: fauna-tui's Folders and Devices pages provision the
 # per-user sync agent it expects BESIDE itself (agent_spawner::agent_binary_absolute
 # resolves the sibling first, then PATH), so the archive carries fauna-sync-agent
-# and this script installs both to the same bin dir. That is also why the script
-# installs from its OWN directory and branches on nothing else: the install-then-
-# drive witness (tests/e2e-unified/tests/artifact/test_tui_installed_product.py)
+# and this script installs both to the same bin dir; and fauna-cli — the cli
+# app's device shell, Fauna operated by an AI assistant over MCP
+# (docs/goal/architecture/apps/cli.md § The device shell) — rides the same
+# archive as its third member (installers/tui.md § Decisions, decision 4), so it
+# is installed and removed beside them. That is also why the script installs
+# from its OWN directory and branches on nothing else: the install-then-drive
+# witness (tests/e2e-unified/tests/artifact/test_tui_installed_product.py)
 # stages debug-configuration binaries into a copy of the archive layout and runs
 # this exact script over it, so any step that read a build configuration would
 # make that substitution dishonest.
@@ -26,6 +30,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BINARY="$SCRIPT_DIR/fauna-tui"
 AGENT_BINARY="$SCRIPT_DIR/fauna-sync-agent"
+CLI_BINARY="$SCRIPT_DIR/fauna-cli"
 
 # Determine prefix: sudo → /usr/local, else honour $PREFIX or default to ~/.local
 if [ -z "$PREFIX" ]; then
@@ -38,6 +43,7 @@ fi
 
 INSTALL_BIN="$PREFIX/bin/fauna-tui"
 INSTALL_AGENT="$PREFIX/bin/fauna-sync-agent"
+INSTALL_CLI="$PREFIX/bin/fauna-cli"
 # The Linux desktop app's install.sh puts ITS fauna-desktop + fauna-sync-agent
 # in the same prefix. The agent is one binary shared by both apps (one product
 # version, one agent), so installing over it is right — and uninstalling the
@@ -56,6 +62,14 @@ uninstall() {
     if [ -f "$INSTALL_BIN" ]; then
         rm -f "$INSTALL_BIN"
         echo "  Removed $INSTALL_BIN"
+        removed=$((removed + 1))
+    fi
+
+    # The cli app is the archive's own (no desktop package installs it into a
+    # user prefix), so it goes whenever the terminal app goes.
+    if [ -f "$INSTALL_CLI" ]; then
+        rm -f "$INSTALL_CLI"
+        echo "  Removed $INSTALL_CLI"
         removed=$((removed + 1))
     fi
 
@@ -97,9 +111,9 @@ install_binary() {
 }
 
 install_fauna() {
-    if [ ! -f "$BINARY" ] || [ ! -f "$AGENT_BINARY" ]; then
-        echo "Error: fauna-tui and fauna-sync-agent must sit beside this script (unpack the whole archive)."
-        echo "Looked for: $BINARY and $AGENT_BINARY"
+    if [ ! -f "$BINARY" ] || [ ! -f "$AGENT_BINARY" ] || [ ! -f "$CLI_BINARY" ]; then
+        echo "Error: fauna-tui, fauna-sync-agent and fauna-cli must sit beside this script (unpack the whole archive)."
+        echo "Looked for: $BINARY, $AGENT_BINARY and $CLI_BINARY"
         exit 1
     fi
 
@@ -109,6 +123,8 @@ install_fauna() {
     echo "  Installed $INSTALL_BIN"
     install_binary "$AGENT_BINARY" "$INSTALL_AGENT"
     echo "  Installed $INSTALL_AGENT"
+    install_binary "$CLI_BINARY" "$INSTALL_CLI"
+    echo "  Installed $INSTALL_CLI (Fauna for AI assistants: fauna-cli mcp)"
 
     echo "Done. Run: fauna-tui"
     if [ "$PREFIX" = "$HOME/.local" ]; then

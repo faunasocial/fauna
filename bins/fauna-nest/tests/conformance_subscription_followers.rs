@@ -73,6 +73,8 @@ async fn subscribe(
     tier: &str,
 ) -> Result<SubscribeReply, RpcError> {
     let req = encode_canonical(&SubscribeRequest {
+        home_nest_url: None,
+        intent: None,
         author_id: ActorId(author),
         tier: tier.to_string(),
         mlkem_encaps_key: None,

@@ -11,16 +11,16 @@
   // component paints. Inspect opens the catalog's inspect panel IN PLACE so the
   // editor's draft survives; its Close returns to the rows.
   import { onMount } from 'svelte';
-  import { identity } from '$lib/store';
-  import { sharedRpcPort } from '$lib/rpc';
-  import { ensureWasm, roomMayNameLabelerKind } from '$lib/wasm';
-  import { createLabelerCatalogMachine } from '$lib/wasm-labeler-catalog';
-  import { t } from '$lib/i18n/strings';
-  import LabelerInspectPanel from '$lib/components/LabelerInspectPanel.svelte';
-  import type { LabelerCatalogSnapshot } from '$lib/labeler-catalog-machine';
+  import { identity } from '#lib/store';
+  import { sharedRpcPort } from '#lib/rpc';
+  import { ensureWasm, roomMayNameLabelerKind } from '#lib/wasm';
+  import { createLabelerCatalogMachine } from '#lib/wasm-labeler-catalog';
+  import { t } from '#lib/i18n/strings';
+  import LabelerInspectPanel from '#lib/components/LabelerInspectPanel.svelte';
+  import type { LabelerCatalogSnapshot } from '#lib/labeler-catalog-machine';
   import type { LabelerCatalogMachine } from '../../../static/fauna_wasm_labeler_catalog.js';
   import type { WasmConversationsManager } from '../../../static/fauna_wasm.js';
-  import { IDS } from '$lib/generated/uiIds';
+  import { IDS } from '#lib/generated/uiIds';
 
   let {
     manager,
@@ -101,6 +101,9 @@
             !manager.roomSettingsLabelerToggleLive(draft, entry.labeler_id)}
           onclick={() => ontoggle(entry.labeler_id)}
         >
+          <!-- The row's text carries the labeler id's first 16 hex characters —
+               what a driver finds the row by (`room_labeler_index`). -->
+          {entry.labeler_id.slice(0, 16)} ·
           {staged
             ? t.conversations.unified.room_labeler_on
             : t.conversations.unified.room_labeler_off}

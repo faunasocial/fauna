@@ -53,9 +53,8 @@ const FOLDER: &str = "role_flip_test";
 async fn start_test_nest(owner: [u8; 32]) -> (String, String) {
     let db = Arc::new(CacheDb::open_in_memory().unwrap());
 
-    let blob_dir = tempfile::tempdir().unwrap();
-    let blob_path = blob_dir.path().to_path_buf();
-    std::mem::forget(blob_dir); // outlive the test; never deleted under test
+    let base = AppState::for_test(db.clone());
+    let blob_path = base.test_scratch_path("blobs");
     let backup_svc =
         Arc::new(BackupService::new(db.clone(), None, false, blob_path, None).unwrap());
 
@@ -84,7 +83,7 @@ async fn start_test_nest(owner: [u8; 32]) -> (String, String) {
             token_store,
             ..Default::default()
         },
-        ..AppState::for_test(db)
+        ..base
     });
 
     let app = fauna_nest::build_router(state.clone());

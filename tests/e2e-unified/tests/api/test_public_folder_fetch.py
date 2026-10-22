@@ -2,7 +2,7 @@
 publicly-synced follow's nest half (folders re-model phase 4 slice 4f-i).
 
 Owner docs: ``docs/goal/behavior/folders.md`` § Publicly-synced follow
-(address / floor / strip / flip-back), ``docs/goal/architecture/federation.md``
+(address / floor / strip / flip-back), ``docs/goal/architecture/federation-shared-folders.md``
 § The public folder read plane (kinds and gates).
 
 What this file adds over the in-process

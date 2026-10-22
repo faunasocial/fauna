@@ -42,6 +42,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 
 use fauna_client_config::MutedWordsSnapshot;
+use fauna_core::scoring::MutedKeywordLevel;
 
 use crate::async_helper::{hydrate_with_retry, spawn_with_snapshot};
 use crate::client::FaunaClient;
@@ -220,15 +221,20 @@ fn refresh(ctx: &Rc<Ctx>) {
     );
 }
 
-/// The two persisting actions the page dispatches.
+/// The persisting actions the page dispatches.
 enum Mutation {
     Add(String),
     Remove(String),
+    /// `muted-word-level-select` — set one stored row's term to a level.
+    SetLevel(String, MutedKeywordLevel),
 }
 
 /// Run a mutation on the tokio runtime, then apply the result on the GTK thread.
 fn dispatch(ctx: &Rc<Ctx>, mutation: Mutation) {
     ctx.w.add_button.set_sensitive(false);
+    // The rows' remove buttons and level pickers wait with the add button
+    // until the round trip's record repaints them.
+    ctx.w.list.set_sensitive(false);
     let store = crate::account_runtime::handle_source();
     let ctx_render = Rc::clone(ctx);
     spawn_with_snapshot(
@@ -237,6 +243,7 @@ fn dispatch(ctx: &Rc<Ctx>, mutation: Mutation) {
             match mutation {
                 Mutation::Add(term) => add_word(store, term).await,
                 Mutation::Remove(term) => remove_word(store, term).await,
+                Mutation::SetLevel(term, level) => set_word_level(store, term, level).await,
             }
         },
         move |result| apply(&ctx_render, result),
@@ -248,6 +255,7 @@ fn dispatch(ctx: &Rc<Ctx>, mutation: Mutation) {
 /// freshly-persisted list. On error the message shows; the rows are untouched.
 fn apply(ctx: &Rc<Ctx>, result: MutationResult) {
     ctx.w.add_button.set_sensitive(true);
+    ctx.w.list.set_sensitive(true);
     match result {
         Ok(snapshot) => {
             super::render_error_label(&ctx.w.error_label, None);
@@ -291,8 +299,8 @@ fn render_rows(ctx: &Rc<Ctx>, snapshot: &MutedWordsSnapshot) {
     for row in rows.drain(..) {
         ctx.w.list.remove(&row);
     }
-    for word in snapshot.terms() {
-        let row = build_word_row(ctx, &word);
+    for keyword in &snapshot.keywords {
+        let row = build_word_row(ctx, &keyword.keyword, keyword.level());
         ctx.w.list.append(&row);
         rows.push(row);
     }
@@ -301,8 +309,19 @@ fn render_rows(ctx: &Rc<Ctx>, snapshot: &MutedWordsSnapshot) {
     ctx.w.empty.set_visible(snapshot.shows_empty_state());
 }
 
-/// Build one `muted-word-item` row: the term text + a remove button.
-fn build_word_row(ctx: &Rc<Ctx>, word: &str) -> gtk::Box {
+/// A level's picker label — the one per-app piece, since the label is i18n
+/// and the level is shared.
+fn level_label(value: &str) -> String {
+    match MutedKeywordLevel::from_value(value) {
+        Some(MutedKeywordLevel::ShowLess) => S::LEVEL_SHOW_LESS,
+        _ => S::LEVEL_HIDE,
+    }
+    .to_string()
+}
+
+/// Build one `muted-word-item` row: the term text, its level picker + a
+/// remove button.
+fn build_word_row(ctx: &Rc<Ctx>, word: &str, level: MutedKeywordLevel) -> gtk::Box {
     let row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(8)
@@ -315,6 +334,35 @@ fn build_word_row(ctx: &Rc<Ctx>, word: &str) -> gtk::Box {
     text.set_halign(gtk::Align::Start);
     set_test_id(&text, ids::MUTED_WORD_TEXT);
     row.append(&text);
+
+    // The level picker (`ui/settings.md` § Muted words — the level picker): its
+    // value is the row's level through the shared classification, selected
+    // BEFORE the handler connects so painting a row never saves it.
+    let picker = crate::wire_kind_dropdown::WireKindDropdown::build(
+        MutedKeywordLevel::ALL
+            .iter()
+            .map(|l| l.value().to_string())
+            .collect(),
+        ids::MUTED_WORD_LEVEL_SELECT,
+        level_label,
+    );
+    picker.select_kind(level.value());
+    picker.dd.set_valign(gtk::Align::Center);
+    crate::offline_gate::declare_wire_kind(&picker.dd, "fauna.account.state.put");
+    {
+        let ctx = Rc::clone(ctx);
+        let term = word.to_string();
+        let handle = picker.clone();
+        picker.dd.connect_selected_notify(move |_| {
+            if let Some(picked) =
+                MutedKeywordLevel::from_value(handle.selected_kind(MutedKeywordLevel::Hide.value()))
+                && picked != level
+            {
+                dispatch(&ctx, Mutation::SetLevel(term.clone(), picked));
+            }
+        });
+    }
+    row.append(&picker.dd);
 
     let remove = gtk::Button::with_label(S::REMOVE);
     remove.add_css_class("flat");
@@ -362,6 +410,15 @@ async fn add_word(store: Store, term: String) -> MutationResult {
 /// Remove a term — [`add_word`]'s inverse on the same shared surface.
 async fn remove_word(store: Store, term: String) -> MutationResult {
     fauna_sync_engine::preference_surfaces::remove_muted_word(&store, &term)
+        .await
+        .map_err(fauna_sync_engine::preference_surfaces::plane_failure)
+}
+
+/// Set a term's level — [`add_word`]'s sibling on the same shared surface; the
+/// returned record carries the new weight, which the repaint reads back through
+/// `MutedKeyword::level()`.
+async fn set_word_level(store: Store, term: String, level: MutedKeywordLevel) -> MutationResult {
+    fauna_sync_engine::preference_surfaces::set_muted_word_level(&store, &term, level)
         .await
         .map_err(fauna_sync_engine::preference_surfaces::plane_failure)
 }

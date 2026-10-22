@@ -325,6 +325,29 @@ internal interface INestRpcClient
     /// auditability).</summary>
     Task<IReadOnlyList<FfiFeatureRow>> FeaturesRowsAsync();
 
+    // ── Feature-limits authoring (dynamic-features.md § Authoring surfaces) ──
+    // The three hosts of the shared feature-policy editor read their tier's
+    // AUTHORED documents and open the editor through these four calls; the draft,
+    // the cells and the parser live in the returned FfiPolicyEditor (shared Rust).
+
+    /// <summary>One tier's authored documents as host rows
+    /// (<c>FfiFeaturesClient.AuthoredRows</c>; <paramref name="tier"/>:
+    /// <c>admin</c> | <c>self</c>), unsupported members already dropped.</summary>
+    Task<IReadOnlyList<FfiAuthoredRow>> FeaturesAuthoredRowsAsync(string tier);
+
+    /// <summary>The guardian host's rows for one ward
+    /// (<c>FfiFeaturesClient.WardAuthoredRows</c>; <paramref name="ward"/> is the
+    /// ward's actor id).</summary>
+    Task<IReadOnlyList<FfiAuthoredRow>> FeaturesWardAuthoredRowsAsync(byte[] ward);
+
+    /// <summary>Open the shared editor over <paramref name="feature"/> at
+    /// <paramref name="tier"/>, seeded from the tier's AUTHORED document.</summary>
+    Task<IFfiPolicyEditor> FeaturesOpenEditorAsync(string tier, string feature);
+
+    /// <summary>Open the shared editor at the guardian tier for
+    /// <paramref name="ward"/>.</summary>
+    Task<IFfiPolicyEditor> FeaturesOpenEditorForWardAsync(byte[] ward, string feature);
+
     /// <summary>The Status snapshot's node leg (<c>FfiStatusClient.Node</c> —
     /// <c>fauna.nest.info</c>: the nest's domain and version). A pure read; one per
     /// visit to the Status page (<c>ui/status.md</c> § State &amp; data shape).</summary>
@@ -633,6 +656,18 @@ internal interface INestRpcClient
     /// caller's session already holds, never a fresh one.</summary>
     Task<CrossGroupEviction> MemberReviewRemoveAsync(ConversationsManager manager, byte[] person);
 
+    /// <summary><c>refused_changes_open</c> — the Events page's refused-change
+    /// list (<c>events.md</c> § Refused scheduling changes): one shared
+    /// <c>refused_change_view</c> row per open refusal, every line a
+    /// <c>LocalizedText</c>. <paramref name="manager"/> re-derives the sender's
+    /// handle at paint — the SAME instance the session already holds.</summary>
+    Task<IReadOnlyList<FfiRefusedChange>> RefusedChangesOpenAsync(ConversationsManager manager);
+
+    /// <summary><c>refused_change_dismiss</c> — record that the owner has seen
+    /// the attempts counted so far (a later attempt re-opens the row). A local
+    /// store write that needs no nest; <c>false</c> when nothing was open.</summary>
+    Task<bool> RefusedChangeDismissAsync(string key);
+
     // ── fauna.spam.* (Privacy + Moderation pages) ───────────────────────
     // WS-RPC twins of the deleted `GET|PUT /api/v1/spam/preferences` HTTP
     // (api-layers.md § Moderation & Spam), via the shared FfiSpamClient
@@ -692,6 +727,14 @@ internal interface INestRpcClient
     /// <c>FaunaFfiMethods.TakedownVerdict</c>'s, never hand-worded here.</summary>
     Task<string> ModerationLegalTakedownAsync(
         string contentId, bool conversation, string legalReference, bool restore);
+
+    /// <summary><c>fauna.moderation.appeal</c> — the author's appeal of one
+    /// enforcement decision, keyed by the <paramref name="contentId"/> captured when
+    /// the appeal form was opened (moderation.md § Legal takedown → the transparency
+    /// triple). Returns the reply's raw status; the gate is
+    /// <c>FaunaFfiMethods.AppealFormView</c>'s and the outcome wording
+    /// <c>FaunaFfiMethods.AppealVerdict</c>'s, never hand-worded here.</summary>
+    Task<string> ModerationAppealAsync(string contentId, string reason);
 
     // ── fauna.moderation.abuse_report.* (user-initiated reporting) ──────
     // moderation.md § User-initiated reporting. The reporter's three calls ride
@@ -2474,8 +2517,8 @@ internal interface INestRpcClient
     /// <summary>
     /// Build the shared-Rust <c>LinkedNestsMachine</c> bound to this session's
     /// connected, auto-reconnecting WS-RPC requester. The admin-dns cert-issue flow
-    /// reads its <c>ThisNest()</c> (the connected nest's identity, the cert's
-    /// <c>target_nest_id</c>, uniform across all 7 apps) — the same
+    /// reads its <c>BoundNestId()</c> (the identity the connection is bound to, the
+    /// cert's <c>target_nest_id</c>, uniform across all 7 apps) — the same
     /// reuse-the-shared-connection pattern as <see cref="BuildMailPolicyMachineAsync"/>.
     /// </summary>
     Task<LinkedNestsMachine> BuildLinkedNestsMachineAsync();

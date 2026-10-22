@@ -346,7 +346,7 @@ Split verbatim out of [`account-data-plane.md`](account-data-plane.md) on 2026-0
   sharpest case is the pair that reads most like a bridge call and is neither —
   revoking a mail credential and disabling mail both only rewrite the
   account's mail custody (`fauna.state.mail`) beside the per-credential blob
-  deletes, because `mail-settings.md` § Disable mail is explicit that
+  deletes, because `mail-credentials.md` § Trigger taxonomy (the *Disable mail* row) is explicit that
   one user disabling their mailbox must not flip the deployment-wide subsystem.
   The genuinely `OnlineOnly` cluster is narrow and nameable: mailbox key
   provisioning and rotation, the alias/list/spam RPCs that live on the *bridge*,
@@ -1474,7 +1474,7 @@ Split verbatim out of [`account-data-plane.md`](account-data-plane.md) on 2026-0
   manager, not a bridge call) and mail settings' credential revoke and
   disable-mail confirm (both `fauna.account.state.put`, `fauna.config.put` until
   the rail retired 2026-10-02: they rewrite the user's own mail state
-  (`fauna.state.mail`), and `mail-settings.md` § Disable mail deliberately does not touch
+  (`fauna.state.mail`), and `mail-credentials.md` § Trigger taxonomy (the *Disable mail* row) deliberately does not touch
   the deployment-wide flag). linux declares the kind on all three
   (`settings/mail_spam.rs:189`, `settings/mail.rs:244,1511`); android declares
   none of them, and `check-offline-gate-kinds.py` **refuses** the attempt — *"no
@@ -1561,8 +1561,9 @@ Split verbatim out of [`account-data-plane.md`](account-data-plane.md) on 2026-0
   ⚠ **`fauna.bridges.revoke_service_user` is the "rotate" button, and that one
   mismatch is why an earlier census filed the kind as an unbuilt section.**
   Rotating an approved bridge's service-user key *is* revoking it: the approved
-  card's rotate confirm dispatches `BridgeApprovalAction::Rotate`, whose machine
-  arm calls `nest.revoke_service_user`, after which the bridge re-enrols with a
+  card's rotate confirm dispatches the shared machine's rotate act (the direct
+  `BridgeApprovalAction::Rotate`, or `Confirm` over an armed `BridgeConfirm::Rotate`),
+  which calls `nest.revoke_service_user`, after which the bridge re-enrols with a
   fresh key (`mail-bridge-lifecycle.md` § Service-user re-keying). The control
   and the kind share no vocabulary at all. **Grade a kind by following its
   dispatcher to the `request(...)`, never by matching the control's own name** —

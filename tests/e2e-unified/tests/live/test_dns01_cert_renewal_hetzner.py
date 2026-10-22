@@ -45,10 +45,16 @@ What this test does leave behind, by design: a **new certificate**. That is the
 point.
 
 Gating — all four are required, and the test skips loudly without them:
-  * ``HETZNER_API_TOKEN``   — a Hetzner **Cloud** API token with Read&Write. One
-                              token covers DNS (zones became Cloud resources when
-                              the standalone DNS API went read-only 2026-05-20;
-                              `i18n/providers.yaml` hetzner `api-token`).
+  * ``HETZNER_API_TOKEN``   — or the nest's *dns* project token file (the zone
+                              project's under fauna.build —
+                              ``helpers.live_provision.hetzner_token``,
+                              ``scripts/_cloud_project.py``): a Hetzner **Cloud**
+                              API token with Read&Write on the project holding
+                              the zone (zones became Cloud resources when the
+                              standalone DNS API went read-only 2026-05-20;
+                              `i18n/providers.yaml` hetzner `api-token`). The
+                              credential an admin app holds is that project's
+                              (``deployment-threat-model.md`` § Concern 2, path 5).
   * ``FAUNA_E2E_LIVE=1``    — explicit opt-in. This spends real Let's Encrypt
                               issuance budget against a real domain.
   * ``FAUNA_LIVE_NEST_URL`` — e.g. https://dev.fauna.build
@@ -81,10 +87,9 @@ import pytest
 
 from helpers import live_box_door
 from helpers.waiting import wait_until
-from helpers.live_provision import skip_unless_live_drive_app
+from helpers.live_provision import hetzner_token, hetzner_token_hint, skip_unless_live_drive_app
 
 _REQUIRED = (
-    "HETZNER_API_TOKEN",
     "FAUNA_LIVE_NEST_URL",
     "FAUNA_LIVE_MAIL_ADDRESS",
 )
@@ -99,6 +104,8 @@ SECRET, SECRET_SOURCE = live_box_door.admin_seed(NEST_URL)
 ADDRESS = os.environ.get("FAUNA_LIVE_MAIL_ADDRESS", "").strip()
 HANDLE_DOMAIN = ADDRESS.split("@", 1)[-1] if "@" in ADDRESS else ADDRESS
 TARGET_DOMAIN = os.environ.get("FAUNA_E2E_CERT_DOMAIN", "").strip() or HANDLE_DOMAIN
+#: The zone's token — the credential the admin app holds — never the box's.
+DNS_TOKEN = hetzner_token(NEST_URL or None, purpose="dns")
 
 pytestmark = [
     # A real deployment artifact (the production nest image under s6 on its own
@@ -114,6 +121,11 @@ pytestmark = [
         not (all(os.environ.get(k, "").strip() for k in _REQUIRED) and SECRET),
         reason="live DNS-01 cert renewal: set " + ", ".join(_REQUIRED)
         + f" and provide the box's admin seed ({live_box_door.SEED_SOURCES}) (opt-in)",
+    ),
+    pytest.mark.skipif(
+        not DNS_TOKEN,
+        reason="live DNS-01 cert renewal needs the zone's Cloud R/W token: "
+        + hetzner_token_hint(NEST_URL or None, purpose="dns"),
     ),
     pytest.mark.skipif(
         not _truthy(os.environ.get("FAUNA_E2E_LIVE")),
@@ -273,7 +285,7 @@ def test_dns01_reissues_the_nest_certificate_through_the_client_ui(app):
         app.driver, surface="the live DNS-01 cert-renewal drive (native order core)"
     )
 
-    token = os.environ["HETZNER_API_TOKEN"].strip()
+    token = DNS_TOKEN
     nest_url = NEST_URL
     print(f"\n[dns01] renewing {TARGET_DOMAIN} on {nest_url}")
     # The box must know the resolved seed before anything is driven: a wrong

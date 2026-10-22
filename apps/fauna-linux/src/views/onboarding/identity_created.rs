@@ -112,7 +112,9 @@ pub fn build(m: Arc<OnboardingMachine>, append: bool) -> (gtk::Box, Rc<dyn Fn()>
             // and the read-back this generated secret most needs: it exists
             // nowhere else).
             match m.confirm_generated_identity() {
-                Ok(secret) => super::commit_confirmed_identity(&secret, append),
+                Ok(secret) => {
+                    super::commit_confirmed_identity(&m, &secret, append);
+                }
                 Err(_) => {
                     // Error already surfaced via m.error_message().
                 }

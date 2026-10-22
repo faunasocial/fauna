@@ -211,7 +211,13 @@ dmarc-policy = ["dep:serde_json", "dep:fauna-protocol"]
 # decompress it (gzip via flate2, zip via the in-tree `zip`), and read the XML
 # with the module's own strict reader — no XML-parser dependency. Native only
 # in practice (the nest's ingest kind); nothing here needs tokio or the network.
-dmarc-report = ["parser", "dep:flate2", "dep:zip", "dep:fauna-protocol"]
+dmarc-report = ["dmarc-report-view", "parser", "dep:zip"]
+# The admin-read half of `dmarc_report` (dmarc-reporting.md § Where logic
+# lives): the `WindowSummary` fold over listed reports and the bounded gunzip of
+# an archived report for the raw view. Pure (flate2's Rust backend) and
+# WASM-safe, so the apps' `DmarcReportsMachine` takes it without the receive
+# half's MIME parser and zip reader.
+dmarc-report-view = ["dep:flate2", "dep:fauna-protocol"]
 # TLSRPT inbound report receive (docs/goal/behavior/smtp-server.md § TLSRPT
 # inbound report listener): the DMARC receive leg's twin, sharing its bounded
 # unpack + error type (hence `dmarc-report`); the RFC 8460 JSON is read with the
@@ -302,6 +308,12 @@ forward-config = ["dep:fauna-protocol"]
 # shape as `auth`/`scan` above: fauna-core is pulled `default-features =
 # false` by this crate, so this adds no network set and stays WASM-safe.
 aliases = ["dep:fauna-core"]
+# The "Delivered to" resolution (`aliases::delivered`) over UniFFI, for the
+# apps' message view (`mail-aliases.md` § Label). Its own feature rather than
+# riding `uniffi`, so the Go mail-bridge build — which enables `uniffi` but
+# not fauna-ffi's `mail-admin` that forwards this — keeps its bindings
+# byte-identical.
+delivered-uniffi = ["aliases", "uniffi"]
 greylist = []
 # Pure deliverability-diagnostic primitives (docs/goal/behavior/
 # mail-deliverability.md § Symptom diagnostics + § Blocklist self-check): the SPF
@@ -383,11 +395,12 @@ caldav-schedule = ["icalendar", "dep:fauna-mls"]
 # enabled by `outbound` alone.
 outbound = ["dep:rand", "dep:async-trait", "dep:tokio", "dep:anyhow", "dep:serde_json", "dep:flate2", "dep:base64", "dep:mail-auth", "dep:rustls-pki-types", "dep:sha2", "dep:x509-parser", "dep:fauna-core", "dep:rsa", "dep:rustls-webpki"]
 # Live MTA-STS policy fetcher (`outbound::mta_sts::LiveMtaStsFetcher`): the
-# native-only DNS (`hickory-resolver`) + HTTPS (`reqwest`) implementation of
-# the `MtaStsFetcher` trait, lifted from the retired `fauna-bridge-smtp`
+# native-only DNS (`hickory-resolver`) implementation of the `MtaStsFetcher`
+# trait — its HTTPS GET is the deployment's SSRF-guarded fetch, injected
+# through `MtaStsPolicyHttp` — lifted from the retired `fauna-bridge-smtp`
 # so the production outbound path (Go bridge → nest) can do MTA-STS without
-# coupling to that retired crate. NOT WASM/FFI-safe — pulls `reqwest` +
-# `hickory-resolver` which don't cross-compile to wasm32 and must not enter
+# coupling to that retired crate. NOT WASM/FFI-safe — pulls
+# `hickory-resolver`, which doesn't cross-compile to wasm32 and must not enter
 # the client FFI surface. Opt-in only (never in `default`): the wasm consumer
 # sets `default-features = false`, and the FFI client build (`fauna-ffi`)
 # only needs the pure `mta_sts::mx_patterns_match` matcher, which is always
@@ -398,7 +411,7 @@ outbound = ["dep:rand", "dep:async-trait", "dep:tokio", "dep:anyhow", "dep:serde
 # `Proof::Secure` filtering) for DANE to be trustworthy. Scoped to this
 # feature so `auth`/`spam` (which also pull hickory-resolver) don't drag in
 # `ring` via DNSSEC.
-outbound-net = ["outbound", "dep:reqwest", "dep:hickory-resolver", "hickory-resolver/dnssec-ring", "dep:tracing"]
+outbound-net = ["outbound", "dep:hickory-resolver", "hickory-resolver/dnssec-ring", "dep:tracing"]
 # The pure mail segment-record codec (`segments::{envelope,floor,paths}`) — the
 # canonical-dag-cbor `MailRecordEnvelope`/`MailFloorMetadata` framing + bucket
 # helper — with NO `fauna-segment-store`/`blake3` (those back the nest-only
@@ -576,6 +589,8 @@ serde_json = { workspace = true }
 # here — so this is a dev-dep rather than part of the `body-ref-resolve` feature.
 async-trait = "0.1"
 hex = { workspace = true }
+# Test-only: property tests over the stranger-facing parsers (`tests/proptest_parsers.rs`).
+proptest = { workspace = true }
 # Cross-surface contract test (writer ⇄ MDA parser): the canonical shared
 # iCalendar *writer* is `fauna_core::ical::generate_ical` (WASM-safe; see
 # caldav-server.md § Where logic lives). This dev-dep lets the crate-backed
@@ -622,4 +637,12 @@ required-features = ["imap-client-native", "tls-test-fixtures"]
 # `tls-test-fixtures`'s shared `TestCert`/`mint_cert`/`tls_acceptor`.
 [[test]]
 name = "imap_client_trust_seed"
+required-features = ["imap-client-native", "tls-test-fixtures"]
+
+# `tests/imap_client_host_map_seed.rs` — the preset-host redirect seed's own
+# target, one process for `FAUNA_E2E_IMAP_HOST_MAP` for the same reason the
+# trust seed has one: a mapped host in the process environment would reach
+# every other test in a shared binary.
+[[test]]
+name = "imap_client_host_map_seed"
 required-features = ["imap-client-native", "tls-test-fixtures"]

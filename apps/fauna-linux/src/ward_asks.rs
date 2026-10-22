@@ -25,7 +25,7 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 
 use fauna_client_family::FeedRequestState;
-use fauna_client_family::family::{FamilyContactRequestInfo, FamilyFeedRequestInfo};
+use fauna_client_family::family::{FamilyContactRequestInfo, FamilyFeedRequestInfo, ReachPolicy};
 
 #[derive(Default)]
 struct Asks {
@@ -38,6 +38,12 @@ struct Asks {
     /// Filled only on the nest's TYPED refusal, so it is supervised-only by
     /// construction.
     refused_feed: BTreeSet<(String, String, String)>,
+    /// Whether every knock waiting on this account waits on its guardian —
+    /// the shared `fauna_client_family::knocks_await_guardian` over the
+    /// caller's own status policy, folded at the same read (tui's
+    /// `FamilyState::own_policy`, read at its knock loop). What the knock
+    /// rows' `knock-guardian-pending` paints from.
+    knocks_await_guardian: bool,
 }
 
 thread_local! {
@@ -45,9 +51,11 @@ thread_local! {
 }
 
 /// Fold one successful `fauna.family.status` read. `supervised` is whether it
-/// named a guardian — the gate that drops a graduated account's leftovers.
+/// named a guardian — the gate that drops a graduated account's leftovers;
+/// `own_policy` is the reply's own `policy`.
 pub fn set_from_status(
     supervised: bool,
+    own_policy: Option<&ReachPolicy>,
     contact: Vec<FamilyContactRequestInfo>,
     feed: Vec<FamilyFeedRequestInfo>,
 ) {
@@ -56,11 +64,20 @@ pub fn set_from_status(
         if supervised {
             a.contact = contact;
             a.feed = feed;
+            a.knocks_await_guardian = fauna_client_family::knocks_await_guardian(own_policy);
         } else {
             a.contact.clear();
             a.feed.clear();
+            a.knocks_await_guardian = false;
         }
     });
+}
+
+/// Whether the knock rows carry `knock-guardian-pending` (`family-safety.md`
+/// § App surface — the knock row is one of the blocked surfaces a pending
+/// approval renders on).
+pub fn knocks_await_guardian() -> bool {
+    ASKS.with(|a| a.borrow().knocks_await_guardian)
 }
 
 /// A landed contact ask's re-read. Empty = the re-read failed: keep what we
@@ -169,9 +186,9 @@ mod tests {
     /// waiting on (the client half of the nest's own graduation drop).
     #[test]
     fn an_unsupervised_read_drops_stale_asks() {
-        set_from_status(true, vec![contact(0xab)], vec![feed(true)]);
+        set_from_status(true, None, vec![contact(0xab)], vec![feed(true)]);
         assert!(contact_ask_pending(&"ab".repeat(32)));
-        set_from_status(false, vec![contact(0xab)], vec![feed(true)]);
+        set_from_status(false, None, vec![contact(0xab)], vec![feed(true)]);
         assert!(!contact_ask_pending(&"ab".repeat(32)));
         assert_eq!(
             feed_request_state("activitypub", "follow", "npub1abc"),
@@ -182,7 +199,7 @@ mod tests {
     /// An empty re-read is a FAILED re-read, not "no asks": keep what we hold.
     #[test]
     fn an_empty_reread_keeps_the_held_asks() {
-        set_from_status(true, vec![contact(0xab)], vec![feed(false)]);
+        set_from_status(true, None, vec![contact(0xab)], vec![feed(false)]);
         replace_contact_requests(Vec::new());
         replace_feed_requests(Vec::new());
         assert!(contact_ask_pending(&"ab".repeat(32)));
@@ -192,5 +209,24 @@ mod tests {
         );
         clear_for_identity_change();
         assert!(!contact_ask_pending(&"ab".repeat(32)));
+    }
+
+    /// Contact approval on the caller's own policy marks every knock; a
+    /// graduated read (no guardian) clears the mark whatever policy it carries.
+    #[test]
+    fn contact_approval_marks_the_knocks_until_graduation() {
+        let approval_on = ReachPolicy {
+            contact_approval: true,
+            ..ReachPolicy::default()
+        };
+        set_from_status(true, Some(&ReachPolicy::default()), Vec::new(), Vec::new());
+        assert!(!knocks_await_guardian());
+        set_from_status(true, Some(&approval_on), Vec::new(), Vec::new());
+        assert!(knocks_await_guardian());
+        set_from_status(false, Some(&approval_on), Vec::new(), Vec::new());
+        assert!(!knocks_await_guardian());
+        set_from_status(true, Some(&approval_on), Vec::new(), Vec::new());
+        clear_for_identity_change();
+        assert!(!knocks_await_guardian());
     }
 }

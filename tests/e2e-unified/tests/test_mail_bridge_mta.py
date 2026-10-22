@@ -1639,10 +1639,11 @@ def test_srs_bounce_to_mail_forwarded_before_a_secret_rotation_still_reaches_the
     (`mail-forwarding.md` § SRS scheme: the prior secret is held through the
     rotation overlap and `decode_srs_bounce` tries every retained one).
 
-    Forward a message, rotate, forward a second message from the same sender:
-    the second leaves under a different `SRS0=` address (the new secret signs
-    it — proof the rotation took effect), and a downstream bounce to the FIRST
-    address is still accepted and delivered to the forwarder's mailbox."""
+    Forward a message, rotate — the nest's newest SRS secret moves on (read off
+    `mail_srs_secrets` by row id: every forward's `SRS0=` address carries its own
+    outbound row id, so a second forward's differing address would prove
+    nothing) — and a downstream bounce to the forwarded address is still
+    accepted and delivered to the forwarder's mailbox."""
     from clients.ws_rpc_admin_client import WsRpcAdminClient
 
     handle = mail_bridge_mta
@@ -1676,6 +1677,15 @@ def test_srs_bounce_to_mail_forwarded_before_a_secret_rotation_still_reaches_the
                 " WHERE actor_id = ? AND mailbox = 'INBOX'",
                 (recipient_actor,),
             ).fetchone()
+            return n
+        finally:
+            conn.close()
+
+    def _newest_secret_id():
+        # Which SRS secret is newest — the row id only, never the bytes.
+        conn = sqlite3.connect(db_path, timeout=10.0)
+        try:
+            (n,) = conn.execute("SELECT MAX(id) FROM mail_srs_secrets").fetchone()
             return n
         finally:
             conn.close()
@@ -1716,6 +1726,7 @@ def test_srs_bounce_to_mail_forwarded_before_a_secret_rotation_still_reaches_the
     _seed_forward_config(forward_target)
     try:
         before_rotation = _forward_and_capture_srs(f"srs-rot-a-{stamp}")
+        secret_before = _newest_secret_id()
 
         admin = nest_instance["admin"]
         with WsRpcAdminClient(
@@ -1725,10 +1736,8 @@ def test_srs_bounce_to_mail_forwarded_before_a_secret_rotation_still_reaches_the
         ) as ws:
             ws.call("fauna.bridges.rotate_srs_secret", {})
 
-        after_rotation = _forward_and_capture_srs(f"srs-rot-b-{stamp}")
-        assert after_rotation != before_rotation, (
-            "the same sender forwarded the same day must leave under a new SRS0= "
-            f"address once the secret is rotated: {before_rotation!r} both times"
+        assert _newest_secret_id() > secret_before, (
+            f"rotate_srs_secret answered but the newest secret is still {secret_before}"
         )
 
         # The downstream MX bounces the message forwarded before the rotation.

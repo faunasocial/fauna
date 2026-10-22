@@ -240,6 +240,11 @@ DEFAULT_WARD_POLICY = {
         "spam": "inherit",
         "phishing": "inherit",
         "commercial": "inherit",
+        # The guardian's rule document (nest-rules.md § The shared rule editor
+        # (b)): absent would leave the last test's rules standing; an EMPTY
+        # document is how a write clears it. `version` is the grammar version
+        # (`fauna_core::content_policy::GRAMMAR_VERSION`).
+        "document": {"version": 2, "rules": [], "scorers": []},
     },
     # `{}`, not three explicit nulls: the sub-document is PRESENT (so the write
     # replaces the columns) and every field takes its `serde(default)` — which
